@@ -1,0 +1,47 @@
+### Page state
+- Page URL: https://www.yunpian.com/entry
+- Page Title: 云片_让沟通更简单_短信平台_短信验证码_短信接口
+- Page Snapshot:
+```yaml
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - img [ref=e6]
+    - img [ref=e7]
+    - img [ref=e8]
+  - generic [ref=e10]:
+    - generic [ref=e13]:
+      - link "云片" [ref=e15] [cursor=pointer]:
+        - /url: /
+      - generic [ref=e17]:
+        - list [ref=e18]:
+          - listitem [ref=e19] [cursor=pointer]: 手机登录
+          - listitem [ref=e20] [cursor=pointer]: 邮箱登录
+        - generic [ref=e21]:
+          - generic [ref=e22]:
+            - textbox "您的注册手机号" [ref=e23]
+            - generic [ref=e25] [cursor=pointer]:
+              - text: "+86"
+              - generic [ref=e26]: 
+          - textbox "8-24位，至少包含数字、英文、符号中的两种" [ref=e28]
+        - generic [ref=e29] [cursor=pointer]: 登 录
+        - generic [ref=e30]:
+          - link "忘记密码" [ref=e31] [cursor=pointer]:
+            - /url: /entry/reset-password
+          - text: "|"
+          - link "新用户注册" [ref=e32] [cursor=pointer]:
+            - /url: /entry/register
+        - generic [ref=e33]:
+          - generic [ref=e35]: 其它方式登录
+          - generic [ref=e36]:  
+    - generic [ref=e37]:
+      - link "© 2014-2025 杭州云片网络科技有限公司" [ref=e38] [cursor=pointer]:
+        - /url: https://beian.miit.gov.cn/#/Integrated/index
+      - generic [ref=e39]: 浙ICP备14004168号-3
+    - list [ref=e42]:
+      - listitem [ref=e43]:
+        - generic [ref=e44]: 
+      - listitem [ref=e45] [cursor=pointer]:
+        - generic [ref=e46]: 
+      - listitem [ref=e47] [cursor=pointer]:
+        - generic [ref=e48]: 
+```
