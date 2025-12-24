@@ -406,8 +406,8 @@ class PlaywrightBrowserManager:
         page = self.get_page(session_id)
         
         if filename is None:
-            import time
-            filename = f"screenshot-{int(time.time())}.png"
+            # 使用 uuid 生成唯一文件名，避免使用 time.time()
+            filename = f"screenshot-{uuid.uuid4().hex[:8]}.png"
         
         screenshot_dir = Path(".playwright-mcp")
         screenshot_dir.mkdir(exist_ok=True)
@@ -624,30 +624,35 @@ class PlaywrightBrowserManager:
         session_id = await self.get_or_create_default_session()
         page = self.get_page(session_id)
         
-        # 等待文件选择器出现
+        # 验证文件路径是否存在
+        import os
+        valid_paths = []
+        for path in paths:
+            if os.path.exists(path):
+                valid_paths.append(path)
+            else:
+                return {
+                    "session_id": session_id,
+                    "action": "error",
+                    "error": f"文件不存在: {path}",
+                    "selector": selector
+                }
+        
+        # 等待文件选择器出现并上传
         file_input = page.locator(selector)
         
-        # 设置文件上传处理器
-        async def handle_file_chooser(file_chooser: FileChooser):
-            await file_chooser.set_files(paths)
-        
-        page.on("filechooser", handle_file_chooser)
-        
-        # 点击触发文件选择器
-        await file_input.click()
-        
-        # 等待文件选择器并上传
+        # 等待文件选择器并上传（只点击一次）
         async with page.expect_file_chooser() as fc_info:
             await file_input.click()
         file_chooser = await fc_info.value
-        await file_chooser.set_files(paths)
+        await file_chooser.set_files(valid_paths)
         
         return {
             "session_id": session_id,
             "action": "uploaded",
             "selector": selector,
-            "files": paths,
-            "count": len(paths)
+            "files": valid_paths,
+            "count": len(valid_paths)
         }
     
     async def browser_fill_form(self, fields: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -710,28 +715,89 @@ class PlaywrightBrowserManager:
         }
     
     async def browser_install(self) -> Dict[str, Any]:
-        """安装浏览器（异步）"""
-        import subprocess
+        """安装浏览器（异步，非阻塞）"""
         import sys
+        import shutil
         
+        # 先检查 playwright 是否已安装（使用异步方式）
+        playwright_path = shutil.which("playwright")
+        if not playwright_path:
+            # 尝试使用 python -m playwright（异步检查）
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "playwright", "--version",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
+                if process.returncode != 0:
+                    return {
+                        "status": "error",
+                        "error": "Playwright 未安装，请先运行: pip install playwright"
+                    }
+            except asyncio.TimeoutError:
+                return {
+                    "status": "error",
+                    "error": "Playwright 检查超时"
+                }
+            except Exception:
+                return {
+                    "status": "error",
+                    "error": "Playwright 未安装，请先运行: pip install playwright"
+                }
+        
+        # 检查浏览器是否已安装（快速检查）
         try:
-            # 使用 playwright 的安装命令
-            result = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                capture_output=True,
-                text=True,
-                timeout=300
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                # 尝试启动浏览器，如果能启动说明已安装
+                try:
+                    browser = await p.chromium.launch(headless=True)
+                    await browser.close()
+                    return {
+                        "status": "already_installed",
+                        "message": "浏览器已安装，无需重复安装"
+                    }
+                except Exception:
+                    # 浏览器未安装，需要安装
+                    pass
+        except Exception:
+            pass
+        
+        # 使用异步 subprocess 执行安装（避免阻塞事件循环）
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "playwright", "install", "chromium",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
             
-            return {
-                "status": "installed" if result.returncode == 0 else "failed",
-                "message": result.stdout + result.stderr,
-                "returncode": result.returncode
-            }
+            # 等待完成，但设置超时
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=300.0  # 5分钟超时
+                )
+                
+                output = (stdout.decode() + stderr.decode()).strip()
+                
+                return {
+                    "status": "installed" if process.returncode == 0 else "failed",
+                    "message": output,
+                    "returncode": process.returncode
+                }
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return {
+                    "status": "timeout",
+                    "error": "安装超时（超过5分钟），请手动运行: python -m playwright install chromium"
+                }
         except Exception as e:
             return {
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
+                "suggestion": "请手动运行: python -m playwright install chromium"
             }
     
     async def browser_network_requests(self, include_static: bool = False) -> Dict[str, Any]:
@@ -742,11 +808,9 @@ class PlaywrightBrowserManager:
         
         # 收集网络请求（需要在会话中存储）
         session = self.get_session(session_id)
-        if not hasattr(session, 'network_requests'):
-            session.network_requests = []
         
         # 设置网络请求监听器（如果还没有设置）
-        if not hasattr(session, 'network_listener_set'):
+        if not session.network_listener_set:
             async def handle_request(request):
                 if include_static or not any(
                     ext in request.url.lower() 
@@ -794,12 +858,16 @@ class PlaywrightBrowserManager:
         return {
             "session_id": session_id,
             "requests": response_data,
-            "total": len(session.network_requests) if hasattr(session, 'network_requests') else 0,
+            "total": len(session.network_requests),
             "include_static": include_static
         }
     
     async def browser_run_code(self, code: str) -> Dict[str, Any]:
-        """运行 Playwright 代码（异步，自动管理 session_id）"""
+        """运行 Playwright 代码（异步，自动管理 session_id）
+        
+        注意：代码中的阻塞操作可能会影响事件循环。
+        建议使用 await 进行异步操作。
+        """
         session_id = await self.get_or_create_default_session()
         session = self.get_session(session_id)
         page = self.get_page(session_id)
@@ -807,22 +875,49 @@ class PlaywrightBrowserManager:
         # 在安全的上下文中执行代码
         # 提供 page, browser, context 等对象
         try:
-            # 创建执行环境
+            # 创建执行环境（包含异步支持）
             exec_globals = {
                 "page": page,
                 "browser": session.browser,
                 "context": session.context,
                 "playwright": session.playwright,
+                "asyncio": asyncio,
+                "await": None,  # 提示可以使用 await
                 "__builtins__": __builtins__
             }
             
-            # 执行代码
-            exec(code, exec_globals)
+            # 如果代码是异步的，需要特殊处理
+            # 检查代码是否包含 async/await
+            if "async" in code or "await" in code:
+                # 尝试编译为异步函数
+                try:
+                    # 包装为异步函数
+                    wrapped_code = f"async def _run():\n    {code.replace(chr(10), chr(10) + '    ')}"
+                    exec(wrapped_code, exec_globals)
+                    # 执行异步函数
+                    result = await exec_globals["_run"]()
+                    return {
+                        "session_id": session_id,
+                        "status": "executed",
+                        "result": str(result) if result is not None else "None",
+                        "code": code[:200]
+                    }
+                except Exception as async_error:
+                    # 如果异步执行失败，尝试同步执行
+                    pass
+            
+            # 同步执行代码（在 executor 中运行，避免阻塞）
+            loop = asyncio.get_event_loop()
+            def run_sync():
+                exec(code, exec_globals)
+                return "executed"
+            
+            result = await loop.run_in_executor(None, run_sync)
             
             return {
                 "session_id": session_id,
-                "status": "executed",
-                "code": code[:200]  # 只返回前200字符
+                "status": result,
+                "code": code[:200]
             }
         except Exception as e:
             return {
@@ -1091,7 +1186,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="browser_install",
-            description="安装 Playwright 浏览器（chromium）",
+            description="安装 Playwright 浏览器（chromium）。注意：通常浏览器已安装，此工具会先检查，如果已安装则立即返回。只有在首次使用或浏览器缺失时才需要调用此工具。如果 browser_launch 失败，可以尝试调用此工具。",
             inputSchema={
                 "type": "object",
                 "properties": {}
