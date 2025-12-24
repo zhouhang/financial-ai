@@ -19,10 +19,7 @@ def main() -> None:
         # 1. 打开登录页
         page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
 
-        # TODO: 下面这些选择器是根据常见登录页结构猜测的，
-        # 如有不匹配，你可以用 `playwright codegen` 或浏览器开发者工具调整选择器。
-
-        # 2. 切换到“邮箱登录”Tab
+        # 2. 切换到"邮箱登录"Tab
         try:
             page.get_by_text("邮箱登录", exact=True).click(timeout=10_000)
         except Exception:
