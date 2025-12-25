@@ -468,18 +468,51 @@ class PlaywrightBrowserManager:
         }
     
     async def browser_evaluate(self, function: str, element: Optional[str] = None, ref: Optional[str] = None) -> Dict[str, Any]:
-        """在页面或元素上执行 JavaScript（异步，自动管理 session_id）"""
+        """在页面或元素上执行 JavaScript（异步，自动管理 session_id）
+        
+        支持两种格式：
+        1. 函数体（包含 return）：会自动包装成箭头函数 `() => { ... }`
+        2. 完整函数表达式：如 `() => { ... }` 或 `function() { ... }`
+        """
         session_id = await self.get_or_create_default_session()
         page = self.get_page(session_id)
         
+        # 检测代码格式，如果是函数体（包含 return 但不是函数表达式），则包装成箭头函数
+        code = function.strip()
+        
+        # 检查是否是函数表达式（以 function、async function、箭头函数、括号等开头）
+        is_function_expression = (
+            code.startswith('function') or
+            code.startswith('async function') or
+            code.startswith('(') or
+            code.startswith('async (') or
+            code.startswith('()') or
+            code.startswith('async ()')
+        )
+        
+        # 如果包含 return 但不是函数表达式，则包装成箭头函数
+        if 'return' in code and not is_function_expression:
+            code = f"() => {{\n{code}\n}}"
+        
+        # 如果指定了元素，使用 locator.evaluate
         if element and ref:
-            result = await page.evaluate(function)
+            locator = page.locator(element)
+            result = await locator.evaluate(code)
         else:
-            result = await page.evaluate(function)
+            result = await page.evaluate(code)
+        
+        # 尝试将结果转换为 JSON 可序列化格式
+        try:
+            if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+                serializable_result = result
+            else:
+                serializable_result = str(result)
+        except Exception:
+            serializable_result = str(result)
         
         return {
             "session_id": session_id,
-            "result": str(result),
+            "result": serializable_result,
             "status": "evaluated"
         }
     
@@ -1103,12 +1136,12 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="browser_evaluate",
-            description="在页面或元素上执行JavaScript代码",
+            description="在页面或元素上执行JavaScript代码。支持两种格式：1) 函数体（包含return语句，会自动包装成箭头函数）；2) 完整函数表达式（如 () => { ... } 或 function() { ... }）",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "function": {"type": "string", "description": "要执行的JavaScript函数代码"},
-                    "element": {"type": "string", "description": "元素描述（可选）"},
+                    "function": {"type": "string", "description": "要执行的JavaScript代码。可以是函数体（包含return，会自动包装）或完整函数表达式（如 () => { ... }）"},
+                    "element": {"type": "string", "description": "元素选择器（可选，如果提供则在指定元素上执行）"},
                     "ref": {"type": "string", "description": "元素引用（可选）"}
                 },
                 "required": ["function"]
