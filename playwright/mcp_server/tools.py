@@ -10,7 +10,7 @@ from mcp.types import Tool, TextContent
 
 def create_tools() -> List[Tool]:
     """创建并返回所有可用的浏览器工具列表"""
-    return [
+        return [
         Tool(
             name="browser_launch",
             description="启动浏览器会话（如果浏览器未启动，会自动启动）",

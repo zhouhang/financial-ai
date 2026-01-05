@@ -1,0 +1,139 @@
+{
+  "version": "2.0",
+  "description": "供应商充值流水 vs 合单对账 - 灵活规则配置示例",
+  
+  "data_sources": {
+    "finance": {
+      "file_pattern": "ads_finance_d_inc_channel_details_*.csv",
+      "field_roles": {
+        "order_id": "sup订单号",
+        "amount": "发生-",
+        "date": "完成时间"
+      }
+    },
+    "business": {
+      "file_pattern": ["*对账流水.csv", "*business*.csv"],
+      "field_roles": {
+        "order_id": ["roc_oid", "sp订单号", "订单号"],
+        "amount": ["product_price", "面值", "金额"],
+        "date": ["statis_date", "订单时间", "日期"]
+      }
+    }
+  },
+  
+  "key_field_role": "order_id",
+  
+  "tolerance": {
+    "amount_diff_max": 2.0,
+    "date_format": "%Y-%m-%d"
+  },
+  
+  "data_cleaning_rules": {
+    "finance": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "divide",
+          "value": 100,
+          "description": "财务金额从分转换为元"
+        },
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值"
+        },
+        {
+          "field": "date",
+          "operation": "format_date",
+          "format": "%Y-%m-%d",
+          "description": "日期格式化"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "row['amount'] > 0",
+          "description": "过滤金额小于等于0的记录"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "按订单号聚合，金额求和"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": ["order_id", "amount"],
+          "description": "删除关键字段为空的记录"
+        }
+      ]
+    },
+    "business": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "date",
+          "operation": "format_date",
+          "format": "%Y-%m-%d",
+          "description": "日期格式化"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "row.get('status', '已完成') != '已取消'",
+          "description": "过滤已取消的订单"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "按订单号聚合，金额求和"
+        }
+      ]
+    },
+    "global": {
+      "global_transforms": [
+        {
+          "operation": "drop_duplicates",
+          "subset": ["order_id"],
+          "keep": "first",
+          "description": "全局去重"
+        }
+      ]
+    }
+  },
+  
+  "custom_validations": [
+    {
+      "name": "skip_test_customer",
+      "condition_expr": "biz.get('客户') == '测试客户'",
+      "issue_type": "skipped",
+      "detail_template": "测试客户，跳过校验"
+    },
+    {
+      "name": "amount_mismatch",
+      "condition_expr": "abs(float(biz.get('amount', 0)) - float(fin.get('amount', 0))) > 2.0",
+      "issue_type": "amount_mismatch",
+      "detail_template": "应收 {biz[amount]}，到账 {fin[amount]}，差额超限"
+    }
+  ]
+}

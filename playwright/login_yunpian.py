@@ -22,7 +22,7 @@ def main() -> None:
         # 2. 切换到"邮箱登录"Tab
         try:
             page.get_by_text("邮箱登录", exact=True).click(timeout=10_000)
-        except Exception:
+            except Exception:
             # 如果未找到精确文本，尝试模糊匹配
             page.get_by_text("邮箱", exact=False).click(timeout=10_000)
 

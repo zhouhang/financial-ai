@@ -14,5 +14,10 @@ pydantic>=2.0.0
 pytest>=7.0.0
 pytest-playwright>=0.4.0
 
-# HTTP 客户端（可选，用于测试）
+# HTTP 客户端
 requests>=2.31.0
+httpx>=0.25.0
+
+# 数据处理（用于 Reconciliation MCP Server）
+pandas>=2.0.0
+openpyxl>=3.1.0  # Excel 文件支持
