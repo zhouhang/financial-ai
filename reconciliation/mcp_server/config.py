@@ -9,11 +9,16 @@ BASE_DIR = Path(__file__).parent.parent.absolute()
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESULT_DIR = BASE_DIR / "results"
 SCHEMA_DIR = BASE_DIR / "schemas"
+CONFIG_DIR = BASE_DIR / "config"
 
 # 确保目录存在
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
 SCHEMA_DIR.mkdir(exist_ok=True)
+CONFIG_DIR.mkdir(exist_ok=True)
+
+# 配置文件路径
+RECONCILIATION_SCHEMAS_FILE = CONFIG_DIR / "reconciliation_schemas.json"
 
 # 服务器配置
 DEFAULT_HOST = "0.0.0.0"

@@ -1,0 +1,156 @@
+{
+  "version": "1.0",
+  "description": "直销对账 - 供应商充值账单 vs 财务BI对账流水",
+  
+  "data_sources": {
+    "finance": {
+      "file_pattern": ["ads_finance_d_inc_channel_details*.csv", "ads_finance_d_inc_channel_details*.xlsx"],
+      "field_roles": {
+        "order_id": "sup订单号",
+        "amount": "发生-",
+        "date": "完成时间"
+      }
+    },
+    "business": {
+      "file_pattern": ["*对账流水*.csv", "*对账流水*.xlsx"],
+      "field_roles": {
+        "order_id": ["roc_oid", "sp订单号"],
+        "amount": ["product_price", "面值"],
+        "date": ["statis_date", "订单时间"],
+        "status": "result",
+        "order_date": ["order_time", "订单日期"]
+      }
+    }
+  },
+  
+  "key_field_role": "order_id",
+  
+  "tolerance": {
+    "amount_diff_max": 0.01,
+    "date_format": "%Y-%m-%d"
+  },
+  
+  "data_cleaning_rules": {
+    "finance": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值（发生-字段可能为负）"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "row.get('order_id', '').startswith('104')",
+          "description": "只保留104开头的订单号"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "按sup订单号合并，发生-字段求和"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": ["order_id", "amount"],
+          "description": "删除关键字段为空的记录"
+        }
+      ]
+    },
+    "business": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "divide",
+          "value": 100,
+          "description": "金额单位转换：分转元"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "row.get('order_id', '').startswith('104')",
+          "description": "只保留104开头的订单号"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first",
+            "status": "first",
+            "order_date": "first"
+          },
+          "description": "按roc_oid或sp订单号合并，product_price字段求和"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": ["order_id"],
+          "description": "删除订单号为空的记录"
+        }
+      ]
+    },
+    "global": {
+      "global_transforms": [
+        {
+          "operation": "drop_duplicates",
+          "subset": ["order_id"],
+          "keep": "first",
+          "description": "全局去重，保留第一条"
+        }
+      ]
+    }
+  },
+  
+  "custom_validations": [
+    {
+      "name": "order_status_mismatch",
+      "condition_expr": "biz.get('status', '').lower() != 'success'",
+      "issue_type": "order_status_mismatch",
+      "detail_template": "订单状态不一致：业务状态为 {biz[status]}，不是 success"
+    },
+    {
+      "name": "order_status_not_over",
+      "condition_expr": "biz.get('status', '') == '充值中' and (pd.Timestamp.now() - pd.to_datetime(biz.get('order_date', pd.Timestamp.now()))).days > 7",
+      "issue_type": "order_status_not_over",
+      "detail_template": "订单状态未完成：订单状态为充值中，且已超过7天（订单日期：{biz[order_date]}）"
+    },
+    {
+      "name": "amount_mismatch",
+      "condition_expr": "abs(float(biz.get('amount', 0)) - float(fin.get('amount', 0))) > 0.01",
+      "issue_type": "amount_mismatch",
+      "detail_template": "金额不匹配：对账流水金额 {biz[amount]} 元 vs 供应商账单金额 {fin[amount]} 元"
+    }
+  ]
+}
+

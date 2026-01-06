@@ -45,30 +45,19 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         return [types.TextContent(type="text", text=error_msg)]
 
 
+# 创建 SSE Transport（全局实例）
+sse_transport = SseServerTransport("/messages/")
+
+
 # 创建 Starlette 应用
 async def handle_sse(request):
     """处理 SSE 连接"""
-    try:
-        async with SseServerTransport("/messages/") as transport:
-            await transport.connect_sse(request.receive, request._send)
-            await mcp_server.run(
-                transport.read_stream,
-                transport.write_stream,
-                mcp_server.create_initialization_options()
-            )
-    except Exception as e:
-        print(f"SSE 连接错误: {e}", file=sys.stderr)
-        return Response(f"SSE 连接失败: {str(e)}", status_code=500)
-
-
-async def handle_messages(request):
-    """处理 MCP 消息"""
-    try:
-        async with SseServerTransport("/messages/") as transport:
-            await transport.handle_post_message(request.receive, request._send)
-    except Exception as e:
-        print(f"消息处理错误: {e}", file=sys.stderr)
-        return Response(f"消息处理失败: {str(e)}", status_code=500)
+    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+        await mcp_server.run(
+            streams[0],
+            streams[1],
+            mcp_server.create_initialization_options()
+        )
 
 
 async def health_check(request):
@@ -82,8 +71,9 @@ async def health_check(request):
 
 # 路由
 routes = [
-    Route("/sse", endpoint=handle_sse),
-    Route("/messages/", endpoint=handle_messages, methods=["POST"]),
+    Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
+    Route("/mcp", endpoint=handle_sse, methods=["GET", "POST"]),  # 添加 /mcp 端点作为别名
+    Mount("/messages/", app=sse_transport.handle_post_message),
     Route("/health", endpoint=health_check),
 ]
 
