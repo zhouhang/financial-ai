@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 from mcp import Tool
 from .task_manager import TaskManager
-from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE
+from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR
 from .schema_loader import SchemaLoader
 
 
@@ -183,20 +183,29 @@ async def _reconciliation_start(args: Dict) -> Dict:
                 "available_types": available_types
             }
         
-        # 3. 获取 schema_url 和 callback_url
-        schema_url = matched_type.get("schema_url")
+        # 3. 获取 schema_path 和 callback_url
+        schema_path_config = matched_type.get("schema_path")
         callback_url = matched_type.get("callback_url", "")
         
-        if not schema_url:
-            return {"error": f"配置缺少 schema_url: {reconciliation_type}"}
+        if not schema_path_config:
+            return {"error": f"配置缺少 schema_path: {reconciliation_type}"}
         
         # 4. 读取 schema 文件
-        schema_path = SCHEMA_DIR / Path(schema_url).name
+        # schema_path 格式: /schemas/direct_sales_schema.json 或 schemas/direct_sales_schema.json
+        if schema_path_config.startswith('/'):
+            # 绝对路径，去掉开头的 / 并与 BASE_DIR 拼接
+            schema_path = BASE_DIR / schema_path_config.lstrip('/')
+        elif schema_path_config.startswith('schemas/'):
+            # 相对路径，与 BASE_DIR 拼接
+            schema_path = BASE_DIR / schema_path_config
+        else:
+            # 只有文件名，与 SCHEMA_DIR 拼接
+            schema_path = SCHEMA_DIR / schema_path_config
         
         if not schema_path.exists():
             return {
                 "error": f"Schema 文件不存在: {schema_path}",
-                "schema_url": schema_url
+                "schema_path": schema_path_config
             }
         
         with open(schema_path, 'r', encoding='utf-8') as f:
@@ -205,13 +214,27 @@ async def _reconciliation_start(args: Dict) -> Dict:
         # 5. 验证 schema
         SchemaLoader.validate_schema(schema)
         
-        # 6. 验证文件
+        # 6. 验证文件并转换为绝对路径
+        absolute_files = []
         for file_path in files:
-            if not Path(file_path).exists():
+            # 将相对路径转换为绝对路径
+            if file_path.startswith('/uploads/'):
+                # 去掉开头的 / 并与 BASE_DIR 拼接
+                abs_path = BASE_DIR / file_path.lstrip('/')
+            elif file_path.startswith('uploads/'):
+                # 相对路径，直接与 BASE_DIR 拼接
+                abs_path = BASE_DIR / file_path
+            else:
+                # 假设是绝对路径或其他格式
+                abs_path = Path(file_path)
+            
+            if not abs_path.exists():
                 return {"error": f"文件不存在: {file_path}"}
+            
+            absolute_files.append(str(abs_path))
         
-        # 7. 创建任务（传入 callback_url，如果为空则不会回调）
-        task_id = await task_manager.create_task(schema, files, callback_url if callback_url else None)
+        # 7. 创建任务（使用绝对路径，传入 callback_url）
+        task_id = await task_manager.create_task(schema, absolute_files, callback_url if callback_url else None)
         
         return {
             "task_id": task_id,
@@ -502,21 +525,29 @@ async def _get_reconciliation(args: Dict) -> Dict:
                 "callback_url": ""
             }
         
-        # 获取 schema_url 和 callback_url
-        schema_url = matched_type.get("schema_url")
+        # 获取 schema_path 和 callback_url
+        schema_path_config = matched_type.get("schema_path")
         callback_url = matched_type.get("callback_url", "")
         type_key = matched_type.get("type_key")
         
-        if not schema_url:
+        if not schema_path_config:
             return {
                 "schema": {},
                 "callback_url": callback_url,
-                "error": f"配置缺少 schema_url: {reconciliation_type}"
+                "error": f"配置缺少 schema_path: {reconciliation_type}"
             }
         
         # 读取 schema 文件
-        # schema_url 格式: /schemas/direct_sales_schema.json
-        schema_path = SCHEMA_DIR / Path(schema_url).name
+        # schema_path 格式: /schemas/direct_sales_schema.json 或 schemas/direct_sales_schema.json
+        if schema_path_config.startswith('/'):
+            # 绝对路径，去掉开头的 / 并与 BASE_DIR 拼接
+            schema_path = BASE_DIR / schema_path_config.lstrip('/')
+        elif schema_path_config.startswith('schemas/'):
+            # 相对路径，与 BASE_DIR 拼接
+            schema_path = BASE_DIR / schema_path_config
+        else:
+            # 只有文件名，与 SCHEMA_DIR 拼接
+            schema_path = SCHEMA_DIR / schema_path_config
         
         if not schema_path.exists():
             return {

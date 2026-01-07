@@ -48,12 +48,24 @@
           "field": "order_id",
           "operation": "strip",
           "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) and len(str(row.get('order_id', ''))) > 21 else str(row.get('order_id', ''))",
+          "description": "订单号只取前21位，统一为21位与业务订单号匹配"
         }
       ],
       "row_filters": [
         {
-          "condition": "row.get('order_id', '').startswith('104')",
-          "description": "只保留104开头的订单号"
+          "condition": "str(row.get('order_id', '')).startswith('104') or str(row.get('order_id', '')).startswith(\"'104\")",
+          "description": "只保留104开头的订单号（支持带单引号）"
         }
       ],
       "aggregations": [
@@ -92,6 +104,18 @@
           "field": "order_id",
           "operation": "strip",
           "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) and len(str(row.get('order_id', ''))) > 21 else str(row.get('order_id', ''))",
+          "description": "订单号只取前21位，统一为21位与财务订单号匹配"
         }
       ],
       "row_filters": [
