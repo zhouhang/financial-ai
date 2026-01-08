@@ -136,8 +136,8 @@
           // 除数
           "value": 100,
           // 可选：条件表达式，只有满足条件时才执行转换
-          "condition": "pd.to_numeric(row.get('amount', 0), errors='coerce') > 100",
-          "description": "金额单位转换：分转元（仅当金额>100时执行）"
+          "condition": "pd.to_numeric(row.get('amount', 0), errors='coerce') > 400",
+          "description": "金额单位转换：分转元（仅当金额>400时执行）"
         },
         {
           "field": "amount",
