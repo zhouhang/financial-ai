@@ -212,7 +212,12 @@ __marimo__/
 # uploads
 uploads/
 
+# Test files and directories
+# 忽略所有包含 test 字符串的文件和文件夹（不区分大小写）
+*test*
+*Test*
+*TEST*
 test_data/
 
+# macOS
 .DS_Store
-*test*
