@@ -4,11 +4,14 @@
 import asyncio
 import uuid
 import httpx
+import logging
 from typing import Dict, Optional, List
 from datetime import datetime
 from .models import ReconciliationTask, TaskStatus, ReconciliationResult
 from .reconciliation_engine import ReconciliationEngine
 from .config import TASK_TIMEOUT
+
+logger = logging.getLogger(__name__)
 
 
 class TaskManager:
@@ -75,13 +78,19 @@ class TaskManager:
                 timeout=TASK_TIMEOUT
             )
             
-            # 构建结果
+            # 构建结果（result_dict 中的 summary、issues、metadata 已经是字典格式）
+            from .models import ReconciliationSummary, ReconciliationIssue, ReconciliationMetadata
+            
+            summary = ReconciliationSummary(**result_dict["summary"])
+            issues = [ReconciliationIssue(**issue) for issue in result_dict["issues"]]
+            metadata = ReconciliationMetadata(**result_dict["metadata"])
+            
             result = ReconciliationResult(
                 task_id=task_id,
                 status=TaskStatus.COMPLETED,
-                summary=result_dict["summary"],
-                issues=result_dict["issues"],
-                metadata=result_dict["metadata"]
+                summary=summary,
+                issues=issues,
+                metadata=metadata
             )
             
             async with self._lock:
@@ -134,7 +143,7 @@ class TaskManager:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(callback_url, json=data)
-                print(f"回调成功: {callback_url}, 状态码: {response.status_code}")
+                logger.info(f"回调成功: {callback_url}, 状态码: {response.status_code}")
         except Exception as e:
-            print(f"回调失败: {callback_url}, 错误: {str(e)}")
+            logger.error(f"回调失败: {callback_url}, 错误: {str(e)}")
 

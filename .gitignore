@@ -213,3 +213,5 @@ __marimo__/
 uploads/
 
 test_data/
+
+.DS_Store

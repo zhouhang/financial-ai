@@ -2,8 +2,11 @@
 文件匹配器 - 根据 schema 中的 file_pattern 匹配文件
 """
 import re
+import logging
 from typing import Dict, List, Tuple
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class FileMatcher:
@@ -30,13 +33,21 @@ class FileMatcher:
         
         for file_path in file_paths:
             file_name = Path(file_path).name
+            logger.info(f"文件匹配器 - 处理文件: {file_path}, 文件名: {file_name}")
             
             # 尝试匹配到各个数据源
+            matched_source = None
             for source_name, source_config in self.data_sources.items():
-                if self._match_pattern(file_name, source_config.get("file_pattern")):
+                patterns = source_config.get("file_pattern", [])
+                if self._match_pattern(file_name, patterns):
+                    matched_source = source_name
                     if source_name in matched:
                         matched[source_name].append(file_path)
+                    logger.info(f"文件匹配器 - 文件 {file_name} 匹配到 {source_name}")
                     break
+            
+            if not matched_source:
+                logger.warning(f"文件匹配器 - 警告：文件 {file_name} 未匹配到任何数据源")
         
         return matched
     

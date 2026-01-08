@@ -3,16 +3,80 @@ MCP 工具定义
 """
 import json
 import uuid
+import logging
 from pathlib import Path
 from typing import Dict, Any, List
 from mcp import Tool
 from .task_manager import TaskManager
 from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR
 from .schema_loader import SchemaLoader
+import re
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(BASE_DIR / 'mcp_server.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 # 全局任务管理器
 task_manager = TaskManager()
+
+
+def load_json_with_comments(file_path: Path) -> Dict:
+    """加载 JSON 文件（支持 JSON5 格式的注释）"""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # 移除多行注释 (/* ... */) - 先处理多行注释
+    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+    
+    # 移除单行注释 (// ...) - 但保留字符串中的 //
+    lines = []
+    in_string = False
+    escape_next = False
+    
+    for line in content.split('\n'):
+        new_line = []
+        i = 0
+        while i < len(line):
+            char = line[i]
+            
+            if escape_next:
+                new_line.append(char)
+                escape_next = False
+                i += 1
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                new_line.append(char)
+                i += 1
+                continue
+            
+            if char == '"':
+                in_string = not in_string
+                new_line.append(char)
+                i += 1
+                continue
+            
+            # 如果不在字符串中，遇到 // 则移除后面的内容
+            if not in_string and char == '/' and i + 1 < len(line) and line[i + 1] == '/':
+                break  # 移除该行剩余部分
+            
+            new_line.append(char)
+            i += 1
+        
+        lines.append(''.join(new_line))
+    
+    content = '\n'.join(lines)
+    
+    return json.loads(content)
 
 
 def create_tools() -> List[Tool]:
@@ -164,8 +228,7 @@ async def _reconciliation_start(args: Dict) -> Dict:
         if not RECONCILIATION_SCHEMAS_FILE.exists():
             return {"error": f"配置文件不存在: {RECONCILIATION_SCHEMAS_FILE}"}
         
-        with open(RECONCILIATION_SCHEMAS_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+        config = load_json_with_comments(RECONCILIATION_SCHEMAS_FILE)
         
         # 2. 查找匹配的对账类型
         types = config.get("types", [])
@@ -208,8 +271,7 @@ async def _reconciliation_start(args: Dict) -> Dict:
                 "schema_path": schema_path_config
             }
         
-        with open(schema_path, 'r', encoding='utf-8') as f:
-            schema = json.load(f)
+        schema = load_json_with_comments(schema_path)
         
         # 5. 验证 schema
         SchemaLoader.validate_schema(schema)
@@ -301,10 +363,11 @@ async def _reconciliation_list_tasks(args: Dict) -> Dict:
 
 
 async def _file_upload(args: Dict) -> Dict:
-    """从 Dify 下载文件并保存（支持多文件）"""
+    """从 Dify 下载文件并保存（支持多文件，自动处理编码）"""
     try:
         import httpx
         from datetime import datetime
+        import chardet
         
         # Dify API 配置
         DIFY_BASE_URL = "http://localhost"
@@ -399,6 +462,49 @@ async def _file_upload(args: Dict) -> Dict:
                         else:
                             safe_filename = f"{safe_filename}_{timestamp}"
                         file_path = date_dir / safe_filename
+                    
+                    # 对文本文件（CSV、TXT）进行编码转换，确保保存为 UTF-8
+                    text_extensions = ['.csv', '.txt', '.tsv']
+                    if file_ext in text_extensions:
+                        try:
+                            logger.info(f"[编码转换] 开始处理文件: {filename}")
+                            logger.info(f"[编码转换] 文件扩展名: {file_ext}")
+                            logger.info(f"[编码转换] 原始文件大小: {len(file_content)} 字节")
+                            
+                            # 检测原始编码
+                            detected = chardet.detect(file_content)
+                            encoding = detected.get('encoding', 'utf-8')
+                            confidence = detected.get('confidence', 0)
+                            
+                            logger.info(f"[编码转换] 检测到编码: {encoding}, 置信度: {confidence:.2%}")
+                            
+                            # 如果检测不出编码或置信度低，尝试常见编码
+                            if not encoding or confidence < 0.7:
+                                logger.info(f"[编码转换] 置信度低，尝试常见编码...")
+                                for try_encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin1']:
+                                    try:
+                                        file_content.decode(try_encoding)
+                                        encoding = try_encoding
+                                        logger.info(f"[编码转换] 使用编码: {encoding}")
+                                        break
+                                    except (UnicodeDecodeError, LookupError):
+                                        continue
+                            
+                            # 解码后重新编码为 UTF-8 保存
+                            if encoding:
+                                try:
+                                    text_content = file_content.decode(encoding)
+                                    file_content = text_content.encode('utf-8-sig')  # 使用 UTF-8 with BOM
+                                    logger.info(f"[编码转换] ✅ 成功转换: {encoding} → UTF-8-sig")
+                                    logger.info(f"[编码转换] 转换后大小: {len(file_content)} 字节")
+                                except (UnicodeDecodeError, LookupError) as e:
+                                    # 如果解码失败，保持原样
+                                    logger.error(f"[编码转换] ❌ 解码失败: {str(e)}")
+                            else:
+                                logger.warning(f"[编码转换] ⚠️ 未检测到编码，保持原样")
+                        except Exception as e:
+                            # 编码转换失败，保持原样
+                            logger.error(f"[编码转换] ❌ 转换异常 ({filename}): {str(e)}")
                     
                     # 保存文件
                     with open(file_path, 'wb') as f:
@@ -506,8 +612,7 @@ async def _get_reconciliation(args: Dict) -> Dict:
                 "error": f"配置文件不存在: {RECONCILIATION_SCHEMAS_FILE}"
             }
         
-        with open(RECONCILIATION_SCHEMAS_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+        config = load_json_with_comments(RECONCILIATION_SCHEMAS_FILE)
         
         # 查找匹配的类型
         types = config.get("types", [])
@@ -556,8 +661,7 @@ async def _get_reconciliation(args: Dict) -> Dict:
                 "error": f"Schema 文件不存在: {schema_path}"
             }
         
-        with open(schema_path, 'r', encoding='utf-8') as f:
-            schema = json.load(f)
+        schema = load_json_with_comments(schema_path)
         
         # 返回新的结构：schema 和 callback_url 分离
         return {

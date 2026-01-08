@@ -51,13 +51,19 @@ class ReconciliationSummary:
     total_finance_records: int = 0
     matched_records: int = 0
     unmatched_records: int = 0
+    # 新增：业务文件名（多个文件以逗号拼接）
+    business_file: str = ""
+    # 新增：财务文件名（多个文件以逗号拼接）
+    finance_file: str = ""
     
     def to_dict(self) -> Dict:
         return {
             "total_business_records": self.total_business_records,
             "total_finance_records": self.total_finance_records,
             "matched_records": self.matched_records,
-            "unmatched_records": self.unmatched_records
+            "unmatched_records": self.unmatched_records,
+            "business_file": self.business_file,
+            "finance_file": self.finance_file,
         }
 
 

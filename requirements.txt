@@ -21,3 +21,4 @@ httpx>=0.25.0
 # 数据处理（用于 Reconciliation MCP Server）
 pandas>=2.0.0
 openpyxl>=3.1.0  # Excel 文件支持
+chardet>=5.0.0  # 编码检测，防止中文乱码

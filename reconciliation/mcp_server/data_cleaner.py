@@ -4,9 +4,12 @@
 """
 import pandas as pd
 import numpy as np
+import logging
 from typing import Dict, List, Optional, Any
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class DataCleaner:
@@ -62,15 +65,16 @@ class DataCleaner:
     def _load_file(self, file_path: str) -> pd.DataFrame:
         """加载文件"""
         if file_path.endswith('.csv'):
-            # 尝试不同的编码
-            for encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030']:
+            # 尝试不同的编码，确保第一列不作为索引
+            for encoding in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030']:
                 try:
-                    return pd.read_csv(file_path, encoding=encoding)
+                    # 使用 index_col=False 确保第一列不作为索引，所有列都被正确读取
+                    return pd.read_csv(file_path, encoding=encoding, index_col=False)
                 except (UnicodeDecodeError, LookupError):
                     continue
             raise ValueError(f"无法读取文件 {file_path}，编码不支持")
         elif file_path.endswith(('.xlsx', '.xls')):
-            return pd.read_excel(file_path)
+            return pd.read_excel(file_path, index_col=False)
         else:
             raise ValueError(f"不支持的文件格式: {file_path}")
     
@@ -173,12 +177,23 @@ class DataCleaner:
                 continue
             
             try:
+                # 保存原始索引，确保过滤后保持原始顺序
+                if '__original_row_index__' not in result_df.columns:
+                    result_df = result_df.reset_index(drop=True)
+                    result_df['__original_row_index__'] = range(len(result_df))
+                
                 # 使用 apply 逐行判断
                 mask = result_df.apply(lambda row: eval(condition, {"row": row, "pd": pd, "np": np}), axis=1)
                 result_df = result_df[mask]
-                print(f"应用过滤规则: {filter_rule.get('description', condition)}, 剩余 {len(result_df)} 条记录")
+                
+                # 按原始索引排序，保持原始相对顺序
+                if '__original_row_index__' in result_df.columns:
+                    result_df = result_df.sort_values('__original_row_index__').reset_index(drop=True)
+                    result_df = result_df.drop(columns=['__original_row_index__'])
+                
+                logger.info(f"应用过滤规则: {filter_rule.get('description', condition)}, 剩余 {len(result_df)} 条记录")
             except Exception as e:
-                print(f"过滤规则执行失败: {condition}, 错误: {str(e)}")
+                logger.error(f"过滤规则执行失败: {condition}, 错误: {str(e)}")
         
         return result_df
     
@@ -227,13 +242,23 @@ class DataCleaner:
             
             # 确保字段存在
             if field not in result_df.columns:
-                print(f"字段 {field} 不存在，跳过转换")
+                logger.warning(f"字段 {field} 不存在，跳过转换")
                 continue
             
             try:
                 if operation == "divide":
                     value = transform.get("value", 1)
-                    result_df[field] = pd.to_numeric(result_df[field], errors='coerce') / value
+                    # 检查是否有条件判断
+                    condition = transform.get("condition")
+                    if condition:
+                        # 有条件时，只对满足条件的行执行 divide
+                        mask = result_df.apply(lambda row: eval(condition, {"row": row, "pd": pd, "np": np}), axis=1)
+                        # 先转换为 float 类型，避免类型不兼容警告
+                        result_df[field] = pd.to_numeric(result_df[field], errors='coerce').astype(float)
+                        result_df.loc[mask, field] = result_df.loc[mask, field] / value
+                    else:
+                        # 无条件时，对所有行执行 divide
+                        result_df[field] = pd.to_numeric(result_df[field], errors='coerce') / value
                 
                 elif operation == "multiply":
                     value = transform.get("value", 1)
@@ -281,10 +306,10 @@ class DataCleaner:
                             axis=1
                         )
                 
-                print(f"应用字段转换: {transform.get('description', f'{field} {operation}')}")
+                logger.info(f"应用字段转换: {transform.get('description', f'{field} {operation}')}")
                 
             except Exception as e:
-                print(f"字段转换失败: {field} {operation}, 错误: {str(e)}")
+                logger.error(f"字段转换失败: {field} {operation}, 错误: {str(e)}")
         
         return result_df
     
@@ -320,26 +345,36 @@ class DataCleaner:
             
             missing_fields = [f for f in group_by if f not in result_df.columns]
             if missing_fields:
-                print(f"分组字段 {missing_fields} 不存在，跳过聚合")
+                logger.warning(f"分组字段 {missing_fields} 不存在，跳过聚合")
                 continue
             
             try:
+                # 保存原始顺序：在聚合前添加原始行索引
+                result_df['__original_index__'] = range(len(result_df))
+                
                 # 构建聚合字典
                 agg_dict = {}
                 for field, func in agg_fields.items():
                     if field in result_df.columns:
                         agg_dict[field] = func
                 
-                # 保留其他字段（使用 first）
+                # 保留其他字段（使用 first），包括原始索引
                 other_fields = [col for col in result_df.columns if col not in group_by and col not in agg_dict]
                 for field in other_fields:
                     agg_dict[field] = 'first'
                 
-                result_df = result_df.groupby(group_by, as_index=False).agg(agg_dict)
-                print(f"应用聚合: {agg_config.get('description', str(group_by))}, 结果 {len(result_df)} 条记录")
+                # 聚合时禁用排序，保持原始顺序
+                result_df = result_df.groupby(group_by, as_index=False, sort=False).agg(agg_dict)
+                
+                # 按原始索引排序，恢复原始顺序
+                if '__original_index__' in result_df.columns:
+                    result_df = result_df.sort_values('__original_index__').reset_index(drop=True)
+                    result_df = result_df.drop(columns=['__original_index__'])
+                
+                logger.info(f"应用聚合: {agg_config.get('description', str(group_by))}, 结果 {len(result_df)} 条记录")
                 
             except Exception as e:
-                print(f"聚合失败: {str(e)}")
+                logger.error(f"聚合失败: {str(e)}")
         
         return result_df
     
@@ -375,19 +410,19 @@ class DataCleaner:
                     subset = transform.get("subset")
                     keep = transform.get("keep", "first")
                     result_df = result_df.drop_duplicates(subset=subset, keep=keep)
-                    print(f"删除重复记录，剩余 {len(result_df)} 条")
+                    logger.info(f"删除重复记录，剩余 {len(result_df)} 条")
                 
                 elif operation == "sort":
                     by = transform.get("by")
                     ascending = transform.get("ascending", True)
                     if by:
                         result_df = result_df.sort_values(by=by, ascending=ascending)
-                        print(f"排序: {by}")
+                        logger.info(f"排序: {by}")
                 
                 elif operation == "drop_na":
                     subset = transform.get("subset")
                     result_df = result_df.dropna(subset=subset)
-                    print(f"删除空值，剩余 {len(result_df)} 条")
+                    logger.info(f"删除空值，剩余 {len(result_df)} 条")
                 
                 elif operation == "fill_na":
                     value = transform.get("value", 0)
@@ -396,13 +431,13 @@ class DataCleaner:
                         result_df[subset] = result_df[subset].fillna(value)
                     else:
                         result_df = result_df.fillna(value)
-                    print(f"填充空值: {value}")
+                    logger.info(f"填充空值: {value}")
                 
                 elif operation == "reset_index":
                     result_df = result_df.reset_index(drop=True)
                 
             except Exception as e:
-                print(f"全局转换失败: {operation}, 错误: {str(e)}")
+                logger.error(f"全局转换失败: {operation}, 错误: {str(e)}")
         
         return result_df
     

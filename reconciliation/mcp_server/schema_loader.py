@@ -2,6 +2,7 @@
 Schema 加载和验证
 """
 import json
+import re
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -11,9 +12,17 @@ class SchemaLoader:
     
     @staticmethod
     def load_from_file(schema_path: str) -> Dict[str, Any]:
-        """从文件加载 schema"""
+        """从文件加载 schema（支持 JSON5 格式的注释）"""
         with open(schema_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            content = f.read()
+        
+        # 移除单行注释 (// ...)
+        content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
+        
+        # 移除多行注释 (/* ... */)
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        
+        return json.loads(content)
     
     @staticmethod
     def load_from_dict(schema_dict: Dict[str, Any]) -> Dict[str, Any]:
