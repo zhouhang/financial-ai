@@ -281,17 +281,23 @@ async def _reconciliation_start(args: Dict) -> Dict:
         for file_path in files:
             # 将相对路径转换为绝对路径
             if file_path.startswith('/uploads/'):
-                # 去掉开头的 / 并与 BASE_DIR 拼接
-                abs_path = BASE_DIR / file_path.lstrip('/')
+                # 去掉开头的 / 并与 FINANCE_AGENT_DIR 拼接（因为 uploads 在 finance-agent 目录下）
+                abs_path = FINANCE_AGENT_DIR / file_path.lstrip('/')
             elif file_path.startswith('uploads/'):
-                # 相对路径，直接与 BASE_DIR 拼接
-                abs_path = BASE_DIR / file_path
+                # 相对路径，直接与 FINANCE_AGENT_DIR 拼接
+                abs_path = FINANCE_AGENT_DIR / file_path
+            elif str(file_path).startswith(str(UPLOAD_DIR)):
+                # 如果已经是 UPLOAD_DIR 的绝对路径
+                abs_path = Path(file_path)
             else:
                 # 假设是绝对路径或其他格式
                 abs_path = Path(file_path)
+                # 如果不是绝对路径，尝试相对 UPLOAD_DIR
+                if not abs_path.is_absolute():
+                    abs_path = UPLOAD_DIR / file_path
             
             if not abs_path.exists():
-                return {"error": f"文件不存在: {file_path}"}
+                return {"error": f"文件不存在: {file_path} (解析路径: {abs_path})"}
             
             absolute_files.append(str(abs_path))
         
