@@ -5,11 +5,12 @@ import os
 from pathlib import Path
 
 # 基础目录
-BASE_DIR = Path(__file__).parent.parent.absolute()
-UPLOAD_DIR = BASE_DIR / "uploads"
-RESULT_DIR = BASE_DIR / "results"
-SCHEMA_DIR = BASE_DIR / "schemas"
-CONFIG_DIR = BASE_DIR / "config"
+BASE_DIR = Path(__file__).parent.parent.absolute()  # finance-agent/reconciliation/
+FINANCE_AGENT_DIR = BASE_DIR.parent  # finance-agent/
+UPLOAD_DIR = FINANCE_AGENT_DIR / "uploads"
+RESULT_DIR = FINANCE_AGENT_DIR / "results"
+SCHEMA_DIR = FINANCE_AGENT_DIR / "schemas" / "reconciliation"
+CONFIG_DIR = FINANCE_AGENT_DIR / "config"
 
 # 确保目录存在
 UPLOAD_DIR.mkdir(exist_ok=True)

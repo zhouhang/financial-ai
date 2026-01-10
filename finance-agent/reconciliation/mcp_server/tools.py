@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 from mcp import Tool
 from .task_manager import TaskManager
-from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR
+from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR, FINANCE_AGENT_DIR
 from .schema_loader import SchemaLoader
 import re
 
@@ -17,7 +17,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(BASE_DIR / 'mcp_server.log'),
+        logging.FileHandler(FINANCE_AGENT_DIR / 'reconciliation_mcp.log'),
         logging.StreamHandler()
     ]
 )
@@ -254,13 +254,13 @@ async def _reconciliation_start(args: Dict) -> Dict:
             return {"error": f"配置缺少 schema_path: {reconciliation_type}"}
         
         # 4. 读取 schema 文件
-        # schema_path 格式: /schemas/direct_sales_schema.json 或 schemas/direct_sales_schema.json
+        # schema_path 格式: /schemas/reconciliation/direct_sales_schema.json
         if schema_path_config.startswith('/'):
-            # 绝对路径，去掉开头的 / 并与 BASE_DIR 拼接
-            schema_path = BASE_DIR / schema_path_config.lstrip('/')
+            # 绝对路径，去掉开头的 / 并与 FINANCE_AGENT_DIR 拼接
+            schema_path = FINANCE_AGENT_DIR / schema_path_config.lstrip('/')
         elif schema_path_config.startswith('schemas/'):
-            # 相对路径，与 BASE_DIR 拼接
-            schema_path = BASE_DIR / schema_path_config
+            # 相对路径，与 FINANCE_AGENT_DIR 拼接
+            schema_path = FINANCE_AGENT_DIR / schema_path_config
         else:
             # 只有文件名，与 SCHEMA_DIR 拼接
             schema_path = SCHEMA_DIR / schema_path_config

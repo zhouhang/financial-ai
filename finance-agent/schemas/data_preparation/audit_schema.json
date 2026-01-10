@@ -1,0 +1,219 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "project_name": "XX公司审计报告",
+    "author": "审计部",
+    "created_at": "2026-01-10",
+    "description": "从多个系统抽取数据生成审计报告（支持Excel/CSV/PDF/图片）"
+  },
+  
+  "data_sources": {
+    "source_1": {
+      "name": "银行流水",
+      "type": "excel",
+      "file_pattern": "bank_statement_*.xlsx",
+      "extraction_rules": {
+        "sheet_name": "流水明细",
+        "range": "A2:Z1000",
+        "skip_rows": 1,
+        "columns_mapping": {
+          "A": "date",
+          "B": "counterparty",
+          "C": "amount",
+          "D": "balance"
+        }
+      },
+      "conditional_extractions": {
+        "condition_id": "complex_condition_001",
+        "name": "复杂科目筛选",
+        "description": "(科目名称='银行流水' AND 核算项目不为空) OR (科目名称='货币资金' AND 核算项目为空)",
+        "condition": {
+          "type": "or",
+          "conditions": [
+            {
+              "type": "and",
+              "conditions": [
+                {
+                  "type": "column_equals",
+                  "column_header": "科目名称",
+                  "value": "银行流水",
+                  "match_type": "exact"
+                },
+                {
+                  "type": "column_empty",
+                  "column_header": "核算项目",
+                  "empty_check": false
+                }
+              ]
+            },
+            {
+              "type": "and",
+              "conditions": [
+                {
+                  "type": "column_equals",
+                  "column_header": "科目名称",
+                  "value": "货币资金",
+                  "match_type": "exact"
+                },
+                {
+                  "type": "column_empty",
+                  "column_header": "核算项目",
+                  "empty_check": true
+                }
+              ]
+            }
+          ]
+        },
+        "extraction": {
+          "target_column": "本期借方金额",
+          "output_field": "complex_account_amount",
+          "aggregation": "sum",
+          "data_type": "float",
+          "rounding": 2
+        }
+      },
+      "validation_rules": [
+        {
+          "rule": "not_null",
+          "fields": ["date", "amount"],
+          "error_message": "日期和金额不能为空"
+        }
+      ]
+    },
+    "source_2": {
+      "name": "发票扫描件",
+      "type": "image",
+      "file_pattern": "invoice_*.jpg",
+      "extraction_rules": {
+        "ocr_engine": "paddleocr",
+        "region_definitions": [
+          {
+            "name": "invoice_no",
+            "coordinates": [100, 50, 300, 80],
+            "regex_pattern": "发票号码[:：]\\s*(\\w+)",
+            "data_type": "string"
+          },
+          {
+            "name": "total_amount",
+            "coordinates": [400, 200, 500, 220],
+            "regex_pattern": "金额[:：]\\s*([\\d,.]+)",
+            "data_type": "float"
+          }
+        ]
+      }
+    },
+    "source_3": {
+      "name": "税务PDF",
+      "type": "pdf",
+      "file_pattern": "tax_*.pdf",
+      "extraction_rules": {
+        "pages": [1, 2],
+        "extraction_method": "text",
+        "key_value_patterns": {
+          "contract_amount": "合同总价[:：]\\s*([\\d,.]+)元",
+          "payment_terms": "付款方式[:：]\\s*(.+)"
+        }
+      }
+    }
+  },
+  
+  "transformations": [
+    {
+      "step_id": "calc_1",
+      "name": "计算月度收入",
+      "operation": "sum",
+      "input_sources": ["source_1", "source_2"],
+      "input_fields": ["amount"],
+      "filter_condition": "date >= '2024-01-01' AND date <= '2024-01-31' AND amount > 0",
+      "output_field": "monthly_income"
+    },
+    {
+      "step_id": "calc_2",
+      "name": "计算增值税",
+      "operation": "formula",
+      "formula": "{{monthly_income}} * 0.06",
+      "output_field": "vat_amount",
+      "rounding": 2
+    },
+    {
+      "step_id": "calc_3",
+      "name": "合并多个合同金额",
+      "operation": "aggregate",
+      "group_by": "contract_no",
+      "aggregations": [
+        {
+          "field": "contract_amount",
+          "method": "sum",
+          "output_field": "total_contract_value"
+        }
+      ],
+      "input_source": "source_3"
+    }
+  ],
+  
+  "template_mapping": {
+    "template_file": "审计模板.xlsx",
+    "output_file_pattern": "审计报告_{YYYYMMDD}.xlsx",
+    "cell_mappings": [
+      {
+        "data_source": "calculation_result",
+        "field": "monthly_income",
+        "target": {
+          "sheet": "汇总表",
+          "cell": "C5",
+          "format": {
+            "number_format": "#,##0.00",
+            "font": {"bold": true, "color": "0066CC"}
+          }
+        }
+      },
+      {
+        "data_source": "calculation_result",
+        "field": "vat_amount",
+        "target": {
+          "sheet": "汇总表",
+          "cell": "C6",
+          "format": {
+            "number_format": "#,##0.00",
+            "font": {"bold": false}
+          }
+        }
+      },
+      {
+        "data_source": "source_1",
+        "field": "transactions",
+        "target": {
+          "sheet": "明细表",
+          "range": "A2:D100",
+          "type": "table",
+          "header_mapping": {
+            "date": "日期",
+            "counterparty": "对方名称",
+            "amount": "金额",
+            "balance": "余额"
+          }
+        }
+      }
+    ],
+    "conditional_formats": [
+      {
+        "range": "汇总表!C5:C10",
+        "type": "data_bar",
+        "color": "63BE7B"
+      }
+    ]
+  },
+  
+  "workflow_controls": {
+    "execution_order": ["source_1", "source_2", "source_3", "calc_1", "calc_2", "calc_3", "output"],
+    "error_handling": {
+      "on_extraction_error": "skip_and_log",
+      "on_calculation_error": "use_default:0",
+      "max_errors": 5
+    },
+    "logging": {
+      "level": "INFO",
+      "output_file": "processing_log_{timestamp}.txt"
+    }
+  }
+}

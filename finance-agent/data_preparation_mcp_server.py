@@ -1,6 +1,6 @@
 """
-Reconciliation MCP SSE Server
-对账 MCP 服务器 - SSE 传输方式
+Data Preparation MCP SSE Server
+数据整理 MCP 服务器 - SSE 传输方式
 """
 import sys
 import asyncio
@@ -13,12 +13,12 @@ from starlette.responses import Response, JSONResponse
 import uvicorn
 
 # 导入模块
-from mcp_server.config import DEFAULT_HOST, DEFAULT_PORT
-from mcp_server.tools import create_tools, handle_tool_call
+from data_preparation.mcp_server.config import DEFAULT_HOST, DEFAULT_PORT
+from data_preparation.mcp_server.tools import create_tools, handle_tool_call
 
 
 # 创建 MCP Server
-mcp_server = Server("reconciliation-mcp-server")
+mcp_server = Server("data-preparation-mcp-server")
 
 
 @mcp_server.list_tools()
@@ -64,7 +64,7 @@ async def health_check(request):
     """健康检查"""
     return JSONResponse({
         "status": "healthy",
-        "service": "reconciliation-mcp-server",
+        "service": "data-preparation-mcp-server",
         "version": "1.0.0"
     })
 
@@ -72,7 +72,7 @@ async def health_check(request):
 # 路由
 routes = [
     Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
-    Route("/mcp", endpoint=handle_sse, methods=["GET", "POST"]),  # 添加 /mcp 端点作为别名
+    Route("/mcp", endpoint=handle_sse, methods=["GET", "POST"]),
     Mount("/messages/", app=sse_transport.handle_post_message),
     Route("/health", endpoint=health_check),
 ]
@@ -87,7 +87,7 @@ async def main():
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
-║        Reconciliation MCP Server 启动中...                       ║
+║        Data Preparation MCP Server 启动中...                     ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 🌐 服务端点:
@@ -98,11 +98,10 @@ async def main():
 
 🛠️  可用工具:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1. reconciliation_start      - 开始对账任务
-  2. reconciliation_status     - 查询任务状态
-  3. reconciliation_result     - 获取对账结果
-  4. reconciliation_list_tasks - 列出所有任务
-  5. file_upload               - 上传文件
+  1. data_preparation_start       - 开始数据整理任务
+  2. data_preparation_status      - 查询任务状态
+  3. data_preparation_result      - 获取数据整理结果
+  4. data_preparation_list_tasks  - 列出所有任务
 
 📖 使用说明:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -111,7 +110,7 @@ async def main():
     或使用 Docker:   http://host.docker.internal:{port}/sse
 
   示例 schema 位置:
-    {sys.path[0]}/schemas/example_schema.json
+    {sys.path[0]}/schemas/data_preparation/audit_schema.json
 
 服务器正在运行...
 """)
@@ -128,4 +127,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

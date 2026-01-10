@@ -3,7 +3,7 @@
     {
       "name_cn": "直销对账",
       "type_key": "direct_sales",
-      "schema_path": "/schemas/direct_sales_schema.json",
+      "schema_path": "/schemas/reconciliation/direct_sales_schema.json",
       "callback_url": "http://your-server.com/triggers/webhook/qD8WWtxs3ceFRFlQYsdQvf4P"
     }
   ]

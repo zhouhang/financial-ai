@@ -1,0 +1,92 @@
+{
+  "task_id": "proc_20260110_135748_9b37a0",
+  "timestamp": "2026-01-10T13:57:48.144019",
+  "schema_version": "2.0",
+  "project_name": "XX公司审计报告",
+  "files_processed": {
+    "source_1": "bank_statement_202401.xlsx"
+  },
+  "data_extraction": {
+    "source_1": {
+      "records": 18,
+      "columns": [
+        "date",
+        "counterparty",
+        "amount",
+        "balance",
+        "银行流水",
+        "Unnamed: 5",
+        500
+      ]
+    }
+  },
+  "calculations": {
+    "monthly_income": 36900.0,
+    "vat_amount": 2214.0
+  },
+  "processing_steps": [
+    {
+      "step_name": "文件匹配",
+      "step_type": "file_matching",
+      "status": "completed",
+      "start_time": "2026-01-10T13:57:48.070016",
+      "end_time": "2026-01-10T13:57:48.072276",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "matched_files": {
+          "source_1": "/Users/kevin/workspace/financial-ai/finance-agent/uploads/2026/1/10/bank_statement_202401.xlsx"
+        }
+      }
+    },
+    {
+      "step_name": "数据提取",
+      "step_type": "extraction",
+      "status": "completed",
+      "start_time": "2026-01-10T13:57:48.073430",
+      "end_time": "2026-01-10T13:57:48.098731",
+      "duration_seconds": null,
+      "records_processed": 18,
+      "error_message": null,
+      "details": {
+        "sources_processed": 1,
+        "total_records": 18
+      }
+    },
+    {
+      "step_name": "数据转换",
+      "step_type": "transformation",
+      "status": "completed",
+      "start_time": "2026-01-10T13:57:48.099878",
+      "end_time": "2026-01-10T13:57:48.105737",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "calculated_fields": [
+          "monthly_income",
+          "vat_amount"
+        ]
+      }
+    },
+    {
+      "step_name": "写入输出",
+      "step_type": "output",
+      "status": "completed",
+      "start_time": "2026-01-10T13:57:48.106907",
+      "end_time": "2026-01-10T13:57:48.142843",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "output_file": "/Users/kevin/workspace/financial-ai/finance-agent/output/审计报告_20260110.xlsx"
+      }
+    }
+  ],
+  "summary": {
+    "total_steps": 4,
+    "completed_steps": 4,
+    "failed_steps": 0
+  }
+}
