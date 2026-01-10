@@ -5,6 +5,12 @@
       "type_key": "audit",
       "schema_path": "/schemas/data_preparation/audit_schema.json",
       "callback_url": "http://your-server.com/triggers/webhook/qD8WWtxs3ceFRFlQYsdQvf4P"
+    },
+    {
+      "name_cn": "货币资金数据整理",
+      "type_key": "monetary_funds",
+      "schema_path": "/schemas/data_preparation/monetary_funds_schema.json",
+      "callback_url": null
     }
   ]
 }

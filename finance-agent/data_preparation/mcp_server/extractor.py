@@ -62,9 +62,40 @@ class DataExtractor:
         sheet_name = extraction_rules.get("sheet_name", 0)
         skip_rows = extraction_rules.get("skip_rows", 0)
         
+        # 支持多级表头
+        multi_index_header = extraction_rules.get("multi_index_header")
+        
         try:
-            df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=skip_rows)
-            logger.info(f"Excel 读取成功: {file_path}, sheet={sheet_name}, 行数={len(df)}")
+            if multi_index_header:
+                # 使用多级表头
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=multi_index_header)
+                logger.info(f"Excel 读取成功（多级表头）: {file_path}, sheet={sheet_name}, 行数={len(df)}")
+                # 将多级列名扁平化：("期初余额", "借方") -> "期初余额_借方"
+                if isinstance(df.columns, pd.MultiIndex):
+                    new_columns = []
+                    seen_cols = {}  # 用于处理重复列名
+                    for i, col in enumerate(df.columns.values):
+                        if isinstance(col, tuple):
+                            # 过滤掉 "Unnamed" 和空值
+                            parts = [str(c) for c in col if c and 'Unnamed' not in str(c)]
+                            new_col = '_'.join(parts) if parts else str(col[0]) if len(col) > 0 else f'Unnamed_{i}'
+                        else:
+                            new_col = str(col)
+                        
+                        # 处理重复列名
+                        if new_col in seen_cols:
+                            seen_cols[new_col] += 1
+                            new_col = f"{new_col}_{seen_cols[new_col]}"
+                        else:
+                            seen_cols[new_col] = 0
+                        
+                        new_columns.append(new_col)
+                    
+                    df.columns = new_columns
+                    logger.info(f"多级表头扁平化完成，列名示例: {list(df.columns[:5])}")
+            else:
+                df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=skip_rows)
+                logger.info(f"Excel 读取成功: {file_path}, sheet={sheet_name}, 行数={len(df)}")
         except Exception as e:
             logger.error(f"Excel 读取失败: {file_path}, 错误: {str(e)}")
             raise
@@ -82,7 +113,13 @@ class DataExtractor:
         # 应用条件提取
         conditional_extractions = config.get("conditional_extractions")
         if conditional_extractions:
-            df = self._apply_conditional_extraction(df, conditional_extractions)
+            result_df = self._apply_conditional_extraction(df, conditional_extractions)
+            # 如果返回的是筛选后的DataFrame（表格输出），使用它
+            # 检查是否是表格输出（通常会有特定的output_type或字段数量减少）
+            output_type = conditional_extractions.get("extraction", {}).get("output_type", "value")
+            if output_type == "table" and isinstance(result_df, pd.DataFrame):
+                df = result_df
+                logger.info(f"条件提取返回表格数据: {len(df)} 行 x {len(df.columns)} 列")
         
         # 应用验证规则
         validation_rules = config.get("validation_rules", [])
@@ -126,6 +163,7 @@ class DataExtractor:
         """
         应用列映射
         mapping 格式: {"A": "date", "B": "amount"} 或 {"原列名": "新列名"}
+        支持部分匹配（如 "科目名称" 匹配 "科目名称_Unnamed: 1_level_1"）
         """
         rename_dict = {}
         
@@ -138,9 +176,16 @@ class DataExtractor:
                     original_col = df.columns[col_index]
                     rename_dict[original_col] = value
             else:
-                # 直接列名映射
+                # 直接列名映射或部分匹配
                 if key in df.columns:
                     rename_dict[key] = value
+                else:
+                    # 尝试部分匹配（扁平化后的列名可能包含原列名）
+                    matching_cols = [col for col in df.columns if str(col).startswith(key) or key in str(col)]
+                    if matching_cols:
+                        # 取第一个匹配的列
+                        rename_dict[matching_cols[0]] = value
+                        logger.info(f"列映射部分匹配: '{key}' -> '{matching_cols[0]}' -> '{value}'")
         
         if rename_dict:
             df = df.rename(columns=rename_dict)
@@ -177,22 +222,62 @@ class DataExtractor:
         """
         应用条件提取
         支持复杂的 AND/OR 条件组合
+        支持表格输出（output_type: "table"）
         """
         condition = config.get("condition", {})
         extraction = config.get("extraction", {})
+        output_type = extraction.get("output_type", "value")
         
         # 评估条件
         mask = self._evaluate_condition(df, condition)
         
-        # 根据条件提取数据
+        # 筛选满足条件的行
+        filtered_df = df[mask].copy()
+        
+        if output_type == "table":
+            # 表格输出：返回筛选后的DataFrame，选择指定字段
+            target_fields = extraction.get("target_fields", [])
+            if target_fields:
+                # 构建要提取的列列表
+                cols_to_extract = []
+                for field in target_fields:
+                    if isinstance(field, str):
+                        # 简单字段名
+                        if field in filtered_df.columns:
+                            cols_to_extract.append(field)
+                    elif isinstance(field, dict):
+                        # 多级字段：{"field": "期初余额", "sub_field": "借方", "output_field": "opening_balance_debit"}
+                        field_name = field.get("field")
+                        sub_field = field.get("sub_field")
+                        output_field = field.get("output_field", f"{field_name}_{sub_field}")
+                        
+                        # 查找匹配的列（扁平化后格式："期初余额_借方"）
+                        # 查找包含 field_name 和 sub_field 的列
+                        matching_cols = [
+                            c for c in filtered_df.columns 
+                            if field_name in str(c) and sub_field in str(c)
+                        ]
+                        
+                        if matching_cols:
+                            # 取第一个匹配的列
+                            matched_col = matching_cols[0]
+                            filtered_df = filtered_df.rename(columns={matched_col: output_field})
+                            cols_to_extract.append(output_field)
+                            logger.debug(f"多级字段提取: '{matched_col}' -> '{output_field}'")
+                        else:
+                            logger.warning(f"未找到匹配的多级字段: {field_name} + {sub_field}")
+                
+                if cols_to_extract:
+                    filtered_df = filtered_df[cols_to_extract]
+                    logger.info(f"条件提取（表格）: {config.get('name')}, 满足条件: {len(filtered_df)} 行, 字段: {cols_to_extract}")
+                    return filtered_df
+        
+        # 原有的单值输出逻辑
         target_column = extraction.get("target_column")
         output_field = extraction.get("output_field")
         aggregation = extraction.get("aggregation", "first")
         
-        if target_column and target_column in df.columns:
-            # 筛选满足条件的行
-            filtered_df = df[mask]
-            
+        if target_column and target_column in filtered_df.columns:
             # 应用聚合
             if aggregation == "sum":
                 value = filtered_df[target_column].sum()
@@ -205,7 +290,7 @@ class DataExtractor:
             else:
                 value = None
             
-            # 添加到 DataFrame
+            # 添加到原始 DataFrame
             if output_field:
                 df[output_field] = value
             
@@ -251,6 +336,20 @@ class DataExtractor:
                 return df[column].astype(str).str.contains(str(value), na=False)
             else:
                 return df[column] == value
+        
+        elif condition_type == "column_matches":
+            # 正则表达式匹配
+            column = condition.get("column_header")
+            regex_pattern = condition.get("regex_pattern")
+            match_type = condition.get("match_type", "regex")
+            
+            if column not in df.columns:
+                return pd.Series([False] * len(df), index=df.index)
+            
+            if match_type == "regex":
+                return df[column].astype(str).str.match(regex_pattern, na=False)
+            else:
+                return pd.Series([False] * len(df), index=df.index)
         
         elif condition_type == "column_empty":
             # 列为空

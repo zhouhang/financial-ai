@@ -95,6 +95,7 @@ class TemplateWriter:
         cell_address = target.get("cell")
         range_address = target.get("range")
         mapping_type = target.get("type", "value")
+        match_by = target.get("match_by")
         
         # 获取工作表
         if sheet_name not in wb.sheetnames:
@@ -107,7 +108,11 @@ class TemplateWriter:
         if data_source == "calculation_result":
             value = calculation_results.get(field)
         elif data_source in extracted_data:
-            value = extracted_data[data_source]
+            # 如果是表格类型，直接使用 DataFrame
+            if mapping_type == "table" and field == "extracted_data":
+                value = extracted_data[data_source]
+            else:
+                value = extracted_data[data_source]
         else:
             logger.warning(f"数据源 {data_source} 不存在")
             return
@@ -122,7 +127,15 @@ class TemplateWriter:
         elif mapping_type == "table" and range_address:
             # 表格数据
             if isinstance(value, pd.DataFrame):
-                self._write_table(ws, range_address, value, target.get("header_mapping", {}))
+                if match_by:
+                    # 需要匹配写入：通过指定字段匹配已写入的数据
+                    self._write_table_with_match(
+                        ws, range_address, value, target.get("header_mapping", {}),
+                        match_by, extracted_data
+                    )
+                else:
+                    # 直接写入
+                    self._write_table(ws, range_address, value, target.get("header_mapping", {}))
             else:
                 logger.warning(f"表格数据类型错误: {type(value)}")
     
@@ -134,25 +147,97 @@ class TemplateWriter:
         header_mapping: Dict
     ):
         """写入表格数据"""
-        # 解析范围 "A2:D100"
+        # 解析范围 "B9:F100"
         start_cell, end_cell = range_address.split(":")
-        start_col = openpyxl.utils.column_index_from_string(re.match(r"([A-Z]+)", start_cell).group(1))
+        start_col_letter = re.match(r"([A-Z]+)", start_cell).group(1)
+        start_col = openpyxl.utils.column_index_from_string(start_col_letter)
         start_row = int(re.match(r"[A-Z]+(\d+)", start_cell).group(1))
         
-        # 写入表头（如果有映射）
+        # 如果 header_mapping 的值是列字母（如 "B", "C"），需要转换为列索引并重新排列
+        if header_mapping and any(isinstance(v, str) and len(v) == 1 and v.isalpha() for v in header_mapping.values()):
+            # header_mapping 格式: {"field_name": "B"}，表示字段写入到B列
+            # 按列字母顺序排列字段
+            col_order = sorted(header_mapping.items(), key=lambda x: openpyxl.utils.column_index_from_string(x[1]))
+            
+            # 写入数据，按列映射写入
+            for row_idx, (_, df_row) in enumerate(df.iterrows(), start=start_row):
+                for field_name, col_letter in col_order:
+                    if field_name in df_row:
+                        col_idx = openpyxl.utils.column_index_from_string(col_letter)
+                        value = df_row[field_name]
+                        ws.cell(row=row_idx, column=col_idx, value=value)
+        else:
+            # 原有的连续写入方式
+            # 写入数据
+            for row_idx, row in enumerate(df.itertuples(index=False), start=start_row):
+                for col_idx, value in enumerate(row, start=start_col):
+                    ws.cell(row=row_idx, column=col_idx, value=value)
+        
+        logger.info(f"写入表格: {range_address}, {len(df)} 行")
+    
+    def _write_table_with_match(
+        self,
+        ws: openpyxl.worksheet.worksheet.Worksheet,
+        range_address: str,
+        df: pd.DataFrame,
+        header_mapping: Dict,
+        match_by: Dict,
+        extracted_data: Dict[str, pd.DataFrame]
+    ):
+        """
+        通过匹配字段写入表格数据
+        用于将 source_2 的数据匹配到 source_1 已写入的行
+        """
+        # 解析范围 "H9:H100"
+        start_cell, end_cell = range_address.split(":")
+        start_col_letter = re.match(r"([A-Z]+)", start_cell).group(1)
+        start_col = openpyxl.utils.column_index_from_string(start_col_letter)
+        start_row = int(re.match(r"[A-Z]+(\d+)", start_cell).group(1))
+        
+        # 获取匹配字段
+        match_fields = match_by.get("fields", [])
+        source_1_fields = match_by.get("source_1_fields", match_fields)
+        
+        # 获取 source_1 的数据（应该已经写入）
+        source_1_id = "source_1"
+        if source_1_id not in extracted_data:
+            logger.warning(f"无法找到 source_1 数据进行匹配")
+            return
+        
+        source_1_df = extracted_data[source_1_id]
+        
+        # 构建匹配键的字典：{("科目名称", "核算项目"): row_index_in_excel}
+        match_dict = {}
+        for idx, row in source_1_df.iterrows():
+            key = tuple(row.get(field, "") for field in source_1_fields if field in row)
+            match_dict[key] = start_row + idx  # Excel 行号（从start_row开始）
+        
+        # 获取要写入的字段和列
         if header_mapping:
-            col_idx = start_col
-            for field in df.columns:
-                header_text = header_mapping.get(field, field)
-                ws.cell(row=start_row - 1, column=col_idx, value=header_text)
-                col_idx += 1
+            # header_mapping 格式: {"prior_period_credit": "H"}
+            write_field = list(header_mapping.keys())[0]
+            write_col_letter = list(header_mapping.values())[0]
+            write_col = openpyxl.utils.column_index_from_string(write_col_letter)
+        else:
+            write_field = df.columns[0] if len(df.columns) > 0 else None
+            write_col = start_col
         
-        # 写入数据
-        for row_idx, row in enumerate(df.itertuples(index=False), start=start_row):
-            for col_idx, value in enumerate(row, start=start_col):
-                ws.cell(row=row_idx, column=col_idx, value=value)
+        # 匹配并写入数据
+        matched_count = 0
+        for idx, row in df.iterrows():
+            # 构建当前行的匹配键
+            key = tuple(row.get(field, "") for field in match_fields if field in row)
+            
+            # 查找匹配的行
+            if key in match_dict:
+                excel_row = match_dict[key]
+                # 写入数据到对应列的匹配行
+                value = row.get(write_field)
+                if value is not None:
+                    ws.cell(row=excel_row, column=write_col, value=value)
+                    matched_count += 1
         
-        logger.info(f"写入表格: {range_address}, {len(df)} 行 x {len(df.columns)} 列")
+        logger.info(f"匹配写入表格: {range_address}, 匹配 {matched_count}/{len(df)} 行到 source_1 的数据")
     
     def _apply_format(self, cell, format_config: Dict):
         """应用单元格格式"""

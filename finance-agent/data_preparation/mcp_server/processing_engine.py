@@ -251,9 +251,26 @@ class ProcessingEngine:
         self.steps.append(step)
         
         try:
-            # 获取模板文件路径（简化：假设模板在 schemas 目录）
+            # 获取模板文件路径
+            from .config import TEMPLATE_DIR, FINANCE_AGENT_DIR
             template_file = self.schema.get("template_mapping", {}).get("template_file", "template.xlsx")
-            template_path = Path(output_dir).parent / "schemas" / "data_preparation" / template_file
+            
+            # 尝试多个可能的模板路径
+            possible_paths = [
+                TEMPLATE_DIR / template_file,  # finance-agent/templates/
+                FINANCE_AGENT_DIR / "templates" / template_file,  # 绝对路径
+                Path(template_file) if Path(template_file).is_absolute() and Path(template_file).exists() else None  # 绝对路径
+            ]
+            
+            template_path = None
+            for path in possible_paths:
+                if path and path.exists():
+                    template_path = path
+                    break
+            
+            if not template_path:
+                # 最后尝试相对路径（向后兼容）
+                template_path = Path(template_file)
             
             # 如果没有模板，创建一个简单的输出文件
             if not template_path.exists():

@@ -61,7 +61,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
     """调用工具（自动路由到对应模块）"""
     try:
         # 根据工具名前缀路由到对应模块
-        if name.startswith("reconciliation_"):
+        # 对账模块工具：以 reconciliation_ 开头，或者 file_upload、get_reconciliation
+        if name.startswith("reconciliation_") or name in ["file_upload", "get_reconciliation"]:
             result = await handle_recon_call(name, arguments)
         elif name.startswith("data_preparation_"):
             result = await handle_prep_call(name, arguments)
