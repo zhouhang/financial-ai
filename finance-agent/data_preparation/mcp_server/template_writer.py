@@ -66,8 +66,15 @@ class TemplateWriter:
                 logger.error(f"应用条件格式失败: {cf.get('range')}, 错误: {str(e)}")
         
         # 生成输出文件名
-        output_file_pattern = self.template_mapping.get("output_file_pattern", "output_{YYYYMMDD}.xlsx")
-        output_filename = self._format_filename(output_file_pattern)
+        # 如果配置了 output_file_pattern，使用它；否则使用模板文件名+日期后缀
+        output_file_pattern = self.template_mapping.get("output_file_pattern")
+        if output_file_pattern:
+            output_filename = self._format_filename(output_file_pattern)
+        else:
+            # 使用模板文件名+日期后缀
+            template_name = Path(template_path).stem  # 不带扩展名的文件名
+            template_ext = Path(template_path).suffix  # 扩展名
+            output_filename = f"{template_name}_{datetime.now().strftime('%Y%m%d')}{template_ext}"
         final_output_path = Path(output_path) / output_filename
         
         # 保存文件

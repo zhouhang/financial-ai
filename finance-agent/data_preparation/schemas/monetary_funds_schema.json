@@ -22,14 +22,14 @@
       "conditional_extractions": {
         "condition_id": "bank_deposit_current_period",
         "name": "本期银行存款-*筛选",
-        "description": "科目名称匹配'银行存款-*'格式（只匹配'银行存款-xx'，不匹配'银行存款-xx-yy'）且核算项目不为空",
+        "description": "科目名称匹配'银行存款_*'格式（只匹配'银行存款_xx'，不匹配'银行存款_xx_yy'）且核算项目不为空",
         "condition": {
           "type": "and",
           "conditions": [
             {
               "type": "column_matches",
               "column_header": "account_name",
-              "regex_pattern": "^银行存款-[^-]+$",
+              "regex_pattern": "^银行存款_[^_]+$",
               "match_type": "regex"
             },
             {
@@ -84,14 +84,14 @@
       "conditional_extractions": {
         "condition_id": "bank_deposit_prior_period",
         "name": "上期银行存款-*筛选",
-        "description": "科目名称匹配'银行存款-*'格式（只匹配'银行存款-xx'，不匹配'银行存款-xx-yy'）且核算项目不为空",
+        "description": "科目名称匹配'银行存款_*'格式（只匹配'银行存款_xx'，不匹配'银行存款_xx_yy'）且核算项目不为空",
         "condition": {
           "type": "and",
           "conditions": [
             {
               "type": "column_matches",
               "column_header": "account_name",
-              "regex_pattern": "^银行存款-[^-]+$",
+              "regex_pattern": "^银行存款_[^_]+$",
               "match_type": "regex"
             },
             {
@@ -128,7 +128,6 @@
   
   "template_mapping": {
     "template_file": "01 审计底稿-模板.xlsx",
-    "output_file_pattern": "货币资金数据整理_{YYYYMMDD}.xlsx",
     "cell_mappings": [
       {
         "data_source": "source_1",

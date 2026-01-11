@@ -1,0 +1,94 @@
+{
+  "task_id": "proc_20260111_125814_fe1fa0",
+  "timestamp": "2026-01-11T12:58:15.717564",
+  "schema_version": "2.0",
+  "project_name": "货币资金数据整理",
+  "files_processed": {
+    "source_1": "福擎-科目余额表 本期2025.xlsx",
+    "source_2": "福擎-科目余额表 上期2024.xlsx"
+  },
+  "data_extraction": {
+    "source_1": {
+      "records": 3,
+      "columns": [
+        "account_name",
+        "project_item",
+        "opening_balance_debit",
+        "current_period_debit",
+        "current_period_credit"
+      ]
+    },
+    "source_2": {
+      "records": 2,
+      "columns": [
+        "account_name",
+        "project_item",
+        "prior_period_credit"
+      ]
+    }
+  },
+  "calculations": {},
+  "processing_steps": [
+    {
+      "step_name": "文件匹配",
+      "step_type": "file_matching",
+      "status": "completed",
+      "start_time": "2026-01-11T12:58:14.222503",
+      "end_time": "2026-01-11T12:58:14.223082",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "matched_files": {
+          "source_1": "/Users/kevin/workspace/financial-ai/finance-agent/uploads/2026/1/10/福擎-科目余额表 本期2025.xlsx",
+          "source_2": "/Users/kevin/workspace/financial-ai/finance-agent/uploads/2026/1/10/福擎-科目余额表 上期2024.xlsx"
+        }
+      }
+    },
+    {
+      "step_name": "数据提取",
+      "step_type": "extraction",
+      "status": "completed",
+      "start_time": "2026-01-11T12:58:14.223134",
+      "end_time": "2026-01-11T12:58:14.364804",
+      "duration_seconds": null,
+      "records_processed": 5,
+      "error_message": null,
+      "details": {
+        "sources_processed": 2,
+        "total_records": 5
+      }
+    },
+    {
+      "step_name": "数据转换",
+      "step_type": "transformation",
+      "status": "completed",
+      "start_time": "2026-01-11T12:58:14.364908",
+      "end_time": "2026-01-11T12:58:14.364924",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "calculated_fields": []
+      }
+    },
+    {
+      "step_name": "写入输出",
+      "step_type": "output",
+      "status": "completed",
+      "start_time": "2026-01-11T12:58:14.364980",
+      "end_time": "2026-01-11T12:58:15.717481",
+      "duration_seconds": null,
+      "records_processed": 0,
+      "error_message": null,
+      "details": {
+        "output_file": "/Users/kevin/workspace/financial-ai/finance-agent/data_preparation/output/01 审计底稿-模板_20260111.xlsx"
+      }
+    }
+  ],
+  "summary": {
+    "total_steps": 4,
+    "completed_steps": 4,
+    "failed_steps": 0
+  }
+}
