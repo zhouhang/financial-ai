@@ -21,7 +21,7 @@ from reconciliation.mcp_server.tools import create_tools as create_recon_tools, 
 
 # 导入数据整理模块  
 from data_preparation.mcp_server.tools import create_tools as create_prep_tools, handle_tool_call as handle_prep_call
-from data_preparation.mcp_server.config import OUTPUT_DIR, REPORT_DIR
+from data_preparation.mcp_server.config import OUTPUT_DIR, REPORT_DIR as PREP_REPORT_DIR_IMPORT
 
 # 配置日志
 logging.basicConfig(
@@ -133,7 +133,7 @@ async def download_file(request):
             )
     
     # 如果找不到，尝试从报告文件中获取
-    report_file = REPORT_DIR / f"{task_id}_report.json"
+    report_file = PREP_REPORT_DIR / f"{task_id}_report.json"
     if report_file.exists():
         import json
         with open(report_file, 'r') as f:
@@ -168,7 +168,7 @@ async def preview_file(request):
     
     # 如果找不到，尝试从报告文件中获取
     if not output_file or not output_file.exists():
-        report_file = REPORT_DIR / f"{task_id}_report.json"
+        report_file = PREP_REPORT_DIR / f"{task_id}_report.json"
         if report_file.exists():
             import json
             with open(report_file, 'r') as f:

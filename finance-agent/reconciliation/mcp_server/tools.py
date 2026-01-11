@@ -254,13 +254,19 @@ async def _reconciliation_start(args: Dict) -> Dict:
             return {"error": f"配置缺少 schema_path: {reconciliation_type}"}
         
         # 4. 读取 schema 文件
-        # schema_path 格式: /schemas/reconciliation/direct_sales_schema.json
+        # schema_path 格式: direct_sales_schema.json (只包含文件名)
+        # SCHEMA_DIR 已经指向 reconciliation/schemas
         if schema_path_config.startswith('/'):
-            # 绝对路径，去掉开头的 / 并与 FINANCE_AGENT_DIR 拼接
-            schema_path = FINANCE_AGENT_DIR / schema_path_config.lstrip('/')
+            # 绝对路径，去掉开头的 / 
+            schema_path_config = schema_path_config.lstrip('/')
+            # 如果包含 schemas/ 前缀，去掉它
+            if schema_path_config.startswith('schemas/reconciliation/'):
+                schema_path_config = schema_path_config.replace('schemas/reconciliation/', '', 1)
+            schema_path = SCHEMA_DIR / schema_path_config
         elif schema_path_config.startswith('schemas/'):
-            # 相对路径，与 FINANCE_AGENT_DIR 拼接
-            schema_path = FINANCE_AGENT_DIR / schema_path_config
+            # 相对路径，去掉 schemas/ 前缀
+            schema_path_config = schema_path_config.replace('schemas/reconciliation/', '').replace('schemas/', '')
+            schema_path = SCHEMA_DIR / schema_path_config
         else:
             # 只有文件名，与 SCHEMA_DIR 拼接
             schema_path = SCHEMA_DIR / schema_path_config

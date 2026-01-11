@@ -130,14 +130,16 @@ async def _data_preparation_start(args: Dict) -> Dict:
         
         # 获取 schema 路径
         schema_path = type_config.get("schema_path", "")
+        
+        # SCHEMA_DIR 已经指向 data_preparation/schemas
+        # schema_path 格式: audit_schema.json (只包含文件名)
         if schema_path.startswith("/"):
             schema_path = schema_path[1:]  # 移除开头的 /
+        if schema_path.startswith("schemas/"):
+            # 如果包含 schemas/ 前缀，去掉它
+            schema_path = schema_path.replace("schemas/", "", 1)
         
-        # SCHEMA_DIR 已经指向 finance-agent/schemas/data_preparation
-        # schema_path 格式: schemas/data_preparation/audit_schema.json
-        # 所以需要从 finance-agent 开始拼接
-        finance_agent_dir = SCHEMA_DIR.parent.parent  # finance-agent/
-        full_schema_path = finance_agent_dir / schema_path
+        full_schema_path = SCHEMA_DIR / schema_path
         
         if not full_schema_path.exists():
             return {"error": f"Schema 文件不存在: {full_schema_path}"}

@@ -252,12 +252,12 @@ class ProcessingEngine:
         
         try:
             # 获取模板文件路径
-            from .config import TEMPLATE_DIR, FINANCE_AGENT_DIR
+            from .config import TEMPLATES_DIR, FINANCE_AGENT_DIR
             template_file = self.schema.get("template_mapping", {}).get("template_file", "template.xlsx")
             
             # 尝试多个可能的模板路径
             possible_paths = [
-                TEMPLATE_DIR / template_file,  # finance-agent/templates/
+                TEMPLATES_DIR / template_file,  # data_preparation/templates/
                 FINANCE_AGENT_DIR / "templates" / template_file,  # 绝对路径
                 Path(template_file) if Path(template_file).is_absolute() and Path(template_file).exists() else None  # 绝对路径
             ]

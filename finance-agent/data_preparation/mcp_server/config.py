@@ -8,17 +8,17 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent.parent.absolute()  # finance-agent/data_preparation/
 FINANCE_AGENT_DIR = BASE_DIR.parent  # finance-agent/
 UPLOAD_DIR = FINANCE_AGENT_DIR / "uploads"
-OUTPUT_DIR = FINANCE_AGENT_DIR / "output"
-REPORT_DIR = FINANCE_AGENT_DIR / "report"
-TEMPLATE_DIR = FINANCE_AGENT_DIR / "templates"
-SCHEMA_DIR = FINANCE_AGENT_DIR / "schemas" / "data_preparation"
-CONFIG_DIR = FINANCE_AGENT_DIR / "config"
+OUTPUT_DIR = BASE_DIR / "output"
+REPORT_DIR = BASE_DIR / "report"
+TEMPLATES_DIR = BASE_DIR / "templates"
+SCHEMA_DIR = BASE_DIR / "schemas"
+CONFIG_DIR = BASE_DIR / "config"
 
 # 确保目录存在
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 REPORT_DIR.mkdir(exist_ok=True)
-TEMPLATE_DIR.mkdir(exist_ok=True)
+TEMPLATES_DIR.mkdir(exist_ok=True)
 SCHEMA_DIR.mkdir(exist_ok=True)
 CONFIG_DIR.mkdir(exist_ok=True)
 
