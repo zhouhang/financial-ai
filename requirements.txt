@@ -22,3 +22,6 @@ httpx>=0.25.0
 pandas>=2.0.0
 openpyxl>=3.1.0  # Excel 文件支持
 chardet>=5.0.0  # 编码检测，防止中文乱码
+
+# 安全表达式评估
+simpleeval>=0.9.13  # 安全替代 eval()，防止代码注入

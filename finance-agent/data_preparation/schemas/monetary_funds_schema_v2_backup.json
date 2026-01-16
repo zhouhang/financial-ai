@@ -1,0 +1,179 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "project_name": "货币资金数据整理",
+    "author": "审计部",
+    "created_at": "2026-01-10",
+    "description": "从福擎科目余额表中抽取银行存款数据并填入审计底稿"
+  },
+  
+  "data_sources": {
+    "source_1": {
+      "name": "福擎-科目余额表 本期2025",
+      "type": "excel",
+      "file_pattern": "*科目余额表*本期*2025*.xlsx",
+      "extraction_rules": {
+        "multi_index_header": [0, 1],
+        "columns_mapping": {
+          "科目名称": "account_name",
+          "核算项目": "project_item"
+        }
+      },
+      "conditional_extractions": {
+        "condition_id": "bank_deposit_current_period",
+        "name": "本期银行存款-*筛选",
+        "description": "科目名称匹配'银行存款_*'格式（只匹配'银行存款_xx'，不匹配'银行存款_xx_yy'）且核算项目不为空",
+        "condition": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "column_matches",
+              "column_header": "account_name",
+              "regex_pattern": "^银行存款_[^_]+$",
+              "match_type": "regex"
+            },
+            {
+              "type": "column_empty",
+              "column_header": "project_item",
+              "empty_check": false
+            }
+          ]
+        },
+        "extraction": {
+          "target_fields": [
+            "account_name",
+            "project_item",
+            {
+              "field": "期初余额",
+              "sub_field": "借方",
+              "output_field": "opening_balance_debit"
+            },
+            {
+              "field": "本期发生额",
+              "sub_field": "借方",
+              "output_field": "current_period_debit"
+            },
+            {
+              "field": "本期发生额",
+              "sub_field": "贷方",
+              "output_field": "current_period_credit"
+            }
+          ],
+          "output_type": "table"
+        }
+      },
+      "validation_rules": [
+        {
+          "rule": "not_null",
+          "fields": ["account_name", "project_item"],
+          "error_message": "科目名称和核算项目不能为空"
+        }
+      ]
+    },
+    "source_2": {
+      "name": "福擎-科目余额表 上期2024",
+      "type": "excel",
+      "file_pattern": "*科目余额表*上期*2024*.xlsx",
+      "extraction_rules": {
+        "multi_index_header": [0, 1],
+        "columns_mapping": {
+          "科目名称": "account_name",
+          "核算项目": "project_item"
+        }
+      },
+      "conditional_extractions": {
+        "condition_id": "bank_deposit_prior_period",
+        "name": "上期银行存款-*筛选",
+        "description": "科目名称匹配'银行存款_*'格式（只匹配'银行存款_xx'，不匹配'银行存款_xx_yy'）且核算项目不为空",
+        "condition": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "column_matches",
+              "column_header": "account_name",
+              "regex_pattern": "^银行存款_[^_]+$",
+              "match_type": "regex"
+            },
+            {
+              "type": "column_empty",
+              "column_header": "project_item",
+              "empty_check": false
+            }
+          ]
+        },
+        "extraction": {
+          "target_fields": [
+            "account_name",
+            "project_item",
+            {
+              "field": "本期发生额",
+              "sub_field": "贷方",
+              "output_field": "prior_period_credit"
+            }
+          ],
+          "output_type": "table"
+        }
+      },
+      "validation_rules": [
+        {
+          "rule": "not_null",
+          "fields": ["account_name", "project_item"],
+          "error_message": "科目名称和核算项目不能为空"
+        }
+      ]
+    }
+  },
+  
+  "transformations": [],
+  
+  "template_mapping": {
+    "template_file": "01 审计底稿-模板.xlsx",
+    "cell_mappings": [
+      {
+        "data_source": "source_1",
+        "field": "extracted_data",
+        "target": {
+          "sheet": "货币资金",
+          "range": "B9:F100",
+          "type": "table",
+          "header_mapping": {
+            "account_name": "B",
+            "project_item": "C",
+            "opening_balance_debit": "D",
+            "current_period_debit": "E",
+            "current_period_credit": "F"
+          }
+        }
+      },
+      {
+        "data_source": "source_2",
+        "field": "extracted_data",
+        "target": {
+          "sheet": "货币资金",
+          "range": "H9:H100",
+          "type": "table",
+          "header_mapping": {
+            "prior_period_credit": "H"
+          },
+          "match_by": {
+            "fields": ["account_name", "project_item"],
+            "source_1_fields": ["account_name", "project_item"]
+          }
+        }
+      }
+    ]
+  },
+  
+  "workflow_controls": {
+    "execution_order": ["source_1", "source_2", "output"],
+    "error_handling": {
+      "on_extraction_error": "skip_and_log",
+      "on_calculation_error": "use_default:0",
+      "max_errors": 10
+    },
+    "logging": {
+      "level": "INFO",
+      "output_file": "monetary_funds_processing_log_{timestamp}.txt"
+    }
+  }
+}

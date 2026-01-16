@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
+from simpleeval import simple_eval, NameNotDefined, FunctionNotDefined
 from .models import ReconciliationIssue, ReconciliationSummary, ReconciliationMetadata
 from .data_cleaner import DataCleaner
 from .file_matcher import FileMatcher
@@ -156,28 +157,49 @@ class ReconciliationEngine:
             if not condition_expr:
                 return None
             
-            # 准备 eval 环境，包含 biz, fin, biz_exists, fin_exists 等变量
-            # 将 tolerance 中的配置项添加到 eval 环境
+            # 准备安全的表达式评估环境，包含 biz, fin, biz_exists, fin_exists 等变量
+            # 将 tolerance 中的配置项添加到环境中
             tolerance = self.tolerance
-            eval_env = {
+
+            # 定义允许的函数（白名单）
+            safe_functions = {
+                "abs": abs,
+                "float": float,
+                "str": str,
+                "len": len,
+                "int": int,
+                "bool": bool,
+                "min": min,
+                "max": max,
+                "round": round,
+            }
+
+            # 定义允许的变量
+            safe_names = {
                 "biz": biz,
                 "fin": fin,
                 "biz_exists": biz_exists,
                 "fin_exists": fin_exists,
-                "abs": abs,
-                "float": float,
-                "str": str,
-                "pd": pd,
-                "len": len,
                 "tolerance": tolerance,
                 # 为了兼容性，直接将常用配置项添加到环境中
                 "amount_diff_max": tolerance.get("amount_diff_max", 0.0),
                 "date_format": tolerance.get("date_format", "%Y-%m-%d"),
             }
-            
-            # 执行条件表达式
-            # 注意：这里使用 eval 有安全风险，生产环境应该使用更安全的表达式解析器
-            result = eval(condition_expr, eval_env)
+
+            # 使用 simpleeval 安全地执行条件表达式
+            # simpleeval 不允许执行任意代码，只能执行简单的表达式
+            try:
+                result = simple_eval(
+                    condition_expr,
+                    names=safe_names,
+                    functions=safe_functions
+                )
+            except (NameNotDefined, FunctionNotDefined) as e:
+                logger.error(f"表达式中使用了不允许的变量或函数: {condition_expr}, 错误: {str(e)}")
+                raise ValueError(f"条件表达式包含不安全的操作: {str(e)}")
+            except Exception as e:
+                logger.error(f"条件表达式执行失败: {condition_expr}, 错误: {str(e)}")
+                raise
             
             if result:
                 # 获取文件名

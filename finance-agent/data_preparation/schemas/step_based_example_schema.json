@@ -1,0 +1,335 @@
+{
+  "version": "3.0",
+  "schema_type": "step_based",
+  "metadata": {
+    "project_name": "多源数据关联整理示例",
+    "author": "数据整理团队",
+    "created_at": "2026-01-16",
+    "description": "演示步骤化数据整理：先读取主表，然后依次关联多个辅助表"
+  },
+
+  "template_config": {
+    "template_file": "多源数据整理模板.xlsx",
+    "output_filename_pattern": "多源数据整理结果_{timestamp}.xlsx"
+  },
+
+  "processing_steps": [
+    {
+      "step_id": "step_1",
+      "step_name": "读取主表excelA并写入模板",
+      "step_type": "extract_and_write",
+      "description": "从excelA读取主数据（如客户列表），写入模板作为后续匹配的基础",
+      "depends_on": [],
+      "enabled": true,
+
+      "data_source": {
+        "source_type": "uploaded_file",
+        "file_pattern": "*客户主表*.xlsx",
+        "extraction_rules": {
+          "sheet_name": "客户信息",
+          "range": "A2:E1000",
+          "skip_rows": 0,
+          "columns_mapping": {
+            "A": "customer_id",
+            "B": "customer_name",
+            "C": "region",
+            "D": "industry",
+            "E": "contact_person"
+          }
+        },
+        "validation_rules": [
+          {
+            "rule": "not_null",
+            "fields": ["customer_id", "customer_name"],
+            "error_message": "客户ID和客户名称不能为空"
+          }
+        ]
+      },
+
+      "template_action": {
+        "action_type": "write_table",
+        "target": {
+          "sheet": "汇总表",
+          "start_cell": "A2",
+          "header_mapping": {
+            "customer_id": "A",
+            "customer_name": "B",
+            "region": "C",
+            "industry": "D",
+            "contact_person": "E"
+          },
+          "write_mode": "overwrite"
+        },
+        "formatting": {
+          "header_bold": true,
+          "auto_width": true
+        }
+      },
+
+      "output_variables": {
+        "main_customer_data": {
+          "description": "主表客户数据，供后续步骤匹配使用",
+          "fields": ["customer_id", "customer_name", "region"]
+        }
+      }
+    },
+
+    {
+      "step_id": "step_2",
+      "step_name": "读取模板数据并匹配excelB",
+      "step_type": "read_template_and_match",
+      "description": "读取step1写入模板的客户数据，作为条件匹配excelB的订单数据",
+      "depends_on": ["step_1"],
+      "enabled": true,
+
+      "template_reference": {
+        "sheet": "汇总表",
+        "range": "A2:E1000",
+        "columns_mapping": {
+          "A": "customer_id",
+          "B": "customer_name",
+          "C": "region",
+          "D": "industry",
+          "E": "contact_person"
+        },
+        "read_until_empty": true
+      },
+
+      "data_source": {
+        "source_type": "uploaded_file",
+        "file_pattern": "*订单明细*.xlsx",
+        "extraction_rules": {
+          "sheet_name": "订单数据",
+          "range": "A2:F1000",
+          "columns_mapping": {
+            "A": "order_id",
+            "B": "customer_id",
+            "C": "order_date",
+            "D": "product_name",
+            "E": "quantity",
+            "F": "amount"
+          }
+        },
+        "conditional_extractions": {
+          "match_with_template": {
+            "template_fields": ["customer_id"],
+            "data_fields": ["customer_id"],
+            "match_type": "inner_join"
+          }
+        }
+      },
+
+      "template_action": {
+        "action_type": "write_matched",
+        "target": {
+          "sheet": "汇总表",
+          "match_by": {
+            "template_columns": ["A"],
+            "data_fields": ["customer_id"]
+          },
+          "write_columns": {
+            "amount": "F"
+          },
+          "aggregation": {
+            "amount": "sum"
+          }
+        }
+      },
+
+      "output_variables": {
+        "order_data": {
+          "description": "订单数据",
+          "fields": ["order_id", "customer_id", "amount"]
+        }
+      }
+    },
+
+    {
+      "step_id": "step_3",
+      "step_name": "读取模板数据并匹配excelC",
+      "step_type": "read_template_and_match",
+      "description": "读取step1写入模板的客户数据，作为条件匹配excelC的付款数据",
+      "depends_on": ["step_1"],
+      "enabled": true,
+
+      "template_reference": {
+        "sheet": "汇总表",
+        "range": "A2:E1000",
+        "columns_mapping": {
+          "A": "customer_id",
+          "B": "customer_name"
+        },
+        "read_until_empty": true
+      },
+
+      "data_source": {
+        "source_type": "uploaded_file",
+        "file_pattern": "*付款记录*.xlsx",
+        "extraction_rules": {
+          "sheet_name": "付款明细",
+          "range": "A2:E1000",
+          "columns_mapping": {
+            "A": "payment_id",
+            "B": "customer_id",
+            "C": "payment_date",
+            "D": "payment_amount",
+            "E": "payment_method"
+          }
+        },
+        "conditional_extractions": {
+          "match_with_template": {
+            "template_fields": ["customer_id"],
+            "data_fields": ["customer_id"],
+            "match_type": "inner_join"
+          }
+        }
+      },
+
+      "template_action": {
+        "action_type": "write_matched",
+        "target": {
+          "sheet": "汇总表",
+          "match_by": {
+            "template_columns": ["A"],
+            "data_fields": ["customer_id"]
+          },
+          "write_columns": {
+            "payment_amount": "G"
+          },
+          "aggregation": {
+            "payment_amount": "sum"
+          }
+        }
+      },
+
+      "output_variables": {
+        "payment_data": {
+          "description": "付款数据",
+          "fields": ["payment_id", "customer_id", "payment_amount"]
+        }
+      }
+    },
+
+    {
+      "step_id": "step_4",
+      "step_name": "读取模板数据并匹配excelD",
+      "step_type": "read_template_and_match",
+      "description": "读取step1写入模板的客户数据，作为条件匹配excelD的退货数据",
+      "depends_on": ["step_1"],
+      "enabled": true,
+
+      "template_reference": {
+        "sheet": "汇总表",
+        "range": "A2:E1000",
+        "columns_mapping": {
+          "A": "customer_id",
+          "B": "customer_name"
+        },
+        "read_until_empty": true
+      },
+
+      "data_source": {
+        "source_type": "uploaded_file",
+        "file_pattern": "*退货记录*.xlsx",
+        "extraction_rules": {
+          "sheet_name": "退货明细",
+          "range": "A2:E1000",
+          "columns_mapping": {
+            "A": "return_id",
+            "B": "customer_id",
+            "C": "return_date",
+            "D": "return_amount",
+            "E": "return_reason"
+          }
+        },
+        "conditional_extractions": {
+          "match_with_template": {
+            "template_fields": ["customer_id"],
+            "data_fields": ["customer_id"],
+            "match_type": "inner_join"
+          }
+        }
+      },
+
+      "template_action": {
+        "action_type": "write_matched",
+        "target": {
+          "sheet": "汇总表",
+          "match_by": {
+            "template_columns": ["A"],
+            "data_fields": ["customer_id"]
+          },
+          "write_columns": {
+            "return_amount": "H"
+          },
+          "aggregation": {
+            "return_amount": "sum"
+          }
+        }
+      },
+
+      "output_variables": {
+        "return_data": {
+          "description": "退货数据",
+          "fields": ["return_id", "customer_id", "return_amount"]
+        }
+      }
+    },
+
+    {
+      "step_id": "step_5",
+      "step_name": "计算净收入",
+      "step_type": "transform_and_write",
+      "description": "读取模板中的订单、付款、退货金额，计算净收入",
+      "depends_on": ["step_2", "step_3", "step_4"],
+      "enabled": true,
+
+      "data_source": {
+        "source_type": "template_range",
+        "template_reference": {
+          "sheet": "汇总表",
+          "range": "A2:H1000",
+          "columns_mapping": {
+            "A": "customer_id",
+            "B": "customer_name",
+            "F": "order_amount",
+            "G": "payment_amount",
+            "H": "return_amount"
+          },
+          "read_until_empty": true
+        }
+      },
+
+      "transformations": [
+        {
+          "operation": "calculate",
+          "formula": "{{payment_amount}} - {{return_amount}}",
+          "output_field": "net_income",
+          "default_value": 0
+        }
+      ],
+
+      "template_action": {
+        "action_type": "write_column",
+        "target": {
+          "sheet": "汇总表",
+          "start_cell": "I2",
+          "field": "net_income"
+        }
+      }
+    }
+  ],
+
+  "workflow_controls": {
+    "execution_order": "sequential",
+    "error_handling": {
+      "on_extraction_error": "skip_and_log",
+      "on_calculation_error": "use_default:0",
+      "max_errors": 10
+    },
+    "logging": {
+      "level": "INFO",
+      "output_file": "processing_log_{timestamp}.txt"
+    }
+  }
+}
