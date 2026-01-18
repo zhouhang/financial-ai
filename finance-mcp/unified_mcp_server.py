@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 创建统一的 MCP Server
-mcp_server = Server("financial-agent-mcp-server")
+mcp_server = Server("financial-mcp-server")
 
 
 @mcp_server.list_tools()
@@ -103,7 +103,7 @@ async def health_check(request):
     """健康检查"""
     return JSONResponse({
         "status": "healthy",
-        "service": "financial-agent-mcp-server",
+        "service": "financial-mcp-server",
         "version": "1.0.0",
         "modules": ["reconciliation", "data_preparation"]
     })

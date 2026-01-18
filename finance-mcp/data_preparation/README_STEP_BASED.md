@@ -14,7 +14,7 @@
 ### 1. 创建测试数据
 
 ```bash
-cd finance-agent/data_preparation
+cd finance-mcp/data_preparation
 ../../.venv/bin/python create_test_data.py
 ```
 
@@ -225,7 +225,7 @@ cd finance-agent/data_preparation
 ## 文件结构
 
 ```
-finance-agent/data_preparation/
+finance-mcp/data_preparation/
 ├── mcp_server/
 │   ├── processing_engine.py    # 核心处理引擎
 │   ├── template_reader.py      # 模板读取器

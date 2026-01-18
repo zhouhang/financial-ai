@@ -5,9 +5,9 @@ import os
 from pathlib import Path
 
 # 基础目录
-BASE_DIR = Path(__file__).parent.parent.absolute()  # finance-agent/reconciliation/
-FINANCE_AGENT_DIR = BASE_DIR.parent  # finance-agent/
-UPLOAD_DIR = FINANCE_AGENT_DIR / "uploads"
+BASE_DIR = Path(__file__).parent.parent.absolute()  # finance-mcp/reconciliation/
+FINANCE_MCP_DIR = BASE_DIR.parent  # finance-mcp/
+UPLOAD_DIR = FINANCE_MCP_DIR / "uploads"
 SCHEMA_DIR = BASE_DIR / "schemas"
 CONFIG_DIR = BASE_DIR / "config"
 

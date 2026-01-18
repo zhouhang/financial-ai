@@ -651,6 +651,6 @@
 
 运行测试脚本验证 schema:
 ```bash
-cd finance-agent/data_preparation
+cd finance-mcp/data_preparation
 ../../.venv/bin/python run_monetary_funds_test.py
 ```

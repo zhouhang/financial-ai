@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 from mcp import Tool
 from .task_manager import TaskManager
-from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR, FINANCE_AGENT_DIR
+from .config import UPLOAD_DIR, ALLOWED_EXTENSIONS, SCHEMA_DIR, RECONCILIATION_SCHEMAS_FILE, BASE_DIR, FINANCE_MCP_DIR
 from .schema_loader import SchemaLoader
 import re
 
@@ -17,7 +17,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(FINANCE_AGENT_DIR / 'reconciliation_mcp.log'),
+        logging.FileHandler(FINANCE_MCP_DIR / 'reconciliation_mcp.log'),
         logging.StreamHandler()
     ]
 )
@@ -287,11 +287,11 @@ async def _reconciliation_start(args: Dict) -> Dict:
         for file_path in files:
             # 将相对路径转换为绝对路径
             if file_path.startswith('/uploads/'):
-                # 去掉开头的 / 并与 FINANCE_AGENT_DIR 拼接（因为 uploads 在 finance-agent 目录下）
-                abs_path = FINANCE_AGENT_DIR / file_path.lstrip('/')
+                # 去掉开头的 / 并与 FINANCE_MCP_DIR 拼接（因为 uploads 在 finance-mcp 目录下）
+                abs_path = FINANCE_MCP_DIR / file_path.lstrip('/')
             elif file_path.startswith('uploads/'):
-                # 相对路径，直接与 FINANCE_AGENT_DIR 拼接
-                abs_path = FINANCE_AGENT_DIR / file_path
+                # 相对路径，直接与 FINANCE_MCP_DIR 拼接
+                abs_path = FINANCE_MCP_DIR / file_path
             elif str(file_path).startswith(str(UPLOAD_DIR)):
                 # 如果已经是 UPLOAD_DIR 的绝对路径
                 abs_path = Path(file_path)

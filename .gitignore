@@ -222,8 +222,8 @@ test_data/
 # macOS
 .DS_Store
 
-finance-ai/finance-agent/uploads
-finance-ai/finance-agent/data_preparation/output
-finance-ai/finance-agent/data_preparation/report
-finance-ai/finance-agent/reconciliation/output
-finance-ai/finance-agent/reconciliation/report
+finance-ai/finance-mcp/uploads
+finance-ai/finance-mcp/data_preparation/output
+finance-ai/finance-mcp/data_preparation/report
+finance-ai/finance-mcp/reconciliation/output
+finance-ai/finance-mcp/reconciliation/report
