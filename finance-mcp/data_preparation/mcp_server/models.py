@@ -81,7 +81,7 @@ class ProcessingMetadata:
 class ProcessingResult:
     """数据整理结果"""
     task_id: str
-    status: str  # success, failed, processing
+    status: str  # completed, failed, processing
     output_file: Optional[str] = None
     output_url: Optional[str] = None
     preview_url: Optional[str] = None
@@ -96,28 +96,8 @@ class ProcessingResult:
             "status": self.status
         }
         
-        if self.status == "success":
-            result["actions"] = []
-            if self.output_url:
-                result["actions"].append({
-                    "action": "download_file",
-                    "url": self.output_url,
-                    "method": "GET",
-                    "expires_at": None  # TODO: 添加过期时间
-                })
-            if self.preview_url:
-                result["actions"].append({
-                    "action": "view_preview",
-                    "url": self.preview_url,
-                    "method": "GET"
-                })
-            if self.report_url:
-                result["actions"].append({
-                    "action": "get_detailed_report",
-                    "url": self.report_url,
-                    "method": "GET"
-                })
-            
+        if self.status == "completed":
+            # 完成状态，包含元数据
             if self.metadata:
                 result["metadata"] = self.metadata.to_dict()
         

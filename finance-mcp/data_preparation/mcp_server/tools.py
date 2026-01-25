@@ -187,19 +187,30 @@ async def _data_preparation_result(args: Dict) -> Dict:
         result = await task_manager.get_task_result(task_id)
         
         # 如果任务完成，添加下载链接
-        if result.get("status") == "success" and "actions" in result:
+        if result.get("status") == "completed":
             # 生成下载/预览/报告 URL
             base_url = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
             
-            for action in result["actions"]:
-                if action["action"] == "download_file":
-                    # 从输出文件路径生成下载 URL
-                    # TODO: 实现文件下载服务
-                    action["url"] = f"{base_url}/download/{task_id}"
-                elif action["action"] == "view_preview":
-                    action["url"] = f"{base_url}/preview/{task_id}"
-                elif action["action"] == "get_detailed_report":
-                    action["url"] = f"{base_url}/report/{task_id}"
+            # 使用结果中的task_id（处理ID）而不是请求的task_id（任务ID）
+            result_task_id = result.get("task_id", task_id)
+            
+            # 确保actions存在
+            if "actions" not in result:
+                result["actions"] = []
+            
+            # 添加默认的操作URL（去掉method属性）
+            result["actions"].append({
+                "action": "download_file",
+                "url": f"{base_url}/download/{result_task_id}"
+            })
+            result["actions"].append({
+                "action": "view_preview",
+                "url": f"{base_url}/preview/{result_task_id}"
+            })
+            result["actions"].append({
+                "action": "get_detailed_report",
+                "url": f"{base_url}/report/{result_task_id}"
+            })
         
         return result
     

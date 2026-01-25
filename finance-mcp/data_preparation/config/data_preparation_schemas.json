@@ -9,7 +9,7 @@
     {
       "name_cn": "货币资金数据整理",
       "type_key": "monetary_funds",
-      "schema_path": "monetary_funds_schema.json",
+      "schema_path": "monetary_funds_schema_v3.json",
       "callback_url": null
     }
   ]

@@ -27,7 +27,7 @@ DATA_PREPARATION_SCHEMAS_FILE = CONFIG_DIR / "data_preparation_schemas.json"
 
 # 服务器配置
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 3336  # 使用不同端口避免冲突
+DEFAULT_PORT = 3335  # 与统一的MCP服务保持一致
 
 # 任务配置
 TASK_TIMEOUT = 7200  # 2 小时（数据处理可能更耗时）

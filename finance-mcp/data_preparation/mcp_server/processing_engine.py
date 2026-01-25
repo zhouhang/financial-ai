@@ -106,7 +106,7 @@ class ProcessingEngine:
             
             result = ProcessingResult(
                 task_id=task_id,
-                status="success",
+                status="completed",
                 output_file=output_file,
                 metadata=metadata,
                 steps=self.steps
@@ -436,7 +436,7 @@ class ProcessingEngine:
 
             result = ProcessingResult(
                 task_id=task_id,
-                status="success",
+                status="completed",
                 output_file=str(working_file),
                 metadata=metadata,
                 steps=self.steps
