@@ -27,7 +27,7 @@ const SchemaCanvas: React.FC<SchemaCanvasProps> = ({
   const {
     steps,
     uploadedFiles,
-    currentStepIndex,
+    currentStepIndex: _currentStepIndex,
     validateSchema,
     testSchema,
     saveSchema,

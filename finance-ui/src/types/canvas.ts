@@ -2,10 +2,12 @@
  * TypeScript type definitions for Canvas functionality
  */
 
+import { WorkType } from './schema';
+
 export interface SchemaMetadata {
   name_cn: string;
   type_key: string;
-  work_type: 'DATA_PREPARATION' | 'RECONCILIATION';
+  work_type: WorkType;
   description?: string;
 }
 
@@ -143,7 +145,7 @@ export interface Schema {
   id: number;
   name_cn: string;
   type_key: string;
-  work_type: 'DATA_PREPARATION' | 'RECONCILIATION';
+  work_type: WorkType;
   schema_path: string;
   config_path: string;
   version: string;

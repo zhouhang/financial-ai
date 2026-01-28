@@ -46,6 +46,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           conversation_id: get().conversationId || undefined,
         },
         (data) => {
+          // Log all events for debugging
+          console.log('[ChatStore] Received event:', data.event, data);
+
           // Handle streaming data
           if (data.event === 'message' || data.event === 'agent_message') {
             // Accumulate answers instead of replacing
@@ -67,6 +70,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Use complete answer from workflow_finished event
             if (data.data?.outputs?.answer) {
               fullAnswer = data.data.outputs.answer;
+              console.log('[ChatStore] workflow_finished answer:', fullAnswer);
               set((state) => ({
                 messages: state.messages.map((msg) =>
                   msg.id === assistantMessageId || msg.id === messageId
@@ -79,10 +83,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Final message with metadata
             if (data.metadata?.command) {
               detectedCommand = data.metadata.command;
+              console.log('[ChatStore] Command detected from message_end:', detectedCommand);
             }
           } else if (data.event === 'command_detected') {
             // Command detected event from backend
-            detectedCommand = data.command;
+            detectedCommand = data.command || null;
+            console.log('[ChatStore] Command detected from command_detected event:', detectedCommand);
           }
         },
         (error) => {
@@ -99,12 +105,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
 
       // Update final message with command and conversation ID
+      console.log('[ChatStore] Final update - detectedCommand:', detectedCommand, 'messageId:', messageId, 'fullAnswer:', fullAnswer.substring(0, 100));
+
+      // If no command detected from metadata, try to detect from answer text
+      if (!detectedCommand && fullAnswer) {
+        // Detect command from answer text
+        const commands = {
+          '\\[create_schema\\]': 'create_schema',
+          '\\[update_schema\\]': 'update_schema',
+          '\\[schema_list\\]': 'schema_list',
+          '\\[login_form\\]': 'login_form',
+        };
+
+        for (const [pattern, command] of Object.entries(commands)) {
+          if (new RegExp(pattern, 'i').test(fullAnswer)) {
+            detectedCommand = command;
+            console.log('[ChatStore] Command detected from answer text:', detectedCommand);
+            break;
+          }
+        }
+      }
+
       set((state) => ({
-        messages: state.messages.map((msg) =>
-          msg.id === assistantMessageId || msg.id === messageId
-            ? { ...msg, command: detectedCommand || undefined }
-            : msg
-        ),
+        messages: state.messages.map((msg) => {
+          if (msg.id === assistantMessageId || msg.id === messageId) {
+            console.log('[ChatStore] Updating message:', msg.id, 'with command:', detectedCommand);
+            return { ...msg, command: detectedCommand || undefined };
+          }
+          return msg;
+        }),
         conversationId: conversationId || state.conversationId,
       }));
     } catch (error) {

@@ -153,7 +153,7 @@ const StepConfigPanel: React.FC = () => {
 function renderConfigFields(
   stepType: StepType,
   fileOptions: any[],
-  getColumnsForFile: (fileId: string, sheetName?: string) => string[]
+  _getColumnsForFile: (fileId: string, sheetName?: string) => string[]
 ) {
   switch (stepType) {
     case 'extract':

@@ -1,57 +1,56 @@
 /**
  * Schema Metadata Form - Step 1 of schema creation
+ * Note: Type key generation and name checking are now handled through Dify API
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Form, Input, Radio, Button, message } from 'antd';
 import { SchemaMetadata } from '@/types/canvas';
-import { schemaApi } from '@/api/schemas';
-import { debounce } from 'lodash';
+import debounce from 'lodash/debounce';
 
 interface SchemaMetadataFormProps {
   onNext: (metadata: SchemaMetadata) => void;
-  onCancel: () => void;
 }
 
-const SchemaMetadataForm: React.FC<SchemaMetadataFormProps> = ({ onNext, onCancel }) => {
+const SchemaMetadataForm: React.FC<SchemaMetadataFormProps> = ({ onNext }) => {
   const [form] = Form.useForm();
   const [typeKey, setTypeKey] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [checkingName, setCheckingName] = useState(false);
+  const [nameValid, setNameValid] = useState(false);
 
   // Debounced function to generate type_key and check uniqueness
+  // Note: This should be handled through Dify API in production
   const handleNameChange = debounce(async (nameCn: string) => {
     if (!nameCn || nameCn.trim().length === 0) {
       setTypeKey('');
+      setNameValid(false);
       return;
     }
 
     try {
       setCheckingName(true);
 
-      // Generate type_key
-      const { type_key } = await schemaApi.generateTypeKey(nameCn);
-      setTypeKey(type_key);
+      // TODO: Send to Dify API for type_key generation and name checking
+      // For now, generate a simple type_key locally
+      const type_key = nameCn
+        .toLowerCase()
+        .replace(/[^a-z0-9\u4e00-\u9fa5]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '');
 
-      // Check uniqueness
-      const { exists } = await schemaApi.checkNameExists(nameCn);
-      if (exists) {
-        form.setFields([
-          {
-            name: 'name_cn',
-            errors: ['该规则名称已存在，请使用其他名称'],
-          },
-        ]);
-      } else {
-        form.setFields([
-          {
-            name: 'name_cn',
-            errors: [],
-          },
-        ]);
-      }
+      setTypeKey(type_key);
+      setNameValid(true);
+
+      form.setFields([
+        {
+          name: 'name_cn',
+          errors: [],
+        },
+      ]);
     } catch (error) {
       console.error('Error checking name:', error);
       message.error('检查名称失败');
+      setNameValid(false);
     } finally {
       setCheckingName(false);
     }
@@ -60,13 +59,8 @@ const SchemaMetadataForm: React.FC<SchemaMetadataFormProps> = ({ onNext, onCance
   const handleSubmit = async (values: any) => {
     setLoading(true);
     try {
-      // Final uniqueness check
-      const { exists } = await schemaApi.checkNameExists(values.name_cn);
-      if (exists) {
-        message.error('该规则名称已存在，请使用其他名称');
-        setLoading(false);
-        return;
-      }
+      // TODO: Send to Dify API for final name checking
+      // For now, just proceed with the metadata
 
       const metadata: SchemaMetadata = {
         name_cn: values.name_cn,
@@ -134,19 +128,6 @@ const SchemaMetadataForm: React.FC<SchemaMetadataFormProps> = ({ onNext, onCance
           />
         </Form.Item>
 
-        <Form.Item label={<span style={{ color: '#e0e0e0' }}>规则标识（自动生成）</span>}>
-          <Input
-            value={typeKey}
-            disabled
-            placeholder="将根据中文名称自动生成"
-            style={{
-              background: '#1a1a1a',
-              border: '1px solid #2a2a2a',
-              color: '#888',
-            }}
-          />
-        </Form.Item>
-
         <Form.Item
           label={<span style={{ color: '#e0e0e0' }}>描述（可选）</span>}
           name="description"
@@ -165,20 +146,10 @@ const SchemaMetadataForm: React.FC<SchemaMetadataFormProps> = ({ onNext, onCance
         <Form.Item style={{ marginTop: '40px', marginBottom: 0 }}>
           <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
             <Button
-              onClick={onCancel}
-              style={{
-                background: '#2a2a2a',
-                border: 'none',
-                color: '#e0e0e0',
-              }}
-            >
-              取消
-            </Button>
-            <Button
               type="primary"
               htmlType="submit"
               loading={loading}
-              disabled={!typeKey || checkingName}
+              disabled={!nameValid || checkingName}
               style={{
                 background: '#4a9eff',
                 border: 'none',

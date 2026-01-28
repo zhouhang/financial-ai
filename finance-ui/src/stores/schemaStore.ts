@@ -1,91 +1,76 @@
 /**
  * Schema state management with Zustand
+ * Note: All schema operations are now handled through Dify API
+ * This store only manages local schema state
  */
 import { create } from 'zustand';
-import { schemaApi } from '@/api/schemas';
 import {
   SchemaState,
   Schema,
   SchemaDetail,
-  CreateSchemaRequest,
-  UpdateSchemaRequest,
-  SchemaFilters,
 } from '@/types/schema';
 
-export const useSchemaStore = create<SchemaState>((set, get) => ({
+export const useSchemaStore = create<SchemaState>((set) => ({
   schemas: [],
   currentSchema: null,
   loading: false,
 
-  fetchSchemas: async (filters?: SchemaFilters) => {
-    set({ loading: true });
-    try {
-      const response = await schemaApi.getSchemas(filters);
-      set({ schemas: response.schemas, loading: false });
-    } catch (error) {
-      console.error('Failed to fetch schemas:', error);
-      set({ loading: false });
-      throw error;
-    }
+  // All schema operations are now handled through Dify chat
+  // These methods update local state based on Dify responses
+
+  setSchemas: (schemas: Schema[]) => {
+    set({ schemas });
   },
 
-  createSchema: async (data: CreateSchemaRequest): Promise<Schema> => {
-    set({ loading: true });
-    try {
-      const schema = await schemaApi.createSchema(data);
-      set((state) => ({
-        schemas: [schema, ...state.schemas],
-        loading: false,
-      }));
-      return schema;
-    } catch (error) {
-      console.error('Failed to create schema:', error);
-      set({ loading: false });
-      throw error;
-    }
+  addSchema: (schema: Schema) => {
+    set((state) => ({
+      schemas: [schema, ...state.schemas],
+    }));
   },
 
-  updateSchema: async (id: number, data: UpdateSchemaRequest): Promise<Schema> => {
-    set({ loading: true });
-    try {
-      const schema = await schemaApi.updateSchema(id, data);
-      set((state) => ({
-        schemas: state.schemas.map((s) => (s.id === id ? schema : s)),
-        loading: false,
-      }));
-      return schema;
-    } catch (error) {
-      console.error('Failed to update schema:', error);
-      set({ loading: false });
-      throw error;
-    }
+  updateSchemaInList: (id: number, schema: Schema) => {
+    set((state) => ({
+      schemas: state.schemas.map((s) => (s.id === id ? schema : s)),
+    }));
   },
 
-  deleteSchema: async (id: number) => {
-    set({ loading: true });
-    try {
-      await schemaApi.deleteSchema(id);
-      set((state) => ({
-        schemas: state.schemas.filter((s) => s.id !== id),
-        loading: false,
-      }));
-    } catch (error) {
-      console.error('Failed to delete schema:', error);
-      set({ loading: false });
-      throw error;
-    }
+  removeSchema: (id: number) => {
+    set((state) => ({
+      schemas: state.schemas.filter((s) => s.id !== id),
+    }));
   },
 
-  getSchema: async (id: number): Promise<SchemaDetail> => {
-    set({ loading: true });
-    try {
-      const schema = await schemaApi.getSchema(id);
-      set({ currentSchema: schema, loading: false });
-      return schema;
-    } catch (error) {
-      console.error('Failed to get schema:', error);
-      set({ loading: false });
-      throw error;
-    }
+  setCurrentSchema: (schema: SchemaDetail | null) => {
+    set({ currentSchema: schema });
+  },
+
+  setLoading: (loading: boolean) => {
+    set({ loading });
+  },
+
+  // Legacy methods - kept for compatibility but should not be called directly
+  fetchSchemas: async () => {
+    console.warn('Schema operations should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
+  },
+
+  createSchema: async () => {
+    console.warn('Schema operations should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
+  },
+
+  updateSchema: async () => {
+    console.warn('Schema operations should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
+  },
+
+  deleteSchema: async () => {
+    console.warn('Schema operations should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
+  },
+
+  getSchema: async () => {
+    console.warn('Schema operations should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
   },
 }));

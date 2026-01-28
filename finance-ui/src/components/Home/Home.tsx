@@ -101,24 +101,50 @@ const Home: React.FC = () => {
     }
 
     try {
-      const response = await fetch('/api/dify/chat', {
+      const response = await fetch(`${import.meta.env.VITE_DIFY_API_URL}/chat-messages`, {
         method: 'POST',
         headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_DIFY_API_KEY}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          inputs: {},
           query: JSON.stringify({ username, password }),
+          response_mode: 'blocking',
+          user: 'anonymous_user',
           conversation_id: useChatStore.getState().conversationId || undefined,
-          streaming: false,
         }),
       });
 
       const data = await response.json();
 
       if (response.ok && data.answer) {
-        // Login successful - completely replace the message content with API response
-        // Clear the command to prevent re-rendering the login form
-        updateMessage(messageId, data.answer, true);
+        // Login successful - token should be in Dify response metadata
+        // Save token if provided by Dify
+        if (data.metadata?.token) {
+          localStorage.setItem('auth_token', data.metadata.token);
+          console.log('[Home] JWT token saved from Dify response');
+        }
+
+        // Check if there's a command in metadata and update accordingly
+        const detectedCommand = data.metadata?.command;
+        console.log('[Home] Login response command:', detectedCommand);
+
+        if (detectedCommand) {
+          // Update message with new content and command
+          updateMessage(messageId, data.answer, false);
+          // Set the command separately
+          useChatStore.setState((state) => ({
+            messages: state.messages.map((msg) =>
+              msg.id === messageId
+                ? { ...msg, command: detectedCommand }
+                : msg
+            ),
+          }));
+        } else {
+          // No command, clear the login_form command
+          updateMessage(messageId, data.answer, true);
+        }
       } else {
         // Login failed - show error message from API below the button
         const errorMessage = data.answer || data.detail || '登录失败，请重试';
@@ -338,22 +364,25 @@ const Home: React.FC = () => {
                     </span>
                   </div>
                   {message.content ? (
-                    <div
-                      className="message-content"
-                      style={{
-                        color: '#e0e0e0',
-                        fontSize: 15,
-                        lineHeight: 1.7,
-                        wordBreak: 'break-word'
-                      }}
-                      dangerouslySetInnerHTML={{
-                        __html: message.command === 'login_form'
-                          ? renderLoginForm(message.content)
-                          : message.command === 'create_schema'
-                          ? renderCreateSchemaButton(message.content, message.id)
-                          : message.content
-                      }}
-                    />
+                    <>
+                      {console.log('[Home] Rendering message:', message.id, 'command:', message.command, 'content preview:', message.content.substring(0, 50))}
+                      <div
+                        className="message-content"
+                        style={{
+                          color: '#e0e0e0',
+                          fontSize: 15,
+                          lineHeight: 1.7,
+                          wordBreak: 'break-word'
+                        }}
+                        dangerouslySetInnerHTML={{
+                          __html: message.command === 'login_form'
+                            ? renderLoginForm(message.content)
+                            : message.command === 'create_schema'
+                            ? renderCreateSchemaButton(message.content, message.id)
+                            : message.content
+                        }}
+                      />
+                    </>
                   ) : (
                     <div style={{ color: '#666', fontSize: 15 }}>
                       <span className="typing-indicator">正在思考</span>

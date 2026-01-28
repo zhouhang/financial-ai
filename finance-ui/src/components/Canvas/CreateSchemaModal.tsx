@@ -16,7 +16,7 @@ interface CreateSchemaModalProps {
 
 const CreateSchemaModal: React.FC<CreateSchemaModalProps> = ({
   visible,
-  messageId,
+  messageId: _messageId,
   onClose,
   onSuccess,
 }) => {
@@ -75,7 +75,6 @@ const CreateSchemaModal: React.FC<CreateSchemaModalProps> = ({
       {currentStep === 1 ? (
         <SchemaMetadataForm
           onNext={handleMetadataNext}
-          onCancel={handleClose}
         />
       ) : (
         <SchemaCanvas

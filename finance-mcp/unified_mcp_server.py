@@ -97,6 +97,7 @@ async def handle_sse(request):
             streams[1],
             mcp_server.create_initialization_options()
         )
+    return Response()
 
 
 async def health_check(request):

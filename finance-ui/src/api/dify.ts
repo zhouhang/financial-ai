@@ -1,16 +1,73 @@
 /**
- * Dify API
+ * Dify API - Direct integration with Dify service
  */
-import apiClient from './client';
 import { ChatRequest, ChatResponse } from '@/types/dify';
+
+// Dify API configuration from environment variables
+const DIFY_API_URL = import.meta.env.VITE_DIFY_API_URL || 'http://localhost/v1';
+const DIFY_API_KEY = import.meta.env.VITE_DIFY_API_KEY || 'app-pffBjBphPBhbrSwz8mxku2R3';
+
+/**
+ * Detect special commands in Dify response
+ */
+function detectCommand(text: string): string | null {
+  const commands = {
+    '\\[create_schema\\]': 'create_schema',
+    '\\[update_schema\\]': 'update_schema',
+    '\\[schema_list\\]': 'schema_list',
+    '\\[login_form\\]': 'login_form',
+  };
+
+  for (const [pattern, command] of Object.entries(commands)) {
+    if (new RegExp(pattern, 'i').test(text)) {
+      return command;
+    }
+  }
+
+  return null;
+}
 
 export const difyApi = {
   /**
-   * Send chat message to Dify
+   * Send chat message to Dify (blocking mode)
    */
   chat: async (request: ChatRequest): Promise<ChatResponse> => {
-    const response = await apiClient.post<ChatResponse>('/dify/chat', request);
-    return response.data;
+    const response = await fetch(`${DIFY_API_URL}/chat-messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DIFY_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        inputs: {},
+        query: request.query,
+        response_mode: 'blocking',
+        user: 'anonymous_user',
+        conversation_id: request.conversation_id,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    // Detect command in response
+    const answer = data.answer || '';
+    const command = detectCommand(answer);
+
+    return {
+      event: 'message',
+      message_id: data.message_id,
+      conversation_id: data.conversation_id,
+      answer: answer,
+      metadata: {
+        ...data.metadata,
+        command: command || undefined,
+      },
+    };
   },
 
   /**
@@ -22,12 +79,19 @@ export const difyApi = {
     onError: (error: Error) => void
   ): Promise<void> => {
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/dify/chat`, {
+      const response = await fetch(`${DIFY_API_URL}/chat-messages`, {
         method: 'POST',
         headers: {
+          'Authorization': `Bearer ${DIFY_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ ...request, streaming: true }),
+        body: JSON.stringify({
+          inputs: {},
+          query: request.query,
+          response_mode: 'streaming',
+          user: 'anonymous_user',
+          conversation_id: request.conversation_id,
+        }),
       });
 
       if (!response.ok) {
@@ -43,6 +107,7 @@ export const difyApi = {
       }
 
       let buffer = '';
+      let fullAnswer = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -76,6 +141,22 @@ export const difyApi = {
             try {
               const data = JSON.parse(eventData);
               console.log('Received SSE event:', data.event, data);
+
+              // Accumulate answer for command detection
+              if (data.event === 'message' || data.event === 'agent_message') {
+                if (data.answer) {
+                  fullAnswer += data.answer;
+                }
+              } else if (data.event === 'workflow_finished') {
+                if (data.data?.outputs?.answer) {
+                  fullAnswer = data.data.outputs.answer;
+                }
+              } else if (data.event === 'message_end') {
+                if (data.answer) {
+                  fullAnswer = data.answer;
+                }
+              }
+
               onMessage(data);
             } catch (e) {
               console.error('Failed to parse SSE data:', eventData, e);
@@ -98,6 +179,16 @@ export const difyApi = {
             }
           }
         }
+      }
+
+      // Send command detection event
+      const command = detectCommand(fullAnswer);
+      if (command) {
+        console.log('Command detected:', command);
+        onMessage({
+          event: 'command_detected',
+          command: command,
+        } as ChatResponse);
       }
     } catch (error) {
       console.error('Streaming error:', error);

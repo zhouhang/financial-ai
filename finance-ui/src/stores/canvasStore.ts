@@ -1,5 +1,6 @@
 /**
  * Canvas state management with Zustand
+ * Note: Schema validation, testing, and saving are now handled through Dify API
  */
 import { create } from 'zustand';
 import {
@@ -11,7 +12,6 @@ import {
   TestResult,
   SchemaMetadata,
 } from '@/types/canvas';
-import { schemaApi } from '@/api/schemas';
 
 const MAX_HISTORY = 50;
 
@@ -154,63 +154,30 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   validateSchema: async (): Promise<ValidationResult> => {
-    const state = get();
-    const schemaContent = buildSchemaContent(state);
-
-    try {
-      const result = await schemaApi.validateSchema(schemaContent);
-      return result;
-    } catch (error) {
-      console.error('Schema validation error:', error);
-      return {
-        valid: false,
-        errors: [error instanceof Error ? error.message : 'Validation failed'],
-        warnings: [],
-      };
-    }
+    // Schema validation is now handled through Dify API
+    console.warn('Schema validation should be handled through Dify chat interface');
+    return {
+      valid: false,
+      errors: ['Please use Dify chat interface for schema validation'],
+      warnings: [],
+    };
   },
 
   testSchema: async (): Promise<TestResult> => {
-    const state = get();
-    const schemaContent = buildSchemaContent(state);
-    const filePaths = state.uploadedFiles.map((f) => f.path);
-
-    try {
-      const result = await schemaApi.testSchema(schemaContent, filePaths);
-      return result;
-    } catch (error) {
-      console.error('Schema test error:', error);
-      return {
-        success: false,
-        output_preview: [],
-        errors: [error instanceof Error ? error.message : 'Test failed'],
-        execution_time: 0,
-      };
-    }
+    // Schema testing is now handled through Dify API
+    console.warn('Schema testing should be handled through Dify chat interface');
+    return {
+      success: false,
+      output_preview: [],
+      errors: ['Please use Dify chat interface for schema testing'],
+      execution_time: 0,
+    };
   },
 
   saveSchema: async (metadata: SchemaMetadata) => {
-    const state = get();
-    const schemaContent = buildSchemaContent(state);
-
-    try {
-      // Create schema with metadata
-      const schema = await schemaApi.createSchema({
-        name_cn: metadata.name_cn,
-        work_type: metadata.work_type,
-        description: metadata.description,
-      });
-
-      // Update schema with content
-      await schemaApi.updateSchema(schema.id, {
-        schema_content: schemaContent,
-      });
-
-      return schema;
-    } catch (error) {
-      console.error('Schema save error:', error);
-      throw error;
-    }
+    // Schema saving is now handled through Dify API
+    console.warn('Schema saving should be handled through Dify chat interface');
+    throw new Error('Please use Dify chat interface for schema operations');
   },
 
   reset: () => {
