@@ -26,7 +26,8 @@ CONFIG_DIR.mkdir(exist_ok=True)
 DATA_PREPARATION_SCHEMAS_FILE = CONFIG_DIR / "data_preparation_schemas.json"
 
 # 服务器配置
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = os.getenv("MCP_SERVER_HOST", "0.0.0.0")  # 服务器绑定地址
+PUBLIC_HOST = os.getenv("MCP_PUBLIC_HOST", "localhost")  # 公开访问地址
 DEFAULT_PORT = 3335  # 与统一的MCP服务保持一致
 
 # 任务配置

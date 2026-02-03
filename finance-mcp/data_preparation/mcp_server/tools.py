@@ -188,16 +188,17 @@ async def _data_preparation_result(args: Dict) -> Dict:
         
         # 如果任务完成，添加下载链接
         if result.get("status") == "completed":
-            # 生成下载/预览/报告 URL
-            base_url = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
-            
+            # 生成下载/预览/报告 URL (使用公开访问地址)
+            from .config import PUBLIC_HOST
+            base_url = f"http://{PUBLIC_HOST}:{DEFAULT_PORT}"
+
             # 使用结果中的task_id（处理ID）而不是请求的task_id（任务ID）
             result_task_id = result.get("task_id", task_id)
-            
+
             # 确保actions存在
             if "actions" not in result:
                 result["actions"] = []
-            
+
             # 添加默认的操作URL（去掉method属性）
             result["actions"].append({
                 "action": "download_file",
