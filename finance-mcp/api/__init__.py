@@ -1,3 +1,0 @@
-"""
-Finance MCP API Package
-"""
