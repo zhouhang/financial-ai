@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, H
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.types import Command
 
 from app.config import HOST, PORT, UPLOAD_DIR, MAX_FILE_SIZE
 from app.graphs.main_graph import create_app
@@ -55,6 +55,42 @@ async def on_startup():
         logger.warning(f"数据库初始化失败（可稍后重试）: {e}")
 
 
+# ── 辅助函数 ──────────────────────────────────────────────────────────────────
+
+def _extract_last_ai_message(messages) -> str | None:
+    """从消息列表中提取最后一条 AI 消息。"""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            return m.content
+    return None
+
+
+def _get_interrupt_info(config: dict) -> tuple[bool, Any, str | None]:
+    """检查图是否处于中断状态。
+
+    Returns:
+        (is_interrupted, interrupt_payload, last_ai_content)
+    """
+    try:
+        snapshot = langgraph_app.get_state(config)
+    except Exception:
+        return False, None, None
+
+    if not snapshot or not snapshot.next:
+        return False, None, None
+
+    # 图处于中断状态 — 提取 interrupt payload
+    payload = None
+    if hasattr(snapshot, "tasks"):
+        for task in snapshot.tasks:
+            if hasattr(task, "interrupts") and task.interrupts:
+                payload = task.interrupts[0].value
+                break
+
+    last_ai = _extract_last_ai_message(snapshot.values.get("messages", []))
+    return True, payload, last_ai
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /upload — 文件上传
 # ══════════════════════════════════════════════════════════════════════════════
@@ -72,7 +108,6 @@ async def upload_file(
     if ext not in {".csv", ".xlsx", ".xls"}:
         raise HTTPException(400, f"不支持的文件类型: {ext}")
 
-    # 按日期组织目录
     now = datetime.now()
     date_dir = Path(UPLOAD_DIR) / str(now.year) / str(now.month) / str(now.day)
     date_dir.mkdir(parents=True, exist_ok=True)
@@ -88,10 +123,8 @@ async def upload_file(
         raise HTTPException(413, "文件过大")
 
     dest.write_bytes(content)
-
     file_path = str(dest)
 
-    # 关联到 thread
     tid = thread_id or "default"
     _thread_files.setdefault(tid, []).append(file_path)
 
@@ -112,7 +145,8 @@ async def websocket_chat(ws: WebSocket):
     - 服务端返回 JSON: {"type": "message", "content": "..."}
                        {"type": "interrupt", "payload": {...}}
                        {"type": "done"}
-    - 当收到 interrupt 时，客户端再次发送 {"message": "用户回复", "thread_id": "...", "resume": true}
+    - 当收到 interrupt 时，客户端再次发送:
+      {"message": "用户回复", "thread_id": "...", "resume": true}
     """
     await ws.accept()
     logger.info("WebSocket 连接已建立")
@@ -131,87 +165,56 @@ async def websocket_chat(ws: WebSocket):
             is_resume = data.get("resume", False)
 
             config = {"configurable": {"thread_id": thread_id}}
-
-            # 收集已上传文件
             files = _thread_files.get(thread_id, [])
 
             try:
                 if is_resume:
-                    # 恢复中断的图执行，将用户回复作为 interrupt 的值
                     result = langgraph_app.invoke(
                         Command(resume=user_msg),
                         config=config,
                     )
                 else:
-                    # 正常调用
                     input_state: dict[str, Any] = {
                         "messages": [HumanMessage(content=user_msg)],
                         "uploaded_files": files,
                     }
                     result = langgraph_app.invoke(input_state, config=config)
 
-                # 提取最后的 AI 消息
-                messages = result.get("messages", [])
-                ai_msgs = [m for m in messages if isinstance(m, AIMessage)]
-                if ai_msgs:
+                # 检查是否处于中断状态
+                is_interrupted, payload, last_ai = _get_interrupt_info(config)
+
+                if is_interrupted:
+                    # 发送中断前的 AI 消息
+                    if last_ai:
+                        await ws.send_json({
+                            "type": "message",
+                            "content": last_ai,
+                            "thread_id": thread_id,
+                        })
                     await ws.send_json({
-                        "type": "message",
-                        "content": ai_msgs[-1].content,
+                        "type": "interrupt",
+                        "payload": payload or {},
                         "thread_id": thread_id,
                     })
-
-                await ws.send_json({"type": "done", "thread_id": thread_id})
+                else:
+                    # 正常完成 — 提取最后的 AI 消息
+                    messages = result.get("messages", [])
+                    last_ai_content = _extract_last_ai_message(messages)
+                    if last_ai_content:
+                        await ws.send_json({
+                            "type": "message",
+                            "content": last_ai_content,
+                            "thread_id": thread_id,
+                        })
+                    await ws.send_json({"type": "done", "thread_id": thread_id})
 
             except Exception as e:
-                err_str = str(e)
-                # 检查是否是 interrupt（GraphInterrupt）
-                if "interrupt" in err_str.lower() or "GraphInterrupt" in err_str:
-                    # 获取当前状态以读取中断信息
-                    try:
-                        snapshot = langgraph_app.get_state(config)
-                        # 从 snapshot 中提取 interrupt payload
-                        next_tasks = snapshot.next if snapshot else ()
-                        interrupt_payload = None
-                        if hasattr(snapshot, 'tasks'):
-                            for task in snapshot.tasks:
-                                if hasattr(task, 'interrupts') and task.interrupts:
-                                    interrupt_payload = task.interrupts[0].value
-                                    break
-
-                        # 提取最后的 AI 消息
-                        state_messages = snapshot.values.get("messages", []) if snapshot else []
-                        last_ai = None
-                        for m in reversed(state_messages):
-                            if isinstance(m, AIMessage):
-                                last_ai = m.content
-                                break
-
-                        if last_ai:
-                            await ws.send_json({
-                                "type": "message",
-                                "content": last_ai,
-                                "thread_id": thread_id,
-                            })
-
-                        await ws.send_json({
-                            "type": "interrupt",
-                            "payload": interrupt_payload if interrupt_payload else {},
-                            "thread_id": thread_id,
-                        })
-                    except Exception as inner_e:
-                        logger.error(f"处理 interrupt 异常: {inner_e}")
-                        await ws.send_json({
-                            "type": "interrupt",
-                            "payload": {},
-                            "thread_id": thread_id,
-                        })
-                else:
-                    logger.error(f"图执行异常: {e}", exc_info=True)
-                    await ws.send_json({
-                        "type": "error",
-                        "content": f"处理失败: {err_str}",
-                        "thread_id": thread_id,
-                    })
+                logger.error(f"图执行异常: {e}", exc_info=True)
+                await ws.send_json({
+                    "type": "error",
+                    "content": f"处理失败: {str(e)}",
+                    "thread_id": thread_id,
+                })
 
     except WebSocketDisconnect:
         logger.info("WebSocket 连接已断开")
@@ -222,22 +225,36 @@ async def websocket_chat(ws: WebSocket):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/stream")
-async def stream_chat(message: str, thread_id: str | None = None):
-    """SSE 流式端点，通过 query 参数传入消息。"""
+async def stream_chat(
+    message: str,
+    thread_id: str | None = None,
+    resume: bool = False,
+):
+    """SSE 流式端点。
+
+    参数:
+        message: 用户消息
+        thread_id: 会话 ID
+        resume: 是否恢复中断（为 true 时 message 作为 interrupt 的回复）
+    """
     tid = thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": tid}}
     files = _thread_files.get(tid, [])
 
     async def event_generator():
-        input_state: dict[str, Any] = {
-            "messages": [HumanMessage(content=message)],
-            "uploaded_files": files,
-        }
-
         try:
-            # 使用 stream 获取增量输出
-            for event in langgraph_app.stream(input_state, config=config, stream_mode="updates"):
+            if resume:
+                invoke_input = Command(resume=message)
+            else:
+                invoke_input = {
+                    "messages": [HumanMessage(content=message)],
+                    "uploaded_files": files,
+                }
+
+            for event in langgraph_app.stream(invoke_input, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
+                    if node_name == "__interrupt__":
+                        continue
                     msgs = node_output.get("messages", [])
                     for m in msgs:
                         if isinstance(m, AIMessage):
@@ -247,41 +264,24 @@ async def stream_chat(message: str, thread_id: str | None = None):
                             )
                             yield f"data: {payload}\n\n"
 
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-        except Exception as e:
-            err_str = str(e)
-            if "interrupt" in err_str.lower() or "GraphInterrupt" in err_str:
-                # 读取 interrupt 信息
-                try:
-                    snapshot = langgraph_app.get_state(config)
-                    state_messages = snapshot.values.get("messages", []) if snapshot else []
-                    last_ai = None
-                    for m in reversed(state_messages):
-                        if isinstance(m, AIMessage):
-                            last_ai = m.content
-                            break
-
-                    if last_ai:
-                        payload = json.dumps(
-                            {"type": "message", "content": last_ai},
-                            ensure_ascii=False,
-                        )
-                        yield f"data: {payload}\n\n"
-
-                    interrupt_data = json.dumps(
-                        {"type": "interrupt", "thread_id": tid},
-                        ensure_ascii=False,
-                    )
-                    yield f"data: {interrupt_data}\n\n"
-                except Exception:
-                    yield f"data: {json.dumps({'type': 'interrupt', 'thread_id': tid})}\n\n"
-            else:
-                error_payload = json.dumps(
-                    {"type": "error", "content": str(e)},
+            # 检查是否中断
+            is_interrupted, payload, _ = _get_interrupt_info(config)
+            if is_interrupted:
+                interrupt_data = json.dumps(
+                    {"type": "interrupt", "payload": payload or {}, "thread_id": tid},
                     ensure_ascii=False,
                 )
-                yield f"data: {error_payload}\n\n"
+                yield f"data: {interrupt_data}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'done', 'thread_id': tid})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Stream 异常: {e}", exc_info=True)
+            error_payload = json.dumps(
+                {"type": "error", "content": str(e)},
+                ensure_ascii=False,
+            )
+            yield f"data: {error_payload}\n\n"
 
     return StreamingResponse(
         event_generator(),

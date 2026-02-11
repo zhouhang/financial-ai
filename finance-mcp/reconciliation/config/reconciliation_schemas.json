@@ -5,7 +5,18 @@
       "type_key": "direct_sales",
       "schema_path": "direct_sales_schema.json",
       "callback_url": "http://your-server.com/triggers/webhook/qD8WWtxs3ceFRFlQYsdQvf4P"
+    },
+    {
+      "name_cn": "测试对账规则",
+      "type_key": "______",
+      "schema_path": "_______schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "WS测试规则",
+      "type_key": "ws____",
+      "schema_path": "ws_____schema.json",
+      "callback_url": ""
     }
   ]
 }
-
