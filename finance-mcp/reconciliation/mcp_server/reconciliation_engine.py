@@ -69,10 +69,14 @@ class ReconciliationEngine:
             logger.warning(f"对账引擎 - 警告：没有匹配到财务文件")
         
         # 3. 执行对账
+        logger.info(f"对账引擎 - 开始执行对账逻辑，业务记录={len(business_df)}，财务记录={len(finance_df)}")
         issues = self._perform_reconciliation(business_df, finance_df)
+        logger.info(f"对账引擎 - 对账完成，发现 {len(issues)} 条差异")
         
         # 4. 生成摘要
+        logger.info(f"对账引擎 - 开始生成摘要")
         summary = self._generate_summary(business_df, finance_df, issues)
+        logger.info(f"对账引擎 - 摘要生成完成")
         
         # 5. 生成元数据
         metadata = ReconciliationMetadata(
@@ -106,9 +110,14 @@ class ReconciliationEngine:
         finance_ids = set(finance_df[self.key_field_role].astype(str)) if not finance_df.empty else set()
         
         all_ids = business_ids | finance_ids
+        total_orders = len(all_ids)
+        logger.info(f"对账引擎 - 开始逐条对账，总订单数: {total_orders}")
         
         # 逐条对账
-        for order_id in all_ids:
+        for idx, order_id in enumerate(all_ids):
+            # 每处理100条记录输出一次进度
+            if idx > 0 and idx % 100 == 0:
+                logger.info(f"对账进度: {idx}/{total_orders} ({idx*100//total_orders}%)")
             biz_records = business_df[business_df[self.key_field_role].astype(str) == order_id] if not business_df.empty else pd.DataFrame()
             fin_records = finance_df[finance_df[self.key_field_role].astype(str) == order_id] if not finance_df.empty else pd.DataFrame()
             

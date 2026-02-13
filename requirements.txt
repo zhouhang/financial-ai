@@ -25,3 +25,8 @@ chardet>=5.0.0  # 编码检测，防止中文乱码
 
 # 安全表达式评估
 simpleeval>=0.9.13  # 安全替代 eval()，防止代码注入
+
+# 数据库相关
+psycopg2-binary>=2.9.0  # PostgreSQL 同步驱动
+asyncpg>=0.29.0  # PostgreSQL 异步驱动
+python-dotenv>=1.0.0  # 环境变量管理

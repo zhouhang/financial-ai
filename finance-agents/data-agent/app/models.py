@@ -19,6 +19,8 @@ from typing_extensions import TypedDict
 class UserIntent(str, Enum):
     USE_EXISTING_RULE = "use_existing_rule"
     CREATE_NEW_RULE = "create_new_rule"
+    LOGIN = "login"
+    REGISTER = "register"
     UNKNOWN = "unknown"
 
 
@@ -158,6 +160,10 @@ class AgentState(TypedDict, total=False):
     # 会话
     thread_id: str
 
+    # ── 认证 ──────────────────────────────────────────────────
+    auth_token: Optional[str]         # JWT token
+    current_user: Optional[dict]      # 当前登录用户信息
+
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值
     selected_rule_name: Optional[str]
@@ -171,10 +177,13 @@ class AgentState(TypedDict, total=False):
     # 字段映射（第2层 – 步骤2，HITL）
     suggested_mappings: dict[str, Any]
     confirmed_mappings: Optional[dict[str, Any]]
+    mapping_adjustment_feedback: Optional[str]  # 用户调整意见的反馈
 
     # 规则配置（第2层 – 步骤3，HITL）
     rule_config_questions: list[dict[str, Any]]
     rule_config_answers: Optional[dict[str, Any]]
+    rule_config_adjustment_feedback: Optional[str]  # 用户调整规则配置的反馈
+    rule_config_items: Optional[list[dict[str, Any]]]  # 增量式配置项列表
 
     # 生成的模式（第2层 – 步骤4）
     generated_schema: Optional[dict[str, Any]]

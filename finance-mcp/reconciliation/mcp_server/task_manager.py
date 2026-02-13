@@ -46,8 +46,10 @@ class TaskManager:
         async with self._lock:
             self.tasks[task_id] = task
         
-        # 异步执行任务
-        asyncio.create_task(self._execute_task(task_id))
+        # 在后台线程中执行任务（不使用 asyncio.create_task，避免事件循环提前关闭）
+        import threading
+        thread = threading.Thread(target=self._execute_task_sync, args=(task_id,), daemon=True)
+        thread.start()
         
         return task_id
     
@@ -61,14 +63,21 @@ class TaskManager:
         async with self._lock:
             return list(self.tasks.values())
     
+    def _execute_task_sync(self, task_id: str):
+        """同步版本的任务执行，在独立线程中运行"""
+        asyncio.run(self._execute_task(task_id))
+    
     async def _execute_task(self, task_id: str):
         """执行任务"""
         async with self._lock:
             task = self.tasks.get(task_id)
             if not task:
+                logger.warning(f"任务不存在: {task_id}")
                 return
             task.status = TaskStatus.PROCESSING
             task.updated_at = datetime.now()
+        
+        logger.info(f"开始执行对账任务: task_id={task_id}, files={len(task.files)}")
         
         try:
             # 执行对账（在线程池中执行，避免阻塞事件循环）
@@ -98,11 +107,14 @@ class TaskManager:
                 task.result = result
                 task.updated_at = datetime.now()
             
+            logger.info(f"对账任务完成: task_id={task_id}, 业务={result.summary.total_business_records}, 财务={result.summary.total_finance_records}, 匹配={result.summary.matched_records}, 差异={result.summary.unmatched_records}")
+            
             # 回调
             if task.callback_url:
                 await self._send_callback(task.callback_url, result.to_dict())
         
         except asyncio.TimeoutError:
+            logger.error(f"任务超时: task_id={task_id}, timeout={TASK_TIMEOUT}秒")
             async with self._lock:
                 task.status = TaskStatus.FAILED
                 task.result = ReconciliationResult(
@@ -114,6 +126,7 @@ class TaskManager:
                 task.updated_at = datetime.now()
         
         except Exception as e:
+            logger.error(f"任务执行失败: task_id={task_id}, error={str(e)}", exc_info=True)
             async with self._lock:
                 task.status = TaskStatus.FAILED
                 task.result = ReconciliationResult(

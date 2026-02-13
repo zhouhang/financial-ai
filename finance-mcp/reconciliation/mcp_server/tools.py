@@ -139,13 +139,13 @@ def create_tools() -> List[Tool]:
         ),
         Tool(
             name="file_upload",
-            description="从 Dify 下载文件并保存到服务器，支持多个文件上传。返回上传文件的路径列表。",
+            description="上传文件并保存到服务器，支持多个文件上传。返回上传文件的路径列表。",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "files": {
                         "type": "array",
-                        "description": "文件数组，每个元素包含 filename, size, related_id, mime_type",
+                        "description": "文件数组，每个元素包含 filename, content (base64编码)",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -153,20 +153,12 @@ def create_tools() -> List[Tool]:
                                     "type": "string",
                                     "description": "文件名"
                                 },
-                                "size": {
-                                    "type": "number",
-                                    "description": "文件大小（字节）"
-                                },
-                                "related_id": {
+                                "content": {
                                     "type": "string",
-                                    "description": "Dify 文件 ID"
-                                },
-                                "mime_type": {
-                                    "type": "string",
-                                    "description": "MIME 类型"
+                                    "description": "文件内容（base64编码）"
                                 }
                             },
-                            "required": ["filename", "related_id"]
+                            "required": ["filename", "content"]
                         }
                     }
                 },
@@ -186,7 +178,24 @@ def create_tools() -> List[Tool]:
                 },
                 "required": ["reconciliation_type"]
             }
-        )
+        ),
+        Tool(
+            name="analyze_files",
+            description="分析已上传的文件，返回文件的列信息、行数、样本数据和文件类型（business/finance）。需要先通过 file_upload 上传文件。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要分析的文件路径列表（由 file_upload 返回的路径）"
+                    }
+                },
+                "required": ["file_paths"]
+            }
+        ),
+        # 注意：list/save/update/delete_reconciliation_rule 已移至 auth/tools.py
+        # 由 auth 模块统一处理（带权限控制）
     ]
 
 
@@ -210,6 +219,9 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Any:
     
     elif tool_name == "get_reconciliation":
         return await _get_reconciliation(arguments)
+    
+    elif tool_name == "analyze_files":
+        return await _analyze_files(arguments)
     
     else:
         return {"error": f"未知的工具: {tool_name}"}
@@ -375,15 +387,11 @@ async def _reconciliation_list_tasks(args: Dict) -> Dict:
 
 
 async def _file_upload(args: Dict) -> Dict:
-    """从 Dify 下载文件并保存（支持多文件，自动处理编码）"""
+    """接收文件并保存（支持多文件，content 为 base64 编码）"""
     try:
-        import httpx
+        import base64
         from datetime import datetime
         import chardet
-        
-        # Dify API 配置
-        DIFY_BASE_URL = "http://localhost"
-        DIFY_API_TOKEN = "app-pffBjBphPBhbrSwz8mxku2R3"
         
         files = args.get("files", [])
         if not files:
@@ -397,146 +405,125 @@ async def _file_upload(args: Dict) -> Dict:
         date_dir = UPLOAD_DIR / str(now.year) / str(now.month) / str(now.day)
         date_dir.mkdir(parents=True, exist_ok=True)
         
-        # 创建 HTTP 客户端
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for idx, file_obj in enumerate(files):
-                try:
-                    # 提取文件信息
-                    filename = file_obj.get("filename")
-                    related_id = file_obj.get("related_id")
-                    file_size = file_obj.get("size", 0)
-                    mime_type = file_obj.get("mime_type", "application/octet-stream")
-                    
-                    # 验证必填字段
-                    if not filename:
-                        errors.append({
-                            "index": idx,
-                            "error": "缺少 filename 字段"
-                        })
-                        continue
-                    
-                    if not related_id:
-                        errors.append({
-                            "index": idx,
-                            "filename": filename,
-                            "error": "缺少 related_id 字段"
-                        })
-                        continue
-                    
-                    # 验证文件扩展名
-                    file_ext = Path(filename).suffix.lower()
-                    if file_ext not in ALLOWED_EXTENSIONS:
-                        errors.append({
-                            "index": idx,
-                            "filename": filename,
-                            "error": f"不支持的文件类型: {file_ext}"
-                        })
-                        continue
-                    
-                    # 构建 Dify 文件下载 URL
-                    file_url = f"{DIFY_BASE_URL}/v1/files/{related_id}/preview"
-                    
-                    # 设置请求头
-                    headers = {
-                        "Authorization": f"Bearer {DIFY_API_TOKEN}"
-                    }
-                    
-                    # 下载文件
-                    try:
-                        response = await client.get(file_url, headers=headers)
-                        response.raise_for_status()
-                        file_content = response.content
-                    except httpx.HTTPStatusError as e:
-                        errors.append({
-                            "index": idx,
-                            "filename": filename,
-                            "error": f"下载文件失败: HTTP {e.response.status_code}"
-                        })
-                        continue
-                    except httpx.RequestError as e:
-                        errors.append({
-                            "index": idx,
-                            "filename": filename,
-                            "error": f"请求失败: {str(e)}"
-                        })
-                        continue
-                    
-                    # 保存文件到日期目录
-                    safe_filename = Path(filename).name  # 只取文件名，去除路径
-                    file_path = date_dir / safe_filename
-                    
-                    # 如果文件已存在，添加时间戳
-                    if file_path.exists():
-                        timestamp = datetime.now().strftime("%H%M%S")
-                        name_parts = safe_filename.rsplit('.', 1)
-                        if len(name_parts) == 2:
-                            safe_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
-                        else:
-                            safe_filename = f"{safe_filename}_{timestamp}"
-                        file_path = date_dir / safe_filename
-                    
-                    # 对文本文件（CSV、TXT）进行编码转换，确保保存为 UTF-8
-                    text_extensions = ['.csv', '.txt', '.tsv']
-                    if file_ext in text_extensions:
-                        try:
-                            logger.info(f"[编码转换] 开始处理文件: {filename}")
-                            logger.info(f"[编码转换] 文件扩展名: {file_ext}")
-                            logger.info(f"[编码转换] 原始文件大小: {len(file_content)} 字节")
-                            
-                            # 检测原始编码
-                            detected = chardet.detect(file_content)
-                            encoding = detected.get('encoding', 'utf-8')
-                            confidence = detected.get('confidence', 0)
-                            
-                            logger.info(f"[编码转换] 检测到编码: {encoding}, 置信度: {confidence:.2%}")
-                            
-                            # 如果检测不出编码或置信度低，尝试常见编码
-                            if not encoding or confidence < 0.7:
-                                logger.info(f"[编码转换] 置信度低，尝试常见编码...")
-                                for try_encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin1']:
-                                    try:
-                                        file_content.decode(try_encoding)
-                                        encoding = try_encoding
-                                        logger.info(f"[编码转换] 使用编码: {encoding}")
-                                        break
-                                    except (UnicodeDecodeError, LookupError):
-                                        continue
-                            
-                            # 解码后重新编码为 UTF-8 保存
-                            if encoding:
-                                try:
-                                    text_content = file_content.decode(encoding)
-                                    file_content = text_content.encode('utf-8-sig')  # 使用 UTF-8 with BOM
-                                    logger.info(f"[编码转换] ✅ 成功转换: {encoding} → UTF-8-sig")
-                                    logger.info(f"[编码转换] 转换后大小: {len(file_content)} 字节")
-                                except (UnicodeDecodeError, LookupError) as e:
-                                    # 如果解码失败，保持原样
-                                    logger.error(f"[编码转换] ❌ 解码失败: {str(e)}")
-                            else:
-                                logger.warning(f"[编码转换] ⚠️ 未检测到编码，保持原样")
-                        except Exception as e:
-                            # 编码转换失败，保持原样
-                            logger.error(f"[编码转换] ❌ 转换异常 ({filename}): {str(e)}")
-                    
-                    # 保存文件
-                    with open(file_path, 'wb') as f:
-                        f.write(file_content)
-                    
-                    # 构建相对路径（相对于 UPLOAD_DIR）
-                    relative_path = file_path.relative_to(UPLOAD_DIR.parent)
-                    
-                    # 添加到成功列表
-                    uploaded_files.append({
-                        "original_filename": filename,
-                        "file_path": f"/{relative_path.as_posix()}"
-                    })
+        for idx, file_obj in enumerate(files):
+            try:
+                # 提取文件信息
+                filename = file_obj.get("filename")
+                content_b64 = file_obj.get("content")
                 
+                # 验证必填字段
+                if not filename:
+                    errors.append({
+                        "index": idx,
+                        "error": "缺少 filename 字段"
+                    })
+                    continue
+                
+                if not content_b64:
+                    errors.append({
+                        "index": idx,
+                        "filename": filename,
+                        "error": "缺少 content 字段"
+                    })
+                    continue
+                
+                # 验证文件扩展名
+                file_ext = Path(filename).suffix.lower()
+                if file_ext not in ALLOWED_EXTENSIONS:
+                    errors.append({
+                        "index": idx,
+                        "filename": filename,
+                        "error": f"不支持的文件类型: {file_ext}"
+                    })
+                    continue
+                
+                # 解码 base64
+                try:
+                    file_content = base64.b64decode(content_b64)
                 except Exception as e:
                     errors.append({
                         "index": idx,
-                        "filename": file_obj.get("filename", "unknown"),
-                        "error": f"处理失败: {str(e)}"
+                        "filename": filename,
+                        "error": f"base64 解码失败: {str(e)}"
                     })
+                    continue
+                
+                # 保存文件到日期目录
+                safe_filename = Path(filename).name  # 只取文件名，去除路径
+                file_path = date_dir / safe_filename
+                
+                # 如果文件已存在，添加时间戳
+                if file_path.exists():
+                    timestamp = datetime.now().strftime("%H%M%S")
+                    name_parts = safe_filename.rsplit('.', 1)
+                    if len(name_parts) == 2:
+                        safe_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+                    else:
+                        safe_filename = f"{safe_filename}_{timestamp}"
+                    file_path = date_dir / safe_filename
+                
+                # 对文本文件（CSV、TXT）进行编码转换，确保保存为 UTF-8
+                text_extensions = ['.csv', '.txt', '.tsv']
+                if file_ext in text_extensions:
+                    try:
+                        logger.info(f"[编码转换] 开始处理文件: {filename}")
+                        logger.info(f"[编码转换] 文件扩展名: {file_ext}")
+                        logger.info(f"[编码转换] 原始文件大小: {len(file_content)} 字节")
+                        
+                        # 检测原始编码
+                        detected = chardet.detect(file_content)
+                        encoding = detected.get('encoding', 'utf-8')
+                        confidence = detected.get('confidence', 0)
+                        
+                        logger.info(f"[编码转换] 检测到编码: {encoding}, 置信度: {confidence:.2%}")
+                        
+                        # 如果检测不出编码或置信度低，尝试常见编码
+                        if not encoding or confidence < 0.7:
+                            logger.info(f"[编码转换] 置信度低，尝试常见编码...")
+                            for try_encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin1']:
+                                try:
+                                    file_content.decode(try_encoding)
+                                    encoding = try_encoding
+                                    logger.info(f"[编码转换] 使用编码: {encoding}")
+                                    break
+                                except (UnicodeDecodeError, LookupError):
+                                    continue
+                        
+                        # 解码后重新编码为 UTF-8 保存
+                        if encoding:
+                            try:
+                                text_content = file_content.decode(encoding)
+                                file_content = text_content.encode('utf-8-sig')  # 使用 UTF-8 with BOM
+                                logger.info(f"[编码转换] ✅ 成功转换: {encoding} → UTF-8-sig")
+                                logger.info(f"[编码转换] 转换后大小: {len(file_content)} 字节")
+                            except (UnicodeDecodeError, LookupError) as e:
+                                # 如果解码失败，保持原样
+                                logger.error(f"[编码转换] ❌ 解码失败: {str(e)}")
+                        else:
+                            logger.warning(f"[编码转换] ⚠️ 未检测到编码，保持原样")
+                    except Exception as e:
+                        # 编码转换失败，保持原样
+                        logger.error(f"[编码转换] ❌ 转换异常 ({filename}): {str(e)}")
+                
+                # 保存文件
+                with open(file_path, 'wb') as f:
+                    f.write(file_content)
+                
+                # 构建相对路径（相对于 UPLOAD_DIR）
+                relative_path = file_path.relative_to(UPLOAD_DIR.parent)
+                
+                # 添加到成功列表
+                uploaded_files.append({
+                    "original_filename": filename,
+                    "file_path": f"/{relative_path.as_posix()}"
+                })
+            
+            except Exception as e:
+                errors.append({
+                    "index": idx,
+                    "filename": file_obj.get("filename", "unknown"),
+                    "error": f"处理失败: {str(e)}"
+                })
         
         # 返回结果
         if not uploaded_files:
@@ -687,3 +674,187 @@ async def _get_reconciliation(args: Dict) -> Dict:
             "callback_url": "",
             "error": f"获取对账配置失败: {str(e)}"
         }
+
+
+async def _analyze_files(args: Dict) -> Dict:
+    """分析已上传的文件，返回文件列信息、行数、样本数据和文件类型判断"""
+    try:
+        import pandas as pd
+        import chardet
+        import json
+        import os
+        from langchain_openai import ChatOpenAI
+        
+        file_paths = args.get("file_paths", [])
+        if not file_paths:
+            return {"error": "file_paths 参数不能为空"}
+        
+        analyses = []
+        
+        # 第一步：读取每个文件的基本信息
+        for file_path in file_paths:
+            # 转换为绝对路径
+            if file_path.startswith("/"):
+                full_path = FINANCE_MCP_DIR / file_path.lstrip("/")
+            else:
+                full_path = FINANCE_MCP_DIR / file_path
+            
+            # 验证文件是否存在
+            if not full_path.exists():
+                analyses.append({
+                    "filename": Path(file_path).name,
+                    "file_path": file_path,
+                    "error": f"文件不存在: {file_path}"
+                })
+                continue
+            
+            # 验证文件扩展名
+            file_ext = full_path.suffix.lower()
+            if file_ext not in ALLOWED_EXTENSIONS:
+                analyses.append({
+                    "filename": full_path.name,
+                    "file_path": file_path,
+                    "error": f"不支持的文件类型: {file_ext}"
+                })
+                continue
+            
+            # 读取文件
+            try:
+                if file_ext == ".csv":
+                    # CSV 文件，检测编码
+                    raw = full_path.read_bytes()
+                    det = chardet.detect(raw[:10000])
+                    enc = det.get("encoding") or "utf-8"
+                    df = pd.read_csv(full_path, encoding=enc, index_col=False)
+                else:
+                    # Excel 文件
+                    df = pd.read_excel(full_path, index_col=False)
+                
+                # 提取样本数据
+                sample = df.head(5).fillna("").to_dict(orient="records")
+                safe_sample = []
+                for row in sample:
+                    safe_sample.append({k: str(v) for k, v in row.items()})
+                
+                # 从文件路径中提取原始文件名（去掉时间戳后缀）
+                # 例如：filename_163045.csv → filename.csv
+                original_name = full_path.name
+                # 检查是否有时间戳后缀（格式：_HHMMSS）
+                import re
+                match = re.match(r'(.+)_(\d{6})(\.\w+)$', original_name)
+                if match:
+                    original_name = match.group(1) + match.group(3)
+                
+                analyses.append({
+                    "filename": full_path.name,  # 系统文件名（带时间戳）
+                    "original_filename": original_name,  # 原始文件名（不带时间戳）
+                    "file_path": file_path,
+                    "columns": list(df.columns),
+                    "row_count": len(df),
+                    "sample_data": safe_sample,
+                    "guessed_source": None  # 稍后由 LLM 填充
+                })
+                
+            except Exception as e:
+                analyses.append({
+                    "filename": full_path.name,
+                    "file_path": file_path,
+                    "error": f"文件读取失败: {str(e)}"
+                })
+        
+        # 第二步：使用 LLM 判断文件类型
+        valid_analyses = [a for a in analyses if "error" not in a]
+        if valid_analyses:
+            try:
+                # 构建 prompt
+                files_desc = []
+                for i, a in enumerate(valid_analyses):
+                    cols_str = ", ".join(a.get("columns", [])[:20])
+                    sample_str = ""
+                    for row in a.get("sample_data", [])[:2]:
+                        sample_str += "    " + str(row) + "\n"
+                    files_desc.append(
+                        f"文件{i+1}: {a['filename']}\n"
+                        f"  列名: {cols_str}\n"
+                        f"  行数: {a.get('row_count', 0)}\n"
+                        f"  示例数据:\n{sample_str}"
+                    )
+                
+                prompt = (
+                    "你是一个财务数据分析专家。以下是用户上传的文件信息，"
+                    "请判断每个文件属于哪种数据源类型。\n\n"
+                    "类型说明：\n"
+                    "- business: 业务数据（如订单流水、销售记录、交易明细等，通常包含订单号、商品、销售额等字段）\n"
+                    "- finance: 财务数据（如财务账单、对账单、银行流水、发票等，通常包含财务科目、借贷金额等字段）\n\n"
+                    + "\n".join(files_desc)
+                    + "\n\n请严格按以下 JSON 格式回复，不要添加其他内容：\n"
+                    '{"results": [{"filename": "文件名", "source": "business 或 finance", "reason": "简短理由"}]}'
+                )
+                
+                # 调用 LLM（使用环境变量配置）
+                llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+                
+                if llm_provider == "deepseek":
+                    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+                    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+                    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+                elif llm_provider == "qwen":
+                    api_key = os.getenv("QWEN_API_KEY", "")
+                    base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+                    model = os.getenv("QWEN_MODEL", "qwen-plus")
+                else:  # openai
+                    api_key = os.getenv("OPENAI_API_KEY", "")
+                    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+                    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                
+                if not api_key:
+                    logger.warning(f"LLM API Key 未配置 ({llm_provider})，跳过文件类型判断")
+                    return {
+                        "success": True,
+                        "analyses": analyses
+                    }
+                
+                llm = ChatOpenAI(
+                    temperature=0.1,
+                    model=model,
+                    api_key=api_key,
+                    base_url=base_url
+                )
+                resp = llm.invoke(prompt)
+                content = resp.content.strip()
+                
+                # 提取 JSON
+                if "```" in content:
+                    import re
+                    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+                    if m:
+                        content = m.group(1)
+                
+                parsed = json.loads(content)
+                results = parsed.get("results", [])
+                
+                # 将结果写回 analyses
+                result_map = {r["filename"]: {"source": r["source"], "reason": r.get("reason", "")} for r in results}
+                for a in valid_analyses:
+                    if a["filename"] in result_map:
+                        a["guessed_source"] = result_map[a["filename"]]["source"]
+                        a["source_reason"] = result_map[a["filename"]]["reason"]
+            
+            except Exception as e:
+                logger.warning(f"LLM 文件类型判断失败: {e}")
+                # 不影响主流程，只是 guessed_source 为 None
+        
+        return {
+            "success": True,
+            "analyses": analyses
+        }
+    
+    except Exception as e:
+        logger.error(f"文件分析失败: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": f"文件分析失败: {str(e)}"
+        }
+
+# 注意：数据库操作工具（list/save/update/delete_reconciliation_rule）
+# 已移至 auth/tools.py，由认证模块统一管理

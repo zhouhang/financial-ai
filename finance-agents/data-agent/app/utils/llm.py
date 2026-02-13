@@ -52,10 +52,11 @@ def get_llm(
             f"请在 .env 中设置 {name.upper()}_API_KEY"
         )
 
-    logger.info(f"创建 LLM 实例: provider={name}, model={model}")
+    logger.info(f"创建 LLM 实例: provider={name}, model={model}, streaming=True")
     return ChatOpenAI(
         model=model,
         api_key=api_key,
         base_url=base_url,
         temperature=temperature,
+        streaming=True,  # 启用流式输出
     )

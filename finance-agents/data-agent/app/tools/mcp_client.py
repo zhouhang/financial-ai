@@ -1,4 +1,8 @@
-"""调用 finance-mcp 对账工具的 HTTP 客户端包装器。"""
+"""调用 finance-mcp 工具的 HTTP 客户端包装器。
+
+所有规则管理和认证操作均通过 finance-mcp 的 MCP 工具完成，
+data-agent 不再直接读取 JSON 配置文件或操作数据库。
+"""
 
 from __future__ import annotations
 
@@ -9,35 +13,23 @@ from typing import Any
 
 import httpx
 
-from app.config import (
-    FINANCE_MCP_BASE_URL,
-    RECONCILIATION_CONFIG_FILE,
-    RECONCILIATION_SCHEMA_DIR,
-)
+from app.config import FINANCE_MCP_BASE_URL
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
-# ---------------------------------------------------------------------------
-# 底层：通过 SSE/messages 端点调用 MCP 工具
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 底层：通过进程内导入调用 MCP 工具
+# ===========================================================================
 
 async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """通过 HTTP API 调用 finance-mcp 工具。
+    """调用 finance-mcp 工具。
 
-    unified_mcp_server 通过 SSE+MCP 协议暴露工具。为了简化，
-    我们在本地复制 reconciliation_start / reconciliation_status / 
-    reconciliation_result 的工具处理器逻辑，调用 MCP 服务器的
-    REST 类似端点（如果可用），或回退到直接 HTTP 调用。
+    优先使用进程内直接调用（两个服务在同一台机器上），
+    失败则回退到 HTTP 方式。
     """
-    url = f"{FINANCE_MCP_BASE_URL}/mcp"
-    # MCP 服务器使用 SSE 传输，直接调用比较复杂。
-    # 相反，当 MCP 服务器位于同一位置时，我们导入并在进程中调用
-    # 工具处理器，或使用 httpx 进行远程调用。
-    # 目前，我们使用直接导入方法，因为两个服务都在
-    # 同一台机器上运行。
     try:
         return await _call_tool_in_process(tool_name, arguments)
     except Exception:
@@ -48,29 +40,34 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
 async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """导入 finance-mcp 工具处理器并直接调用。"""
     import sys
-    # 添加 finance-mcp 到路径，以便我们可以导入其模块
-    mcp_root = str(Path(__file__).resolve().parents[3] / "finance-mcp")
+    mcp_root = str(Path(__file__).resolve().parents[4] / "finance-mcp")
     if mcp_root not in sys.path:
         sys.path.insert(0, mcp_root)
+    
+    # 认证和规则管理工具 -> auth/tools.py
+    _auth_tools = {
+        "auth_register", "auth_login", "auth_me",
+        "list_reconciliation_rules", "get_reconciliation_rule",
+        "save_reconciliation_rule", "update_reconciliation_rule",
+        "delete_reconciliation_rule",
+    }
 
-    from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
-    result = await handle_tool_call(tool_name, arguments)
-    return result
+    if tool_name in _auth_tools:
+        from auth.tools import handle_auth_tool_call  # type: ignore
+        return await handle_auth_tool_call(tool_name, arguments)
+    else:
+        from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
+        return await handle_tool_call(tool_name, arguments)
 
 
 async def _call_tool_http(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """回退：POST 到简单的 JSON-RPC 风格端点。
-
-    这假设 MCP 服务器已扩展了 /tool_call 端点，
-    或者我们通过健康端点 + 直接逻辑模拟调用。
-    为了健壮性，我们只是抛出异常，让调用者知道 HTTP 路径不可用。
-    """
+    """回退：HTTP 方式调用。"""
     raise NotImplementedError("基于 HTTP 的 MCP 工具调用未实现；使用进程内调用")
 
 
-# ---------------------------------------------------------------------------
-# 高级辅助函数
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 高级辅助函数 - 对账执行
+# ===========================================================================
 
 async def start_reconciliation(reconciliation_type: str, files: list[str]) -> dict[str, Any]:
     """通过 MCP 工具启动对账任务。"""
@@ -95,115 +92,87 @@ async def list_reconciliation_tasks() -> dict[str, Any]:
     return await call_mcp_tool("reconciliation_list_tasks", {})
 
 
-# ---------------------------------------------------------------------------
-# 模式/配置辅助函数（本地文件访问）
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 高级辅助函数 - 认证
+# ===========================================================================
 
-def _load_json_with_comments(path: str) -> dict:
-    """加载可能包含 // 或 /* */ 注释的 JSON 文件。
+async def auth_login(username: str, password: str) -> dict[str, Any]:
+    """用户登录"""
+    return await call_mcp_tool("auth_login", {
+        "username": username,
+        "password": password,
+    })
 
-    注意：需要跳过字符串内部的 // 和 /* */，避免破坏 URL 等内容。
+
+async def auth_register(username: str, password: str, **kwargs) -> dict[str, Any]:
+    """用户注册"""
+    args = {"username": username, "password": password}
+    args.update(kwargs)
+    return await call_mcp_tool("auth_register", args)
+
+
+async def auth_me(token: str) -> dict[str, Any]:
+    """获取当前用户信息"""
+    return await call_mcp_tool("auth_me", {"auth_token": token})
+
+
+# ===========================================================================
+# 高级辅助函数 - 规则管理（全部通过 MCP 工具，需要 auth_token）
+# ===========================================================================
+
+async def list_available_rules(auth_token: str) -> list[dict[str, str]]:
+    """查询当前用户可见的对账规则列表。
+
+    Returns:
+        [{"id": "...", "name": "...", "description": "...", ...}, ...]
     """
-    text = Path(path).read_text(encoding="utf-8")
-
-    result: list[str] = []
-    i = 0
-    in_string = False
-    while i < len(text):
-        ch = text[i]
-        # 处理字符串内部（跳过转义字符）
-        if in_string:
-            result.append(ch)
-            if ch == '\\' and i + 1 < len(text):
-                result.append(text[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-            i += 1
-            continue
-        # 字符串开始
-        if ch == '"':
-            in_string = True
-            result.append(ch)
-            i += 1
-            continue
-        # 多行注释 /* ... */
-        if ch == '/' and i + 1 < len(text) and text[i + 1] == '*':
-            end = text.find('*/', i + 2)
-            i = end + 2 if end != -1 else len(text)
-            continue
-        # 单行注释 // ...
-        if ch == '/' and i + 1 < len(text) and text[i + 1] == '/':
-            end = text.find('\n', i + 2)
-            i = end if end != -1 else len(text)
-            continue
-        result.append(ch)
-        i += 1
-
-    return json.loads("".join(result))
+    result = await call_mcp_tool("list_reconciliation_rules", {
+        "auth_token": auth_token,
+    })
+    if result.get("success"):
+        return result.get("rules", [])
+    logger.error(f"查询规则列表失败: {result.get('error')}")
+    return []
 
 
-def list_available_rules() -> list[dict[str, str]]:
-    """从配置文件返回对账类型的列表。"""
-    try:
-        config = _load_json_with_comments(RECONCILIATION_CONFIG_FILE)
-        return [
-            {"name_cn": t.get("name_cn", ""), "type_key": t.get("type_key", "")}
-            for t in config.get("types", [])
-        ]
-    except Exception as e:
-        logger.error(f"加载对账配置失败: {e}")
-        return []
-
-
-def load_schema_by_type(type_key: str) -> dict[str, Any] | None:
-    """根据 type_key 加载对账模式。"""
-    try:
-        config = _load_json_with_comments(RECONCILIATION_CONFIG_FILE)
-        for t in config.get("types", []):
-            if t.get("type_key") == type_key:
-                schema_filename = t.get("schema_path", "")
-                schema_path = Path(RECONCILIATION_SCHEMA_DIR) / schema_filename
-                if schema_path.exists():
-                    return _load_json_with_comments(str(schema_path))
-        return None
-    except Exception as e:
-        logger.error(f"加载 {type_key} 的模式失败: {e}")
+async def get_rule_detail(auth_token: str, rule_id: str = None,
+                          rule_name: str = None) -> dict[str, Any] | None:
+    """获取规则详情（含 rule_template）"""
+    args: dict[str, Any] = {"auth_token": auth_token}
+    if rule_id:
+        args["rule_id"] = rule_id
+    if rule_name:
+        args["rule_name"] = rule_name
+    result = await call_mcp_tool("get_reconciliation_rule", args)
+    if result.get("success"):
+        return result.get("rule")
         return None
 
 
-def save_schema_to_config(name_cn: str, type_key: str, schema: dict[str, Any]) -> str:
-    """保存新的模式 JSON 文件并将其注册到配置中。
+async def save_rule(auth_token: str, name: str, rule_template: dict,
+                    description: str = "", visibility: str = "private",
+                    tags: list[str] = None) -> dict[str, Any]:
+    """保存新规则"""
+    return await call_mcp_tool("save_reconciliation_rule", {
+        "auth_token": auth_token,
+        "name": name,
+        "description": description or name,
+        "rule_template": rule_template,
+        "visibility": visibility,
+        "tags": tags or [],
+    })
 
-    返回模式文件名。
-    """
-    schema_filename = f"{type_key}_schema.json"
-    schema_path = Path(RECONCILIATION_SCHEMA_DIR) / schema_filename
 
-    # 写入模式文件
-    schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+async def update_rule(auth_token: str, rule_id: str, **kwargs) -> dict[str, Any]:
+    """更新规则"""
+    args: dict[str, Any] = {"auth_token": auth_token, "rule_id": rule_id}
+    args.update(kwargs)
+    return await call_mcp_tool("update_reconciliation_rule", args)
 
-    # 更新配置
-    config = _load_json_with_comments(RECONCILIATION_CONFIG_FILE)
-    types_list: list[dict] = config.get("types", [])
 
-    # 检查 type_key 是否已存在
-    existing = next((t for t in types_list if t.get("type_key") == type_key), None)
-    if existing:
-        existing["name_cn"] = name_cn
-        existing["schema_path"] = schema_filename
-    else:
-        types_list.append({
-            "name_cn": name_cn,
-            "type_key": type_key,
-            "schema_path": schema_filename,
-            "callback_url": "",
-        })
-
-    config["types"] = types_list
-    Path(RECONCILIATION_CONFIG_FILE).write_text(
-        json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    return schema_filename
+async def delete_rule(auth_token: str, rule_id: str) -> dict[str, Any]:
+    """删除规则"""
+    return await call_mcp_tool("delete_reconciliation_rule", {
+        "auth_token": auth_token,
+        "rule_id": rule_id,
+    })

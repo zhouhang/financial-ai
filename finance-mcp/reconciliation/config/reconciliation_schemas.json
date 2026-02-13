@@ -17,6 +17,12 @@
       "type_key": "ws____",
       "schema_path": "ws_____schema.json",
       "callback_url": ""
+    },
+    {
+      "name_cn": "南京飞翰知晓对账",
+      "type_key": "________",
+      "schema_path": "_________schema.json",
+      "callback_url": ""
     }
   ]
 }
