@@ -39,15 +39,18 @@ class FileMatcher:
             matched_source = None
             for source_name, source_config in self.data_sources.items():
                 patterns = source_config.get("file_pattern", [])
+                logger.info(f"文件匹配器 - 数据源 {source_name} 的模式: {patterns}")
                 if self._match_pattern(file_name, patterns):
                     matched_source = source_name
                     if source_name in matched:
                         matched[source_name].append(file_path)
                     logger.info(f"文件匹配器 - 文件 {file_name} 匹配到 {source_name}")
                     break
+                else:
+                    logger.debug(f"文件匹配器 - 文件 {file_name} 不匹配 {source_name} 的模式 {patterns}")
             
             if not matched_source:
-                logger.warning(f"文件匹配器 - 警告：文件 {file_name} 未匹配到任何数据源")
+                logger.warning(f"文件匹配器 - 警告：文件 {file_name} 未匹配到任何数据源，可用模式: business={self.data_sources.get('business', {}).get('file_pattern', [])}, finance={self.data_sources.get('finance', {}).get('file_pattern', [])}")
         
         return matched
     

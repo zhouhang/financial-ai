@@ -189,6 +189,11 @@ def create_tools() -> List[Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "要分析的文件路径列表（由 file_upload 返回的路径）"
+                    },
+                    "original_filenames": {
+                        "type": "object",
+                        "description": "文件路径到原始文件名的映射（可选，用于纯数字文件名）",
+                        "additionalProperties": {"type": "string"}
                     }
                 },
                 "required": ["file_paths"]
@@ -449,18 +454,15 @@ async def _file_upload(args: Dict) -> Dict:
                     continue
                 
                 # 保存文件到日期目录
+                # 始终添加时间戳，确保文件名唯一
+                timestamp = datetime.now().strftime("%H%M%S")
                 safe_filename = Path(filename).name  # 只取文件名，去除路径
+                name_parts = safe_filename.rsplit('.', 1)
+                if len(name_parts) == 2:
+                    safe_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+                else:
+                    safe_filename = f"{safe_filename}_{timestamp}"
                 file_path = date_dir / safe_filename
-                
-                # 如果文件已存在，添加时间戳
-                if file_path.exists():
-                    timestamp = datetime.now().strftime("%H%M%S")
-                    name_parts = safe_filename.rsplit('.', 1)
-                    if len(name_parts) == 2:
-                        safe_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
-                    else:
-                        safe_filename = f"{safe_filename}_{timestamp}"
-                    file_path = date_dir / safe_filename
                 
                 # 对文本文件（CSV、TXT）进行编码转换，确保保存为 UTF-8
                 text_extensions = ['.csv', '.txt', '.tsv']
@@ -689,6 +691,9 @@ async def _analyze_files(args: Dict) -> Dict:
         if not file_paths:
             return {"error": "file_paths 参数不能为空"}
         
+        # 获取原始文件名映射（如果提供）
+        original_filenames_map = args.get("original_filenames", {})
+        
         analyses = []
         
         # 第一步：读取每个文件的基本信息
@@ -698,6 +703,9 @@ async def _analyze_files(args: Dict) -> Dict:
                 full_path = FINANCE_MCP_DIR / file_path.lstrip("/")
             else:
                 full_path = FINANCE_MCP_DIR / file_path
+            
+            # 调试日志：记录文件路径信息
+            logger.info(f"analyze_files - 处理文件: file_path={file_path}, full_path={full_path}, full_path.name={full_path.name}")
             
             # 验证文件是否存在
             if not full_path.exists():
@@ -737,15 +745,44 @@ async def _analyze_files(args: Dict) -> Dict:
                     safe_sample.append({k: str(v) for k, v in row.items()})
                 
                 # 从文件路径中提取原始文件名（去掉时间戳后缀）
-                # 例如：filename_163045.csv → filename.csv
+                # 支持多种时间戳格式：
+                # - filename_163045.csv → filename.csv (HHMMSS)
+                # - 1767597466118.csv → 纯数字文件名，从 original_filenames_map 获取或使用文件扩展名模式
+                # - filename_20260105152012277_0.csv → filename.csv (带日期时间戳)
                 original_name = full_path.name
-                # 检查是否有时间戳后缀（格式：_HHMMSS）
                 import re
-                match = re.match(r'(.+)_(\d{6})(\.\w+)$', original_name)
-                if match:
-                    original_name = match.group(1) + match.group(3)
                 
-                analyses.append({
+                # 首先检查是否提供了原始文件名映射
+                if file_path in original_filenames_map:
+                    original_name = original_filenames_map[file_path]
+                    logger.info(f"使用提供的原始文件名: {original_name}")
+                else:
+                    # 尝试匹配各种时间戳格式
+                    # 1. _HHMMSS 格式（6位数字）
+                    match = re.match(r'(.+)_(\d{6})(\.\w+)$', original_name)
+                    if match:
+                        original_name = match.group(1) + match.group(3)
+                    else:
+                        # 2. 纯数字文件名（可能是时间戳，如 1767597466118.csv）
+                        # 对于纯数字文件名，无法提取原始文件名，使用文件扩展名模式
+                        if re.match(r'^\d+\.\w+$', original_name):
+                            # 纯数字文件名，使用文件扩展名模式（如 *.csv）
+                            file_ext = full_path.suffix
+                            original_name = f"*{file_ext}"  # 使用通配符模式
+                            logger.warning(f"纯数字文件名 {full_path.name}，使用扩展名模式: {original_name}")
+                        else:
+                            # 3. 带日期时间戳的格式：filename_YYYYMMDDHHMMSSmmm_0.ext
+                            match = re.match(r'(.+?)_(\d{17})_\d+(\.\w+)$', original_name)
+                            if match:
+                                original_name = match.group(1) + match.group(3)
+                            else:
+                                # 4. 其他格式，尝试提取基础文件名（去掉最后的数字后缀）
+                                # 例如：filename_12345.csv → filename.csv
+                                match = re.match(r'(.+?)_\d+(\.\w+)$', original_name)
+                                if match:
+                                    original_name = match.group(1) + match.group(2)
+                
+                analysis_result = {
                     "filename": full_path.name,  # 系统文件名（带时间戳）
                     "original_filename": original_name,  # 原始文件名（不带时间戳）
                     "file_path": file_path,
@@ -753,7 +790,10 @@ async def _analyze_files(args: Dict) -> Dict:
                     "row_count": len(df),
                     "sample_data": safe_sample,
                     "guessed_source": None  # 稍后由 LLM 填充
-                })
+                }
+                # 调试日志：记录 analyze_files 返回的数据
+                logger.info(f"analyze_files - 返回数据: filename={analysis_result['filename']}, original_filename={analysis_result['original_filename']}, file_path={file_path}")
+                analyses.append(analysis_result)
                 
             except Exception as e:
                 analyses.append({

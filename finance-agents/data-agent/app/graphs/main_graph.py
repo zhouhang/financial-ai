@@ -43,6 +43,7 @@ from app.tools.mcp_client import (
     start_reconciliation,
     get_reconciliation_status,
     get_reconciliation_result,
+    delete_rule,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,7 +157,8 @@ SYSTEM_PROMPT = """\
 你可以做以下事情：
 1. 使用已有的对账规则快速执行对账
 2. 引导用户创建新的对账规则
-3. 帮助用户理解对账结果
+3. 删除对账规则
+4. 帮助用户理解对账结果
 
 当前已有的对账规则包括：
 {available_rules}
@@ -164,9 +166,13 @@ SYSTEM_PROMPT = """\
 请根据用户的意图判断下一步操作：
 - 如果用户想使用已有规则对账，回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
+- 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
 - 如果用户在闲聊或询问信息，正常用中文回复即可
 
-注意：只在明确判断意图时才返回 JSON，否则正常对话。
+注意：
+- 只在明确判断意图时才返回 JSON，否则正常对话
+- 删除规则时，必须从用户输入中提取准确的规则名称
+- 只返回一条消息，不要分多次回复
 """
 
 
@@ -217,8 +223,16 @@ async def router_node(state: AgentState) -> dict:
                 if username and password:
                     result = await auth_login(username, password)
                     if result.get("success"):
+                        # 返回登录成功消息，包含 token 信息让前端识别
+                        import json as _json
+                        login_response = {
+                            "type": "login_success",
+                            "message": f"✅ {result['message']}",
+                            "token": result["token"],
+                            "user": result["user"],
+                        }
                         return {
-                            "messages": [AIMessage(content=f"✅ {result['message']}")],
+                            "messages": [AIMessage(content=_json.dumps(login_response, ensure_ascii=False))],
                             "auth_token": result["token"],
                             "current_user": result["user"],
                             "user_intent": UserIntent.UNKNOWN.value,
@@ -239,8 +253,16 @@ async def router_node(state: AgentState) -> dict:
                         department_code=form_data.get("department_code", "").strip() or None,
                     )
                     if result.get("success"):
+                        # 返回注册成功消息，包含 token 信息让前端识别
+                        import json as _json
+                        register_response = {
+                            "type": "register_success",
+                            "message": f"✅ {result['message']}",
+                            "token": result["token"],
+                            "user": result["user"],
+                        }
                         return {
-                            "messages": [AIMessage(content=f"✅ {result['message']}")],
+                            "messages": [AIMessage(content=_json.dumps(register_response, ensure_ascii=False))],
                             "auth_token": result["token"],
                             "current_user": result["user"],
                             "user_intent": UserIntent.UNKNOWN.value,
@@ -355,6 +377,42 @@ async def router_node(state: AgentState) -> dict:
             "suggested_mappings": {},  # 清空之前的字段映射
             "confirmed_mappings": {},  # 清空之前的确认映射
         }
+    elif intent == UserIntent.DELETE_RULE.value and rule_name:
+        # 删除规则
+        try:
+            # 从规则列表中查找规则 ID
+            rule_id = None
+            for rule in rules:
+                if rule.get("name") == rule_name:
+                    rule_id = rule.get("id")
+                    break
+            
+            if not rule_id:
+                return {
+                    "messages": [AIMessage(content=f"❌ 未找到规则「{rule_name}」，请检查规则名称是否正确。")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+            
+            # 调用删除规则 API
+            result = await delete_rule(auth_token, rule_id)
+            
+            if result.get("success"):
+                return {
+                    "messages": [AIMessage(content=f"✅ {result.get('message', f'规则「{rule_name}」已成功删除')}")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+            else:
+                error_msg = result.get("error", "删除失败")
+                return {
+                    "messages": [AIMessage(content=f"❌ 删除规则失败：{error_msg}")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+        except Exception as e:
+            logger.error(f"删除规则时出错: {e}")
+            return {
+                "messages": [AIMessage(content=f"❌ 删除规则时发生错误：{str(e)}")],
+                "user_intent": UserIntent.UNKNOWN.value,
+        }
     else:
         # 普通对话
         return {
@@ -449,7 +507,7 @@ def task_execution_node(state: AgentState) -> dict:
     由于 langgraph 节点是同步的，内部使用 asyncio 调用异步函数。
     """
     rule_name = state.get("selected_rule_name") or state.get("saved_rule_name")
-    files = state.get("uploaded_files", [])
+    uploaded_files = state.get("uploaded_files", [])
     step = state.get("execution_step", TaskExecutionStep.NOT_STARTED.value)
 
     if not rule_name:
@@ -457,6 +515,19 @@ def task_execution_node(state: AgentState) -> dict:
             "messages": [AIMessage(content="缺少对账规则名称，请先选择或创建一个规则。")],
             "phase": ReconciliationPhase.IDLE.value,
         }
+    
+    # 从 uploaded_files 中提取 file_path（带时间戳的文件路径）
+    # uploaded_files 可能是对象列表（包含 file_path 和 original_filename）或字符串列表（直接是文件路径）
+    files = []
+    for item in uploaded_files:
+        if isinstance(item, dict):
+            file_path = item.get("file_path", "")
+            if file_path:
+                files.append(file_path)
+        else:
+            # 兼容旧格式（直接是文件路径字符串）
+            files.append(item)
+    
     if not files:
         # 等待文件上传
         interrupt({
@@ -464,14 +535,14 @@ def task_execution_node(state: AgentState) -> dict:
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
         # interrupt后结束节点，等待用户上传文件后重新进入
-        return {
+            return {
             "messages": [],
-            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+                "phase": ReconciliationPhase.TASK_EXECUTION.value,
                 "execution_step": TaskExecutionStep.NOT_STARTED.value,
             }
 
     # ── 启动任务 ──
-    logger.info(f"开始执行对账任务: rule={rule_name}, files={len(files)}个")
+    logger.info(f"开始执行对账任务: rule={rule_name}, files={len(files)}个, file_paths={files}")
     start_result = _run_async_safe(_do_start_task(rule_name, files))
 
     if "error" in start_result:

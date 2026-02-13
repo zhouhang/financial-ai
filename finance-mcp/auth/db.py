@@ -265,11 +265,10 @@ def update_rule(rule_id: str, **kwargs) -> Optional[dict]:
 
 
 def delete_rule(rule_id: str) -> bool:
-    """软删除规则（设置 status = 'archived'）"""
+    """物理删除规则（从数据库中完全删除）"""
     sql = """
-    UPDATE reconciliation_rules
-    SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-    WHERE id = %s AND status = 'active'
+    DELETE FROM reconciliation_rules
+    WHERE id = %s
     RETURNING id
     """
     with get_conn() as conn:

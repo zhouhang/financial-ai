@@ -9,7 +9,7 @@
     {
       "name_cn": "测试对账规则",
       "type_key": "______",
-      "schema_path": "_______schema.json",
+      "schema_path": "测试reconciliation规则_schema.json",
       "callback_url": ""
     },
     {
@@ -22,6 +22,30 @@
       "name_cn": "南京飞翰知晓对账",
       "type_key": "________",
       "schema_path": "_________schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "南京飞翰直销对账",
+      "type_key": "nanjingfeihandirect_salesreconciliation",
+      "schema_path": "nanjingfeihandirect_salesreconciliation_schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "飞翰对账",
+      "type_key": "feihanreconciliation",
+      "schema_path": "feihanreconciliation_schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "南京飞翰对账",
+      "type_key": "nanjingfeihanreconciliation",
+      "schema_path": "nanjingfeihanreconciliation_schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "南京对账",
+      "type_key": "nanjingreconciliation",
+      "schema_path": "nanjingreconciliation_schema.json",
       "callback_url": ""
     }
   ]

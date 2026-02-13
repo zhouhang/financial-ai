@@ -44,6 +44,8 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
     if mcp_root not in sys.path:
         sys.path.insert(0, mcp_root)
     
+    logger.info(f"尝试进程内调用工具: {tool_name}, mcp_root={mcp_root}")
+    
     # 认证和规则管理工具 -> auth/tools.py
     _auth_tools = {
         "auth_register", "auth_login", "auth_me",
@@ -52,17 +54,69 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "delete_reconciliation_rule",
     }
 
-    if tool_name in _auth_tools:
-        from auth.tools import handle_auth_tool_call  # type: ignore
-        return await handle_auth_tool_call(tool_name, arguments)
-    else:
-        from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
-        return await handle_tool_call(tool_name, arguments)
+    try:
+        if tool_name in _auth_tools:
+            logger.info(f"导入认证工具处理器: {tool_name}")
+            from auth.tools import handle_auth_tool_call  # type: ignore
+            result = await handle_auth_tool_call(tool_name, arguments)
+            logger.info(f"认证工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
+            return result
+        else:
+            logger.info(f"导入对账工具处理器: {tool_name}")
+            from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
+            result = await handle_tool_call(tool_name, arguments)
+            logger.info(f"对账工具调用成功: {tool_name}")
+            return result
+    except ImportError as e:
+        logger.error(f"导入模块失败: {e}, 工具名: {tool_name}, sys.path 前3项: {sys.path[:3]}")
+        raise
+    except Exception as e:
+        logger.error(f"工具调用失败: {e}, 工具名: {tool_name}")
+        raise
 
 
 async def _call_tool_http(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """回退：HTTP 方式调用。"""
-    raise NotImplementedError("基于 HTTP 的 MCP 工具调用未实现；使用进程内调用")
+    """通过 HTTP 调用 MCP 服务的工具。
+    
+    向 MCP 服务的消息端点发送请求。
+    """
+    try:
+        logger.info(f"使用 HTTP 调用 MCP 工具: {tool_name}")
+        
+        # 构建 MCP 协议的工具调用请求
+        request_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.post(
+                f"{FINANCE_MCP_BASE_URL}/messages/",
+                json=request_body,
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"MCP 服务返回错误: {response.status_code}, 内容: {response.text}")
+                return {
+                    "success": False,
+                    "error": f"MCP 服务错误: {response.status_code}",
+                }
+            
+            result = response.json()
+            logger.info(f"HTTP MCP 调用成功: {tool_name}")
+            return result.get("result", result)
+            
+    except Exception as e:
+        logger.error(f"HTTP MCP 调用失败: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": f"HTTP 调用失败: {str(e)}",
+        }
 
 
 # ===========================================================================

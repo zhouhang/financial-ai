@@ -1,6 +1,9 @@
 """认证和规则管理的 MCP 工具定义与处理"""
 
+import json
 import logging
+import re
+from pathlib import Path
 from typing import Dict, Any
 
 import bcrypt
@@ -10,6 +13,23 @@ from auth.jwt_utils import create_token, get_user_from_token
 from auth import db as auth_db
 
 logger = logging.getLogger(__name__)
+
+# ════════════════════════════════════════════════════════════════════════════
+# 配置路径（用于保存规则的 JSON 和更新配置文件）
+# ════════════════════════════════════════════════════════════════════════════
+try:
+    # finance-mcp 的根目录
+    FINANCE_MCP_DIR = Path(__file__).resolve().parent.parent
+    SCHEMA_DIR = FINANCE_MCP_DIR / "reconciliation" / "schemas"
+    RECONCILIATION_SCHEMAS_FILE = FINANCE_MCP_DIR / "reconciliation" / "config" / "reconciliation_schemas.json"
+    
+    # 确保目录存在
+    SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
+    (FINANCE_MCP_DIR / "reconciliation" / "config").mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    logger.error(f"初始化规则存储目录失败: {e}")
+    SCHEMA_DIR = None
+    RECONCILIATION_SCHEMAS_FILE = None
 
 
 # ============================================================================
@@ -192,10 +212,10 @@ async def _handle_register(args: dict) -> dict:
     """注册新用户"""
     username = args.get("username", "").strip()
     password = args.get("password", "").strip()
-    email = args.get("email", "").strip() or None
-    phone = args.get("phone", "").strip() or None
-    company_code = args.get("company_code", "").strip() or None
-    department_code = args.get("department_code", "").strip() or None
+    email = (args.get("email") or "").strip() or None
+    phone = (args.get("phone") or "").strip() or None
+    company_code = (args.get("company_code") or "").strip() or None
+    department_code = (args.get("department_code") or "").strip() or None
 
     if not username or not password:
         return {"success": False, "error": "用户名和密码不能为空"}
@@ -377,8 +397,123 @@ async def _handle_get_rule(args: dict) -> dict:
     return {"success": True, "rule": rule}
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 规则存储辅助函数
+# ════════════════════════════════════════════════════════════════════════════
+
+def _translate_rule_name_to_type_key(name_cn: str) -> str:
+    """将中文规则名称转换为英文 type_key
+    例如: "南京飞翰直销对账" → "nanjing_feihan_direct_sales_reconciliation"
+    """
+    # 简化的转换（实际应用中可能需要更复杂的逻辑或 LLM）
+    # 先转换为拼音，这里用简单的替换规则
+    translation_map = {
+        "南京": "nanjing",
+        "飞翰": "feihan",
+        "直销": "direct_sales",
+        "对账": "reconciliation",
+    }
+    
+    result = name_cn
+    for cn, en in translation_map.items():
+        result = result.replace(cn, en)
+    
+    # 如果没有匹配，用拼音库或简单的拉丁化
+    # 保留字母和数字，替换其他字符为下划线
+    result = re.sub(r'[^\w]', '_', result)
+    result = re.sub(r'_+', '_', result)  # 合并多个下划线
+    result = result.strip('_').lower()
+    
+    return result or "custom_rule"
+
+
+def _save_schema_file(schema_dict: dict, rule_name_cn: str) -> tuple[bool, str, str]:
+    """将 schema 保存为 JSON 文件
+    
+    返回: (是否成功, 文件名, 错误信息)
+    """
+    if not SCHEMA_DIR:
+        return False, "", "SCHEMA_DIR 未初始化"
+    
+    try:
+        # 生成 type_key 和文件名
+        type_key = _translate_rule_name_to_type_key(rule_name_cn)
+        schema_filename = f"{type_key}_schema.json"
+        schema_filepath = SCHEMA_DIR / schema_filename
+        
+        # 保存 schema 为 JSON 文件
+        with open(schema_filepath, 'w', encoding='utf-8') as f:
+            json.dump(schema_dict, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"规则 schema 已保存: {schema_filepath}")
+        return True, schema_filename, ""
+        
+    except Exception as e:
+        logger.error(f"保存规则 schema 文件失败: {e}")
+        return False, "", str(e)
+
+
+def _update_reconciliation_schemas_config(rule_name_cn: str, schema_filename: str) -> tuple[bool, str]:
+    """更新 reconciliation_schemas.json 配置文件，添加新规则类型
+    
+    返回: (是否成功, 错误信息)
+    """
+    if not RECONCILIATION_SCHEMAS_FILE:
+        return False, "RECONCILIATION_SCHEMAS_FILE 未初始化"
+    
+    try:
+        # 读取现有配置
+        if RECONCILIATION_SCHEMAS_FILE.exists():
+            with open(RECONCILIATION_SCHEMAS_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        else:
+            config = {"types": []}
+        
+        # 确保 types 列表存在
+        if "types" not in config:
+            config["types"] = []
+        
+        # 生成 type_key
+        type_key = _translate_rule_name_to_type_key(rule_name_cn)
+        
+        # 检查是否已存在同名规则
+        for type_config in config["types"]:
+            if type_config.get("name_cn") == rule_name_cn:
+                # 更新现有规则的 schema_path
+                type_config["schema_path"] = schema_filename
+                logger.info(f"已更新现有规则配置: {rule_name_cn}")
+                break
+        else:
+            # 添加新规则类型
+            new_type = {
+                "name_cn": rule_name_cn,
+                "type_key": type_key,
+                "schema_path": schema_filename,
+                "callback_url": "",
+            }
+            config["types"].append(new_type)
+            logger.info(f"已添加新规则类型: {rule_name_cn}")
+        
+        # 写回配置文件
+        with open(RECONCILIATION_SCHEMAS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"reconciliation_schemas.json 已更新")
+        return True, ""
+        
+    except Exception as e:
+        logger.error(f"更新规则配置文件失败: {e}")
+        return False, str(e)
+
+
 async def _handle_save_rule(args: dict) -> dict:
-    """保存新规则"""
+    """保存新规则
+    
+    流程:
+    1. 保存到 PostgreSQL 数据库
+    2. 将 rule_template 保存为 JSON 文件（如 nanjing_feihan_direct_sales_reconciliation_schema.json）
+    3. 更新 reconciliation_schemas.json 配置文件
+    """
     valid, user_info, err = _require_auth(args)
     if not valid:
         return {"success": False, "error": err}
@@ -394,24 +529,62 @@ async def _handle_save_rule(args: dict) -> dict:
     if not rule_template:
         return {"success": False, "error": "规则模板不能为空"}
 
-    rule = auth_db.create_rule(
-        name=name,
-        description=description,
-        created_by=user_info["user_id"],
-        company_id=user_info.get("company_id"),
-        department_id=user_info.get("department_id"),
-        rule_template=rule_template,
-        visibility=visibility,
-        tags=tags,
-    )
-
-    logger.info(f"规则已保存: {name} (id={rule.get('id')}), 创建者: {user_info['username']}")
-
-    return {
-        "success": True,
-        "rule": rule,
-        "message": f"规则 '{name}' 保存成功",
-    }
+    try:
+        # 1️⃣ 保存到 PostgreSQL 数据库
+        rule = auth_db.create_rule(
+            name=name,
+            description=description,
+            created_by=user_info["user_id"],
+            company_id=user_info.get("company_id"),
+            department_id=user_info.get("department_id"),
+            rule_template=rule_template,
+            visibility=visibility,
+            tags=tags,
+        )
+        
+        logger.info(f"规则已保存到数据库: {name} (id={rule.get('id')}), 创建者: {user_info['username']}")
+        
+        # 2️⃣ 保存 schema 为 JSON 文件
+        success, schema_filename, save_error = _save_schema_file(rule_template, name)
+        if not success:
+            logger.warning(f"保存规则 schema 文件失败 (数据库保存已成功): {save_error}")
+            return {
+                "success": True,
+                "rule": rule,
+                "message": f"规则 '{name}' 已保存，但 schema 文件保存失败: {save_error}",
+                "warning": f"规则已保存到数据库，但 JSON 文件保存失败"
+            }
+        
+        # 3️⃣ 更新 reconciliation_schemas.json 配置文件
+        config_success, config_error = _update_reconciliation_schemas_config(name, schema_filename)
+        if not config_success:
+            logger.warning(f"更新规则配置文件失败 (数据库和 JSON 文件保存已成功): {config_error}")
+            return {
+                "success": True,
+                "rule": rule,
+                "message": f"规则 '{name}' 已保存，但配置文件更新失败: {config_error}",
+                "warning": f"规则已保存，但配置文件可能未更新，执行时可能找不到规则"
+            }
+        
+        # ✅ 完全成功
+        return {
+            "success": True,
+            "rule": rule,
+            "message": f"规则 '{name}' 已完全保存",
+            "details": {
+                "saved_to_db": True,
+                "schema_file": schema_filename,
+                "config_file_updated": True
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"保存规则时发生异常: {e}")
+        logger.exception(e)
+        return {
+            "success": False,
+            "error": f"规则保存失败: {str(e)}"
+        }
 
 
 async def _handle_update_rule(args: dict) -> dict:
@@ -454,7 +627,7 @@ async def _handle_update_rule(args: dict) -> dict:
 
 
 async def _handle_delete_rule(args: dict) -> dict:
-    """删除规则"""
+    """删除规则（同时删除数据库记录和 JSON 文件）"""
     valid, user_info, err = _require_auth(args)
     if not valid:
         return {"success": False, "error": err}
@@ -472,11 +645,103 @@ async def _handle_delete_rule(args: dict) -> dict:
     if not auth_db.can_user_modify_rule(user_info["user_id"], user_info["role"], rule):
         return {"success": False, "error": "无权删除此规则"}
 
+    rule_name = rule.get("name", "")
+    
+    # 1️⃣ 删除数据库记录
     success = auth_db.delete_rule(rule_id)
     if not success:
-        return {"success": False, "error": "删除失败"}
+        return {"success": False, "error": "删除数据库记录失败"}
+
+    # 2️⃣ 删除 JSON 文件
+    # 首先尝试从 reconciliation_schemas.json 中查找 type_key
+    type_key = None
+    schema_filename = None
+    
+    try:
+        config_path = RECONCILIATION_SCHEMAS_FILE
+        if config_path and config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            # 从配置文件中查找对应的 type_key
+            if "reconciliation_types" in config:
+                for rt in config["reconciliation_types"]:
+                    if rt.get("name_cn") == rule_name:
+                        type_key = rt.get("type_key")
+                        schema_filename = rt.get("schema_path")
+                        logger.info(f"从配置文件找到 type_key: {type_key}, schema_filename: {schema_filename}")
+                        break
+            
+            # 如果配置文件中使用的是 "types" 而不是 "reconciliation_types"
+            if not type_key and "types" in config:
+                for rt in config["types"]:
+                    if rt.get("name_cn") == rule_name:
+                        type_key = rt.get("type_key")
+                        schema_filename = rt.get("schema_path")
+                        logger.info(f"从配置文件找到 type_key: {type_key}, schema_filename: {schema_filename}")
+                        break
+    except Exception as e:
+        logger.warning(f"读取配置文件失败: {e}")
+    
+    # 如果从配置文件中找不到，尝试生成 type_key
+    if not type_key:
+        type_key = _translate_rule_name_to_type_key(rule_name)
+        schema_filename = f"{type_key}_schema.json"
+        logger.info(f"使用生成的 type_key: {type_key}, schema_filename: {schema_filename}")
+    
+    # 删除 JSON 文件
+    try:
+        if not schema_filename:
+            schema_filename = f"{type_key}_schema.json"
+        
+        schema_path = SCHEMA_DIR / schema_filename
+        
+        if schema_path.exists():
+            schema_path.unlink()
+            logger.info(f"已删除 JSON 文件: {schema_path}")
+        else:
+            logger.warning(f"JSON 文件不存在: {schema_path}")
+    except Exception as e:
+        logger.warning(f"删除 JSON 文件失败: {e}")
+
+    # 3️⃣ 从 reconciliation_schemas.json 中移除该规则
+    try:
+        config_path = RECONCILIATION_SCHEMAS_FILE
+        if config_path and config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            # 移除该规则（支持两种配置格式）
+            removed = False
+            if "reconciliation_types" in config:
+                original_count = len(config["reconciliation_types"])
+                config["reconciliation_types"] = [
+                    rt for rt in config["reconciliation_types"]
+                    if rt.get("type_key") != type_key and rt.get("name_cn") != rule_name
+                ]
+                if len(config["reconciliation_types"]) < original_count:
+                    removed = True
+            
+            # 如果配置文件中使用的是 "types" 而不是 "reconciliation_types"
+            if "types" in config:
+                original_count = len(config["types"])
+                config["types"] = [
+                    rt for rt in config["types"]
+                    if rt.get("type_key") != type_key and rt.get("name_cn") != rule_name
+                ]
+                if len(config["types"]) < original_count:
+                    removed = True
+            
+            if removed:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                logger.info(f"已从 reconciliation_schemas.json 中移除规则: {type_key} (name: {rule_name})")
+            else:
+                logger.warning(f"在 reconciliation_schemas.json 中未找到规则: {type_key} (name: {rule_name})")
+    except Exception as e:
+        logger.warning(f"更新 reconciliation_schemas.json 失败: {e}")
 
     return {
         "success": True,
-        "message": f"规则 '{rule.get('name')}' 已删除",
+        "message": f"规则 '{rule_name}' 已删除（包括数据库记录和 JSON 文件）",
     }

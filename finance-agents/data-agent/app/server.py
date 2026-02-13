@@ -41,7 +41,7 @@ app.add_middleware(
 langgraph_app = create_app()
 
 # 用于跟踪每个 thread 上传的文件
-_thread_files: dict[str, list[str]] = {}
+_thread_files: dict[str, list[dict]] = {}  # 保存文件信息，包含 file_path 和 original_filename
 
 
 # ── 启动时初始化 ──────────────────────────────────────────────────────────────
@@ -144,8 +144,11 @@ async def upload_file(
         file_info = uploaded_files[0]
         file_path = file_info.get("file_path", "")
         
-        # 保存到线程文件映射
-        _thread_files.setdefault(thread_id, []).append(file_path)
+        # 保存到线程文件映射（包含 file_path 和 original_filename）
+        _thread_files.setdefault(thread_id, []).append({
+            "file_path": file_path,
+            "original_filename": file_info.get("original_filename", file.filename)
+        })
         
         logger.info(f"文件已通过 MCP 工具上传: {file_path} (thread={thread_id})")
         return {
@@ -223,15 +226,18 @@ async def websocket_chat(ws: WebSocket):
             register_progress_callback(thread_id, lambda msg: _send_progress(ws, thread_id, msg))
 
             config = {"configurable": {"thread_id": thread_id}}
-            files = _thread_files.get(thread_id, [])
+            file_infos = _thread_files.get(thread_id, [])
+            # 提取文件路径列表（兼容旧代码）
+            files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
 
             try:
                 # 使用 astream_events 捕获 LLM token 级别的流式输出
                 if is_resume:
                     # resume 前先更新 state 中的 uploaded_files 和 auth_token
                     update_state: dict[str, Any] = {}
-                    if files:
-                        update_state["uploaded_files"] = files
+                    if file_infos:
+                        # 传递文件信息对象（包含 file_path 和 original_filename）
+                        update_state["uploaded_files"] = file_infos
                     if auth_token:
                         update_state["auth_token"] = auth_token
                         # 解析 token 获取用户信息
@@ -320,8 +326,8 @@ async def websocket_chat(ws: WebSocket):
                                 # 其他节点：过滤掉 file_analysis 的 LLM 输出（内部字段映射生成）
                                 # 只有 result_analysis 等面向用户的节点才流式输出
                                 if node_name not in ["file_analysis", "field_mapping", "rule_config", "validation_preview"]:
-                                    streamed_content += token
-                                    await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
+                                streamed_content += token
+                                await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
                     
                     # ② router LLM 结束
                     elif kind == "on_chat_model_end" and node_name == "router":
@@ -350,6 +356,11 @@ async def websocket_chat(ws: WebSocket):
                         # resume 时跳过 router 的旧消息
                         if is_resume and node_name == "router":
                             logger.info(f"resume: 跳过 router 的 on_chain_end 消息")
+                            continue
+                        
+                        # router 节点如果已经通过流式输出发送了内容，就跳过 on_chain_end 的消息
+                        if node_name == "router" and streamed_content.strip():
+                            logger.info(f"router 节点已通过流式输出发送内容，跳过 on_chain_end 消息")
                             continue
                         
                         output = data_obj.get("output", {})
@@ -427,16 +438,20 @@ async def stream_chat(
     """
     tid = thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": tid}}
-    files = _thread_files.get(tid, [])
+    file_infos = _thread_files.get(tid, [])
+    # 提取文件路径列表（兼容旧代码）
+    files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
 
     async def event_generator():
         try:
             if resume:
                 invoke_input = Command(resume=message)
             else:
+                # 传递文件信息对象（包含 file_path 和 original_filename）
+                uploaded_files_for_state = file_infos if file_infos else files
                 invoke_input = {
                     "messages": [HumanMessage(content=message)],
-                    "uploaded_files": files,
+                    "uploaded_files": uploaded_files_for_state,
                 }
 
             for event in langgraph_app.stream(invoke_input, config=config, stream_mode="updates"):

@@ -266,9 +266,27 @@ async def file_analysis_node(state: AgentState) -> dict:
             }
 
     # 调用 MCP 工具分析文件（包括 LLM 文件类型判断）
+    # 提取文件路径和原始文件名映射
+    file_paths = []
+    original_filenames_map = {}
+    
+    for item in uploaded:
+        if isinstance(item, dict):
+            file_path = item.get("file_path", "")
+            original_filename = item.get("original_filename", "")
+            if file_path:
+                file_paths.append(file_path)
+                if original_filename:
+                    original_filenames_map[file_path] = original_filename
+        else:
+            # 兼容旧格式（直接是文件路径字符串）
+            file_paths.append(item)
     
     try:
-        result = await call_mcp_tool("analyze_files", {"file_paths": uploaded})
+        analyze_args = {"file_paths": file_paths}
+        if original_filenames_map:
+            analyze_args["original_filenames"] = original_filenames_map
+        result = await call_mcp_tool("analyze_files", analyze_args)
         if not result.get("success"):
             error_msg = result.get("error", "文件分析失败")
             return {
@@ -642,7 +660,7 @@ def rule_config_node(state: AgentState) -> dict:
     """第3步 (HITL)：增量式配置规则参数，支持自然语言添加/删除配置项。
     
     新的配置体验：
-    1. 初始配置为空
+    1. 初始配置为空，等待用户输入
     2. 用户输入配置，LLM解析为JSON片段并添加到"当前配置"
     3. 用户可以删除已添加的配置
     4. 用户确认后完成配置
@@ -653,15 +671,10 @@ def rule_config_node(state: AgentState) -> dict:
     config_items = state.get("rule_config_items") or []
     logger.info(f"rule_config_node: 当前配置项数量={len(config_items)}, 配置项={[item.get('description', '未知') for item in config_items]}")
     
-    # 构建配置展示
-    config_display = _format_rule_config_items(config_items)
-    logger.info(f"config_display 内容: {repr(config_display)}")
-    
-    # 构建问题文本 - 确保不包含任何默认配置
+    # 区分初始状态和配置中状态
     if len(config_items) == 0:
-        question_text = f"""⚙️ **第3步：配置对账规则参数**
-
-{config_display}
+        # 初始状态：只显示提示，不显示"当前配置"标题
+        question_text = """⚙️ **第3步：配置对账规则参数**
 
 请描述对账规则的配置要求，例如：
 • "金额容差0.1元"
@@ -671,6 +684,8 @@ def rule_config_node(state: AgentState) -> dict:
 
 **请输入你的配置要求：**"""
     else:
+        # 有配置项时：显示当前配置列表
+        config_display = _format_rule_config_items(config_items)
         question_text = f"""⚙️ **第3步：配置对账规则参数**
 
 当前配置：
@@ -815,24 +830,82 @@ def rule_config_node(state: AgentState) -> dict:
 
 def validation_preview_node(state: AgentState) -> dict:
     """第4步 (HITL)：生成规则 schema，预览对账效果，等待用户确认。"""
+    logger.info("validation_preview_node - 开始执行")
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
     config_items = state.get("rule_config_items", [])  # 新的配置项列表
     analyses = state.get("file_analyses", [])
+    logger.info(f"validation_preview_node - 初始状态: analyses数量={len(analyses)}, config_items数量={len(config_items)}")
 
-    # ⚠️ 提取文件模式：使用原始文件名（不带时间戳）生成匹配模式
-    # 例如：原始文件名 "sales_data.csv" → 模式 "*sales_data*.csv"
+    # ⚠️ 提取文件模式：使用带时间戳的文件名生成匹配模式，时间戳部分用*替换
+    # 例如：sales_data_115959.csv → sales_data_*.csv
     biz_patterns: list[str] = []
     fin_patterns: list[str] = []
     
+    import re
+    
+    # 调试日志：记录 analyses 的内容
+    logger.info(f"validation_preview_node - 收到的 analyses 数量: {len(analyses)}")
+    for idx, a in enumerate(analyses):
+        logger.info(f"validation_preview_node - analyses[{idx}]: filename={a.get('filename', 'N/A')}, original_filename={a.get('original_filename', 'N/A')}, guessed_source={a.get('guessed_source', 'N/A')}")
+    
     for a in analyses:
         src = a.get("guessed_source")
-        original_fn = a.get("original_filename") or a.get("filename", "")
-        if not original_fn:
+        # 使用带时间戳的文件名（filename），而不是original_filename
+        filename_with_timestamp = a.get("filename", "")
+        original_filename = a.get("original_filename", "")
+        file_path = a.get("file_path", "")
+        
+        # 如果 filename 不包含时间戳（不包含 _ 后跟数字），尝试从 file_path 中提取
+        if filename_with_timestamp and not re.search(r'_\d{6}(\.\w+)$', filename_with_timestamp):
+            # 从 file_path 中提取文件名
+            if file_path:
+                from pathlib import Path
+                path_obj = Path(file_path)
+                extracted_filename = path_obj.name
+                # 如果提取的文件名包含时间戳，使用它
+                if re.search(r'_\d{6}(\.\w+)$', extracted_filename) or re.search(r'_\d+(\.\w+)$', extracted_filename):
+                    filename_with_timestamp = extracted_filename
+                    logger.info(f"validation_preview_node - 从 file_path 提取文件名: {filename_with_timestamp}")
+        
+        if not filename_with_timestamp:
             continue
         
-        # 使用原始文件名生成模式（前后加通配符，以适应可能的时间戳）
-        # 例如：sales_data.csv → *sales_data*.csv
-        pattern = f"*{original_fn}*"
+        # 调试日志
+        logger.info(f"validation_preview_node - 文件分析结果: filename={filename_with_timestamp}, original_filename={original_filename}, file_path={file_path}, source={src}")
+        
+        # 将时间戳部分替换为*通配符
+        # 匹配格式：filename_HHMMSS.ext 或 filename_数字.ext
+        # 例如：sales_data_115959.csv → sales_data_*.csv
+        # 例如：1767597466118_134019.csv → 1767597466118_*.csv
+        pattern = filename_with_timestamp
+        
+        # 首先尝试匹配 _HHMMSS 格式（6位数字，时间戳格式）
+        # 例如：1767597466118_134019.csv → 1767597466118_*.csv
+        pattern = re.sub(r'_(\d{6})(\.\w+)$', r'_*\2', pattern)
+        
+        # 如果上面没匹配到，尝试匹配其他数字后缀格式（任意长度的数字）
+        # 例如：filename_12345.csv → filename_*.csv
+        if pattern == filename_with_timestamp:
+            pattern = re.sub(r'_(\d+)(\.\w+)$', r'_*\2', pattern)
+        
+        # 如果还是没匹配到，说明文件名本身可能不包含时间戳
+        # 对于纯数字文件名（如 1767597466118.csv），使用前后通配符模式
+        # 例如：1767597466118.csv → *1767597466118_*.csv（确保能匹配带时间戳的版本）
+        if pattern == filename_with_timestamp:
+            # 检查是否是纯数字文件名
+            if re.match(r'^\d+\.\w+$', filename_with_timestamp):
+                # 纯数字文件名，生成模式：*数字_*.ext（确保能匹配带时间戳的版本）
+                name_parts = filename_with_timestamp.rsplit('.', 1)
+                if len(name_parts) == 2:
+                    pattern = f"*{name_parts[0]}_*.{name_parts[1]}"
+                else:
+                    pattern = f"*{filename_with_timestamp}_*"
+            else:
+                # 其他情况，使用默认模式（前后加通配符）
+                pattern = f"*{filename_with_timestamp}*"
+        
+        # 调试日志：记录生成的 pattern
+        logger.info(f"validation_preview_node - 生成的 file_pattern: {pattern} (来源: {src}, 原始文件名: {filename_with_timestamp})")
         
         if src == "business":
             if pattern not in biz_patterns:
@@ -846,6 +919,9 @@ def validation_preview_node(state: AgentState) -> dict:
         biz_patterns = ["*.csv", "*.xlsx", "*.xls"]
     if not fin_patterns:
         fin_patterns = ["*.csv", "*.xlsx", "*.xls"]
+
+    # 调试日志：记录最终生成的 file_pattern
+    logger.info(f"validation_preview_node - 最终生成的 file_pattern: business={biz_patterns}, finance={fin_patterns}")
 
     biz_field_roles = mappings.get("business", {})
     fin_field_roles = mappings.get("finance", {})
@@ -863,10 +939,27 @@ def validation_preview_node(state: AgentState) -> dict:
     )
     
     # 将用户添加的配置项合并到基础schema中
+    # ⚠️ 保护 file_pattern，防止被覆盖
+    protected_file_patterns = {
+        "business": biz_patterns.copy(),
+        "finance": fin_patterns.copy(),
+    }
+    
     if config_items:
         schema = _merge_json_snippets(base_schema, config_items)
+        # 恢复被保护的 file_pattern
+        if "data_sources" in schema:
+            if "business" in schema["data_sources"]:
+                schema["data_sources"]["business"]["file_pattern"] = protected_file_patterns["business"]
+            if "finance" in schema["data_sources"]:
+                schema["data_sources"]["finance"]["file_pattern"] = protected_file_patterns["finance"]
     else:
         schema = base_schema
+
+    # 调试日志：记录合并后的 schema 中的 file_pattern
+    biz_patterns_after_merge = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
+    fin_patterns_after_merge = schema.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
+    logger.info(f"validation_preview_node - 合并后的 schema file_pattern: business={biz_patterns_after_merge}, finance={fin_patterns_after_merge}")
 
     # 简单预览（统计匹配信息）
     preview = _preview_schema(schema, analyses)
@@ -994,6 +1087,12 @@ async def save_rule_node(state: AgentState) -> dict:
     # 更新 schema 的 description 为用户输入的中文名
     schema_with_desc = schema.copy()
     schema_with_desc["description"] = rule_name_cn
+
+    # 调试日志：记录保存的 schema 中的 file_pattern
+    biz_patterns = schema_with_desc.get("data_sources", {}).get("business", {}).get("file_pattern", [])
+    fin_patterns = schema_with_desc.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
+    logger.info(f"save_rule_node - 保存的规则 file_pattern: business={biz_patterns}, finance={fin_patterns}")
+    logger.info(f"save_rule_node - 完整的 schema data_sources: {schema_with_desc.get('data_sources', {})}")
 
     # ⚠️ 通过 finance-mcp 工具保存规则（带认证 token）
     auth_token = state.get("auth_token", "")

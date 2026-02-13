@@ -19,6 +19,7 @@ from typing_extensions import TypedDict
 class UserIntent(str, Enum):
     USE_EXISTING_RULE = "use_existing_rule"
     CREATE_NEW_RULE = "create_new_rule"
+    DELETE_RULE = "delete_rule"
     LOGIN = "login"
     REGISTER = "register"
     UNKNOWN = "unknown"

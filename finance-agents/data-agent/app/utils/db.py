@@ -85,7 +85,7 @@ def save_rule(name: str, type_key: str, schema: dict, description: str = "") -> 
                     )
                 )
                 returned_id = cur.fetchone()[0]
-                conn.commit()
+        conn.commit()
                 logger.info(f"规则已保存到数据库: {name} (id={returned_id})")
                 return str(returned_id)
             except Exception as e:
