@@ -307,7 +307,7 @@ async def router_node(state: AgentState) -> dict:
         else:
             # LLM 正常回复（引导用户）
             # 去掉开头的"！"或"!"，并确保只有一条消息
-            cleaned_content = content.lstrip("！!").strip()
+            cleaned_content = content.strip()
             return {"messages": [AIMessage(content=cleaned_content)]}
 
     # ── 已登录状态：正常意图识别 ──────────────────────────────────
@@ -535,11 +535,11 @@ def task_execution_node(state: AgentState) -> dict:
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
         # interrupt后结束节点，等待用户上传文件后重新进入
-            return {
+        return {
             "messages": [],
-                "phase": ReconciliationPhase.TASK_EXECUTION.value,
-                "execution_step": TaskExecutionStep.NOT_STARTED.value,
-            }
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+        }
 
     # ── 启动任务 ──
     logger.info(f"开始执行对账任务: rule={rule_name}, files={len(files)}个, file_paths={files}")

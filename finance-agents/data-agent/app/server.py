@@ -326,8 +326,8 @@ async def websocket_chat(ws: WebSocket):
                                 # 其他节点：过滤掉 file_analysis 的 LLM 输出（内部字段映射生成）
                                 # 只有 result_analysis 等面向用户的节点才流式输出
                                 if node_name not in ["file_analysis", "field_mapping", "rule_config", "validation_preview"]:
-                                streamed_content += token
-                                await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
+                                    streamed_content += token
+                                    await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
                     
                     # ② router LLM 结束
                     elif kind == "on_chat_model_end" and node_name == "router":

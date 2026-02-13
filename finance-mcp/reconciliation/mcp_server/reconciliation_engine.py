@@ -20,6 +20,11 @@ class ReconciliationEngine:
     
     def __init__(self, schema: Dict):
         self.schema = schema
+        logger.info(f"ReconciliationEngine 初始化 - schema keys: {list(schema.keys())}")
+        logger.info(f"ReconciliationEngine 初始化 - data_sources keys: {list(schema.get('data_sources', {}).keys())}")
+        biz_patterns = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
+        fin_patterns = schema.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
+        logger.info(f"ReconciliationEngine 初始化 - business file_pattern: {biz_patterns}, finance file_pattern: {fin_patterns}")
         self.file_matcher = FileMatcher(schema)
         self.data_cleaner = DataCleaner(schema)
         self.key_field_role = schema.get("key_field_role", "order_id")

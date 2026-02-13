@@ -261,7 +261,7 @@ async def file_analysis_node(state: AgentState) -> dict:
             # 仍然没有文件，返回提示消息
             return {
                 "messages": [AIMessage(content="⚠️ 未检测到文件上传，请上传文件后再试。")],
-                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
                 "file_analyses": [],  # 空列表，路由函数会返回END
             }
 
@@ -377,10 +377,10 @@ def field_mapping_node(state: AgentState) -> dict:
     if response_lower in ("确认", "ok", "yes", "确定", "对", "没问题", "正确"):
         return {
             "messages": [AIMessage(content="✅ 字段映射已确认。接下来配置对账规则。")],
-            "confirmed_mappings": confirmed,
+        "confirmed_mappings": confirmed,
             "mapping_adjustment_feedback": None,  # 清除反馈
-            "phase": ReconciliationPhase.RULE_CONFIG.value,
-        }
+        "phase": ReconciliationPhase.RULE_CONFIG.value,
+    }
 
     # 用户需要调整，使用 LLM 解析调整意见并更新映射
     logger.info(f"用户调整意见: {response_str}")
@@ -483,6 +483,8 @@ JSON模板结构（参考）：
 示例：
 - "金额容差0.1元" → {{"action": "add", "json_snippet": {{"tolerance": {{"amount_diff_max": 0.1}}}}, "description": "金额容差：0.1元"}}
 - "订单号104开头" → {{"action": "add", "json_snippet": {{"data_cleaning_rules": {{"finance": {{"row_filters": [{{"condition": "str(row.get('order_id', '')).startswith('104')", "description": "只保留104开头的订单号"}}]}}, "business": {{"row_filters": [{{"condition": "str(row.get('order_id', '')).startswith('104')", "description": "只保留104开头的订单号"}}]}}}}}}, "description": "订单号过滤：104开头"}}
+- "订单号去掉开头单引号" → {{"action": "add", "json_snippet": {{"data_cleaning_rules": {{"finance": {{"field_transforms": [{{"field": "order_id", "transform": "str(row.get('order_id', '')).strip(\\\"'\\\")[:21]", "description": "去掉开头单引号，截取前21位"}}]}}, "business": {{"field_transforms": [{{"field": "order_id", "transform": "str(row.get('order_id', '')).strip(\\\"'\\\")[:21]", "description": "去掉开头单引号，截取前21位"}}]}}}}}}}}, "description": "订单号转换：去掉开头单引号"}}
+- "订单号去掉开头双引号" → {{"action": "add", "json_snippet": {{"data_cleaning_rules": {{"finance": {{"field_transforms": [{{"field": "order_id", "transform": "str(row.get('order_id', '')).strip(\\\"\\\"\\\")[:21]", "description": "去掉开头双引号，截取前21位"}}]}}, "business": {{"field_transforms": [{{"field": "order_id", "transform": "str(row.get('order_id', '')).strip(\\\"\\\"\\\")[:21]", "description": "去掉开头双引号，截取前21位"}}]}}}}}}}}, "description": "订单号转换：去掉开头双引号"}}
 - "相同订单号做金额累加" → {{"action": "add", "json_snippet": {{"data_cleaning_rules": {{"finance": {{"aggregations": [{{"group_by": "order_id", "agg_fields": {{"amount": "sum"}}, "description": "按订单号合并，金额累加"}}]}}, "business": {{"aggregations": [{{"group_by": "order_id", "agg_fields": {{"amount": "sum"}}, "description": "按订单号合并，金额累加"}}]}}}}}}, "description": "金额累加：相同订单号的金额自动累加"}}
 - "删除金额容差" → {{"action": "delete", "target": "金额容差", "description": "删除金额容差配置"}}
 """
@@ -840,23 +842,40 @@ def validation_preview_node(state: AgentState) -> dict:
     # 例如：sales_data_115959.csv → sales_data_*.csv
     biz_patterns: list[str] = []
     fin_patterns: list[str] = []
-    
+
     import re
-    
+
     # 调试日志：记录 analyses 的内容
     logger.info(f"validation_preview_node - 收到的 analyses 数量: {len(analyses)}")
     for idx, a in enumerate(analyses):
         logger.info(f"validation_preview_node - analyses[{idx}]: filename={a.get('filename', 'N/A')}, original_filename={a.get('original_filename', 'N/A')}, guessed_source={a.get('guessed_source', 'N/A')}")
-    
+
     for a in analyses:
         src = a.get("guessed_source")
         # 使用带时间戳的文件名（filename），而不是original_filename
         filename_with_timestamp = a.get("filename", "")
         original_filename = a.get("original_filename", "")
         file_path = a.get("file_path", "")
+
+        # ⚠️ 关键修复：检查 filename 是否真的包含时间戳
+        # 如果 filename 看起来是原始文件名（与 original_filename 相同），则从 file_path 提取
+        if filename_with_timestamp and original_filename and filename_with_timestamp == original_filename:
+            logger.warning(f"validation_preview_node - ⚠️ 发现问题：filename({filename_with_timestamp}) == original_filename({original_filename})，这表示 filename 可能被错误设置")
+            # 尝试从 file_path 中提取系统文件名（应该带时间戳）
+            if file_path:
+                from pathlib import Path
+                path_obj = Path(file_path)
+                extracted_filename = path_obj.name
+                # 验证提取的文件名是否包含时间戳
+                has_timestamp = re.search(r'_\d{6}(\.\w+)$', extracted_filename) or re.search(r'_\d+(\.\w+)$', extracted_filename)
+                if has_timestamp:
+                    filename_with_timestamp = extracted_filename
+                    logger.info(f"validation_preview_node - ✅ 修正：从 file_path 提取带时间戳的文件名: {filename_with_timestamp}")
+                else:
+                    logger.error(f"validation_preview_node - ❌ 从 file_path 提取的文件名也没有时间戳: {extracted_filename}，这表示文件上传阶段可能有问题")
         
         # 如果 filename 不包含时间戳（不包含 _ 后跟数字），尝试从 file_path 中提取
-        if filename_with_timestamp and not re.search(r'_\d{6}(\.\w+)$', filename_with_timestamp):
+        elif filename_with_timestamp and not re.search(r'_\d{6}(\.\w+)$', filename_with_timestamp) and not re.search(r'_\d+(\.\w+)$', filename_with_timestamp):
             # 从 file_path 中提取文件名
             if file_path:
                 from pathlib import Path
@@ -864,35 +883,37 @@ def validation_preview_node(state: AgentState) -> dict:
                 extracted_filename = path_obj.name
                 # 如果提取的文件名包含时间戳，使用它
                 if re.search(r'_\d{6}(\.\w+)$', extracted_filename) or re.search(r'_\d+(\.\w+)$', extracted_filename):
+                    logger.warning(f"validation_preview_node - filename({filename_with_timestamp}) 没有时间戳，从 file_path 提取: {extracted_filename}")
                     filename_with_timestamp = extracted_filename
-                    logger.info(f"validation_preview_node - 从 file_path 提取文件名: {filename_with_timestamp}")
-        
+
         if not filename_with_timestamp:
+            logger.warning(f"validation_preview_node - 跳过文件（没有 filename）: original_filename={original_filename}, file_path={file_path}")
             continue
-        
-        # 调试日志
-        logger.info(f"validation_preview_node - 文件分析结果: filename={filename_with_timestamp}, original_filename={original_filename}, file_path={file_path}, source={src}")
-        
+
+        # 详细的调试日志
+        logger.info(f"validation_preview_node - 处理文件: filename={filename_with_timestamp}, original_filename={original_filename}, file_path={file_path}, source={src}")
+
         # 将时间戳部分替换为*通配符
         # 匹配格式：filename_HHMMSS.ext 或 filename_数字.ext
         # 例如：sales_data_115959.csv → sales_data_*.csv
         # 例如：1767597466118_134019.csv → 1767597466118_*.csv
         pattern = filename_with_timestamp
-        
+
         # 首先尝试匹配 _HHMMSS 格式（6位数字，时间戳格式）
         # 例如：1767597466118_134019.csv → 1767597466118_*.csv
         pattern = re.sub(r'_(\d{6})(\.\w+)$', r'_*\2', pattern)
-        
+
         # 如果上面没匹配到，尝试匹配其他数字后缀格式（任意长度的数字）
         # 例如：filename_12345.csv → filename_*.csv
         if pattern == filename_with_timestamp:
             pattern = re.sub(r'_(\d+)(\.\w+)$', r'_*\2', pattern)
-        
+
         # 如果还是没匹配到，说明文件名本身可能不包含时间戳
-        # 对于纯数字文件名（如 1767597466118.csv），使用前后通配符模式
-        # 例如：1767597466118.csv → *1767597466118_*.csv（确保能匹配带时间戳的版本）
+        # 这是一个诊断点，表示上游可能出现问题
         if pattern == filename_with_timestamp:
-            # 检查是否是纯数字文件名
+            logger.error(f"validation_preview_node - ❌ 警告：无法从 filename={filename_with_timestamp} 生成时间戳通配符，这可能导致对账无法匹配带时间戳的文件")
+            # 对于纯数字文件名（如 1767597466118.csv），使用前后通配符模式
+            # 例如：1767597466118.csv → *1767597466118_*.csv（确保能匹配带时间戳的版本）
             if re.match(r'^\d+\.\w+$', filename_with_timestamp):
                 # 纯数字文件名，生成模式：*数字_*.ext（确保能匹配带时间戳的版本）
                 name_parts = filename_with_timestamp.rsplit('.', 1)
@@ -903,10 +924,11 @@ def validation_preview_node(state: AgentState) -> dict:
             else:
                 # 其他情况，使用默认模式（前后加通配符）
                 pattern = f"*{filename_with_timestamp}*"
-        
-        # 调试日志：记录生成的 pattern
-        logger.info(f"validation_preview_node - 生成的 file_pattern: {pattern} (来源: {src}, 原始文件名: {filename_with_timestamp})")
-        
+
+        # 调试日志：记录生成的 pattern（显示是否成功生成通配符）
+        has_wildcard = '*' in pattern
+        logger.info(f"validation_preview_node - 生成的 file_pattern: {pattern} (是否包含通配符: {has_wildcard}, 来源: {src}, 原始 filename: {filename_with_timestamp})")
+
         if src == "business":
             if pattern not in biz_patterns:
                 biz_patterns.append(pattern)
@@ -937,24 +959,38 @@ def validation_preview_node(state: AgentState) -> dict:
         amount_tolerance=0.1,  # 从配置项中获取
         check_order_status=True,  # 从配置项中获取
     )
-    
+
     # 将用户添加的配置项合并到基础schema中
     # ⚠️ 保护 file_pattern，防止被覆盖
     protected_file_patterns = {
         "business": biz_patterns.copy(),
         "finance": fin_patterns.copy(),
     }
-    
+
     if config_items:
         schema = _merge_json_snippets(base_schema, config_items)
-        # 恢复被保护的 file_pattern
-        if "data_sources" in schema:
-            if "business" in schema["data_sources"]:
-                schema["data_sources"]["business"]["file_pattern"] = protected_file_patterns["business"]
-            if "finance" in schema["data_sources"]:
-                schema["data_sources"]["finance"]["file_pattern"] = protected_file_patterns["finance"]
     else:
         schema = base_schema
+
+    # 强制恢复被保护的 file_pattern，确保在任何合并后都保留正确的模式
+    # 这是关键修复：无论合并过程如何，都要确保 file_pattern 是正确的
+    if "data_sources" in schema:
+        if "business" in schema["data_sources"]:
+            schema["data_sources"]["business"]["file_pattern"] = protected_file_patterns["business"]
+        else:
+            # 如果 business 不存在，创建它
+            schema["data_sources"]["business"] = {"file_pattern": protected_file_patterns["business"]}
+        
+        if "finance" in schema["data_sources"]:
+            schema["data_sources"]["finance"]["file_pattern"] = protected_file_patterns["finance"]
+        else:
+            # 如果 finance 不存在，创建它
+            schema["data_sources"]["finance"] = {"file_pattern": protected_file_patterns["finance"]}
+    
+    # 再次验证 file_pattern 是否正确设置
+    biz_file_pattern = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
+    fin_file_pattern = schema.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
+    logger.info(f"validation_preview_node - 修复后的 schema file_pattern: business={biz_file_pattern}, finance={fin_file_pattern}")
 
     # 调试日志：记录合并后的 schema 中的 file_pattern
     biz_patterns_after_merge = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
@@ -1088,11 +1124,37 @@ async def save_rule_node(state: AgentState) -> dict:
     schema_with_desc = schema.copy()
     schema_with_desc["description"] = rule_name_cn
 
-    # 调试日志：记录保存的 schema 中的 file_pattern
+    # ⚠️ 关键验证：检查 file_pattern 是否包含通配符
     biz_patterns = schema_with_desc.get("data_sources", {}).get("business", {}).get("file_pattern", [])
     fin_patterns = schema_with_desc.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
-    logger.info(f"save_rule_node - 保存的规则 file_pattern: business={biz_patterns}, finance={fin_patterns}")
+    
+    logger.info(f"save_rule_node - 保存前规则 file_pattern: business={biz_patterns}, finance={fin_patterns}")
     logger.info(f"save_rule_node - 完整的 schema data_sources: {schema_with_desc.get('data_sources', {})}")
+    
+    # 检查 file_pattern 是否有效
+    def check_pattern_validity(patterns: list[str], source_name: str) -> bool:
+        """检查 file_pattern 是否包含通配符，如果不包含则发出警告"""
+        if not patterns:
+            logger.warning(f"save_rule_node - ⚠️ {source_name} 的 file_pattern 为空")
+            return False
+        
+        has_wildcard = any('*' in p for p in patterns)
+        if not has_wildcard:
+            logger.error(f"save_rule_node - ❌ 严重问题：{source_name} 的 file_pattern 不包含通配符，这会导致无法匹配带时间戳的文件！patterns={patterns}")
+            return False
+        
+        logger.info(f"save_rule_node - ✅ {source_name} 的 file_pattern 有效：{patterns}")
+        return True
+    
+    biz_valid = check_pattern_validity(biz_patterns, "business")
+    fin_valid = check_pattern_validity(fin_patterns, "finance")
+    
+    if not biz_valid or not fin_valid:
+        logger.error(f"save_rule_node - ⚠️ 警告：规则的 file_pattern 可能不完整，请检查规则配置是否正确")
+        # 返回警告信息但继续保存
+        warning_msg = "⚠️ 警告：规则的 file_pattern 可能有问题，请确保上传的文件包含时间戳后缀（如：filename_134019.csv）"
+    else:
+        warning_msg = None
 
     # ⚠️ 通过 finance-mcp 工具保存规则（带认证 token）
     auth_token = state.get("auth_token", "")
@@ -1124,6 +1186,9 @@ async def save_rule_node(state: AgentState) -> dict:
         f"现在可以用它开始对账了。要立即开始吗？\n"
         f"（回复\"开始\"立即执行对账，或稍后再说）"
     )
+    
+    if warning_msg:
+        msg = warning_msg + "\n\n" + msg
 
     return {
         "messages": [AIMessage(content=msg)],

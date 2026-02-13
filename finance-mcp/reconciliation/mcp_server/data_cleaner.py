@@ -128,15 +128,18 @@ class DataCleaner:
         # 合并规则（数据源规则优先）
         rules = {**global_rules, **source_rules}
         
-        # 1. 行过滤（在转换之前）
-        row_filters = rules.get("row_filters", [])
-        if row_filters:
-            cleaned_df = self._apply_row_filters(cleaned_df, row_filters)
+        # ⚠️ 关键修复：调整执行顺序，字段转换必须在行过滤之前
+        # 这样可以确保行过滤检查的值都是清洗后的值（如订单号去掉引号后）
         
-        # 2. 字段转换
+        # 1. 字段转换（必须在行过滤之前，这样行过滤检查的是清洗后的值）
         field_transforms = rules.get("field_transforms", [])
         if field_transforms:
             cleaned_df = self._apply_field_transforms(cleaned_df, field_transforms, file_paths)
+        
+        # 2. 行过滤（在转换之后）
+        row_filters = rules.get("row_filters", [])
+        if row_filters:
+            cleaned_df = self._apply_row_filters(cleaned_df, row_filters)
         
         # 3. 聚合
         aggregations = rules.get("aggregations", [])
@@ -230,8 +233,18 @@ class DataCleaner:
             field = transform.get("field")
             operation = transform.get("operation")
             
-            if not field or not operation:
+            # ⚠️ 支持两种形式：operation 或 transform（transform 视为 expr）
+            if not field:
                 continue
+            
+            # 如果没有 operation，检查是否有 transform（将其视为 expr）
+            if not operation:
+                if "transform" in transform:
+                    operation = "expr"
+                    # 将 transform 字段的值复制为 expression
+                    transform = {**transform, "expression": transform["transform"]}
+                else:
+                    continue
             
             # 检查条件（如文件模式匹配）
             condition = transform.get("condition")

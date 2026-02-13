@@ -296,6 +296,11 @@ async def _reconciliation_start(args: Dict) -> Dict:
         
         schema = load_json_with_comments(schema_path)
         
+        # 调试日志：记录加载的 schema 中的 file_pattern
+        biz_patterns = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
+        fin_patterns = schema.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
+        logger.info(f"reconciliation_start - 加载的 schema file_pattern: business={biz_patterns}, finance={fin_patterns}")
+        
         # 5. 验证 schema
         SchemaLoader.validate_schema(schema)
         

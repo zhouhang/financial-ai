@@ -15,6 +15,12 @@ class FileMatcher:
     def __init__(self, schema: Dict):
         self.schema = schema
         self.data_sources = schema.get("data_sources", {})
+        logger.info(f"FileMatcher 初始化 - data_sources keys: {list(self.data_sources.keys())}")
+        logger.info(f"FileMatcher 初始化 - 完整 schema keys: {list(schema.keys())}")
+        for source_name, source_config in self.data_sources.items():
+            patterns = source_config.get("file_pattern", [])
+            logger.info(f"FileMatcher 初始化 - {source_name} file_pattern: {patterns} (类型: {type(patterns)})")
+            logger.info(f"FileMatcher 初始化 - {source_name} 完整配置: {source_config}")
     
     def match_files(self, file_paths: List[str]) -> Dict[str, List[str]]:
         """
@@ -37,17 +43,33 @@ class FileMatcher:
             
             # 尝试匹配到各个数据源
             matched_source = None
+            logger.info(f"文件匹配器 - 开始匹配文件 {file_name}，可用数据源: {list(self.data_sources.keys())}")
             for source_name, source_config in self.data_sources.items():
                 patterns = source_config.get("file_pattern", [])
-                logger.info(f"文件匹配器 - 数据源 {source_name} 的模式: {patterns}")
+                logger.info(f"文件匹配器 - 数据源 {source_name} 的模式: {patterns} (类型: {type(patterns)})")
+                
+                # 详细调试：对每个模式进行匹配测试
+                if isinstance(patterns, list):
+                    pattern_list = patterns
+                elif isinstance(patterns, str):
+                    pattern_list = [patterns]
+                else:
+                    pattern_list = []
+                    logger.warning(f"文件匹配器 - 数据源 {source_name} 的模式类型异常: {type(patterns)}")
+                
+                for p in pattern_list:
+                    regex_pattern = self._wildcard_to_regex(p)
+                    match_result = re.match(regex_pattern, file_name)
+                    logger.info(f"文件匹配器 - 测试模式 '{p}' -> 正则 '{regex_pattern}' vs 文件名 '{file_name}': {match_result is not None}")
+                
                 if self._match_pattern(file_name, patterns):
                     matched_source = source_name
                     if source_name in matched:
                         matched[source_name].append(file_path)
-                    logger.info(f"文件匹配器 - 文件 {file_name} 匹配到 {source_name}")
+                    logger.info(f"文件匹配器 - ✅ 文件 {file_name} 匹配到 {source_name}")
                     break
                 else:
-                    logger.debug(f"文件匹配器 - 文件 {file_name} 不匹配 {source_name} 的模式 {patterns}")
+                    logger.warning(f"文件匹配器 - ❌ 文件 {file_name} 不匹配 {source_name} 的模式 {patterns}")
             
             if not matched_source:
                 logger.warning(f"文件匹配器 - 警告：文件 {file_name} 未匹配到任何数据源，可用模式: business={self.data_sources.get('business', {}).get('file_pattern', [])}, finance={self.data_sources.get('finance', {}).get('file_pattern', [])}")

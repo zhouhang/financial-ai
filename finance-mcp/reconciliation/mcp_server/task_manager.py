@@ -148,6 +148,9 @@ class TaskManager:
     
     def _run_reconciliation(self, task: ReconciliationTask) -> Dict:
         """运行对账（同步方法，在执行器中运行）"""
+        logger.info(f"开始运行对账任务 - task_id={task.task_id}, files={task.files}")
+        logger.info(f"任务 schema keys: {list(task.schema.keys())}")
+        logger.info(f"任务 schema data_sources: {list(task.schema.get('data_sources', {}).keys())}")
         engine = ReconciliationEngine(task.schema)
         return engine.reconcile(task.files)
     

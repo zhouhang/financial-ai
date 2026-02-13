@@ -1,97 +1,47 @@
 #!/bin/bash
-# 重启所有服务脚本
-# 用途：修改代码后，统一重启 data-agent 和 finance-web
+# 统一重启所有服务的脚本
 
-set -e  # 遇到错误立即退出
+echo "正在重启所有服务..."
 
-echo "════════════════════════════════════════════════════════════════"
-echo "🔄 重启服务脚本"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
-
-# ── 1. 停止所有服务 ──
-echo "📦 步骤 1/3: 停止现有服务..."
-echo ""
-
-# 停止 data-agent (端口 8100)
-if lsof -ti:8100 > /dev/null 2>&1; then
-    lsof -ti:8100 | xargs kill -9 2>/dev/null
-    echo "  ✓ 已停止 data-agent (端口 8100)"
-else
-    echo "  ℹ data-agent 未运行"
-fi
-
-# 停止 finance-web (端口 5173)
-if lsof -ti:5173 > /dev/null 2>&1; then
-    lsof -ti:5173 | xargs kill -9 2>/dev/null
-    echo "  ✓ 已停止 finance-web (端口 5173)"
-else
-    echo "  ℹ finance-web 未运行"
-fi
-
-echo ""
-sleep 1
-
-# ── 2. 启动 data-agent ──
-echo "📦 步骤 2/3: 启动 data-agent..."
-echo ""
-
-cd /Users/kevin/workspace/financial-ai/finance-agents/data-agent
-source .venv/bin/activate
-
-# 后台启动
-nohup python -m app.server > ../../logs/data-agent.log 2>&1 &
-DATA_AGENT_PID=$!
-
-echo "  ✓ data-agent 已启动 (PID: $DATA_AGENT_PID)"
-echo "  ℹ 日志: logs/data-agent.log"
-
+# 清理端口
+echo "1. 清理端口占用..."
+lsof -ti:5173 | xargs kill -9 2>/dev/null
+lsof -ti:5174 | xargs kill -9 2>/dev/null
+lsof -ti:8100 | xargs kill -9 2>/dev/null
 sleep 2
 
-# ── 3. 启动 finance-web ──
-echo ""
-echo "📦 步骤 3/3: 启动 finance-web..."
-echo ""
+# 启动后端服务 (data-agent)
+echo "2. 启动后端服务 (8100)..."
+cd /Users/kevin/workspace/financial-ai/finance-agents/data-agent
+.venv/bin/python -u -m app.server > /tmp/data-agent.log 2>&1 &
+BACKEND_PID=$!
 
+# 启动前端服务 (finance-web)
+echo "3. 启动前端服务 (5173)..."
 cd /Users/kevin/workspace/financial-ai/finance-web
+npm run dev > /tmp/finance-web.log 2>&1 &
+FRONTEND_PID=$!
 
-# 后台启动
-nohup npm run dev > ../logs/finance-web.log 2>&1 &
-FINANCE_WEB_PID=$!
+# 等待服务启动
+echo "4. 等待服务启动..."
+sleep 8
 
-echo "  ✓ finance-web 已启动 (PID: $FINANCE_WEB_PID)"
-echo "  ℹ 日志: logs/finance-web.log"
-
-sleep 3
-
-# ── 4. 验证服务 ──
+# 检查服务状态
 echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo "✅ 服务启动完成"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
-
-# 检查端口
-if lsof -ti:8100 > /dev/null 2>&1; then
-    echo "  ✓ data-agent 运行中   → http://0.0.0.0:8100"
+echo "=== 服务状态 ==="
+if curl -s http://localhost:8100/health 2>/dev/null | grep -q ok; then
+    echo "✅ 后端服务 (8100) 运行正常"
 else
-    echo "  ✗ data-agent 启动失败 → 查看 logs/data-agent.log"
+    echo "❌ 后端服务 (8100) 未启动，查看日志: tail -20 /tmp/data-agent.log"
 fi
 
-if lsof -ti:5173 > /dev/null 2>&1; then
-    echo "  ✓ finance-web 运行中  → http://localhost:5173"
+if curl -s http://localhost:5173 2>/dev/null | head -1 | grep -q "html\|<!DOCTYPE"; then
+    echo "✅ 前端服务 (5173) 运行正常"
 else
-    echo "  ✗ finance-web 启动失败 → 查看 logs/finance-web.log"
+    echo "❌ 前端服务 (5173) 未启动，查看日志: tail -20 /tmp/finance-web.log"
 fi
 
 echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo "📖 查看日志："
-echo "  • data-agent:  tail -f logs/data-agent.log"
-echo "  • finance-web: tail -f logs/finance-web.log"
-echo ""
-echo "🛑 停止服务："
-echo "  • kill $DATA_AGENT_PID (data-agent)"
-echo "  • kill $FINANCE_WEB_PID (finance-web)"
-echo "  • 或运行: lsof -ti:8100 | xargs kill -9; lsof -ti:5173 | xargs kill -9"
-echo "════════════════════════════════════════════════════════════════"
+echo "服务重启完成！"
+echo "后端日志: tail -f /tmp/data-agent.log"
+echo "前端日志: tail -f /tmp/finance-web.log"

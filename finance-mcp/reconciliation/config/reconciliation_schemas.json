@@ -43,9 +43,9 @@
       "callback_url": ""
     },
     {
-      "name_cn": "南京对账",
-      "type_key": "nanjingreconciliation",
-      "schema_path": "nanjingreconciliation_schema.json",
+      "name_cn": "你好?",
+      "type_key": "你好",
+      "schema_path": "你好_schema.json",
       "callback_url": ""
     }
   ]
