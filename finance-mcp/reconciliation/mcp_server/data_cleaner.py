@@ -73,8 +73,10 @@ class DataCleaner:
                 except (UnicodeDecodeError, LookupError):
                     continue
             raise ValueError(f"无法读取文件 {file_path}，编码不支持")
-        elif file_path.endswith(('.xlsx', '.xls')):
-            return pd.read_excel(file_path, index_col=False)
+        elif file_path.endswith('.xlsx'):
+            return pd.read_excel(file_path, index_col=False, engine='openpyxl')
+        elif file_path.endswith('.xls'):
+            return pd.read_excel(file_path, index_col=False, engine='xlrd')
         else:
             raise ValueError(f"不支持的文件格式: {file_path}")
     

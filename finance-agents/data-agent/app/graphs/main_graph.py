@@ -331,8 +331,8 @@ async def router_node(state: AgentState) -> dict:
     uploaded_files = state.get("uploaded_files", [])
     
     if intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
-        if old_intent != intent:
-            uploaded_files = []
+        # ⚠️ 修复：切换意图时不要清空 uploaded_files，否则会丢失用户刚上传的新文件
+        # （用户换文件后说「使用南京飞翰对账」时，state 已通过 input 合并了新文件，清空会导致仍用旧结果）
         return {
             "messages": [AIMessage(content=f"好的，将使用规则「{rule_name}」进行对账。")],
             "user_intent": intent,
@@ -503,6 +503,11 @@ def task_execution_node(state: AgentState) -> dict:
     uploaded_files = state.get("uploaded_files", [])
     step = state.get("execution_step", TaskExecutionStep.NOT_STARTED.value)
 
+    # ⚠️ 清除旧的对账结果，防止显示上一次的结果
+    state.pop("task_id", None)
+    state.pop("task_result", None)
+    state.pop("task_status", None)
+    
     if not rule_name:
         return {
             "messages": [AIMessage(content="缺少对账规则名称，请先选择或创建一个规则。")],
