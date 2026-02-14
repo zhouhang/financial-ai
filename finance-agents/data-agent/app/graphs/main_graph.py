@@ -158,18 +158,21 @@ SYSTEM_PROMPT = """\
 1. 使用已有的对账规则快速执行对账
 2. 引导用户创建新的对账规则
 3. 删除对账规则
-4. 帮助用户理解对账结果
+4. 查看规则列表
+5. 帮助用户理解对账结果
 
 当前已有的对账规则包括：
 {available_rules}
 
 请根据用户的意图判断下一步操作：
-- 如果用户想使用已有规则对账，回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
+- 如果用户想**查看规则列表**（如"我的规则列表"、"看看有哪些规则"、"规则列表"），回复 JSON: {{"intent": "list_rules"}}
+- 如果用户想**使用已有规则对账**（如"用XX规则对账"、"执行XX对账"），回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
 - 如果用户在闲聊或询问信息，正常用中文回复即可
 
 注意：
+- **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
 - 只在明确判断意图时才返回 JSON，否则正常对话
 - 删除规则时，必须从用户输入中提取准确的规则名称
 - 只返回一条消息，不要分多次回复
@@ -326,15 +329,46 @@ async def router_node(state: AgentState) -> dict:
         intent = ""
         rule_name = ""
 
+    # ⚠️ 兜底：用户明确说"规则列表"/"看看规则"时，强制识别为 list_rules，避免误触发对账
+    last_user_msg = (messages[-1].content if messages and hasattr(messages[-1], "content") else "") or ""
+    last_user_msg_lower = last_user_msg.lower().strip()
+    list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则")
+    if any(kw in last_user_msg_lower for kw in list_rules_keywords) and intent == UserIntent.USE_EXISTING_RULE.value:
+        intent = UserIntent.LIST_RULES.value
+        rule_name = ""
+        logger.info(f"router: 用户说「{last_user_msg[:30]}...」强制识别为 list_rules，避免误触发对账")
+
     # 检查是否切换意图
     old_intent = state.get("user_intent", "")
+    old_phase = state.get("phase", "")
     uploaded_files = state.get("uploaded_files", [])
     
-    if intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
+    # ⚠️ 关键修复：如果前一个对账已完成，开始新对账时需要清空旧数据
+    # 只有在 phase 不是 COMPLETED 时，才保留 uploaded_files（用户换文件的场景）
+    if old_phase == ReconciliationPhase.COMPLETED.value:
+        # 对账已完成，开始新对账需要清空旧数据
+        uploaded_files = []
+    
+    if intent == UserIntent.LIST_RULES.value:
+        # 查看规则列表：直接展示，不触发对账
+        if rules:
+            lines = ["📋 **我的对账规则列表**\n"]
+            for r in rules:
+                desc = r.get("description", "")
+                lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+            msg = "\n".join(lines)
+        else:
+            msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
+        return {
+            "messages": [AIMessage(content=msg)],
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+    elif intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
         # ⚠️ 修复：切换意图时不要清空 uploaded_files，否则会丢失用户刚上传的新文件
         # （用户换文件后说「使用南京飞翰对账」时，state 已通过 input 合并了新文件，清空会导致仍用旧结果）
+        msg = f"好的，将使用规则「{rule_name}」进行对账。\n\n✨ 请上传对账文件（业务数据和财务数据各一个）"
         return {
-            "messages": [AIMessage(content=f"好的，将使用规则「{rule_name}」进行对账。")],
+            "messages": [AIMessage(content=msg)],
             "user_intent": intent,
             "selected_rule_name": rule_name,
             "phase": ReconciliationPhase.TASK_EXECUTION.value,
@@ -342,7 +376,8 @@ async def router_node(state: AgentState) -> dict:
             "uploaded_files": uploaded_files,
         }
     elif intent == UserIntent.CREATE_NEW_RULE.value:
-        if old_intent != intent:
+        if old_intent != intent or old_phase == ReconciliationPhase.COMPLETED.value:
+            # 开始创建新规则，清空旧数据
             uploaded_files = []
         welcome_msg = (
             "🎯 **开始创建新的对账规则**\n\n"
@@ -443,11 +478,11 @@ async def _do_poll(
     """
     # 进度消息列表（带时间戳，用于显示）
     progress_messages_with_timing = [
-        (0, "📊 正在加载数据文件..."),
-        (5, "🔍 正在分析数据结构..."),
-        (15, "⚙️  正在执行对账规则..."),
-        (30, "📈 正在生成对账结果..."),
-        (45, "✨ 即将完成..."),
+        (0, "📊 正在加载数据文件 {{SPINNER}}"),
+        (5, "🔍 正在分析数据结构 {{SPINNER}}"),
+        (15, "⚙️  正在执行对账规则 {{SPINNER}}"),
+        (30, "📈 正在生成对账结果 {{SPINNER}}"),
+        (45, "✨ 即将完成 {{SPINNER}}"),
     ]
     
     collected_progress = []
@@ -528,10 +563,28 @@ def task_execution_node(state: AgentState) -> dict:
     
     if not files:
         # 等待文件上传
-        interrupt({
+        user_response = interrupt({
             "question": "请上传需要对账的文件",
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
+        # ⚠️ 若用户回复的是「规则列表」等，说明想切换意图，不继续对账流程
+        response_str = (user_response or "").strip().lower()
+        list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则")
+        if any(kw in response_str for kw in list_rules_keywords):
+            rules = _run_async_safe(list_available_rules(auth_token))
+            if rules:
+                lines = ["📋 **我的对账规则列表**\n"]
+                for r in rules:
+                    desc = r.get("description", "")
+                    lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+                msg = "\n".join(lines)
+            else:
+                msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
+            return {
+                "messages": [AIMessage(content=msg)],
+                "phase": ReconciliationPhase.COMPLETED.value,
+                "selected_rule_name": None,
+            }
         # interrupt后结束节点，等待用户上传文件后重新进入
         return {
             "messages": [],
@@ -561,7 +614,7 @@ def task_execution_node(state: AgentState) -> dict:
     
     # ── 启动成功，立即返回消息并开始轮询 ──
     messages_to_send = [
-        AIMessage(content=f"🚀 对账任务已启动\n\n📋 规则：{rule_name}\n📁 文件：{len(files)} 个\n💾 任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒...\n\n📊 进度：开始加载数据..."),
+        AIMessage(content=f"🚀 对账任务已启动\n\n📋 规则：{rule_name}\n📁 文件：{len(files)} 个\n💾 任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒 {{SPINNER}}\n\n📊 进度：开始加载数据 {{SPINNER}}"),
     ]
 
     # ── 轮询 ──
@@ -649,7 +702,10 @@ RESULT_ANALYSIS_PROMPT = """\
 
 
 def result_analysis_node(state: AgentState) -> dict:
-    """由 LLM 分析对账结果并生成报告（流式输出）。"""
+    """由 LLM 分析对账结果并生成报告（流式输出）。
+    
+    ⚠️ 对账完成后清除旧数据，防止下次新对账时误用旧文件
+    """
     import json as _json
 
     task_result = state.get("task_result")
@@ -661,6 +717,9 @@ def result_analysis_node(state: AgentState) -> dict:
         return {
             "phase": ReconciliationPhase.COMPLETED.value,
             "execution_step": TaskExecutionStep.DONE.value,
+            # ⚠️ 清除旧数据
+            "uploaded_files": [],
+            "selected_rule_name": None,
         }
 
     # 构建结果 JSON（精简版，避免 token 过多）
@@ -686,6 +745,9 @@ def result_analysis_node(state: AgentState) -> dict:
         "messages": [AIMessage(content=resp.content)],
         "phase": ReconciliationPhase.COMPLETED.value,
         "execution_step": TaskExecutionStep.DONE.value,
+        # ⚠️ 清除旧数据，防止下次新对账时误用旧文件
+        "uploaded_files": [],
+        "selected_rule_name": None,
     }
 
 
@@ -725,11 +787,13 @@ def ask_start_now_node(state: AgentState) -> dict:
 
     response_str = str(user_response).strip()
     if response_str in ("开始", "是", "yes", "ok", "好", "执行", "立即开始"):
+        # 保留 uploaded_files，因为在创建规则流程中已经上传过文件
         return {
-            "messages": [AIMessage(content="好的，开始执行对账...")],
+            "messages": [AIMessage(content="好的，开始执行对账 {{SPINNER}}")],
             "selected_rule_name": state.get("saved_rule_name"),
             "phase": ReconciliationPhase.TASK_EXECUTION.value,
             "execution_step": TaskExecutionStep.NOT_STARTED.value,
+            "uploaded_files": state.get("uploaded_files", []),
         }
     else:
         return {

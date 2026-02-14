@@ -1,10 +1,14 @@
 {
   "version": "1.0",
-  "description": "南京飞翰",
+  "description": "西福",
   "data_sources": {
     "business": {
       "file_pattern": [
-        "1767597466118_*.xlsx"
+        "1767597466118_*.csv",
+        "1767597466118_*.xlsb",
+        "1767597466118_*.xls",
+        "1767597466118_*.xlsx",
+        "1767597466118_*.xlsm"
       ],
       "field_roles": {
         "order_id": [
@@ -17,7 +21,11 @@
     },
     "finance": {
       "file_pattern": [
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx"
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm"
       ],
       "field_roles": {
         "order_id": [

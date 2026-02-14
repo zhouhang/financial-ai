@@ -245,6 +245,21 @@ async def websocket_chat(ws: WebSocket):
             register_progress_callback(thread_id, lambda msg: _send_progress(ws, thread_id, msg))
 
             config = {"configurable": {"thread_id": thread_id}}
+            
+            # ⚠️ 修复：检查前一个任务是否已完成，如果完成则清空旧文件等待新输入
+            try:
+                current_state = langgraph_app.get_state(config)
+                current_phase = current_state.values.get("phase", "")
+                if current_phase == ReconciliationPhase.COMPLETED.value:
+                    # 前一个任务已完成，清空 _thread_files 强制用户上传新文件
+                    old_files_count = len(_thread_files.get(thread_id, []))
+                    _thread_files[thread_id] = []
+                    _thread_files_snapshot[thread_id] = []
+                    if old_files_count > 0:
+                        logger.info(f"检测到 phase=COMPLETED，清空 {old_files_count} 个旧文件，等待新上传 (thread={thread_id})")
+            except Exception as e:
+                logger.warning(f"检查 phase 状态失败: {e}")
+            
             file_infos = _thread_files.get(thread_id, [])
             # 提取文件路径列表（兼容旧代码）
             files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]

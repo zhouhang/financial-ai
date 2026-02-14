@@ -136,7 +136,10 @@ class DataCleaner:
         # 1. 字段转换（必须在行过滤之前，这样行过滤检查的是清洗后的值）
         field_transforms = rules.get("field_transforms", [])
         if field_transforms:
-            cleaned_df = self._apply_field_transforms(cleaned_df, field_transforms, file_paths)
+            field_roles = self.data_sources.get(source_name, {}).get("field_roles", {})
+            cleaned_df = self._apply_field_transforms(
+                cleaned_df, field_transforms, file_paths, field_roles
+            )
         
         # 2. 行过滤（在转换之后）
         row_filters = rules.get("row_filters", [])
@@ -202,7 +205,50 @@ class DataCleaner:
         
         return result_df
     
-    def _apply_field_transforms(self, df: pd.DataFrame, transforms: List[Dict], file_paths: List[str]) -> pd.DataFrame:
+    def _rewrite_transform_expression(
+        self, expression: str, field: str, field_roles: Dict[str, Any]
+    ) -> str:
+        """
+        将 transform 表达式中的原始列名替换为映射后的角色名。
+        LLM 生成的表达式使用原始列名（如 roc_oid、product_price），
+        但 transform 在字段映射之后执行，此时 DataFrame 只有角色名（order_id、amount）。
+        同时处理 LLM 误将其他数据源的列名写入的情况（如 finance 中误用 product_price）。
+        """
+        if not expression:
+            return expression
+        # 构建 原始列名 -> 角色名 的映射（合并所有数据源，修复 LLM 误用其他源的列名）
+        orig_to_role = {}
+        for _src, src_config in self.data_sources.items():
+            src_roles = src_config.get("field_roles", {})
+            role_orig_cols = src_roles.get(field)
+            if isinstance(role_orig_cols, list):
+                for orig in role_orig_cols:
+                    orig_to_role[orig] = field
+            elif isinstance(role_orig_cols, str):
+                orig_to_role[role_orig_cols] = field
+        if not orig_to_role:
+            return expression
+        # 替换 row.get('orig_col', x) 为 row.get('role', x)
+        result = expression
+        for orig_col, role in orig_to_role.items():
+            if orig_col == role:
+                continue
+            # 匹配 row.get('orig_col', 或 row.get("orig_col",
+            for q in ("'", '"'):
+                old_pat = f"row.get({q}{orig_col}{q}"
+                new_pat = f"row.get({q}{role}{q}"
+                result = result.replace(old_pat, new_pat)
+        if result != expression:
+            logger.debug(f"表达式重写: {field} 原始列 {list(orig_to_role.keys())} -> 角色名 {field}")
+        return result
+
+    def _apply_field_transforms(
+        self,
+        df: pd.DataFrame,
+        transforms: List[Dict],
+        file_paths: List[str],
+        field_roles: Optional[Dict[str, Any]] = None,
+    ) -> pd.DataFrame:
         """
         应用字段转换规则
         
@@ -313,9 +359,12 @@ class DataCleaner:
                     result_df[field] = result_df[field].astype(str).str.lower()
                 
                 elif operation == "expr":
-                    # 自定义表达式
+                    # 自定义表达式（LLM 可能用原始列名，需替换为映射后的角色名）
                     expression = transform.get("expression")
                     if expression:
+                        expression = self._rewrite_transform_expression(
+                            expression, field, field_roles or {}
+                        )
                         result_df[field] = result_df.apply(
                             lambda row: eval(expression, {"row": row, "pd": pd, "np": np}),
                             axis=1

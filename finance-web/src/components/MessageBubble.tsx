@@ -167,7 +167,18 @@ function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormS
             />
           ) : (
           <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-            {message.content}
+            {message.content.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
+              <span key={i}>
+                {part}
+                {i < arr.length - 1 && (
+                  <span className="inline-flex gap-1 ml-0.5 align-middle">
+                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                  </span>
+                )}
+              </span>
+            ))}
           </div>
           )}
         </div>

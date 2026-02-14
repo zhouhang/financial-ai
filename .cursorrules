@@ -1,0 +1,5 @@
+# Financial AI 项目规则
+
+## 服务重启
+- **每次修改 data-agent、finance-mcp 或 finance-web 相关代码后，记得重启服务使修改生效**
+- 重启命令：`./START_ALL_SERVICES.sh`（会先停止旧服务再启动）

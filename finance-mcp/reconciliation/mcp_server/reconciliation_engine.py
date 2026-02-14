@@ -114,6 +114,12 @@ class ReconciliationEngine:
         business_ids = set(business_df[self.key_field_role].astype(str)) if not business_df.empty else set()
         finance_ids = set(finance_df[self.key_field_role].astype(str)) if not finance_df.empty else set()
         
+        # 过滤掉"nan"和空值（这些是无效的订单号）
+        business_ids.discard("nan")
+        finance_ids.discard("nan")
+        business_ids = {oid for oid in business_ids if oid and str(oid).strip()}
+        finance_ids = {oid for oid in finance_ids if oid and str(oid).strip()}
+        
         all_ids = business_ids | finance_ids
         total_orders = len(all_ids)
         logger.info(f"对账引擎 - 开始逐条对账，总订单数: {total_orders}")
