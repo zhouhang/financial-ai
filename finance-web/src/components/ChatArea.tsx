@@ -70,11 +70,13 @@ export default function ChatArea({
     try {
         const attachmentsList: MessageAttachment[] = [];
 
-        for (const staged of stagedFiles) {
+        for (const [index, staged] of stagedFiles.entries()) {
         try {
           const formData = new FormData();
             formData.append('file', staged.file);
           formData.append('thread_id', threadId);
+          // ⚠️ 修复：第一个文件时设置 is_first_file=1，其他为0（避免字符串"false"被当成真值）
+          formData.append('is_first_file', index === 0 ? '1' : '0');
 
           const resp = await fetch('/api/upload', {
             method: 'POST',

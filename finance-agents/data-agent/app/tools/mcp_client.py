@@ -123,12 +123,27 @@ async def _call_tool_http(tool_name: str, arguments: dict[str, Any]) -> dict[str
 # 高级辅助函数 - 对账执行
 # ===========================================================================
 
-async def start_reconciliation(reconciliation_type: str, files: list[str]) -> dict[str, Any]:
-    """通过 MCP 工具启动对账任务。"""
-    return await call_mcp_tool("reconciliation_start", {
-        "reconciliation_type": reconciliation_type,
+async def start_reconciliation(auth_token: str, files: list[str], rule_id: str = None, rule_name: str = None) -> dict[str, Any]:
+    """通过 MCP 工具启动对账任务。从 PostgreSQL 查询规则。
+    
+    Args:
+        auth_token: JWT token，用于身份验证
+        files: 文件列表
+        rule_id: 规则 ID（与 rule_name 二选一）
+        rule_name: 规则名称（与 rule_id 二选一）
+    """
+    args = {
+        "auth_token": auth_token,
         "files": files,
-    })
+    }
+    if rule_id:
+        args["rule_id"] = rule_id
+    elif rule_name:
+        args["rule_name"] = rule_name
+    else:
+        raise ValueError("必须提供 rule_id 或 rule_name")
+    
+    return await call_mcp_tool("reconciliation_start", args)
 
 
 async def get_reconciliation_status(task_id: str) -> dict[str, Any]:

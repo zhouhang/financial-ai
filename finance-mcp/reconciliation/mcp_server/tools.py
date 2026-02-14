@@ -84,13 +84,21 @@ def create_tools() -> List[Tool]:
     return [
         Tool(
             name="reconciliation_start",
-            description="开始对账任务。根据对账类型自动获取配置，系统会异步执行对账并返回任务 ID。",
+            description="开始对账任务。从 PostgreSQL 查询用户的规则，使用规则中的完整 JSON schema 执行对账。",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "reconciliation_type": {
+                    "auth_token": {
                         "type": "string",
-                        "description": "对账类型中文名称，例如：直销对账"
+                        "description": "JWT token，用于校验用户身份和规则权限"
+                    },
+                    "rule_id": {
+                        "type": "string",
+                        "description": "规则 ID（与 rule_name 二选一）"
+                    },
+                    "rule_name": {
+                        "type": "string",
+                        "description": "规则名称（与 rule_id 二选一）"
                     },
                     "files": {
                         "type": "array",
@@ -98,7 +106,7 @@ def create_tools() -> List[Tool]:
                         "description": "要对账的文件路径列表"
                     }
                 },
-                "required": ["reconciliation_type", "files"]
+                "required": ["auth_token", "files"]
             }
         ),
         Tool(
@@ -233,78 +241,88 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Any:
 
 
 async def _reconciliation_start(args: Dict) -> Dict:
-    """开始对账任务"""
+    """开始对账任务 - 从 PostgreSQL 读取规则和 schema"""
     try:
-        reconciliation_type = args.get("reconciliation_type")
+        from auth.jwt_utils import get_user_from_token
+        from auth import db as auth_db
+        
+        # 1. 验证 token 和获取用户信息
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token 参数"}
+        
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "token 无效或已过期"}
+        
+        # 2. 获取规则 ID 或名称
+        rule_id = args.get("rule_id")
+        rule_name = args.get("rule_name")
         files = args.get("files", [])
         
-        if not reconciliation_type:
-            return {"error": "缺少 reconciliation_type 参数"}
+        if not rule_id and not rule_name:
+            return {"error": "缺少 rule_id 或 rule_name 参数"}
         
-        # 1. 读取配置文件，获取 schema 和 callback_url
-        if not RECONCILIATION_SCHEMAS_FILE.exists():
-            return {"error": f"配置文件不存在: {RECONCILIATION_SCHEMAS_FILE}"}
+        if not files:
+            return {"error": "缺少 files 参数"}
         
-        config = load_json_with_comments(RECONCILIATION_SCHEMAS_FILE)
-        
-        # 2. 查找匹配的对账类型
-        types = config.get("types", [])
-        matched_type = None
-        
-        for type_config in types:
-            if type_config.get("name_cn") == reconciliation_type:
-                matched_type = type_config
-                break
-        
-        if not matched_type:
-            available_types = [t.get("name_cn") for t in types if t.get("name_cn")]
-            return {
-                "error": f"未找到对账类型: {reconciliation_type}",
-                "available_types": available_types
-            }
-        
-        # 3. 获取 schema_path 和 callback_url
-        schema_path_config = matched_type.get("schema_path")
-        callback_url = matched_type.get("callback_url", "")
-        
-        if not schema_path_config:
-            return {"error": f"配置缺少 schema_path: {reconciliation_type}"}
-        
-        # 4. 读取 schema 文件
-        # schema_path 格式: direct_sales_schema.json (只包含文件名)
-        # SCHEMA_DIR 已经指向 reconciliation/schemas
-        if schema_path_config.startswith('/'):
-            # 绝对路径，去掉开头的 / 
-            schema_path_config = schema_path_config.lstrip('/')
-            # 如果包含 schemas/ 前缀，去掉它
-            if schema_path_config.startswith('schemas/reconciliation/'):
-                schema_path_config = schema_path_config.replace('schemas/reconciliation/', '', 1)
-            schema_path = SCHEMA_DIR / schema_path_config
-        elif schema_path_config.startswith('schemas/'):
-            # 相对路径，去掉 schemas/ 前缀
-            schema_path_config = schema_path_config.replace('schemas/reconciliation/', '').replace('schemas/', '')
-            schema_path = SCHEMA_DIR / schema_path_config
+        # 3. 从 PostgreSQL 查询规则
+        rule = None
+        if rule_id:
+            rule = auth_db.get_rule_by_id(rule_id)
         else:
-            # 只有文件名，与 SCHEMA_DIR 拼接
-            schema_path = SCHEMA_DIR / schema_path_config
+            rule = auth_db.get_rule_by_name(rule_name)
         
-        if not schema_path.exists():
-            return {
-                "error": f"Schema 文件不存在: {schema_path}",
-                "schema_path": schema_path_config
-            }
+        if not rule:
+            return {"error": f"规则不存在: {rule_id or rule_name}"}
         
-        schema = load_json_with_comments(schema_path)
+        # 4. 验证用户是否有权限使用此规则
+        # 检查规则的可见性
+        rule_visibility = rule.get("visibility", "private")
+        rule_created_by = rule.get("created_by")
+        rule_company_id = rule.get("company_id")
+        rule_department_id = rule.get("department_id")
         
-        # 调试日志：记录加载的 schema 中的 file_pattern
-        biz_patterns = schema.get("data_sources", {}).get("business", {}).get("file_pattern", [])
-        fin_patterns = schema.get("data_sources", {}).get("finance", {}).get("file_pattern", [])
-        logger.info(f"reconciliation_start - 加载的 schema file_pattern: business={biz_patterns}, finance={fin_patterns}")
+        user_id = user_info.get("user_id")
+        user_company_id = user_info.get("company_id")
+        user_department_id = user_info.get("department_id")
+        user_role = user_info.get("role")
         
-        # 5. 验证 schema
-        SchemaLoader.validate_schema(schema)
+        # 检查权限
+        has_access = False
+        if str(rule_created_by) == user_id:  # 创建者可以使用自己的规则
+            has_access = True
+        elif rule_visibility == "company" and str(rule_company_id) == str(user_company_id):  # 公司可见
+            has_access = True
+        elif rule_visibility == "department" and str(rule_department_id) == str(user_department_id):  # 部门可见
+            has_access = True
+        elif user_role == "admin":  # admin 可以使用所有规则
+            has_access = True
         
-        # 6. 验证文件并转换为绝对路径
+        if not has_access:
+            return {"error": f"无权使用该规则: {rule.get('name')}"}
+        
+        # 5. 获取规则的 rule_template（完整的 JSON schema）
+        rule_template = rule.get("rule_template")
+        if not rule_template:
+            return {"error": f"规则缺少 rule_template: {rule.get('name')}"}
+        
+        # 如果 rule_template 是 dict 则直接使用，如果是字符串则解析
+        if isinstance(rule_template, str):
+            try:
+                schema = json.loads(rule_template)
+            except json.JSONDecodeError as e:
+                return {"error": f"规则 rule_template 格式错误: {str(e)}"}
+        else:
+            schema = rule_template
+        
+        # 6. 验证 schema
+        try:
+            SchemaLoader.validate_schema(schema)
+        except Exception as e:
+            return {"error": f"规则 schema 验证失败: {str(e)}"}
+        
+        # 7. 验证文件并转换为绝对路径
         absolute_files = []
         for file_path in files:
             # 将相对路径转换为绝对路径
@@ -329,16 +347,25 @@ async def _reconciliation_start(args: Dict) -> Dict:
             
             absolute_files.append(str(abs_path))
         
-        # 7. 创建任务（使用绝对路径，传入 callback_url）
+        # 8. 获取 callback_url（可选，从规则中获取或从参数中获取）
+        callback_url_arg = args.get("callback_url", "")
+        callback_url = callback_url_arg or rule.get("callback_url", "")
+        
+        # 9. 创建任务（使用绝对路径和schema）
         task_id = await task_manager.create_task(schema, absolute_files, callback_url if callback_url else None)
+        
+        logger.info(f"规则对账任务已创建: rule={rule.get('name')} (id={rule_id or rule_name}), task_id={task_id}, user={user_info['username']}")
         
         return {
             "task_id": task_id,
             "status": "pending",
-            "message": "对账任务已创建，正在处理中"
+            "rule_id": rule.get("id"),
+            "rule_name": rule.get("name"),
+            "message": f"对账任务已创建，使用规则 '{rule.get('name')}'，正在处理中"
         }
     
     except Exception as e:
+        logger.error(f"reconciliation_start 执行失败: {str(e)}", exc_info=True)
         return {"error": f"创建任务失败: {str(e)}"}
 
 

@@ -43,9 +43,15 @@
       "callback_url": ""
     },
     {
-      "name_cn": "你好?",
-      "type_key": "你好",
-      "schema_path": "你好_schema.json",
+      "name_cn": "南京飞翰",
+      "type_key": "nanjingfeihan",
+      "schema_path": "nanjingfeihan_schema.json",
+      "callback_url": ""
+    },
+    {
+      "name_cn": "西福",
+      "type_key": "西福",
+      "schema_path": "西福_schema.json",
       "callback_url": ""
     }
   ]

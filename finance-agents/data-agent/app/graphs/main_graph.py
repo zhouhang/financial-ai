@@ -223,16 +223,9 @@ async def router_node(state: AgentState) -> dict:
                 if username and password:
                     result = await auth_login(username, password)
                     if result.get("success"):
-                        # 返回登录成功消息，包含 token 信息让前端识别
-                        import json as _json
-                        login_response = {
-                            "type": "login_success",
-                            "message": f"✅ {result['message']}",
-                            "token": result["token"],
-                            "user": result["user"],
-                        }
+                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
                         return {
-                            "messages": [AIMessage(content=_json.dumps(login_response, ensure_ascii=False))],
+                            "messages": [AIMessage(content=f"✅ {result['message']}")],
                             "auth_token": result["token"],
                             "current_user": result["user"],
                             "user_intent": UserIntent.UNKNOWN.value,
@@ -253,16 +246,9 @@ async def router_node(state: AgentState) -> dict:
                         department_code=form_data.get("department_code", "").strip() or None,
                     )
                     if result.get("success"):
-                        # 返回注册成功消息，包含 token 信息让前端识别
-                        import json as _json
-                        register_response = {
-                            "type": "register_success",
-                            "message": f"✅ {result['message']}",
-                            "token": result["token"],
-                            "user": result["user"],
-                        }
+                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
                         return {
-                            "messages": [AIMessage(content=_json.dumps(register_response, ensure_ascii=False))],
+                            "messages": [AIMessage(content=f"✅ {result['message']}")],
                             "auth_token": result["token"],
                             "current_user": result["user"],
                             "user_intent": UserIntent.UNKNOWN.value,
@@ -426,9 +412,15 @@ async def router_node(state: AgentState) -> dict:
 # 第3层：任务执行 — 调用 finance-mcp
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _do_start_task(rule_name: str, files: list[str]) -> dict[str, Any]:
-    """启动对账任务。"""
-    result = await start_reconciliation(rule_name, files)
+async def _do_start_task(auth_token: str, rule_name: str, files: list[str]) -> dict[str, Any]:
+    """启动对账任务。
+    
+    Args:
+        auth_token: JWT token
+        rule_name: 规则名称
+        files: 文件列表
+    """
+    result = await start_reconciliation(auth_token=auth_token, files=files, rule_name=rule_name)
     return result
 
 
@@ -507,6 +499,7 @@ def task_execution_node(state: AgentState) -> dict:
     由于 langgraph 节点是同步的，内部使用 asyncio 调用异步函数。
     """
     rule_name = state.get("selected_rule_name") or state.get("saved_rule_name")
+    auth_token = state.get("auth_token", "")
     uploaded_files = state.get("uploaded_files", [])
     step = state.get("execution_step", TaskExecutionStep.NOT_STARTED.value)
 
@@ -542,8 +535,15 @@ def task_execution_node(state: AgentState) -> dict:
         }
 
     # ── 启动任务 ──
-    logger.info(f"开始执行对账任务: rule={rule_name}, files={len(files)}个, file_paths={files}")
-    start_result = _run_async_safe(_do_start_task(rule_name, files))
+    if not auth_token:
+        return {
+            "messages": [AIMessage(content="❌ 缺少认证信息，请先登录")],
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+        }
+    
+    logger.info(f"开始执行对账任务: rule={rule_name}, auth_token={auth_token[:20]}..., files={len(files)}个, file_paths={files}")
+    start_result = _run_async_safe(_do_start_task(auth_token, rule_name, files))
 
     if "error" in start_result:
         return {

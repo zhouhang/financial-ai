@@ -510,14 +510,17 @@ async def _handle_save_rule(args: dict) -> dict:
     """保存新规则
     
     流程:
-    1. 保存到 PostgreSQL 数据库
-    2. 将 rule_template 保存为 JSON 文件（如 nanjing_feihan_direct_sales_reconciliation_schema.json）
-    3. 更新 reconciliation_schemas.json 配置文件
+    1. 保存到 PostgreSQL 数据库（主存储）
+    2. 将 rule_template 保存为 JSON 文件（备份）
+    3. 更新 reconciliation_schemas.json 配置文件（备份）
+    
+    注意: PostgreSQL 是规则的主数据源，JSON 文件仅作备份用途。
+    规则的读取（get_reconciliation_rule）和使用（reconciliation_start）
+    都直接从 PostgreSQL 数据库读取，不依赖 JSON 文件。
     """
     valid, user_info, err = _require_auth(args)
     if not valid:
         return {"success": False, "error": err}
-
     name = args.get("name", "").strip()
     description = args.get("description", name)
     rule_template = args.get("rule_template")
@@ -544,37 +547,19 @@ async def _handle_save_rule(args: dict) -> dict:
         
         logger.info(f"规则已保存到数据库: {name} (id={rule.get('id')}), 创建者: {user_info['username']}")
         
-        # 2️⃣ 保存 schema 为 JSON 文件
+        # 2️⃣ 保存 schema 为 JSON 文件（备份）
         success, schema_filename, save_error = _save_schema_file(rule_template, name)
         if not success:
             logger.warning(f"保存规则 schema 文件失败 (数据库保存已成功): {save_error}")
-            return {
-                "success": True,
-                "rule": rule,
-                "message": f"规则 '{name}' 已保存，但 schema 文件保存失败: {save_error}",
-                "warning": f"规则已保存到数据库，但 JSON 文件保存失败"
-            }
         
-        # 3️⃣ 更新 reconciliation_schemas.json 配置文件
-        config_success, config_error = _update_reconciliation_schemas_config(name, schema_filename)
-        if not config_success:
-            logger.warning(f"更新规则配置文件失败 (数据库和 JSON 文件保存已成功): {config_error}")
-            return {
-                "success": True,
-                "rule": rule,
-                "message": f"规则 '{name}' 已保存，但配置文件更新失败: {config_error}",
-                "warning": f"规则已保存，但配置文件可能未更新，执行时可能找不到规则"
-            }
-        
-        # ✅ 完全成功
+        # ✅ 成功（主要是保存到 PostgreSQL，JSON 文件失败不影响）
         return {
             "success": True,
             "rule": rule,
-            "message": f"规则 '{name}' 已完全保存",
+            "message": f"规则 '{name}' 已保存到 PostgreSQL",
             "details": {
                 "saved_to_db": True,
-                "schema_file": schema_filename,
-                "config_file_updated": True
+                "schema_file": schema_filename if success else None,
             }
         }
         
@@ -627,7 +612,15 @@ async def _handle_update_rule(args: dict) -> dict:
 
 
 async def _handle_delete_rule(args: dict) -> dict:
-    """删除规则（同时删除数据库记录和 JSON 文件）"""
+    """删除规则
+    
+    流程:
+    1. 从 PostgreSQL 数据库删除规则记录（主操作）
+    2. 删除对应的 JSON schema 文件（备份）
+    
+    注意: PostgreSQL 是规则的主数据源，删除 PostgreSQL 记录即删除规则。
+    JSON 文件的删除仅为了保持备份的一致性。
+    """
     valid, user_info, err = _require_auth(args)
     if not valid:
         return {"success": False, "error": err}
@@ -647,101 +640,28 @@ async def _handle_delete_rule(args: dict) -> dict:
 
     rule_name = rule.get("name", "")
     
-    # 1️⃣ 删除数据库记录
+    # 1️⃣ 删除数据库记录（主操作）
     success = auth_db.delete_rule(rule_id)
     if not success:
         return {"success": False, "error": "删除数据库记录失败"}
 
-    # 2️⃣ 删除 JSON 文件
-    # 首先尝试从 reconciliation_schemas.json 中查找 type_key
-    type_key = None
-    schema_filename = None
+    logger.info(f"规则已从 PostgreSQL 删除: {rule_name} (id={rule_id})")
     
+    # 2️⃣ 删除对应的 JSON 文件备份
     try:
-        config_path = RECONCILIATION_SCHEMAS_FILE
-        if config_path and config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            
-            # 从配置文件中查找对应的 type_key
-            if "reconciliation_types" in config:
-                for rt in config["reconciliation_types"]:
-                    if rt.get("name_cn") == rule_name:
-                        type_key = rt.get("type_key")
-                        schema_filename = rt.get("schema_path")
-                        logger.info(f"从配置文件找到 type_key: {type_key}, schema_filename: {schema_filename}")
-                        break
-            
-            # 如果配置文件中使用的是 "types" 而不是 "reconciliation_types"
-            if not type_key and "types" in config:
-                for rt in config["types"]:
-                    if rt.get("name_cn") == rule_name:
-                        type_key = rt.get("type_key")
-                        schema_filename = rt.get("schema_path")
-                        logger.info(f"从配置文件找到 type_key: {type_key}, schema_filename: {schema_filename}")
-                        break
-    except Exception as e:
-        logger.warning(f"读取配置文件失败: {e}")
-    
-    # 如果从配置文件中找不到，尝试生成 type_key
-    if not type_key:
         type_key = _translate_rule_name_to_type_key(rule_name)
         schema_filename = f"{type_key}_schema.json"
-        logger.info(f"使用生成的 type_key: {type_key}, schema_filename: {schema_filename}")
-    
-    # 删除 JSON 文件
-    try:
-        if not schema_filename:
-            schema_filename = f"{type_key}_schema.json"
-        
         schema_path = SCHEMA_DIR / schema_filename
         
         if schema_path.exists():
             schema_path.unlink()
-            logger.info(f"已删除 JSON 文件: {schema_path}")
+            logger.info(f"已删除 JSON 备份文件: {schema_path}")
         else:
-            logger.warning(f"JSON 文件不存在: {schema_path}")
+            logger.info(f"JSON 备份文件不存在（无需删除）: {schema_path}")
     except Exception as e:
-        logger.warning(f"删除 JSON 文件失败: {e}")
-
-    # 3️⃣ 从 reconciliation_schemas.json 中移除该规则
-    try:
-        config_path = RECONCILIATION_SCHEMAS_FILE
-        if config_path and config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            
-            # 移除该规则（支持两种配置格式）
-            removed = False
-            if "reconciliation_types" in config:
-                original_count = len(config["reconciliation_types"])
-                config["reconciliation_types"] = [
-                    rt for rt in config["reconciliation_types"]
-                    if rt.get("type_key") != type_key and rt.get("name_cn") != rule_name
-                ]
-                if len(config["reconciliation_types"]) < original_count:
-                    removed = True
-            
-            # 如果配置文件中使用的是 "types" 而不是 "reconciliation_types"
-            if "types" in config:
-                original_count = len(config["types"])
-                config["types"] = [
-                    rt for rt in config["types"]
-                    if rt.get("type_key") != type_key and rt.get("name_cn") != rule_name
-                ]
-                if len(config["types"]) < original_count:
-                    removed = True
-            
-            if removed:
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config, f, indent=2, ensure_ascii=False)
-                logger.info(f"已从 reconciliation_schemas.json 中移除规则: {type_key} (name: {rule_name})")
-            else:
-                logger.warning(f"在 reconciliation_schemas.json 中未找到规则: {type_key} (name: {rule_name})")
-    except Exception as e:
-        logger.warning(f"更新 reconciliation_schemas.json 失败: {e}")
+        logger.warning(f"删除 JSON 备份文件失败（不影响主操作）: {e}")
 
     return {
         "success": True,
-        "message": f"规则 '{rule_name}' 已删除（包括数据库记录和 JSON 文件）",
+        "message": f"规则 '{rule_name}' 已从 PostgreSQL 删除，JSON 备份文件已清理",
     }

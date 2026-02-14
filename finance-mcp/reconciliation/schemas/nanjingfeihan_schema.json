@@ -1,13 +1,15 @@
 {
   "version": "1.0",
-  "description": "你好?",
+  "description": "南京飞翰",
   "data_sources": {
     "business": {
       "file_pattern": [
-        "1767597466118_*.csv"
+        "1767597466118_*.xlsx"
       ],
       "field_roles": {
-        "order_id": "sp订单号",
+        "order_id": [
+          "sp订单号"
+        ],
         "amount": "销售额",
         "date": "订单时间",
         "status": "状态"
@@ -15,10 +17,12 @@
     },
     "finance": {
       "file_pattern": [
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv"
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx"
       ],
       "field_roles": {
-        "order_id": "sup订单号",
+        "order_id": [
+          "sup订单号"
+        ],
         "amount": "发生-",
         "date": "完成时间",
         "status": null

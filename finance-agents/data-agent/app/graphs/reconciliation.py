@@ -1042,38 +1042,23 @@ def validation_preview_node(state: AgentState) -> dict:
 
 
 def _translate_rule_name_to_english(rule_name_cn: str) -> str:
-    """使用 LLM 将中文规则名称翻译成英文，用作 type_key 和文件名。
+    """将中文规则名称翻译成英文，用作 type_key 和文件名。
     
+    使用 pypinyin 将中文转为拼音，避免使用 LLM。
     返回格式：小写字母和下划线，例如：direct_sales_reconciliation
     """
-    from app.utils.llm import get_llm
-    import json as _json
-    
-    prompt = f"""请将以下中文规则名称翻译成英文，并转换为适合作为文件名和标识符的格式。
-
-中文名称：{rule_name_cn}
-
-要求：
-1. 翻译成英文（简洁、专业）
-2. 只使用小写字母、数字和下划线
-3. 单词之间用下划线分隔
-4. 如果名称包含"对账"，翻译为 reconciliation
-5. 如果名称包含"规则"，可以省略或翻译为 rule
-
-示例：
-- "直销对账" → "direct_sales_reconciliation"
-- "南京飞翰知晓对账" → "nanjing_feihan_zhixiao_reconciliation"
-- "电商订单对账规则" → "ecommerce_order_reconciliation"
-
-只返回翻译后的英文标识符，不要有其他内容。"""
-    
     try:
-        llm = get_llm(temperature=0.1)
-        resp = llm.invoke(prompt)
-        type_key = resp.content.strip()
+        from pypinyin import pinyin, Style
+        
+        # 获取拼音（首字母模式更简洁）
+        pinyin_list = pinyin(rule_name_cn, style=Style.NORMAL)
+        
+        # 将拼音转为下划线分隔的英文
+        pinyin_words = [py[0] for py in pinyin_list if py[0]]  # 每个汉字的拼音
+        type_key = '_'.join(pinyin_words).lower()
         
         # 清理结果（只保留小写字母、数字和下划线）
-        type_key = re.sub(r'[^a-z0-9_]', '_', type_key.lower())
+        type_key = re.sub(r'[^a-z0-9_]', '_', type_key)
         type_key = re.sub(r'_+', '_', type_key)  # 多个下划线合并为一个
         type_key = type_key.strip('_')  # 去除首尾下划线
         
@@ -1081,22 +1066,31 @@ def _translate_rule_name_to_english(rule_name_cn: str) -> str:
         if not type_key or type_key[0].isdigit():
             type_key = "rule_" + type_key
         
-        # 如果翻译失败或结果为空，使用默认方式
+        # 如果转换失败或结果为空，使用默认方式
         if not type_key or len(type_key) < 3:
             type_key = re.sub(r"[^a-zA-Z0-9_]", "_", rule_name_cn.lower())
             if not type_key or type_key[0].isdigit():
                 type_key = "rule_" + type_key
         
-        logger.info(f"规则名称翻译: {rule_name_cn} → {type_key}")
+        logger.info(f"规则名称转换: {rule_name_cn} → {type_key}")
         return type_key
     
-    except Exception as e:
-        logger.warning(f"LLM 规则名称翻译失败: {e}，使用默认方式")
+    except ImportError:
+        logger.warning("pypinyin 库未安装，使用默认方式转换规则名称")
         # 降级方案：直接转换
         type_key = re.sub(r"[^a-zA-Z0-9_]", "_", rule_name_cn.lower())
         if not type_key or type_key[0].isdigit():
             type_key = "rule_" + type_key
         return type_key
+    
+    except Exception as e:
+        logger.warning(f"规则名称转换失败: {e}，使用默认方式")
+        # 降级方案：直接转换
+        type_key = re.sub(r"[^a-zA-Z0-9_]", "_", rule_name_cn.lower())
+        if not type_key or type_key[0].isdigit():
+            type_key = "rule_" + type_key
+        return type_key
+
 
 
 async def save_rule_node(state: AgentState) -> dict:

@@ -17,6 +17,7 @@ from langgraph.types import Command
 
 from app.config import HOST, PORT, MAX_FILE_SIZE
 from app.graphs.main_graph import create_app, register_progress_callback, unregister_progress_callback
+from app.models import ReconciliationPhase  # ⚠️ 新增导入
 from app.utils.db import ensure_tables
 
 logging.basicConfig(
@@ -42,6 +43,8 @@ langgraph_app = create_app()
 
 # 用于跟踪每个 thread 上传的文件
 _thread_files: dict[str, list[dict]] = {}  # 保存文件信息，包含 file_path 和 original_filename
+# ⚠️ 修复：跟踪每个 thread 的上一次文件列表（用于检测文件变化）
+_thread_files_snapshot: dict[str, list[str]] = {}  # 保存上一次的文件路径列表快照
 
 
 # ── 启动时初始化 ──────────────────────────────────────────────────────────────
@@ -98,8 +101,15 @@ def _get_interrupt_info(config: dict) -> tuple[bool, Any, str | None]:
 async def upload_file(
     file: UploadFile = File(...),
     thread_id: str = Form("default"),
+    is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
 ):
-    """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。"""
+    """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
+    
+    Args:
+        file: 上传的文件
+        thread_id: 会话 ID
+        is_first_file: 是否是本批上传的第一个文件 ("1"=True, "0"=False)
+    """
     import base64
     from app.tools.mcp_client import call_mcp_tool
     
@@ -117,6 +127,12 @@ async def upload_file(
     
     # 转换为 base64
     content_b64 = base64.b64encode(content).decode('utf-8')
+    
+    # ⚠️ 修复：正确处理 is_first_file 参数（来自表单的字符串）
+    is_first = is_first_file == "1"
+    if is_first:
+        _thread_files[thread_id] = []
+        logger.info(f"清空 thread={thread_id} 的历史文件，开始新批次上传")
     
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
@@ -149,6 +165,9 @@ async def upload_file(
             "file_path": file_path,
             "original_filename": file_info.get("original_filename", file.filename)
         })
+        
+        # ⚠️ 修复：更新轻量级快照（只保存文件路径，用于快速比较）
+        _thread_files_snapshot[thread_id] = [f.get("file_path", f) if isinstance(f, dict) else f for f in _thread_files[thread_id]]
         
         logger.info(f"文件已通过 MCP 工具上传: {file_path} (thread={thread_id})")
         return {
@@ -229,6 +248,27 @@ async def websocket_chat(ws: WebSocket):
             file_infos = _thread_files.get(thread_id, [])
             # 提取文件路径列表（兼容旧代码）
             files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
+            
+            # ⚠️ 修复：检查文件列表是否变化，如果变化则清空 LangGraph 状态中的旧分析结果
+            previous_files = _thread_files_snapshot.get(thread_id, [])
+            files_changed = set(files) != set(previous_files)
+            if files_changed and files:
+                logger.info(f"检测到文件列表变化 (thread={thread_id}): 之前={previous_files}, 现在={files}")
+                # 清空旧的分析结果，强制重新分析
+                try:
+                    langgraph_app.update_state(config, {
+                        "file_analyses": [],
+                        "suggested_mappings": {},
+                        "confirmed_mappings": {},
+                        "rule_config_items": [],
+                        "generated_schema": None,
+                        "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                    })
+                    logger.info(f"已清空 LangGraph 状态中的旧分析结果 (thread={thread_id})")
+                except Exception as e:
+                    logger.warning(f"清空 LangGraph 状态失败: {e}")
+                # 更新快照
+                _thread_files_snapshot[thread_id] = files
 
             try:
                 # 使用 astream_events 捕获 LLM token 级别的流式输出
@@ -275,11 +315,16 @@ async def websocket_chat(ws: WebSocket):
                 # result_analysis 等: 直接流式
                 # task_execution: 手动 AIMessage → message
                 # resume 时: 跳过 router 旧消息
+                # ⚠️ 修复：添加消息缓冲机制防止分段
                 streamed_content = ""
                 router_buffer = ""
                 router_mode = "detect"  # "detect" | "stream" | "json"
                 event_count = 0
                 sent_contents: set[str] = set()
+                # 消息缓冲（防止每个 token 都单独发送导致分段）
+                message_buffer = ""
+                BUFFER_SIZE = 100  # 累积 100 字符后发送一次
+                current_streaming_node = None  # 跟踪当前流式输出的节点
 
                 # resume 时，记录已有的 AI 消息内容，避免重发
                 if is_resume:
@@ -315,11 +360,17 @@ async def websocket_chat(ws: WebSocket):
                                         else:
                                             router_mode = "stream"  # 普通对话，立即流式
                                             streamed_content += router_buffer
-                                            await ws.send_json({"type": "stream", "content": router_buffer, "thread_id": thread_id})
+                                            message_buffer += router_buffer
+                                            current_streaming_node = "router"
                                             router_buffer = ""
                                 elif router_mode == "stream":
                                     streamed_content += token
-                                    await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
+                                    message_buffer += token
+                                    current_streaming_node = "router"
+                                    # ⚠️ 修复：缓冲累积而不是每个 token 都发送
+                                    if len(message_buffer) >= BUFFER_SIZE:
+                                        await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
+                                        message_buffer = ""
                                 else:  # json
                                     router_buffer += token
                             else:
@@ -327,15 +378,25 @@ async def websocket_chat(ws: WebSocket):
                                 # 只有 result_analysis 等面向用户的节点才流式输出
                                 if node_name not in ["file_analysis", "field_mapping", "rule_config", "validation_preview"]:
                                     streamed_content += token
-                                    await ws.send_json({"type": "stream", "content": token, "thread_id": thread_id})
+                                    message_buffer += token
+                                    current_streaming_node = node_name
+                                    # ⚠️ 修复：缓冲累积而不是每个 token 都发送
+                                    if len(message_buffer) >= BUFFER_SIZE:
+                                        await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
+                                        message_buffer = ""
                     
                     # ② router LLM 结束
                     elif kind == "on_chat_model_end" and node_name == "router":
                         if router_mode == "json":
                             logger.info(f"过滤 router JSON 意图，长度={len(router_buffer)}")
                         elif router_mode == "stream":
+                            # ⚠️ 修复：发送缓冲中还未发送的内容
+                            if message_buffer:
+                                await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
+                                logger.info(f"router 流式输出完成，发送最后缓冲，长度={len(message_buffer)}")
+                                message_buffer = ""
                             sent_contents.add(streamed_content.strip())
-                            logger.info(f"router 流式输出完成，长度={len(streamed_content)}")
+                            logger.info(f"router 流式输出完成，总长度={len(streamed_content)}")
                         elif router_mode == "detect" and router_buffer.strip():
                             # 只有少量 token，未触发检测，作为 message 发送
                             content = router_buffer.strip()
@@ -344,9 +405,16 @@ async def websocket_chat(ws: WebSocket):
                                 await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                         router_buffer = ""
                         router_mode = "detect"
+                        current_streaming_node = None
                     
                     # ③ 其他 LLM 结束：记录用于去重
                     elif kind == "on_chat_model_end" and node_name and node_name != "router":
+                        # ⚠️ 修复：发送缓冲中还未发送的内容
+                        if message_buffer and current_streaming_node == node_name:
+                            await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
+                            logger.info(f"[{node_name}] 流式输出完成，发送最后缓冲，长度={len(message_buffer)}")
+                            message_buffer = ""
+                            current_streaming_node = None
                         output = data_obj.get("output")
                         if output and hasattr(output, "content") and output.content:
                             sent_contents.add(output.content.strip())
