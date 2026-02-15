@@ -117,6 +117,7 @@ function SystemActionMessage({ message }: { message: Message }) {
 function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void }) {
   const formRef = useRef<HTMLDivElement>(null);
   const isHtmlForm = message.content.includes('<form');
+  const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
 
   useEffect(() => {
     if (!isHtmlForm || !formRef.current || !onFormSubmit) return;
@@ -165,6 +166,18 @@ function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormS
               className="auth-form-wrapper"
               dangerouslySetInnerHTML={{ __html: message.content }}
             />
+          ) : isSavingMessage ? (
+            <div className="px-5 py-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-text-secondary">正在保存</span>
+                <div className="flex gap-1 ml-1">
+                  <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                  <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                  <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+                </div>
+              </div>
+              <p className="text-xs text-text-muted mt-1">请稍候，正在处理您的请求</p>
+            </div>
           ) : (
           <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
             {message.content.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (

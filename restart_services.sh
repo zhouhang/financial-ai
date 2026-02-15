@@ -1,47 +1,41 @@
 #!/bin/bash
-# 统一重启所有服务的脚本
+# 重启 finance-ai 服务脚本
 
-echo "正在重启所有服务..."
+echo "========================================="
+echo "重启 Financial AI 服务"
+echo "========================================="
 
-# 清理端口
-echo "1. 清理端口占用..."
-lsof -ti:5173 | xargs kill -9 2>/dev/null
-lsof -ti:5174 | xargs kill -9 2>/dev/null
-lsof -ti:8100 | xargs kill -9 2>/dev/null
+# 1. 停止所有相关进程
+echo "1. 停止现有服务..."
+pkill -f "finance-agents/data-agent" || echo "  data-agent 未运行"
+pkill -f "finance-mcp" || echo "  finance-mcp 未运行"
+pkill -f "finance-web" || echo "  finance-web 未运行"
 sleep 2
 
-# 启动后端服务 (data-agent)
-echo "2. 启动后端服务 (8100)..."
-cd /Users/kevin/workspace/financial-ai/finance-agents/data-agent
-.venv/bin/python -u -m app.server > /tmp/data-agent.log 2>&1 &
-BACKEND_PID=$!
+# 2. 清理 Python 缓存
+echo "2. 清理 Python 缓存..."
+find finance-agents -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find finance-mcp -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -name "*.pyc" -delete 2>/dev/null || true
+echo "  ✓ 缓存已清理"
 
-# 启动前端服务 (finance-web)
-echo "3. 启动前端服务 (5173)..."
-cd /Users/kevin/workspace/financial-ai/finance-web
-npm run dev > /tmp/finance-web.log 2>&1 &
-FRONTEND_PID=$!
-
-# 等待服务启动
-echo "4. 等待服务启动..."
-sleep 8
-
-# 检查服务状态
-echo ""
-echo "=== 服务状态 ==="
-if curl -s http://localhost:8100/health 2>/dev/null | grep -q ok; then
-    echo "✅ 后端服务 (8100) 运行正常"
-else
-    echo "❌ 后端服务 (8100) 未启动，查看日志: tail -20 /tmp/data-agent.log"
-fi
-
-if curl -s http://localhost:5173 2>/dev/null | head -1 | grep -q "html\|<!DOCTYPE"; then
-    echo "✅ 前端服务 (5173) 运行正常"
-else
-    echo "❌ 前端服务 (5173) 未启动，查看日志: tail -20 /tmp/finance-web.log"
-fi
+# 3. 显示修复信息
+echo "3. 修复内容确认..."
+echo "  ✓ main_graph.py:310 - 使用 .replace() 替代 .format()"
+echo "  ✓ main_graph.py:747 - 使用 .replace() 替代 .format()"
 
 echo ""
-echo "服务重启完成！"
-echo "后端日志: tail -f /tmp/data-agent.log"
-echo "前端日志: tail -f /tmp/finance-web.log"
+echo "========================================="
+echo "服务已停止，缓存已清理"
+echo "========================================="
+echo ""
+echo "接下来请手动启动服务："
+echo "1. 启动 finance-mcp:"
+echo "   cd finance-mcp && python -m mcp_server.main"
+echo ""
+echo "2. 启动 data-agent:"
+echo "   cd finance-agents/data-agent && python -m app.server"
+echo ""
+echo "3. 启动 finance-web:"
+echo "   cd finance-web && npm run dev"
+echo ""

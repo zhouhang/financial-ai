@@ -4,9 +4,11 @@ import os
 import logging
 from typing import Optional, Any
 from contextlib import contextmanager
+import time
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import OperationalError, InterfaceError
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +24,54 @@ def _get_db_config() -> dict:
     }
 
 
-@contextmanager
-def get_conn():
-    """获取数据库连接的上下文管理器"""
-    conn = psycopg2.connect(**_get_db_config())
-    try:
-        yield conn
-    finally:
-        conn.close()
+def get_conn(max_retries=3, retry_delay=1):
+    """获取数据库连接的上下文管理器，带重试机制"""
+    for attempt in range(max_retries):
+        try:
+            conn = psycopg2.connect(**_get_db_config())
+            return _ConnectionContextManager(conn)
+        except (OperationalError, InterfaceError) as e:
+            logger.warning(f"数据库连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"数据库连接失败，已达到最大重试次数: {e}")
+                raise
+
+
+class _ConnectionContextManager:
+    """数据库连接的上下文管理器类"""
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.conn:
+            self.conn.close()
+
+    def cursor(self, cursor_factory=None):
+        """获取游标，自动处理连接失效"""
+        try:
+            # 检查连接是否仍然有效
+            with self.conn.cursor() as test_cursor:
+                test_cursor.execute('SELECT 1')
+        except (OperationalError, InterfaceError):
+            logger.warning("数据库连接已失效，尝试重新连接")
+            self.conn.close()
+            # 重新建立连接
+            self.conn = psycopg2.connect(**_get_db_config())
+        
+        return self.conn.cursor(cursor_factory=cursor_factory)
+
+    def commit(self):
+        """提交事务"""
+        self.conn.commit()
+
+    def rollback(self):
+        """回滚事务"""
+        self.conn.rollback()
 
 
 # ── 用户操作 ──────────────────────────────────────────────────────────
@@ -46,10 +88,15 @@ def get_user_by_username(username: str) -> Optional[dict]:
     LEFT JOIN departments d ON u.department_id = d.id
     WHERE u.username = %s
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (username,))
-            return cur.fetchone()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (username,))
+                return cur.fetchone()
+    except Exception as e:
+        logger.error(f"查询用户失败 (username={username}): {e}")
+        return None
 
 
 def get_user_by_id(user_id: str) -> Optional[dict]:
@@ -64,10 +111,15 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
     LEFT JOIN departments d ON u.department_id = d.id
     WHERE u.id = %s
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (user_id,))
-            return cur.fetchone()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (user_id,))
+                return cur.fetchone()
+    except Exception as e:
+        logger.error(f"查询用户失败 (user_id={user_id}): {e}")
+        return None
 
 
 def create_user(username: str, password_hash: str, email: str = None,
@@ -79,22 +131,32 @@ def create_user(username: str, password_hash: str, email: str = None,
     VALUES (%s, %s, %s, %s, %s, %s, %s)
     RETURNING id, username, email, phone, company_id, department_id, role, status
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (username, password_hash, email, phone,
-                              company_id, department_id, role))
-            user = cur.fetchone()
-            conn.commit()
-            return dict(user)
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (username, password_hash, email, phone,
+                                  company_id, department_id, role))
+                user = cur.fetchone()
+                conn.commit()
+                return dict(user)
+    except Exception as e:
+        logger.error(f"创建用户失败 (username={username}): {e}")
+        raise
 
 
 def update_last_login(user_id: str):
     """更新最后登录时间"""
     sql = "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s"
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (user_id,))
-            conn.commit()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (user_id,))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"更新登录时间失败 (user_id={user_id}): {e}")
+        # Don't raise here as this is not critical for login
 
 
 # ── 公司/部门查询 ────────────────────────────────────────────────────
@@ -102,10 +164,15 @@ def update_last_login(user_id: str):
 def list_companies() -> list[dict]:
     """列出所有公司"""
     sql = "SELECT id, name, code FROM company WHERE status = 'active' ORDER BY name"
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql)
-            return [dict(r) for r in cur.fetchall()]
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql)
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"查询公司列表失败: {e}")
+        return []
 
 
 def list_departments(company_id: str) -> list[dict]:
@@ -116,10 +183,15 @@ def list_departments(company_id: str) -> list[dict]:
     WHERE company_id = %s
     ORDER BY name
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (company_id,))
-            return [dict(r) for r in cur.fetchall()]
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (company_id,))
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"查询部门列表失败 (company_id={company_id}): {e}")
+        return []
 
 
 # ── 规则 CRUD ─────────────────────────────────────────────────────────
@@ -152,11 +224,16 @@ def list_rules_for_user(user_id: str, company_id: str = None,
       )
     ORDER BY r.updated_at DESC
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (status, user_id, company_id, department_id, user_id))
-            rows = cur.fetchall()
-            return [_serialize_rule_row(r) for r in rows]
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (status, user_id, company_id, department_id, user_id))
+                rows = cur.fetchall()
+                return [_serialize_rule_row(r) for r in rows]
+    except Exception as e:
+        logger.error(f"查询规则列表失败 (user_id={user_id}): {e}")
+        return []
 
 
 def get_rule_by_id(rule_id: str) -> Optional[dict]:
@@ -167,13 +244,18 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
     JOIN users u ON r.created_by = u.id
     WHERE r.id = %s
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (rule_id,))
-            row = cur.fetchone()
-            if row:
-                return _serialize_rule_row(row, include_template=True)
-            return None
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (rule_id,))
+                row = cur.fetchone()
+                if row:
+                    return _serialize_rule_row(row, include_template=True)
+                return None
+    except Exception as e:
+        logger.error(f"查询规则详情失败 (rule_id={rule_id}): {e}")
+        return None
 
 
 def get_rule_by_name(name: str, created_by: str = None) -> Optional[dict]:
@@ -190,13 +272,18 @@ def get_rule_by_name(name: str, created_by: str = None) -> Optional[dict]:
         params.append(created_by)
     sql += " ORDER BY r.updated_at DESC LIMIT 1"
 
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-            if row:
-                return _serialize_rule_row(row, include_template=True)
-            return None
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                if row:
+                    return _serialize_rule_row(row, include_template=True)
+                return None
+    except Exception as e:
+        logger.error(f"查询规则详情失败 (name={name}): {e}")
+        return None
 
 
 def create_rule(name: str, description: str, created_by: str,
@@ -212,16 +299,21 @@ def create_rule(name: str, description: str, created_by: str,
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '1.0', 'active')
     RETURNING id, name, description, visibility, version, status, created_at
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (
-                name, description, created_by, company_id, department_id,
-                json.dumps(rule_template, ensure_ascii=False),
-                visibility, tags or [],
-            ))
-            row = cur.fetchone()
-            conn.commit()
-            return _serialize_rule_row(row)
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (
+                    name, description, created_by, company_id, department_id,
+                    json.dumps(rule_template, ensure_ascii=False),
+                    visibility, tags or [],
+                ))
+                row = cur.fetchone()
+                conn.commit()
+                return _serialize_rule_row(row)
+    except Exception as e:
+        logger.error(f"创建规则失败 (name={name}): {e}")
+        raise
 
 
 def update_rule(rule_id: str, **kwargs) -> Optional[dict]:
@@ -254,14 +346,19 @@ def update_rule(rule_id: str, **kwargs) -> Optional[dict]:
     WHERE id = %s
     RETURNING id, name, description, visibility, version, status, updated_at
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-            conn.commit()
-            if row:
-                return _serialize_rule_row(row)
-            return None
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                conn.commit()
+                if row:
+                    return _serialize_rule_row(row)
+                return None
+    except Exception as e:
+        logger.error(f"更新规则失败 (rule_id={rule_id}): {e}")
+        return None
 
 
 def delete_rule(rule_id: str) -> bool:
@@ -271,12 +368,17 @@ def delete_rule(rule_id: str) -> bool:
     WHERE id = %s
     RETURNING id
     """
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (rule_id,))
-            result = cur.fetchone()
-            conn.commit()
-            return result is not None
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (rule_id,))
+                result = cur.fetchone()
+                conn.commit()
+                return result is not None
+    except Exception as e:
+        logger.error(f"删除规则失败 (rule_id={rule_id}): {e}")
+        return False
 
 
 def can_user_modify_rule(user_id: str, role: str, rule: dict) -> bool:

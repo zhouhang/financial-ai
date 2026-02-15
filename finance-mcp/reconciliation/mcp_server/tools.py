@@ -3,6 +3,7 @@ MCP 工具定义
 """
 import json
 import uuid
+import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
@@ -377,12 +378,16 @@ async def _reconciliation_status(args: Dict) -> Dict:
     if not task:
         return {"error": f"任务不存在: {task_id}"}
     
-    return {
+    result = {
         "task_id": task.task_id,
         "status": task.status.value,
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat()
     }
+    # 任务失败时返回错误信息，便于前端展示
+    if task.status.value in ("failed", "error") and task.result and getattr(task.result, "error", None):
+        result["error"] = task.result.error
+    return result
 
 
 async def _reconciliation_result(args: Dict) -> Dict:
@@ -429,25 +434,26 @@ async def _file_upload(args: Dict) -> Dict:
         import base64
         from datetime import datetime
         import chardet
-        
+        from security_utils import validate_filename, sanitize_path
+
         files = args.get("files", [])
         if not files:
             return {"error": "files 参数不能为空"}
-        
+
         uploaded_files = []
         errors = []
-        
+
         # 创建按日期分类的上传目录
         now = datetime.now()
         date_dir = UPLOAD_DIR / str(now.year) / str(now.month) / str(now.day)
         date_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for idx, file_obj in enumerate(files):
             try:
                 # 提取文件信息
                 filename = file_obj.get("filename")
                 content_b64 = file_obj.get("content")
-                
+
                 # 验证必填字段
                 if not filename:
                     errors.append({
@@ -455,7 +461,7 @@ async def _file_upload(args: Dict) -> Dict:
                         "error": "缺少 filename 字段"
                     })
                     continue
-                
+
                 if not content_b64:
                     errors.append({
                         "index": idx,
@@ -463,7 +469,16 @@ async def _file_upload(args: Dict) -> Dict:
                         "error": "缺少 content 字段"
                     })
                     continue
-                
+
+                # Validate filename to prevent path traversal attacks
+                if not validate_filename(filename):
+                    errors.append({
+                        "index": idx,
+                        "filename": filename,
+                        "error": "非法文件名，可能存在安全风险"
+                    })
+                    continue
+
                 # 验证文件扩展名
                 file_ext = Path(filename).suffix.lower()
                 if file_ext not in ALLOWED_EXTENSIONS:
@@ -473,7 +488,7 @@ async def _file_upload(args: Dict) -> Dict:
                         "error": f"不支持的文件类型: {file_ext}"
                     })
                     continue
-                
+
                 # 解码 base64
                 try:
                     file_content = base64.b64decode(content_b64)
@@ -484,7 +499,17 @@ async def _file_upload(args: Dict) -> Dict:
                         "error": f"base64 解码失败: {str(e)}"
                     })
                     continue
-                
+
+                # Check file size limit
+                max_file_size = int(os.getenv("MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
+                if len(file_content) > max_file_size:
+                    errors.append({
+                        "index": idx,
+                        "filename": filename,
+                        "error": f"文件大小超过限制 ({max_file_size} bytes)"
+                    })
+                    continue
+
                 # 保存文件到日期目录
                 # 始终添加时间戳，确保文件名唯一
                 timestamp = datetime.now().strftime("%H%M%S")
@@ -494,8 +519,17 @@ async def _file_upload(args: Dict) -> Dict:
                     safe_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
                 else:
                     safe_filename = f"{safe_filename}_{timestamp}"
-                file_path = date_dir / safe_filename
                 
+                # Sanitize the file path to prevent directory traversal
+                file_path = sanitize_path(date_dir, safe_filename)
+                if file_path is None:
+                    errors.append({
+                        "index": idx,
+                        "filename": filename,
+                        "error": "非法文件路径，可能存在安全风险"
+                    })
+                    continue
+
                 # 对文本文件（CSV、TXT）进行编码转换，确保保存为 UTF-8
                 text_extensions = ['.csv', '.txt', '.tsv']
                 if file_ext in text_extensions:
@@ -503,14 +537,14 @@ async def _file_upload(args: Dict) -> Dict:
                         logger.info(f"[编码转换] 开始处理文件: {filename}")
                         logger.info(f"[编码转换] 文件扩展名: {file_ext}")
                         logger.info(f"[编码转换] 原始文件大小: {len(file_content)} 字节")
-                        
+
                         # 检测原始编码
                         detected = chardet.detect(file_content)
                         encoding = detected.get('encoding', 'utf-8')
                         confidence = detected.get('confidence', 0)
-                        
+
                         logger.info(f"[编码转换] 检测到编码: {encoding}, 置信度: {confidence:.2%}")
-                        
+
                         # 如果检测不出编码或置信度低，尝试常见编码
                         if not encoding or confidence < 0.7:
                             logger.info(f"[编码转换] 置信度低，尝试常见编码...")
@@ -522,7 +556,7 @@ async def _file_upload(args: Dict) -> Dict:
                                     break
                                 except (UnicodeDecodeError, LookupError):
                                     continue
-                        
+
                         # 解码后重新编码为 UTF-8 保存
                         if encoding:
                             try:
@@ -538,27 +572,27 @@ async def _file_upload(args: Dict) -> Dict:
                     except Exception as e:
                         # 编码转换失败，保持原样
                         logger.error(f"[编码转换] ❌ 转换异常 ({filename}): {str(e)}")
-                
+
                 # 保存文件
                 with open(file_path, 'wb') as f:
                     f.write(file_content)
-                
+
                 # 构建相对路径（相对于 UPLOAD_DIR）
                 relative_path = file_path.relative_to(UPLOAD_DIR.parent)
-                
+
                 # 添加到成功列表
                 uploaded_files.append({
                     "original_filename": filename,
                     "file_path": f"/{relative_path.as_posix()}"
                 })
-            
+
             except Exception as e:
                 errors.append({
                     "index": idx,
                     "filename": file_obj.get("filename", "unknown"),
                     "error": f"处理失败: {str(e)}"
                 })
-        
+
         # 返回结果
         if not uploaded_files:
             return {
@@ -567,19 +601,19 @@ async def _file_upload(args: Dict) -> Dict:
                 "uploaded_files": [],
                 "errors": errors
             }
-        
+
         result = {
             "success": True,
             "uploaded_count": len(uploaded_files),
             "uploaded_files": uploaded_files
         }
-        
+
         if errors:
             result["errors"] = errors
             result["error_count"] = len(errors)
-        
+
         return result
-    
+
     except Exception as e:
         return {"error": f"文件上传失败: {str(e)}"}
 

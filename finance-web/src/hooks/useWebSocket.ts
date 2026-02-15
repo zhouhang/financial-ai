@@ -7,9 +7,17 @@ const MAX_RECONNECT_ATTEMPTS = 50;
 const BASE_RECONNECT_INTERVAL = 3000;
 const MAX_RECONNECT_INTERVAL = 30000;
 
+export type SendMessageFn = (
+  message: string,
+  threadId: string,
+  resume?: boolean,
+  authToken?: string,
+  attachments?: Array<{ name: string; path: string }>
+) => boolean;
+
 interface UseWebSocketOptions {
   onMessage?: (data: WsOutgoing) => void;
-  onConnect?: () => void;
+  onConnect?: (sendMessage: SendMessageFn) => void;
   onDisconnect?: () => void;
   autoReconnect?: boolean;
 }
@@ -24,7 +32,41 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const callbacksRef = useRef(options);
+  const sendMessageRef = useRef<SendMessageFn | null>(null);
   callbacksRef.current = options;
+
+  const sendMessage = useCallback(
+    (
+      message: string,
+      threadId: string,
+      resume = false,
+      authToken?: string,
+      attachments?: Array<{ name: string; path: string }>
+    ) => {
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        console.warn('WebSocket is not connected');
+        return false;
+      }
+      const payload: Record<string, unknown> = {
+        message,
+        thread_id: threadId,
+        resume,
+      };
+      if (authToken) {
+        payload.auth_token = authToken;
+      }
+      if (attachments?.length) {
+        payload.attachments = attachments.map((a) => ({
+          original_filename: a.name,
+          file_path: a.path,
+        }));
+      }
+      wsRef.current.send(JSON.stringify(payload));
+      return true;
+    },
+    []
+  );
+  sendMessageRef.current = sendMessage;
 
   const connect = useCallback(() => {
     // 如果已有 OPEN 或 CONNECTING 状态的连接，不重复创建
@@ -42,7 +84,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       if (wsRef.current === ws) {
         setStatus('connected');
         reconnectAttemptsRef.current = 0;
-        callbacksRef.current.onConnect?.();
+        const send = sendMessageRef.current;
+        if (send) callbacksRef.current.onConnect?.(send);
       }
     };
 
@@ -90,26 +133,6 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     wsRef.current = null;
     setStatus('disconnected');
   }, []);
-
-  const sendMessage = useCallback(
-    (message: string, threadId: string, resume = false, authToken?: string) => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        console.warn('WebSocket is not connected');
-        return false;
-      }
-      const payload: Record<string, unknown> = {
-        message,
-        thread_id: threadId,
-        resume,
-      };
-      if (authToken) {
-        payload.auth_token = authToken;
-      }
-      wsRef.current.send(JSON.stringify(payload));
-      return true;
-    },
-    []
-  );
 
   useEffect(() => {
     connect();

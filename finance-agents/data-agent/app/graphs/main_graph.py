@@ -29,10 +29,17 @@ from app.graphs.reconciliation import (
     rule_config_node,
     validation_preview_node,
     save_rule_node,
+    edit_field_mapping_node,
+    edit_rule_config_node,
+    edit_validation_preview_node,
+    edit_save_node,
     route_after_file_analysis,
     route_after_field_mapping,
     route_after_rule_config,
     route_after_preview,
+    _rule_template_to_mappings,
+    _rule_template_to_config_items,
+    _format_edit_field_mappings,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
 from app.tools.mcp_client import (
@@ -157,9 +164,10 @@ SYSTEM_PROMPT = """\
 你可以做以下事情：
 1. 使用已有的对账规则快速执行对账
 2. 引导用户创建新的对账规则
-3. 删除对账规则
-4. 查看规则列表
-5. 帮助用户理解对账结果
+3. 调整/编辑已有规则（如修改字段映射、规则配置等）
+4. 删除对账规则
+5. 查看规则列表
+6. 帮助用户理解对账结果
 
 当前已有的对账规则包括：
 {available_rules}
@@ -167,12 +175,18 @@ SYSTEM_PROMPT = """\
 请根据用户的意图判断下一步操作：
 - 如果用户想**查看规则列表**（如"我的规则列表"、"看看有哪些规则"、"规则列表"），回复 JSON: {{"intent": "list_rules"}}
 - 如果用户想**使用已有规则对账**（如"用XX规则对账"、"执行XX对账"），回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
+- 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
-- 如果用户在闲聊或询问信息，正常用中文回复即可
+- 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
+  1. 用「你好，{username}！」开头，带上用户名
+  2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
+  3. 说明当前已有规则
+  4. 询问用户需要什么帮助
 
 注意：
 - **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
+- **调整/编辑规则**与**使用规则对账**要严格区分：说"调整XX"、"编辑XX"、"修改XX规则"→ edit_rule；说"用XX对账"、"执行对账"→ use_existing_rule
 - 只在明确判断意图时才返回 JSON，否则正常对话
 - 删除规则时，必须从用户输入中提取准确的规则名称
 - 只返回一条消息，不要分多次回复
@@ -195,6 +209,10 @@ async def router_node(state: AgentState) -> dict:
         ReconciliationPhase.RULE_CONFIG.value,
         ReconciliationPhase.VALIDATION_PREVIEW.value,
         ReconciliationPhase.SAVE_RULE.value,
+        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        ReconciliationPhase.EDIT_SAVE.value,
     ]
     
     if current_phase in subgraph_phases:
@@ -306,7 +324,8 @@ async def router_node(state: AgentState) -> dict:
     ) if rules else "暂无已有规则"
 
     username = current_user.get("username", "用户")
-    system_msg = SYSTEM_PROMPT.format(username=username, available_rules=rules_text)
+    # 使用 replace 替代 format，避免规则名称/描述中的 {} 被误解析
+    system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
 
     llm = get_llm()
     messages = list(state.get("messages", []))
@@ -337,6 +356,20 @@ async def router_node(state: AgentState) -> dict:
         intent = UserIntent.LIST_RULES.value
         rule_name = ""
         logger.info(f"router: 用户说「{last_user_msg[:30]}...」强制识别为 list_rules，避免误触发对账")
+
+    # ⚠️ 兜底：对账完成后用户说"调整/编辑/修改XX规则"时，强制识别为 edit_rule，避免误触发再次对账
+    edit_rule_keywords = ("调整", "编辑", "修改")
+    if (state.get("phase", "") == ReconciliationPhase.COMPLETED.value
+            and any(kw in last_user_msg_lower for kw in edit_rule_keywords)
+            and intent != UserIntent.EDIT_RULE.value):
+        intent = UserIntent.EDIT_RULE.value
+        # 从规则名中提取：用户可能说"调整喜马"、"调整喜马规则"
+        if not rule_name and rules:
+            for r in rules:
+                if r.get("name", "") in last_user_msg or last_user_msg in r.get("name", ""):
+                    rule_name = r.get("name", "")
+                    break
+        logger.info(f"router: 对账完成后用户说「{last_user_msg[:30]}...」强制识别为 edit_rule，避免误触发对账")
 
     # 检查是否切换意图
     old_intent = state.get("user_intent", "")
@@ -433,6 +466,35 @@ async def router_node(state: AgentState) -> dict:
             return {
                 "messages": [AIMessage(content=f"❌ 删除规则时发生错误：{str(e)}")],
                 "user_intent": UserIntent.UNKNOWN.value,
+        }
+    elif intent == UserIntent.EDIT_RULE.value:
+        if not rule_name:
+            return {
+                "messages": [AIMessage(content="❌ 请指定要编辑的规则名称，例如「调整喜马规则」。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+        # 调整/编辑规则：加载规则详情，进入编辑流程
+        rule_detail = await get_rule_detail(auth_token, rule_name=rule_name)
+        if not rule_detail:
+            return {
+                "messages": [AIMessage(content=f"❌ 未找到规则「{rule_name}」，请检查规则名称是否正确。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+        rule_template = rule_detail.get("rule_template") or {}
+        rule_id = rule_detail.get("id", "")
+        mappings = _rule_template_to_mappings(rule_template)
+        config_items = _rule_template_to_config_items(rule_template)
+        welcome_msg = f"📝 正在加载规则「{rule_name}」的编辑..."
+        return {
+            "messages": [AIMessage(content=welcome_msg)],
+            "user_intent": UserIntent.EDIT_RULE.value,
+            "editing_rule_id": rule_id,
+            "editing_rule_name": rule_name,
+            "editing_rule_template": rule_template,
+            "confirmed_mappings": mappings,
+            "suggested_mappings": mappings,
+            "rule_config_items": config_items,
+            "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
     else:
         # 普通对话
@@ -659,7 +721,13 @@ def task_execution_node(state: AgentState) -> dict:
             "execution_step": TaskExecutionStep.DONE.value,
         }
     else:
-        messages_to_send.append(AIMessage(content=f"❌ 对账任务失败（状态: {status}），请检查日志或重试。"))
+        error_detail = poll_result.get("error", "")
+        err_msg = f"❌ 对账任务失败（状态: {status}）"
+        if error_detail:
+            err_msg += f"\n\n{error_detail}"
+        else:
+            err_msg += "，请检查日志或重试。"
+        messages_to_send.append(AIMessage(content=err_msg))
         return {
             "messages": messages_to_send,
             "task_id": task_id,
@@ -736,7 +804,9 @@ def result_analysis_node(state: AgentState) -> dict:
     logger.info(f"开始 LLM 分析对账结果: summary={summary}, issues_count={len(issues)}")
 
     llm = get_llm()
-    prompt = RESULT_ANALYSIS_PROMPT.format(result_json=result_json)
+    # 使用 replace 替代 format，避免 JSON 中的 {} 被误解析为格式化占位符
+    # 仅替换占位符一次，防止 result_json 内含 {result_json} 导致递归
+    prompt = RESULT_ANALYSIS_PROMPT.replace("{result_json}", result_json, 1)
 
     messages = [SystemMessage(content=prompt)]
     resp = llm.invoke(messages)
@@ -761,10 +831,11 @@ def route_after_router(state: AgentState) -> str:
     phase = state.get("phase", "")
 
     if intent == UserIntent.CREATE_NEW_RULE.value:
-        # 直接路由到文件分析节点（不再使用子图）
         return "file_analysis"
     elif intent == UserIntent.USE_EXISTING_RULE.value:
         return "task_execution"
+    elif intent == UserIntent.EDIT_RULE.value:
+        return "edit_field_mapping"
     else:
         return END
 
@@ -809,6 +880,27 @@ def route_after_ask_start(state: AgentState) -> str:
     return END
 
 
+def _route_after_edit_field_mapping(state: AgentState) -> str:
+    phase = state.get("phase", "")
+    if phase == ReconciliationPhase.EDIT_FIELD_MAPPING.value:
+        return "edit_field_mapping"
+    return "edit_rule_config"
+
+
+def _route_after_edit_rule_config(state: AgentState) -> str:
+    phase = state.get("phase", "")
+    if phase == ReconciliationPhase.EDIT_RULE_CONFIG.value:
+        return "edit_rule_config"
+    return "edit_validation_preview"
+
+
+def _route_after_edit_preview(state: AgentState) -> str:
+    phase = state.get("phase", "")
+    if phase == ReconciliationPhase.EDIT_RULE_CONFIG.value:
+        return "edit_rule_config"
+    return "edit_save"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 构建主图
 # ══════════════════════════════════════════════════════════════════════════════
@@ -844,10 +936,17 @@ def build_main_graph() -> StateGraph:
     # ── 边 ────────────────────────────────────────────────────────────────
     graph.set_entry_point("router")
 
+    # 编辑规则节点
+    graph.add_node("edit_field_mapping", edit_field_mapping_node)
+    graph.add_node("edit_rule_config", edit_rule_config_node)
+    graph.add_node("edit_validation_preview", edit_validation_preview_node)
+    graph.add_node("edit_save", edit_save_node)
+
     # router 后路由
     graph.add_conditional_edges("router", route_after_router, {
         "file_analysis": "file_analysis",
         "task_execution": "task_execution",
+        "edit_field_mapping": "edit_field_mapping",
         END: END,
     })
 
@@ -878,6 +977,21 @@ def build_main_graph() -> StateGraph:
         "task_execution": "task_execution",
         END: END,
     })
+
+    # 编辑规则流程
+    graph.add_conditional_edges("edit_field_mapping", _route_after_edit_field_mapping, {
+        "edit_field_mapping": "edit_field_mapping",
+        "edit_rule_config": "edit_rule_config",
+    })
+    graph.add_conditional_edges("edit_rule_config", _route_after_edit_rule_config, {
+        "edit_rule_config": "edit_rule_config",
+        "edit_validation_preview": "edit_validation_preview",
+    })
+    graph.add_conditional_edges("edit_validation_preview", _route_after_edit_preview, {
+        "edit_rule_config": "edit_rule_config",
+        "edit_save": "edit_save",
+    })
+    graph.add_edge("edit_save", END)
 
     # task_execution → result_analysis → END
     graph.add_edge("task_execution", "result_analysis")

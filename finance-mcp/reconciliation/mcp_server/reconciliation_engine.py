@@ -142,6 +142,9 @@ class ReconciliationEngine:
             
             # 执行所有自定义验证规则（按顺序检查，一旦满足条件就停止）
             for validation in self.custom_validations:
+                # 跳过非验证项（无 condition_expr 的条目，如误合并的聚合配置）
+                if not validation.get("condition_expr"):
+                    continue
                 issue = self._apply_custom_validation(
                     order_id, 
                     biz, 
@@ -272,15 +275,8 @@ class ReconciliationEngine:
                     except:
                         pass
                 
-                # 格式化 detail
-                try:
-                    detail = detail_template.format(**format_kwargs)
-                except Exception as e:
-                    # 如果格式化失败，尝试简单的替换
-                    try:
-                        detail = detail_template.format(biz=biz, fin=fin)
-                    except:
-                        detail = detail_template
+                # 格式化 detail（使用安全替换，避免 JSON 等含 {} 的内容被误解析为 format 占位符）
+                detail = self._safe_format_detail(detail_template, format_kwargs, biz_exists, fin_exists)
                 
                 # 确定业务值和财务值（从 detail_template 和 condition_expr 中自动提取字段名）
                 # 优先从 detail_template 中提取（如 {biz[amount]}），如果没有则从 condition_expr 中提取（如 biz.get('amount')）
@@ -344,6 +340,23 @@ class ReconciliationEngine:
         
         return None
     
+    def _safe_format_detail(self, detail_template: str, format_kwargs: dict, biz_exists: bool, fin_exists: bool) -> str:
+        """仅用正则替换已知占位符，绝不调用 .format()，避免模板中混入的 JSON 等含 {} 的内容触发 Invalid format specifier"""
+        result = detail_template
+        biz = format_kwargs.get("biz", {})
+        fin = format_kwargs.get("fin", {})
+        
+        def replace_biz_field(m):
+            return str(biz.get(m.group(1), "")) if isinstance(biz, dict) else ""
+        def replace_fin_field(m):
+            return str(fin.get(m.group(1), "")) if isinstance(fin, dict) else ""
+        
+        result = re.sub(r'\{biz\[(\w+)\]\}', replace_biz_field, result)
+        result = re.sub(r'\{fin\[(\w+)\]\}', replace_fin_field, result)
+        for key in ("amount_diff", "amount_diff_formatted", "amount_diff_max"):
+            if key in format_kwargs:
+                result = result.replace("{" + key + "}", str(format_kwargs[key]))
+        return result
     
     def _generate_summary(self, business_df: pd.DataFrame, finance_df: pd.DataFrame, issues: List[ReconciliationIssue]) -> ReconciliationSummary:
         """生成对账摘要"""

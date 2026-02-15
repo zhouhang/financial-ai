@@ -104,17 +104,40 @@ async def upload_file(
     is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
 ):
     """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
-    
+
     Args:
         file: 上传的文件
         thread_id: 会话 ID
         is_first_file: 是否是本批上传的第一个文件 ("1"=True, "0"=False)
     """
     import base64
+    import os
+    import sys
     from app.tools.mcp_client import call_mcp_tool
     
+    # Add finance-mcp to path to access security utilities
+    finance_mcp_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '..', '..', '..', 'finance-mcp')
+    )
+    if finance_mcp_path not in sys.path:
+        sys.path.insert(0, finance_mcp_path)
+    
+    from security_utils import validate_filename
+
+    # Validate thread_id to prevent injection attacks
+    if not thread_id or not isinstance(thread_id, str) or len(thread_id) > 100:
+        raise HTTPException(400, "无效的 thread_id")
+    
+    # Prevent path traversal in thread_id
+    if '..' in thread_id or '/' in thread_id or '\\' in thread_id:
+        raise HTTPException(400, "无效的 thread_id")
+
     if not file.filename:
         raise HTTPException(400, "文件名不能为空")
+
+    # Validate filename to prevent path traversal attacks
+    if not validate_filename(file.filename):
+        raise HTTPException(400, "非法文件名，可能存在安全风险")
 
     ext = Path(file.filename).suffix.lower()
     if ext not in {".csv", ".xlsx", ".xls"}:
@@ -124,16 +147,16 @@ async def upload_file(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(413, "文件过大")
-    
+
     # 转换为 base64
     content_b64 = base64.b64encode(content).decode('utf-8')
-    
+
     # ⚠️ 修复：正确处理 is_first_file 参数（来自表单的字符串）
     is_first = is_first_file == "1"
     if is_first:
         _thread_files[thread_id] = []
         logger.info(f"清空 thread={thread_id} 的历史文件，开始新批次上传")
-    
+
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
         result = await call_mcp_tool("file_upload", {
@@ -144,38 +167,40 @@ async def upload_file(
                 }
             ]
         })
-        
+
         # 检查上传结果
         if not result.get("success"):
             error_msg = result.get("error", "上传失败")
             if "errors" in result and result["errors"]:
                 error_msg = result["errors"][0].get("error", error_msg)
             raise HTTPException(500, error_msg)
-        
+
         # 获取上传的文件信息
         uploaded_files = result.get("uploaded_files", [])
         if not uploaded_files:
             raise HTTPException(500, "上传成功但未返回文件信息")
-        
+
         file_info = uploaded_files[0]
         file_path = file_info.get("file_path", "")
-        
+
         # 保存到线程文件映射（包含 file_path 和 original_filename）
         _thread_files.setdefault(thread_id, []).append({
             "file_path": file_path,
             "original_filename": file_info.get("original_filename", file.filename)
         })
-        
+
         # ⚠️ 修复：更新轻量级快照（只保存文件路径，用于快速比较）
         _thread_files_snapshot[thread_id] = [f.get("file_path", f) if isinstance(f, dict) else f for f in _thread_files[thread_id]]
-        
+
         logger.info(f"文件已通过 MCP 工具上传: {file_path} (thread={thread_id})")
         return {
             "file_path": file_path,
             "filename": file.filename,
             "size": len(content)
         }
-        
+
+    except HTTPException:
+        raise  # 重新抛出 HTTPException
     except Exception as e:
         logger.error(f"调用 MCP 工具上传文件失败: {e}", exc_info=True)
         raise HTTPException(500, f"文件上传失败: {str(e)}")
@@ -237,8 +262,36 @@ async def websocket_chat(ws: WebSocket):
             thread_id = data.get("thread_id", str(uuid.uuid4()))
             is_resume = data.get("resume", False)
             auth_token = data.get("auth_token", "")
+            msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}")
+
+            # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
+            if not user_msg and not is_resume and auth_token:
+                logger.info(f"收到认证验证请求 (token length={len(auth_token)})")
+                from app.tools.mcp_client import auth_me
+                try:
+                    me_result = await auth_me(auth_token)
+                    if me_result.get("success"):
+                        logger.info(f"认证验证成功，用户: {me_result.get('user', {}).get('username', 'unknown')}")
+                        await ws.send_json({
+                            "type": "auth_verify",
+                            "success": True,
+                            "user": me_result.get("user"),
+                        })
+                    else:
+                        logger.warning(f"认证验证失败: {me_result.get('error', 'unknown')}")
+                        await ws.send_json({
+                            "type": "auth_verify",
+                            "success": False,
+                        })
+                except Exception as e:
+                    logger.error(f"认证验证异常: {str(e)}")
+                    await ws.send_json({
+                        "type": "auth_verify",
+                        "success": False,
+                    })
+                continue  # 认证验证完成，不继续处理消息
 
             # 注册进度回调（每次消息都重新注册，确保使用最新的 ws 连接）
             current_thread_id = thread_id
@@ -246,21 +299,31 @@ async def websocket_chat(ws: WebSocket):
 
             config = {"configurable": {"thread_id": thread_id}}
             
-            # ⚠️ 修复：检查前一个任务是否已完成，如果完成则清空旧文件等待新输入
+            # ⚠️ 不再在收到消息时清空 _thread_files：用户可能刚上传完文件再发消息，
+            # 若此时 phase=COMPLETED 会误清空刚上传的文件，导致「未检测到文件上传」
+            file_infos = _thread_files.get(thread_id, [])
+            # ⚠️ 对账完成后再次「使用XX对账」时，清空旧文件，强制用户重新上传（避免复用上次对账的文件）
             try:
-                current_state = langgraph_app.get_state(config)
-                current_phase = current_state.values.get("phase", "")
-                if current_phase == ReconciliationPhase.COMPLETED.value:
-                    # 前一个任务已完成，清空 _thread_files 强制用户上传新文件
-                    old_files_count = len(_thread_files.get(thread_id, []))
+                snapshot = langgraph_app.get_state(config)
+                current_phase = (snapshot.values.get("phase") or "").strip()
+                if current_phase == ReconciliationPhase.COMPLETED.value and not msg_attachments:
                     _thread_files[thread_id] = []
                     _thread_files_snapshot[thread_id] = []
-                    if old_files_count > 0:
-                        logger.info(f"检测到 phase=COMPLETED，清空 {old_files_count} 个旧文件，等待新上传 (thread={thread_id})")
+                    file_infos = []
+                    logger.info(f"对账已完成，清空旧文件，要求重新上传 (thread={thread_id})")
             except Exception as e:
-                logger.warning(f"检查 phase 状态失败: {e}")
-            
-            file_infos = _thread_files.get(thread_id, [])
+                logger.warning(f"获取 phase 失败: {e}")
+            # 若 _thread_files 为空但消息附带附件（前端上传后随消息发送），则使用附件作为文件来源
+            if not file_infos and msg_attachments:
+                file_infos = [
+                    {"file_path": a.get("file_path", ""), "original_filename": a.get("original_filename", a.get("name", ""))}
+                    for a in msg_attachments
+                    if a.get("file_path")
+                ]
+                if file_infos:
+                    _thread_files[thread_id] = file_infos
+                    _thread_files_snapshot[thread_id] = [f.get("file_path", "") for f in file_infos]
+                    logger.info(f"使用消息附带的 {len(file_infos)} 个文件 (thread={thread_id})")
             # 提取文件路径列表（兼容旧代码）
             files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
             
@@ -310,7 +373,7 @@ async def websocket_chat(ws: WebSocket):
                 else:
                     input_data: dict[str, Any] = {
                         "messages": [HumanMessage(content=user_msg)],
-                        "uploaded_files": files,
+                        "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
                     }
                     if auth_token:
                         input_data["auth_token"] = auth_token
@@ -389,9 +452,13 @@ async def websocket_chat(ws: WebSocket):
                                 else:  # json
                                     router_buffer += token
                             else:
-                                # 其他节点：过滤掉 file_analysis 的 LLM 输出（内部字段映射生成）
+                                # 其他节点：过滤掉内部 LLM 输出（字段映射/规则配置的解析，不应显示 raw JSON）
                                 # 只有 result_analysis 等面向用户的节点才流式输出
-                                if node_name not in ["file_analysis", "field_mapping", "rule_config", "validation_preview"]:
+                                _no_stream_nodes = [
+                                    "file_analysis", "field_mapping", "rule_config", "validation_preview",
+                                    "edit_field_mapping", "edit_rule_config",
+                                ]
+                                if node_name not in _no_stream_nodes:
                                     streamed_content += token
                                     message_buffer += token
                                     current_streaming_node = node_name

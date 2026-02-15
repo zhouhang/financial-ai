@@ -4,6 +4,13 @@
   file_analysis → field_mapping (HITL) → rule_config (HITL) → validation_preview (HITL) → save_rule
 
 每个 HITL 节点通过 interrupt 暂停，等待用户确认后继续。
+
+字段映射逻辑（以用户纠正结果为准）：
+  1. 文件解析表头 → LLM 自动猜测（仅 order_id/amount/date，不含 status）
+  2. 显示给用户 → 用户可确认或输入自然语言纠正（如「删除status」）
+  3. LLM 解析纠正意见 → 更新底层 JSON
+  4. 最终以 confirmed_mappings 为准 → 保存到 rule_template.field_roles
+  5. field_mapping_text、rule_config_text 一并存入 rule_template，供编辑规则时展示
 """
 
 from __future__ import annotations
@@ -449,6 +456,10 @@ def _adjust_field_mappings_with_llm(
    - 如果用户想删除一个 **role本身**（如"删除status"）→ 使用 action: "delete"，不指定column
    - 如果用户想删除该role下的 **某个列别名**（如"删除pay_amt"）→ 使用 action: "delete_column"，指定column
    - 例：当前amount有["pay_amt", "金额"]两个列，用户说"去掉pay_amt" → delete_column with column="pay_amt"
+10. ⭐️ delete_column 严格匹配：每个 delete_column 的 column 必须与用户说的列名**完全一致**。
+   - 用户说"去掉喜马订单号、订单号、合单订单号、退款订单号"时，只生成这4个 delete_column，不要多删。
+   - "第三方订单号"与"订单号"是不同列，用户没说去掉"第三方订单号"就绝不能删除它。
+   - 不要因列名相似或同属某类而推断删除用户未提及的列。
 """
     
     try:
@@ -529,6 +540,118 @@ def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, An
     return "\n" + "\n".join(lines) if lines else "\n  （未找到匹配字段）"
 
 
+def _rule_template_to_mappings(rule_template: dict) -> dict[str, Any]:
+    """将 rule_template 的 field_roles 转为 confirmed_mappings 格式。"""
+    mappings: dict[str, dict] = {"business": {}, "finance": {}}
+    ds = rule_template.get("data_sources", {})
+    for src in ("business", "finance"):
+        roles = ds.get(src, {}).get("field_roles", {})
+        for role, col in roles.items():
+            if col:
+                mappings[src][role] = col
+    return mappings
+
+
+def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
+    """将 rule_template 转为 rule_config_items，保留用户原有的具体描述（非通用文案）。"""
+    items: list[dict] = []
+    # 1. 金额容差
+    tol = rule_template.get("tolerance", {})
+    if tol.get("amount_diff_max") is not None:
+        items.append({
+            "json_snippet": {"tolerance": dict(tol)},
+            "description": f"金额容差 {tol.get('amount_diff_max', 0.1)} 元",
+        })
+    # 2. 从 data_cleaning_rules 提取每个有 description 的规则项（保留用户原配置）
+    dcr = rule_template.get("data_cleaning_rules", {})
+    for src in ("business", "finance"):
+        src_label = "业务文件" if src == "business" else "财务文件"
+        src_rules = dcr.get(src, {})
+        # field_transforms
+        for t in src_rules.get("field_transforms", []):
+            desc = t.get("description", "").strip()
+            if desc:
+                items.append({
+                    "json_snippet": {"data_cleaning_rules": {src: {"field_transforms": [t]}}},
+                    "description": f"{src_label}：{desc}",
+                })
+        # aggregations
+        for agg in src_rules.get("aggregations", []):
+            desc = agg.get("description", "").strip()
+            if desc:
+                items.append({
+                    "json_snippet": {"data_cleaning_rules": {src: {"aggregations": [agg]}}},
+                    "description": f"{src_label}：{desc}",
+                })
+        # row_filters
+        for rf in src_rules.get("row_filters", []):
+            desc = rf.get("description", "").strip()
+            if desc:
+                items.append({
+                    "json_snippet": {"data_cleaning_rules": {src: {"row_filters": [rf]}}},
+                    "description": f"{src_label}：{desc}",
+                })
+    # 若未提取到任何带描述的项，回退为整体展示（避免空列表）
+    if not items:
+        biz = dcr.get("business", {})
+        fin = dcr.get("finance", {})
+        if biz or fin:
+            items.append({
+                "json_snippet": {"data_cleaning_rules": {k: v for k, v in [("business", biz), ("finance", fin)] if v}},
+                "description": "数据清理规则（转换、过滤、聚合）",
+            })
+    return items
+
+
+def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
+    """编辑模式下格式化字段映射（无需 file_analyses）。"""
+    role_labels = {"order_id": "订单号", "amount": "金额", "date": "日期", "status": "状态"}
+    lines: list[str] = []
+    for role, label in role_labels.items():
+        biz_col = mappings.get("business", {}).get(role)
+        fin_col = mappings.get("finance", {}).get(role)
+        if biz_col or fin_col:
+            biz_str = " / ".join(biz_col) if isinstance(biz_col, list) else str(biz_col or "")
+            fin_str = " / ".join(fin_col) if isinstance(fin_col, list) else str(fin_col or "")
+            lines.append(f"  • **{label}**：业务 `{biz_str}` ⇄ 财务 `{fin_str}`")
+    return "\n".join(lines) if lines else "  （无映射）"
+
+
+def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
+    """将字段映射构建为可保存的自然语言描述，供编辑规则时展示。
+    
+    格式示例：
+    业务: 订单号->第三方订单号, 金额->应结算平台金额, 日期->支付时间
+    财务: 订单号->sup订单号, 金额->发生-, 日期->完成时间
+    """
+    role_labels = {"order_id": "订单号", "amount": "金额", "date": "日期", "status": "状态"}
+    lines = []
+    for source, label in [("business", "业务"), ("finance", "财务")]:
+        src_map = mappings.get(source, {})
+        if not src_map:
+            continue
+        parts = []
+        for role, col in src_map.items():
+            rl = role_labels.get(role, role)
+            col_str = " / ".join(col) if isinstance(col, list) else str(col)
+            parts.append(f"{rl}->{col_str}")
+        if parts:
+            lines.append(f"{label}: {', '.join(parts)}")
+    return "\n".join(lines) if lines else ""
+
+
+def _build_rule_config_text(config_items: list[dict]) -> str:
+    """将规则配置项中的用户输入或描述拼接为可保存的自然语言，供编辑规则时展示。"""
+    if not config_items:
+        return ""
+    parts = []
+    for item in config_items:
+        text = (item.get("user_input") or item.get("description", "")).strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
 def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
     """使用 LLM 智能猜测字段映射：原始列名 → 标准角色。"""
     import json as _json
@@ -556,17 +679,18 @@ def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
 
     prompt = (
         "你是一个财务数据分析专家。以下是用户上传的对账文件信息。\n"
-        "请为每个文件的列名匹配到以下标准角色：\n"
+        "请为每个文件的列名匹配到以下标准角色（**只猜测以下 3 个必需角色**）：\n"
         "- order_id: 订单号/交易号（用于两边数据匹配的关键字段）\n"
         "- amount: 金额\n"
-        "- date: 日期/时间\n"
-        "- status: 订单状态（可选）\n\n"
-        "如果一个角色可能对应多个列名，全部列出。\n"
-        "如果某个角色没有对应的列，不要包含。\n\n"
+        "- date: 日期/时间\n\n"
+        "**规则：**\n"
+        "- 如果一个角色可能对应多个列名，全部列出。\n"
+        "- 如果某个角色没有对应的列，不要包含。\n"
+        "- **禁止在初始猜测中包含 status**。即使用户文件有「订单状态」「结算状态」等列，也不要映射。用户若需要状态映射，会在确认时主动添加。\n\n"
         + "\n".join(files_info)
         + "\n\n请严格按以下 JSON 格式回复，不要添加其他内容：\n"
-        '{"business": {"order_id": "列名或[列名1,列名2]", "amount": "...", ...}, '
-        '"finance": {"order_id": "...", "amount": "...", ...}}'
+        '{"business": {"order_id": "列名或[列名1,列名2]", "amount": "...", "date": "..."}, '
+        '"finance": {"order_id": "...", "amount": "...", "date": "..."}}'
     )
 
     try:
@@ -744,8 +868,8 @@ def field_mapping_node(state: AgentState) -> dict:
     # 使用 LLM 调整映射（返回调整后的映射和操作列表）
     adjusted_mappings, operations = _adjust_field_mappings_with_llm(confirmed, response_str, analyses)
     
-    # 检查映射是否有变化
-    if adjusted_mappings != confirmed:
+    # 检查映射是否有变化（且 operations 非空，避免显示无效更新）
+    if adjusted_mappings != confirmed and operations:
         operations_summary = _format_operations_summary(operations)
         adjustment_msg = f"✅ 已根据你的调整意见更新字段映射：\n{operations_summary}"
         logger.info("字段映射已更新")
@@ -782,8 +906,8 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
     
     # 读取JSON模板
     # 从 finance-agents/data-agent/app/graphs/reconciliation.py 
-    # 到 finance-mcp/reconciliation/schemas/direct_sales_schema.json
-    template_path = Path(__file__).resolve().parents[3] / "finance-mcp" / "reconciliation" / "schemas" / "direct_sales_schema.json"
+    # 到 finance-mcp/reconciliation/schemas/direct_sales_schema.json（需 parents[4] 到项目根）
+    template_path = Path(__file__).resolve().parents[4] / "finance-mcp" / "reconciliation" / "schemas" / "direct_sales_schema.json"
     try:
         with open(template_path, 'r', encoding='utf-8') as f:
             template = _json.load(f)
@@ -843,7 +967,8 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
                     field_str = str(field)
                 field_mapping_desc += f"   • {role:10} → {field_str}\n"
     
-    # 构建 prompt（避免f-string中多层嵌套括号导致的语法错误）
+    # 构建 prompt：使用 replace 替代 f-string 插入 template_json/user_input，
+    # 避免 template 中的 JSON（如 {"amount":"sum","date":"first"}）被下游 .format() 误解析为占位符
     template_json = _json.dumps(template, ensure_ascii=False, indent=2)[:2000]
     
     # JSON 示例（使用普通字符串避免转义问题）
@@ -867,17 +992,25 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
 
 [示例6] 删除配置（target 必须是用户要删除的具体内容，精确匹配一项）：
 {"action": "delete", "target": "金额容差", "description": "删除金额容差配置"}
-{"action": "delete", "target": "product_price除以100", "description": "删除product_price除以100的转换"}'''
+{"action": "delete", "target": "product_price除以100", "description": "删除product_price除以100的转换"}
+
+[示例7] 聚合类配置（按某字段合并、金额累加等）- 必须放入 aggregations，不能放全局：
+- 用户未指定文件 → 放 business.aggregations 和 finance.aggregations
+- 用户指定文件1 → 只放 business.aggregations
+- 用户指定文件2 → 只放 finance.aggregations
+示例（用户未指定，两个都放）：{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}}}, "description": "按订单号合并金额（两个文件）"}'''
     
-    prompt = f"""你是一个对账规则配置助手。请根据JSON模板解析用户的自然语言输入，返回一个JSON片段。
+    # 使用 replace 替代 f-string，避免 template_json 中的 {"amount":"sum","date":"first"} 等
+    # 被下游 .format() 误解析为 Invalid format specifier
+    prompt = """你是一个对账规则配置助手。请根据JSON模板解析用户的自然语言输入，返回一个JSON片段。
 
 JSON模板结构（参考）：
-{template_json}
+<<<TEMPLATE_JSON>>>
 
-{field_mapping_desc}{current_items_desc}
+<<<FIELD_MAPPING_DESC>>><<<CURRENT_ITEMS_DESC>>>
 
 用户的指令：
-{user_input}
+<<<USER_INPUT>>>
 
 请判断用户的意图：
 1. 如果是**添加配置**，返回 action: "add"（每次添加一个逻辑规则，description 对应单一规则）
@@ -903,6 +1036,11 @@ JSON模板结构（参考）：
 - 当用户既没指定文件，也没指明具体字段名（如"订单号处理"、"金额除以100"）时，为 business 和 finance 都配置
 - 例如：用户说"订单号去掉开头单引号，截取前21位，保留104开头" → 为两个文件都配置
 - 例如：用户说"金额除以100"（未指明具体字段）→ 为两个文件都配置（根据各自字段名写 transform）
+
+**规则3.5：聚合类配置的放置位置（按字段合并、金额累加等）**
+- 聚合类配置必须放在 data_cleaning_rules 的 **business.aggregations** 或 **finance.aggregations** 中，绝不能放在全局（tolerance、global 等）
+- 放置规则与规则1-4一致：用户未指定文件 → 两个都放；用户指定文件1/业务 → 只放 business；用户指定文件2/财务 → 只放 finance
+- 格式：{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "..."}
 
 **规则4：用户明确指定文件时**
 - 如果用户说"文件1"或"业务"或"业务数据" → 只配置到 business
@@ -959,6 +1097,9 @@ JSON模板结构（参考）：
   • 两边都加row_filters"104开头"
   • 结果：L开头的业务订单被删除，无法看出与财务的差异
 
+**规则6.5：禁止输出 custom_validations**
+- json_snippet 中不要包含 custom_validations，仅配置 data_cleaning_rules、tolerance 等
+
 **规则7：避免重复规则**
 - 检查当前已有的配置项（见上方"当前已添加的配置项"）
 - 当用户说的需求已经包含在某个配置项中时，建议用户是否要更新或替换，而不是添加新规则
@@ -975,10 +1116,17 @@ JSON模板结构（参考）：
 - ❌ 错：在 finance 的 transform 中使用 row.get('product_price', 0)（product_price 是业务列）
 - ✅ 对：在 finance 的 transform 中使用 row.get('发生-', 0)
 
-{json_examples}
+<<<JSON_EXAMPLES>>>
 
 请返回这个JSON格式的结果（只返回JSON，不要其他文字）：
 {{"action": "add|delete|update", "json_snippet": {{...}}, "description": "用户友好的描述"}}"""
+    
+    # 使用 replace 插入变量，避免 template_json 中的 JSON 花括号被 .format() 误解析
+    prompt = prompt.replace("<<<TEMPLATE_JSON>>>", template_json, 1)
+    prompt = prompt.replace("<<<FIELD_MAPPING_DESC>>>", field_mapping_desc, 1)
+    prompt = prompt.replace("<<<CURRENT_ITEMS_DESC>>>", current_items_desc, 1)
+    prompt = prompt.replace("<<<USER_INPUT>>>", user_input, 1)
+    prompt = prompt.replace("<<<JSON_EXAMPLES>>>", json_examples, 1)
         
     try:
         llm = get_llm(temperature=0.1)
@@ -1264,9 +1412,13 @@ def _merge_json_snippets(base_schema: dict, snippets: list[dict]) -> dict:
         if not snippet:
             continue
         
-        # 深度合并
+        # 深度合并（排除 custom_validations，仅使用 base_schema 的，避免 LLM 误输出导致 format 报错）
+        _skip_keys = frozenset({"custom_validations"})
+        
         def deep_merge(target: dict, source: dict):
             for key, value in source.items():
+                if key in _skip_keys:
+                    continue
                 if key in target and isinstance(target[key], dict) and isinstance(value, dict):
                     deep_merge(target[key], value)
                 elif key in target and isinstance(target[key], list) and isinstance(value, list):
@@ -1325,9 +1477,12 @@ def rule_config_node(state: AgentState) -> dict:
 
 请描述对账规则的配置要求。支持以下类型的配置：
 
-**全局配置**（适用于两个文件）：
+**全局配置**（如金额容差）：
 • "金额容差0.1元"
-• "相同订单号做金额累加"
+
+**聚合类配置**（按字段合并、金额累加等，放入 business/finance 的 aggregations，不放全局）：
+• 未指定文件："按订单号合并金额" → 两个文件都配置
+• 指定文件："文件1按订单号合并" → 只配置业务文件
 
 **针对业务数据(文件1)的配置**：
 • "业务文件的product_price除以100"
@@ -1920,6 +2075,12 @@ async def save_rule_node(state: AgentState) -> dict:
     # ⚠️ 保存前将 transform/expression 中的原始列名重写为映射字段名（order_id、amount 等）
     _rewrite_schema_transforms_to_mapped_fields(schema_with_desc)
 
+    # 保存用户自然语言描述，供后续编辑规则功能使用
+    mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
+    config_items = state.get("rule_config_items", [])
+    schema_with_desc["field_mapping_text"] = _build_field_mapping_text(mappings)
+    schema_with_desc["rule_config_text"] = _build_rule_config_text(config_items)
+
     # ⚠️ 通过 finance-mcp 工具保存规则（带认证 token）
     auth_token = state.get("auth_token", "")
     try:
@@ -1980,6 +2141,287 @@ def _preview_schema(schema: dict, analyses: list[dict]) -> dict:
         "biz_count": biz_count,
         "fin_count": fin_count,
         "estimated_match": estimated_match,
+    }
+
+
+# ── 编辑规则节点 ─────────────────────────────────────────────────────────────
+
+def _build_dummy_analyses_from_mappings(mappings: dict[str, Any]) -> list[dict]:
+    """从 mappings 构建虚拟 analyses，供编辑模式下 _adjust_field_mappings_with_llm 使用。"""
+    analyses = []
+    for src, label in [("business", "业务文件"), ("finance", "财务文件")]:
+        cols = []
+        for role, col in mappings.get(src, {}).items():
+            if isinstance(col, list):
+                cols.extend(col)
+            elif col:
+                cols.append(str(col))
+        analyses.append({"guessed_source": src, "filename": label, "columns": cols})
+    return analyses
+
+
+def edit_field_mapping_node(state: AgentState) -> dict:
+    """编辑规则 - 第1步：显示当前字段映射，支持修改或确认。"""
+    mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
+    adjustment_feedback = state.get("mapping_adjustment_feedback")
+    rule_name = state.get("editing_rule_name", "规则")
+
+    mapping_display = _format_edit_field_mappings(mappings)
+    if adjustment_feedback:
+        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n{adjustment_feedback}\n\n当前映射：\n{mapping_display}\n\n请确认或继续修改。"
+    else:
+        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n当前字段对应关系：\n{mapping_display}\n\n请确认是否正确？回复「确认」继续，或描述需要修改的地方。"
+
+    user_response = interrupt({
+        "step": "1/3",
+        "step_title": "确认字段映射",
+        "question": question_text,
+        "suggested_mappings": mappings,
+        "hint": "• 回复「确认」继续  • 修改示例：「订单号改为XX」「添加status对应YY」「删除status」",
+    })
+
+    response_str = str(user_response).strip()
+    if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
+        return {"messages": [], "mapping_adjustment_feedback": None, "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value}
+
+    response_lower = response_str.lower()
+    if response_lower in ("确认", "ok", "yes", "确定", "对", "没问题", "正确"):
+        return {
+            "messages": [AIMessage(content="✅ 字段映射已确认。")],
+            "confirmed_mappings": mappings,
+            "mapping_adjustment_feedback": None,
+            "phase": ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        }
+
+    # 用户需要调整
+    dummy_analyses = _build_dummy_analyses_from_mappings(mappings)
+    adjusted_mappings, operations = _adjust_field_mappings_with_llm(mappings, response_str, dummy_analyses)
+    if adjusted_mappings != mappings and operations:
+        ops_summary = _format_operations_summary(operations)
+        feedback = f"✅ 已更新：\n{ops_summary}"
+    else:
+        feedback = f"⚠️ 未能解析修改，请更具体描述。\n\n> {response_str}"
+
+    return {
+        "messages": [AIMessage(content=feedback)],
+        "suggested_mappings": adjusted_mappings,
+        "confirmed_mappings": adjusted_mappings,
+        "mapping_adjustment_feedback": feedback,
+        "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+    }
+
+
+def edit_rule_config_node(state: AgentState) -> dict:
+    """编辑规则 - 第2步：显示当前规则配置，支持修改或确认。"""
+    config_items = state.get("rule_config_items") or []
+    rule_name = state.get("editing_rule_name", "规则")
+    mappings = state.get("confirmed_mappings") or {}
+
+    config_display = _format_rule_config_items(config_items, {"business": "业务文件", "finance": "财务文件"})
+    question_text = f"⚙️ **编辑「{rule_name}」- 规则配置**\n\n当前配置：\n{config_display}\n\n请确认是否正确？回复「确认」继续，或描述需要添加/删除的配置。"
+
+    user_response = interrupt({
+        "step": "2/3",
+        "step_title": "确认规则配置",
+        "question": question_text,
+        "current_config_items": config_items,
+        "hint": "• 回复「确认」继续  • 添加：「金额容差0.1」  • 删除：「删除金额容差」",
+    })
+
+    response_str = str(user_response).strip()
+    if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
+        return {"messages": [], "phase": ReconciliationPhase.EDIT_RULE_CONFIG.value}
+
+    response_lower = response_str.lower()
+    if response_lower in ("确认", "ok", "yes", "确定", "对", "没问题", "正确", "完成"):
+        return {
+            "messages": [AIMessage(content="✅ 规则配置已确认。")],
+            "rule_config_items": config_items,
+            "phase": ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        }
+
+    # 用户需要调整
+    parsed = _parse_rule_config_json_snippet(response_str, config_items, mappings)
+    action = parsed.get("action", "unknown")
+    new_config_items = config_items.copy()
+    feedback_msg = ""
+
+    if action == "add":
+        new_item = {
+            "json_snippet": parsed.get("json_snippet", {}),
+            "description": parsed.get("description", "未知配置"),
+            "user_input": response_str,
+        }
+        new_config_items.append(new_item)
+        feedback_msg = f"✅ 已添加：{parsed.get('description', '')}\n\n> {response_str}"
+    elif action == "delete":
+        target = parsed.get("target", "").strip()
+        for prefix in ("删除", "去掉", "移除", "删掉"):
+            if target.startswith(prefix):
+                target = target[len(prefix):].strip()
+                break
+        if target:
+            matching = _find_matching_items(target, new_config_items, threshold=0.5, max_matches=1, strict_substring_only=True)
+            if matching:
+                for idx in sorted(matching, reverse=True):
+                    del new_config_items[idx]
+                feedback_msg = f"🗑️ 已删除匹配的配置\n\n> {response_str}"
+            else:
+                feedback_msg = f"⚠️ 未找到匹配项\n\n> {response_str}"
+        else:
+            feedback_msg = f"⚠️ 未指定删除目标\n\n> {response_str}"
+    else:
+        feedback_msg = f"⚠️ 未能解析，请更具体描述\n\n> {response_str}"
+
+    return {
+        "messages": [AIMessage(content=feedback_msg)],
+        "rule_config_items": new_config_items,
+        "phase": ReconciliationPhase.EDIT_RULE_CONFIG.value,
+    }
+
+
+def edit_validation_preview_node(state: AgentState) -> dict:
+    """编辑规则 - 第3步：预览并确认保存。以 editing_rule_template 为基准，仅更新 field_roles。"""
+    import copy
+
+    rule_template = state.get("editing_rule_template") or {}
+    mappings = state.get("confirmed_mappings") or {}
+    config_items = state.get("rule_config_items") or []
+    rule_name = state.get("editing_rule_name", "规则")
+
+    # 以原始 rule_template 为基准（完整保留用户原有配置），仅更新 field_roles
+    schema = copy.deepcopy(rule_template)
+    schema["description"] = rule_name
+    if "data_sources" not in schema:
+        schema["data_sources"] = {}
+    for src in ("business", "finance"):
+        if src not in schema["data_sources"]:
+            schema["data_sources"][src] = {}
+        schema["data_sources"][src]["field_roles"] = mappings.get(src, {})
+
+    # 若用户编辑过规则配置（增删），从 config_items 重建；否则保留原 schema
+    if config_items:
+        orig_dcr = rule_template.get("data_cleaning_rules", {})
+        base = {
+            "version": "1.0",
+            "description": rule_name,
+            "data_sources": schema["data_sources"],
+            "key_field_role": schema.get("key_field_role", "order_id"),
+            "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1},
+            "data_cleaning_rules": {"global": orig_dcr.get("global", {})},
+            "custom_validations": schema.get("custom_validations", []),
+        }
+        merged = _merge_json_snippets(base, config_items)
+        schema["tolerance"] = merged.get("tolerance", schema.get("tolerance"))
+        dcr = merged.get("data_cleaning_rules", {})
+        if "global" not in dcr and "global" in orig_dcr:
+            dcr["global"] = orig_dcr["global"]
+        schema["data_cleaning_rules"] = dcr
+
+    schema = _validate_and_deduplicate_rules(schema)
+
+    mapping_display = _format_edit_field_mappings(mappings)
+    config_display = _format_rule_config_items(config_items, {"business": "业务文件", "finance": "财务文件"})
+
+    preview_text = (
+        f"✅ **编辑「{rule_name}」- 预览**\n\n"
+        f"🔗 **字段映射**\n{mapping_display}\n\n"
+        f"📋 **规则配置**\n{config_display}\n\n"
+        "确认无误后回复「保存」，将删除旧规则并保存新规则。"
+    )
+
+    user_response = interrupt({
+        "step": "3/3",
+        "step_title": "确认并保存",
+        "question": preview_text,
+        "hint": "• 回复「保存」完成编辑  • 回复「调整」返回上一步修改",
+    })
+
+    response_str = str(user_response).strip()
+    if response_str in ("调整", "重新配置", "返回", "上一步"):
+        return {
+            "messages": [AIMessage(content="好的，返回规则配置。")],
+            "phase": ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        }
+
+    if response_str.lower() not in ("保存", "确认", "ok", "yes"):
+        return {
+            "messages": [AIMessage(content="请回复「保存」以完成编辑，或「调整」返回修改。")],
+            "phase": ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        }
+
+    return {
+        "messages": [AIMessage(content="正在保存...")],
+        "generated_schema": schema,
+        "phase": ReconciliationPhase.EDIT_SAVE.value,
+    }
+
+
+async def edit_save_node(state: AgentState) -> dict:
+    """编辑规则 - 保存：仅在此步骤删除旧规则（PostgreSQL+JSON），并新建规则。"""
+    schema = state.get("generated_schema")
+    rule_id = state.get("editing_rule_id")
+    rule_name = state.get("editing_rule_name")
+    auth_token = state.get("auth_token", "")
+
+    if not schema or not rule_id or not rule_name:
+        return {
+            "messages": [AIMessage(content="❌ 缺少规则信息，无法保存。")],
+            "phase": ReconciliationPhase.COMPLETED.value,
+        }
+
+    _rewrite_schema_transforms_to_mapped_fields(schema)
+    mappings = state.get("confirmed_mappings") or {}
+    config_items = state.get("rule_config_items", [])
+    schema["field_mapping_text"] = _build_field_mapping_text(mappings)
+    schema["rule_config_text"] = _build_rule_config_text(config_items)
+
+    # 1. 删除旧规则（PostgreSQL + JSON）
+    try:
+        del_result = await call_mcp_tool("delete_reconciliation_rule", {
+            "auth_token": auth_token,
+            "rule_id": rule_id,
+        })
+        if not del_result.get("success"):
+            return {
+                "messages": [AIMessage(content=f"❌ 删除旧规则失败: {del_result.get('error', '未知错误')}")],
+                "phase": ReconciliationPhase.EDIT_SAVE.value,
+            }
+    except Exception as e:
+        logger.error(f"删除旧规则失败: {e}")
+        return {
+            "messages": [AIMessage(content=f"❌ 删除旧规则失败: {str(e)}")],
+            "phase": ReconciliationPhase.EDIT_SAVE.value,
+        }
+
+    # 2. 新建规则（PostgreSQL + JSON）
+    try:
+        save_result = await call_mcp_tool("save_reconciliation_rule", {
+            "auth_token": auth_token,
+            "name": rule_name,
+            "description": rule_name,
+            "rule_template": schema,
+            "visibility": "private",
+        })
+        if not save_result.get("success"):
+            return {
+                "messages": [AIMessage(content=f"❌ 保存新规则失败: {save_result.get('error', '未知错误')}")],
+                "phase": ReconciliationPhase.EDIT_SAVE.value,
+            }
+    except Exception as e:
+        logger.error(f"保存新规则失败: {e}")
+        return {
+            "messages": [AIMessage(content=f"❌ 保存新规则失败: {str(e)}")],
+            "phase": ReconciliationPhase.EDIT_SAVE.value,
+        }
+
+    return {
+        "messages": [AIMessage(content=f"✅ 规则「{rule_name}」已更新！（已删除旧规则并保存新规则）")],
+        "saved_rule_name": rule_name,
+        "editing_rule_id": None,
+        "editing_rule_name": None,
+        "editing_rule_template": None,
+        "phase": ReconciliationPhase.COMPLETED.value,
     }
 
 

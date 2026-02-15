@@ -64,14 +64,16 @@ export interface WsIncoming {
 }
 
 export interface WsOutgoing {
-  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth';
+  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify';
   content?: string;
   payload?: Record<string, unknown>;
   thread_id?: string;
   node?: string;
-  /** auth 类型专用 */
+  /** auth 和 auth_verify 类型专用 */
   token?: string;
   user?: Record<string, unknown>;
+  /** auth_verify 类型专用 - 验证是否成功 */
+  success?: boolean;
 }
 
 // ── 连接状态 ─────────────────────────────────────────────────────────────

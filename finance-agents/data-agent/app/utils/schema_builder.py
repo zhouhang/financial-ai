@@ -60,13 +60,7 @@ def build_schema(
         cleaning["business"] = {
             "field_transforms": biz_transforms,
             "row_filters": biz_filters,
-            "aggregations": [
-                {
-                    "group_by": "order_id",
-                    "agg_fields": {"amount": "sum", "date": "first"},
-                    "description": "按订单号合并",
-                }
-            ],
+            "aggregations": [],  # 不添加默认聚合，用户通过配置项添加「相同订单号按金额累加」等
             "global_transforms": [
                 {"operation": "drop_na", "subset": ["order_id"], "description": "删除订单号为空的记录"}
             ],
@@ -89,13 +83,7 @@ def build_schema(
         cleaning["finance"] = {
             "field_transforms": fin_transforms,
             "row_filters": fin_filters,
-            "aggregations": [
-                {
-                    "group_by": "order_id",
-                    "agg_fields": {"amount": "sum", "date": "first"},
-                    "description": "按订单号合并",
-                }
-            ],
+            "aggregations": [],  # 不添加默认聚合，用户通过配置项添加「相同订单号按金额累加」等
             "global_transforms": [
                 {"operation": "drop_na", "subset": ["order_id", "amount"], "description": "删除关键字段为空的记录"}
             ],
@@ -137,7 +125,10 @@ def build_schema(
         },
     ]
 
-    if check_order_status:
+    # 仅当用户配置了 status 字段映射且明确要求检查状态时，才添加 order_status_mismatch
+    # 用户未配置 status 时不应添加，避免误报
+    has_status_mapping = "status" in business_field_roles
+    if check_order_status and has_status_mapping:
         validations.append({
             "name": "order_status_mismatch",
             "condition_expr": (

@@ -19,6 +19,7 @@ from typing_extensions import TypedDict
 class UserIntent(str, Enum):
     USE_EXISTING_RULE = "use_existing_rule"
     CREATE_NEW_RULE = "create_new_rule"
+    EDIT_RULE = "edit_rule"  # 调整/编辑已有规则
     DELETE_RULE = "delete_rule"
     LIST_RULES = "list_rules"  # 查看规则列表
     LOGIN = "login"
@@ -33,6 +34,11 @@ class ReconciliationPhase(str, Enum):
     RULE_CONFIG = "rule_config"
     VALIDATION_PREVIEW = "validation_preview"
     SAVE_RULE = "save_rule"
+    # 编辑规则流程
+    EDIT_FIELD_MAPPING = "edit_field_mapping"
+    EDIT_RULE_CONFIG = "edit_rule_config"
+    EDIT_VALIDATION_PREVIEW = "edit_validation_preview"
+    EDIT_SAVE = "edit_save"
     TASK_EXECUTION = "task_execution"
     COMPLETED = "completed"
 
@@ -198,6 +204,11 @@ class AgentState(TypedDict, total=False):
 
     # 当前阶段跟踪
     phase: str  # ReconciliationPhase 值
+
+    # 编辑规则流程（edit_rule 意图）
+    editing_rule_id: Optional[str]
+    editing_rule_name: Optional[str]
+    editing_rule_template: Optional[dict[str, Any]]
 
     # 任务执行（第3层）
     task_id: Optional[str]

@@ -1,7 +1,6 @@
 import { useCallback, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
-import Workbench from './components/Workbench';
 import { useWebSocket } from './hooks/useWebSocket';
 import type {
   Conversation,
@@ -84,6 +83,18 @@ export default function App() {
     [activeConvId]
   );
 
+  // ── WebSocket 连接时的认证验证 ─────────────────────────
+  const handleWsConnected = useCallback(
+    (sendMessage: (msg: string, threadId: string, resume?: boolean, token?: string) => boolean) => {
+      // WebSocket 连接建立后，如果有保存的 authToken，发送验证请求
+      if (authToken) {
+        console.log('WebSocket connected, verifying stored auth token...');
+        sendMessage('', activeConvId, false, authToken);
+      }
+    },
+    [authToken, activeConvId]
+  );
+
   // ── WebSocket ─────────────────────────────────────────────
   const handleWsMessage = useCallback(
     (data: WsOutgoing) => {
@@ -137,15 +148,24 @@ export default function App() {
         case 'message':
           setIsLoading(false);
           setStreamingMessageId(null); // 完整消息，清除流式状态
-          appendMessage({
-            id: generateId(),
-            role: 'assistant',
-            content: data.content || '',
-            timestamp: new Date(),
-          });
+          const newContent = data.content || '';
+          // 若上一条是「正在保存」，用新消息替换它（保存成功后不再显示正在保存）
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== activeConvId) return c;
+              const lastMsg = c.messages[c.messages.length - 1];
+              const isLastSaving =
+                lastMsg?.role === 'assistant' &&
+                /^正在保存\.*$/.test(String(lastMsg.content || '').trim());
+              const messages = isLastSaving
+                ? [...c.messages.slice(0, -1), { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }]
+                : [...c.messages, { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }];
+              return { ...c, messages, updatedAt: new Date() };
+            })
+          );
 
           // 尝试从 AI 消息中解析任务
-          parseTasksFromMessage(data.content || '');
+          parseTasksFromMessage(newContent);
           break;
 
         case 'interrupt':
@@ -200,6 +220,25 @@ export default function App() {
           }
           break;
 
+        case 'auth_verify':
+          // 认证验证响应（WebSocket连接建立后验证现有token）
+          if (data.success) {
+            // token 仍然有效，同步用户信息（如果返回了）
+            if (data.user) {
+              setCurrentUser(data.user);
+              localStorage.setItem('finflux_current_user', JSON.stringify(data.user));
+            }
+            console.log('Auth token verified successfully');
+          } else {
+            // token 已过期或无效，清除本地凭证
+            console.log('Auth token verification failed, clearing stored credentials');
+            setAuthToken(null);
+            setCurrentUser(null);
+            localStorage.removeItem('finflux_auth_token');
+            localStorage.removeItem('finflux_current_user');
+          }
+          break;
+
         case 'error':
           setIsLoading(false);
           appendMessage({
@@ -219,6 +258,7 @@ export default function App() {
 
   const { status, sendMessage } = useWebSocket({
     onMessage: handleWsMessage,
+    onConnect: handleWsConnected,
   });
 
   // ── 从 AI 消息中提取任务列表 ──────────────────────────────
@@ -296,7 +336,11 @@ export default function App() {
       setIsLoading(true);
       const shouldResume = waitingForFileUpload;
       setWaitingForFileUpload(false);
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined);
+      // 附件中有 path 时一并发送，供服务端检测文件（避免 _thread_files 为空）
+      const filesToSend = attachments
+        ?.filter((a): a is import('./types').MessageAttachment & { path: string } => !!a.path)
+        .map((a) => ({ name: a.name, path: a.path }));
+      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend);
     },
     [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken]
   );
@@ -363,11 +407,6 @@ export default function App() {
         onSendMessage={handleSendMessage}
         onFileUploaded={handleFileUploaded}
         threadId={activeConvId}
-      />
-      <Workbench
-        tasks={tasks}
-        uploadedFiles={uploadedFiles}
-        results={taskResult}
       />
     </div>
   );
