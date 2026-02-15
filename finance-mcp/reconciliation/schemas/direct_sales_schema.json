@@ -1,0 +1,215 @@
+{
+  "version": "1.0",
+  "description": "直销对账 - 供应商充值账单 vs 财务BI对账流水",
+  "data_sources": {
+    "finance": {
+      "file_pattern": [
+        "ads_finance_d_inc_channel_details*.csv",
+        "ads_finance_d_inc_channel_details*.xlsx",
+        "*合单*.xlsx"
+      ],
+      "field_roles": {
+        "order_id": "sup订单号",
+        "amount": "发生-",
+        "date": "完成时间"
+      }
+    },
+    "business": {
+      "file_pattern": [
+        "*对账流水*.csv",
+        "*对账流水*.xlsx",
+        "*官网*.xlsx",
+        "[0-9]{13}*.csv",
+        "[0-9]{13}*.xlsx"
+      ],
+      "field_roles": {
+        "order_id": [
+          "roc_oid",
+          "sp订单号",
+          "第三方订单号"
+        ],
+        "amount": [
+          "product_price",
+          "销售额",
+          "应结算平台金额"
+        ],
+        "date": [
+          "statis_date",
+          "订单时间"
+        ],
+        "status": [
+          "result",
+          "状态",
+          "订单状态"
+        ],
+        "order_date": [
+          "order_time",
+          "订单日期"
+        ]
+      }
+    }
+  },
+  "key_field_role": "order_id",
+  "tolerance": {
+    "date_format": "%Y-%m-%d",
+    "amount_diff_max": 0.1
+  },
+  "data_cleaning_rules": {
+    "finance": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值（发生-字段可能为负）"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) and len(str(row.get('order_id', ''))) > 21 else str(row.get('order_id', ''))",
+          "description": "订单号只取前21位，统一为21位与业务订单号匹配"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "str(row.get('order_id', '')).startswith('104') or str(row.get('order_id', '')).startswith(\"'104\") or str(row.get('order_id', '')).startswith('L')",
+          "description": "只保留104或L开头的订单号（支持带单引号）"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "按sup订单号合并，发生-字段求和"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": [
+            "order_id",
+            "amount"
+          ],
+          "description": "删除关键字段为空的记录"
+        }
+      ]
+    },
+    "business": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) and len(str(row.get('order_id', ''))) > 21 else str(row.get('order_id', ''))",
+          "description": "订单号只取前21位，统一为21位与财务订单号匹配"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "str(row.get('order_id', '')).strip().startswith('104') or str(row.get('order_id', '')).strip().startswith('L')",
+          "description": "只保留104或L开头的订单号"
+        }
+      ],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first",
+            "status": "first",
+            "order_date": "first"
+          },
+          "description": "按roc_oid或sp订单号合并，product_price字段求和"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": [
+            "order_id"
+          ],
+          "description": "删除订单号为空的记录"
+        }
+      ]
+    },
+    "global": {
+      "global_transforms": [
+        {
+          "operation": "drop_duplicates",
+          "subset": [
+            "order_id"
+          ],
+          "keep": "first",
+          "description": "全局去重，保留第一条"
+        }
+      ]
+    }
+  },
+  "custom_validations": [
+    {
+      "name": "missing_in_business",
+      "condition_expr": "fin_exists and not biz_exists",
+      "issue_type": "missing_in_business",
+      "detail_template": "{fin_file}存在，{biz_file}无此订单记录"
+    },
+    {
+      "name": "missing_in_finance",
+      "condition_expr": "biz_exists and not fin_exists",
+      "issue_type": "missing_in_finance",
+      "detail_template": "{biz_file}存在，{fin_file}无此订单记录"
+    },
+    {
+      "name": "amount_mismatch",
+      "condition_expr": "biz_exists and fin_exists and biz.get('amount') is not None and fin.get('amount') is not None and abs(float(biz.get('amount', 0)) - float(fin.get('amount', 0))) > amount_diff_max",
+      "issue_type": "amount_mismatch",
+      "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"
+    },
+    {
+      "name": "order_status_mismatch",
+      "condition_expr": "biz_exists and str(biz.get('status', '')).lower() != 'success' and str(biz.get('status', '')).lower() != '成功' and str(biz.get('status', '')).lower() != '交易成功'",
+      "issue_type": "order_status_mismatch",
+      "detail_template": "订单状态不一致：状态为 {biz[status]}，不是允许的成功状态"
+    },
+    {
+      "name": "order_status_not_over",
+      "condition_expr": "biz_exists and biz.get('status', '') == '充值中'",
+      "issue_type": "order_status_not_over",
+      "detail_template": "订单状态未完成：订单状态为充值中（订单日期：{biz[order_date]}）"
+    }
+  ]
+}

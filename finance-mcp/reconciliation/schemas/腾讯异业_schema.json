@@ -1,32 +1,36 @@
 {
   "version": "1.0",
-  "description": "喜马",
+  "description": "腾讯异业",
   "data_sources": {
     "business": {
       "file_pattern": [
-        "官网_*.xlsb",
-        "官网_*.xlsm",
-        "官网_*.xlsx",
-        "官网_*.csv",
-        "官网_*.xls"
+        "2025-12-01~2025-12-01对账流水_*.xlsb",
+        "2025-12-01~2025-12-01对账流水_*.xlsm",
+        "2025-12-01~2025-12-01对账流水_*.xlsx",
+        "2025-12-01~2025-12-01对账流水_*.csv",
+        "2025-12-01~2025-12-01对账流水_*.xls"
       ],
       "field_roles": {
         "order_id": [
-          "第三方订单号"
+          "roc_oid"
         ],
-        "amount": [
-          "应结算平台金额"
+        "amount": "product_price",
+        "date": [
+          "ftran_time"
         ],
-        "date": "支付时间"
+        "status": [
+          "result",
+          "provide_result"
+        ]
       }
     },
     "finance": {
       "file_pattern": [
-        "合单_*.xlsx",
-        "合单_*.csv",
-        "合单_*.xls",
-        "合单_*.xlsb",
-        "合单_*.xlsm"
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsb",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.csv",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xls",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsx",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsm"
       ],
       "field_roles": {
         "order_id": [
@@ -35,7 +39,9 @@
         "amount": [
           "发生-"
         ],
-        "date": "完成时间"
+        "date": [
+          "完成时间"
+        ]
       }
     }
   },
@@ -60,9 +66,18 @@
         },
         {
           "field": "order_id",
-          "operation": "expr",
-          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "transform": "str(row.get('order_id', '')).lstrip(\"'\")[:21]",
           "description": "订单号去掉开头单引号，并截取前21位"
+        },
+        {
+          "field": "order_id",
+          "transform": "str(row.get('order_id', ''))",
+          "description": "订单号转换为字符串"
+        },
+        {
+          "field": "amount",
+          "transform": "float(row.get('amount', 0)) / 100",
+          "description": "product_price 除以100转换为元"
         }
       ],
       "row_filters": [],
@@ -73,7 +88,7 @@
             "amount": "sum",
             "date": "first"
           },
-          "description": "相同的订单号按金额累加合并"
+          "description": "按订单号合并"
         }
       ],
       "global_transforms": [
@@ -83,6 +98,18 @@
             "order_id"
           ],
           "description": "删除订单号为空的记录"
+        }
+      ],
+      "group_by": [
+        {
+          "field": "order_id",
+          "aggregations": [
+            {
+              "field": "amount",
+              "operation": "sum",
+              "output_field": "amount"
+            }
+          ]
         }
       ]
     },
@@ -106,9 +133,13 @@
         },
         {
           "field": "order_id",
-          "operation": "expr",
-          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "transform": "str(row.get('order_id', '')).lstrip(\"'\")[:21]",
           "description": "订单号去掉开头单引号，并截取前21位"
+        },
+        {
+          "field": "order_id",
+          "transform": "str(row.get('order_id', '')) if pd.notna(row.get('order_id', '')) and str(row.get('order_id', '')).strip() else None",
+          "description": "订单号转换为字符串，保留NaN便于后续drop_na删除空值记录"
         }
       ],
       "row_filters": [],
@@ -119,7 +150,7 @@
             "amount": "sum",
             "date": "first"
           },
-          "description": "相同的订单号按金额累加合并"
+          "description": "按订单号合并"
         }
       ],
       "global_transforms": [
@@ -130,6 +161,18 @@
             "amount"
           ],
           "description": "删除关键字段为空的记录"
+        }
+      ],
+      "group_by": [
+        {
+          "field": "order_id",
+          "aggregations": [
+            {
+              "field": "amount",
+              "operation": "sum",
+              "output_field": "amount"
+            }
+          ]
         }
       ]
     },
@@ -164,8 +207,12 @@
       "condition_expr": "biz_exists and fin_exists and biz.get('amount') is not None and fin.get('amount') is not None and abs(float(biz.get('amount', 0)) - float(fin.get('amount', 0))) > amount_diff_max",
       "issue_type": "amount_mismatch",
       "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"
+    },
+    {
+      "name": "order_status_mismatch",
+      "condition_expr": "biz_exists and str(biz.get('status', '')).lower() != 'success' and str(biz.get('status', '')).lower() != '成功' and str(biz.get('status', '')).lower() != '交易成功'",
+      "issue_type": "order_status_mismatch",
+      "detail_template": "订单状态不一致：状态为 {biz[status]}，不是允许的成功状态"
     }
-  ],
-  "field_mapping_text": "业务: 订单号->第三方订单号, 金额->应结算平台金额, 日期->支付时间\n财务: 订单号->sup订单号, 金额->发生-, 日期->完成时间",
-  "rule_config_text": "订单号去掉开头单引号，并截取前21位\n相同的订单号按金额累加合并"
+  ]
 }

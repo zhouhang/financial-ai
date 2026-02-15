@@ -37,7 +37,7 @@ export default function Sidebar({
           </div>
           <div>
             <h1 className="text-gray-900 font-semibold text-base leading-tight">
-              FinFlux
+              Tally
             </h1>
             <p className="text-gray-500 text-xs">智能财务助手</p>
           </div>

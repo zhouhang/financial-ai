@@ -193,7 +193,7 @@ export default function ChatArea({
           <div className="flex items-baseline gap-2">
             <h2 className="text-base font-semibold text-gray-900">分析会话</h2>
             <span className="text-xs text-gray-500">
-              数据分析与财务对账助手
+              Tally 智能财务助手
             </span>
           </div>
         </div>
