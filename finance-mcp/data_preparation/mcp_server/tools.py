@@ -34,6 +34,10 @@ def create_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "data_preparation_type": {
                         "type": "string",
                         "description": "数据整理类型（中文名称，如：审计数据整理）"
@@ -44,7 +48,7 @@ def create_tools() -> list[Tool]:
                         "description": "文件路径列表"
                     }
                 },
-                "required": ["data_preparation_type", "files"]
+                "required": ["auth_token", "data_preparation_type", "files"]
             }
         ),
         Tool(
@@ -53,12 +57,16 @@ def create_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "task_id": {
                         "type": "string",
                         "description": "任务ID"
                     }
                 },
-                "required": ["task_id"]
+                "required": ["auth_token", "task_id"]
             }
         ),
         Tool(
@@ -67,12 +75,16 @@ def create_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "task_id": {
                         "type": "string",
                         "description": "任务ID"
                     }
                 },
-                "required": ["task_id"]
+                "required": ["auth_token", "task_id"]
             }
         ),
         Tool(
@@ -80,7 +92,13 @@ def create_tools() -> list[Tool]:
             description="列出所有数据整理任务",
             inputSchema={
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    }
+                },
+                "required": ["auth_token"]
             }
         )
     ]
@@ -103,6 +121,18 @@ async def handle_tool_call(name: str, arguments: dict) -> Dict[str, Any]:
 async def _data_preparation_start(args: Dict) -> Dict:
     """开始数据整理任务"""
     try:
+        from auth.jwt_utils import get_user_from_token
+        
+        # 1. 验证 token 和获取用户信息
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token 参数"}
+        
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "token 无效或已过期"}
+        
+        # 2. 获取业务参数
         data_preparation_type = args.get("data_preparation_type")
         files = args.get("files", [])
         
@@ -179,6 +209,18 @@ async def _data_preparation_start(args: Dict) -> Dict:
 async def _data_preparation_result(args: Dict) -> Dict:
     """获取数据整理结果"""
     try:
+        from auth.jwt_utils import get_user_from_token
+        
+        # 1. 验证 token 和获取用户信息
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token 参数"}
+        
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "token 无效或已过期"}
+        
+        # 2. 获取业务参数
         task_id = args.get("task_id")
         
         if not task_id:
@@ -223,6 +265,18 @@ async def _data_preparation_result(args: Dict) -> Dict:
 async def _data_preparation_status(args: Dict) -> Dict:
     """查询任务状态"""
     try:
+        from auth.jwt_utils import get_user_from_token
+        
+        # 1. 验证 token 和获取用户信息
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token 参数"}
+        
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "token 无效或已过期"}
+        
+        # 2. 获取业务参数
         task_id = args.get("task_id")
         
         if not task_id:
@@ -238,6 +292,18 @@ async def _data_preparation_status(args: Dict) -> Dict:
 async def _data_preparation_list_tasks(args: Dict) -> Dict:
     """列出所有任务"""
     try:
+        from auth.jwt_utils import get_user_from_token
+        
+        # 1. 验证 token 和获取用户信息
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token 参数"}
+        
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "token 无效或已过期"}
+        
+        # 2. 获取任务列表
         tasks = await task_manager.list_tasks()
         return {"tasks": tasks}
     

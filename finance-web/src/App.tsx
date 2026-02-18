@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -54,6 +54,9 @@ export default function App() {
   // ── 流式输出状态 ──────────────────────────────────────────
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
 
+  // ── 响应目标会话追踪 ───────────────────────────────────────
+  const pendingConvIdRef = useRef<string | null>(null);
+
   // ── 任务和文件 ────────────────────────────────────────────
   const [tasks, setTasks] = useState<Task[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
@@ -98,13 +101,14 @@ export default function App() {
   // ── WebSocket ─────────────────────────────────────────────
   const handleWsMessage = useCallback(
     (data: WsOutgoing) => {
+      const targetConvId = pendingConvIdRef.current || activeConvId;
       switch (data.type) {
         case 'stream':
           // 流式输出：逐步更新消息内容
           setIsLoading(false);
           setConversations((prev) =>
             prev.map((c) => {
-              if (c.id !== activeConvId) return c;
+              if (c.id !== targetConvId) return c;
               
               // 查找或创建流式消息
               const existingMsgIndex = c.messages.findIndex(
@@ -152,7 +156,7 @@ export default function App() {
           // 若上一条是「正在保存」，用新消息替换它（保存成功后不再显示正在保存）
           setConversations((prev) =>
             prev.map((c) => {
-              if (c.id !== activeConvId) return c;
+              if (c.id !== targetConvId) return c;
               const lastMsg = c.messages[c.messages.length - 1];
               const isLastSaving =
                 lastMsg?.role === 'assistant' &&
@@ -190,22 +194,37 @@ export default function App() {
             
             content += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
             
-            appendMessage({
-              id: generateId(),
-              role: 'assistant',
-              content,
-              timestamp: new Date(),
-            });
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === targetConvId
+                  ? {
+                      ...c,
+                      messages: [
+                        ...c.messages,
+                        {
+                          id: generateId(),
+                          role: 'assistant' as const,
+                          content,
+                          timestamp: new Date(),
+                        },
+                      ],
+                      updatedAt: new Date(),
+                    }
+                  : c
+              )
+            );
           }
           
           // 标记等待用户回复
           setWaitingForFileUpload(true);
+          pendingConvIdRef.current = null;
           break;
 
         case 'done':
           setIsLoading(false);
           setWaitingForFileUpload(false);
           setStreamingMessageId(null); // 清除流式状态
+          pendingConvIdRef.current = null;
           break;
 
         case 'auth':
@@ -241,19 +260,32 @@ export default function App() {
 
         case 'error':
           setIsLoading(false);
-          appendMessage({
-            id: generateId(),
-            role: 'system',
-            content: data.content || '发生错误',
-            timestamp: new Date(),
-            action: 'info',
-            actionDetail: '处理出错',
-            actionDone: true,
-          });
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === targetConvId
+                ? {
+                    ...c,
+                    messages: [
+                      ...c.messages,
+                      {
+                        id: generateId(),
+                        role: 'system' as const,
+                        content: data.content || '发生错误',
+                        timestamp: new Date(),
+                        action: 'info',
+                        actionDetail: '处理出错',
+                        actionDone: true,
+                      },
+                    ],
+                    updatedAt: new Date(),
+                  }
+                : c
+            )
+          );
           break;
       }
     },
-    [appendMessage, streamingMessageId, activeConvId]
+    [appendMessage, streamingMessageId, activeConvId, pendingConvIdRef]
   );
 
   const { status, sendMessage } = useWebSocket({
@@ -333,6 +365,7 @@ export default function App() {
       });
       }
 
+      pendingConvIdRef.current = activeConvId;
       setIsLoading(true);
       const shouldResume = waitingForFileUpload;
       setWaitingForFileUpload(false);
@@ -342,7 +375,7 @@ export default function App() {
         .map((a) => ({ name: a.name, path: a.path }));
       sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend);
     },
-    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken]
+    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -377,7 +410,6 @@ export default function App() {
     const conv = createConversation();
     setConversations((prev) => [conv, ...prev]);
     setActiveConvId(conv.id);
-    setIsLoading(false);
     setTasks([]);
     setUploadedFiles([]);
     setTaskResult(null);
