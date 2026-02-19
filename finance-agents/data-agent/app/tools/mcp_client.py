@@ -146,19 +146,33 @@ async def start_reconciliation(auth_token: str, files: list[str], rule_id: str =
     return await call_mcp_tool("reconciliation_start", args)
 
 
-async def get_reconciliation_status(task_id: str) -> dict[str, Any]:
-    """轮询对账任务状态。"""
-    return await call_mcp_tool("reconciliation_status", {"task_id": task_id})
+async def get_reconciliation_status(auth_token: str, task_id: str) -> dict[str, Any]:
+    """轮询对账任务状态。
+    
+    Args:
+        auth_token: JWT token，用于身份验证
+        task_id: 任务 ID
+    """
+    return await call_mcp_tool("reconciliation_status", {"auth_token": auth_token, "task_id": task_id})
 
 
-async def get_reconciliation_result(task_id: str) -> dict[str, Any]:
-    """获取对账结果。"""
-    return await call_mcp_tool("reconciliation_result", {"task_id": task_id})
+async def get_reconciliation_result(auth_token: str, task_id: str) -> dict[str, Any]:
+    """获取对账结果。
+    
+    Args:
+        auth_token: JWT token，用于身份验证
+        task_id: 任务 ID
+    """
+    return await call_mcp_tool("reconciliation_result", {"auth_token": auth_token, "task_id": task_id})
 
 
-async def list_reconciliation_tasks() -> dict[str, Any]:
-    """列出所有对账任务。"""
-    return await call_mcp_tool("reconciliation_list_tasks", {})
+async def list_reconciliation_tasks(auth_token: str) -> dict[str, Any]:
+    """列出当前用户的所有对账任务。
+    
+    Args:
+        auth_token: JWT token，用于身份验证
+    """
+    return await call_mcp_tool("reconciliation_list_tasks", {"auth_token": auth_token})
 
 
 # ===========================================================================

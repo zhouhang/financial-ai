@@ -118,4 +118,5 @@ class ReconciliationTask:
     result: Optional[ReconciliationResult] = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+    user_id: Optional[str] = None  # 创建任务的用户ID
 

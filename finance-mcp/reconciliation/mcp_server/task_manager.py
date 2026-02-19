@@ -21,7 +21,7 @@ class TaskManager:
         self.tasks: Dict[str, ReconciliationTask] = {}
         self._lock = asyncio.Lock()
     
-    async def create_task(self, schema: Dict, files: List[str], callback_url: Optional[str] = None) -> str:
+    async def create_task(self, schema: Dict, files: List[str], callback_url: Optional[str] = None, user_id: Optional[str] = None) -> str:
         """
         创建新任务
         
@@ -29,6 +29,7 @@ class TaskManager:
             schema: 对账 schema
             files: 文件路径列表
             callback_url: 回调地址
+            user_id: 创建任务的用户ID
         
         Returns:
             任务 ID
@@ -40,7 +41,8 @@ class TaskManager:
             schema=schema,
             files=files,
             callback_url=callback_url,
-            status=TaskStatus.PENDING
+            status=TaskStatus.PENDING,
+            user_id=user_id
         )
         
         async with self._lock:

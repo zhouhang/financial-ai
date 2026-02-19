@@ -1,0 +1,768 @@
+"""主图节点函数模块
+
+包含主图中的所有节点函数：
+- router_node: AI 自主决策节点
+- task_execution_node: 任务执行节点
+- result_analysis_node: 结果分析节点
+- ask_start_now_node: 询问是否立即执行
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from typing import Any
+
+from langchain_core.messages import AIMessage, SystemMessage
+from langgraph.types import interrupt
+
+from app.utils.llm import get_llm
+from app.models import (
+    AgentState,
+    ReconciliationPhase,
+    TaskExecutionStep,
+    UserIntent,
+)
+from app.graphs.reconciliation import (
+    _rule_template_to_mappings,
+    _rule_template_to_config_items,
+)
+from app.tools.mcp_client import (
+    list_available_rules,
+    get_rule_detail,
+    auth_login,
+    auth_register,
+    start_reconciliation,
+    get_reconciliation_status,
+    get_reconciliation_result,
+    delete_rule,
+)
+from .forms import generate_login_form, generate_register_form
+
+logger = logging.getLogger(__name__)
+
+
+# ── 全局进度回调管理 ──────────────────────────────────────────────────────────
+
+_progress_callbacks: dict[str, Any] = {}
+
+def register_progress_callback(thread_id: str, callback: Any):
+    """注册进度回调函数（由 WebSocket 处理器调用）"""
+    _progress_callbacks[thread_id] = callback
+
+def unregister_progress_callback(thread_id: str):
+    """注销进度回调函数"""
+    _progress_callbacks.pop(thread_id, None)
+
+def _get_progress_callback(thread_id: str):
+    """获取进度回调函数"""
+    return _progress_callbacks.get(thread_id)
+
+
+# ── 系统提示词 ────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT_NOT_LOGGED_IN = """\
+你是一个专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+
+⚠️ 当前用户尚未登录。请引导用户先登录或注册。
+
+请根据用户的意图判断：
+- 如果用户想登录，回复 JSON: {{"intent": "show_login_form"}}
+- 如果用户想注册，回复 JSON: {{"intent": "show_register_form"}}
+- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，包含：
+  1. 简短的问候和自我介绍（1-2句话，不要使用感叹号开头）
+  2. 说明需要登录才能使用
+  3. 引导用户"请输入'我要登录'或'我要注册'"
+
+重要：
+- 所有内容必须在同一条消息中完成，不要分多次回复
+- 不要使用感叹号（！或!）开头
+- 只在用户明确表达要登录或注册时才返回 JSON，否则正常对话
+"""
+
+SYSTEM_PROMPT = """\
+你是一个专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+当前登录用户：{username}
+
+你可以做以下事情：
+1. 使用已有的对账规则快速执行对账
+2. 引导用户创建新的对账规则
+3. 调整/编辑已有规则（如修改字段映射、规则配置等）
+4. 删除对账规则
+5. 查看规则列表
+6. 帮助用户理解对账结果
+
+当前已有的对账规则包括：
+{available_rules}
+
+请根据用户的意图判断下一步操作：
+- 如果用户想**查看规则列表**（如"我的规则列表"、"看看有哪些规则"、"规则列表"），回复 JSON: {{"intent": "list_rules"}}
+- 如果用户想**使用已有规则对账**（如"用XX规则对账"、"执行XX对账"），回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
+- 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
+- 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
+- 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
+- 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
+  1. 用「你好，{username}！」开头，带上用户名
+  2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
+  3. 说明当前已有规则
+  4. 询问用户需要什么帮助
+
+注意：
+- **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
+- **调整/编辑规则**与**使用规则对账**要严格区分：说"调整XX"、"编辑XX"、"修改XX规则"→ edit_rule；说"用XX对账"、"执行对账"→ use_existing_rule
+- 只在明确判断意图时才返回 JSON，否则正常对话
+- 删除规则时，必须从用户输入中提取准确的规则名称
+- 只返回一条消息，不要分多次回复
+"""
+
+
+RESULT_ANALYSIS_PROMPT = """\
+你是一个专业的财务对账分析师。请根据以下对账结果，给出清晰、专业的分析报告。
+
+对账结果数据：
+{result_json}
+
+请严格按照以下格式输出分析报告：
+
+## 📊 对账概况
+简要列出：业务记录数、财务记录数、匹配数、差异数、匹配率。
+
+## ⚠️ 差异分析
+**按问题类型（issue_type）分组**列出差异，每个类型下列出对应的订单号。格式如下：
+
+### 类型名称（X 条）
+说明该类型的含义。
+- 订单号列表（每行一个）
+
+如果某类型的订单数超过20条，只列前20个并注明总数。
+
+要求：
+- 使用中文
+- 数据准确，直接引用结果中的数字
+- 语言简洁专业，不要重复信息
+- 不需要给出建议，只做数据分析
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第1层：对话理解 — router
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def router_node(state: AgentState) -> dict:
+    """AI 自主决策节点：分析用户意图，决定走快速路径还是引导式生成。"""
+
+    # ⚠️ 关键：如果当前在子图执行中，不要重新识别意图，直接透传
+    current_phase = state.get("phase", "")
+    subgraph_phases = [
+        ReconciliationPhase.FILE_ANALYSIS.value,
+        ReconciliationPhase.FIELD_MAPPING.value,
+        ReconciliationPhase.RULE_CONFIG.value,
+        ReconciliationPhase.VALIDATION_PREVIEW.value,
+        ReconciliationPhase.SAVE_RULE.value,
+        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        ReconciliationPhase.EDIT_SAVE.value,
+    ]
+    
+    if current_phase in subgraph_phases:
+        logger.info(f"router_node: 当前在子图执行中 (phase={current_phase})，跳过意图识别")
+        return {"messages": []}
+
+    auth_token = state.get("auth_token", "")
+    current_user = state.get("current_user")
+
+    # ── 未登录状态：引导登录 / 处理登录注册 ──────────────────────
+    if not auth_token or not current_user:
+        messages = list(state.get("messages", []))
+        last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
+        
+        # 检查是否是表单提交（JSON 格式的表单数据）
+        form_data = None
+        try:
+            if last_user_msg.strip().startswith("{") and "form_type" in last_user_msg:
+                form_data = json.loads(last_user_msg)
+        except:
+            pass
+        
+        if form_data:
+            # 处理表单提交
+            form_type = form_data.get("form_type")
+            if form_type == "login":
+                username = form_data.get("username", "").strip()
+                password = form_data.get("password", "").strip()
+                if username and password:
+                    result = await auth_login(username, password)
+                    if result.get("success"):
+                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
+                        return {
+                            "messages": [AIMessage(content=f"✅ {result['message']}")],
+                            "auth_token": result["token"],
+                            "current_user": result["user"],
+                            "user_intent": UserIntent.UNKNOWN.value,
+                        }
+                    else:
+                        # 登录失败，重新显示登录表单（错误信息嵌入表单）
+                        error = result.get('error', '用户名或密码错误')
+                        return {"messages": [AIMessage(content=generate_login_form(error))]}
+            elif form_type == "register":
+                username = form_data.get("username", "").strip()
+                password = form_data.get("password", "").strip()
+                if username and password:
+                    result = await auth_register(
+                        username, password,
+                        email=form_data.get("email", "").strip() or None,
+                        phone=form_data.get("phone", "").strip() or None,
+                        company_code=form_data.get("company_code", "").strip() or None,
+                        department_code=form_data.get("department_code", "").strip() or None,
+                    )
+                    if result.get("success"):
+                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
+                        return {
+                            "messages": [AIMessage(content=f"✅ {result['message']}")],
+                            "auth_token": result["token"],
+                            "current_user": result["user"],
+                            "user_intent": UserIntent.UNKNOWN.value,
+                        }
+                    else:
+                        # 注册失败，重新显示注册表单（错误信息嵌入表单）
+                        error = result.get('error', '注册失败，请检查输入信息')
+                        return {"messages": [AIMessage(content=generate_register_form(error))]}
+        
+        # 使用 LLM 流式生成回复（支持流式输出）
+        llm = get_llm()
+        # 使用 astream 进行流式调用，LangGraph 会自动处理流式输出
+        resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
+        content = resp.content.strip()
+
+        # 尝试解析意图 JSON
+        try:
+            json_match = content
+            if "```" in content:
+                m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+                if m:
+                    json_match = m.group(1)
+            parsed = json.loads(json_match)
+            intent = parsed.get("intent", "")
+        except (json.JSONDecodeError, AttributeError):
+            intent = ""
+
+        if intent == "show_login_form":
+            login_html = generate_login_form()
+            # 验证：确保登录表单只包含用户名和密码字段
+            if login_html.count('<input') != 2:
+                logger.error(f"登录表单字段数量错误！期望2个，实际: {login_html.count('<input')}")
+            if 'company_code' in login_html or 'department_code' in login_html:
+                logger.error("登录表单错误地包含了公司编码或部门编码字段！")
+            logger.info(f"返回登录表单，长度: {len(login_html)}, 输入框数量: {login_html.count('<input')}")
+            return {"messages": [AIMessage(content=login_html)]}
+        elif intent == "show_register_form":
+            register_html = generate_register_form()
+            logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
+            return {"messages": [AIMessage(content=register_html)]}
+        else:
+            # LLM 正常回复（引导用户）
+            # 去掉开头的"！"或"!"，并确保只有一条消息
+            cleaned_content = content.strip()
+            return {"messages": [AIMessage(content=cleaned_content)]}
+
+    # ── 已登录状态：正常意图识别 ──────────────────────────────────
+    rules = await list_available_rules(auth_token)
+    rules_text = "\n".join(
+        [f"• {r['name']}（{r.get('description', '')}）" for r in rules]
+    ) if rules else "暂无已有规则"
+
+    username = current_user.get("username", "用户")
+    # 使用 replace 替代 format，避免规则名称/描述中的 {} 被误解析
+    system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
+
+    llm = get_llm()
+    messages = list(state.get("messages", []))
+    resp = llm.invoke([SystemMessage(content=system_msg)] + messages)
+
+    content = resp.content.strip()
+
+    # 尝试解析 JSON 意图
+    try:
+        json_match = content
+        if "```" in content:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if m:
+                json_match = m.group(1)
+        parsed = json.loads(json_match)
+        intent = parsed.get("intent", "")
+        rule_name = parsed.get("rule_name", "")
+    except (json.JSONDecodeError, AttributeError):
+        intent = ""
+        rule_name = ""
+
+    # ⚠️ 兜底：用户明确说"规则列表"/"看看规则"时，强制识别为 list_rules，避免误触发对账
+    last_user_msg = (messages[-1].content if messages and hasattr(messages[-1], "content") else "") or ""
+    last_user_msg_lower = last_user_msg.lower().strip()
+    list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则")
+    if any(kw in last_user_msg_lower for kw in list_rules_keywords) and intent == UserIntent.USE_EXISTING_RULE.value:
+        intent = UserIntent.LIST_RULES.value
+        rule_name = ""
+        logger.info(f"router: 用户说「{last_user_msg[:30]}...」强制识别为 list_rules，避免误触发对账")
+
+    # ⚠️ 兜底：对账完成后用户说"调整/编辑/修改XX规则"时，强制识别为 edit_rule，避免误触发再次对账
+    edit_rule_keywords = ("调整", "编辑", "修改")
+    if (state.get("phase", "") == ReconciliationPhase.COMPLETED.value
+            and any(kw in last_user_msg_lower for kw in edit_rule_keywords)
+            and intent != UserIntent.EDIT_RULE.value):
+        intent = UserIntent.EDIT_RULE.value
+        # 从规则名中提取：用户可能说"调整喜马"、"调整喜马规则"
+        if not rule_name and rules:
+            for r in rules:
+                if r.get("name", "") in last_user_msg or last_user_msg in r.get("name", ""):
+                    rule_name = r.get("name", "")
+                    break
+        logger.info(f"router: 对账完成后用户说「{last_user_msg[:30]}...」强制识别为 edit_rule，避免误触发对账")
+
+    # 检查是否切换意图
+    old_intent = state.get("user_intent", "")
+    old_phase = state.get("phase", "")
+    uploaded_files = state.get("uploaded_files", [])
+    
+    # ⚠️ 关键修复：如果前一个对账已完成，开始新对账时需要清空旧数据
+    # 只有在 phase 不是 COMPLETED 时，才保留 uploaded_files（用户换文件的场景）
+    if old_phase == ReconciliationPhase.COMPLETED.value:
+        # 对账已完成，开始新对账需要清空旧数据
+        uploaded_files = []
+    
+    if intent == UserIntent.LIST_RULES.value:
+        # 查看规则列表：直接展示，不触发对账
+        if rules:
+            lines = ["📋 **我的对账规则列表**\n"]
+            for r in rules:
+                desc = r.get("description", "")
+                lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+            msg = "\n".join(lines)
+        else:
+            msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
+        return {
+            "messages": [AIMessage(content=msg)],
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+    elif intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
+        # ⚠️ 修复：切换意图时不要清空 uploaded_files，否则会丢失用户刚上传的新文件
+        # （用户换文件后说「使用南京飞翰对账」时，state 已通过 input 合并了新文件，清空会导致仍用旧结果）
+        msg = f"好的，将使用规则「{rule_name}」进行对账。\n\n✨ 请上传对账文件（业务数据和财务数据各一个）"
+        return {
+            "messages": [AIMessage(content=msg)],
+            "user_intent": intent,
+            "selected_rule_name": rule_name,
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+            "uploaded_files": uploaded_files,
+        }
+    elif intent == UserIntent.CREATE_NEW_RULE.value:
+        if old_intent != intent or old_phase == ReconciliationPhase.COMPLETED.value:
+            # 开始创建新规则，清空旧数据
+            uploaded_files = []
+        welcome_msg = (
+            "🎯 **开始创建新的对账规则**\n\n"
+            "我会引导你完成以下4个步骤：\n\n"
+            "**1️⃣ 上传并分析文件** - 分析文件结构和列名\n"
+            "**2️⃣ 确认字段映射** - 将列名映射到标准字段（订单号、金额等）\n"
+            "**3️⃣ 配置规则参数** - 设置容差、订单号特征等\n"
+            "**4️⃣ 预览并保存** - 查看规则效果并保存\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。"
+        )
+        return {
+            "messages": [AIMessage(content=welcome_msg)],
+            "user_intent": intent,
+            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+            "uploaded_files": uploaded_files,
+            "file_analyses": [],
+            "suggested_mappings": {},  # 清空之前的字段映射
+            "confirmed_mappings": {},  # 清空之前的确认映射
+        }
+    elif intent == UserIntent.DELETE_RULE.value and rule_name:
+        # 删除规则
+        try:
+            # 从规则列表中查找规则 ID
+            rule_id = None
+            for rule in rules:
+                if rule.get("name") == rule_name:
+                    rule_id = rule.get("id")
+                    break
+            
+            if not rule_id:
+                return {
+                    "messages": [AIMessage(content=f"❌ 未找到规则「{rule_name}」，请检查规则名称是否正确。")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+            
+            # 调用删除规则 API
+            result = await delete_rule(auth_token, rule_id)
+            
+            if result.get("success"):
+                return {
+                    "messages": [AIMessage(content=f"✅ {result.get('message', f'规则「{rule_name}」已成功删除')}")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+            else:
+                error_msg = result.get("error", "删除失败")
+                return {
+                    "messages": [AIMessage(content=f"❌ 删除规则失败：{error_msg}")],
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+        except Exception as e:
+            logger.error(f"删除规则时出错: {e}")
+            return {
+                "messages": [AIMessage(content=f"❌ 删除规则时发生错误：{str(e)}")],
+                "user_intent": UserIntent.UNKNOWN.value,
+        }
+    elif intent == UserIntent.EDIT_RULE.value:
+        if not rule_name:
+            return {
+                "messages": [AIMessage(content="❌ 请指定要编辑的规则名称，例如「调整喜马规则」。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+        # 调整/编辑规则：加载规则详情，进入编辑流程
+        rule_detail = await get_rule_detail(auth_token, rule_name=rule_name)
+        if not rule_detail:
+            return {
+                "messages": [AIMessage(content=f"❌ 未找到规则「{rule_name}」，请检查规则名称是否正确。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+        rule_template = rule_detail.get("rule_template") or {}
+        rule_id = rule_detail.get("id", "")
+        mappings = _rule_template_to_mappings(rule_template)
+        config_items = _rule_template_to_config_items(rule_template)
+        welcome_msg = f"📝 正在加载规则「{rule_name}」的编辑..."
+        return {
+            "messages": [AIMessage(content=welcome_msg)],
+            "user_intent": UserIntent.EDIT_RULE.value,
+            "editing_rule_id": rule_id,
+            "editing_rule_name": rule_name,
+            "editing_rule_template": rule_template,
+            "confirmed_mappings": mappings,
+            "suggested_mappings": mappings,
+            "rule_config_items": config_items,
+            "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        }
+    else:
+        # 普通对话
+        return {
+            "messages": [AIMessage(content=content)],
+            "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": uploaded_files,  # 保留文件信息
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第3层：任务执行 — 调用 finance-mcp
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _do_start_task(auth_token: str, rule_name: str, files: list[str]) -> dict[str, Any]:
+    """启动对账任务。
+    
+    Args:
+        auth_token: JWT token
+        rule_name: 规则名称
+        files: 文件列表
+    """
+    result = await start_reconciliation(auth_token=auth_token, files=files, rule_name=rule_name)
+    return result
+
+
+async def _do_poll(
+    auth_token: str,
+    task_id: str, 
+    progress_callback=None,
+    max_polls: int = 60,  # 增加到 60 次 (60 秒)
+    interval: float = 1.0  # 缩短到 1 秒
+) -> dict[str, Any]:
+    """轮询任务状态直到完成，并收集进度消息。
+    
+    Args:
+        auth_token: JWT token，用于身份验证
+        task_id: 任务 ID
+        progress_callback: 未使用（保留接口兼容性）
+        max_polls: 最大轮询次数
+        interval: 轮询间隔（秒）
+    
+    Returns:
+        包含 status 和可选的 progress_messages 的字典
+    """
+    # 进度消息列表（带时间戳，用于显示）
+    progress_messages_with_timing = [
+        (0, "📊 正在加载数据文件 {{SPINNER}}"),
+        (5, "🔍 正在分析数据结构 {{SPINNER}}"),
+        (15, "⚙️  正在执行对账规则 {{SPINNER}}"),
+        (30, "📈 正在生成对账结果 {{SPINNER}}"),
+        (45, "✨ 即将完成 {{SPINNER}}"),
+    ]
+    
+    collected_progress = []
+    last_message_idx = -1
+    
+    for poll_count in range(max_polls):
+        status = await get_reconciliation_status(auth_token, task_id)
+        st = status.get("status", "")
+        
+        # 根据时间显示进度（不使用回调，而是收集消息）
+        for idx, (timing, message) in enumerate(progress_messages_with_timing):
+            if poll_count >= timing and idx > last_message_idx:
+                collected_progress.append(message)
+                last_message_idx = idx
+                logger.info(f"对账进度 [{poll_count}s]: {message}")
+        
+        if st in ("completed", "failed", "error"):
+            result = status.copy()
+            result["progress_messages"] = collected_progress
+            return result
+        
+        await asyncio.sleep(interval)
+    
+    return {
+        "status": "timeout",
+        "task_id": task_id,
+        "progress_messages": collected_progress
+    }
+
+
+def _run_async_safe(coro):
+    """安全地运行协程，兼容已存在的事件循环环境。"""
+    try:
+        # 尝试获取当前运行中的事件循环
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # 没有运行中的事件循环，创建新的并运行
+        return asyncio.run(coro)
+    else:
+        # 已有运行中的事件循环，在线程池中运行
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+
+def task_execution_node(state: AgentState) -> dict:
+    """第3层：启动对账任务、轮询状态、展示结果。
+
+    由于 langgraph 节点是同步的，内部使用 asyncio 调用异步函数。
+    """
+    rule_name = state.get("selected_rule_name") or state.get("saved_rule_name")
+    auth_token = state.get("auth_token", "")
+    uploaded_files = state.get("uploaded_files", [])
+    step = state.get("execution_step", TaskExecutionStep.NOT_STARTED.value)
+
+    # ⚠️ 清除旧的对账结果，防止显示上一次的结果
+    state.pop("task_id", None)
+    state.pop("task_result", None)
+    state.pop("task_status", None)
+    
+    if not rule_name:
+        return {
+            "messages": [AIMessage(content="缺少对账规则名称，请先选择或创建一个规则。")],
+            "phase": ReconciliationPhase.IDLE.value,
+        }
+    
+    # 从 uploaded_files 中提取 file_path（带时间戳的文件路径）
+    # uploaded_files 可能是对象列表（包含 file_path 和 original_filename）或字符串列表（直接是文件路径）
+    files = []
+    for item in uploaded_files:
+        if isinstance(item, dict):
+            file_path = item.get("file_path", "")
+            if file_path:
+                files.append(file_path)
+        else:
+            # 兼容旧格式（直接是文件路径字符串）
+            files.append(item)
+    
+    if not files:
+        # 等待文件上传
+        user_response = interrupt({
+            "question": "请上传需要对账的文件",
+            "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
+        })
+        # ⚠️ 若用户回复的是「规则列表」等，说明想切换意图，不继续对账流程
+        response_str = (user_response or "").strip().lower()
+        list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则")
+        if any(kw in response_str for kw in list_rules_keywords):
+            rules = _run_async_safe(list_available_rules(auth_token))
+            if rules:
+                lines = ["📋 **我的对账规则列表**\n"]
+                for r in rules:
+                    desc = r.get("description", "")
+                    lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+                msg = "\n".join(lines)
+            else:
+                msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
+            return {
+                "messages": [AIMessage(content=msg)],
+                "phase": ReconciliationPhase.COMPLETED.value,
+                "selected_rule_name": None,
+            }
+        # interrupt后结束节点，等待用户上传文件后重新进入
+        return {
+            "messages": [],
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+        }
+
+    # ── 启动任务 ──
+    if not auth_token:
+        return {
+            "messages": [AIMessage(content="❌ 缺少认证信息，请先登录")],
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+        }
+    
+    logger.info(f"开始执行对账任务: rule={rule_name}, auth_token={auth_token[:20]}..., files={len(files)}个, file_paths={files}")
+    start_result = _run_async_safe(_do_start_task(auth_token, rule_name, files))
+
+    if "error" in start_result:
+        return {
+            "messages": [AIMessage(content=f"❌ 启动对账任务失败：{start_result['error']}")],
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+        }
+
+    task_id = start_result.get("task_id", "")
+    
+    # ── 启动成功，立即返回消息并开始轮询 ──
+    messages_to_send = [
+        AIMessage(content=f"🚀 对账任务已启动\n\n📋 规则：{rule_name}\n📁 文件：{len(files)} 个\n💾 任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒 {{SPINNER}}\n\n📊 进度：开始加载数据 {{SPINNER}}"),
+    ]
+
+    # ── 轮询 ──
+    logger.info(f"开始轮询任务状态: task_id={task_id}")
+    poll_result = _run_async_safe(_do_poll(auth_token, task_id))
+
+    status = poll_result.get("status", "")
+    logger.info(f"轮询结束: task_id={task_id}, status={status}")
+
+    if status == "completed":
+        # ── 获取结果，存入 state，交给 result_analysis 节点由 LLM 分析 ──
+        try:
+            logger.info(f"开始获取对账结果: task_id={task_id}")
+            result = _run_async_safe(get_reconciliation_result(auth_token, task_id))
+            logger.info(f"对账结果获取成功: task_id={task_id}, result keys={list(result.keys())}")
+
+            return {
+                "messages": messages_to_send,
+                "task_id": task_id,
+                "task_status": "completed",
+                "task_result": result,
+                "phase": ReconciliationPhase.TASK_EXECUTION.value,
+                "execution_step": TaskExecutionStep.SHOWING_RESULT.value,
+            }
+        except Exception as e:
+            logger.error(f"获取对账结果出错: task_id={task_id}, error={e}", exc_info=True)
+            messages_to_send.append(AIMessage(content=f"❌ 获取对账结果失败：{str(e)}"))
+            return {
+                "messages": messages_to_send,
+                "task_id": task_id,
+                "task_status": "error",
+                "phase": ReconciliationPhase.COMPLETED.value,
+                "execution_step": TaskExecutionStep.DONE.value,
+            }
+    elif status == "timeout":
+        messages_to_send.append(AIMessage(content="⏱️ 对账任务超时，任务可能仍在后台执行，请稍后查询。"))
+        return {
+            "messages": messages_to_send,
+            "task_id": task_id,
+            "task_status": status,
+            "phase": ReconciliationPhase.COMPLETED.value,
+            "execution_step": TaskExecutionStep.DONE.value,
+        }
+    else:
+        error_detail = poll_result.get("error", "")
+        err_msg = f"❌ 对账任务失败（状态: {status}）"
+        if error_detail:
+            err_msg += f"\n\n{error_detail}"
+        else:
+            err_msg += "，请检查日志或重试。"
+        messages_to_send.append(AIMessage(content=err_msg))
+        return {
+            "messages": messages_to_send,
+            "task_id": task_id,
+            "task_status": status,
+            "phase": ReconciliationPhase.COMPLETED.value,
+            "execution_step": TaskExecutionStep.DONE.value,
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 结果分析 — 由 LLM 分析对账结果并流式输出
+# ══════════════════════════════════════════════════════════════════════════════
+
+def result_analysis_node(state: AgentState) -> dict:
+    """由 LLM 分析对账结果并生成报告（流式输出）。
+    
+    ⚠️ 对账完成后清除旧数据，防止下次新对账时误用旧文件
+    """
+
+    task_result = state.get("task_result")
+    task_status = state.get("task_status", "")
+
+    # 如果任务未完成，跳过分析
+    if task_status != "completed" or not task_result:
+        logger.info(f"跳过结果分析: task_status={task_status}")
+        return {
+            "phase": ReconciliationPhase.COMPLETED.value,
+            "execution_step": TaskExecutionStep.DONE.value,
+            # ⚠️ 清除旧数据
+            "uploaded_files": [],
+            "selected_rule_name": None,
+        }
+
+    # 构建结果 JSON（精简版，避免 token 过多）
+    summary = task_result.get("summary", {})
+    issues = task_result.get("issues", [])
+    
+    result_for_llm = {
+        "summary": summary,
+        "issues_count": len(issues),
+        "issues": issues[:50],  # 传前50条给 LLM（按类型分组需要更多数据）
+    }
+
+    result_json = json.dumps(result_for_llm, ensure_ascii=False, indent=2, default=str)
+    logger.info(f"开始 LLM 分析对账结果: summary={summary}, issues_count={len(issues)}")
+
+    llm = get_llm()
+    # 使用 replace 替代 format，避免 JSON 中的 {} 被误解析为格式化占位符
+    # 仅替换占位符一次，防止 result_json 内含 {result_json} 导致递归
+    prompt = RESULT_ANALYSIS_PROMPT.replace("{result_json}", result_json, 1)
+
+    messages = [SystemMessage(content=prompt)]
+    resp = llm.invoke(messages)
+
+    return {
+        "messages": [AIMessage(content=resp.content)],
+        "phase": ReconciliationPhase.COMPLETED.value,
+        "execution_step": TaskExecutionStep.DONE.value,
+        # ⚠️ 清除旧数据，防止下次新对账时误用旧文件
+        "uploaded_files": [],
+        "selected_rule_name": None,
+    }
+
+
+def ask_start_now_node(state: AgentState) -> dict:
+    """询问用户是否立即开始对账。"""
+    user_response = interrupt({
+        "question": "是否立即开始对账？",
+        "hint": "回复\"开始\"立即执行，或\"稍后\"退出",
+    })
+
+    response_str = str(user_response).strip()
+    if response_str in ("开始", "是", "yes", "ok", "好", "执行", "立即开始"):
+        # 保留 uploaded_files，因为在创建规则流程中已经上传过文件
+        return {
+            "messages": [AIMessage(content="好的，开始执行对账 {{SPINNER}}")],
+            "selected_rule_name": state.get("saved_rule_name"),
+            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "execution_step": TaskExecutionStep.NOT_STARTED.value,
+            "uploaded_files": state.get("uploaded_files", []),
+        }
+    else:
+        return {
+            "messages": [AIMessage(content="好的，你可以随时回来执行对账。")],
+            "phase": ReconciliationPhase.COMPLETED.value,
+        }

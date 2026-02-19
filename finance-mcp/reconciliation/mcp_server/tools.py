@@ -116,12 +116,16 @@ def create_tools() -> List[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "task_id": {
                         "type": "string",
                         "description": "任务 ID"
                     }
                 },
-                "required": ["task_id"]
+                "required": ["auth_token", "task_id"]
             }
         ),
         Tool(
@@ -130,20 +134,30 @@ def create_tools() -> List[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "task_id": {
                         "type": "string",
                         "description": "任务 ID"
                     }
                 },
-                "required": ["task_id"]
+                "required": ["auth_token", "task_id"]
             }
         ),
         Tool(
             name="reconciliation_list_tasks",
-            description="列出所有对账任务",
+            description="列出当前用户的所有对账任务",
             inputSchema={
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    }
+                },
+                "required": ["auth_token"]
             }
         ),
         Tool(
@@ -152,6 +166,10 @@ def create_tools() -> List[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "files": {
                         "type": "array",
                         "description": "文件数组，每个元素包含 filename, content (base64编码)",
@@ -171,7 +189,7 @@ def create_tools() -> List[Tool]:
                         }
                     }
                 },
-                "required": ["files"]
+                "required": ["auth_token", "files"]
             }
         ),
         Tool(
@@ -180,12 +198,16 @@ def create_tools() -> List[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "reconciliation_type": {
                         "type": "string",
                         "description": "对账类型中文名称，例如：直销对账"
                     }
                 },
-                "required": ["reconciliation_type"]
+                "required": ["auth_token", "reconciliation_type"]
             }
         ),
         Tool(
@@ -194,6 +216,10 @@ def create_tools() -> List[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -205,7 +231,7 @@ def create_tools() -> List[Tool]:
                         "additionalProperties": {"type": "string"}
                     }
                 },
-                "required": ["file_paths"]
+                "required": ["auth_token", "file_paths"]
             }
         ),
         # 注意：list/save/update/delete_reconciliation_rule 已移至 auth/tools.py
