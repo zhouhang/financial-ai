@@ -51,8 +51,8 @@ def create_auth_tools() -> list[mcp_types.Tool]:
                     "password": {"type": "string", "description": "密码"},
                     "email": {"type": "string", "description": "邮箱（可选）"},
                     "phone": {"type": "string", "description": "手机号（可选）"},
-                    "company_code": {"type": "string", "description": "公司编码（可选，加入已有公司）"},
-                    "department_code": {"type": "string", "description": "部门编码（可选）"},
+                    "company_id": {"type": "string", "description": "公司 ID（可选）"},
+                    "department_id": {"type": "string", "description": "部门 ID（可选）"},
                 },
                 "required": ["username", "password"],
             },
@@ -164,6 +164,101 @@ def create_auth_tools() -> list[mcp_types.Tool]:
                 "required": ["auth_token", "rule_id"],
             },
         ),
+
+        # ── 管理员功能 ───────────────────────────────────────────────
+        Tool(
+            name="admin_login",
+            description="管理员登录",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "description": "管理员用户名"},
+                    "password": {"type": "string", "description": "管理员密码"},
+                },
+                "required": ["username", "password"],
+            },
+        ),
+        Tool(
+            name="create_company",
+            description="管理员创建公司",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "admin_token": {"type": "string", "description": "管理员 token"},
+                    "name": {"type": "string", "description": "公司名称"},
+                },
+                "required": ["admin_token", "name"],
+            },
+        ),
+        Tool(
+            name="create_department",
+            description="管理员创建部门",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "admin_token": {"type": "string", "description": "管理员 token"},
+                    "company_id": {"type": "string", "description": "公司 ID"},
+                    "name": {"type": "string", "description": "部门名称"},
+                },
+                "required": ["admin_token", "company_id", "name"],
+            },
+        ),
+        Tool(
+            name="list_companies",
+            description="获取公司列表（管理员）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "admin_token": {"type": "string", "description": "管理员 token"},
+                },
+                "required": ["admin_token"],
+            },
+        ),
+        Tool(
+            name="list_departments",
+            description="获取部门列表（可按公司筛选）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "admin_token": {"type": "string", "description": "管理员 token"},
+                    "company_id": {"type": "string", "description": "公司 ID（可选）"},
+                },
+                "required": ["admin_token"],
+            },
+        ),
+        Tool(
+            name="get_admin_view",
+            description="获取管理员视图 - 公司部门员工规则层级结构",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "admin_token": {"type": "string", "description": "管理员 token"},
+                },
+                "required": ["admin_token"],
+            },
+        ),
+        
+        # ── 公开 API（无需认证）───────────────────────────────────────
+        Tool(
+            name="list_companies_public",
+            description="获取公司列表（公开，用于注册）",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="list_departments_public",
+            description="获取指定公司的部门列表（公开，用于注册）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string", "description": "公司 ID"},
+                },
+                "required": ["company_id"],
+            },
+        ),
     ]
 
 
@@ -182,6 +277,14 @@ async def handle_auth_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Di
         "save_reconciliation_rule": _handle_save_rule,
         "update_reconciliation_rule": _handle_update_rule,
         "delete_reconciliation_rule": _handle_delete_rule,
+        "admin_login": _handle_admin_login,
+        "create_company": _handle_create_company,
+        "create_department": _handle_create_department,
+        "list_companies": _handle_list_companies,
+        "list_departments": _handle_list_departments,
+        "get_admin_view": _handle_admin_view,
+        "list_companies_public": _handle_list_companies_public,
+        "list_departments_public": _handle_list_departments_public,
     }
     handler = handlers.get(tool_name)
     if not handler:
@@ -214,8 +317,9 @@ async def _handle_register(args: dict) -> dict:
     password = args.get("password", "").strip()
     email = (args.get("email") or "").strip() or None
     phone = (args.get("phone") or "").strip() or None
-    company_code = (args.get("company_code") or "").strip() or None
-    department_code = (args.get("department_code") or "").strip() or None
+    # 支持直接传入 company_id 和 department_id
+    company_id = (args.get("company_id") or "").strip() or None
+    department_id = (args.get("department_id") or "").strip() or None
 
     if not username or not password:
         return {"success": False, "error": "用户名和密码不能为空"}
@@ -226,24 +330,6 @@ async def _handle_register(args: dict) -> dict:
     existing = auth_db.get_user_by_username(username)
     if existing:
         return {"success": False, "error": f"用户名 '{username}' 已存在"}
-
-    # 查找公司和部门
-    company_id = None
-    department_id = None
-
-    if company_code:
-        companies = auth_db.list_companies()
-        company = next((c for c in companies if c["code"] == company_code), None)
-        if not company:
-            return {"success": False, "error": f"公司编码 '{company_code}' 不存在"}
-        company_id = str(company["id"])
-
-        if department_code and company_id:
-            departments = auth_db.list_departments(company_id)
-            dept = next((d for d in departments if d["code"] == department_code), None)
-            if not dept:
-                return {"success": False, "error": f"部门编码 '{department_code}' 不存在"}
-            department_id = str(dept["id"])
 
     # 密码哈希
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -393,6 +479,27 @@ async def _handle_get_rule(args: dict) -> dict:
 
     if not rule:
         return {"success": False, "error": "规则不存在"}
+    
+    # 验证用户是否有权限查看该规则
+    user_id = user_info.get("user_id")
+    user_role = user_info.get("role")
+    rule_created_by = rule.get("created_by")
+    rule_visibility = rule.get("visibility", "private")
+    rule_department_id = rule.get("department_id")
+    user_department_id = user_info.get("department_id")
+    
+    has_access = False
+    if str(rule_created_by) == user_id:  # 创建者可以查看
+        has_access = True
+    elif rule_visibility == "company" and str(rule.get("company_id")) == str(user_info.get("company_id")):  # 公司可见
+        has_access = True
+    elif rule_visibility == "department" and str(rule_department_id) == str(user_department_id):  # 部门可见
+        has_access = True
+    elif user_role == "admin":  # admin 可以查看所有
+        has_access = True
+    
+    if not has_access:
+        return {"success": False, "error": "无权查看该规则"}
 
     return {"success": True, "rule": rule}
 
@@ -524,7 +631,7 @@ async def _handle_save_rule(args: dict) -> dict:
     name = args.get("name", "").strip()
     description = args.get("description", name)
     rule_template = args.get("rule_template")
-    visibility = args.get("visibility", "private")
+    visibility = args.get("visibility", "department")  # 默认改为 department
     tags = args.get("tags", [])
 
     if not name:
@@ -665,3 +772,141 @@ async def _handle_delete_rule(args: dict) -> dict:
         "success": True,
         "message": f"规则 '{rule_name}' 已从 PostgreSQL 删除，JSON 备份文件已清理",
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 管理员功能
+# ══════════════════════════════════════════════════════════════════════════════
+
+import hashlib
+
+ADMIN_TOKENS = {}  # 简单的内存存储：admin_token -> admin_info
+
+def _verify_admin(username: str, password: str) -> dict | None:
+    """验证管理员账号密码"""
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    
+    conn = auth_db.get_conn()
+    try:
+        with conn as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT id, username FROM admins WHERE username = %s AND password = %s",
+                    (username, password_hash)
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"id": row[0], "username": row[1]}
+    except Exception as e:
+        logger.error(f"验证管理员失败: {e}")
+    return None
+
+
+async def _handle_admin_login(args: dict) -> dict:
+    """管理员登录"""
+    username = args.get("username", "").strip()
+    password = args.get("password", "").strip()
+    
+    if not username or not password:
+        return {"success": False, "error": "用户名和密码不能为空"}
+    
+    admin = _verify_admin(username, password)
+    if not admin:
+        return {"success": False, "error": "用户名或密码错误"}
+    
+    import time
+    admin_token = f"admin_{int(time.time())}_{username}"
+    ADMIN_TOKENS[admin_token] = admin
+    
+    return {
+        "success": True,
+        "admin_token": admin_token,
+        "username": admin["username"],
+    }
+
+
+async def _handle_create_company(args: dict) -> dict:
+    """创建公司"""
+    admin_token = args.get("admin_token", "")
+    name = args.get("name", "").strip()
+    
+    if not admin_token or admin_token not in ADMIN_TOKENS:
+        return {"success": False, "error": "无效的管理员 token，请先登录"}
+    
+    if not name:
+        return {"success": False, "error": "公司名称不能为空"}
+    
+    company = auth_db.create_company(name)
+    if not company:
+        return {"success": False, "error": "公司名称已存在"}
+    
+    return {"success": True, "company": company}
+
+
+async def _handle_create_department(args: dict) -> dict:
+    """创建部门"""
+    admin_token = args.get("admin_token", "")
+    company_id = args.get("company_id", "").strip()
+    name = args.get("name", "").strip()
+    
+    if not admin_token or admin_token not in ADMIN_TOKENS:
+        return {"success": False, "error": "无效的管理员 token，请先登录"}
+    
+    if not company_id or not name:
+        return {"success": False, "error": "公司ID和部门名称不能为空"}
+    
+    department = auth_db.create_department(company_id, name)
+    if not department:
+        return {"success": False, "error": "该公司下已存在此部门名称"}
+    
+    return {"success": True, "department": department}
+
+
+async def _handle_list_companies(args: dict) -> dict:
+    """获取公司列表"""
+    admin_token = args.get("admin_token", "")
+    
+    if not admin_token or admin_token not in ADMIN_TOKENS:
+        return {"success": False, "error": "无效的管理员 token，请先登录"}
+    
+    companies = auth_db.list_companies()
+    return {"success": True, "companies": companies}
+
+
+async def _handle_list_departments(args: dict) -> dict:
+    """获取部门列表"""
+    admin_token = args.get("admin_token", "")
+    company_id = args.get("company_id", "").strip() or None
+    
+    if not admin_token or admin_token not in ADMIN_TOKENS:
+        return {"success": False, "error": "无效的管理员 token，请先登录"}
+    
+    departments = auth_db.list_departments(company_id)
+    return {"success": True, "departments": departments}
+
+
+async def _handle_admin_view(args: dict) -> dict:
+    """获取管理员视图 - 公司部门员工规则层级"""
+    admin_token = args.get("admin_token", "")
+    
+    if not admin_token or admin_token not in ADMIN_TOKENS:
+        return {"success": False, "error": "无效的管理员 token，请先登录"}
+    
+    data = auth_db.get_admin_view()
+    return {"success": True, "data": data}
+
+
+async def _handle_list_companies_public(args: dict) -> dict:
+    """获取公司列表（公开，用于注册）"""
+    companies = auth_db.list_companies()
+    return {"success": True, "companies": companies}
+
+
+async def _handle_list_departments_public(args: dict) -> dict:
+    """获取指定公司的部门列表（公开，用于注册）"""
+    company_id = args.get("company_id", "").strip()
+    if not company_id:
+        return {"success": False, "error": "公司 ID 不能为空"}
+    
+    departments = auth_db.list_departments(company_id)
+    return {"success": True, "departments": departments}

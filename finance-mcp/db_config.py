@@ -24,8 +24,8 @@ class DatabaseConfig:
     def __init__(self):
         self.host = os.getenv('DB_HOST', 'localhost')
         self.port = int(os.getenv('DB_PORT', '5432'))
-        self.database = os.getenv('DB_NAME', 'finflux')
-        self.user = os.getenv('DB_USER', 'finflux_user')
+        self.database = os.getenv('DB_NAME', 'tally')
+        self.user = os.getenv('DB_USER', 'tally_user')
         self.password = os.getenv('DB_PASSWORD', '123456')
     
     def get_connection_params(self) -> Dict[str, Any]:

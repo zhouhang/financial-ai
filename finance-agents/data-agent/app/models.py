@@ -24,6 +24,12 @@ class UserIntent(str, Enum):
     LIST_RULES = "list_rules"  # 查看规则列表
     LOGIN = "login"
     REGISTER = "register"
+    # 管理员相关
+    ADMIN_LOGIN = "admin_login"
+    ADMIN_VIEW = "admin_view"
+    CREATE_COMPANY = "create_company"
+    CREATE_DEPARTMENT = "create_department"
+    ADMIN_LOGOUT = "admin_logout"
     UNKNOWN = "unknown"
 
 
@@ -171,6 +177,10 @@ class AgentState(TypedDict, total=False):
     # ── 认证 ──────────────────────────────────────────────────
     auth_token: Optional[str]         # JWT token
     current_user: Optional[dict]      # 当前登录用户信息
+    
+    # ── 管理员 ────────────────────────────────────────────────
+    admin_token: Optional[str]        # 管理员 token
+    admin_data: Optional[dict]        # 管理员数据（公司部门员工规则）
 
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值

@@ -52,6 +52,11 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "list_reconciliation_rules", "get_reconciliation_rule",
         "save_reconciliation_rule", "update_reconciliation_rule",
         "delete_reconciliation_rule",
+        # 管理员功能
+        "admin_login", "create_company", "create_department",
+        "list_companies", "list_departments", "get_admin_view",
+        # 公开 API
+        "list_companies_public", "list_departments_public",
     }
 
     try:
@@ -258,4 +263,67 @@ async def delete_rule(auth_token: str, rule_id: str) -> dict[str, Any]:
     return await call_mcp_tool("delete_reconciliation_rule", {
         "auth_token": auth_token,
         "rule_id": rule_id,
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 管理员功能
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def admin_login(username: str, password: str) -> dict[str, Any]:
+    """管理员登录"""
+    return await call_mcp_tool("admin_login", {
+        "username": username,
+        "password": password,
+    })
+
+
+async def create_company(admin_token: str, name: str) -> dict[str, Any]:
+    """管理员创建公司"""
+    return await call_mcp_tool("create_company", {
+        "admin_token": admin_token,
+        "name": name,
+    })
+
+
+async def create_department(admin_token: str, company_id: str, name: str) -> dict[str, Any]:
+    """管理员创建部门"""
+    return await call_mcp_tool("create_department", {
+        "admin_token": admin_token,
+        "company_id": company_id,
+        "name": name,
+    })
+
+
+async def list_companies(admin_token: str) -> dict[str, Any]:
+    """获取公司列表"""
+    return await call_mcp_tool("list_companies", {
+        "admin_token": admin_token,
+    })
+
+
+async def list_departments(admin_token: str, company_id: str = None) -> dict[str, Any]:
+    """获取部门列表"""
+    args = {"admin_token": admin_token}
+    if company_id:
+        args["company_id"] = company_id
+    return await call_mcp_tool("list_departments", args)
+
+
+async def get_admin_view(admin_token: str) -> dict[str, Any]:
+    """获取管理员视图"""
+    return await call_mcp_tool("get_admin_view", {
+        "admin_token": admin_token,
+    })
+
+
+async def list_companies_public() -> dict[str, Any]:
+    """获取公司列表（公开，用于注册）"""
+    return await call_mcp_tool("list_companies_public", {})
+
+
+async def list_departments_public(company_id: str) -> dict[str, Any]:
+    """获取指定公司的部门列表（公开，用于注册）"""
+    return await call_mcp_tool("list_departments_public", {
+        "company_id": company_id,
     })

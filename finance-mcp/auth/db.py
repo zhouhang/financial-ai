@@ -14,14 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_db_config() -> dict:
-    """获取数据库连接配置"""
-    return {
-        "host": os.getenv("DB_HOST", "localhost"),
-        "port": int(os.getenv("DB_PORT", "5432")),
-        "database": os.getenv("DB_NAME", "finflux"),
-        "user": os.getenv("DB_USER", "finflux_user"),
-        "password": os.getenv("DB_PASSWORD", "123456"),
-    }
+    """获取数据库连接配置 - 引用统一的 db_config"""
+    from db_config import db_config
+    return db_config.get_connection_params()
 
 
 def get_conn(max_retries=3, retry_delay=1):
@@ -412,3 +407,170 @@ def _serialize_rule_row(row: dict, include_template: bool = False) -> dict:
         else:
             result[key] = val
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 公司部门管理
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_company(name: str) -> dict | None:
+    """创建公司，返回公司dict或None（如果已存在）"""
+    import uuid
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 检查是否已存在
+                cur.execute("SELECT id FROM company WHERE name = %s", (name,))
+                if cur.fetchone():
+                    return None
+                
+                # 生成唯一的 code
+                code = f"COMP_{uuid.uuid4().hex[:8].upper()}"
+                
+                cur.execute(
+                    "INSERT INTO company (name, code) VALUES (%s, %s) RETURNING id, name, code, created_at",
+                    (name, code)
+                )
+                row = cur.fetchone()
+                c.commit()
+                return dict(row)
+    except Exception as e:
+        logger.error(f"创建公司失败: {e}")
+        return None
+
+
+def create_department(company_id: str, name: str) -> dict | None:
+    """创建部门，返回部门dict或None（如果已存在）"""
+    import uuid
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 检查是否已存在
+                cur.execute(
+                    "SELECT id FROM departments WHERE company_id = %s AND name = %s",
+                    (company_id, name)
+                )
+                if cur.fetchone():
+                    return None
+                
+                # 生成唯一的 code
+                code = f"DEPT_{uuid.uuid4().hex[:8].upper()}"
+                
+                cur.execute(
+                    "INSERT INTO departments (company_id, name, code) VALUES (%s, %s, %s) RETURNING id, company_id, name, code, created_at",
+                    (company_id, name, code)
+                )
+                row = cur.fetchone()
+                c.commit()
+                return dict(row)
+    except Exception as e:
+        logger.error(f"创建部门失败: {e}")
+        return None
+
+
+def list_companies() -> list[dict]:
+    """获取公司列表"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT id, name, created_at FROM company ORDER BY created_at DESC")
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"获取公司列表失败: {e}")
+        return []
+
+
+def list_departments(company_id: str | None = None) -> list[dict]:
+    """获取部门列表，可按公司筛选"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if company_id:
+                    cur.execute(
+                        "SELECT id, company_id, name, created_at FROM departments WHERE company_id = %s ORDER BY created_at DESC",
+                        (company_id,)
+                    )
+                else:
+                    cur.execute("SELECT id, company_id, name, created_at FROM departments ORDER BY created_at DESC")
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"获取部门列表失败: {e}")
+        return []
+
+
+def get_admin_view() -> dict:
+    """获取管理员视图 - 公司部门员工规则层级"""
+    conn = get_conn()
+    result = {"companies": []}
+    
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 获取所有公司
+                cur.execute("SELECT id, name, created_at FROM company ORDER BY name")
+                companies = cur.fetchall()
+                
+                for company in companies:
+                    company_id = company["id"]
+                    company_data = {
+                        "id": str(company["id"]),
+                        "name": company["name"],
+                        "departments": []
+                    }
+                    
+                    # 获取该公司的部门
+                    cur.execute(
+                        "SELECT id, name FROM departments WHERE company_id = %s ORDER BY name",
+                        (company_id,)
+                    )
+                    departments = cur.fetchall()
+                    
+                    for dept in departments:
+                        dept_id = dept["id"]
+                        dept_data = {
+                            "id": str(dept["id"]),
+                            "name": dept["name"],
+                            "employees": [],
+                            "rules": []
+                        }
+                        
+                        # 获取该部门的员工
+                        cur.execute(
+                            "SELECT id, username, email FROM users WHERE department_id = %s",
+                            (dept_id,)
+                        )
+                        employees = cur.fetchall()
+                        for emp in employees:
+                            dept_data["employees"].append({
+                                "id": str(emp["id"]),
+                                "username": emp["username"],
+                                "email": emp.get("email")
+                            })
+                        
+                        # 获取该部门的规则
+                        cur.execute(
+                            "SELECT id, name, visibility FROM reconciliation_rules WHERE department_id = %s",
+                            (dept_id,)
+                        )
+                        rules = cur.fetchall()
+                        for rule in rules:
+                            dept_data["rules"].append({
+                                "id": str(rule["id"]),
+                                "name": rule["name"],
+                                "visibility": rule["visibility"]
+                            })
+                        
+                        company_data["departments"].append(dept_data)
+                    
+                    result["companies"].append(company_data)
+        
+        return result
+    except Exception as e:
+        logger.error(f"获取管理员视图失败: {e}")
+        return {"companies": [], "error": str(e)}

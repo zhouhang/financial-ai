@@ -38,8 +38,22 @@ from app.tools.mcp_client import (
     get_reconciliation_status,
     get_reconciliation_result,
     delete_rule,
+    admin_login,
+    create_company,
+    create_department,
+    list_companies,
+    get_admin_view,
+    list_companies_public,
+    list_departments_public,
 )
-from .forms import generate_login_form, generate_register_form
+from .forms import (
+    generate_login_form,
+    generate_register_form,
+    generate_admin_login_form,
+    generate_create_company_form,
+    generate_create_department_form,
+    generate_admin_view,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,19 +187,110 @@ async def router_node(state: AgentState) -> dict:
 
     auth_token = state.get("auth_token", "")
     current_user = state.get("current_user")
+    messages = list(state.get("messages", []))
+    last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
+    
+    # ── 解析表单数据 ─────────────────────────────────────────────
+    form_data = None
+    try:
+        if last_user_msg.strip().startswith("{") and "form_type" in last_user_msg:
+            form_data = json.loads(last_user_msg)
+    except:
+        pass
+
+    # ── 管理员隐藏指令检测（优先级最高，在用户登录状态判断之前）─────
+    last_user_msg_lower = last_user_msg.lower().strip()
+    admin_token = state.get("admin_token", "")
+    admin_data = state.get("admin_data", {})
+    
+    # 管理员登录指令（任何状态下都可触发）
+    if "管理员登录" in last_user_msg or ("admin" in last_user_msg_lower and "login" not in last_user_msg_lower):
+        return {
+            "messages": [AIMessage(content=generate_admin_login_form())],
+            "user_intent": UserIntent.ADMIN_LOGIN.value,
+        }
+    
+    # 管理员表单提交
+    if form_data and form_data.get("form_type") == "admin_login":
+        username = form_data.get("username", "").strip()
+        password = form_data.get("password", "").strip()
+        if username and password:
+            result = await admin_login(username, password)
+            if result.get("success"):
+                # 登录成功，显示简单提示
+                return {
+                    "messages": [AIMessage(content=f"✅ 管理员 {username} 登录成功！\n\n可用指令：\n• 输入「创建公司」添加公司\n• 输入「创建部门」添加部门\n• 输入「退出管理」退出管理员模式")],
+                    "admin_token": result["admin_token"],
+                    "user_intent": UserIntent.ADMIN_VIEW.value,
+                }
+            else:
+                error = result.get('error', '管理员用户名或密码错误')
+                return {"messages": [AIMessage(content=generate_admin_login_form(error))]}
+    
+    # 管理员视图状态下的操作
+    if admin_token:
+        # 创建公司指令
+        if "创建公司" in last_user_msg:
+            return {
+                "messages": [AIMessage(content=generate_create_company_form())],
+                "user_intent": UserIntent.CREATE_COMPANY.value,
+            }
+        
+        # 创建公司表单提交
+        if form_data and form_data.get("form_type") == "create_company":
+            name = form_data.get("name", "").strip()
+            if name:
+                result = await create_company(admin_token, name)
+                if result.get("success"):
+                    return {
+                        "messages": [AIMessage(content=f"✅ 公司 '{name}' 创建成功！\n\n输入「创建公司」继续添加 | 输入「创建部门」添加部门")],
+                    }
+                else:
+                    error = result.get('error', '创建公司失败')
+                    return {"messages": [AIMessage(content=generate_create_company_form(error))]}
+        
+        # 创建部门指令
+        if "创建部门" in last_user_msg:
+            companies_result = await list_companies(admin_token)
+            return {
+                "messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies")))],
+                "user_intent": UserIntent.CREATE_DEPARTMENT.value,
+            }
+        
+        # 创建部门表单提交
+        if form_data and form_data.get("form_type") == "create_department":
+            company_id = form_data.get("company_id", "").strip()
+            name = form_data.get("name", "").strip()
+            if company_id and name:
+                result = await create_department(admin_token, company_id, name)
+                if result.get("success"):
+                    return {
+                        "messages": [AIMessage(content=f"✅ 部门 '{name}' 创建成功！\n\n输入「创建部门」继续添加 | 输入「创建公司」添加公司")],
+                    }
+                else:
+                    error = result.get('error', '创建部门失败')
+                    companies_result = await list_companies(admin_token)
+                    return {"messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies"), error))]}
+        
+        # 退出管理员
+        if "退出" in last_user_msg and "管理" in last_user_msg:
+            return {
+                "messages": [AIMessage(content="已退出管理员模式")],
+                "admin_token": None,
+                "admin_data": None,
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+        
+        # 返回/查看管理员视图
+        if ("返回" in last_user_msg or "查看" in last_user_msg) and admin_token:
+            view_result = await get_admin_view(admin_token)
+            return {
+                "messages": [AIMessage(content=generate_admin_view(view_result.get("data"), admin_token))],
+                "admin_data": view_result.get("data", {}),
+            }
 
     # ── 未登录状态：引导登录 / 处理登录注册 ──────────────────────
     if not auth_token or not current_user:
-        messages = list(state.get("messages", []))
-        last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
-        
-        # 检查是否是表单提交（JSON 格式的表单数据）
-        form_data = None
-        try:
-            if last_user_msg.strip().startswith("{") and "form_type" in last_user_msg:
-                form_data = json.loads(last_user_msg)
-        except:
-            pass
         
         if form_data:
             # 处理表单提交
@@ -207,16 +312,32 @@ async def router_node(state: AgentState) -> dict:
                         # 登录失败，重新显示登录表单（错误信息嵌入表单）
                         error = result.get('error', '用户名或密码错误')
                         return {"messages": [AIMessage(content=generate_login_form(error))]}
+            elif form_type == "select_company":
+                # 用户选择了公司，显示带部门的注册表单
+                company_id = form_data.get("company_id", "").strip()
+                if company_id:
+                    # 获取公司列表和该公司的部门列表
+                    companies_result = await list_companies_public()
+                    departments_result = await list_departments_public(company_id)
+                    return {
+                        "messages": [AIMessage(content=generate_register_form(
+                            companies=companies_result.get("companies", []),
+                            departments=departments_result.get("departments", []),
+                            selected_company_id=company_id
+                        ))],
+                    }
             elif form_type == "register":
                 username = form_data.get("username", "").strip()
                 password = form_data.get("password", "").strip()
+                company_id = form_data.get("company_id", "").strip()
+                department_id = form_data.get("department_id", "").strip()
                 if username and password:
                     result = await auth_register(
                         username, password,
                         email=form_data.get("email", "").strip() or None,
                         phone=form_data.get("phone", "").strip() or None,
-                        company_code=form_data.get("company_code", "").strip() or None,
-                        department_code=form_data.get("department_code", "").strip() or None,
+                        company_id=company_id or None,
+                        department_id=department_id or None,
                     )
                     if result.get("success"):
                         # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
@@ -229,7 +350,14 @@ async def router_node(state: AgentState) -> dict:
                     else:
                         # 注册失败，重新显示注册表单（错误信息嵌入表单）
                         error = result.get('error', '注册失败，请检查输入信息')
-                        return {"messages": [AIMessage(content=generate_register_form(error))]}
+                        companies_result = await list_companies_public()
+                        departments_result = await list_departments_public(company_id) if company_id else {"departments": []}
+                        return {"messages": [AIMessage(content=generate_register_form(
+                            error=error,
+                            companies=companies_result.get("companies", []),
+                            departments=departments_result.get("departments", []),
+                            selected_company_id=company_id
+                        ))]}
         
         # 使用 LLM 流式生成回复（支持流式输出）
         llm = get_llm()
@@ -259,7 +387,9 @@ async def router_node(state: AgentState) -> dict:
             logger.info(f"返回登录表单，长度: {len(login_html)}, 输入框数量: {login_html.count('<input')}")
             return {"messages": [AIMessage(content=login_html)]}
         elif intent == "show_register_form":
-            register_html = generate_register_form()
+            # 获取公司列表用于注册表单
+            companies_result = await list_companies_public()
+            register_html = generate_register_form(companies=companies_result.get("companies", []))
             logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
             return {"messages": [AIMessage(content=register_html)]}
         else:
