@@ -57,6 +57,9 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "list_companies", "list_departments", "get_admin_view",
         # 公开 API
         "list_companies_public", "list_departments_public",
+        # 会话管理
+        "create_conversation", "list_conversations", "get_conversation",
+        "update_conversation", "delete_conversation", "save_message",
     }
 
     try:
@@ -327,3 +330,66 @@ async def list_departments_public(company_id: str) -> dict[str, Any]:
     return await call_mcp_tool("list_departments_public", {
         "company_id": company_id,
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 会话管理
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def create_conversation(auth_token: str, title: str = None) -> dict[str, Any]:
+    """创建新会话"""
+    args = {"auth_token": auth_token}
+    if title:
+        args["title"] = title
+    return await call_mcp_tool("create_conversation", args)
+
+
+async def list_conversations(auth_token: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """获取用户的会话列表"""
+    return await call_mcp_tool("list_conversations", {
+        "auth_token": auth_token,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+async def get_conversation(auth_token: str, conversation_id: str) -> dict[str, Any]:
+    """获取单个会话详情（包含消息）"""
+    return await call_mcp_tool("get_conversation", {
+        "auth_token": auth_token,
+        "conversation_id": conversation_id,
+    })
+
+
+async def update_conversation(auth_token: str, conversation_id: str, title: str = None, status: str = None) -> dict[str, Any]:
+    """更新会话"""
+    args = {
+        "auth_token": auth_token,
+        "conversation_id": conversation_id,
+    }
+    if title:
+        args["title"] = title
+    if status:
+        args["status"] = status
+    return await call_mcp_tool("update_conversation", args)
+
+
+async def delete_conversation(auth_token: str, conversation_id: str) -> dict[str, Any]:
+    """删除会话"""
+    return await call_mcp_tool("delete_conversation", {
+        "auth_token": auth_token,
+        "conversation_id": conversation_id,
+    })
+
+
+async def save_message(auth_token: str, conversation_id: str, role: str, content: str, metadata: dict = None) -> dict[str, Any]:
+    """保存消息到会话"""
+    args = {
+        "auth_token": auth_token,
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content,
+    }
+    if metadata:
+        args["metadata"] = metadata
+    return await call_mcp_tool("save_message", args)

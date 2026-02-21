@@ -12,7 +12,8 @@ export type SendMessageFn = (
   threadId: string,
   resume?: boolean,
   authToken?: string,
-  attachments?: Array<{ name: string; path: string }>
+  attachments?: Array<{ name: string; path: string }>,
+  conversationId?: string
 ) => boolean;
 
 interface UseWebSocketOptions {
@@ -41,7 +42,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       threadId: string,
       resume = false,
       authToken?: string,
-      attachments?: Array<{ name: string; path: string }>
+      attachments?: Array<{ name: string; path: string }>,
+      conversationId?: string
     ) => {
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
         console.warn('WebSocket is not connected');
@@ -60,6 +62,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
           original_filename: a.name,
           file_path: a.path,
         }));
+      }
+      if (conversationId) {
+        payload.conversation_id = conversationId;
       }
       wsRef.current.send(JSON.stringify(payload));
       return true;

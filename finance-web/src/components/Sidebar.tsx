@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import {
   BarChart3,
   LogOut,
   MessageSquare,
-  Plus,
+  Trash2,
   User,
   Zap,
 } from 'lucide-react';
@@ -14,6 +15,7 @@ interface SidebarProps {
   connectionStatus: ConnectionStatus;
   onNewConversation: () => void;
   onSelectConversation: (id: string) => void;
+  onDeleteConversation?: (id: string) => void;
   currentUser?: Record<string, unknown> | null;
   onLogout?: () => void;
 }
@@ -24,9 +26,18 @@ export default function Sidebar({
   connectionStatus,
   onNewConversation,
   onSelectConversation,
+  onDeleteConversation,
   currentUser,
   onLogout,
 }: SidebarProps) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  const handleDelete = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation(); // 防止触发选择会话
+    if (confirm('确定要删除这个会话吗？')) {
+      onDeleteConversation?.(id);
+    }
+  };
   return (
     <aside className="w-64 bg-white flex flex-col h-full shrink-0 border-r border-gray-200">
       {/* ── Brand ── */}
@@ -46,14 +57,14 @@ export default function Sidebar({
 
       {/* ── New Analysis Button ── */}
       <div className="px-4 mb-3">
-        <button
+          <button
           onClick={onNewConversation}
           className="w-full flex items-center justify-center gap-2 py-3 rounded-xl
             bg-gradient-to-r from-blue-500 to-blue-600 text-white font-medium text-sm
             hover:shadow-lg hover:shadow-blue-500/30 transition-all cursor-pointer"
         >
           <Zap className="w-4 h-4" />
-          开始新分析
+          开启新会话
         </button>
       </div>
 
@@ -64,14 +75,16 @@ export default function Sidebar({
         </p>
         <div className="space-y-1">
           {conversations.map((conv) => (
-            <button
+            <div
               key={conv.id}
-              onClick={() => onSelectConversation(conv.id)}
-              className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer ${
+              className={`relative w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer ${
                 activeConversationId === conv.id
                   ? 'bg-blue-50 text-blue-600'
                   : 'text-gray-600 hover:bg-gray-50'
               }`}
+              onClick={() => onSelectConversation(conv.id)}
+              onMouseEnter={() => setHoveredId(conv.id)}
+              onMouseLeave={() => setHoveredId(null)}
             >
               <MessageSquare className="w-4 h-4 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
@@ -83,7 +96,17 @@ export default function Sidebar({
                   })}
                 </span>
               </div>
-            </button>
+              {/* 删除按钮 - 悬停时显示 */}
+              {hoveredId === conv.id && onDeleteConversation && (
+                <button
+                  onClick={(e) => handleDelete(e, conv.id)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                  title="删除会话"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           ))}
         </div>
       </div>
@@ -100,9 +123,9 @@ export default function Sidebar({
                 <p className="text-sm font-medium text-gray-800 truncate">
                   {currentUser.username as string}
                 </p>
-                {currentUser.company_name && (
+                {typeof currentUser.company_name === 'string' && currentUser.company_name && (
                   <p className="text-xs text-gray-400 truncate">
-                    {currentUser.company_name as string}
+                    {currentUser.company_name}
                   </p>
                 )}
               </div>

@@ -259,6 +259,86 @@ def create_auth_tools() -> list[mcp_types.Tool]:
                 "required": ["company_id"],
             },
         ),
+        
+        # ── 会话管理 ───────────────────────────────────────────────────
+        Tool(
+            name="create_conversation",
+            description="创建新会话",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "title": {"type": "string", "description": "会话标题（可选）"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="list_conversations",
+            description="获取用户的会话列表",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "limit": {"type": "integer", "description": "返回数量限制"},
+                    "offset": {"type": "integer", "description": "偏移量"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="get_conversation",
+            description="获取单个会话详情（包含消息）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "conversation_id": {"type": "string", "description": "会话 ID"},
+                },
+                "required": ["auth_token", "conversation_id"],
+            },
+        ),
+        Tool(
+            name="update_conversation",
+            description="更新会话（标题、状态）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "conversation_id": {"type": "string", "description": "会话 ID"},
+                    "title": {"type": "string", "description": "新标题"},
+                    "status": {"type": "string", "description": "新状态"},
+                },
+                "required": ["auth_token", "conversation_id"],
+            },
+        ),
+        Tool(
+            name="delete_conversation",
+            description="删除会话",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "conversation_id": {"type": "string", "description": "会话 ID"},
+                },
+                "required": ["auth_token", "conversation_id"],
+            },
+        ),
+        Tool(
+            name="save_message",
+            description="保存消息到会话",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "conversation_id": {"type": "string", "description": "会话 ID"},
+                    "role": {"type": "string", "description": "消息角色 (user/assistant/system)"},
+                    "content": {"type": "string", "description": "消息内容"},
+                    "metadata": {"type": "object", "description": "附加数据"},
+                },
+                "required": ["auth_token", "conversation_id", "role", "content"],
+            },
+        ),
     ]
 
 
@@ -285,6 +365,13 @@ async def handle_auth_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Di
         "get_admin_view": _handle_admin_view,
         "list_companies_public": _handle_list_companies_public,
         "list_departments_public": _handle_list_departments_public,
+        # 会话管理
+        "create_conversation": _handle_create_conversation,
+        "list_conversations": _handle_list_conversations,
+        "get_conversation": _handle_get_conversation,
+        "update_conversation": _handle_update_conversation,
+        "delete_conversation": _handle_delete_conversation,
+        "save_message": _handle_save_message,
     }
     handler = handlers.get(tool_name)
     if not handler:
@@ -910,3 +997,131 @@ async def _handle_list_departments_public(args: dict) -> dict:
     
     departments = auth_db.list_departments(company_id)
     return {"success": True, "departments": departments}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 会话管理
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _handle_create_conversation(args: dict) -> dict:
+    """创建新会话"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    title = args.get("title", "").strip() or None
+    user_id = user_info["user_id"]
+    
+    conversation = auth_db.create_conversation(user_id, title)
+    if not conversation:
+        return {"success": False, "error": "创建会话失败"}
+    
+    return {"success": True, "conversation": conversation}
+
+
+async def _handle_list_conversations(args: dict) -> dict:
+    """获取用户的会话列表"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    user_id = user_info["user_id"]
+    limit = int(args.get("limit", 50))
+    offset = int(args.get("offset", 0))
+    
+    conversations = auth_db.list_conversations(user_id, limit, offset)
+    return {"success": True, "conversations": conversations}
+
+
+async def _handle_get_conversation(args: dict) -> dict:
+    """获取单个会话详情（包含消息）"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    user_id = user_info["user_id"]
+    conversation_id = args.get("conversation_id", "").strip()
+    
+    if not conversation_id:
+        return {"success": False, "error": "会话 ID 不能为空"}
+    
+    conversation = auth_db.get_conversation(conversation_id, user_id)
+    if not conversation:
+        return {"success": False, "error": "会话不存在"}
+    
+    # 获取消息列表
+    messages = auth_db.get_messages(conversation_id)
+    conversation["messages"] = messages
+    
+    return {"success": True, "conversation": conversation}
+
+
+async def _handle_update_conversation(args: dict) -> dict:
+    """更新会话"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    user_id = user_info["user_id"]
+    conversation_id = args.get("conversation_id", "").strip()
+    title = args.get("title", "").strip() or None
+    status = args.get("status", "").strip() or None
+    
+    if not conversation_id:
+        return {"success": False, "error": "会话 ID 不能为空"}
+    
+    conversation = auth_db.update_conversation(conversation_id, user_id, title, status)
+    if not conversation:
+        return {"success": False, "error": "更新会话失败"}
+    
+    return {"success": True, "conversation": conversation}
+
+
+async def _handle_delete_conversation(args: dict) -> dict:
+    """删除会话"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    user_id = user_info["user_id"]
+    conversation_id = args.get("conversation_id", "").strip()
+    
+    if not conversation_id:
+        return {"success": False, "error": "会话 ID 不能为空"}
+    
+    success = auth_db.delete_conversation(conversation_id, user_id)
+    if not success:
+        return {"success": False, "error": "删除会话失败"}
+    
+    return {"success": True, "message": "会话已删除"}
+
+
+async def _handle_save_message(args: dict) -> dict:
+    """保存消息到会话"""
+    is_valid, user_info, error = _require_auth(args)
+    if not is_valid:
+        return {"success": False, "error": error}
+    
+    user_id = user_info["user_id"]
+    conversation_id = args.get("conversation_id", "").strip()
+    role = args.get("role", "").strip()
+    content = args.get("content", "")
+    metadata = args.get("metadata", {})
+    
+    if not conversation_id:
+        return {"success": False, "error": "会话 ID 不能为空"}
+    if not role:
+        return {"success": False, "error": "消息角色不能为空"}
+    if role not in ("user", "assistant", "system"):
+        return {"success": False, "error": "无效的消息角色"}
+    
+    # 验证会话所有权
+    conversation = auth_db.get_conversation(conversation_id, user_id)
+    if not conversation:
+        return {"success": False, "error": "会话不存在"}
+    
+    message = auth_db.save_message(conversation_id, role, content, metadata)
+    if not message:
+        return {"success": False, "error": "保存消息失败"}
+    
+    return {"success": True, "message": message}

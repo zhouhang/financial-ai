@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useConversations } from './hooks/useConversations';
 import type {
   Conversation,
   Message,
@@ -26,13 +27,8 @@ function createConversation(): Conversation {
 
 export default function App() {
   // ── 会话状态 ──────────────────────────────────────────────
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const initial = createConversation();
-    return [initial];
-  });
-  const [activeConvId, setActiveConvId] = useState<string>(
-    () => conversations[0].id
-  );
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string>('');
 
   // ── 当前会话 ──────────────────────────────────────────────
   const activeConv = conversations.find((c) => c.id === activeConvId);
@@ -47,6 +43,24 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
+  // ── 服务器会话管理 ──────────────────────────────────────────
+  const {
+    serverConversations,
+    isLoading: _isLoadingConversations,
+    loadConversations,
+    loadConversation,
+    deleteConversation: deleteServerConversation,
+    clearCache: clearConversationsCache,
+  } = useConversations({ authToken });
+  // TODO: 使用 _isLoadingConversations 显示加载状态
+  void _isLoadingConversations;
+
+  // 跟踪本地会话与服务器会话的映射（本地临时ID -> 服务器ID）
+  const convIdMapRef = useRef<Map<string, string>>(new Map());
+  
+  // 追踪对账任务状态（用于在任务完成时删除"任务启动"消息）
+  const taskStartedRef = useRef<Map<string, boolean>>(new Map());
+
   // ── 加载和中断状态 ────────────────────────────────────────
   const [isLoading, setIsLoading] = useState(false);
   const [waitingForFileUpload, setWaitingForFileUpload] = useState(false);
@@ -58,11 +72,13 @@ export default function App() {
   const pendingConvIdRef = useRef<string | null>(null);
 
   // ── 任务和文件 ────────────────────────────────────────────
+  // TODO: 这些状态变量用于任务面板功能，目前仅使用 setter
   const [tasks, setTasks] = useState<Task[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [taskResult, setTaskResult] = useState<Record<string, unknown> | null>(
     null
   );
+  void tasks; void uploadedFiles; void taskResult;
 
   // ── 辅助函数：追加消息 ───────────────────────────────────
   const appendMessage = useCallback(
@@ -151,19 +167,54 @@ export default function App() {
         
         case 'message':
           setIsLoading(false);
+          const currentStreamingId = streamingMessageId;
           setStreamingMessageId(null); // 完整消息，清除流式状态
           const newContent = data.content || '';
-          // 若上一条是「正在保存」，用新消息替换它（保存成功后不再显示正在保存）
+          
+          // 检测是否是对账任务启动消息
+          const isTaskStarted = /^🚀 对账任务已启动/.test(newContent);
+          
           setConversations((prev) =>
             prev.map((c) => {
               if (c.id !== targetConvId) return c;
-              const lastMsg = c.messages[c.messages.length - 1];
+              
+              let filteredMessages = c.messages;
+              
+              // 如果之前有任务启动消息标记，现在收到新消息时删除启动消息
+              // 但如果是自己刚收到的任务启动消息，则不删除
+              if (taskStartedRef.current.get(targetConvId) && !isTaskStarted) {
+                filteredMessages = c.messages.filter(
+                  (m) => !(m.role === 'assistant' && /^🚀 对账任务已启动/.test(m.content))
+                );
+                taskStartedRef.current.delete(targetConvId);
+              }
+              
+              // 如果当前消息是任务启动消息，设置标记（下次收到新消息时删除）
+              if (isTaskStarted) {
+                taskStartedRef.current.set(targetConvId, true);
+              }
+              
+              // 检查是否有正在流式输出的消息，如果有则更新它而不是创建新消息
+              if (currentStreamingId) {
+                const streamingIndex = filteredMessages.findIndex((m) => m.id === currentStreamingId);
+                if (streamingIndex >= 0) {
+                  // 更新现有的流式消息
+                  const updatedMessages = [...filteredMessages];
+                  updatedMessages[streamingIndex] = {
+                    ...updatedMessages[streamingIndex],
+                    content: newContent,
+                  };
+                  return { ...c, messages: updatedMessages, updatedAt: new Date() };
+                }
+              }
+              
+              const lastMsg = filteredMessages[filteredMessages.length - 1];
               const isLastSaving =
                 lastMsg?.role === 'assistant' &&
                 /^正在保存\.*$/.test(String(lastMsg.content || '').trim());
               const messages = isLastSaving
-                ? [...c.messages.slice(0, -1), { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }]
-                : [...c.messages, { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }];
+                ? [...filteredMessages.slice(0, -1), { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }]
+                : [...filteredMessages, { id: generateId(), role: 'assistant' as const, content: newContent, timestamp: new Date() }];
               return { ...c, messages, updatedAt: new Date() };
             })
           );
@@ -258,6 +309,15 @@ export default function App() {
           }
           break;
 
+        case 'conversation_created':
+          // 服务器创建了新会话，记录映射关系
+          if (data.conversation_id && data.thread_id) {
+            convIdMapRef.current.set(data.thread_id, data.conversation_id);
+            // 刷新会话列表
+            loadConversations();
+          }
+          break;
+
         case 'error':
           setIsLoading(false);
           setConversations((prev) =>
@@ -285,7 +345,7 @@ export default function App() {
           break;
       }
     },
-    [appendMessage, streamingMessageId, activeConvId, pendingConvIdRef]
+    [appendMessage, streamingMessageId, activeConvId, pendingConvIdRef, loadConversations]
   );
 
   const { status, sendMessage } = useWebSocket({
@@ -373,9 +433,14 @@ export default function App() {
       const filesToSend = attachments
         ?.filter((a): a is import('./types').MessageAttachment & { path: string } => !!a.path)
         .map((a) => ({ name: a.name, path: a.path }));
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend);
+      // 获取对应的 server conversation_id
+      // activeConvId 可能是本地 ID（随机字符串）或服务器 ID（UUID）
+      // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
+      const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
+      const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
+      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId);
     },
-    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef]
+    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -394,6 +459,10 @@ export default function App() {
     localStorage.removeItem('finflux_auth_token');
     localStorage.removeItem('finflux_current_user');
     
+    // 清除服务器会话缓存
+    clearConversationsCache();
+    convIdMapRef.current.clear();
+    
     // 清除所有会话，重新开始
     const newConv = createConversation();
     setConversations([newConv]);
@@ -403,32 +472,101 @@ export default function App() {
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
-  }, []);
+  }, [clearConversationsCache]);
 
   // ── 新建会话 ──────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
+    // 如果正在加载中，不允许创建新会话（避免消息显示错乱）
+    if (isLoading) {
+      return;
+    }
     const conv = createConversation();
     setConversations((prev) => [conv, ...prev]);
     setActiveConvId(conv.id);
     setTasks([]);
     setUploadedFiles([]);
     setTaskResult(null);
-  }, []);
+  }, [isLoading]);
 
   // ── 切换会话 ──────────────────────────────────────────────
-  const handleSelectConversation = useCallback((id: string) => {
+  const handleSelectConversation = useCallback(async (id: string) => {
     setActiveConvId(id);
     setIsLoading(false);
-  }, []);
+    
+    // 如果是服务器会话且本地没有消息，从服务器加载
+    const localConv = conversations.find((c) => c.id === id);
+    const isServerConv = serverConversations.some((c) => c.id === id);
+    
+    if (isServerConv && (!localConv || localConv.messages.length === 0)) {
+      const serverConv = await loadConversation(id);
+      if (serverConv && serverConv.messages.length > 0) {
+        setConversations((prev) => {
+          const existing = prev.find((c) => c.id === id);
+          if (existing) {
+            // 更新现有会话的消息
+            return prev.map((c) =>
+              c.id === id
+                ? { ...c, messages: serverConv.messages, title: serverConv.title }
+                : c
+            );
+          } else {
+            // 添加新会话
+            return [serverConv, ...prev];
+          }
+        });
+      }
+    }
+  }, [conversations, serverConversations, loadConversation]);
+
+  // ── 删除会话 ──────────────────────────────────────────────
+  const handleDeleteConversation = useCallback(async (id: string) => {
+    console.log('handleDeleteConversation called, id:', id);
+    
+    // 检查是否是服务器会话 ID（UUID 格式）
+    const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    
+    // 如果是服务器会话，调用删除 API
+    if (isServerId) {
+      await deleteServerConversation(id);
+    }
+    
+    // 无论服务器删除成功与否，都从本地列表中移除
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    
+    // 如果删除的是当前活动会话，切换到其他会话
+    if (activeConvId === id) {
+      // 合并后的列表（排除被删除的）
+      const remaining = [...conversations, ...serverConversations].filter((c: import('./types').Conversation) => c.id !== id);
+      if (remaining.length > 0) {
+        setActiveConvId(remaining[0].id);
+      } else {
+        // 没有其他会话，清空当前会话（用户可以点击"开始新分析"创建）
+        setActiveConvId('');
+      }
+    }
+  }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
+
+  // ── 合并本地和服务器会话 ────────────────────────────────────
+  // 服务器会话优先，本地会话补充（未同步的新会话）
+  const mergedConversations = useCallback(() => {
+    const serverIds = new Set(serverConversations.map((c) => c.id));
+    // 本地会话中不在服务器列表中的（新创建的、未保存的）
+    const localOnly = conversations.filter((c) => !serverIds.has(c.id));
+    // 服务器会话 + 本地未同步的会话
+    return [...localOnly, ...serverConversations];
+  }, [conversations, serverConversations]);
+
+  const displayConversations = mergedConversations();
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary">
       <Sidebar
-        conversations={conversations}
+        conversations={displayConversations}
         activeConversationId={activeConvId}
         connectionStatus={status}
         onNewConversation={handleNewConversation}
         onSelectConversation={handleSelectConversation}
+        onDeleteConversation={handleDeleteConversation}
         currentUser={currentUser}
         onLogout={handleLogout}
       />
@@ -439,13 +577,8 @@ export default function App() {
         onSendMessage={handleSendMessage}
         onFileUploaded={handleFileUploaded}
         threadId={activeConvId}
+        showInput={!!activeConvId}
       />
     </div>
   );
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }

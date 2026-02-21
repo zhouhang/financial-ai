@@ -16,11 +16,12 @@ interface StagedFile {
   size: number;
 }
 
-function formatFileSize(bytes: number): string {
+function _formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
+void _formatFileSize; // Reserved for future use
 
 interface ChatAreaProps {
   messages: Message[];
@@ -29,6 +30,7 @@ interface ChatAreaProps {
   onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean) => void;
   onFileUploaded: (file: UploadedFile) => void;
   threadId: string;
+  showInput?: boolean;
 }
 
 export default function ChatArea({
@@ -38,6 +40,7 @@ export default function ChatArea({
   onSendMessage,
   onFileUploaded,
   threadId,
+  showInput = true,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -241,10 +244,10 @@ export default function ChatArea({
                 </svg>
               </div>
               <h3 className="text-base font-medium text-gray-800 mb-2">
-                请输入您的分析需求
+                开启新会话，开始对话
               </h3>
               <p className="text-sm text-gray-500">
-                可以上传数据文件或直接描述分析需求
+                上传数据文件或直接描述您的分析需求
               </p>
             </div>
           </div>
@@ -260,6 +263,7 @@ export default function ChatArea({
       </div>
 
       {/* ── Floating Input Bar ── */}
+      {showInput && (
       <div className="absolute bottom-0 left-0 right-0 pointer-events-none z-10">
         <div className="px-6 pb-3 pointer-events-none">
           <div className="max-w-4xl mx-auto pointer-events-none">
@@ -358,6 +362,7 @@ export default function ChatArea({
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

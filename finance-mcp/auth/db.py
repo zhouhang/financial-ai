@@ -574,3 +574,187 @@ def get_admin_view() -> dict:
     except Exception as e:
         logger.error(f"获取管理员视图失败: {e}")
         return {"companies": [], "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 会话管理
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_conversation(user_id: str, title: str = None) -> dict | None:
+    """创建新会话"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """INSERT INTO conversations (user_id, title) 
+                       VALUES (%s, %s) 
+                       RETURNING id, user_id, title, created_at, updated_at, status""",
+                    (user_id, title)
+                )
+                row = cur.fetchone()
+                c.commit()
+                result = dict(row)
+                result["id"] = str(result["id"])
+                result["user_id"] = str(result["user_id"])
+                return result
+    except Exception as e:
+        logger.error(f"创建会话失败: {e}")
+        return None
+
+
+def get_conversation(conversation_id: str, user_id: str) -> dict | None:
+    """获取单个会话（验证所有权）"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT id, user_id, title, created_at, updated_at, status 
+                       FROM conversations 
+                       WHERE id = %s AND user_id = %s""",
+                    (conversation_id, user_id)
+                )
+                row = cur.fetchone()
+                if row:
+                    result = dict(row)
+                    result["id"] = str(result["id"])
+                    result["user_id"] = str(result["user_id"])
+                    return result
+                return None
+    except Exception as e:
+        logger.error(f"获取会话失败: {e}")
+        return None
+
+
+def list_conversations(user_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
+    """获取用户的会话列表"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT id, user_id, title, created_at, updated_at, status 
+                       FROM conversations 
+                       WHERE user_id = %s AND status = 'active'
+                       ORDER BY updated_at DESC
+                       LIMIT %s OFFSET %s""",
+                    (user_id, limit, offset)
+                )
+                rows = cur.fetchall()
+                result = []
+                for row in rows:
+                    item = dict(row)
+                    item["id"] = str(item["id"])
+                    item["user_id"] = str(item["user_id"])
+                    result.append(item)
+                return result
+    except Exception as e:
+        logger.error(f"获取会话列表失败: {e}")
+        return []
+
+
+def update_conversation(conversation_id: str, user_id: str, title: str = None, status: str = None) -> dict | None:
+    """更新会话"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 构建更新语句
+                updates = []
+                params = []
+                if title is not None:
+                    updates.append("title = %s")
+                    params.append(title)
+                if status is not None:
+                    updates.append("status = %s")
+                    params.append(status)
+                
+                if not updates:
+                    return get_conversation(conversation_id, user_id)
+                
+                params.extend([conversation_id, user_id])
+                cur.execute(
+                    f"""UPDATE conversations 
+                        SET {', '.join(updates)}
+                        WHERE id = %s AND user_id = %s
+                        RETURNING id, user_id, title, created_at, updated_at, status""",
+                    params
+                )
+                row = cur.fetchone()
+                c.commit()
+                if row:
+                    result = dict(row)
+                    result["id"] = str(result["id"])
+                    result["user_id"] = str(result["user_id"])
+                    return result
+                return None
+    except Exception as e:
+        logger.error(f"更新会话失败: {e}")
+        return None
+
+
+def delete_conversation(conversation_id: str, user_id: str) -> bool:
+    """删除会话（软删除）"""
+    result = update_conversation(conversation_id, user_id, status="deleted")
+    return result is not None
+
+
+def save_message(conversation_id: str, role: str, content: str, metadata: dict = None) -> dict | None:
+    """保存消息"""
+    import json
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """INSERT INTO messages (conversation_id, role, content, metadata)
+                       VALUES (%s, %s, %s, %s)
+                       RETURNING id, conversation_id, role, content, metadata, created_at""",
+                    (conversation_id, role, content, json.dumps(metadata or {}))
+                )
+                row = cur.fetchone()
+                
+                # 同时更新会话的 updated_at
+                cur.execute(
+                    "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (conversation_id,)
+                )
+                
+                c.commit()
+                if row:
+                    result = dict(row)
+                    result["id"] = str(result["id"])
+                    result["conversation_id"] = str(result["conversation_id"])
+                    return result
+                return None
+    except Exception as e:
+        logger.error(f"保存消息失败: {e}")
+        return None
+
+
+def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    """获取会话的消息列表"""
+    conn = get_conn()
+    try:
+        with conn as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT id, conversation_id, role, content, metadata, created_at
+                       FROM messages
+                       WHERE conversation_id = %s
+                       ORDER BY created_at ASC
+                       LIMIT %s OFFSET %s""",
+                    (conversation_id, limit, offset)
+                )
+                rows = cur.fetchall()
+                result = []
+                for row in rows:
+                    item = dict(row)
+                    item["id"] = str(item["id"])
+                    item["conversation_id"] = str(item["conversation_id"])
+                    result.append(item)
+                return result
+    except Exception as e:
+        logger.error(f"获取消息列表失败: {e}")
+        return []

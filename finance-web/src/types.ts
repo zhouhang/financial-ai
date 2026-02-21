@@ -64,7 +64,7 @@ export interface WsIncoming {
 }
 
 export interface WsOutgoing {
-  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify';
+  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify' | 'conversation_created';
   content?: string;
   payload?: Record<string, unknown>;
   thread_id?: string;
@@ -74,6 +74,8 @@ export interface WsOutgoing {
   user?: Record<string, unknown>;
   /** auth_verify 类型专用 - 验证是否成功 */
   success?: boolean;
+  /** conversation_created 类型专用 */
+  conversation_id?: string;
 }
 
 // ── 连接状态 ─────────────────────────────────────────────────────────────

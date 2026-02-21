@@ -7,9 +7,9 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
@@ -19,6 +19,13 @@ from app.config import HOST, PORT, MAX_FILE_SIZE
 from app.graphs.main_graph import create_app, register_progress_callback, unregister_progress_callback
 from app.models import ReconciliationPhase  # ⚠️ 新增导入
 from app.utils.db import ensure_tables
+from app.tools.mcp_client import (
+    create_conversation as mcp_create_conversation,
+    save_message as mcp_save_message,
+    list_conversations as mcp_list_conversations,
+    get_conversation as mcp_get_conversation,
+    delete_conversation as mcp_delete_conversation,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -263,8 +270,9 @@ async def websocket_chat(ws: WebSocket):
             is_resume = data.get("resume", False)
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
+            conversation_id = data.get("conversation_id", "")  # 会话 ID
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, conversation_id={conversation_id}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -371,6 +379,13 @@ async def websocket_chat(ws: WebSocket):
                         logger.info(f"resume: 更新 state: {list(update_state.keys())}")
                     input_data = Command(resume=user_msg)
                 else:
+                    # 非 resume 模式：重置 phase 状态，避免之前的任务结果影响新任务
+                    try:
+                        langgraph_app.update_state(config, {"phase": ""})
+                        logger.info(f"新会话: 已重置 LangGraph state (thread={thread_id})")
+                    except Exception as e:
+                        logger.warning(f"重置 LangGraph state 失败: {e}")
+                    
                     input_data: dict[str, Any] = {
                         "messages": [HumanMessage(content=user_msg)],
                         "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
@@ -548,6 +563,41 @@ async def websocket_chat(ws: WebSocket):
                     })
                 else:
                     await ws.send_json({"type": "done", "thread_id": thread_id})
+                
+                # ── 会话保存 ──────────────────────────────────────────────
+                # 如果用户已登录且有消息内容，保存到数据库
+                if auth_token and user_msg and not user_msg.startswith("{"):
+                    try:
+                        # 如果没有 conversation_id，检查是否需要创建新会话
+                        if not conversation_id:
+                            # 检查是否已存在该 thread_id 对应的会话（通过查找最新的会话）
+                            # 如果不存在，创建新会话
+                            title = user_msg[:30] + ("..." if len(user_msg) > 30 else "")
+                            conv_result = await mcp_create_conversation(auth_token, title)
+                            if conv_result.get("success"):
+                                conversation_id = conv_result["conversation"]["id"]
+                                # 通知前端新会话 ID
+                                await ws.send_json({
+                                    "type": "conversation_created",
+                                    "conversation_id": conversation_id,
+                                    "title": title,
+                                    "thread_id": thread_id,
+                                })
+                                logger.info(f"创建新会话: {conversation_id}")
+                        
+                        if conversation_id:
+                            # 保存用户消息
+                            await mcp_save_message(auth_token, conversation_id, "user", user_msg)
+                            
+                            # 保存 AI 回复（收集所有发送的内容）
+                            if sent_contents:
+                                for content in sent_contents:
+                                    if content and not content.startswith("<"):  # 跳过 HTML 表单
+                                        await mcp_save_message(auth_token, conversation_id, "assistant", content)
+                            
+                            logger.info(f"消息已保存到会话 {conversation_id}")
+                    except Exception as e:
+                        logger.warning(f"保存消息失败: {e}")
 
             except Exception as e:
                 import traceback
@@ -650,6 +700,75 @@ async def stream_chat(
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "data-agent"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 会话管理 REST API
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/conversations")
+async def list_conversations(
+    limit: int = 50,
+    offset: int = 0,
+    authorization: Optional[str] = Header(None),
+):
+    """获取用户的会话列表"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    
+    # 支持 Bearer token 格式
+    auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    
+    try:
+        result = await mcp_list_conversations(auth_token, limit, offset)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "获取会话列表失败"))
+        return result
+    except Exception as e:
+        logger.error(f"获取会话列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """获取单个会话详情（包含消息）"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    
+    auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    
+    try:
+        result = await mcp_get_conversation(auth_token, conversation_id)
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail=result.get("error", "会话不存在"))
+        return result
+    except Exception as e:
+        logger.error(f"获取会话详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """删除会话"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    
+    auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    
+    try:
+        result = await mcp_delete_conversation(auth_token, conversation_id)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "删除会话失败"))
+        return result
+    except Exception as e:
+        logger.error(f"删除会话失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
