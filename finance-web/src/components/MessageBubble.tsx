@@ -130,6 +130,16 @@ function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormS
     const inputCount = formElement.querySelectorAll('input').length;
     console.log(`Form rendered: id=${formId}, input count=${inputCount}`);
 
+    // 聚焦第一个输入框
+    const firstInput = formElement.querySelector('input:not([type="hidden"]):not([type="submit"])') as HTMLInputElement | null;
+    if (firstInput) {
+      // 使用 setTimeout 确保 DOM 完全渲染后再聚焦
+      setTimeout(() => {
+        firstInput.focus();
+        console.log(`Focused on first input: ${firstInput.name || firstInput.id}`);
+      }, 100);
+    }
+
     const handleSubmit = (e: Event) => {
       e.preventDefault();
       const form = e.target as HTMLFormElement;

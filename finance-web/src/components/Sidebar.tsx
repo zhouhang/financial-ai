@@ -64,7 +64,7 @@ export default function Sidebar({
             hover:shadow-lg hover:shadow-blue-500/30 transition-all cursor-pointer"
         >
           <Zap className="w-4 h-4" />
-          开启新会话
+          开启新对话
         </button>
       </div>
 

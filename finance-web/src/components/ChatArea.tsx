@@ -26,32 +26,59 @@ void _formatFileSize; // Reserved for future use
 interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
+  isLoadingConversation?: boolean;
   connectionStatus: ConnectionStatus;
   onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean) => void;
   onFileUploaded: (file: UploadedFile) => void;
   threadId: string;
   showInput?: boolean;
+  currentUser?: Record<string, unknown> | null;
 }
 
 export default function ChatArea({
   messages,
   isLoading,
+  isLoadingConversation = false,
   connectionStatus,
   onSendMessage,
   onFileUploaded,
   threadId,
   showInput = true,
+  currentUser,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // 自动滚动到最新消息
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+    // 会话加载完成后滚动到底部（不使用动画，直接跳转）
+    if (!isLoadingConversation && messages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [isLoadingConversation, messages.length]);
+  
+  // 新消息时平滑滚动
+  useEffect(() => {
+    if (!isLoadingConversation) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isLoading, isLoadingConversation]);
+
+  // 聚焦输入框
+  useEffect(() => {
+    if (showInput && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [showInput, threadId]);
+
+  // 暴露聚焦函数给父组件
+  useEffect(() => {
+    // 可以通过其他方式触发聚焦
+  }, []);
 
   // 确保上传状态正确初始化
   useEffect(() => {
@@ -235,7 +262,18 @@ export default function ChatArea({
 
       {/* ── Messages ── */}
       <div className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
-        {messages.length === 0 && !isLoading && (
+        {/* 会话加载中 */}
+        {isLoadingConversation && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-4" />
+              <p className="text-sm text-gray-500">正在加载会话...</p>
+            </div>
+          </div>
+        )}
+        
+        {/* 空状态 */}
+        {!isLoadingConversation && messages.length === 0 && !isLoading && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
               <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
@@ -243,17 +281,31 @@ export default function ChatArea({
                   <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </div>
-              <h3 className="text-base font-medium text-gray-800 mb-2">
-                开启新会话，开始对话
-              </h3>
-              <p className="text-sm text-gray-500">
-                上传数据文件或直接描述您的分析需求
-              </p>
+              {currentUser ? (
+                <>
+                  <h3 className="text-base font-medium text-gray-800 mb-2">
+                    开启新对话，开始交流
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    上传数据文件或直接描述您的分析需求
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h3 className="text-base font-medium text-gray-800 mb-2">
+                    未登录，请在对话中登录
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    发送"登录"或"注册"进行身份验证
+                  </p>
+                </>
+              )}
             </div>
           </div>
         )}
 
-        {messages.map((msg) => (
+        {/* 消息列表 */}
+        {!isLoadingConversation && messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} onFormSubmit={handleFormSubmit} />
         ))}
 
@@ -321,6 +373,7 @@ export default function ChatArea({
                 {/* Text input */}
                 <div className="flex-1 relative">
                   <textarea
+                    ref={inputRef}
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
