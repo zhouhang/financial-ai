@@ -1,152 +1,170 @@
-# 🚀 Finance AI - 快速参考卡片
+# Financial AI - 快速参考卡
 
-## 📐 架构图（最重要！）
-
-```
-用户
- ↓
-finance-ui (纯前端)
- ↓ 只调用 Dify API
- ↓ Bearer app-pffBjBphPBhbrSwz8mxku2R3
-Dify API
- ↓
- ├─→ finance-mcp API (认证、Schema、文件)
- └─→ finance-mcp MCP (数据整理、对账)
-```
-
-## ⚡ 一键启动
+## 🚀 一键启动
 
 ```bash
-cd /Users/kevin/workspace/financial-ai
+cd /Users/fanyuli/Desktop/workspace/financial-ai
 ./START_ALL_SERVICES.sh
 ```
 
-## 🔑 关键配置
+## 🛑 一键停止
 
-### Dify API
-- **URL**: `http://localhost/v1/chat-messages`
-- **Key**: `app-pffBjBphPBhbrSwz8mxku2R3`
-- **文件**: `finance-ui/src/api/dify.ts`
-
-### 请求示例
-```javascript
-fetch('http://localhost/v1/chat-messages', {
-  method: 'POST',
-  headers: {
-    'Authorization': 'Bearer app-pffBjBphPBhbrSwz8mxku2R3',
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    inputs: {},
-    query: '用户消息',
-    response_mode: 'streaming',
-    user: 'anonymous_user',
-  }),
-});
-```
-
-## 🌐 服务地址
-
-| 服务 | 地址 | 用途 |
-|------|------|------|
-| finance-ui | http://localhost:5173 | 前端界面 |
-| Dify API | http://localhost/v1 | AI 对话 |
-| finance-mcp API | http://localhost:8000 | RESTful API |
-| API 文档 | http://localhost:8000/docs | Swagger |
-| finance-mcp MCP | http://localhost:3335 | MCP 工具 |
-
-## 🎯 特殊指令
-
-| 指令 | 触发 UI |
-|------|---------|
-| `[login_form]` | 登录表单 |
-| `[create_schema]` | 创建 Schema 表单 |
-| `[update_schema]` | 更新 Schema 表单 |
-| `[schema_list]` | Schema 列表 |
-
-## 🔄 典型流程
-
-### 用户登录
-```
-用户: "登录"
-→ Dify 返回: [login_form]
-→ 显示登录表单
-→ 用户填写
-→ Dify 调用: POST /api/auth/login
-→ 返回 token
-→ 保存认证状态
-```
-
-### 创建 Schema
-```
-用户: "创建规则"
-→ Dify 返回: [create_schema]
-→ 显示创建表单
-→ 用户填写
-→ Dify 调用: POST /api/schemas
-→ 返回 Schema
-→ 更新本地状态
-```
-
-## 🧪 快速测试
-
-### 测试 Dify API
-```bash
-curl -X POST http://localhost/v1/chat-messages \
-  -H "Authorization: Bearer app-pffBjBphPBhbrSwz8mxku2R3" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs":{},"query":"你好","response_mode":"blocking","user":"test"}'
-```
-
-### 测试 finance-mcp API
-```bash
-curl http://localhost:8000/health
-```
-
-### 测试前端
-```bash
-open http://localhost:5173
-```
-
-## 📋 验证架构
-```bash
-./verify_architecture.sh
-```
-
-## 🛑 停止服务
 ```bash
 ./STOP_ALL_SERVICES.sh
 ```
 
-## 📚 完整文档
+或者：
+```bash
+lsof -ti:3335,8100,5173 | xargs kill -9
+```
 
-| 文档 | 说明 |
-|------|------|
-| [FINAL_ARCHITECTURE.md](./FINAL_ARCHITECTURE.md) | 完整架构说明 ⭐ |
-| [COMPLETION_SUMMARY.md](./COMPLETION_SUMMARY.md) | 完成总结 ⭐ |
-| [ARCHITECTURE_FIX_REPORT.md](./ARCHITECTURE_FIX_REPORT.md) | 修正报告 |
-| [TESTING_CHECKLIST.md](./TESTING_CHECKLIST.md) | 测试清单 |
+## 📍 服务访问地址
 
-## ⚠️ 重要提示
+| 服务 | 端口 | 地址 |
+|------|------|------|
+| finance-web | 5173 | http://localhost:5173 |
+| data-agent | 8100 | http://localhost:8100 |
+| finance-mcp | 3335 | http://localhost:3335 |
 
-### ✅ 正确
-- finance-ui → Dify → finance-mcp
-- finance-ui 只调用 Dify API
-- 所有业务逻辑通过 Dify 协调
+## 📋 查看日志
 
-### ❌ 错误
-- ~~finance-ui → finance-mcp API~~
-- ~~finance-ui 直接调用后端~~
+```bash
+# 实时查看日志
+tail -f logs/finance-mcp.log
+tail -f logs/data-agent.log
+tail -f logs/finance-web.log
 
-## 🎯 下一步
+# 查看最近20行日志
+tail -20 logs/finance-mcp.log
+tail -20 logs/data-agent.log
+tail -20 logs/finance-web.log
+```
 
-1. ✅ 架构已验证通过
-2. ⏳ 启动所有服务
-3. ⏳ 在 Dify 中配置 finance-mcp 集成
-4. ⏳ 测试完整流程
+## 🔍 检查服务状态
+
+```bash
+# 检查端口占用
+lsof -i:3335,8100,5173 | grep LISTEN
+
+# 检查单个端口
+lsof -i:3335  # finance-mcp
+lsof -i:8100  # data-agent
+lsof -i:5173  # finance-web
+```
+
+## 🔧 验证配置
+
+```bash
+./VERIFY_CONFIG.sh
+```
+
+## 💻 手动启动（三个终端）
+
+**终端 1 - finance-mcp：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+cd finance-mcp
+python unified_mcp_server.py
+```
+
+**终端 2 - data-agent：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+cd finance-agents/data-agent
+python -m app.server
+```
+
+**终端 3 - finance-web：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai/finance-web
+npm run dev
+```
+
+## 🐛 常见问题快速修复
+
+### 端口被占用
+```bash
+# 查看占用端口的进程
+lsof -i:3335
+
+# 杀死进程
+lsof -ti:3335 | xargs kill -9
+```
+
+### 虚拟环境错误
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+which python  # 验证是否使用正确的虚拟环境
+```
+
+### 依赖缺失
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# finance-web 依赖
+cd finance-web
+npm install
+```
+
+### 脚本无执行权限
+```bash
+chmod +x START_ALL_SERVICES.sh
+chmod +x STOP_ALL_SERVICES.sh
+chmod +x VERIFY_CONFIG.sh
+```
+
+## 📂 项目结构
+
+```
+financial-ai/
+├── finance-web/          # 前端 (端口 5173)
+├── finance-agents/       # AI 后端 (端口 8100)
+├── finance-mcp/          # MCP 服务 (端口 3335)
+├── .venv/                # Python 虚拟环境
+├── logs/                 # 日志目录
+├── START_ALL_SERVICES.sh # 启动脚本
+├── STOP_ALL_SERVICES.sh  # 停止脚本
+└── README.md             # 详细文档
+```
+
+## 📚 详细文档
+
+- [README.md](./README.md) - 完整项目说明
+- [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md) - 系统架构
+- [README_SERVICES.md](./README_SERVICES.md) - 服务管理指南
+
+## 🔐 环境变量
+
+创建 `.env` 文件（如果不存在）：
+
+```bash
+# 数据库配置
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finflux
+DB_USER=finflux_user
+DB_PASSWORD=123456
+
+# MCP 服务器配置
+MCP_SERVER_PORT=3335
+```
+
+## 🎯 快速测试
+
+```bash
+# 健康检查
+curl http://localhost:3335/health  # finance-mcp
+curl http://localhost:8100/health  # data-agent
+
+# 访问前端
+open http://localhost:5173
+```
 
 ---
 
-**版本**: 2.0 Final
-**日期**: 2026-01-27
-**状态**: ✅ 就绪
+**提示**：首次启动前运行 `./VERIFY_CONFIG.sh` 验证配置！
