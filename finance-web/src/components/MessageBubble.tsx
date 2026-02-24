@@ -13,6 +13,8 @@ import type { Message, MessageAttachment } from '../types';
 interface MessageBubbleProps {
   message: Message;
   onFormSubmit?: (formData: Record<string, unknown>) => void;
+  /** 是否正在流式输出（显示闪烁光标） */
+  isStreaming?: boolean;
 }
 
 function formatTime(date: Date): string {
@@ -113,8 +115,92 @@ function SystemActionMessage({ message }: { message: Message }) {
   );
 }
 
+/** 打字机效果组件 - 逐字显示文本（仅用于流式输出的新消息） */
+function TypewriterText({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+  // 追踪是否曾经处于流式状态（用于区分新消息和历史消息）
+  const hasBeenStreamingRef = useRef(isStreaming);
+  const [displayedLength, setDisplayedLength] = useState(() => {
+    // 如果初始时不是流式状态，说明是历史消息，直接显示全部
+    return isStreaming ? 0 : content.length;
+  });
+  const [isTyping, setIsTyping] = useState(false);
+  const prevContentRef = useRef(content);
+  const targetLengthRef = useRef(content.length);
+  
+  // 记录曾经处于流式状态
+  useEffect(() => {
+    if (isStreaming) {
+      hasBeenStreamingRef.current = true;
+    }
+  }, [isStreaming]);
+  
+  useEffect(() => {
+    // 如果从未处于流式状态（历史消息），直接显示全部内容
+    if (!hasBeenStreamingRef.current) {
+      setDisplayedLength(content.length);
+      return;
+    }
+    
+    // 检测新内容
+    const prevContent = prevContentRef.current;
+    const newContent = content;
+    
+    // 如果内容变化了
+    if (newContent !== prevContent) {
+      // 如果是追加内容（流式输出场景）
+      if (newContent.startsWith(prevContent)) {
+        // 保持当前显示位置，继续打字
+        targetLengthRef.current = newContent.length;
+      } else {
+        // 内容完全变化，重新开始
+        setDisplayedLength(0);
+        targetLengthRef.current = newContent.length;
+      }
+      prevContentRef.current = newContent;
+    }
+    
+    // 如果还没显示完，继续打字
+    if (displayedLength < targetLengthRef.current) {
+      setIsTyping(true);
+      const timer = setTimeout(() => {
+        setDisplayedLength((prev) => Math.min(prev + 1, targetLengthRef.current));
+      }, 60); // 每个字符 60ms
+      return () => clearTimeout(timer);
+    } else {
+      setIsTyping(false);
+    }
+  }, [content, displayedLength]);
+  
+  // 历史消息或打字完成后直接显示完整内容
+  const displayContent = !hasBeenStreamingRef.current || (!isStreaming && !isTyping) 
+    ? content 
+    : content.slice(0, displayedLength);
+  const showCursor = hasBeenStreamingRef.current && (isStreaming || isTyping);
+  
+  return (
+    <>
+      {displayContent.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
+        <span key={i}>
+          {part}
+          {i < arr.length - 1 && (
+            <span className="inline-flex gap-1 ml-0.5 align-middle">
+              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            </span>
+          )}
+        </span>
+      ))}
+      {/* 打字中或流式输出时显示闪烁光标 */}
+      {showCursor && (
+        <span className="streaming-cursor inline-block w-0.5 h-4 bg-blue-500 ml-0.5 align-middle animate-pulse" />
+      )}
+    </>
+  );
+}
+
 /** AI 消息 */
-function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void }) {
+function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
   const isHtmlForm = message.content.includes('<form');
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
@@ -190,18 +276,7 @@ function AssistantMessage({ message, onFormSubmit }: { message: Message; onFormS
             </div>
           ) : (
           <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-            {message.content.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
-              <span key={i}>
-                {part}
-                {i < arr.length - 1 && (
-                  <span className="inline-flex gap-1 ml-0.5 align-middle">
-                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-                    <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-                  </span>
-                )}
-              </span>
-            ))}
+            <TypewriterText content={message.content} isStreaming={isStreaming} />
           </div>
           )}
         </div>
@@ -244,12 +319,12 @@ function UserMessage({ message }: { message: Message }) {
   );
 }
 
-export default function MessageBubble({ message, onFormSubmit }: MessageBubbleProps) {
+export default function MessageBubble({ message, onFormSubmit, isStreaming }: MessageBubbleProps) {
   if (message.role === 'system' && message.action) {
     return <SystemActionMessage message={message} />;
   }
   if (message.role === 'assistant') {
-    return <AssistantMessage message={message} onFormSubmit={onFormSubmit} />;
+    return <AssistantMessage message={message} onFormSubmit={onFormSubmit} isStreaming={isStreaming} />;
   }
   return <UserMessage message={message} />;
 }

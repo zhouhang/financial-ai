@@ -1,276 +1,456 @@
-# Finance AI - 架构迁移完成 🎉
+# Financial AI - 金融智能数据整理与对账平台
 
-## 快速开始
+基于 **LangGraph** 的 AI 驱动金融数据处理系统，提供智能对话、数据整理和自动对账功能。
 
-### 一键启动所有服务
+## 🏗️ 系统架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     用户层                               │
+│              浏览器 (http://localhost:5173)              │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                  finance-web (前端)                      │
+│   React 19 + TypeScript + Vite + WebSocket              │
+│   - 实时聊天界面                                          │
+│   - 文件上传管理                                          │
+│   - 任务进度展示                                          │
+│   端口: 5173                                             │
+└──────────────────┬──────────────────────────────────────┘
+                   │ WebSocket /chat
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                data-agent (AI 后端)                      │
+│   LangGraph + FastAPI + LangChain                       │
+│   - AI 意图识别                                          │
+│   - 工作流编排                                            │
+│   - MCP 工具调用                                          │
+│   端口: 8100                                             │
+└──────────────────┬──────────────────────────────────────┘
+                   │ MCP Protocol
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│              finance-mcp (MCP 工具服务器)                │
+│   MCP Protocol + Pandas + asyncio                       │
+│   - 数据整理工具 (4个)                                    │
+│   - 对账工具 (6个)                                        │
+│   - 异步任务管理                                          │
+│   端口: 3335                                             │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│              PostgreSQL (finflux 数据库)                 │
+│   - 对账规则管理                                          │
+│   - 任务状态持久化                                        │
+│   - 用户权限管理                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+## 🚀 快速开始
+
+### 一键启动所有服务（推荐）
+
 ```bash
-cd /Users/kevin/workspace/financial-ai
+cd /Users/fanyuli/Desktop/workspace/financial-ai
 ./START_ALL_SERVICES.sh
 ```
 
+启动脚本会自动：
+- ✅ 停止旧服务（端口 3335、8100、5173）
+- ✅ 启动 finance-mcp（MCP 工具服务器）
+- ✅ 启动 data-agent（AI 后端）
+- ✅ 启动 finance-web（前端界面）
+- ✅ 验证服务状态
+- ✅ 显示访问地址和日志路径
+
 ### 一键停止所有服务
+
 ```bash
-cd /Users/kevin/workspace/financial-ai
+cd /Users/fanyuli/Desktop/workspace/financial-ai
 ./STOP_ALL_SERVICES.sh
 ```
 
-## 服务地址
-
-| 服务 | 地址 | 说明 |
-|------|------|------|
-| **finance-ui** | http://localhost:5173 | 前端界面 |
-| **finance-mcp API** | http://localhost:8000 | RESTful API |
-| **API 文档** | http://localhost:8000/docs | Swagger 文档 |
-| **finance-mcp MCP** | http://localhost:3335 | MCP 工具服务 |
-| **Dify** | http://localhost | AI 对话服务 |
-
-## 新架构说明
-
-### 🎯 核心变化
-
-**之前**: finance-ui 包含前端 + 后端，通过后端代理调用 Dify
-```
-用户 → finance-ui 前端 → finance-ui 后端 → Dify → finance-mcp MCP
+或使用快捷命令：
+```bash
+lsof -ti:3335,8100,5173 | xargs kill -9
 ```
 
-**现在**: finance-ui 纯前端，直接调用 Dify 和 finance-mcp API
-```
-用户 → finance-ui 前端 ─┬→ Dify → finance-mcp MCP
-                        └→ finance-mcp API
-```
+## 📍 服务地址
 
-### 📦 各服务职责
+| 服务 | 端口 | 地址 | 说明 |
+|------|------|------|------|
+| **finance-web** | 5173 | http://localhost:5173 | 用户界面（React 前端） |
+| **data-agent** | 8100 | http://localhost:8100 | AI 后端（LangGraph + FastAPI） |
+| **finance-mcp** | 3335 | http://localhost:3335 | MCP 工具服务器（数据整理+对账） |
 
-#### 1. finance-mcp (核心服务)
-**位置**: `/Users/kevin/workspace/financial-ai/finance-mcp`
+## 📚 手动启动（三个终端）
 
-**提供两个服务**:
-- **API Server** (端口 8000): 认证、Schema 管理、文件上传
-- **MCP Server** (端口 3335): 数据整理和对账工具
+如果需要分别查看每个服务的日志，可以手动启动：
 
-**目录结构**:
-```
-finance-mcp/
-├── api/                    # RESTful API (新增)
-│   ├── routers/           # 路由
-│   ├── models/            # 数据库模型
-│   ├── services/          # 业务逻辑
-│   └── utils/             # 工具函数
-├── api_server.py          # API 服务器入口 (新增)
-├── unified_mcp_server.py  # MCP 服务器入口
-├── data_preparation/      # 数据整理模块
-└── reconciliation/        # 对账模块
+**终端 1 - finance-mcp：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+cd finance-mcp
+python unified_mcp_server.py
 ```
 
-#### 2. finance-ui (纯前端)
-**位置**: `/Users/kevin/workspace/financial-ai/finance-ui`
+**终端 2 - data-agent：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+cd finance-agents/data-agent
+python -m app.server
+```
 
-**职责**:
-- 用户界面展示
-- 直接调用 Dify API 进行对话
-- 调用 finance-mcp API 进行数据管理
-- 解析 Dify 响应中的特殊指令并渲染 UI
+**终端 3 - finance-web：**
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai/finance-web
+npm run dev
+```
 
-**关键变化**:
-- ✅ 删除了整个 `backend/` 目录
-- ✅ `src/api/dify.ts` 直接调用 Dify API
-- ✅ 其他 API 调用 finance-mcp
+## 📊 查看日志
 
-#### 3. Dify (AI 编排)
-**位置**: http://localhost
+使用 `START_ALL_SERVICES.sh` 启动时，日志保存在 `logs/` 目录：
 
-**职责**:
-- AI 对话流程编排
-- 调用 finance-mcp MCP 工具
-- 返回响应 (包含特殊指令)
+```bash
+# 实时查看 finance-mcp 日志
+tail -f logs/finance-mcp.log
 
-## 数据流示例
+# 实时查看 data-agent 日志
+tail -f logs/data-agent.log
 
-### 场景 1: 用户对话
+# 实时查看 finance-web 日志
+tail -f logs/finance-web.log
+```
+
+## 💻 项目结构
+
+```
+financial-ai/
+├── finance-web/                    # 前端 (React + TypeScript + Vite)
+│   ├── src/
+│   │   ├── App.tsx              # 主应用
+│   │   ├── components/          # 组件
+│   │   │   ├── Sidebar.tsx      # 会话列表
+│   │   │   ├── ChatArea.tsx     # 聊天区
+│   │   │   └── Workbench.tsx    # 工作台
+│   │   ├── hooks/
+│   │   │   └── useWebSocket.ts  # WebSocket 钩子
+│   │   └── types.ts             # 类型定义
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── finance-agents/                # AI 后端 (LangGraph + FastAPI)
+│   └── data-agent/
+│       ├── app/
+│       │   ├── server.py        # FastAPI 服务器
+│       │   ├── config.py        # 配置
+│       │   ├── graphs/          # LangGraph 工作流
+│       │   │   ├── main_graph.py
+│       │   │   ├── reconciliation.py
+│       │   │   └── data_preparation.py
+│       │   ├── tools/           # MCP 工具客户端
+│       │   │   └── mcp_client.py
+│       │   └── utils/           # 工具类
+│       └── requirements.txt
+│
+├── finance-mcp/                   # MCP 工具服务器
+│   ├── unified_mcp_server.py    # 服务器入口
+│   ├── db_config.py             # 数据库配置
+│   ├── reconciliation/          # 对账模块
+│   │   ├── mcp_server/
+│   │   │   ├── tools.py         # 6个 MCP 工具
+│   │   │   ├── reconciliation_engine.py
+│   │   │   ├── data_cleaner.py
+│   │   │   └── task_manager.py
+│   │   └── schemas/             # 对账规则配置
+│   └── data_preparation/        # 数据整理模块
+│       ├── mcp_server/
+│       │   ├── tools.py         # 4个 MCP 工具
+│       │   ├── processing_engine.py
+│       │   └── task_manager.py
+│       └── schemas/             # 数据整理配置
+│
+├── .venv/                         # Python 虚拟环境（所有 Python 服务共用）
+├── requirements.txt               # Python 依赖
+├── START_ALL_SERVICES.sh          # 一键启动脚本
+├── STOP_ALL_SERVICES.sh           # 一键停止脚本
+└── README.md                      # 本文件
+```
+
+## 🔧 技术栈
+
+### 前端
+- **React 19** - UI 框架
+- **TypeScript** - 类型安全
+- **Vite** - 构建工具
+- **Tailwind CSS** - 样式框架
+- **WebSocket** - 实时通信
+
+### AI 后端
+- **LangGraph** - AI 工作流编排
+- **FastAPI** - Web 框架
+- **LangChain** - LLM 集成
+- **PostgreSQL** - 状态持久化
+
+### MCP 服务
+- **MCP Protocol** - 模型上下文协议
+- **Starlette** - ASGI Web 框架
+- **Pandas** - 数据处理
+- **asyncio** - 异步任务管理
+
+### 数据库
+- **PostgreSQL (finflux)** - 主数据库
+  - 对账规则管理
+  - 任务状态持久化
+  - 用户权限管理
+
+## 📊 数据流示例
+
+### 场景 1：用户对话 + 数据整理
 ```
 1. 用户输入: "帮我整理货币资金数据"
    ↓
-2. finance-ui 调用 Dify API
-   POST http://localhost/v1/chat-messages
+2. finance-web 通过 WebSocket 发送消息
+   WebSocket /chat → data-agent
    ↓
-3. Dify 处理并调用 MCP 工具
-   → finance-mcp MCP Server (端口 3335)
+3. LangGraph 分析意图 → 数据整理子图
    ↓
-4. 执行数据整理任务
+4. 调用 MCP 工具
+   MCP Protocol → finance-mcp (data_preparation_start)
    ↓
-5. 返回结果给 Dify
+5. finance-mcp 异步执行数据整理任务
    ↓
-6. Dify 返回响应: "已完成数据整理 [create_schema]"
+6. 轮询查询任务状态
+   data_preparation_status
    ↓
-7. finance-ui 检测到 [create_schema] 指令
-   ↓
-8. 显示创建 Schema 表单
+7. 获取结果并流式返回给用户
+   WebSocket stream → finance-web
 ```
 
-### 场景 2: 创建 Schema
+### 场景 2：文件上传 + 对账
 ```
-1. 用户填写 Schema 表单
+1. 用户上传两个文件（业务流水 + 财务流水）
    ↓
-2. finance-ui 调用 finance-mcp API
-   POST http://localhost:8000/api/schemas
+2. finance-web 调用 data-agent
+   POST /upload → data-agent
    ↓
-3. 保存到数据库
+3. data-agent 调用 MCP 工具
+   MCP file_upload → finance-mcp
    ↓
-4. 返回 Schema 对象
+4. 文件保存到 finance-mcp/uploads/
    ↓
-5. finance-ui 显示成功消息
-```
-
-### 场景 3: 上传文件
-```
-1. 用户上传 Excel 文件
+5. 用户发送对账指令: "对比这两个文件"
    ↓
-2. finance-ui 调用 finance-mcp API
-   POST http://localhost:8000/api/files/upload
+6. LangGraph 分析意图 → 对账子图
    ↓
-3. 保存到 finance-mcp/uploads/
+7. 调用 MCP 工具
+   reconciliation_start → finance-mcp
    ↓
-4. 返回文件路径
+8. finance-mcp 异步执行对账
    ↓
-5. finance-ui 显示文件预览
+9. 返回对账结果（匹配/差异明细）
+   WebSocket stream → finance-web
 ```
 
-## API 端点
+## ✨ 主要功能
 
-### finance-mcp API (http://localhost:8000/api)
+### 1. 智能对话
+- ✅ 实时 WebSocket 通信
+- ✅ 流式输出支持
+- ✅ AI 意图识别
+- ✅ 多会话管理
+- ✅ 中断处理 (Interrupt)
 
-#### 认证
-- `POST /api/auth/register` - 用户注册
-- `POST /api/auth/login` - 用户登录
-- `GET /api/auth/me` - 获取当前用户
+### 2. 数据整理
+- ✅ Schema 驱动的数据提取
+- ✅ 智能字段映射
+- ✅ 数据清洗和转换
+- ✅ 自动生成 Excel 报表
+- ✅ 任务进度实时显示
 
-#### Schema 管理
-- `POST /api/schemas` - 创建 Schema
-- `GET /api/schemas` - 获取列表
-- `GET /api/schemas/{id}` - 获取详情
-- `PUT /api/schemas/{id}` - 更新
-- `DELETE /api/schemas/{id}` - 删除
-- `POST /api/schemas/generate-type-key` - 生成标识符
-- `GET /api/schemas/check-name-exists` - 检查名称
-- `POST /api/schemas/validate-content` - 验证内容
-- `POST /api/schemas/test` - 测试执行
+### 3. 自动对账
+- ✅ 多文件智能匹配
+- ✅ 灵活的对账规则
+- ✅ 差异自动检测
+- ✅ 容差配置支持
+- ✅ 详细的对账报告
 
-#### 文件管理
-- `POST /api/files/upload` - 上传文件
-- `GET /api/files/preview` - 预览文件
+### 4. 文件管理
+- ✅ 拖拽上传
+- ✅ 多文件批量处理
+- ✅ 文件预览
+- ✅ 自动编码检测
+- ✅ 上传进度显示
 
-### Dify API (http://localhost/v1)
-- `POST /v1/chat-messages` - 聊天对话 (支持 streaming)
+## 🛠️ 环境要求
 
-## 配置文件
+### Python 服务 (finance-mcp, data-agent)
+- Python 3.9+
+- PostgreSQL 12+ (数据库)
+- 根虚拟环境 `.venv`
 
-### finance-mcp/api/config.py
-```python
-DATABASE_URL = "mysql+pymysql://aiuser:123456@127.0.0.1:3306/finance-ai"
-API_PREFIX = "/api"
-CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
-UPLOAD_DIR = "./uploads"
-```
+### 前端服务 (finance-web)
+- Node.js 16+
+- npm 或 yarn
 
-### finance-ui/.env
+### 环境配置
+项目根目录需要创建 `.env` 文件：
+
 ```bash
-VITE_API_BASE_URL=http://localhost:8000/api
+# 数据库配置
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finflux
+DB_USER=finflux_user
+DB_PASSWORD=123456
+
+# MCP 服务器配置
+MCP_SERVER_HOST=0.0.0.0
+MCP_PUBLIC_HOST=localhost
+MCP_SERVER_PORT=3335
+
+# 文件配置
+UPLOAD_MAX_SIZE=104857600
+FILE_RETENTION_DAYS=30
+
+# 任务配置
+TASK_TIMEOUT=3600
+MAX_CONCURRENT_TASKS=5
 ```
 
-### finance-ui/src/api/dify.ts
-```typescript
-const DIFY_API_URL = 'http://localhost/v1';
-const DIFY_API_KEY = 'app-1ab05125-5865-4833-b6a1-ebfd69338f76';
-```
+## 🔍 常见问题
 
-## 测试验证
-
-### 1. 测试 API 服务器
-```bash
-# 健康检查
-curl http://localhost:8000/health
-
-# 查看 API 文档
-open http://localhost:8000/docs
-
-# 测试根端点
-curl http://localhost:8000/
-```
-
-### 2. 测试前端
-```bash
-# 访问前端
-open http://localhost:5173
-```
-
-### 3. 查看日志
-```bash
-# API 日志
-tail -f /tmp/finance-mcp-api.log
-
-# MCP 日志
-tail -f /tmp/finance-mcp-mcp.log
-
-# 前端日志
-tail -f /tmp/finance-ui.log
-```
-
-## 常见问题
-
-### Q: 端口被占用怎么办？
+### Q1: 端口被占用？
 ```bash
 # 查看端口占用
-lsof -i :8000
-lsof -i :3335
-lsof -i :5173
+lsof -i:3335  # finance-mcp
+lsof -i:8100  # data-agent
+lsof -i:5173  # finance-web
 
 # 使用停止脚本清理
 ./STOP_ALL_SERVICES.sh
 ```
 
-### Q: 数据库连接失败？
+### Q2: 虚拟环境问题？
 ```bash
-# 检查 MySQL 服务
-mysql -h 127.0.0.1 -u aiuser -p123456 -e "USE finance-ai;"
+# 检查当前虚拟环境
+which python
+# 应该输出: /Users/fanyuli/Desktop/workspace/financial-ai/.venv/bin/python
 
-# 如果数据库不存在，创建它
-mysql -h 127.0.0.1 -u aiuser -p123456 -e "CREATE DATABASE IF NOT EXISTS finance-ai CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+# 如果不是，重新激活
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
 ```
 
-### Q: CORS 错误？
-检查 `finance-mcp/api/config.py` 中的 `CORS_ORIGINS` 配置是否包含前端地址。
+### Q3: 依赖缺失？
+```bash
+cd /Users/fanyuli/Desktop/workspace/financial-ai
+source .venv/bin/activate
+pip install -r requirements.txt
 
-### Q: Dify 调用失败？
-确保 Dify 服务运行在 http://localhost，并且 API Key 正确。
+# finance-web 依赖
+cd finance-web
+npm install
+```
 
-## 文档索引
+### Q4: data-agent 无法调用 finance-mcp？
 
-- 📘 [架构迁移详细文档](./ARCHITECTURE_MIGRATION.md) - 完整的架构说明
-- 📗 [迁移总结](./MIGRATION_SUMMARY.md) - 迁移过程和技术细节
-- 📙 [快速启动指南](./QUICK_START.md) - 详细的启动和使用指南
-- 📕 [迁移报告](./MIGRATION_REPORT.md) - 完整的迁移报告
+**检查清单**：
+1. ✅ finance-mcp 是否在运行？（端口 3335）
+2. ✅ data-agent 是否使用根虚拟环境启动？
+3. ✅ 网络连接是否正常？
 
-## 架构优势
+```bash
+# 验证 finance-mcp 连接
+curl http://localhost:3335/health
 
-✅ **职责清晰**: 前端专注 UI，finance-mcp 专注业务逻辑
-✅ **直接集成**: finance-ui 直接调用 Dify API，减少中间层
-✅ **易于扩展**: 各服务可以独立部署和扩展
-✅ **便于维护**: 代码组织更清晰，易于理解和修改
-✅ **性能提升**: 减少了一层代理，响应更快
+# 查看 data-agent 日志
+tail -20 logs/data-agent.log | grep -i "mcp"
+```
 
-## 下一步
+### Q5: 数据库连接失败？
+```bash
+# 检查 PostgreSQL 服务
+psql -U finflux_user -d finflux -h localhost
 
-1. **测试所有功能**: 确保登录、Schema 管理、文件上传、对话功能都正常
-2. **配置 Dify**: 确保 Dify 正确配置了 MCP 集成
-3. **性能优化**: 根据实际使用情况优化性能
-4. **安全加固**: 生产环境需要加强安全配置
+# 如果数据库不存在，创建它
+creatdb -U finflux_user finflux
+```
 
-## 支持
+## 📚 详细文档
 
-如有问题，请查看日志文件或联系开发团队。
+- [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md) - 完整系统架构说明
+- [README_SERVICES.md](./README_SERVICES.md) - 服务管理指南
+- [QUICK_START.md](./QUICK_START.md) - 快速开始指南
+- [启动三个服务-对话记录.md](./%E5%90%AF%E5%8A%A8%E4%B8%89%E4%B8%AA%E6%9C%8D%E5%8A%A1-%E5%AF%B9%E8%AF%9D%E8%AE%B0%E5%BD%95.md) - 服务启动记录
+
+## 🌟 系统特点
+
+### 1. Schema 驱动
+- 所有对账和数据整理逻辑通过 JSON Schema 配置
+- 无需修改代码即可添加新规则
+
+### 2. 异步任务处理
+- 使用 asyncio 处理长时间运行任务
+- 不阻塞主线程、实时显示进度
+
+### 3. 实时通信
+- WebSocket 实现实时聊天
+- 支持流式输出（Streaming）
+
+### 4. AI 驱动
+- LangGraph 工作流编排
+- 智能意图识别和任务路由
+
+### 5. 安全性
+- 路径遍历防护
+- 文件类型验证
+- 输入验证和清理
+
+### 6. 可扩展性
+- MCP 协议标准化工具调用
+- LangGraph 灵活的工作流编排
+- 数据库持久化状态
+
+## 🚀 部署建议
+
+### 开发环境
+使用 `START_ALL_SERVICES.sh` 一键启动所有服务
+
+### 生产环境
+1. **数据库**：使用独立的 PostgreSQL 服务器
+2. **finance-mcp**：使用 systemd 或 supervisor 管理
+3. **data-agent**：使用 gunicorn + uvicorn 部署
+4. **finance-web**：使用 nginx 代理，`npm run build` 构建静态文件
+
+## 👥 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 本项目
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交修改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 提交 Pull Request
+
+## 📄 License
+
+MIT
+
+## 📞 支持
+
+如有问题，请：
+- 查看 [README_SERVICES.md](./README_SERVICES.md) 了解常见问题
+- 查看日志文件（`logs/` 目录）
+- 提交 Issue 到 GitHub
 
 ---
 
-**迁移完成日期**: 2026-01-27
-**版本**: 1.0
-**状态**: ✅ 完成并可用
+**最后更新**: 2026-02-24  
+**版本**: 2.0 (LangGraph 架构)  
+**状态**: ✅ 生产就绪

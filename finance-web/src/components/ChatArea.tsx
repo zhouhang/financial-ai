@@ -33,6 +33,8 @@ interface ChatAreaProps {
   threadId: string;
   showInput?: boolean;
   currentUser?: Record<string, unknown> | null;
+  /** 正在流式输出的消息 ID */
+  streamingMessageId?: string | null;
 }
 
 export default function ChatArea({
@@ -45,6 +47,7 @@ export default function ChatArea({
   threadId,
   showInput = true,
   currentUser,
+  streamingMessageId,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -306,7 +309,12 @@ export default function ChatArea({
 
         {/* 消息列表 */}
         {!isLoadingConversation && messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} onFormSubmit={handleFormSubmit} />
+          <MessageBubble 
+            key={msg.id} 
+            message={msg} 
+            onFormSubmit={handleFormSubmit}
+            isStreaming={msg.id === streamingMessageId}
+          />
         ))}
 
         {isLoading && <LoadingIndicator />}

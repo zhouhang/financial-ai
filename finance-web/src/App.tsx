@@ -571,6 +571,11 @@ export default function App() {
   // ── 发送消息 ──────────────────────────────────────────────
   const handleSendMessage = useCallback(
     (text: string, attachments?: import('./types').MessageAttachment[], silent = false) => {
+      // 如果正在流式输出，中断当前流式输出
+      if (streamingMessageId) {
+        setStreamingMessageId(null);
+      }
+      
       // 如果是待确认的新会话的第一条消息，先将会话添加到列表
       if (pendingNewConvRef.current && pendingNewConvRef.current.id === activeConvId) {
         const newConv = pendingNewConvRef.current;
@@ -606,7 +611,7 @@ export default function App() {
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
       sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId);
     },
-    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef]
+    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -763,6 +768,7 @@ export default function App() {
         threadId={activeConvId}
         showInput={!!activeConvId}
         currentUser={currentUser}
+        streamingMessageId={streamingMessageId}
       />
     </div>
   );
