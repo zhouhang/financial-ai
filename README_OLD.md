@@ -1,2 +1,0 @@
-# financial-ai
-financial ai

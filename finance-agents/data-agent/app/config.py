@@ -33,7 +33,7 @@ PORT: int = int(os.getenv("PORT", "8100"))
 # ── 数据库 ────────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    "postgresql://finflux_user:123456@localhost:5432/finflux",
+    "postgresql://tally_user:123456@localhost:5432/tally",
 )
 
 # ── Finance MCP ───────────────────────────────────────────────────────────────

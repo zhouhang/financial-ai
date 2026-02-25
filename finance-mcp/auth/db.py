@@ -231,6 +231,39 @@ def list_rules_for_user(user_id: str, company_id: str = None,
         return []
 
 
+def list_all_active_rules(status: str = "active") -> list[dict]:
+    """查询所有活跃规则（游客模式使用）
+    
+    Args:
+        status: 规则状态
+        
+    Returns:
+        list: 规则列表
+    """
+    sql = """
+    SELECT r.id, r.name, r.description, r.visibility, r.version,
+           r.use_count, r.last_used_at, r.tags, r.status,
+           r.created_at, r.updated_at,
+           u.username AS created_by_name,
+           r.created_by
+    FROM reconciliation_rules r
+    JOIN users u ON r.created_by = u.id
+    WHERE r.status = %s
+    ORDER BY r.use_count DESC
+    LIMIT 50
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (status,))
+                rows = cur.fetchall()
+                return [_serialize_rule_row(r) for r in rows]
+    except Exception as e:
+        logger.error(f"查询所有活跃规则失败: {e}")
+        return []
+
+
 def get_rule_by_id(rule_id: str) -> Optional[dict]:
     """根据 ID 获取规则详情（含 rule_template）"""
     sql = """
@@ -285,13 +318,16 @@ def create_rule(name: str, description: str, created_by: str,
                 company_id: str, department_id: str,
                 rule_template: dict, visibility: str = "private",
                 tags: list[str] = None) -> dict:
-    """创建新规则"""
+    """创建新规则，自动计算并存储 field_mapping_hash"""
     import json
+    
+    hash_value = compute_field_mapping_hash(rule_template)
+    
     sql = """
     INSERT INTO reconciliation_rules
         (name, description, created_by, company_id, department_id,
-         rule_template, visibility, tags, version, status)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '1.0', 'active')
+         rule_template, visibility, tags, version, status, field_mapping_hash)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '1.0', 'active', %s)
     RETURNING id, name, description, visibility, version, status, created_at
     """
     conn_manager = get_conn()
@@ -301,7 +337,7 @@ def create_rule(name: str, description: str, created_by: str,
                 cur.execute(sql, (
                     name, description, created_by, company_id, department_id,
                     json.dumps(rule_template, ensure_ascii=False),
-                    visibility, tags or [],
+                    visibility, tags or [], hash_value,
                 ))
                 row = cur.fetchone()
                 conn.commit()
@@ -388,6 +424,226 @@ def can_user_modify_rule(user_id: str, role: str, rule: dict) -> bool:
     if role == "manager":
         return True
     return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 规则推荐功能 - 字段映射哈希
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_field_mapping_hash(rule_template: dict) -> str:
+    """计算字段映射的哈希值，用于规则匹配推荐。
+    
+    提取6个关键字段（业务和财务的 order_id, amount, date），
+    排序后计算 MD5 哈希。
+    """
+    import hashlib
+    
+    fields = []
+    for source in ["business", "finance"]:
+        for role in ["order_id", "amount", "date"]:
+            value = (
+                rule_template.get("data_sources", {})
+                .get(source, {})
+                .get("field_roles", {})
+                .get(role)
+            )
+            if isinstance(value, list):
+                value = ",".join(sorted(value))
+            elif value:
+                value = str(value)
+            else:
+                value = ""
+            fields.append(f"{source}.{role}={value}")
+    
+    fields.sort()
+    hash_input = "|".join(fields)
+    return hashlib.md5(hash_input.encode()).hexdigest()
+
+
+def add_field_mapping_hash_column():
+    """迁移：为 reconciliation_rules 表添加 field_mapping_hash 字段"""
+    sql = """
+    ALTER TABLE reconciliation_rules 
+    ADD COLUMN IF NOT EXISTS field_mapping_hash VARCHAR(32);
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+        logger.info("field_mapping_hash 字段已添加")
+    except Exception as e:
+        logger.error(f"添加 field_mapping_hash 字段失败: {e}")
+        raise
+
+
+def create_field_mapping_hash_index():
+    """迁移：创建 field_mapping_hash 字段的 B-tree 索引"""
+    sql = """
+    CREATE INDEX IF NOT EXISTS idx_rules_field_mapping_hash 
+    ON reconciliation_rules(field_mapping_hash);
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+        logger.info("field_mapping_hash 索引已创建")
+    except Exception as e:
+        logger.error(f"创建索引失败: {e}")
+        raise
+
+
+def migrate_existing_rules_hash():
+    """迁移：为现有规则计算并填充 field_mapping_hash"""
+    import json
+    
+    sql = """
+    SELECT id, rule_template 
+    FROM reconciliation_rules 
+    WHERE field_mapping_hash IS NULL OR field_mapping_hash = ''
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                
+                if not rows:
+                    logger.info("没有需要迁移的规则")
+                    return 0
+                
+                count = 0
+                for row in rows:
+                    rule_id = row["id"]
+                    template = row["rule_template"]
+                    if isinstance(template, str):
+                        template = json.loads(template)
+                    
+                    hash_value = compute_field_mapping_hash(template)
+                    
+                    update_sql = """
+                    UPDATE reconciliation_rules 
+                    SET field_mapping_hash = %s 
+                    WHERE id = %s
+                    """
+                    cur.execute(update_sql, (hash_value, rule_id))
+                    count += 1
+                
+                conn.commit()
+                logger.info(f"已迁移 {count} 条规则的 field_mapping_hash")
+                return count
+    except Exception as e:
+        logger.error(f"迁移规则哈希失败: {e}")
+        raise
+
+
+def search_rules_by_field_mapping(field_mapping_hash: str, limit: int = 3) -> list[dict]:
+    """根据字段映射哈希搜索匹配规则"""
+    sql = """
+    SELECT r.id, r.name, r.description, r.rule_template, r.field_mapping_hash,
+           r.created_at, r.created_by
+    FROM reconciliation_rules r
+    WHERE r.field_mapping_hash = %s 
+      AND r.status = 'active'
+    LIMIT %s
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (field_mapping_hash, limit))
+                rows = cur.fetchall()
+                return [_serialize_rule_row(r, include_template=True) for r in rows]
+    except Exception as e:
+        logger.error(f"搜索规则失败: {e}")
+        return []
+
+
+def batch_get_rules_by_ids(rule_ids: list[str]) -> list[dict]:
+    """批量获取规则详情（含 rule_template）
+    
+    Args:
+        rule_ids: 规则 ID 列表
+        
+    Returns:
+        规则详情列表，包含 rule_template
+    """
+    if not rule_ids:
+        return []
+    
+    # 使用 ANY 数组查询，将 UUID 转换为 text 后比较
+    sql = """
+    SELECT r.*, u.username AS created_by_name
+    FROM reconciliation_rules r
+    JOIN users u ON r.created_by = u.id
+    WHERE r.id::text = ANY(%s)
+      AND r.status = 'active'
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (rule_ids,))
+                rows = cur.fetchall()
+                return [_serialize_rule_row(r, include_template=True) for r in rows]
+    except Exception as e:
+        logger.error(f"批量获取规则失败: {e}")
+        return []
+
+
+def copy_rule(source_rule_id: str, new_name: str, user_id: str) -> dict:
+    """复制规则为新规则"""
+    import json
+    
+    sql = """
+    SELECT * FROM reconciliation_rules WHERE id = %s
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (source_rule_id,))
+                row = cur.fetchone()
+                
+                if not row:
+                    raise ValueError(f"源规则不存在: {source_rule_id}")
+                
+                template = row["rule_template"]
+                if isinstance(template, str):
+                    template = json.loads(template)
+                
+                new_hash = compute_field_mapping_hash(template)
+                
+                insert_sql = """
+                INSERT INTO reconciliation_rules
+                    (name, description, created_by, company_id, department_id,
+                     rule_template, visibility, tags, version, status, field_mapping_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, description, created_at
+                """
+                cur.execute(insert_sql, (
+                    new_name,
+                    row["description"],
+                    user_id,
+                    row["company_id"],
+                    row["department_id"],
+                    json.dumps(template, ensure_ascii=False),
+                    row["visibility"],
+                    row["tags"] or [],
+                    row["version"],
+                    "active",
+                    new_hash,
+                ))
+                new_row = cur.fetchone()
+                conn.commit()
+                return _serialize_rule_row(new_row)
+    except Exception as e:
+        logger.error(f"复制规则失败: {e}")
+        raise
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
@@ -695,37 +951,70 @@ def update_conversation(conversation_id: str, user_id: str, title: str = None, s
 
 
 def delete_conversation(conversation_id: str, user_id: str) -> bool:
-    """删除会话（软删除）"""
-    result = update_conversation(conversation_id, user_id, status="deleted")
-    return result is not None
+    """删除会话（物理删除）及关联的历史消息"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as c:
+            with c.cursor() as cur:
+                # 1. 删除该会话下的所有消息
+                cur.execute("DELETE FROM messages WHERE conversation_id = %s", (conversation_id,))
+                # 2. 物理删除会话
+                cur.execute(
+                    "DELETE FROM conversations WHERE id = %s AND user_id = %s",
+                    (conversation_id, user_id)
+                )
+                c.commit()
+                return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"删除会话失败: {e}")
+        try:
+            conn_manager.rollback()
+        except Exception:
+            pass
+        return False
 
 
-def save_message(conversation_id: str, role: str, content: str, metadata: dict = None) -> dict | None:
-    """保存消息"""
+def save_message(conversation_id: str, role: str, content: str, metadata: dict = None, attachments: list = None) -> dict | None:
+    """保存消息（支持附件，向后兼容）"""
     import json
     conn = get_conn()
     try:
         with conn as c:
             with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """INSERT INTO messages (conversation_id, role, content, metadata)
-                       VALUES (%s, %s, %s, %s)
-                       RETURNING id, conversation_id, role, content, metadata, created_at""",
-                    (conversation_id, role, content, json.dumps(metadata or {}))
-                )
-                row = cur.fetchone()
-                
+                # 尝试使用新的 attachments 列（如果存在）
+                try:
+                    cur.execute(
+                        """INSERT INTO messages (conversation_id, role, content, metadata, attachments)
+                           VALUES (%s, %s, %s, %s, %s)
+                           RETURNING id, conversation_id, role, content, metadata, attachments, created_at""",
+                        (conversation_id, role, content, json.dumps(metadata or {}), json.dumps(attachments or []))
+                    )
+                    row = cur.fetchone()
+                except Exception as column_error:
+                    # 如果 attachments 列不存在，回退到旧版本（不包含 attachments）
+                    logger.warning(f"attachments 列不存在，使用旧版本保存: {column_error}")
+                    cur.execute(
+                        """INSERT INTO messages (conversation_id, role, content, metadata)
+                           VALUES (%s, %s, %s, %s)
+                           RETURNING id, conversation_id, role, content, metadata, created_at""",
+                        (conversation_id, role, content, json.dumps(metadata or {}))
+                    )
+                    row = cur.fetchone()
+
                 # 同时更新会话的 updated_at
                 cur.execute(
                     "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                     (conversation_id,)
                 )
-                
+
                 c.commit()
                 if row:
                     result = dict(row)
                     result["id"] = str(result["id"])
                     result["conversation_id"] = str(result["conversation_id"])
+                    # 确保总是返回 attachments 字段（即使是空数组）
+                    if "attachments" not in result:
+                        result["attachments"] = []
                     return result
                 return None
     except Exception as e:
@@ -733,28 +1022,272 @@ def save_message(conversation_id: str, role: str, content: str, metadata: dict =
         return None
 
 
+def should_display_message(role: str, content: str, metadata: dict = None) -> bool:
+    """判断消息是否应该显示给用户。
+
+    过滤掉以下类型的消息：
+    - JSON响应（意图识别等）
+    - HTML表单
+    - 代码块
+    - 系统消息
+    - 进度提示消息（包含SPINNER等临时标记）
+
+    Args:
+        role: 消息角色 (user/assistant/system)
+        content: 消息内容
+        metadata: 可选的元数据
+
+    Returns:
+        True 表示应该显示，False 表示应该过滤掉
+    """
+    if not content:
+        return False
+
+    content_stripped = content.strip()
+
+    # 过滤JSON响应
+    if content_stripped.startswith("{") or content_stripped.startswith("["):
+        return False
+
+    # 过滤代码块
+    if content_stripped.startswith("```"):
+        return False
+
+    # 过滤HTML表单
+    if content_stripped.startswith("<"):
+        return False
+
+    # 过滤系统消息
+    if role == "system":
+        return False
+
+    # 过滤进度消息（临时指示器）
+    progress_patterns = [
+        "{{SPINNER}}",
+        "正在保存",
+        "📊 进度：",
+    ]
+    for pattern in progress_patterns:
+        if pattern in content:
+            return False
+
+    return True
+
+
 def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
-    """获取会话的消息列表"""
+    """获取会话的消息列表（已过滤不应显示的消息，向后兼容）"""
     conn = get_conn()
     try:
         with conn as c:
             with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """SELECT id, conversation_id, role, content, metadata, created_at
-                       FROM messages
-                       WHERE conversation_id = %s
-                       ORDER BY created_at ASC
-                       LIMIT %s OFFSET %s""",
-                    (conversation_id, limit, offset)
-                )
+                # 尝试查询包含 attachments 列
+                try:
+                    cur.execute(
+                        """SELECT id, conversation_id, role, content, metadata, attachments, created_at
+                           FROM messages
+                           WHERE conversation_id = %s
+                           ORDER BY created_at ASC
+                           LIMIT %s OFFSET %s""",
+                        (conversation_id, limit, offset)
+                    )
+                except Exception as column_error:
+                    # 如果 attachments 列不存在，查询不包含它
+                    logger.warning(f"attachments 列不存在，使用旧版本查询: {column_error}")
+                    cur.execute(
+                        """SELECT id, conversation_id, role, content, metadata, created_at
+                           FROM messages
+                           WHERE conversation_id = %s
+                           ORDER BY created_at ASC
+                           LIMIT %s OFFSET %s""",
+                        (conversation_id, limit, offset)
+                    )
+
                 rows = cur.fetchall()
+                result = []
+                for row in rows:
+                    # 应用过滤器：只返回应该显示的消息
+                    if should_display_message(row["role"], row["content"], row.get("metadata")):
+                        item = dict(row)
+                        item["id"] = str(item["id"])
+                        item["conversation_id"] = str(item["conversation_id"])
+                        # 确保 attachments 总是一个列表
+                        if "attachments" not in item or item.get("attachments") is None:
+                            item["attachments"] = []
+                        result.append(item)
+                return result
+    except Exception as e:
+        logger.error(f"获取消息列表失败: {e}")
+        return []
+
+
+# ── 游客认证操作 ──────────────────────────────────────────────────────────
+
+import secrets
+from datetime import datetime, timedelta
+
+
+def create_guest_token(session_id: str, ip_address: str = None, user_agent: str = None) -> dict:
+    """创建游客临时token
+    
+    Args:
+        session_id: 会话ID
+        ip_address: 用户IP地址
+        user_agent: 用户浏览器信息
+        
+    Returns:
+        dict: 包含 token 和过期时间
+    """
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now() + timedelta(days=7)
+    
+    sql = """
+    INSERT INTO guest_auth_tokens (token, session_id, ip_address, user_agent, expires_at)
+    VALUES (%s, %s, %s, %s, %s)
+    RETURNING id, token, usage_count, max_usage, expires_at
+    """
+    
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (token, session_id, ip_address, user_agent, expires_at))
+                result = cur.fetchone()
+                conn.commit()
+                
+                return {
+                    "id": str(result["id"]),
+                    "token": result["token"],
+                    "usage_count": result["usage_count"],
+                    "max_usage": result["max_usage"],
+                    "expires_at": result["expires_at"].isoformat() if result["expires_at"] else None
+                }
+    except Exception as e:
+        logger.error(f"创建游客token失败: {e}")
+        return None
+
+
+def verify_guest_token(token: str) -> Optional[dict]:
+    """验证游客token
+    
+    Args:
+        token: 游客token
+        
+    Returns:
+        dict: token信息，如果无效则返回None
+    """
+    sql = """
+    SELECT id, token, session_id, usage_count, max_usage, expires_at, created_at
+    FROM guest_auth_tokens
+    WHERE token = %s
+    """
+    
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (token,))
+                result = cur.fetchone()
+                
+                if not result:
+                    return None
+                
+                # 检查是否过期 - 统一转换为 naive datetime 进行比较
+                if result["expires_at"]:
+                    expires_at = result["expires_at"]
+                    # 确保两个datetime都是naive（不带时区信息）
+                    if hasattr(expires_at, 'tzinfo') and expires_at.tzinfo is not None:
+                        # 如果有时区信息，去掉时区信息转为naive
+                        expires_at = expires_at.replace(tzinfo=None)
+                    now = datetime.utcnow()
+                    if expires_at < now:
+                        return {"valid": False, "error": "token已过期"}
+                
+                return {
+                    "id": str(result["id"]),
+                    "token": result["token"],
+                    "session_id": result["session_id"],
+                    "usage_count": result["usage_count"],
+                    "max_usage": result["max_usage"],
+                    "expires_at": result["expires_at"].isoformat() if result["expires_at"] else None,
+                    "valid": True
+                }
+    except Exception as e:
+        logger.error(f"验证游客token失败: {e}")
+        return None
+
+
+def increment_guest_usage(token: str) -> Optional[dict]:
+    """增加游客token使用次数
+    
+    Args:
+        token: 游客token
+        
+    Returns:
+        dict: 更新后的token信息
+    """
+    sql = """
+    UPDATE guest_auth_tokens
+    SET usage_count = usage_count + 1
+    WHERE token = %s
+    RETURNING id, token, session_id, usage_count, max_usage, expires_at
+    """
+    
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (token,))
+                result = cur.fetchone()
+                conn.commit()
+                
+                if not result:
+                    return None
+                
+                return {
+                    "id": str(result["id"]),
+                    "token": result["token"],
+                    "session_id": result["session_id"],
+                    "usage_count": result["usage_count"],
+                    "max_usage": result["max_usage"],
+                    "expires_at": result["expires_at"].isoformat() if result["expires_at"] else None
+                }
+    except Exception as e:
+        logger.error(f"增加游客使用次数失败: {e}")
+        return None
+
+
+def list_recommended_rules(limit: int = 20) -> list:
+    """获取系统推荐规则列表（返回所有活跃规则）
+    
+    Args:
+        limit: 返回数量限制
+        
+    Returns:
+        list: 推荐规则列表
+    """
+    sql = """
+    SELECT id, name, description, visibility, version, use_count, status,
+           created_at, key_field_role, field_mapping_hash
+    FROM reconciliation_rules
+    WHERE status = 'active'
+    ORDER BY use_count DESC
+    LIMIT %s
+    """
+    
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (limit,))
+                rows = cur.fetchall()
+                
                 result = []
                 for row in rows:
                     item = dict(row)
                     item["id"] = str(item["id"])
-                    item["conversation_id"] = str(item["conversation_id"])
+                    item["created_at"] = item["created_at"].isoformat() if item["created_at"] else None
                     result.append(item)
                 return result
     except Exception as e:
-        logger.error(f"获取消息列表失败: {e}")
+        logger.error(f"获取推荐规则列表失败: {e}")
         return []

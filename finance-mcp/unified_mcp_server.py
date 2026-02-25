@@ -31,7 +31,7 @@ from data_preparation.mcp_server.tools import create_tools as create_prep_tools,
 from data_preparation.mcp_server.config import OUTPUT_DIR, REPORT_DIR as PREP_REPORT_DIR_IMPORT
 
 # 导入认证和规则管理模块
-from auth.tools import create_auth_tools, handle_auth_tool_call
+from auth.tools import create_auth_tools, handle_auth_tool_call, _create_guest_tools, _handle_create_guest_token, _handle_verify_guest_token, _handle_list_recommended_rules
 
 # 配置日志
 logging.basicConfig(
@@ -55,6 +55,13 @@ async def list_tools() -> list[types.Tool]:
         auth_tools = []
 
     try:
+        guest_tools = _create_guest_tools()
+        logger.info(f"游客认证工具数量: {len(guest_tools)}")
+    except Exception as e:
+        logger.error(f"加载游客工具失败: {str(e)}", exc_info=True)
+        guest_tools = []
+
+    try:
         recon_tools = create_recon_tools()
         logger.info(f"对账工具数量: {len(recon_tools)}")
     except Exception as e:
@@ -68,7 +75,7 @@ async def list_tools() -> list[types.Tool]:
         logger.error(f"加载数据整理工具失败: {str(e)}", exc_info=True)
         prep_tools = []
     
-    all_tools = auth_tools + recon_tools + prep_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -79,6 +86,11 @@ _AUTH_TOOL_NAMES = {
     "list_reconciliation_rules", "get_reconciliation_rule",
     "save_reconciliation_rule", "update_reconciliation_rule",
     "delete_reconciliation_rule",
+}
+
+# 游客工具名集合
+_GUEST_TOOL_NAMES = {
+    "create_guest_token", "verify_guest_token", "list_recommended_rules"
 }
 
 
@@ -92,11 +104,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         if name in _AUTH_TOOL_NAMES:
             result = await handle_auth_tool_call(name, arguments)
 
-        # 2) 对账执行模块工具
+        # 2) 游客认证工具
+        elif name in _GUEST_TOOL_NAMES:
+            if name == "create_guest_token":
+                result = await _handle_create_guest_token(arguments)
+            elif name == "verify_guest_token":
+                result = await _handle_verify_guest_token(arguments)
+            elif name == "list_recommended_rules":
+                result = await _handle_list_recommended_rules(arguments)
+            else:
+                result = {"error": f"未知的游客工具: {name}"}
+
+        # 3) 对账执行模块工具
         elif name.startswith("reconciliation_") or name in ["file_upload", "get_reconciliation", "analyze_files"]:
             result = await handle_recon_call(name, arguments)
 
-        # 3) 数据整理模块
+        # 4) 数据整理模块
         elif name.startswith("data_preparation_"):
             result = await handle_prep_call(name, arguments)
 

@@ -45,6 +45,7 @@ from app.tools.mcp_client import (
     get_admin_view,
     list_companies_public,
     list_departments_public,
+    create_guest_token,
 )
 from .forms import (
     generate_login_form,
@@ -80,20 +81,19 @@ def _get_progress_callback(thread_id: str):
 SYSTEM_PROMPT_NOT_LOGGED_IN = """\
 你是一个专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
 
-⚠️ 当前用户尚未登录。请引导用户先登录或注册。
+你可以帮助用户：
+1. 上传业务文件和财务文件进行对账
+2. 根据文件自动推荐合适的对账规则
+3. 执行对账并展示差异结果
+4. 回答用户关于对账功能的问题
 
-请根据用户的意图判断：
-- 如果用户想登录，回复 JSON: {{"intent": "show_login_form"}}
-- 如果用户想注册，回复 JSON: {{"intent": "show_register_form"}}
-- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，包含：
-  1. 简短的问候和自我介绍（1-2句话，不要使用感叹号开头）
-  2. 说明需要登录才能使用
-  3. 引导用户"请输入'我要登录'或'我要注册'"
+请根据用户的意图判断下一步操作：
+- 如果用户想上传文件对账，回复 JSON: {{"intent": "guest_reconciliation"}}
+- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，介绍你的功能
 
 重要：
 - 所有内容必须在同一条消息中完成，不要分多次回复
 - 不要使用感叹号（！或!）开头
-- 只在用户明确表达要登录或注册时才返回 JSON，否则正常对话
 """
 
 SYSTEM_PROMPT = """\
@@ -133,30 +133,39 @@ SYSTEM_PROMPT = """\
 
 
 RESULT_ANALYSIS_PROMPT = """\
-你是一个专业的财务对账分析师。请根据以下对账结果，给出清晰、专业的分析报告。
+你是对账结果分析助手。请用简洁友好的语言描述对账结果。
 
 对账结果数据：
 {result_json}
 
-请严格按照以下格式输出分析报告：
+重要要求：
+1. 不要使用Markdown格式（不要用*、#、-等符号）
+2. 使用Emoji图标增强可读性
+3. 语言简洁直白，易于理解
+4. 文件名不要包含时间戳，使用原始上传的文件名
+5. 异常类型直接用文件名表示，不要用"财务数据"、"业务数据"等描述
 
-## 📊 对账概况
-简要列出：业务记录数、财务记录数、匹配数、差异数、匹配率。
+示例格式：
 
-## ⚠️ 差异分析
-**按问题类型（issue_type）分组**列出差异，每个类型下列出对应的订单号。格式如下：
+✅ 对账完成
 
-### 类型名称（X 条）
-说明该类型的含义。
-- 订单号列表（每行一个）
+总记录：100条
+匹配成功：95条
+异常记录：5条
+匹配率：95%
 
-如果某类型的订单数超过20条，只列前20个并注明总数。
+异常明细：
 
-要求：
-- 使用中文
-- 数据准确，直接引用结果中的数字
-- 语言简洁专业，不要重复信息
-- 不需要给出建议，只做数据分析
+销售数据.xlsx缺失（3条）
+• 订单A001
+• 订单A002
+• 订单A003
+
+财务报表.xlsx金额差异（2条）
+• 订单B001（差异0.5元）
+• 订单B002（差异1.2元）
+
+注意：如果某类型订单数超过20条，只列前20个并注明总数。
 """
 
 
@@ -164,52 +173,50 @@ RESULT_ANALYSIS_PROMPT = """\
 # 第1层：对话理解 — router
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def router_node(state: AgentState) -> dict:
-    """AI 自主决策节点：分析用户意图，决定走快速路径还是引导式生成。"""
+def _parse_form_data(last_user_msg: str) -> dict | None:
+    """解析用户消息中的表单数据。
 
-    # ⚠️ 关键：如果当前在子图执行中，不要重新识别意图，直接透传
-    current_phase = state.get("phase", "")
-    subgraph_phases = [
-        ReconciliationPhase.FILE_ANALYSIS.value,
-        ReconciliationPhase.FIELD_MAPPING.value,
-        ReconciliationPhase.RULE_CONFIG.value,
-        ReconciliationPhase.VALIDATION_PREVIEW.value,
-        ReconciliationPhase.SAVE_RULE.value,
-        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
-        ReconciliationPhase.EDIT_RULE_CONFIG.value,
-        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
-        ReconciliationPhase.EDIT_SAVE.value,
-    ]
-    
-    if current_phase in subgraph_phases:
-        logger.info(f"router_node: 当前在子图执行中 (phase={current_phase})，跳过意图识别")
-        return {"messages": []}
+    Args:
+        last_user_msg: 用户最后一条消息内容
 
-    auth_token = state.get("auth_token", "")
-    current_user = state.get("current_user")
-    messages = list(state.get("messages", []))
-    last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
-    
-    # ── 解析表单数据 ─────────────────────────────────────────────
-    form_data = None
+    Returns:
+        解析出的表单数据字典，如果不是表单数据则返回 None
+    """
     try:
         if last_user_msg.strip().startswith("{") and "form_type" in last_user_msg:
-            form_data = json.loads(last_user_msg)
+            return json.loads(last_user_msg)
     except:
         pass
+    return None
 
-    # ── 管理员隐藏指令检测（优先级最高，在用户登录状态判断之前）─────
+
+async def admin_handler(state: AgentState) -> dict | None:
+    """处理管理员登录和管理员操作。
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        如果是管理员相关操作，返回状态更新字典；否则返回 None
+    """
+    # 提取通用状态
+    messages = list(state.get("messages", []))
+    last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
     last_user_msg_lower = last_user_msg.lower().strip()
     admin_token = state.get("admin_token", "")
     admin_data = state.get("admin_data", {})
-    
+
+    # 解析表单数据
+    form_data = _parse_form_data(last_user_msg)
+
+    # ── 管理员隐藏指令检测（优先级最高，在用户登录状态判断之前）─────
     # 管理员登录指令（任何状态下都可触发）
     if "管理员登录" in last_user_msg or ("admin" in last_user_msg_lower and "login" not in last_user_msg_lower):
         return {
             "messages": [AIMessage(content=generate_admin_login_form())],
             "user_intent": UserIntent.ADMIN_LOGIN.value,
         }
-    
+
     # 管理员表单提交
     if form_data and form_data.get("form_type") == "admin_login":
         username = form_data.get("username", "").strip()
@@ -226,7 +233,7 @@ async def router_node(state: AgentState) -> dict:
             else:
                 error = result.get('error', '管理员用户名或密码错误')
                 return {"messages": [AIMessage(content=generate_admin_login_form(error))]}
-    
+
     # 管理员视图状态下的操作
     if admin_token:
         # 创建公司指令
@@ -235,7 +242,7 @@ async def router_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=generate_create_company_form())],
                 "user_intent": UserIntent.CREATE_COMPANY.value,
             }
-        
+
         # 创建公司表单提交
         if form_data and form_data.get("form_type") == "create_company":
             name = form_data.get("name", "").strip()
@@ -248,7 +255,7 @@ async def router_node(state: AgentState) -> dict:
                 else:
                     error = result.get('error', '创建公司失败')
                     return {"messages": [AIMessage(content=generate_create_company_form(error))]}
-        
+
         # 创建部门指令
         if "创建部门" in last_user_msg:
             companies_result = await list_companies(admin_token)
@@ -256,7 +263,7 @@ async def router_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies")))],
                 "user_intent": UserIntent.CREATE_DEPARTMENT.value,
             }
-        
+
         # 创建部门表单提交
         if form_data and form_data.get("form_type") == "create_department":
             company_id = form_data.get("company_id", "").strip()
@@ -271,7 +278,7 @@ async def router_node(state: AgentState) -> dict:
                     error = result.get('error', '创建部门失败')
                     companies_result = await list_companies(admin_token)
                     return {"messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies"), error))]}
-        
+
         # 退出管理员
         if "退出" in last_user_msg and "管理" in last_user_msg:
             return {
@@ -280,7 +287,7 @@ async def router_node(state: AgentState) -> dict:
                 "admin_data": None,
                 "user_intent": UserIntent.UNKNOWN.value,
             }
-        
+
         # 返回/查看管理员视图
         if ("返回" in last_user_msg or "查看" in last_user_msg) and admin_token:
             view_result = await get_admin_view(admin_token)
@@ -289,114 +296,181 @@ async def router_node(state: AgentState) -> dict:
                 "admin_data": view_result.get("data", {}),
             }
 
+    # 不是管理员相关操作，返回 None
+    return None
+
+
+async def auth_handler(state: AgentState) -> dict | None:
+    """处理未登录用户的认证流程（登录/注册）。
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        如果用户未认证，返回状态更新字典；如果已认证，返回 None
+    """
+    # 提取通用状态
+    auth_token = state.get("auth_token", "")
+    current_user = state.get("current_user")
+    messages = list(state.get("messages", []))
+    last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
+
+    # 如果已登录，返回 None（由 intent_router 处理）
+    if auth_token and current_user:
+        return None
+
+    # 解析表单数据
+    form_data = _parse_form_data(last_user_msg)
+
     # ── 未登录状态：引导登录 / 处理登录注册 ──────────────────────
-    if not auth_token or not current_user:
-        
-        if form_data:
-            # 处理表单提交
-            form_type = form_data.get("form_type")
-            if form_type == "login":
-                username = form_data.get("username", "").strip()
-                password = form_data.get("password", "").strip()
-                if username and password:
-                    result = await auth_login(username, password)
-                    if result.get("success"):
-                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
-                        return {
-                            "messages": [AIMessage(content=f"✅ {result['message']}")],
-                            "auth_token": result["token"],
-                            "current_user": result["user"],
-                            "user_intent": UserIntent.UNKNOWN.value,
-                        }
-                    else:
-                        # 登录失败，重新显示登录表单（错误信息嵌入表单）
-                        error = result.get('error', '用户名或密码错误')
-                        return {"messages": [AIMessage(content=generate_login_form(error))]}
-            elif form_type == "select_company":
-                # 用户选择了公司，显示带部门的注册表单
-                company_id = form_data.get("company_id", "").strip()
-                if company_id:
-                    # 获取公司列表和该公司的部门列表
-                    companies_result = await list_companies_public()
-                    departments_result = await list_departments_public(company_id)
+    if form_data:
+        # 处理表单提交
+        form_type = form_data.get("form_type")
+        if form_type == "login":
+            username = form_data.get("username", "").strip()
+            password = form_data.get("password", "").strip()
+            if username and password:
+                result = await auth_login(username, password)
+                if result.get("success"):
+                    # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
                     return {
-                        "messages": [AIMessage(content=generate_register_form(
-                            companies=companies_result.get("companies", []),
-                            departments=departments_result.get("departments", []),
-                            selected_company_id=company_id
-                        ))],
+                        "messages": [AIMessage(content=f"✅ {result['message']}")],
+                        "auth_token": result["token"],
+                        "current_user": result["user"],
+                        "user_intent": UserIntent.UNKNOWN.value,
                     }
-            elif form_type == "register":
-                username = form_data.get("username", "").strip()
-                password = form_data.get("password", "").strip()
-                company_id = form_data.get("company_id", "").strip()
-                department_id = form_data.get("department_id", "").strip()
-                if username and password:
-                    result = await auth_register(
-                        username, password,
-                        email=form_data.get("email", "").strip() or None,
-                        phone=form_data.get("phone", "").strip() or None,
-                        company_id=company_id or None,
-                        department_id=department_id or None,
-                    )
-                    if result.get("success"):
-                        # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
-                        return {
-                            "messages": [AIMessage(content=f"✅ {result['message']}")],
-                            "auth_token": result["token"],
-                            "current_user": result["user"],
-                            "user_intent": UserIntent.UNKNOWN.value,
-                        }
-                    else:
-                        # 注册失败，重新显示注册表单（错误信息嵌入表单）
-                        error = result.get('error', '注册失败，请检查输入信息')
-                        companies_result = await list_companies_public()
-                        departments_result = await list_departments_public(company_id) if company_id else {"departments": []}
-                        return {"messages": [AIMessage(content=generate_register_form(
-                            error=error,
-                            companies=companies_result.get("companies", []),
-                            departments=departments_result.get("departments", []),
-                            selected_company_id=company_id
-                        ))]}
+                else:
+                    # 登录失败，重新显示登录表单（错误信息嵌入表单）
+                    error = result.get('error', '用户名或密码错误')
+                    return {"messages": [AIMessage(content=generate_login_form(error))]}
+        elif form_type == "select_company":
+            # 用户选择了公司，显示带部门的注册表单
+            company_id = form_data.get("company_id", "").strip()
+            if company_id:
+                # 获取公司列表和该公司的部门列表
+                companies_result = await list_companies_public()
+                departments_result = await list_departments_public(company_id)
+                return {
+                    "messages": [AIMessage(content=generate_register_form(
+                        companies=companies_result.get("companies", []),
+                        departments=departments_result.get("departments", []),
+                        selected_company_id=company_id
+                    ))],
+                }
+        elif form_type == "register":
+            username = form_data.get("username", "").strip()
+            password = form_data.get("password", "").strip()
+            company_id = form_data.get("company_id", "").strip()
+            department_id = form_data.get("department_id", "").strip()
+            if username and password:
+                result = await auth_register(
+                    username, password,
+                    email=form_data.get("email", "").strip() or None,
+                    phone=form_data.get("phone", "").strip() or None,
+                    company_id=company_id or None,
+                    department_id=department_id or None,
+                )
+                if result.get("success"):
+                    # token/user 通过 output 由 server 发送 type "auth"，前端保存；消息内容仅展示友好文案
+                    return {
+                        "messages": [AIMessage(content=f"✅ {result['message']}")],
+                        "auth_token": result["token"],
+                        "current_user": result["user"],
+                        "user_intent": UserIntent.UNKNOWN.value,
+                    }
+                else:
+                    # 注册失败，重新显示注册表单（错误信息嵌入表单）
+                    error = result.get('error', '注册失败，请检查输入信息')
+                    companies_result = await list_companies_public()
+                    departments_result = await list_departments_public(company_id) if company_id else {"departments": []}
+                    return {"messages": [AIMessage(content=generate_register_form(
+                        error=error,
+                        companies=companies_result.get("companies", []),
+                        departments=departments_result.get("departments", []),
+                        selected_company_id=company_id
+                    ))]}
+
+    # 使用 LLM 流式生成回复（支持流式输出）
+    llm = get_llm()
+    # 使用 astream 进行流式调用，LangGraph 会自动处理流式输出
+    resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
+    content = resp.content.strip()
+
+    # 尝试解析意图 JSON
+    try:
+        json_match = content
+        if "```" in content:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if m:
+                json_match = m.group(1)
+        parsed = json.loads(json_match)
+        intent = parsed.get("intent", "")
+    except (json.JSONDecodeError, AttributeError):
+        intent = ""
+
+    if intent == "guest_reconciliation":
+        # 游客对账流程：使用推荐规则
+        # 创建或获取游客token
+        session_id = state.get("thread_id") or f"guest_{state.get('thread_id', 'unknown')}"
         
-        # 使用 LLM 流式生成回复（支持流式输出）
-        llm = get_llm()
-        # 使用 astream 进行流式调用，LangGraph 会自动处理流式输出
-        resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
-        content = resp.content.strip()
-
-        # 尝试解析意图 JSON
-        try:
-            json_match = content
-            if "```" in content:
-                m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-                if m:
-                    json_match = m.group(1)
-            parsed = json.loads(json_match)
-            intent = parsed.get("intent", "")
-        except (json.JSONDecodeError, AttributeError):
-            intent = ""
-
-        if intent == "show_login_form":
-            login_html = generate_login_form()
-            # 验证：确保登录表单只包含用户名和密码字段
-            if login_html.count('<input') != 2:
-                logger.error(f"登录表单字段数量错误！期望2个，实际: {login_html.count('<input')}")
-            if 'company_code' in login_html or 'department_code' in login_html:
-                logger.error("登录表单错误地包含了公司编码或部门编码字段！")
-            logger.info(f"返回登录表单，长度: {len(login_html)}, 输入框数量: {login_html.count('<input')}")
-            return {"messages": [AIMessage(content=login_html)]}
-        elif intent == "show_register_form":
-            # 获取公司列表用于注册表单
-            companies_result = await list_companies_public()
-            register_html = generate_register_form(companies=companies_result.get("companies", []))
-            logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
-            return {"messages": [AIMessage(content=register_html)]}
+        # 获取游客token
+        guest_result = await create_guest_token(session_id=session_id)
+        
+        if guest_result.get("success"):
+            guest_token = guest_result.get("token")
+            # 检查是否已有上传的文件
+            uploaded = state.get("uploaded_files", [])
+            if uploaded:
+                # 已有文件，直接进入文件分析
+                return {
+                    "messages": [AIMessage(content="好的，我现在为您分析文件并推荐合适的规则。")],
+                    "guest_token": guest_token,
+                    "user_intent": "guest_reconciliation",
+                }
+            else:
+                # 没有文件，提示上传
+                return {
+                    "messages": [AIMessage(content="好的，请您上传业务文件和财务文件，我会为您推荐合适的规则。")],
+                    "guest_token": guest_token,
+                    "user_intent": "guest_reconciliation",
+                }
         else:
-            # LLM 正常回复（引导用户）
-            # 去掉开头的"！"或"!"，并确保只有一条消息
-            cleaned_content = content.strip()
-            return {"messages": [AIMessage(content=cleaned_content)]}
+            return {"messages": [AIMessage(content="抱歉，无法创建游客会话，请稍后重试。")]}
+    elif intent == "show_login_form":
+        login_html = generate_login_form()
+        # 验证：确保登录表单只包含用户名和密码字段
+        if login_html.count('<input') != 2:
+            logger.error(f"登录表单字段数量错误！期望2个，实际: {login_html.count('<input')}")
+        if 'company_code' in login_html or 'department_code' in login_html:
+            logger.error("登录表单错误地包含了公司编码或部门编码字段！")
+        logger.info(f"返回登录表单，长度: {len(login_html)}, 输入框数量: {login_html.count('<input')}")
+        return {"messages": [AIMessage(content=login_html)]}
+    elif intent == "show_register_form":
+        # 获取公司列表用于注册表单
+        companies_result = await list_companies_public()
+        register_html = generate_register_form(companies=companies_result.get("companies", []))
+        logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
+        return {"messages": [AIMessage(content=register_html)]}
+    else:
+        # LLM 正常回复（引导用户）
+        # 去掉开头的"！"或"!"，并确保只有一条消息
+        cleaned_content = content.strip()
+        return {"messages": [AIMessage(content=cleaned_content)]}
+
+
+async def intent_router(state: AgentState) -> dict:
+    """核心意图识别：为已登录用户识别意图并路由到相应流程。
+
+    Args:
+        state: 当前状态（假设用户已认证）
+
+    Returns:
+        状态更新字典，包含识别的意图和相应的状态转换
+    """
+    # 提取通用状态
+    auth_token = state.get("auth_token", "")
+    current_user = state.get("current_user")
+    messages = list(state.get("messages", []))
 
     # ── 已登录状态：正常意图识别 ──────────────────────────────────
     rules = await list_available_rules(auth_token)
@@ -455,13 +529,13 @@ async def router_node(state: AgentState) -> dict:
     old_intent = state.get("user_intent", "")
     old_phase = state.get("phase", "")
     uploaded_files = state.get("uploaded_files", [])
-    
+
     # ⚠️ 关键修复：如果前一个对账已完成，开始新对账时需要清空旧数据
     # 只有在 phase 不是 COMPLETED 时，才保留 uploaded_files（用户换文件的场景）
     if old_phase == ReconciliationPhase.COMPLETED.value:
         # 对账已完成，开始新对账需要清空旧数据
         uploaded_files = []
-    
+
     if intent == UserIntent.LIST_RULES.value:
         # 查看规则列表：直接展示，不触发对账
         if rules:
@@ -493,13 +567,12 @@ async def router_node(state: AgentState) -> dict:
             # 开始创建新规则，清空旧数据
             uploaded_files = []
         welcome_msg = (
-            "🎯 **开始创建新的对账规则**\n\n"
+            "🎯 开始创建新的对账规则\n\n"
             "我会引导你完成以下4个步骤：\n\n"
-            "**1️⃣ 上传并分析文件** - 分析文件结构和列名\n"
-            "**2️⃣ 确认字段映射** - 将列名映射到标准字段（订单号、金额等）\n"
-            "**3️⃣ 配置规则参数** - 设置容差、订单号特征等\n"
-            "**4️⃣ 预览并保存** - 查看规则效果并保存\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "1️⃣ 上传并分析文件 - 分析文件结构和列名\n"
+            "2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）\n"
+            "3️⃣ 配置规则参数 - 设置容差、订单号特征等\n"
+            "4️⃣ 预览并保存 - 查看规则效果并保存\n\n"
             "请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。"
         )
         return {
@@ -512,27 +585,36 @@ async def router_node(state: AgentState) -> dict:
             "confirmed_mappings": {},  # 清空之前的确认映射
         }
     elif intent == UserIntent.DELETE_RULE.value and rule_name:
-        # 删除规则
+        # 删除规则：必须从用户消息中提取精确的规则名，避免误删（如用户说「删除西福3」时不应删除「西福」）
         try:
-            # 从规则列表中查找规则 ID
+            target_name = rule_name
+            m = re.search(r"(?:删除|删掉)\s*([^\s,，。]+?)(?:\s*规则)?\s*$", last_user_msg)
+            if m:
+                extracted = m.group(1).strip()
+                if extracted.endswith("规则"):
+                    extracted = extracted[:-2].strip()
+                target_name = extracted
+            # 仅当规则列表中存在与 target_name 完全匹配的规则时才删除
             rule_id = None
+            matched_rule_name = None
             for rule in rules:
-                if rule.get("name") == rule_name:
+                if rule.get("name") == target_name:
                     rule_id = rule.get("id")
+                    matched_rule_name = rule.get("name")
                     break
-            
+
             if not rule_id:
                 return {
-                    "messages": [AIMessage(content=f"❌ 未找到规则「{rule_name}」，请检查规则名称是否正确。")],
+                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
                     "user_intent": UserIntent.UNKNOWN.value,
                 }
-            
+
             # 调用删除规则 API
             result = await delete_rule(auth_token, rule_id)
-            
+
             if result.get("success"):
                 return {
-                    "messages": [AIMessage(content=f"✅ {result.get('message', f'规则「{rule_name}」已成功删除')}")],
+                    "messages": [AIMessage(content=f"✅ 规则「{matched_rule_name}」已删除")],
                     "user_intent": UserIntent.UNKNOWN.value,
                 }
             else:
@@ -546,7 +628,7 @@ async def router_node(state: AgentState) -> dict:
             return {
                 "messages": [AIMessage(content=f"❌ 删除规则时发生错误：{str(e)}")],
                 "user_intent": UserIntent.UNKNOWN.value,
-        }
+            }
     elif intent == UserIntent.EDIT_RULE.value:
         if not rule_name:
             return {
@@ -585,25 +667,88 @@ async def router_node(state: AgentState) -> dict:
         }
 
 
+async def router_node(state: AgentState) -> dict:
+    """轻量级编排器：委托给专门的处理器。
+
+    优先级顺序：
+    1. 跳过子图执行阶段
+    2. 管理员操作（最高优先级）
+    3. 认证处理（未登录用户）
+    4. 意图路由（已登录用户）
+    """
+    # 1. 如果当前在子图执行中，不要重新识别意图，直接透传
+    current_phase = state.get("phase", "")
+    subgraph_phases = [
+        ReconciliationPhase.FILE_ANALYSIS.value,
+        ReconciliationPhase.FIELD_MAPPING.value,
+        ReconciliationPhase.RULE_CONFIG.value,
+        ReconciliationPhase.VALIDATION_PREVIEW.value,
+        ReconciliationPhase.SAVE_RULE.value,
+        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        ReconciliationPhase.EDIT_SAVE.value,
+    ]
+
+    if current_phase in subgraph_phases:
+        logger.info(f"router_node: 当前在子图执行中 (phase={current_phase})，跳过意图识别")
+        return {"messages": []}
+
+    # 2. 尝试管理员处理器（最高优先级）
+    admin_result = await admin_handler(state)
+    if admin_result is not None:
+        return admin_result
+
+    # 3. 尝试认证处理器（第二优先级）
+    auth_result = await auth_handler(state)
+    if auth_result is not None:
+        return auth_result
+
+    # 4. 回退到意图路由器（已认证用户）
+    return await intent_router(state)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 第3层：任务执行 — 调用 finance-mcp
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _do_start_task(auth_token: str, rule_name: str, files: list[str]) -> dict[str, Any]:
+async def _do_start_task(
+    auth_token: str,
+    rule_name: str,
+    files: list[str],
+    guest_token: str = None,
+    rule_template: dict = None,
+) -> dict[str, Any]:
     """启动对账任务。
     
     Args:
-        auth_token: JWT token
-        rule_name: 规则名称
+        auth_token: JWT token (优先使用)
+        rule_name: 规则名称（与 rule_template 二选一）
         files: 文件列表
+        guest_token: 游客token (当 auth_token 为空时使用)
+        rule_template: 规则模板（新建规则流程直接传入，先对账再保存）
     """
-    result = await start_reconciliation(auth_token=auth_token, files=files, rule_name=rule_name)
+    if rule_template:
+        result = await start_reconciliation(
+            files=files,
+            rule_template=rule_template,
+            auth_token=auth_token,
+            guest_token=guest_token,
+        )
+    else:
+        result = await start_reconciliation(
+            files=files,
+            rule_name=rule_name,
+            auth_token=auth_token,
+            guest_token=guest_token,
+        )
     return result
 
 
 async def _do_poll(
     auth_token: str,
     task_id: str, 
+    guest_token: str = None,
     progress_callback=None,
     max_polls: int = 60,  # 增加到 60 次 (60 秒)
     interval: float = 1.0  # 缩短到 1 秒
@@ -613,6 +758,7 @@ async def _do_poll(
     Args:
         auth_token: JWT token，用于身份验证
         task_id: 任务 ID
+        guest_token: 游客token（当 auth_token 为空时使用）
         progress_callback: 未使用（保留接口兼容性）
         max_polls: 最大轮询次数
         interval: 轮询间隔（秒）
@@ -633,7 +779,7 @@ async def _do_poll(
     last_message_idx = -1
     
     for poll_count in range(max_polls):
-        status = await get_reconciliation_status(auth_token, task_id)
+        status = await get_reconciliation_status(task_id, auth_token=auth_token, guest_token=guest_token)
         st = status.get("status", "")
         
         # 根据时间显示进度（不使用回调，而是收集消息）
@@ -673,12 +819,15 @@ def _run_async_safe(coro):
 
 
 def task_execution_node(state: AgentState) -> dict:
-    """第3层：启动对账任务、轮询状态、展示结果。
+    """第3层：启动对账任务、轮询状态，展示结果。
 
     由于 langgraph 节点是同步的，内部使用 asyncio 调用异步函数。
+    支持两种模式：1) 已保存规则（rule_name） 2) 新建规则（generated_schema，先对账再保存）
     """
+    generated_schema = state.get("generated_schema")
     rule_name = state.get("selected_rule_name") or state.get("saved_rule_name")
     auth_token = state.get("auth_token", "")
+    guest_token = state.get("guest_token", "")
     uploaded_files = state.get("uploaded_files", [])
     step = state.get("execution_step", TaskExecutionStep.NOT_STARTED.value)
 
@@ -687,7 +836,11 @@ def task_execution_node(state: AgentState) -> dict:
     state.pop("task_result", None)
     state.pop("task_status", None)
     
-    if not rule_name:
+    # 新建规则流程：有 generated_schema 则直接使用，无需 rule_name
+    use_rule_template = bool(generated_schema)
+    display_name = rule_name or ("新规则_待确认" if use_rule_template else "")
+    
+    if not rule_name and not use_rule_template:
         return {
             "messages": [AIMessage(content="缺少对账规则名称，请先选择或创建一个规则。")],
             "phase": ReconciliationPhase.IDLE.value,
@@ -705,6 +858,17 @@ def task_execution_node(state: AgentState) -> dict:
             # 兼容旧格式（直接是文件路径字符串）
             files.append(item)
     
+    # ⚠️ 新建规则流程：用户从 result_evaluation 选「不要」返回字段映射后，uploaded_files 已被清空
+    # 此时 file_analyses 仍保留原始文件路径，可从其恢复
+    if not files and use_rule_template:
+        analyses = state.get("file_analyses", [])
+        for a in analyses:
+            fp = a.get("file_path", "")
+            if fp:
+                files.append(fp)
+        if files:
+            logger.info(f"从 file_analyses 恢复文件路径: {len(files)} 个")
+    
     if not files:
         # 等待文件上传
         user_response = interrupt({
@@ -715,7 +879,7 @@ def task_execution_node(state: AgentState) -> dict:
         response_str = (user_response or "").strip().lower()
         list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则")
         if any(kw in response_str for kw in list_rules_keywords):
-            rules = _run_async_safe(list_available_rules(auth_token))
+            rules = _run_async_safe(list_available_rules(auth_token or guest_token))
             if rules:
                 lines = ["📋 **我的对账规则列表**\n"]
                 for r in rules:
@@ -737,15 +901,22 @@ def task_execution_node(state: AgentState) -> dict:
         }
 
     # ── 启动任务 ──
-    if not auth_token:
+    if not auth_token and not guest_token:
         return {
-            "messages": [AIMessage(content="❌ 缺少认证信息，请先登录")],
+            "messages": [AIMessage(content="❌ 缺少认证信息，请先登录或使用游客模式")],
             "phase": ReconciliationPhase.TASK_EXECUTION.value,
             "execution_step": TaskExecutionStep.NOT_STARTED.value,
         }
     
-    logger.info(f"开始执行对账任务: rule={rule_name}, auth_token={auth_token[:20]}..., files={len(files)}个, file_paths={files}")
-    start_result = _run_async_safe(_do_start_task(auth_token, rule_name, files))
+    # 使用 auth_token 或 guest_token
+    logger.info(f"开始执行对账任务: rule={display_name}, use_template={use_rule_template}, files={len(files)}个")
+    start_result = _run_async_safe(_do_start_task(
+        auth_token if auth_token else "",
+        rule_name or display_name,
+        files,
+        guest_token=guest_token if guest_token else None,
+        rule_template=generated_schema if use_rule_template else None,
+    ))
 
     if "error" in start_result:
         return {
@@ -758,12 +929,12 @@ def task_execution_node(state: AgentState) -> dict:
     
     # ── 启动成功，立即返回消息并开始轮询 ──
     messages_to_send = [
-        AIMessage(content=f"🚀 对账任务已启动\n\n📋 规则：{rule_name}\n📁 文件：{len(files)} 个\n💾 任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒 {{SPINNER}}\n\n📊 进度：开始加载数据 {{SPINNER}}"),
+        AIMessage(content=f"🚀 对账任务已启动\n\n规则：{display_name}\n文件：{len(files)} 个\n任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒\n\n进度：开始加载数据"),
     ]
 
     # ── 轮询 ──
     logger.info(f"开始轮询任务状态: task_id={task_id}")
-    poll_result = _run_async_safe(_do_poll(auth_token, task_id))
+    poll_result = _run_async_safe(_do_poll(auth_token or "", task_id, guest_token=guest_token))
 
     status = poll_result.get("status", "")
     logger.info(f"轮询结束: task_id={task_id}, status={status}")
@@ -772,7 +943,7 @@ def task_execution_node(state: AgentState) -> dict:
         # ── 获取结果，存入 state，交给 result_analysis 节点由 LLM 分析 ──
         try:
             logger.info(f"开始获取对账结果: task_id={task_id}")
-            result = _run_async_safe(get_reconciliation_result(auth_token, task_id))
+            result = _run_async_safe(get_reconciliation_result(task_id, auth_token=auth_token or "", guest_token=guest_token))
             logger.info(f"对账结果获取成功: task_id={task_id}, result keys={list(result.keys())}")
 
             return {
@@ -838,8 +1009,6 @@ def result_analysis_node(state: AgentState) -> dict:
         return {
             "phase": ReconciliationPhase.COMPLETED.value,
             "execution_step": TaskExecutionStep.DONE.value,
-            # ⚠️ 清除旧数据
-            "uploaded_files": [],
             "selected_rule_name": None,
         }
 
@@ -868,8 +1037,7 @@ def result_analysis_node(state: AgentState) -> dict:
         "messages": [AIMessage(content=resp.content)],
         "phase": ReconciliationPhase.COMPLETED.value,
         "execution_step": TaskExecutionStep.DONE.value,
-        # ⚠️ 清除旧数据，防止下次新对账时误用旧文件
-        "uploaded_files": [],
+        # ⚠️ 保留 uploaded_files：用户回复「不要」仅表示不采纳/不保存规则，返回重新配置时仍需使用原文件
         "selected_rule_name": None,
     }
 

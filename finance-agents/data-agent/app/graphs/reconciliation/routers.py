@@ -14,9 +14,11 @@ from .nodes import (
     entry_router_node,
     file_analysis_node,
     field_mapping_node,
+    rule_recommendation_node,
     rule_config_node,
     validation_preview_node,
     save_rule_node,
+    result_evaluation_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,19 +27,39 @@ logger = logging.getLogger(__name__)
 # ── 路由函数 ─────────────────────────────────────────────────────────────────
 
 def route_after_file_analysis(state: AgentState) -> str:
-    """文件分析后路由：如果有分析结果则继续，否则结束等待文件上传。"""
+    """文件分析后路由：直接进入规则推荐节点。"""
     analyses = state.get("file_analyses", [])
     if analyses:
-        return "field_mapping"
+        return "rule_recommendation"  # 直接进入规则推荐
     return END
 
 
 def route_after_field_mapping(state: AgentState) -> str:
-    """字段映射后路由：如果用户要调整则重新进入 field_mapping，否则进入 rule_config。"""
+    """字段映射后路由：进入规则配置。"""
     phase = state.get("phase", "")
     if phase == ReconciliationPhase.FIELD_MAPPING.value:
         return "field_mapping"  # 用户输入了调整意见，重新进入
-    return "rule_config"  # 用户确认了，进入下一步
+    return "rule_config"  # 确认后进入规则配置
+
+
+def route_after_rule_recommendation(state: AgentState) -> str:
+    """规则推荐后路由：
+    - 如果用户已选择推荐规则（selected_rule_id存在）→ 进入任务执行
+    - 如果不采纳推荐 → 进入字段映射
+    """
+    using_recommended = state.get("using_recommended_rule", False)
+    selected_rule_id = state.get("selected_rule_id")
+    phase = state.get("phase", "")
+    
+    logger.info(f"route_after_rule_recommendation: phase={phase}, using_recommended={using_recommended}, selected_rule_id={selected_rule_id}")
+    
+    # 用户已选择规则（通过数字选择），直接进入任务执行
+    if using_recommended and selected_rule_id:
+        logger.info("路由: 用户已选择规则 -> task_execution")
+        return "task_execution"
+    
+    logger.info("路由: 不采纳推荐 -> field_mapping")
+    return "field_mapping"
 
 
 def route_after_rule_config(state: AgentState) -> str:
@@ -49,11 +71,26 @@ def route_after_rule_config(state: AgentState) -> str:
 
 
 def route_after_preview(state: AgentState) -> str:
-    """预览后路由：如果用户选择调整则回到 rule_config，否则进入 save_rule。"""
+    """预览后路由：如果用户选择调整则回到 rule_config，否则进入对账执行。
+    
+    ⚠️ 创建规则流程：配置好规则后必须先对账，再在 result_evaluation 中提示保存。
+    绝不在此处路由到 save_rule。
+    """
     phase = state.get("phase", "")
     if phase == ReconciliationPhase.RULE_CONFIG.value:
+        logger.info("route_after_preview: 用户选择调整 -> rule_config")
         return "rule_config"
-    return "save_rule"
+    # 预览确认后，直接执行对账（跳过保存规则步骤，先对账再提示保存）
+    logger.info("route_after_preview: 用户确认 -> task_execution（先对账，后保存）")
+    return "task_execution"
+
+
+def route_after_save_rule(state: AgentState) -> str:
+    """保存规则后路由：如果使用了推荐规则，进入结果评估。"""
+    using_recommended = state.get("using_recommended_rule", False)
+    if using_recommended:
+        return "result_evaluation"
+    return END
 
 
 def route_from_entry(state: AgentState) -> str:
@@ -64,14 +101,22 @@ def route_from_entry(state: AgentState) -> str:
     if phase == ReconciliationPhase.FIELD_MAPPING.value:
         logger.info("路由到: field_mapping")
         return "field_mapping"
+    elif phase == ReconciliationPhase.RULE_RECOMMENDATION.value:
+        logger.info("路由到: rule_recommendation")
+        return "rule_recommendation"
     elif phase == ReconciliationPhase.RULE_CONFIG.value:
         logger.info("路由到: rule_config")
         return "rule_config"
+    elif phase == ReconciliationPhase.VALIDATION_PREVIEW.value:
+        logger.info("路由到: validation_preview")
+        return "validation_preview"
     elif phase == ReconciliationPhase.SAVE_RULE.value:
         logger.info("路由到: save_rule")
         return "save_rule"
+    elif phase == ReconciliationPhase.RESULT_EVALUATION.value:
+        logger.info("路由到: result_evaluation")
+        return "result_evaluation"
     else:
-        # 默认从 file_analysis 开始
         logger.info(f"路由到: file_analysis (默认，phase={phase})")
         return "file_analysis"
 
@@ -85,9 +130,11 @@ def build_reconciliation_subgraph() -> StateGraph:
     sg.add_node("entry_router", entry_router_node)
     sg.add_node("file_analysis", file_analysis_node)
     sg.add_node("field_mapping", field_mapping_node)
+    sg.add_node("rule_recommendation", rule_recommendation_node)
     sg.add_node("rule_config", rule_config_node)
     sg.add_node("validation_preview", validation_preview_node)
     sg.add_node("save_rule", save_rule_node)
+    sg.add_node("result_evaluation", result_evaluation_node)
 
     sg.set_entry_point("entry_router")
     
@@ -95,26 +142,40 @@ def build_reconciliation_subgraph() -> StateGraph:
     sg.add_conditional_edges("entry_router", route_from_entry, {
         "file_analysis": "file_analysis",
         "field_mapping": "field_mapping",
+        "rule_recommendation": "rule_recommendation",
         "rule_config": "rule_config",
+        "validation_preview": "validation_preview",
         "save_rule": "save_rule",
+        "result_evaluation": "result_evaluation",
     })
-    
+
     sg.add_conditional_edges("file_analysis", route_after_file_analysis, {
-        "field_mapping": "field_mapping",
+        "rule_recommendation": "rule_recommendation",
         END: END,
     })
     sg.add_conditional_edges("field_mapping", route_after_field_mapping, {
-        "field_mapping": "field_mapping",  # 调整意见，重新进入
-        "rule_config": "rule_config",      # 确认，进入下一步
+        "field_mapping": "field_mapping",
+        "rule_config": "rule_config",
+    })
+    sg.add_conditional_edges("rule_recommendation", route_after_rule_recommendation, {
+        "field_mapping": "field_mapping",
+        "task_execution": "task_execution",
     })
     sg.add_conditional_edges("rule_config", route_after_rule_config, {
-        "rule_config": "rule_config",           # 调整意见，重新进入
-        "validation_preview": "validation_preview",  # 确认，进入下一步
+        "rule_config": "rule_config",
+        "validation_preview": "validation_preview",
     })
+    # ⚠️ 创建规则流程：确认后必须进入 task_execution（先对账），绝不进入 save_rule
+    # 主图使用展平节点，此子图未被主图使用。若子图被使用，task_execution 会导向 END，
+    # 由父图接管；否则需在子图中添加 task_execution 节点。
     sg.add_conditional_edges("validation_preview", route_after_preview, {
         "rule_config": "rule_config",
-        "save_rule": "save_rule",
+        "task_execution": END,  # 先对账：子图结束，父图应路由到 task_execution
+        "save_rule": "save_rule",  # 兼容旧逻辑（route_after_preview 现不再返回 save_rule）
     })
-    sg.add_edge("save_rule", END)
+    sg.add_conditional_edges("save_rule", route_after_save_rule, {
+        "result_evaluation": "result_evaluation",
+        END: END,
+    })
 
     return sg

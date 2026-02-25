@@ -104,7 +104,7 @@ case 'auth_verify':
     // token 有效，同步用户信息
     if (data.user) {
       setCurrentUser(data.user);
-      localStorage.setItem('finflux_current_user', JSON.stringify(data.user));
+      localStorage.setItem('tally_current_user', JSON.stringify(data.user));
     }
     console.log('Auth token verified successfully');
   } else {
@@ -112,8 +112,8 @@ case 'auth_verify':
     console.log('Auth token verification failed, clearing credentials');
     setAuthToken(null);
     setCurrentUser(null);
-    localStorage.removeItem('finflux_auth_token');
-    localStorage.removeItem('finflux_current_user');
+    localStorage.removeItem('tally_auth_token');
+    localStorage.removeItem('tally_current_user');
   }
   break;
 ```

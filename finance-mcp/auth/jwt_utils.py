@@ -11,9 +11,9 @@ import jwt  # PyJWT
 logger = logging.getLogger(__name__)
 
 # ── 配置 ──────────────────────────────────────────────────────────────
-JWT_SECRET = os.getenv("JWT_SECRET", "finflux-secret-change-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET", "tally-secret-change-in-production")
 # Warn if using default secret in production
-if JWT_SECRET == "finflux-secret-change-in-production":
+if JWT_SECRET == "tally-secret-change-in-production":
     logger.warning("警告: 使用默认 JWT 密钥，生产环境应设置环境变量 JWT_SECRET")
 
 JWT_ALGORITHM = "HS256"

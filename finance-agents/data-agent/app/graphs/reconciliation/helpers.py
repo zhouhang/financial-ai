@@ -771,10 +771,15 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
     
     lines = []
     for i, item in enumerate(config_items, 1):
-        desc = item.get("description", "未知配置")
+        desc = item.get("description") or item.get("content") or item.get("name", "")
+        if not desc:
+            desc = "未知配置"
         json_snippet = item.get("json_snippet", {})
-        target = _analyze_config_target(json_snippet, file_names)
-        lines.append(f"  {i}. {target} {desc}")
+        target = _analyze_config_target(json_snippet, file_names) if json_snippet else ""
+        if target:
+            lines.append(f"  {i}. {target} {desc}")
+        else:
+            lines.append(f"  {i}. {desc}")
     
     return "\n".join(lines)
 
@@ -978,3 +983,680 @@ def _translate_rule_name_to_english(rule_name_cn: str) -> str:
         if not type_key or type_key[0].isdigit():
             type_key = "rule_" + type_key
         return type_key
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 规则推荐 - 字段名匹配算法
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 字段别名映射（用于模糊匹配）- 只包含通用词，不包含具体字段名
+KEY_FIELD_ALIASES = {
+    "order_id": ["订单号", "订单", "order", "order_id"],
+    "amount": ["金额", "钱", "amount", "发生", "sum", "total"],
+    "date": ["日期", "时间", "date", "time", "datetime"],
+}
+
+# 严格匹配：这些字段名必须精确匹配，不能模糊匹配
+EXACT_MATCH_FIELDS = ["order_id", "amount"]
+
+
+def _is_field_match(rule_field: str, file_columns: list[str], field_role: str) -> tuple[bool, str]:
+    """检查规则字段是否与文件列名匹配。
+    
+    严格匹配规则：
+    1. order_id: 必须精确匹配（包含关系也不行）
+    2. amount: 必须完全相同或非常接近（如"发生"匹配"发生-"）
+    3. date: 可以模糊匹配
+    
+    Args:
+        rule_field: 规则中的字段名
+        file_columns: 文件的列名列表
+        field_role: 字段角色 (order_id/amount/date)
+    
+    Returns:
+        (is_match, matched_column)
+    """
+    if not rule_field:
+        return False, ""
+    
+    # 处理列表类型的字段名
+    if isinstance(rule_field, list):
+        rule_field = rule_field[0] if rule_field else ""
+    
+    rule_field = str(rule_field).strip()
+    if not rule_field:
+        return False, ""
+    
+    for col in file_columns:
+        col = str(col).strip()
+        if not col:
+            continue
+        
+        col_lower = col.lower()
+        rule_lower = rule_field.lower()
+        
+        # 1. 精确匹配（最严格）
+        if rule_lower == col_lower:
+            return True, col
+        
+        # 2. 对于 order_id，必须更严格匹配
+        if field_role == "order_id":
+            # 允许：订单号 ↔ 订单号，第三方订单号 ↔ 第三方订单号
+            # 不允许：sp订单号 ↔ 第三方订单号
+            # 只有完全包含才算匹配
+            if rule_lower in col_lower or col_lower in rule_lower:
+                # 但要排除部分匹配的情况
+                # 例如：sp订单号 不应该匹配 第三方订单号
+                continue
+        
+        # 3. 对于 amount，必须非常接近
+        if field_role == "amount":
+            # 允许：发生 ↔ 发生-，金额 ↔ 金额
+            # 不允许：销售额 ↔ 应结算平台金额
+            # 检查是否一个是另一个的子串，且长度差异不大
+            if rule_lower in col_lower or col_lower in rule_lower:
+                # 长度差异超过3个字符就不算匹配
+                if abs(len(rule_lower) - len(col_lower)) <= 2:
+                    return True, col
+                continue
+        
+        # 4. 对于 date，可以使用模糊匹配
+        if field_role == "date":
+            # 检查是否包含时间相关的关键词
+            date_keywords = ["日期", "时间", "date", "time", "datetime", "创建", "下单", "支付", "完成", "发生"]
+            if any(kw in rule_lower for kw in date_keywords):
+                if any(kw in col_lower for kw in date_keywords):
+                    if rule_lower in col_lower or col_lower in rule_lower:
+                        return True, col
+    
+    return False, ""
+
+
+def match_rules_by_field_names(
+    file_columns: dict[str, list[str]], 
+    rules: list[dict]
+) -> list[tuple[dict, int, list[str]]]:
+    """根据文件表头字段名匹配规则，返回排序后的匹配结果。
+    
+    匹配策略：
+    1. 必须同时匹配 business 和 finance 的字段
+    2. order_id 必须精确匹配
+    3. 根据匹配字段数量和精确度计算分数
+    
+    Args:
+        file_columns: {"business": ["sp订单号", "销售额", "订单时间"], "finance": ["sup订单号", "发生-", "完成时间"]}
+        rules: 规则列表，每个规则包含 rule_template
+    
+    Returns:
+        [(rule, score, matched_fields), ...] 按 score 降序排列
+    """
+    matched_rules = []
+    
+    for rule in rules:
+        template = rule.get("rule_template", {})
+        if isinstance(template, str):
+            try:
+                template = json.loads(template)
+            except json.JSONDecodeError:
+                continue
+        
+        rule_name = rule.get("name", "")
+        
+        biz_fields = template.get("data_sources", {}).get("business", {}).get("field_roles", {})
+        fin_fields = template.get("data_sources", {}).get("finance", {}).get("field_roles", {})
+        
+        biz_matched = []
+        fin_matched = []
+        
+        # 匹配 business 字段
+        for role, rule_field in biz_fields.items():
+            is_match, matched_col = _is_field_match(rule_field, file_columns.get("business", []), role)
+            if is_match:
+                # order_id 权重更高
+                weight = 3 if role == "order_id" else 2
+                biz_matched.append((role, matched_col, weight))
+        
+        # 匹配 finance 字段
+        for role, rule_field in fin_fields.items():
+            is_match, matched_col = _is_field_match(rule_field, file_columns.get("finance", []), role)
+            if is_match:
+                weight = 3 if role == "order_id" else 2
+                fin_matched.append((role, matched_col, weight))
+        
+        # 计算总分
+        biz_score = sum(w for _, _, w in biz_matched)
+        fin_score = sum(w for _, _, w in fin_matched)
+        total_score = biz_score + fin_score
+        
+        # 构建匹配字段描述
+        matched_fields = [f"business.{r}:{c}" for r, c, _ in biz_matched]
+        matched_fields += [f"finance.{r}:{c}" for r, c, _ in fin_matched]
+        
+        # 必须同时匹配 business 和 finance 的 order_id
+        biz_has_order_id = any(r == "order_id" for r, _, _ in biz_matched)
+        fin_has_order_id = any(r == "order_id" for r, _, _ in fin_matched)
+        
+        # 只有当 business 和 finance 都有匹配时才推荐
+        if biz_has_order_id and fin_has_order_id and total_score >= 6:
+            matched_rules.append((rule, total_score, matched_fields))
+    
+    matched_rules.sort(key=lambda x: x[1], reverse=True)
+    return matched_rules
+
+
+def calculate_match_percentage(matched_fields: list[str], total_fields: int = 6) -> int:
+    """计算匹配度百分比 - 基于实际匹配的字段计算"""
+    if not matched_fields:
+        return 0
+    
+    biz_count = sum(1 for f in matched_fields if f.startswith("business."))
+    fin_count = sum(1 for f in matched_fields if f.startswith("finance."))
+    
+    # 基础分数：每个字段 17%
+    base = (biz_count + fin_count) * 17
+    
+    # 如果 business 和 finance 都有 3 个字段匹配，给满分
+    if biz_count >= 3 and fin_count >= 3:
+        return 100
+    
+    return min(100, base)
+
+
+def get_match_reason(matched_fields: list[str]) -> str:
+    """根据匹配字段生成推荐理由"""
+    biz_count = sum(1 for f in matched_fields if f.startswith("business."))
+    fin_count = sum(1 for f in matched_fields if f.startswith("finance."))
+    order_id_matched = any("order_id" in f for f in matched_fields)
+
+    if biz_count >= 3 and fin_count >= 3:
+        return "字段完全匹配，推荐使用"
+    elif biz_count >= 2 and fin_count >= 2:
+        if order_id_matched:
+            return "关键字段匹配度高"
+        return "部分字段匹配"
+    elif order_id_matched:
+        return "订单号匹配"
+    else:
+        return "存在字段匹配"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 智能文件分析辅助函数
+# ══════════════════════════════════════════════════════════════════════════════
+
+def quick_complexity_check(uploaded_files: list) -> str:
+    """快速检查文件复杂度
+
+    Returns:
+        "simple": 标准场景（2个文件，标准格式）
+        "medium": 中等复杂（多sheet或可能有格式问题）
+        "complex": 复杂场景（多文件配对、确定有格式问题）
+    """
+    if not uploaded_files:
+        return "simple"
+
+    file_count = len(uploaded_files)
+
+    # 快速判断
+    if file_count > 2:
+        return "complex"
+    elif file_count == 1:
+        return "medium"  # 单文件可能需要拆分或识别
+    else:
+        # 2个文件，检查是否都是标准格式（简单启发式）
+        # 这里只做快速判断，详细检测由MCP工具完成
+        return "simple"
+
+
+async def invoke_intelligent_analyzer(uploaded_files: list, complexity_level: str) -> dict:
+    """调用智能文件分析器（基于SKILL.md策略）
+
+    Args:
+        uploaded_files: 上传的文件列表
+        complexity_level: 复杂度级别
+
+    Returns:
+        {
+            "success": bool,
+            "analyses": list,  # 标准化的文件分析结果
+            "recommendations": dict,  # 推荐方案
+            "warnings": list  # 警告信息
+        }
+    """
+    from app.tools.mcp_client import call_mcp_tool
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from app.utils.llm import get_llm
+    import json
+    from pathlib import Path
+
+    logger.info(f"开始智能文件分析，复杂度: {complexity_level}, 文件数: {len(uploaded_files)}")
+
+    try:
+        # 1. 调用MCP工具检测详细复杂度
+        complexity_result = await call_mcp_tool("detect_file_complexity", {"files": uploaded_files})
+
+        if not complexity_result.get("success"):
+            logger.error(f"复杂度检测失败: {complexity_result.get('error')}")
+            # 降级到简单分析
+            return await _fallback_to_simple_analysis(uploaded_files)
+
+        complexity_info = complexity_result
+
+        # 2. 处理多文件配对（优先级最高，因为涉及文件选择）
+        if complexity_info.get("file_count", 0) > 2:
+            return await _smart_file_pairing(uploaded_files, complexity_info)
+
+        # 3. 处理单文件场景
+        if complexity_info.get("file_count", 0) == 1:
+            # 单文件多sheet
+            if complexity_info.get("multi_sheet"):
+                return await _analyze_multi_sheet_files(uploaded_files, complexity_info)
+            # 单文件单sheet
+            return await _analyze_single_file(uploaded_files[0], complexity_info)
+
+        # 4. 处理双文件多sheet场景
+        if complexity_info.get("file_count", 0) == 2 and complexity_info.get("multi_sheet"):
+            # 双文件中有多sheet文件，需要智能判断
+            # 优先尝试直接配对（假设用户上传的是2个标准文件）
+            return await _fallback_to_simple_analysis(uploaded_files)
+
+        # 5. 标准场景，但可能有格式问题
+        if complexity_info.get("non_standard"):
+            return await _analyze_with_format_normalization(uploaded_files, complexity_info)
+
+        # 6. 降级到简单分析
+        return await _fallback_to_simple_analysis(uploaded_files)
+
+    except Exception as e:
+        logger.error(f"智能分析失败: {e}", exc_info=True)
+        return await _fallback_to_simple_analysis(uploaded_files)
+
+
+async def _analyze_multi_sheet_files(uploaded_files: list, complexity_info: dict) -> dict:
+    """分析包含多sheet的Excel文件"""
+    from app.tools.mcp_client import call_mcp_tool
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from app.utils.llm import get_llm
+    import json
+
+    logger.info("处理多sheet文件场景")
+
+    all_analyses = []
+    warnings = []
+
+    # 对每个多sheet文件进行处理
+    for multi_sheet_file in complexity_info.get("multi_sheet_files", []):
+        file_path = multi_sheet_file["file_path"]
+
+        # 读取所有sheet
+        sheets_result = await call_mcp_tool("read_excel_sheets", {
+            "file_path": file_path,
+            "sample_rows": 5
+        })
+
+        if not sheets_result.get("success"):
+            warnings.append(f"无法读取文件 {file_path} 的sheets")
+            continue
+
+        sheets = sheets_result.get("sheets", [])
+
+        # 使用LLM识别每个sheet的类型
+        sheet_types = await _classify_sheets_with_llm(sheets, file_path)
+
+        # 将识别结果转换为标准分析格式
+        for sheet_info in sheets:
+            if "error" in sheet_info:
+                continue
+
+            sheet_name = sheet_info["sheet_name"]
+            guessed_type = sheet_types.get(sheet_name, {}).get("type", "unknown")
+            confidence = sheet_types.get(sheet_name, {}).get("confidence", 0.5)
+
+            # 只保留business和finance类型的sheet
+            if guessed_type in ["business", "finance"]:
+                all_analyses.append({
+                    "filename": f"{file_path} - {sheet_name}",
+                    "original_filename": f"{multi_sheet_file.get('original_filename', file_path)} - {sheet_name}",
+                    "file_path": file_path,
+                    "sheet_name": sheet_name,
+                    "columns": sheet_info["columns"],
+                    "row_count": sheet_info["row_count"],  # 这是样本行数
+                    "sample_data": sheet_info["sample_data"],
+                    "guessed_source": guessed_type,
+                    "confidence": confidence,
+                    "processing_notes": f"从多sheet文件中识别（置信度: {int(confidence*100)}%）"
+                })
+            elif guessed_type == "summary":
+                warnings.append(f"{sheet_name}: 识别为汇总表，已跳过")
+            else:
+                warnings.append(f"{sheet_name}: 类型未知，已跳过")
+
+    # 检查是否成功识别出business和finance
+    has_business = any(a["guessed_source"] == "business" for a in all_analyses)
+    has_finance = any(a["guessed_source"] == "finance" for a in all_analyses)
+
+    recommendations = {
+        "success": has_business and has_finance,
+        "message": ""
+    }
+
+    if has_business and has_finance:
+        recommendations["message"] = "✅ 成功识别出业务数据和财务数据"
+    elif has_business:
+        recommendations["message"] = "⚠️ 只识别到业务数据，请补充上传财务数据文件"
+    elif has_finance:
+        recommendations["message"] = "⚠️ 只识别到财务数据，请补充上传业务数据文件"
+    else:
+        recommendations["message"] = "❌ 未识别到有效的对账数据"
+
+    return {
+        "success": True,
+        "analyses": all_analyses,
+        "recommendations": recommendations,
+        "warnings": warnings
+    }
+
+
+async def _classify_sheets_with_llm(sheets: list, file_path: str) -> dict:
+    """使用LLM分类sheet类型（参考skill.md策略）
+
+    优化：
+    - 限制一次分析的sheet数量（最多15个），避免prompt过长
+    - sheet过多时只分析最有可能的候选（按行数排序）
+    - 添加30秒超时保护，超时则降级到基于名称判断
+    - 失败时使用降级策略_fallback_classify_sheets_by_name
+    """
+    from app.utils.llm import get_llm
+    from pathlib import Path
+    import json
+
+    # 加载skill.md策略（如果存在）
+    skill_strategy = ""
+    skill_path = Path(__file__).parent.parent.parent / "skills" / "intelligent-file-analyzer.skill.md"
+    logger.info(f"尝试加载skill.md: {skill_path}, 存在: {skill_path.exists()}")
+
+    if skill_path.exists():
+        try:
+            skill_content = skill_path.read_text(encoding="utf-8")
+            # 提取"多Sheet识别与分类"部分
+            if "### 1. 多Sheet识别与分类" in skill_content:
+                start_idx = skill_content.find("### 1. 多Sheet识别与分类")
+                end_idx = skill_content.find("### 2.", start_idx)
+                if end_idx > start_idx:
+                    skill_strategy = "\n📖 分析策略参考:\n" + skill_content[start_idx:end_idx].strip()
+                    logger.info(f"✅ 成功加载skill.md策略，长度: {len(skill_strategy)}字符")
+        except Exception as e:
+            logger.warning(f"❌ 加载skill.md失败: {e}")
+    else:
+        logger.warning(f"⚠️ skill.md文件不存在: {skill_path}")
+
+    # 优化：限制一次分析的sheet数量（最多15个）
+    MAX_SHEETS_PER_CALL = 15
+    valid_sheets = [s for s in sheets if "error" not in s]
+
+    if len(valid_sheets) > MAX_SHEETS_PER_CALL:
+        logger.warning(f"检测到{len(valid_sheets)}个sheet，过多！只分析前{MAX_SHEETS_PER_CALL}个")
+        # 优先分析有数据的sheet（行数>0）
+        valid_sheets = sorted(valid_sheets, key=lambda s: s.get("row_count", 0), reverse=True)
+        valid_sheets = valid_sheets[:MAX_SHEETS_PER_CALL]
+        sheets = valid_sheets
+
+    # 构建prompt
+    sheets_desc = []
+    for sheet in sheets:
+        if "error" in sheet:
+            continue
+        cols_str = ", ".join(sheet.get("columns", [])[:15])
+        sheets_desc.append(
+            f"Sheet名称: {sheet['sheet_name']}\n"
+            f"  列名: {cols_str}\n"
+            f"  行数: {sheet.get('row_count', 0)}"
+        )
+
+    prompt = f"""你是财务数据分析专家。分析以下Excel文件的sheet，判断每个sheet的数据类型。
+
+文件: {file_path}
+
+Sheet信息（共{len(sheets_desc)}个）：
+{chr(10).join(sheets_desc)}
+
+类型定义：
+- business: 业务数据（订单、销售、交易等，包含订单号、商品、金额等）
+- finance: 财务数据（账单、流水、发票等，包含财务科目、收支等）
+- summary: 汇总表（统计、总结类，不包含明细数据）
+- other: 其他（说明、模板、空表等）
+{skill_strategy}
+
+严格按以下JSON格式回复：
+{{"results": [{{"sheet_name": "...", "type": "business|finance|summary|other", "confidence": 0.85, "reason": "..."}}]}}
+"""
+
+    try:
+        llm = get_llm(temperature=0.1)
+
+        # 添加30秒超时保护
+        import asyncio
+        try:
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(llm.invoke, prompt),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"LLM分类sheet超时（30秒），sheet数: {len(sheets_desc)}")
+            # 降级：按sheet名称判断
+            return _fallback_classify_sheets_by_name(sheets)
+
+        content = resp.content.strip()
+
+        # 提取JSON
+        if "```" in content:
+            import re
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if m:
+                content = m.group(1)
+
+        parsed = json.loads(content)
+        results = parsed.get("results", [])
+
+        # 转换为字典
+        return {
+            r["sheet_name"]: {
+                "type": r["type"],
+                "confidence": r.get("confidence", 0.5),
+                "reason": r.get("reason", "")
+            }
+            for r in results
+        }
+
+    except Exception as e:
+        logger.error(f"LLM分类sheet失败: {e}", exc_info=True)
+        # 降级：按sheet名称判断
+        return _fallback_classify_sheets_by_name(sheets)
+
+
+def _fallback_classify_sheets_by_name(sheets: list) -> dict:
+    """降级策略：根据sheet名称简单判断类型"""
+    result = {}
+
+    business_keywords = ["订单", "销售", "交易", "业务", "商品", "order", "sales", "transaction"]
+    finance_keywords = ["财务", "账单", "流水", "发票", "finance", "bill", "invoice", "account"]
+    summary_keywords = ["汇总", "统计", "总结", "summary", "total"]
+
+    for sheet in sheets:
+        if "error" in sheet:
+            continue
+
+        sheet_name = sheet.get("sheet_name", "").lower()
+
+        # 判断类型
+        if any(kw in sheet_name for kw in business_keywords):
+            result[sheet["sheet_name"]] = {"type": "business", "confidence": 0.6, "reason": "根据sheet名称判断"}
+        elif any(kw in sheet_name for kw in finance_keywords):
+            result[sheet["sheet_name"]] = {"type": "finance", "confidence": 0.6, "reason": "根据sheet名称判断"}
+        elif any(kw in sheet_name for kw in summary_keywords):
+            result[sheet["sheet_name"]] = {"type": "summary", "confidence": 0.6, "reason": "根据sheet名称判断"}
+        else:
+            result[sheet["sheet_name"]] = {"type": "other", "confidence": 0.3, "reason": "无法识别"}
+
+    logger.info(f"使用降级策略分类了{len(result)}个sheet")
+    return result
+
+
+async def _smart_file_pairing(uploaded_files: list, complexity_info: dict) -> dict:
+    """智能文件配对（>2个文件）"""
+    from app.tools.mcp_client import call_mcp_tool
+
+    logger.info(f"智能配对场景，共{len(uploaded_files)}个文件")
+
+    # 先分析所有文件
+    file_paths = [f.get("file_path") for f in uploaded_files]
+    original_filenames_map = {f.get("file_path"): f.get("original_filename") for f in uploaded_files if f.get("original_filename")}
+
+    result = await call_mcp_tool("analyze_files", {
+        "file_paths": file_paths,
+        "original_filenames": original_filenames_map
+    })
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "error": "文件分析失败",
+            "analyses": [],
+            "recommendations": {},
+            "warnings": []
+        }
+
+    analyses = result.get("analyses", [])
+
+    # 计算文件间的相似度，推荐最佳配对
+    business_files = [a for a in analyses if a.get("guessed_source") == "business"]
+    finance_files = [a for a in analyses if a.get("guessed_source") == "finance"]
+
+    if not business_files or not finance_files:
+        return {
+            "success": False,
+            "analyses": analyses,
+            "recommendations": {
+                "message": "❌ 未能识别出有效的业务-财务文件配对"
+            },
+            "warnings": [f"业务文件: {len(business_files)}个, 财务文件: {len(finance_files)}个"]
+        }
+
+    # 简单推荐：选择第一个business和第一个finance
+    # TODO: 未来可以实现更智能的配对算法（列名相似度、行数接近度等）
+    selected_business = business_files[0]
+    selected_finance = finance_files[0]
+
+    recommended_pair = {
+        "business": selected_business,
+        "finance": selected_finance,
+        "confidence": 0.85,
+        "reason": "基于文件类型自动配对"
+    }
+
+    # 收集被排除的文件
+    selected_filenames = {selected_business['original_filename'], selected_finance['original_filename']}
+    excluded_files = [
+        a['original_filename']
+        for a in analyses
+        if a.get('original_filename') not in selected_filenames
+    ]
+
+    # 构建warnings列表
+    warning_msgs = [f"检测到{len(uploaded_files)}个文件，已自动选择最佳配对"]
+    if excluded_files:
+        warning_msgs.append(f"已排除: {', '.join(excluded_files)}")
+
+    return {
+        "success": True,
+        "analyses": [selected_business, selected_finance],  # 只返回推荐的配对
+        "recommendations": {
+            "pairing": recommended_pair,
+            "message": f"✅ 推荐配对: {selected_business['original_filename']} ↔ {selected_finance['original_filename']}"
+        },
+        "warnings": warning_msgs
+    }
+
+
+async def _analyze_single_file(uploaded_file: dict, complexity_info: dict) -> dict:
+    """分析单个文件（尝试拆分或提示缺失）"""
+    from app.tools.mcp_client import call_mcp_tool
+
+    logger.info("单文件场景，尝试识别类型")
+
+    file_path = uploaded_file.get("file_path")
+    result = await call_mcp_tool("analyze_files", {
+        "file_paths": [file_path],
+        "original_filenames": {file_path: uploaded_file.get("original_filename", "")}
+    })
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "error": "文件分析失败",
+            "analyses": [],
+            "recommendations": {},
+            "warnings": []
+        }
+
+    analyses = result.get("analyses", [])
+    if not analyses:
+        return {
+            "success": False,
+            "error": "文件为空",
+            "analyses": [],
+            "recommendations": {},
+            "warnings": []
+        }
+
+    analysis = analyses[0]
+    guessed_type = analysis.get("guessed_source")
+
+    opposite_type = "财务数据" if guessed_type == "business" else "业务数据"
+
+    return {
+        "success": False,  # 标记为失败，因为缺少配对文件
+        "analyses": analyses,
+        "recommendations": {
+            "message": f"⚠️ 检测到{guessed_type}数据，请上传对应的{opposite_type}文件"
+        },
+        "warnings": ["只有一个文件，无法完成对账"]
+    }
+
+
+async def _analyze_with_format_normalization(uploaded_files: list, complexity_info: dict) -> dict:
+    """处理非标准格式文件"""
+    # TODO: 实现格式标准化逻辑
+    # 目前降级到简单分析
+    return await _fallback_to_simple_analysis(uploaded_files)
+
+
+async def _fallback_to_simple_analysis(uploaded_files: list) -> dict:
+    """降级到简单分析（使用现有的analyze_files工具）"""
+    from app.tools.mcp_client import call_mcp_tool
+
+    logger.info("降级到简单文件分析")
+
+    file_paths = [f.get("file_path") for f in uploaded_files]
+    original_filenames_map = {f.get("file_path"): f.get("original_filename") for f in uploaded_files if f.get("original_filename")}
+
+    result = await call_mcp_tool("analyze_files", {
+        "file_paths": file_paths,
+        "original_filenames": original_filenames_map
+    })
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "error": result.get("error", "文件分析失败"),
+            "analyses": [],
+            "recommendations": {},
+            "warnings": []
+        }
+
+    return {
+        "success": True,
+        "analyses": result.get("analyses", []),
+        "recommendations": {},
+        "warnings": []
+    }

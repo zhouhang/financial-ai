@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
@@ -20,11 +20,16 @@ from app.graphs.main_graph import create_app, register_progress_callback, unregi
 from app.models import ReconciliationPhase  # ⚠️ 新增导入
 from app.utils.db import ensure_tables
 from app.tools.mcp_client import (
+    auth_login as mcp_auth_login,
+    auth_register as mcp_auth_register,
+    list_companies_public as mcp_list_companies_public,
+    list_departments_public as mcp_list_departments_public,
     create_conversation as mcp_create_conversation,
     save_message as mcp_save_message,
     list_conversations as mcp_list_conversations,
     get_conversation as mcp_get_conversation,
     delete_conversation as mcp_delete_conversation,
+    call_mcp_tool,
 )
 
 logging.basicConfig(
@@ -310,15 +315,20 @@ async def websocket_chat(ws: WebSocket):
             # ⚠️ 不再在收到消息时清空 _thread_files：用户可能刚上传完文件再发消息，
             # 若此时 phase=COMPLETED 会误清空刚上传的文件，导致「未检测到文件上传」
             file_infos = _thread_files.get(thread_id, [])
-            # ⚠️ 对账完成后再次「使用XX对账」时，清空旧文件，强制用户重新上传（避免复用上次对账的文件）
+            # ⚠️ 仅在用户发送新消息（非 resume）且对账已完成时清空旧文件
+            # 用户回复「不要」是 resume，表示不采纳规则、返回重新配置，应保留文件
             try:
                 snapshot = langgraph_app.get_state(config)
                 current_phase = (snapshot.values.get("phase") or "").strip()
-                if current_phase == ReconciliationPhase.COMPLETED.value and not msg_attachments:
+                if (
+                    not is_resume
+                    and current_phase == ReconciliationPhase.COMPLETED.value
+                    and not msg_attachments
+                ):
                     _thread_files[thread_id] = []
                     _thread_files_snapshot[thread_id] = []
                     file_infos = []
-                    logger.info(f"对账已完成，清空旧文件，要求重新上传 (thread={thread_id})")
+                    logger.info(f"对账已完成且为新消息，清空旧文件 (thread={thread_id})")
             except Exception as e:
                 logger.warning(f"获取 phase 失败: {e}")
             # 若 _thread_files 为空但消息附带附件（前端上传后随消息发送），则使用附件作为文件来源
@@ -512,9 +522,11 @@ async def websocket_chat(ws: WebSocket):
                             logger.info(f"[{node_name}] 流式输出完成，发送最后缓冲，长度={len(message_buffer)}")
                             message_buffer = ""
                             current_streaming_node = None
-                        output = data_obj.get("output")
-                        if output and hasattr(output, "content") and output.content:
-                            sent_contents.add(output.content.strip())
+                        # ⚠️ 只收集面向用户的消息，不收集内部处理的 JSON
+                        if node_name not in _no_stream_nodes:
+                            output = data_obj.get("output")
+                            if output and hasattr(output, "content") and output.content:
+                                sent_contents.add(output.content.strip())
                     
                     # ④ 节点完成：发送手动 AIMessage + auth_token 更新
                     elif kind == "on_chain_end" and node_name:
@@ -586,15 +598,27 @@ async def websocket_chat(ws: WebSocket):
                                 logger.info(f"创建新会话: {conversation_id}")
                         
                         if conversation_id:
-                            # 保存用户消息
-                            await mcp_save_message(auth_token, conversation_id, "user", user_msg)
-                            
-                            # 保存 AI 回复（收集所有发送的内容）
+                            # 保存用户消息（带附件信息）
+                            uploaded_files_info = _thread_files.get(thread_id, [])
+                            attachments = [
+                                {
+                                    "name": f.get("filename"),
+                                    "path": f.get("file_path"),
+                                    "size": f.get("size", 0)
+                                }
+                                for f in uploaded_files_info
+                            ] if uploaded_files_info else []
+                            await mcp_save_message(auth_token, conversation_id, "user", user_msg, attachments=attachments)
+
+                            # 保存 AI 回复（只保存面向用户的消息）
                             if sent_contents:
                                 for content in sent_contents:
-                                    if content and not content.startswith("<"):  # 跳过 HTML 表单
+                                    # 跳过 HTML 表单和进度消息
+                                    if (content and
+                                        not content.startswith("<") and
+                                        "{{SPINNER}}" not in content):
                                         await mcp_save_message(auth_token, conversation_id, "assistant", content)
-                            
+
                             logger.info(f"消息已保存到会话 {conversation_id}")
                     except Exception as e:
                         logger.warning(f"保存消息失败: {e}")
@@ -700,6 +724,164 @@ async def stream_chat(
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "data-agent"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /auth/login — 用户登录
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/auth/login")
+async def auth_login(username: str = Form(...), password: str = Form(...)):
+    """用户登录，返回 token 和用户信息"""
+    try:
+        result = await mcp_auth_login(username, password)
+        if result.get("success"):
+            return result
+        raise HTTPException(status_code=401, detail=result.get("error", "登录失败"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"登录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/companies")
+async def get_companies():
+    """获取公司列表（公开，用于注册）"""
+    try:
+        result = await mcp_list_companies_public()
+        return result.get("companies", []) if result.get("success") else []
+    except Exception as e:
+        logger.error(f"获取公司列表失败: {e}")
+        return []
+
+
+@app.get("/departments")
+async def get_departments(company_id: str):
+    """获取部门列表（公开，用于注册）"""
+    if not company_id:
+        return []
+    try:
+        result = await mcp_list_departments_public(company_id)
+        return result.get("departments", []) if result.get("success") else []
+    except Exception as e:
+        logger.error(f"获取部门列表失败: {e}")
+        return []
+
+
+@app.post("/auth/register")
+async def auth_register(
+    username: str = Form(...),
+    password: str = Form(...),
+    company_id: str = Form(...),
+    department_id: str = Form(...),
+    email: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+):
+    """用户注册，返回 token 和用户信息"""
+    try:
+        kwargs = {
+            "company_id": company_id.strip(),
+            "department_id": department_id.strip(),
+        }
+        if email and email.strip():
+            kwargs["email"] = email.strip()
+        if phone and phone.strip():
+            kwargs["phone"] = phone.strip()
+        result = await mcp_auth_register(username, password, **kwargs)
+        if result.get("success"):
+            return result
+        raise HTTPException(status_code=400, detail=result.get("error", "注册失败"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"注册失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/copy-rule")
+async def copy_rule(
+    body: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    """复制对账规则为个人规则（登录后保存游客创建的推荐规则）"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    source_rule_id = body.get("source_rule_id")
+    new_rule_name = body.get("new_rule_name")
+    if not source_rule_id or not new_rule_name:
+        raise HTTPException(status_code=400, detail="缺少 source_rule_id 或 new_rule_name")
+    try:
+        result = await call_mcp_tool("copy_reconciliation_rule", {
+            "auth_token": token,
+            "source_rule_id": source_rule_id,
+            "new_rule_name": new_rule_name,
+        })
+        return result
+    except Exception as e:
+        logger.error(f"复制规则失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/save-pending-rule")
+async def save_pending_rule(
+    body: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    """从 LangGraph 线程状态恢复并保存新建规则（游客创建规则后登录）"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    thread_id = body.get("thread_id")
+    rule_name = body.get("rule_name")
+    if not thread_id or not rule_name:
+        raise HTTPException(status_code=400, detail="缺少 thread_id 或 rule_name")
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = langgraph_app.get_state(config)
+        if not snapshot or not snapshot.values:
+            raise HTTPException(status_code=404, detail="未找到对应的会话状态，规则可能已过期")
+        state = snapshot.values
+        schema = state.get("generated_schema")
+        if not schema:
+            raise HTTPException(status_code=404, detail="会话中无待保存的规则")
+        from app.graphs.reconciliation.helpers import (
+            _rewrite_schema_transforms_to_mapped_fields,
+            _build_field_mapping_text,
+            _build_rule_config_text,
+            _expand_file_patterns,
+        )
+        schema_to_save = schema.copy()
+        schema_to_save["description"] = rule_name
+        _rewrite_schema_transforms_to_mapped_fields(schema_to_save)
+        mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
+        config_items = state.get("rule_config_items", [])
+        schema_to_save["field_mapping_text"] = _build_field_mapping_text(mappings)
+        schema_to_save["rule_config_text"] = _build_rule_config_text(config_items)
+        for src in ("business", "finance"):
+            patterns = schema_to_save.get("data_sources", {}).get(src, {}).get("file_pattern", [])
+            expanded = []
+            for p in patterns:
+                expanded.extend(_expand_file_patterns(p))
+            if "data_sources" not in schema_to_save:
+                schema_to_save["data_sources"] = {}
+            if src not in schema_to_save["data_sources"]:
+                schema_to_save["data_sources"][src] = {}
+            schema_to_save["data_sources"][src]["file_pattern"] = list(set(expanded))
+        result = await call_mcp_tool("save_reconciliation_rule", {
+            "auth_token": token,
+            "name": rule_name,
+            "description": rule_name,
+            "rule_template": schema_to_save,
+            "visibility": "private",
+        })
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"保存待处理规则失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

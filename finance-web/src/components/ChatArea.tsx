@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ChevronLeft,
+  ChevronRight,
   Paperclip,
   Send,
   Loader2,
@@ -33,6 +35,14 @@ interface ChatAreaProps {
   threadId: string;
   showInput?: boolean;
   currentUser?: Record<string, unknown> | null;
+  /** 对话名称，显示在顶部左侧 */
+  conversationTitle?: string;
+  /** 未登录时显示登录按钮，点击回调 */
+  onLogin?: () => void;
+  /** 侧边栏是否收起 */
+  sidebarCollapsed?: boolean;
+  /** 切换侧边栏收起/展开 */
+  onToggleSidebar?: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
 }
@@ -47,8 +57,20 @@ export default function ChatArea({
   threadId,
   showInput = true,
   currentUser,
+  conversationTitle,
+  onLogin,
+  sidebarCollapsed = false,
+  onToggleSidebar,
   streamingMessageId,
 }: ChatAreaProps) {
+  // 登录后自动发送消息获取规则列表
+  useEffect(() => {
+    const justSavedRule = localStorage.getItem('rule_just_saved');
+    if (justSavedRule && messages.length === 0 && !isLoading && connectionStatus === 'connected') {
+      localStorage.removeItem('rule_just_saved');
+      onSendMessage(`你好，请介绍自己并展示我的规则列表`, undefined, true);
+    }
+  }, [messages.length, isLoading, connectionStatus, onSendMessage]);
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
@@ -71,12 +93,45 @@ export default function ChatArea({
     }
   }, [messages, isLoading, isLoadingConversation]);
 
+  // 流式消息内容变化时也触发滚动（确保长消息流式输出时页面自动下滑）
+  useEffect(() => {
+    if (!isLoadingConversation && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.role === 'assistant') {
+        // 当助手消息内容增长时滚动到底部
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+  }, [messages.map(m => m.content).join(''), isLoadingConversation]);
+
   // 聚焦输入框
   useEffect(() => {
     if (showInput && inputRef.current) {
       inputRef.current.focus();
     }
   }, [showInput, threadId]);
+
+  // 解析消息中的 SAVE_RULE / SAVE_NEW_RULE 标记，写入 localStorage 供登录后保存使用
+  useEffect(() => {
+    for (const msg of messages) {
+      if (msg.role === 'assistant') {
+        const saveRuleMatch = msg.content.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
+        if (saveRuleMatch) {
+          localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
+          localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
+          localStorage.removeItem('pending_thread_id');
+          localStorage.removeItem('pending_is_new_rule');
+        }
+        const saveNewRuleMatch = msg.content.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
+        if (saveNewRuleMatch) {
+          localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
+          localStorage.setItem('pending_thread_id', threadId);
+          localStorage.setItem('pending_is_new_rule', 'true');
+          localStorage.removeItem('pending_source_rule_id');
+        }
+      }
+    }
+  }, [messages, threadId]);
 
   // 暴露聚焦函数给父组件
   useEffect(() => {
@@ -165,10 +220,15 @@ export default function ChatArea({
   }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // 忽略输入法组合过程中的按键事件（中文、日文等）
+    if (e.nativeEvent.isComposing) {
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
-        }
+    }
   };
 
   // 选文件 → 暂存到本地（不上传）
@@ -213,9 +273,22 @@ export default function ChatArea({
     <div className="flex-1 flex flex-col min-w-0 bg-surface-secondary relative">
       {/* ── Header ── */}
       <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors shrink-0"
+              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            >
+              {sidebarCollapsed ? (
+                <ChevronRight className="w-5 h-5" />
+              ) : (
+                <ChevronLeft className="w-5 h-5" />
+              )}
+            </button>
+          )}
           <div
-            className={`w-2.5 h-2.5 rounded-full ${
+            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
               connectionStatus === 'connected'
                 ? 'bg-green-500'
                 : connectionStatus === 'connecting'
@@ -223,45 +296,37 @@ export default function ChatArea({
                 : 'bg-red-500'
             }`}
           />
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-base font-semibold text-gray-900">分析会话</h2>
-            <span className="text-xs text-gray-500">
-              Tally 智能财务助手
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className={`text-xs font-medium px-3 py-1.5 rounded-full ${
-              connectionStatus === 'connected'
-                ? 'bg-green-50 text-green-600'
-                : connectionStatus === 'connecting'
-                ? 'bg-yellow-50 text-yellow-600'
-                : 'bg-red-50 text-red-600'
-            }`}
-          >
-            {connectionStatus === 'connected'
-              ? '已连接'
-              : connectionStatus === 'connecting'
-              ? '连接中'
-              : '未连接'}
+          <span className="text-sm font-medium text-gray-800 truncate">
+            {conversationTitle || 'Tally 智能财务助手'}
           </span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {!currentUser && onLogin ? (
+            <button
+              onClick={onLogin}
+              className="px-4 py-2 text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+            >
+              登录
+            </button>
+          ) : currentUser ? null : (
+            <span
+              className={`text-xs font-medium px-3 py-1.5 rounded-full ${
+                connectionStatus === 'connected'
+                  ? 'bg-green-50 text-green-600'
+                  : connectionStatus === 'connecting'
+                  ? 'bg-yellow-50 text-yellow-600'
+                  : 'bg-red-50 text-red-600'
+              }`}
+            >
+              {connectionStatus === 'connected'
+                ? '已连接'
+                : connectionStatus === 'connecting'
+                ? '连接中'
+                : '未连接'}
+            </span>
+          )}
         </div>
       </header>
-
-      {/* ── AI 正在处理横幅 ── */}
-      {isLoading && (
-        <div className="bg-blue-50 border-b border-blue-100 px-6 py-2.5 flex items-center gap-2">
-          <div className="flex gap-1">
-            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-          </div>
-          <span className="text-sm text-blue-600 font-medium">
-            AI 正在处理您的请求...
-          </span>
-        </div>
-      )}
 
       {/* ── Messages ── */}
       <div className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
@@ -296,10 +361,10 @@ export default function ChatArea({
               ) : (
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
-                    未登录，请在对话中登录
+                    您好！我是 Tally 智能财务助手
                   </h3>
                   <p className="text-sm text-gray-500">
-                    发送"登录"或"注册"进行身份验证
+                    我可以帮助您进行财务数据对账，上传文件即可开始
                   </p>
                 </>
               )}

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -45,6 +46,10 @@ from .helpers import (
     _validate_and_deduplicate_rules,
     _merge_json_snippets,
     _translate_rule_name_to_english,
+    match_rules_by_field_names,
+    calculate_match_percentage,
+    get_match_reason,
+    KEY_FIELD_ALIASES,
 )
 from .parsers import _parse_rule_config_json_snippet
 
@@ -55,16 +60,22 @@ logger = logging.getLogger(__name__)
 
 async def file_analysis_node(state: AgentState) -> dict:
     """第1步：分析上传的文件，提取列名和样本数据。
-    
+
+    支持智能分析：
+    - 简单场景（2个标准文件）→ 快速分析
+    - 复杂场景（多sheet/非标准格式/多文件）→ 智能分析
+
     ⚠️ 展平到主图后，interrupt/resume 不会 replay 此节点，无需缓存检查。
     """
+    from .helpers import quick_complexity_check, invoke_intelligent_analyzer
+
     uploaded = state.get("uploaded_files", [])
     if not uploaded:
         # 使用 interrupt 等待用户上传文件
         user_response = interrupt({
             "step": "1/4",
             "step_title": "上传文件",
-            "question": "📤 **第1步：上传文件**\n\n请上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。",
+            "question": "📤 第1步：上传文件\n\n请上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。",
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
         # interrupt 返回后，重新检查文件
@@ -73,59 +84,141 @@ async def file_analysis_node(state: AgentState) -> dict:
             # 仍然没有文件，返回提示消息
             return {
                 "messages": [AIMessage(content="⚠️ 未检测到文件上传，请上传文件后再试。")],
-            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
                 "file_analyses": [],  # 空列表，路由函数会返回END
             }
 
-    # 调用 MCP 工具分析文件（包括 LLM 文件类型判断）
-    # 提取文件路径和原始文件名映射
-    file_paths = []
-    original_filenames_map = {}
-    
-    for item in uploaded:
-        if isinstance(item, dict):
-            file_path = item.get("file_path", "")
-            original_filename = item.get("original_filename", "")
-            if file_path:
-                file_paths.append(file_path)
-                if original_filename:
-                    original_filenames_map[file_path] = original_filename
-        else:
-            # 兼容旧格式（直接是文件路径字符串）
-            file_paths.append(item)
-    
-    try:
-        analyze_args = {"file_paths": file_paths}
-        if original_filenames_map:
-            analyze_args["original_filenames"] = original_filenames_map
-        result = await call_mcp_tool("analyze_files", analyze_args)
-        if not result.get("success"):
-            error_msg = result.get("error", "文件分析失败")
+    # ── 智能复杂度检测 ──────────────────────────────────────────
+    complexity_level = quick_complexity_check(uploaded)
+    logger.info(f"文件复杂度检测: {complexity_level}, 文件数: {len(uploaded)}")
+
+    # ── 根据复杂度选择分析策略 ──────────────────────────────────
+    if complexity_level == "simple":
+        # 简单场景：使用现有快速分析逻辑
+        logger.info("使用快速分析路径")
+
+        # 提取文件路径和原始文件名映射
+        file_paths = []
+        original_filenames_map = {}
+
+        for item in uploaded:
+            if isinstance(item, dict):
+                file_path = item.get("file_path", "")
+                original_filename = item.get("original_filename", "")
+                if file_path:
+                    file_paths.append(file_path)
+                    if original_filename:
+                        original_filenames_map[file_path] = original_filename
+            else:
+                # 兼容旧格式（直接是文件路径字符串）
+                file_paths.append(item)
+
+        try:
+            analyze_args = {"file_paths": file_paths}
+            if original_filenames_map:
+                analyze_args["original_filenames"] = original_filenames_map
+            result = await call_mcp_tool("analyze_files", analyze_args)
+            if not result.get("success"):
+                error_msg = result.get("error", "文件分析失败")
+                return {
+                    "messages": [AIMessage(content=f"❌ {error_msg}")],
+                    "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                    "file_analyses": [],
+                }
+
+            analyses = result.get("analyses", [])
+            warnings = []
+
+        except Exception as e:
+            logger.error(f"调用 MCP 文件分析工具失败: {e}", exc_info=True)
             return {
-                "messages": [AIMessage(content=f"❌ {error_msg}")],
+                "messages": [AIMessage(content=f"❌ 文件分析失败: {str(e)}")],
                 "phase": ReconciliationPhase.FILE_ANALYSIS.value,
                 "file_analyses": [],
             }
-        
-        analyses = result.get("analyses", [])
-    except Exception as e:
-        logger.error(f"调用 MCP 文件分析工具失败: {e}", exc_info=True)
-        return {
-            "messages": [AIMessage(content=f"❌ 文件分析失败: {str(e)}")],
-            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
-            "file_analyses": [],
-        }
+    else:
+        # 复杂场景：使用智能分析
+        logger.info(f"使用智能分析路径 (复杂度: {complexity_level})")
 
-    # 构建文件分析摘要（只显示文件名和基本信息，不显示业务/财务标签）
-    summary_parts: list[str] = ["📊 **第1步：文件分析完成**\n"]
-    for a in analyses:
-        summary_parts.append(f"📄 **{a['filename']}**")
-        summary_parts.append(f"   • 列数: {len(a.get('columns', []))}  行数: {a.get('row_count', 0)}")
-        summary_parts.append(f"   • 列名: {', '.join(a.get('columns', [])[:10])}{'...' if len(a.get('columns', [])) > 10 else ''}")
-        summary_parts.append("")
+        try:
+            result = await invoke_intelligent_analyzer(uploaded, complexity_level)
 
-    summary_parts.append("正在为你生成字段映射建议...")
-    msg = "\n".join(summary_parts)
+            if not result.get("success"):
+                # 智能分析失败或发现问题（如单文件缺少配对）
+                error_msg = result.get("recommendations", {}).get("message", "智能分析失败")
+                analyses = result.get("analyses", [])
+                warnings = result.get("warnings", [])
+
+                # 构建消息
+                msg_parts = [f"🔍 智能文件分析\n", f"{error_msg}\n"]
+                if warnings:
+                    msg_parts.append("⚠️ 提示：")
+                    for w in warnings:
+                        msg_parts.append(f"  • {w}")
+
+                return {
+                    "messages": [AIMessage(content="\n".join(msg_parts))],
+                    "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                    "file_analyses": analyses,
+                }
+
+            analyses = result.get("analyses", [])
+            warnings = result.get("warnings", [])
+            recommendations = result.get("recommendations", {})
+
+            # 构建智能分析结果消息
+            msg_parts = ["🔍 智能文件分析完成 📖 [使用skill.md策略]\n"]
+
+            # 显示分析结果
+            for a in analyses:
+                guessed_source_label = "业务数据" if a.get("guessed_source") == "business" else "财务数据"
+                confidence = a.get("confidence", 0)
+                confidence_pct = int(confidence * 100) if confidence else 0
+
+                filename_display = a.get("original_filename", a.get("filename", ""))
+                msg_parts.append(f"✅ {filename_display} ({guessed_source_label} {confidence_pct}%)")
+                msg_parts.append(f"   • {len(a.get('columns', []))}列，{a.get('row_count', 0)}行")
+
+                if a.get("processing_notes"):
+                    msg_parts.append(f"   • {a.get('processing_notes')}")
+                msg_parts.append("")
+
+            # 显示推荐信息
+            if recommendations.get("message"):
+                msg_parts.append(recommendations["message"])
+                msg_parts.append("")
+
+            # 显示警告
+            if warnings:
+                msg_parts.append("⚠️ 提示：")
+                for w in warnings:
+                    msg_parts.append(f"  • {w}")
+                msg_parts.append("")
+
+        except Exception as e:
+            logger.error(f"智能文件分析失败: {e}", exc_info=True)
+            return {
+                "messages": [AIMessage(content=f"❌ 智能文件分析失败: {str(e)}")],
+                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                "file_analyses": [],
+            }
+
+    # ── 构建最终输出消息 ─────────────────────────────────────────
+    if complexity_level == "simple":
+        # 简单场景的原有消息格式
+        summary_parts: list[str] = ["📊 第1步：文件分析完成\n"]
+        for a in analyses:
+            summary_parts.append(f"📄 {a['original_filename'] if a.get('original_filename') else a['filename']}")
+            summary_parts.append(f"   • 列数: {len(a.get('columns', []))}  行数: {a.get('row_count', 0)}")
+            summary_parts.append(f"   • 列名: {', '.join(a.get('columns', [])[:10])}{'...' if len(a.get('columns', [])) > 10 else ''}")
+            summary_parts.append("")
+
+        summary_parts.append("正在为你生成字段映射建议...")
+        msg = "\n".join(summary_parts)
+    else:
+        # 智能场景使用前面构建的msg_parts
+        msg_parts.append("正在为你生成字段映射建议...")
+        msg = "\n".join(msg_parts)
 
     # 使用 LLM 猜测字段映射（在后台完成，不显示给用户）
     suggested = _guess_field_mappings(analyses)
@@ -194,10 +287,11 @@ def field_mapping_node(state: AgentState) -> dict:
     if response_lower in ("确认", "ok", "yes", "确定", "对", "没问题", "正确"):
         return {
             "messages": [AIMessage(content="✅ 字段映射已确认。接下来配置对账规则。")],
-        "confirmed_mappings": confirmed,
+            "confirmed_mappings": confirmed,
             "mapping_adjustment_feedback": None,  # 清除反馈
-        "phase": ReconciliationPhase.RULE_CONFIG.value,
-    }
+            "rule_config_items": [],  # 新建规则时第三步从空配置开始
+            "phase": ReconciliationPhase.RULE_CONFIG.value,
+        }
 
     # 用户需要调整，使用 LLM 解析调整意见并更新映射
     logger.info(f"用户调整意见: {response_str}")
@@ -219,6 +313,298 @@ def field_mapping_node(state: AgentState) -> dict:
         "suggested_mappings": adjusted_mappings,  # 更新映射
         "mapping_adjustment_feedback": adjustment_msg,
         "phase": ReconciliationPhase.FIELD_MAPPING.value,  # 保持在当前阶段
+    }
+
+
+async def rule_recommendation_node(state: AgentState) -> dict:
+    """第2.5步 (HITL)：根据字段映射推荐已有规则，供用户选择。
+    
+    流程：
+    1. 计算当前字段映射的哈希值
+    2. 调用 MCP 工具搜索匹配规则
+    3. 如果哈希匹配结果少，用字段名匹配补充
+    4. 展示推荐结果，供用户选择
+    5. 用户选择推荐规则或创建新规则
+    """
+    import hashlib
+    import json
+    
+    logger.info(f"rule_recommendation_node 进入，当前 phase={state.get('phase', '')}")
+    
+    mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
+    auth_token = state.get("auth_token", "")
+    file_analyses = state.get("file_analyses", [])
+    
+    # 计算字段映射哈希
+    def compute_hash(m: dict) -> str:
+        fields = []
+        for source in ["business", "finance"]:
+            for role in ["order_id", "amount", "date"]:
+                value = m.get(source, {}).get(role, "")
+                if isinstance(value, list):
+                    value = ",".join(sorted(value))
+                elif value:
+                    value = str(value)
+                else:
+                    value = ""
+                fields.append(f"{source}.{role}={value}")
+        fields.sort()
+        hash_input = "|".join(fields)
+        return hashlib.md5(hash_input.encode()).hexdigest()
+    
+    field_hash = compute_hash(mappings)
+    logger.info(f"字段映射哈希: {field_hash}")
+    
+    # 调用 MCP 工具搜索匹配规则（基于哈希）
+    recommended = []
+    guest_token = state.get("guest_token", "")
+    
+    if auth_token:
+        try:
+            result = await call_mcp_tool("search_rules_by_mapping", {
+                "auth_token": auth_token,
+                "field_mapping_hash": field_hash,
+                "limit": 5,
+            })
+            if result.get("success"):
+                recommended = result.get("rules", [])
+                logger.info(f"基于哈希找到 {len(recommended)} 个匹配规则")
+        except Exception as e:
+            logger.error(f"搜索推荐规则失败: {e}")
+    elif guest_token:
+        # 游客模式：使用 search_rules_by_mapping 搜索匹配规则
+        try:
+            result = await call_mcp_tool("search_rules_by_mapping", {
+                "guest_token": guest_token,
+                "field_mapping_hash": field_hash,
+                "limit": 5,
+            })
+            if result.get("success"):
+                recommended = result.get("rules", [])
+                logger.info(f"游客模式基于哈希找到 {len(recommended)} 个匹配规则")
+        except Exception as e:
+            logger.error(f"游客搜索推荐规则失败: {e}")
+    
+    # 如果哈希匹配结果少于5条，用字段名匹配补充
+    from .helpers import match_rules_by_field_names, calculate_match_percentage, get_match_reason, KEY_FIELD_ALIASES
+    
+    if len(recommended) < 5 and file_analyses:
+        # 构建文件列名字典
+        file_columns = {}
+        for analysis in file_analyses:
+            source = analysis.get("guessed_source", "")
+            columns = analysis.get("columns", [])
+            if source:
+                file_columns[source] = columns
+        
+        if file_columns:
+            try:
+                # 获取所有规则列表（不含 rule_template）- 支持游客模式
+                list_args = {"status": "active"}
+                if auth_token:
+                    list_args["auth_token"] = auth_token
+                elif guest_token:
+                    list_args["guest_token"] = guest_token
+                list_result = await call_mcp_tool("list_reconciliation_rules", list_args)
+                if list_result.get("success"):
+                    all_rules = list_result.get("rules", [])
+                    
+                    # 获取当前用户ID，过滤掉用户自己的规则
+                    current_user = state.get("current_user", {})
+                    current_user_id = current_user.get("user_id") if isinstance(current_user, dict) else None
+                    
+                    if current_user_id:
+                        original_count = len(all_rules)
+                        all_rules = [r for r in all_rules if str(r.get("created_by")) != str(current_user_id)]
+                        logger.info(f"过滤用户自己的规则: {original_count} -> {len(all_rules)} 条规则")
+                    
+                    # 过滤掉已通过哈希匹配的规则
+                    matched_ids = {r.get("id") for r in recommended}
+                    remaining_rule_ids = [r.get("id") for r in all_rules if r.get("id") not in matched_ids]
+                    
+                    # 使用批量 API 获取规则详情（含 rule_template）- 支持游客模式
+                    rules_with_template = []
+                    if remaining_rule_ids:
+                        batch_args = {"rule_ids": remaining_rule_ids[:100]}
+                        if auth_token:
+                            batch_args["auth_token"] = auth_token
+                        elif guest_token:
+                            batch_args["guest_token"] = guest_token
+                        batch_result = await call_mcp_tool("batch_get_reconciliation_rules", batch_args)
+                        if batch_result.get("success"):
+                            rules_with_template = batch_result.get("rules", [])
+                    
+                    # 字段名匹配
+                    field_matches = match_rules_by_field_names(file_columns, rules_with_template)
+                    
+                    # 添加字段名匹配的结果
+                    for rule, score, matched_fields in field_matches:
+                        match_pct = calculate_match_percentage(matched_fields)
+                        # 只添加匹配度 >= 90% 的规则
+                        if match_pct >= 90 and len(recommended) < 3:
+                            rule["_match_score"] = score
+                            rule["_matched_fields"] = matched_fields
+                            rule["_match_reason"] = get_match_reason(matched_fields)
+                            recommended.append(rule)
+                    
+                    logger.info(f"字段名匹配后共有 {len(recommended)} 个推荐规则（匹配度>=90%）")
+            except Exception as e:
+                logger.error(f"字段名匹配补充失败: {e}")
+    
+    # 过滤：只保留匹配度 >= 90% 的规则，最多3个
+    high_match_rules = []
+    for rule in recommended:
+        matched_fields = rule.get("_matched_fields", [])
+        match_pct = calculate_match_percentage(matched_fields)
+        if match_pct >= 90:
+            high_match_rules.append(rule)
+        if len(high_match_rules) >= 3:
+            break
+    
+    recommended = high_match_rules
+    
+    # 如果没有高匹配度的推荐规则，直接跳过推荐流程
+    if not recommended:
+        logger.info("没有匹配度>=90%的规则，跳过推荐流程")
+        return {
+            "messages": [],
+            "recommended_rules": [],
+            "using_recommended_rule": False,
+            "rule_config_items": [],  # 新建规则时第三步从空配置开始
+            "phase": ReconciliationPhase.FIELD_MAPPING.value,
+        }
+    
+    # 构建推荐结果展示（优化格式）
+    rule_list_text = []
+    for idx, rule in enumerate(recommended[:3], 1):
+        name = rule.get("name", "未知规则")
+        template = rule.get("rule_template", {})
+        if isinstance(template, str):
+            template = json.loads(template)
+        
+        # 计算匹配度
+        matched_fields = rule.get("_matched_fields", [])
+        match_reason = rule.get("_match_reason", "")
+        match_percentage = calculate_match_percentage(matched_fields)
+        
+        # 提取字段映射摘要
+        biz_fields = template.get("data_sources", {}).get("business", {}).get("field_roles", {})
+        fin_fields = template.get("data_sources", {}).get("finance", {}).get("field_roles", {})
+        
+        # 获取规则配置信息（尝试多个字段）
+        rule_config_text = template.get("rule_config_text", "")
+        if not rule_config_text:
+            # 从 custom_validations 或其他配置中提取
+            custom_validations = template.get("custom_validations", [])
+            if custom_validations:
+                rule_config_text = "、".join([v.get("name", "") for v in custom_validations[:3]])
+        
+        biz_summary = ", ".join([f"{k}→{v}" for k, v in biz_fields.items() if v])
+        fin_summary = ", ".join([f"{k}→{v}" for k, v in fin_fields.items() if v])
+        
+        # 添加匹配度图标
+        if match_percentage >= 90:
+            emoji = "✨"
+        else:
+            emoji = "📋"
+        
+        rule_text = f"{idx}. {emoji} **{name}** (匹配度: {match_percentage}%)\n"
+        rule_text += f"   📊 字段映射:\n"
+        rule_text += f"      • 业务: {biz_summary or '无'}\n"
+        rule_text += f"      • 财务: {fin_summary or '无'}\n"
+        
+        if rule_config_text:
+            rule_text += f"   ⚙️ 规则配置:\n"
+            rule_text += f"      {rule_config_text}\n"
+        
+        rule_text += f"   💡 {match_reason}"
+        
+        rule_list_text.append(rule_text)
+    
+    recommendation_text = "\n\n".join(rule_list_text)
+    
+    question_text = (
+        f"🔍 **为你推荐以下规则**（基于字段映射匹配）：\n\n"
+        f"{recommendation_text}\n\n"
+        f"请输入数字选择规则（如 1、2、3），或输入「创建新规则」继续配置。"
+    )
+    
+    user_response = interrupt({
+        "step": "2.5/4",
+        "step_title": "规则推荐",
+        "question": question_text,
+        "recommended_rules": recommended,
+        "hint": "输入数字选择推荐规则，或输入「创建新规则」自行配置",
+    })
+    
+    response_str = str(user_response).strip().lower()
+    
+    logger.info(f"rule_recommendation_node 处理输入: response={response_str}, using_recommended_rule={state.get('using_recommended_rule')}, selected_rule_id={state.get('selected_rule_id')}, current_phase={state.get('phase')}")
+    
+    # 解析用户选择数字 → 直接执行对账（不再询问确认）
+    if response_str.isdigit():
+        idx = int(response_str) - 1
+        if 0 <= idx < len(recommended):
+            selected = recommended[idx]
+            
+            # 加载推荐规则的模板
+            template = selected.get("rule_template", {})
+            if isinstance(template, str):
+                template = json.loads(template)
+            
+            # 提取字段映射到 confirmed_mappings
+            biz_roles = template.get("data_sources", {}).get("business", {}).get("field_roles", {})
+            fin_roles = template.get("data_sources", {}).get("finance", {}).get("field_roles", {})
+            
+            # 提取规则配置信息
+            rule_config_text = template.get("rule_config_text", "")
+            custom_validations = template.get("custom_validations", [])
+            data_cleaning_rules = template.get("data_cleaning_rules", {})
+            
+            # 构建 rule_config_items（用于预览显示）- 兼容字段名
+            rule_config_items = []
+            if rule_config_text:
+                rule_config_items.append({"type": "rule_config", "content": rule_config_text})
+            if custom_validations:
+                for v in custom_validations:
+                    rule_config_items.append({"type": "validation", "name": v.get("name", ""), "content": v.get("detail_template", "")})
+            
+            # 提取文件清洗规则描述
+            cleaning_descriptions = []
+            for source in ["business", "finance"]:
+                source_rules = data_cleaning_rules.get(source, {})
+                for rule_type, rules in source_rules.items():
+                    if isinstance(rules, list):
+                        for r in rules:
+                            desc = r.get("description", "")
+                            if desc:
+                                cleaning_descriptions.append(f"{source}: {desc}")
+            
+            logger.info(f"用户选择推荐规则 {selected['name']}，直接执行对账，phase=TASK_EXECUTION")
+            
+            # 用户选择数字后直接执行对账，不再询问确认
+            return {
+                "messages": [AIMessage(content=f"✅ 已选择规则「{selected['name']}」，正在开始对账...")],
+                "recommended_rules": recommended,
+                "selected_rule_id": selected["id"],
+                "selected_rule_name": selected.get("name", ""),
+                "using_recommended_rule": True,
+                "confirmed_mappings": {"business": biz_roles, "finance": fin_roles},
+                "generated_schema": template,
+                "rule_config_items": rule_config_items,
+                "rule_config_text": rule_config_text,
+                "cleaning_descriptions": cleaning_descriptions,
+                "phase": ReconciliationPhase.TASK_EXECUTION.value,  # 直接进入任务执行
+            }
+    
+    # 用户选择创建新规则
+    return {
+        "messages": [AIMessage(content="好的，将继续创建新规则。")],
+        "recommended_rules": recommended,
+        "selected_rule_id": None,
+        "using_recommended_rule": False,
+        "rule_config_items": [],  # 新建规则时清空，避免残留旧格式配置
+        "phase": ReconciliationPhase.FIELD_MAPPING.value,  # 回到字段映射流程
     }
 
 
@@ -670,7 +1056,7 @@ def validation_preview_node(state: AgentState) -> dict:
     )
 
     preview_text = (
-        f"✅ **第4步：确认规则并保存**\n\n"
+        f"✅ **第4步：确认规则并执行对账**\n\n"
         f"我已经根据你的配置生成了对账规则！预览结果：\n\n"
         f"📊 **数据统计**\n"
         f"• 业务记录数：{preview.get('biz_count', 'N/A')}\n"
@@ -683,7 +1069,7 @@ def validation_preview_node(state: AgentState) -> dict:
 
     user_response = interrupt({
         "step": "4/4",
-        "step_title": "确认并保存规则",
+        "step_title": "确认并执行对账",
         "question": preview_text,
         "preview": preview,
         "schema_summary": {
@@ -691,7 +1077,7 @@ def validation_preview_node(state: AgentState) -> dict:
             "biz_patterns": biz_patterns,
             "fin_patterns": fin_patterns,
         },
-        "hint": "• 如果确认无误，回复\"保存\"\n• 如果需要调整，回复\"调整\"重新配置",
+        "hint": "• 回复「确认」执行对账  • 回复「调整」重新配置",
     })
 
     response_str = str(user_response).strip()
@@ -703,11 +1089,15 @@ def validation_preview_node(state: AgentState) -> dict:
             "generated_schema": None,
         }
 
+    # ⚠️ 功能关键：与推荐规则流程一致，必须先执行对账，再在 result_evaluation 中提示保存
+    # 绝不在此处进入 save_rule（先对账再保存）
+    logger.info("validation_preview_node: 用户确认规则 -> phase=TASK_EXECUTION，将执行对账")
     return {
-        "messages": [AIMessage(content="规则确认完毕，准备保存。请为这个规则起个名字（例如：\"直销对账\"）。")],
+        "messages": [AIMessage(content="✅ 规则确认完毕，正在执行对账...")],
         "generated_schema": schema,
         "preview_result": preview,
-        "phase": ReconciliationPhase.SAVE_RULE.value,
+        "selected_rule_name": "新规则_待确认",  # 用于 task_execution 显示
+        "phase": ReconciliationPhase.TASK_EXECUTION.value,
     }
 
 
@@ -828,11 +1218,20 @@ async def save_rule_node(state: AgentState) -> dict:
             "phase": ReconciliationPhase.SAVE_RULE.value,
         }
 
+    # 检查是否使用推荐规则
+    using_recommended = state.get("using_recommended_rule", False)
+    
     msg = (
         f"规则 **{rule_name_cn}** 已保存！\n\n"
-        f"现在可以用它开始对账了。要立即开始吗？\n"
-        f"（回复\"开始\"立即执行对账，或稍后再说）"
     )
+    
+    if using_recommended:
+        # 使用推荐规则，询问是否立即开始对账
+        msg += f"是否立即开始对账？\n（回复\"开始\"立即执行对账，或回复\"不要\"返回字段映射）"
+        next_phase = ReconciliationPhase.RESULT_EVALUATION.value
+    else:
+        msg += f"现在可以用它开始对账了。要立即开始吗？\n（回复\"开始\"立即执行对账，或稍后再说）"
+        next_phase = ReconciliationPhase.COMPLETED.value
     
     if warning_msg:
         msg = warning_msg + "\n\n" + msg
@@ -840,7 +1239,7 @@ async def save_rule_node(state: AgentState) -> dict:
     return {
         "messages": [AIMessage(content=msg)],
         "saved_rule_name": rule_name_cn,
-        "phase": ReconciliationPhase.COMPLETED.value,
+        "phase": next_phase,
     }
 
 
@@ -1111,6 +1510,191 @@ async def edit_save_node(state: AgentState) -> dict:
     }
 
 
+# ── 对账结果评估节点 ─────────────────────────────────────────────────────────
+
+async def result_evaluation_node(state: AgentState) -> dict:
+    """第6步 (HITL)：对账完成后评估规则适用性，提示用户保存。
+    
+    流程：
+    1. 分析对账结果（匹配率、差异分析）
+    2. 生成规则适用性评估结论
+    3. 展示评估结果和保存提示
+    4. 用户选择保存或不保存
+    5. 如果保存，调用 copy_rule 复制规则
+    """
+    logger.info(f"result_evaluation_node 进入，当前 phase={state.get('phase', '')}")
+    
+    preview_result = state.get("preview_result", {})
+    using_recommended = state.get("using_recommended_rule", False)
+    selected_rule_id = state.get("selected_rule_id")
+    waiting_for_name = state.get("waiting_for_rule_name", False)
+    auth_token = state.get("auth_token", "")
+    
+    # 处理用户输入规则名称（推荐规则用 copy，新建规则用 save）
+    generated_schema = state.get("generated_schema")
+    if waiting_for_name and (selected_rule_id or generated_schema):
+        user_response = interrupt({
+            "question": "请输入规则名称",
+            "hint": "输入规则名称，例如：我的对账规则",
+        })
+        
+        rule_name = str(user_response).strip()
+        if not rule_name:
+            return {
+                "messages": [AIMessage(content="⚠️ 请输入有效的规则名称。")],
+                "phase": ReconciliationPhase.RESULT_EVALUATION.value,
+                "waiting_for_rule_name": True,
+            }
+        
+        if auth_token:
+            try:
+                if generated_schema:
+                    # 新建规则：直接保存 schema
+                    from .helpers import _rewrite_schema_transforms_to_mapped_fields, _build_field_mapping_text, _build_rule_config_text, _expand_file_patterns
+                    schema_to_save = generated_schema.copy()
+                    schema_to_save["description"] = rule_name
+                    _rewrite_schema_transforms_to_mapped_fields(schema_to_save)
+                    mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
+                    config_items = state.get("rule_config_items", [])
+                    schema_to_save["field_mapping_text"] = _build_field_mapping_text(mappings)
+                    schema_to_save["rule_config_text"] = _build_rule_config_text(config_items)
+                    for src in ("business", "finance"):
+                        patterns = schema_to_save.get("data_sources", {}).get(src, {}).get("file_pattern", [])
+                        expanded = []
+                        for p in patterns:
+                            expanded.extend(_expand_file_patterns(p))
+                        if "data_sources" not in schema_to_save:
+                            schema_to_save["data_sources"] = {}
+                        if src not in schema_to_save["data_sources"]:
+                            schema_to_save["data_sources"][src] = {}
+                        schema_to_save["data_sources"][src]["file_pattern"] = list(set(expanded))
+                    result = await call_mcp_tool("save_reconciliation_rule", {
+                        "auth_token": auth_token,
+                        "name": rule_name,
+                        "description": rule_name,
+                        "rule_template": schema_to_save,
+                        "visibility": "private",
+                    })
+                else:
+                    # 推荐规则：复制
+                    result = await call_mcp_tool("copy_reconciliation_rule", {
+                        "auth_token": auth_token,
+                        "source_rule_id": selected_rule_id,
+                        "new_rule_name": rule_name,
+                    })
+                if result.get("success"):
+                    logger.info(f"规则保存成功: {rule_name}")
+                    return {
+                        "messages": [AIMessage(content=f"✅ 规则已保存为「{rule_name}」！您可以在后续对账中直接使用此规则。")],
+                        "saved_rule_name": rule_name,
+                        "phase": ReconciliationPhase.COMPLETED.value,
+                        "waiting_for_rule_name": False,
+                    }
+                else:
+                    return {
+                        "messages": [AIMessage(content=f"❌ 保存失败: {result.get('error', '未知错误')}")],
+                        "phase": ReconciliationPhase.RESULT_EVALUATION.value,
+                        "waiting_for_rule_name": True,
+                    }
+            except Exception as e:
+                logger.error(f"保存规则失败: {e}")
+                return {
+                    "messages": [AIMessage(content=f"❌ 保存失败: {str(e)}")],
+                    "phase": ReconciliationPhase.RESULT_EVALUATION.value,
+                    "waiting_for_rule_name": True,
+                }
+        
+        # 游客：提示登录后保存
+        if generated_schema:
+            # 新建规则：使用 SAVE_NEW_RULE 标记，登录后由 /api/save-pending-rule 从 thread 状态恢复并保存
+            return {
+                "messages": [AIMessage(content=f"[SAVE_NEW_RULE:{rule_name}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则「{rule_name}」。")],
+                "phase": ReconciliationPhase.COMPLETED.value,
+            }
+        # 推荐规则：使用 SAVE_RULE 标记，登录后由 /api/copy-rule 复制
+        return {
+            "messages": [AIMessage(content=f"[SAVE_RULE:{rule_name}:{selected_rule_id}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则。")],
+            "phase": ReconciliationPhase.COMPLETED.value,
+        }
+    
+    # 首次进入：需为推荐规则或新建规则（有 generated_schema）才显示评估
+    generated_schema = state.get("generated_schema")
+    if not using_recommended and not selected_rule_id and not generated_schema:
+        return {
+            "messages": [],
+            "phase": ReconciliationPhase.COMPLETED.value,
+        }
+    
+    # 从 task_result 获取统计信息（推荐规则跳过preview直接执行）
+    task_result = state.get("task_result") or {}
+    preview_result = state.get("preview_result") or {}
+    
+    # 优先使用 task_result，否则使用 preview_result
+    if task_result:
+        summary = task_result.get("summary") or {}
+        biz_count = summary.get("total_business_records", 0)
+        fin_count = summary.get("total_finance_records", 0)
+        estimated_match = summary.get("matched_records", 0)
+    else:
+        biz_count = preview_result.get("biz_count", 0)
+        fin_count = preview_result.get("fin_count", 0)
+        estimated_match = preview_result.get("estimated_match", 0)
+    
+    # 如果两者都为空，使用默认值
+    if not biz_count and not fin_count and not estimated_match:
+        logger.warning("task_result 和 preview_result 都为空，使用默认值")
+        biz_count = fin_count = estimated_match = 0
+    
+    # 计算匹配率
+    match_rate = 0
+    if biz_count > 0:
+        match_rate = (estimated_match / biz_count) * 100
+    
+    # 生成评估结论（不再重复显示对账结果，task_execution_node 已经显示过了）
+    if match_rate >= 90:
+        evaluation = "⭐⭐⭐⭐⭐ (强烈推荐)"
+        conclusion = "该规则匹配度非常高，配置合理，建议保存为个人规则以便复用。"
+    elif match_rate >= 70:
+        evaluation = "⭐⭐⭐⭐☆ (推荐使用)"
+        conclusion = "该规则匹配度较高，可以保存为个人规则。"
+    elif match_rate >= 50:
+        evaluation = "⭐⭐⭐☆☆ (可以使用)"
+        conclusion = "该规则匹配度一般，建议根据实际情况决定是否保存。"
+    else:
+        evaluation = "⭐⭐☆☆☆ (不推荐)"
+        conclusion = "该规则匹配度较低，建议重新配置规则。"
+    
+    # 只显示评估和保存提示（对账结果已在 task_execution_node 显示）
+    question_text = (
+        f"💡 规则适用性评估: {evaluation}\n"
+        f"{conclusion}\n\n"
+        f"请选择：\n"
+        f"• 输入「保存」将规则保存为个人规则\n"
+        f"• 输入「不要」返回字段映射界面重新配置"
+    )
+    
+    user_response = interrupt({
+        "step": "6/6",
+        "step_title": "规则评估",
+        "question": question_text,
+        "hint": "输入「保存」或「不要」",
+    })
+    
+    response_str = str(user_response).strip().lower()
+    
+    if response_str in ("保存", "save", "是", "确认"):
+        return {
+            "messages": [AIMessage(content="请输入规则名称，将为您保存为个人规则。")],
+            "phase": ReconciliationPhase.RESULT_EVALUATION.value,
+            "waiting_for_rule_name": True,
+        }
+    
+    return {
+        "messages": [AIMessage(content="好的，将返回字段映射界面，您可以重新配置规则。")],
+        "phase": ReconciliationPhase.FIELD_MAPPING.value,
+    }
+
+
 # ── 入口路由节点 ─────────────────────────────────────────────────────────────
 
 def entry_router_node(state: AgentState) -> dict:
@@ -1120,6 +1704,7 @@ def entry_router_node(state: AgentState) -> dict:
     """
     phase = state.get("phase", "")
     logger.info(f"子图入口路由: phase={phase}")
+    logger.info(f"  完整state keys: {list(state.keys())}")
     
     # 直接返回，让条件边路由到正确的节点
     return {"messages": []}

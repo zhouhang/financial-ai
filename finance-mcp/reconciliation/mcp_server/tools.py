@@ -85,7 +85,7 @@ def create_tools() -> List[Tool]:
     return [
         Tool(
             name="reconciliation_start",
-            description="开始对账任务。从 PostgreSQL 查询用户的规则，使用规则中的完整 JSON schema 执行对账。",
+            description="开始对账任务。支持从 PostgreSQL 查询规则，或直接传入 rule_template（新建规则流程先对账再保存）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -93,13 +93,21 @@ def create_tools() -> List[Tool]:
                         "type": "string",
                         "description": "JWT token，用于校验用户身份和规则权限"
                     },
+                    "guest_token": {
+                        "type": "string",
+                        "description": "游客 token（与 auth_token 二选一）"
+                    },
                     "rule_id": {
                         "type": "string",
-                        "description": "规则 ID（与 rule_name 二选一）"
+                        "description": "规则 ID（与 rule_name、rule_template 三选一）"
                     },
                     "rule_name": {
                         "type": "string",
-                        "description": "规则名称（与 rule_id 二选一）"
+                        "description": "规则名称（与 rule_id、rule_template 三选一）"
+                    },
+                    "rule_template": {
+                        "type": "object",
+                        "description": "规则模板 JSON（新建规则流程直接传入，无需先保存）"
                     },
                     "files": {
                         "type": "array",
@@ -107,7 +115,7 @@ def create_tools() -> List[Tool]:
                         "description": "要对账的文件路径列表"
                     }
                 },
-                "required": ["auth_token", "files"]
+                "required": ["files"]
             }
         ),
         Tool(
@@ -234,6 +242,46 @@ def create_tools() -> List[Tool]:
                 "required": ["auth_token", "file_paths"]
             }
         ),
+        Tool(
+            name="read_excel_sheets",
+            description="读取Excel文件的所有sheet信息，返回每个sheet的名称、列名和样本数据。用于处理多sheet的Excel文件。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel文件路径"
+                    },
+                    "sample_rows": {
+                        "type": "integer",
+                        "description": "每个sheet读取的样本行数（默认5行）",
+                        "default": 5
+                    }
+                },
+                "required": ["file_path"]
+            }
+        ),
+        Tool(
+            name="detect_file_complexity",
+            description="检测上传文件的复杂度，判断是否需要智能分析处理（多sheet、非标准格式、多文件配对等）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string"},
+                                "original_filename": {"type": "string"}
+                            }
+                        },
+                        "description": "要检测的文件列表"
+                    }
+                },
+                "required": ["files"]
+            }
+        ),
         # 注意：list/save/update/delete_reconciliation_rule 已移至 auth/tools.py
         # 由 auth 模块统一处理（带权限控制）
     ]
@@ -262,7 +310,13 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Any:
     
     elif tool_name == "analyze_files":
         return await _analyze_files(arguments)
-    
+
+    elif tool_name == "read_excel_sheets":
+        return await _read_excel_sheets(arguments)
+
+    elif tool_name == "detect_file_complexity":
+        return await _detect_file_complexity(arguments)
+
     else:
         return {"error": f"未知的工具: {tool_name}"}
 
@@ -273,75 +327,107 @@ async def _reconciliation_start(args: Dict) -> Dict:
         from auth.jwt_utils import get_user_from_token
         from auth import db as auth_db
         
-        # 1. 验证 token 和获取用户信息
+        # 1. 验证 token 和获取用户信息 - 支持 auth_token 或 guest_token
         auth_token = args.get("auth_token", "")
-        if not auth_token:
-            return {"error": "缺少 auth_token 参数"}
+        guest_token = args.get("guest_token", "")
         
-        user_info = get_user_from_token(auth_token)
-        if not user_info:
-            return {"error": "token 无效或已过期"}
+        user_info = None
+        if auth_token:
+            user_info = get_user_from_token(auth_token)
+            if not user_info:
+                return {"error": "token 无效或已过期"}
+        elif guest_token:
+            # 验证游客token
+            try:
+                token_info = auth_db.verify_guest_token(guest_token)
+            except Exception as e:
+                logger.error(f"验证游客token失败: {e}")
+                return {"error": f"验证游客token失败: {e}"}
+            
+            if not token_info:
+                return {"error": "无效的游客token"}
+            if not token_info.get("valid", False):
+                return {"error": token_info.get("error", "游客token已过期")}
+            
+            # 检查使用次数
+            if token_info.get("usage_count", 0) >= token_info.get("max_usage", 3):
+                return {"error": "游客使用次数已达上限，请登录后继续使用", "code": "GUEST_LIMIT_REACHED"}
+        else:
+            return {"error": "缺少 auth_token 或 guest_token 参数"}
         
-        # 2. 获取规则 ID 或名称
+        # 2. 获取规则：rule_template（直接传入）或 rule_id/rule_name（从 DB 查询）
         rule_id = args.get("rule_id")
         rule_name = args.get("rule_name")
+        rule_template_arg = args.get("rule_template")
         files = args.get("files", [])
         
-        if not rule_id and not rule_name:
-            return {"error": "缺少 rule_id 或 rule_name 参数"}
+        if not rule_id and not rule_name and not rule_template_arg:
+            return {"error": "缺少 rule_id、rule_name 或 rule_template 参数"}
         
         if not files:
             return {"error": "缺少 files 参数"}
         
-        # 3. 从 PostgreSQL 查询规则
-        rule = None
-        if rule_id:
-            rule = auth_db.get_rule_by_id(rule_id)
+        schema = None
+        rule = None  # rule_template 路径下不查 DB，rule 为空
+        if rule_template_arg:
+            # 直接使用传入的 rule_template（新建规则流程：先对账再保存）
+            if isinstance(rule_template_arg, str):
+                try:
+                    schema = json.loads(rule_template_arg)
+                except json.JSONDecodeError as e:
+                    return {"error": f"rule_template 格式错误: {str(e)}"}
+            else:
+                schema = rule_template_arg
+            logger.info("使用直接传入的 rule_template 执行对账（新建规则流程）")
         else:
-            rule = auth_db.get_rule_by_name(rule_name)
-        
-        if not rule:
-            return {"error": f"规则不存在: {rule_id or rule_name}"}
-        
-        # 4. 验证用户是否有权限使用此规则
-        # 检查规则的可见性
-        rule_visibility = rule.get("visibility", "private")
-        rule_created_by = rule.get("created_by")
-        rule_company_id = rule.get("company_id")
-        rule_department_id = rule.get("department_id")
-        
-        user_id = user_info.get("user_id")
-        user_company_id = user_info.get("company_id")
-        user_department_id = user_info.get("department_id")
-        user_role = user_info.get("role")
-        
-        # 检查权限
-        has_access = False
-        if str(rule_created_by) == user_id:  # 创建者可以使用自己的规则
-            has_access = True
-        elif rule_visibility == "company" and str(rule_company_id) == str(user_company_id):  # 公司可见
-            has_access = True
-        elif rule_visibility == "department" and str(rule_department_id) == str(user_department_id):  # 部门可见
-            has_access = True
-        elif user_role == "admin":  # admin 可以使用所有规则
-            has_access = True
-        
-        if not has_access:
-            return {"error": f"无权使用该规则: {rule.get('name')}"}
-        
-        # 5. 获取规则的 rule_template（完整的 JSON schema）
-        rule_template = rule.get("rule_template")
-        if not rule_template:
-            return {"error": f"规则缺少 rule_template: {rule.get('name')}"}
-        
-        # 如果 rule_template 是 dict 则直接使用，如果是字符串则解析
-        if isinstance(rule_template, str):
-            try:
-                schema = json.loads(rule_template)
-            except json.JSONDecodeError as e:
-                return {"error": f"规则 rule_template 格式错误: {str(e)}"}
-        else:
-            schema = rule_template
+            # 3. 从 PostgreSQL 查询规则
+            rule = None
+            if rule_id:
+                rule = auth_db.get_rule_by_id(rule_id)
+            else:
+                rule = auth_db.get_rule_by_name(rule_name)
+            
+            if not rule:
+                return {"error": f"规则不存在: {rule_id or rule_name}"}
+            
+            # 4. 验证用户是否有权限使用此规则
+            rule_visibility = rule.get("visibility", "private")
+            rule_created_by = rule.get("created_by")
+            rule_company_id = rule.get("company_id")
+            rule_department_id = rule.get("department_id")
+            
+            if not user_info:
+                if rule_visibility in ["company", "department", "public"]:
+                    logger.info(f"游客模式：允许使用规则 {rule.get('name')}")
+                elif rule_created_by:
+                    logger.info(f"游客模式：允许使用创建者的规则 {rule.get('name')}")
+            else:
+                user_id = user_info.get("user_id")
+                user_company_id = user_info.get("company_id")
+                user_department_id = user_info.get("department_id")
+                user_role = user_info.get("role")
+                has_access = False
+                if str(rule_created_by) == user_id:
+                    has_access = True
+                elif rule_visibility == "company" and str(rule_company_id) == str(user_company_id):
+                    has_access = True
+                elif rule_visibility == "department" and str(rule_department_id) == str(user_department_id):
+                    has_access = True
+                elif user_role == "admin":
+                    has_access = True
+                if not has_access:
+                    return {"error": f"无权使用该规则: {rule.get('name')}"}
+            
+            rule_template = rule.get("rule_template")
+            if not rule_template:
+                return {"error": f"规则缺少 rule_template: {rule.get('name')}"}
+            if isinstance(rule_template, str):
+                try:
+                    schema = json.loads(rule_template)
+                except json.JSONDecodeError as e:
+                    return {"error": f"规则 rule_template 格式错误: {str(e)}"}
+            else:
+                schema = rule_template
         
         # 6. 验证 schema
         try:
@@ -376,19 +462,25 @@ async def _reconciliation_start(args: Dict) -> Dict:
         
         # 8. 获取 callback_url（可选，从规则中获取或从参数中获取）
         callback_url_arg = args.get("callback_url", "")
-        callback_url = callback_url_arg or rule.get("callback_url", "")
+        rule_id_for_callback = rule.get("id") if rule else None
+        rule_name_for_msg = rule.get("name") if rule else (rule_name or schema.get("description", "新规则"))
+        callback_url = callback_url_arg or (rule.get("callback_url", "") if rule else "")
         
         # 9. 创建任务（使用绝对路径和schema）
         task_id = await task_manager.create_task(schema, absolute_files, callback_url if callback_url else None)
         
-        logger.info(f"规则对账任务已创建: rule={rule.get('name')} (id={rule_id or rule_name}), task_id={task_id}, user={user_info['username']}")
+        # 记录日志（区分游客和登录用户）
+        if user_info:
+            logger.info(f"规则对账任务已创建: rule={rule_name_for_msg} (id={rule_id or rule_name}), task_id={task_id}, user={user_info.get('username', 'unknown')}")
+        else:
+            logger.info(f"游客模式 - 规则对账任务已创建: rule={rule_name_for_msg} (id={rule_id or rule_name}), task_id={task_id}")
         
         return {
             "task_id": task_id,
             "status": "pending",
-            "rule_id": rule.get("id"),
-            "rule_name": rule.get("name"),
-            "message": f"对账任务已创建，使用规则 '{rule.get('name')}'，正在处理中"
+            "rule_id": rule_id_for_callback or rule_id,
+            "rule_name": rule_name_for_msg,
+            "message": f"对账任务已创建，使用规则 '{rule_name_for_msg}'，正在处理中"
         }
     
     except Exception as e:
@@ -918,6 +1010,11 @@ async def _analyze_files(args: Dict) -> Dict:
                     "类型说明：\n"
                     "- business: 业务数据（如订单流水、销售记录、交易明细等，通常包含订单号、商品、销售额等字段）\n"
                     "- finance: 财务数据（如财务账单、对账单、银行流水、发票等，通常包含财务科目、借贷金额等字段）\n\n"
+                    "📖 分析策略提示：\n"
+                    "- 优先根据列名判断（如：订单号、商品名→business；科目、借贷方向→finance）\n"
+                    "- 参考样本数据特征（业务数据通常有SKU/商品信息，财务数据有会计科目/凭证号）\n"
+                    "- 文件名也可作为辅助判断依据\n"
+                    "- 如果同时包含业务和财务特征，优先判断为主要特征更明显的类型\n\n"
                     + "\n".join(files_desc)
                     + "\n\n请严格按以下 JSON 格式回复，不要添加其他内容：\n"
                     '{"results": [{"filename": "文件名", "source": "business 或 finance", "reason": "简短理由"}]}'
@@ -971,6 +1068,8 @@ async def _analyze_files(args: Dict) -> Dict:
                     if a["filename"] in result_map:
                         a["guessed_source"] = result_map[a["filename"]]["source"]
                         a["source_reason"] = result_map[a["filename"]]["reason"]
+                        # 设置置信度（基于LLM识别的确定性，这里统一设为0.85）
+                        a["confidence"] = 0.85
             
             except Exception as e:
                 logger.warning(f"LLM 文件类型判断失败: {e}")
@@ -987,6 +1086,178 @@ async def _analyze_files(args: Dict) -> Dict:
             "success": False,
             "error": f"文件分析失败: {str(e)}"
         }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 智能文件分析工具
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _read_excel_sheets(args: Dict) -> Dict:
+    """读取Excel文件的所有sheet信息"""
+    try:
+        import pandas as pd
+        from pathlib import Path
+
+        file_path = args.get("file_path", "")
+        sample_rows = args.get("sample_rows", 5)
+
+        if not file_path:
+            return {"error": "缺少file_path参数"}
+
+        # 转换为绝对路径
+        if file_path.startswith("/"):
+            full_path = FINANCE_MCP_DIR / file_path.lstrip("/")
+        else:
+            full_path = FINANCE_MCP_DIR / file_path
+
+        if not full_path.exists():
+            return {"error": f"文件不存在: {file_path}"}
+
+        # 检查是否是Excel文件
+        file_ext = full_path.suffix.lower()
+        if file_ext not in [".xlsx", ".xls"]:
+            return {"error": f"不是Excel文件: {file_ext}"}
+
+        # 读取所有sheet
+        excel_file = pd.ExcelFile(full_path)
+        sheets_info = []
+
+        for sheet_name in excel_file.sheet_names:
+            try:
+                df = pd.read_excel(full_path, sheet_name=sheet_name, nrows=sample_rows)
+
+                # 提取样本数据，确保所有值都转换为字符串（避免大整数序列化问题）
+                sample = df.head(sample_rows).fillna("").to_dict(orient="records")
+                safe_sample = []
+                for row in sample:
+                    safe_sample.append({k: str(v) for k, v in row.items()})
+
+                # 提取信息
+                sheet_info = {
+                    "sheet_name": sheet_name,
+                    "columns": [str(col) for col in df.columns],  # 确保列名也是字符串
+                    "row_count": int(len(df)),  # 确保是标准int
+                    "sample_data": safe_sample
+                }
+                sheets_info.append(sheet_info)
+            except Exception as e:
+                sheets_info.append({
+                    "sheet_name": sheet_name,
+                    "error": f"读取失败: {str(e)}"
+                })
+
+        return {
+            "success": True,
+            "file_path": file_path,
+            "sheet_count": len(excel_file.sheet_names),
+            "sheets": sheets_info
+        }
+
+    except Exception as e:
+        logger.error(f"读取Excel sheets失败: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": f"读取失败: {str(e)}"
+        }
+
+
+async def _detect_file_complexity(args: Dict) -> Dict:
+    """检测文件复杂度"""
+    try:
+        import pandas as pd
+        from pathlib import Path
+
+        files = args.get("files", [])
+        if not files:
+            return {"error": "缺少files参数"}
+
+        complexity_info = {
+            "file_count": len(files),
+            "multi_sheet": False,
+            "multi_sheet_files": [],
+            "non_standard": False,
+            "non_standard_files": [],
+            "complexity_level": "simple"  # simple, medium, complex
+        }
+
+        # 检查每个文件
+        for file in files:
+            file_path = file.get("file_path", "")
+            if not file_path:
+                continue
+
+            # 转换为绝对路径
+            if file_path.startswith("/"):
+                full_path = FINANCE_MCP_DIR / file_path.lstrip("/")
+            else:
+                full_path = FINANCE_MCP_DIR / file_path
+
+            if not full_path.exists():
+                continue
+
+            file_ext = full_path.suffix.lower()
+
+            # 检查是否是多sheet的Excel
+            if file_ext in [".xlsx", ".xls"]:
+                try:
+                    excel_file = pd.ExcelFile(full_path)
+                    if len(excel_file.sheet_names) > 1:
+                        complexity_info["multi_sheet"] = True
+                        complexity_info["multi_sheet_files"].append({
+                            "file_path": file_path,
+                            "sheet_count": len(excel_file.sheet_names),
+                            "sheet_names": excel_file.sheet_names
+                        })
+
+                    # 检查第一个sheet是否有非标准格式迹象
+                    df = pd.read_excel(full_path, sheet_name=0, nrows=10)
+
+                    # 检测非标准格式的简单启发式规则
+                    # 1. 前几行全空
+                    # 2. 列名包含大量Unnamed
+                    # 3. 第一行不是列名（包含数字数据）
+
+                    unnamed_count = sum(1 for col in df.columns if str(col).startswith("Unnamed"))
+                    if unnamed_count > len(df.columns) * 0.3:  # 超过30%的列是Unnamed
+                        complexity_info["non_standard"] = True
+                        complexity_info["non_standard_files"].append({
+                            "file_path": file_path,
+                            "reason": "检测到大量未命名列，可能有合并单元格"
+                        })
+
+                    # 检查前3行是否有大量空值
+                    if len(df) >= 3:
+                        null_ratio = df.iloc[:3].isnull().sum().sum() / (3 * len(df.columns))
+                        if null_ratio > 0.5:  # 超过50%为空
+                            complexity_info["non_standard"] = True
+                            if file_path not in [f["file_path"] for f in complexity_info["non_standard_files"]]:
+                                complexity_info["non_standard_files"].append({
+                                    "file_path": file_path,
+                                    "reason": "检测到前几行大量空值，可能有注释行"
+                                })
+
+                except Exception as e:
+                    logger.warning(f"检测文件复杂度时出错: {file_path}, {e}")
+
+        # 判断复杂度等级
+        if len(files) > 2:
+            complexity_info["complexity_level"] = "complex"
+        elif complexity_info["multi_sheet"] or complexity_info["non_standard"]:
+            complexity_info["complexity_level"] = "medium"
+        else:
+            complexity_info["complexity_level"] = "simple"
+
+        return {
+            "success": True,
+            **complexity_info
+        }
+
+    except Exception as e:
+        logger.error(f"检测文件复杂度失败: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": f"检测失败: {str(e)}"
+        }
+
 
 # 注意：数据库操作工具（list/save/update/delete_reconciliation_rule）
 # 已移至 auth/tools.py，由认证模块统一管理

@@ -52,6 +52,8 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "list_reconciliation_rules", "get_reconciliation_rule",
         "save_reconciliation_rule", "update_reconciliation_rule",
         "delete_reconciliation_rule",
+        "search_rules_by_mapping", "copy_reconciliation_rule",
+        "batch_get_reconciliation_rules",
         # 管理员功能
         "admin_login", "create_company", "create_department",
         "list_companies", "list_departments", "get_admin_view",
@@ -60,6 +62,8 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         # 会话管理
         "create_conversation", "list_conversations", "get_conversation",
         "update_conversation", "delete_conversation", "save_message",
+        # 游客认证
+        "create_guest_token", "verify_guest_token", "list_recommended_rules",
     }
 
     try:
@@ -131,47 +135,71 @@ async def _call_tool_http(tool_name: str, arguments: dict[str, Any]) -> dict[str
 # 高级辅助函数 - 对账执行
 # ===========================================================================
 
-async def start_reconciliation(auth_token: str, files: list[str], rule_id: str = None, rule_name: str = None) -> dict[str, Any]:
-    """通过 MCP 工具启动对账任务。从 PostgreSQL 查询规则。
+async def start_reconciliation(
+    files: list[str],
+    rule_name: str = None,
+    rule_id: str = None,
+    rule_template: dict = None,
+    auth_token: str = "",
+    guest_token: str = None,
+) -> dict[str, Any]:
+    """通过 MCP 工具启动对账任务。支持从 PostgreSQL 查询规则，或直接传入 rule_template。
     
     Args:
-        auth_token: JWT token，用于身份验证
         files: 文件列表
-        rule_id: 规则 ID（与 rule_name 二选一）
-        rule_name: 规则名称（与 rule_id 二选一）
+        rule_name: 规则名称（与 rule_id、rule_template 三选一）
+        rule_id: 规则 ID（与 rule_name、rule_template 三选一）
+        rule_template: 规则模板 JSON（新建规则流程直接传入，先对账再保存）
+        auth_token: JWT token，用于身份验证
+        guest_token: 游客token（当 auth_token 为空时使用）
     """
-    args = {
-        "auth_token": auth_token,
-        "files": files,
-    }
-    if rule_id:
+    args: dict[str, Any] = {"files": files}
+    if auth_token and auth_token.strip():
+        args["auth_token"] = auth_token
+    elif guest_token:
+        args["guest_token"] = guest_token
+    if rule_template:
+        args["rule_template"] = rule_template
+    elif rule_id:
         args["rule_id"] = rule_id
     elif rule_name:
         args["rule_name"] = rule_name
     else:
-        raise ValueError("必须提供 rule_id 或 rule_name")
+        raise ValueError("必须提供 rule_id、rule_name 或 rule_template")
     
     return await call_mcp_tool("reconciliation_start", args)
 
 
-async def get_reconciliation_status(auth_token: str, task_id: str) -> dict[str, Any]:
+async def get_reconciliation_status(task_id: str = "", auth_token: str = "", guest_token: str = None) -> dict[str, Any]:
     """轮询对账任务状态。
     
     Args:
-        auth_token: JWT token，用于身份验证
         task_id: 任务 ID
+        auth_token: JWT token，用于身份验证
+        guest_token: 游客token（当 auth_token 为空时使用）
     """
-    return await call_mcp_tool("reconciliation_status", {"auth_token": auth_token, "task_id": task_id})
+    args: dict[str, Any] = {"task_id": task_id}
+    if auth_token:
+        args["auth_token"] = auth_token
+    elif guest_token:
+        args["guest_token"] = guest_token
+    return await call_mcp_tool("reconciliation_status", args)
 
 
-async def get_reconciliation_result(auth_token: str, task_id: str) -> dict[str, Any]:
+async def get_reconciliation_result(task_id: str = "", auth_token: str = "", guest_token: str = None) -> dict[str, Any]:
     """获取对账结果。
     
     Args:
-        auth_token: JWT token，用于身份验证
         task_id: 任务 ID
+        auth_token: JWT token，用于身份验证
+        guest_token: 游客token（当 auth_token 为空时使用）
     """
-    return await call_mcp_tool("reconciliation_result", {"auth_token": auth_token, "task_id": task_id})
+    args: dict[str, Any] = {"task_id": task_id}
+    if auth_token:
+        args["auth_token"] = auth_token
+    elif guest_token:
+        args["guest_token"] = guest_token
+    return await call_mcp_tool("reconciliation_result", args)
 
 
 async def list_reconciliation_tasks(auth_token: str) -> dict[str, Any]:
@@ -205,6 +233,30 @@ async def auth_register(username: str, password: str, **kwargs) -> dict[str, Any
 async def auth_me(token: str) -> dict[str, Any]:
     """获取当前用户信息"""
     return await call_mcp_tool("auth_me", {"auth_token": token})
+
+
+# ===========================================================================
+# 高级辅助函数 - 游客认证
+# ===========================================================================
+
+async def create_guest_token(session_id: str, ip_address: str = None, user_agent: str = None) -> dict[str, Any]:
+    """创建游客临时token"""
+    args = {"session_id": session_id}
+    if ip_address:
+        args["ip_address"] = ip_address
+    if user_agent:
+        args["user_agent"] = user_agent
+    return await call_mcp_tool("create_guest_token", args)
+
+
+async def verify_guest_token(guest_token: str) -> dict[str, Any]:
+    """验证游客token"""
+    return await call_mcp_tool("verify_guest_token", {"guest_token": guest_token})
+
+
+async def list_recommended_rules(guest_token: str) -> dict[str, Any]:
+    """获取系统推荐规则列表（游客专用）"""
+    return await call_mcp_tool("list_recommended_rules", {"guest_token": guest_token})
 
 
 # ===========================================================================
@@ -382,8 +434,8 @@ async def delete_conversation(auth_token: str, conversation_id: str) -> dict[str
     })
 
 
-async def save_message(auth_token: str, conversation_id: str, role: str, content: str, metadata: dict = None) -> dict[str, Any]:
-    """保存消息到会话"""
+async def save_message(auth_token: str, conversation_id: str, role: str, content: str, metadata: dict = None, attachments: list = None) -> dict[str, Any]:
+    """保存消息到会话（支持附件）"""
     args = {
         "auth_token": auth_token,
         "conversation_id": conversation_id,
@@ -392,4 +444,6 @@ async def save_message(auth_token: str, conversation_id: str, role: str, content
     }
     if metadata:
         args["metadata"] = metadata
+    if attachments:
+        args["attachments"] = attachments
     return await call_mcp_tool("save_message", args)

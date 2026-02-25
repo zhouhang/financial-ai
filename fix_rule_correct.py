@@ -95,8 +95,8 @@ for source, filename in actual_files.items():
 db_config = {
     "host": os.getenv("DB_HOST", "localhost"),
     "port": int(os.getenv("DB_PORT", "5432")),
-    "database": os.getenv("DB_NAME", "finflux"),
-    "user": os.getenv("DB_USER", "finflux_user"),
+    "database": os.getenv("DB_NAME", "tally"),
+    "user": os.getenv("DB_USER", "tally_user"),
     "password": os.getenv("DB_PASSWORD", "123456"),
 }
 

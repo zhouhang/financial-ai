@@ -9,7 +9,7 @@ financial-ai/
 ├── finance-web/          # 前端 Web 界面 (React + TypeScript + Vite)
 ├── finance-agents/       # AI Agent 后端 (LangGraph + FastAPI)
 ├── finance-mcp/          # MCP 服务器 (对账 + 数据整理)
-└── finflux (PostgreSQL)  # 数据库
+└── tally (PostgreSQL)  # 数据库
 ```
 
 ---
@@ -165,7 +165,7 @@ finance-mcp/
 
 ---
 
-## 🗄️ **4. finflux** - PostgreSQL 数据库
+## 🗄️ **4. tally** - PostgreSQL 数据库
 
 ### 表结构（12个表）
 
@@ -238,8 +238,8 @@ finance-mcp/
 # 数据库
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=finflux
-DB_USER=finflux_user
+DB_NAME=tally
+DB_USER=tally_user
 DB_PASSWORD=123456
 
 # MCP 服务器
@@ -275,7 +275,7 @@ conn = await get_async_db_connection()
 ### 1. 启动数据库
 ```bash
 # PostgreSQL 应该已经在运行
-psql -U finflux_user -d finflux
+psql -U tally_user -d tally
 ```
 
 ### 2. 启动 finance-mcp
@@ -378,7 +378,7 @@ npm run dev
 
 现在已经完全了解了：
 1. ✅ finance-mcp 代码结构
-2. ✅ finflux 数据库表结构
+2. ✅ tally 数据库表结构
 3. ✅ finance-web 前端架构
 4. ✅ finance-agents AI 后端
 5. ✅ 数据库配置已环境变量化

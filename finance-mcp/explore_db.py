@@ -21,12 +21,12 @@ import json
 
 # 连接数据库
 try:
-    # 首先尝试使用 finflux_user
+    # 首先尝试使用 tally_user
     try:
         conn = psycopg2.connect(
             host="localhost",
-            database="finflux",
-            user="finflux_user",
+            database="tally",
+            user="tally_user",
             password="123456"
         )
     except psycopg2.OperationalError:
@@ -36,14 +36,14 @@ try:
         print(f"⚠️  尝试使用系统用户: {current_user}")
         conn = psycopg2.connect(
             host="localhost",
-            database="finflux",
+            database="tally",
             user=current_user
         )
     
     cur = conn.cursor()
     
     print("\n" + "=" * 80)
-    print("✅ 成功连接到数据库 finflux")
+    print("✅ 成功连接到数据库 tally")
     print("=" * 80)
     print()
     
@@ -165,7 +165,7 @@ try:
     print(f"总表数: {len(tables)}")
     
     # 获取数据库大小
-    cur.execute("SELECT pg_size_pretty(pg_database_size('finflux'));")
+    cur.execute("SELECT pg_size_pretty(pg_database_size('tally'));")
     db_size = cur.fetchone()[0]
     print(f"数据库大小: {db_size}")
     

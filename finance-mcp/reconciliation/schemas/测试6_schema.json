@@ -1,0 +1,170 @@
+{
+  "version": "1.0",
+  "description": "测试6",
+  "data_sources": {
+    "business": {
+      "file_pattern": [
+        "1767597466118_*.xlsm",
+        "1767597466118_*.xlsx",
+        "1767597466118_*.xls",
+        "1767597466118_*.xlsb",
+        "1767597466118_*.csv"
+      ],
+      "field_roles": {
+        "order_id": [
+          "sp订单号"
+        ],
+        "amount": "销售额",
+        "date": "订单时间"
+      }
+    },
+    "finance": {
+      "file_pattern": [
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm"
+      ],
+      "field_roles": {
+        "order_id": [
+          "sup订单号"
+        ],
+        "amount": [
+          "发生+",
+          "发生-"
+        ],
+        "date": "完成时间"
+      }
+    }
+  },
+  "key_field_role": "order_id",
+  "tolerance": {
+    "date_format": "%Y-%m-%d",
+    "amount_diff_max": 0.1
+  },
+  "data_cleaning_rules": {
+    "business": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号，并截取前21位"
+        }
+      ],
+      "row_filters": [],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "相同的订单号按金额累加合并"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": [
+            "order_id"
+          ],
+          "description": "删除订单号为空的记录"
+        }
+      ]
+    },
+    "finance": {
+      "field_transforms": [
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
+        },
+        {
+          "field": "order_id",
+          "operation": "strip",
+          "description": "订单号去除首尾空格"
+        },
+        {
+          "field": "order_id",
+          "operation": "expr",
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号，并截取前21位"
+        }
+      ],
+      "row_filters": [],
+      "aggregations": [
+        {
+          "group_by": "order_id",
+          "agg_fields": {
+            "amount": "sum",
+            "date": "first"
+          },
+          "description": "相同的订单号按金额累加合并"
+        }
+      ],
+      "global_transforms": [
+        {
+          "operation": "drop_na",
+          "subset": [
+            "order_id",
+            "amount"
+          ],
+          "description": "删除关键字段为空的记录"
+        }
+      ]
+    },
+    "global": {
+      "global_transforms": [
+        {
+          "operation": "drop_duplicates",
+          "subset": [
+            "order_id"
+          ],
+          "keep": "first",
+          "description": "全局去重"
+        }
+      ]
+    }
+  },
+  "custom_validations": [
+    {
+      "name": "missing_in_business",
+      "condition_expr": "fin_exists and not biz_exists",
+      "issue_type": "missing_in_business",
+      "detail_template": "{fin_file}存在，{biz_file}无此订单记录"
+    },
+    {
+      "name": "missing_in_finance",
+      "condition_expr": "biz_exists and not fin_exists",
+      "issue_type": "missing_in_finance",
+      "detail_template": "{biz_file}存在，{fin_file}无此订单记录"
+    },
+    {
+      "name": "amount_mismatch",
+      "condition_expr": "biz_exists and fin_exists and biz.get('amount') is not None and fin.get('amount') is not None and abs(float(biz.get('amount', 0)) - float(fin.get('amount', 0))) > amount_diff_max",
+      "issue_type": "amount_mismatch",
+      "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"
+    }
+  ],
+  "field_mapping_text": "业务: 订单号->sp订单号, 金额->销售额, 日期->订单时间\n财务: 订单号->sup订单号, 金额->发生+ / 发生-, 日期->完成时间",
+  "rule_config_text": "去掉订单号前单引号，并截取前21位\n相同的订单号按金额累加合并"
+}

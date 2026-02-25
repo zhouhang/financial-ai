@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
+import LoginModal from './components/LoginModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
 import type {
@@ -26,39 +27,84 @@ function createConversation(): Conversation {
 }
 
 // localStorage 键名
-const STORAGE_KEY_ACTIVE_CONV = 'finflux_active_conversation_id';
-const STORAGE_KEY_IS_NEW_CONV = 'finflux_is_new_conversation';
+const STORAGE_KEY_ACTIVE_CONV = 'tally_active_conversation_id';
+const STORAGE_KEY_IS_NEW_CONV = 'tally_is_new_conversation';
+const STORAGE_KEY_GUEST_CONV = 'tally_guest_conversation';
 
 // 创建初始会话（在组件外部，确保只创建一次）
 const initialPendingConv = createConversation();
 
-// 从 localStorage 读取上次的会话状态
-function getInitialConversationState(): { activeId: string; isNewConv: boolean } {
+/** 序列化会话用于 localStorage（Date 转为 ISO 字符串） */
+function serializeGuestConv(conv: Conversation): string {
+  return JSON.stringify({
+    id: conv.id,
+    title: conv.title,
+    createdAt: conv.createdAt.toISOString(),
+    updatedAt: conv.updatedAt.toISOString(),
+    messages: conv.messages.map((m) => ({
+      ...m,
+      timestamp: m.timestamp.toISOString(),
+    })),
+  });
+}
+
+/** 从 localStorage 解析游客会话 */
+function parseGuestConv(json: string): Conversation | null {
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed?.id) return null;
+    return {
+      id: parsed.id,
+      title: parsed.title || '新对话',
+      createdAt: new Date(parsed.createdAt || Date.now()),
+      updatedAt: new Date(parsed.updatedAt || Date.now()),
+      messages: (parsed.messages || []).map((m: { timestamp: string; [k: string]: unknown }) => ({
+        ...m,
+        timestamp: new Date(m.timestamp),
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 从 localStorage 读取初始会话状态（区分游客/登录）
+function getInitialConversationState(): {
+  activeId: string;
+  isNewConv: boolean;
+  conversations: Conversation[];
+  pendingNew: Conversation | null;
+} {
+  const token = localStorage.getItem('tally_auth_token');
+  if (!token) {
+    // 游客模式：从本地存储恢复
+    const guest = localStorage.getItem(STORAGE_KEY_GUEST_CONV);
+    const conv = guest ? parseGuestConv(guest) : null;
+    if (conv) {
+      return { activeId: conv.id, isNewConv: false, conversations: [conv], pendingNew: null };
+    }
+    const newConv = createConversation();
+    return { activeId: newConv.id, isNewConv: true, conversations: [], pendingNew: newConv };
+  }
+  // 已登录
   const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_CONV);
   const savedIsNewConv = localStorage.getItem(STORAGE_KEY_IS_NEW_CONV) === 'true';
-  
-  // 如果上次是在新对话框页面，继续显示新对话框
   if (savedIsNewConv || !savedActiveId) {
-    return { activeId: initialPendingConv.id, isNewConv: true };
+    return { activeId: initialPendingConv.id, isNewConv: true, conversations: [], pendingNew: initialPendingConv };
   }
-  
-  // 否则恢复上次选中的会话
-  return { activeId: savedActiveId, isNewConv: false };
+  return { activeId: savedActiveId, isNewConv: false, conversations: [], pendingNew: null };
 }
 
 const initialState = getInitialConversationState();
 
 export default function App() {
   // ── 会话状态 ──────────────────────────────────────────────
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  // 初始化时使用保存的会话ID或待确认会话的ID
+  const [conversations, setConversations] = useState<Conversation[]>(initialState.conversations);
   const [activeConvId, setActiveConvId] = useState<string>(initialState.activeId);
   
   // ── 当前会话 ──────────────────────────────────────────────
   // 追踪"待确认"的新会话（用户点击新建或刷新页面时，还没发消息）
-  const pendingNewConvRef = useRef<Conversation | null>(
-    initialState.isNewConv ? initialPendingConv : null
-  );
+  const pendingNewConvRef = useRef<Conversation | null>(initialState.pendingNew);
   
   // ── 会话加载状态 ──────────────────────────────────────────
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
@@ -66,29 +112,43 @@ export default function App() {
   const activeConv = conversations.find((c) => c.id === activeConvId) 
     || (pendingNewConvRef.current?.id === activeConvId ? pendingNewConvRef.current : undefined);
   const messages = activeConv?.messages || [];
-  
-  // 保存当前会话状态到 localStorage
-  useEffect(() => {
-    const isNewConv = pendingNewConvRef.current?.id === activeConvId;
-    if (isNewConv) {
-      localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'true');
-      localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
-    } else if (activeConvId) {
-      localStorage.setItem(STORAGE_KEY_ACTIVE_CONV, activeConvId);
-      localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'false');
-    }
-  }, [activeConvId]);
 
   // ── 认证状态 ────────────────────────────────────────────────
   const [authToken, setAuthToken] = useState<string | null>(() => {
-    return localStorage.getItem('finflux_auth_token');
+    return localStorage.getItem('tally_auth_token');
   });
   const [currentUser, setCurrentUser] = useState<Record<string, unknown> | null>(() => {
-    const saved = localStorage.getItem('finflux_current_user');
+    const saved = localStorage.getItem('tally_current_user');
     return saved ? JSON.parse(saved) : null;
   });
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  /** 登录框标题提示，如「登录后使用完整功能」；为空时显示默认「登录」/「注册」 */
+  const [loginModalTitleHint, setLoginModalTitleHint] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  // ── 服务器会话管理 ──────────────────────────────────────────
+  const isGuest = !authToken;
+
+  // 保存当前会话状态到 localStorage（游客用 guest 存储，已登录用 active/id）
+  useEffect(() => {
+    if (isGuest) {
+      const conv = conversations.find((c) => c.id === activeConvId)
+        || (pendingNewConvRef.current?.id === activeConvId ? pendingNewConvRef.current : null);
+      if (conv) {
+        localStorage.setItem(STORAGE_KEY_GUEST_CONV, serializeGuestConv(conv));
+      }
+    } else {
+      const isNewConv = pendingNewConvRef.current?.id === activeConvId;
+      if (isNewConv) {
+        localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'true');
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
+      } else if (activeConvId) {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_CONV, activeConvId);
+        localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'false');
+      }
+    }
+  }, [isGuest, activeConvId, conversations]);
+
+  // ── 服务器会话管理（需在 handleLoginSuccess 之前，供其使用）──────────────────────────────────────────
   const {
     serverConversations,
     isLoading: _isLoadingConversations,
@@ -100,9 +160,99 @@ export default function App() {
   // TODO: 使用 _isLoadingConversations 显示加载状态
   void _isLoadingConversations;
 
-  // 跟踪本地会话与服务器会话的映射（本地临时ID -> 服务器ID）
   const convIdMapRef = useRef<Map<string, string>>(new Map());
-  
+
+  // ── 登录成功处理 ──────────────────────────────────────────────
+  const handleLoginSuccess = useCallback(async (user: { username: string; userId: string }) => {
+    const newToken = localStorage.getItem('tally_auth_token') || localStorage.getItem('finflux_auth_token');
+    if (newToken) {
+      setAuthToken(newToken);
+    }
+    setCurrentUser({ username: user.username, id: user.userId });
+    
+    const pendingRuleName = localStorage.getItem('pending_rule_name');
+    const pendingSourceRuleId = localStorage.getItem('pending_source_rule_id');
+    const pendingThreadId = localStorage.getItem('pending_thread_id');
+    const pendingIsNewRule = localStorage.getItem('pending_is_new_rule') === 'true';
+    
+    localStorage.removeItem(STORAGE_KEY_GUEST_CONV);
+    localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
+    localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
+    
+    let ruleJustSaved = false;
+    if (pendingRuleName && newToken) {
+      try {
+        if (pendingIsNewRule && pendingThreadId) {
+          // 新建规则：从 thread 状态恢复并保存
+          const response = await fetch('/api/save-pending-rule', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${newToken}`,
+            },
+            body: JSON.stringify({
+              thread_id: pendingThreadId,
+              rule_name: pendingRuleName,
+            }),
+          });
+          const data = await response.json();
+          if (data.success) {
+            ruleJustSaved = true;
+            localStorage.removeItem('pending_rule_name');
+            localStorage.removeItem('pending_thread_id');
+            localStorage.removeItem('pending_is_new_rule');
+          } else {
+            console.error('保存新建规则失败:', data.error || data.detail || '未知错误');
+          }
+        } else if (pendingSourceRuleId) {
+          // 推荐规则：复制
+          const response = await fetch('/api/copy-rule', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${newToken}`,
+            },
+            body: JSON.stringify({
+              source_rule_id: pendingSourceRuleId,
+              new_rule_name: pendingRuleName,
+            }),
+          });
+          const data = await response.json();
+          if (data.success) {
+            ruleJustSaved = true;
+            localStorage.removeItem('pending_rule_name');
+            localStorage.removeItem('pending_source_rule_id');
+          } else {
+            console.error('复制规则失败:', data.error || data.detail || '未知错误');
+          }
+        }
+        if (ruleJustSaved) {
+          localStorage.removeItem('pending_rule_id');
+        }
+      } catch (e) {
+        console.error('保存规则失败:', e);
+        // 失败时不清除 pending_*，便于用户重试
+      }
+    }
+    
+    setIsLoginModalOpen(false);
+    clearConversationsCache();
+    convIdMapRef.current.clear();
+    const newConv = createConversation();
+    pendingNewConvRef.current = newConv;
+    setConversations([]);
+    setActiveConvId(newConv.id);
+    setIsLoading(false);
+    setTasks([]);
+    setUploadedFiles([]);
+    setTaskResult(null);
+    setWaitingForFileUpload(false);
+    if (ruleJustSaved) {
+      localStorage.setItem('rule_just_saved', pendingRuleName!);
+    }
+    void loadConversations();
+  }, [clearConversationsCache, loadConversations]);
+
   // 追踪对账任务状态（用于在任务完成时删除"任务启动"消息）
   const taskStartedRef = useRef<Map<string, boolean>>(new Map());
   
@@ -362,6 +512,23 @@ export default function App() {
 
           // 尝试从 AI 消息中解析任务
           parseTasksFromMessage(newContent);
+
+          // 游客保存规则：收到 SAVE_RULE 或 SAVE_NEW_RULE 时自动弹出登录框并存储待保存信息
+          const saveRuleMatch = newContent.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
+          const saveNewRuleMatch = newContent.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
+          if (saveRuleMatch) {
+            localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
+            localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
+            setLoginModalTitleHint('登录后可完成保存规则');
+            setIsLoginModalOpen(true);
+          } else if (saveNewRuleMatch) {
+            localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
+            // 优先使用服务端返回的 thread_id（与 LangGraph 状态一致）
+            localStorage.setItem('pending_thread_id', (data.thread_id as string) || targetConvId);
+            localStorage.setItem('pending_is_new_rule', 'true');
+            setLoginModalTitleHint('登录后可完成保存规则');
+            setIsLoginModalOpen(true);
+          }
           break;
 
         case 'interrupt':
@@ -423,10 +590,10 @@ export default function App() {
           // 登录/注册成功，保存 token
           if (data.token) {
             setAuthToken(data.token);
-            localStorage.setItem('finflux_auth_token', data.token);
+            localStorage.setItem('tally_auth_token', data.token);
             if (data.user) {
               setCurrentUser(data.user);
-              localStorage.setItem('finflux_current_user', JSON.stringify(data.user));
+              localStorage.setItem('tally_current_user', JSON.stringify(data.user));
             }
             // 记录登录时的会话ID（本地ID），标记需要在会话列表加载后选择最新会话
             loginConvIdRef.current = { 
@@ -443,7 +610,7 @@ export default function App() {
             // token 仍然有效，同步用户信息（如果返回了）
             if (data.user) {
               setCurrentUser(data.user);
-              localStorage.setItem('finflux_current_user', JSON.stringify(data.user));
+              localStorage.setItem('tally_current_user', JSON.stringify(data.user));
             }
             console.log('Auth token verified successfully');
           } else {
@@ -451,25 +618,31 @@ export default function App() {
             console.log('Auth token verification failed, clearing stored credentials');
             setAuthToken(null);
             setCurrentUser(null);
-            localStorage.removeItem('finflux_auth_token');
-            localStorage.removeItem('finflux_current_user');
+            localStorage.removeItem('tally_auth_token');
+            localStorage.removeItem('tally_current_user');
           }
           break;
 
         case 'conversation_created':
-          // 服务器创建了新会话，记录映射关系并移除本地临时会话
+          // 服务器创建了新会话，记录映射关系；保留当前消息并切换为服务器 ID（避免闪屏）
           if (data.conversation_id && data.thread_id) {
             convIdMapRef.current.set(data.thread_id, data.conversation_id);
             // 如果是登录会话，更新服务器ID
             if (loginConvIdRef.current.localId === data.thread_id) {
               loginConvIdRef.current.serverId = data.conversation_id;
             }
-            // 移除本地临时会话（避免与服务器会话重复）
-            setConversations((prev) => prev.filter((c) => c.id !== data.thread_id));
-            // 刷新会话列表（从服务器获取正式会话）
+            setConversations((prev) => {
+              const current = prev.find((c) => c.id === data.thread_id);
+              const rest = prev.filter((c) => c.id !== data.thread_id);
+              if (current) {
+                // 保留消息，仅将会话 ID 更新为服务器 ID
+                return [{ ...current, id: data.conversation_id }, ...rest];
+              }
+              return rest;
+            });
             loadConversations();
-            // 更新当前活动会话ID为服务器ID
             if (activeConvId === data.thread_id) {
+              pendingConvIdRef.current = data.conversation_id;
               setActiveConvId(data.conversation_id);
             }
           }
@@ -571,6 +744,16 @@ export default function App() {
   // ── 发送消息 ──────────────────────────────────────────────
   const handleSendMessage = useCallback(
     (text: string, attachments?: import('./types').MessageAttachment[], silent = false) => {
+      // 游客：仅当本地对话数大于 1 时弹出登录框（保持 1 个对话可正常使用）
+      if (isGuest) {
+        const totalConvs = conversations.length + (pendingNewConvRef.current ? 1 : 0);
+        if (totalConvs > 1) {
+          setLoginModalTitleHint('登录后使用完整功能');
+          setIsLoginModalOpen(true);
+          return;
+        }
+      }
+
       // 如果正在流式输出，中断当前流式输出
       if (streamingMessageId) {
         setStreamingMessageId(null);
@@ -611,7 +794,7 @@ export default function App() {
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
       sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId);
     },
-    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId]
+    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -627,8 +810,8 @@ export default function App() {
     // 清除认证状态
     setAuthToken(null);
     setCurrentUser(null);
-    localStorage.removeItem('finflux_auth_token');
-    localStorage.removeItem('finflux_current_user');
+    localStorage.removeItem('tally_auth_token');
+    localStorage.removeItem('tally_current_user');
     localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
     localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
     
@@ -651,16 +834,14 @@ export default function App() {
   // ── 新建会话 ──────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
     // 如果正在加载中，不允许创建新会话（避免消息显示错乱）
-    if (isLoading) {
-      return;
-    }
+    if (isLoading) return;
     const conv = createConversation();
-    // 不立即添加到列表，只设置为当前活动会话
     pendingNewConvRef.current = conv;
     setActiveConvId(conv.id);
     setTasks([]);
     setUploadedFiles([]);
     setTaskResult(null);
+    // 游客模式：不清除已有本地对话，保持始终可使用一个对话
   }, [isLoading]);
 
   // ── 切换会话 ──────────────────────────────────────────────
@@ -749,16 +930,19 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary">
       <Sidebar
+        collapsed={sidebarCollapsed}
         conversations={displayConversations}
         activeConversationId={activeConvId}
         connectionStatus={status}
         onNewConversation={handleNewConversation}
         onSelectConversation={handleSelectConversation}
-        onDeleteConversation={handleDeleteConversation}
+        onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
       />
       <ChatArea
+        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        sidebarCollapsed={sidebarCollapsed}
         messages={messages}
         isLoading={isLoading}
         isLoadingConversation={isLoadingConversation}
@@ -768,7 +952,21 @@ export default function App() {
         threadId={activeConvId}
         showInput={!!activeConvId}
         currentUser={currentUser}
+        conversationTitle={activeConv?.title}
+        onLogin={() => {
+          setLoginModalTitleHint(null);
+          setIsLoginModalOpen(true);
+        }}
         streamingMessageId={streamingMessageId}
+      />
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => {
+          setIsLoginModalOpen(false);
+          setLoginModalTitleHint(null);
+        }}
+        onLoginSuccess={handleLoginSuccess}
+        titleHint={loginModalTitleHint}
       />
     </div>
   );

@@ -164,6 +164,48 @@ def create_auth_tools() -> list[mcp_types.Tool]:
                 "required": ["auth_token", "rule_id"],
             },
         ),
+        Tool(
+            name="search_rules_by_mapping",
+            description="根据字段映射哈希搜索匹配的对账规则",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "field_mapping_hash": {"type": "string", "description": "字段映射哈希值"},
+                    "limit": {"type": "integer", "description": "返回结果数量限制", "default": 3},
+                },
+                "required": ["auth_token", "field_mapping_hash"],
+            },
+        ),
+        Tool(
+            name="copy_reconciliation_rule",
+            description="复制对账规则为个人规则",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "source_rule_id": {"type": "string", "description": "源规则 ID"},
+                    "new_rule_name": {"type": "string", "description": "新规则名称"},
+                },
+                "required": ["auth_token", "source_rule_id", "new_rule_name"],
+            },
+        ),
+        Tool(
+            name="batch_get_reconciliation_rules",
+            description="批量获取多个对账规则的详情（含 rule_template），用于规则推荐时的字段名匹配",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string", "description": "JWT token"},
+                    "rule_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "规则 ID 列表",
+                    },
+                },
+                "required": ["auth_token", "rule_ids"],
+            },
+        ),
 
         # ── 管理员功能 ───────────────────────────────────────────────
         Tool(
@@ -357,6 +399,9 @@ async def handle_auth_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Di
         "save_reconciliation_rule": _handle_save_rule,
         "update_reconciliation_rule": _handle_update_rule,
         "delete_reconciliation_rule": _handle_delete_rule,
+        "search_rules_by_mapping": _handle_search_rules_by_mapping,
+        "copy_reconciliation_rule": _handle_copy_rule,
+        "batch_get_reconciliation_rules": _handle_batch_get_rules,
         "admin_login": _handle_admin_login,
         "create_company": _handle_create_company,
         "create_department": _handle_create_department,
@@ -372,6 +417,10 @@ async def handle_auth_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Di
         "update_conversation": _handle_update_conversation,
         "delete_conversation": _handle_delete_conversation,
         "save_message": _handle_save_message,
+        # 游客认证
+        "create_guest_token": _handle_create_guest_token,
+        "verify_guest_token": _handle_verify_guest_token,
+        "list_recommended_rules": _handle_list_recommended_rules,
     }
     handler = handlers.get(tool_name)
     if not handler:
@@ -532,9 +581,25 @@ async def _handle_me(args: dict) -> dict:
 
 async def _handle_list_rules(args: dict) -> dict:
     """列出用户可见的规则"""
-    valid, user_info, err = _require_auth(args)
-    if not valid:
-        return {"success": False, "error": err}
+    # 支持 auth_token 或 guest_token
+    auth_token = args.get("auth_token", "")
+    guest_token = args.get("guest_token", "")
+    
+    if auth_token:
+        valid, user_info, err = _require_auth(args)
+        if not valid:
+            return {"success": False, "error": err}
+    elif guest_token:
+        # 验证游客token
+        token_info = auth_db.verify_guest_token(guest_token)
+        if not token_info or not token_info.get("valid"):
+            return {"success": False, "error": "无效的游客token或token已过期"}
+        # 游客模式：返回所有活跃规则
+        status = args.get("status", "active")
+        rules = auth_db.list_all_active_rules(status=status)
+        return {"success": True, "rules": rules, "count": len(rules)}
+    else:
+        return {"success": False, "error": "请提供 auth_token 或 guest_token"}
 
     status = args.get("status", "active")
     rules = auth_db.list_rules_for_user(
@@ -857,8 +922,113 @@ async def _handle_delete_rule(args: dict) -> dict:
 
     return {
         "success": True,
-        "message": f"规则 '{rule_name}' 已从 PostgreSQL 删除，JSON 备份文件已清理",
+        "message": f"规则「{rule_name}」已删除",
     }
+
+
+async def _handle_search_rules_by_mapping(args: dict) -> dict:
+    """根据字段映射哈希搜索匹配规则"""
+    # 支持 auth_token 或 guest_token
+    auth_token = args.get("auth_token", "")
+    guest_token = args.get("guest_token", "")
+    
+    if auth_token:
+        valid, user_info, err = _require_auth(args)
+        if not valid:
+            return {"success": False, "error": err}
+    elif guest_token:
+        # 验证游客token
+        token_info = auth_db.verify_guest_token(guest_token)
+        if not token_info or not token_info.get("valid"):
+            return {"success": False, "error": "无效的游客token或token已过期"}
+    else:
+        return {"success": False, "error": "请提供 auth_token 或 guest_token"}
+
+    field_mapping_hash = args.get("field_mapping_hash")
+    if not field_mapping_hash:
+        return {"success": False, "error": "缺少 field_mapping_hash"}
+
+    limit = args.get("limit", 3)
+
+    try:
+        rules = auth_db.search_rules_by_field_mapping(field_mapping_hash, limit)
+        return {
+            "success": True,
+            "rules": rules,
+            "count": len(rules),
+        }
+    except Exception as e:
+        logger.error(f"搜索规则失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def _handle_copy_rule(args: dict) -> dict:
+    """复制对账规则为个人规则"""
+    valid, user_info, err = _require_auth(args)
+    if not valid:
+        return {"success": False, "error": err}
+
+    source_rule_id = args.get("source_rule_id")
+    new_rule_name = args.get("new_rule_name")
+
+    if not source_rule_id:
+        return {"success": False, "error": "缺少 source_rule_id"}
+    if not new_rule_name:
+        return {"success": False, "error": "缺少 new_rule_name"}
+
+    user_id = user_info["user_id"]
+
+    try:
+        new_rule = auth_db.copy_rule(source_rule_id, new_rule_name, user_id)
+        logger.info(f"用户 {user_id} 复制规则 {source_rule_id} 为 {new_rule_name}")
+        return {
+            "success": True,
+            "message": f"规则已复制为 '{new_rule_name}'",
+            "rule": new_rule,
+        }
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"复制规则失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def _handle_batch_get_rules(args: dict) -> dict:
+    """批量获取多个规则的详情（含 rule_template）"""
+    # 支持 auth_token 或 guest_token
+    auth_token = args.get("auth_token", "")
+    guest_token = args.get("guest_token", "")
+    
+    if auth_token:
+        valid, user_info, err = _require_auth(args)
+        if not valid:
+            return {"success": False, "error": err}
+    elif guest_token:
+        # 验证游客token
+        token_info = auth_db.verify_guest_token(guest_token)
+        if not token_info or not token_info.get("valid"):
+            return {"success": False, "error": "无效的游客token或token已过期"}
+    else:
+        return {"success": False, "error": "请提供 auth_token 或 guest_token"}
+
+    rule_ids = args.get("rule_ids", [])
+    if not rule_ids:
+        return {"success": True, "rules": [], "count": 0}
+
+    if not isinstance(rule_ids, list):
+        return {"success": False, "error": "rule_ids 必须是数组"}
+
+    # 限制单次请求最多 100 个规则
+    if len(rule_ids) > 100:
+        rule_ids = rule_ids[:100]
+        logger.warning(f"batch_get_rules: 请求超过100条，已截断")
+
+    try:
+        rules = auth_db.batch_get_rules_by_ids(rule_ids)
+        return {"success": True, "rules": rules, "count": len(rules)}
+    except Exception as e:
+        logger.error(f"批量获取规则失败: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1097,31 +1267,149 @@ async def _handle_delete_conversation(args: dict) -> dict:
 
 
 async def _handle_save_message(args: dict) -> dict:
-    """保存消息到会话"""
+    """保存消息到会话（支持附件）"""
     is_valid, user_info, error = _require_auth(args)
     if not is_valid:
         return {"success": False, "error": error}
-    
+
     user_id = user_info["user_id"]
     conversation_id = args.get("conversation_id", "").strip()
     role = args.get("role", "").strip()
     content = args.get("content", "")
     metadata = args.get("metadata", {})
-    
+    attachments = args.get("attachments", [])  # 新增：文件附件列表
+
     if not conversation_id:
         return {"success": False, "error": "会话 ID 不能为空"}
     if not role:
         return {"success": False, "error": "消息角色不能为空"}
     if role not in ("user", "assistant", "system"):
         return {"success": False, "error": "无效的消息角色"}
-    
+
     # 验证会话所有权
     conversation = auth_db.get_conversation(conversation_id, user_id)
     if not conversation:
         return {"success": False, "error": "会话不存在"}
-    
-    message = auth_db.save_message(conversation_id, role, content, metadata)
+
+    message = auth_db.save_message(conversation_id, role, content, metadata, attachments)  # 传递附件参数
     if not message:
         return {"success": False, "error": "保存消息失败"}
-    
+
     return {"success": True, "message": message}
+
+
+# ── 游客认证工具 ──────────────────────────────────────────────────────────
+
+def _create_guest_tools() -> list[mcp_types.Tool]:
+    """创建游客认证相关的工具"""
+    Tool = mcp_types.Tool
+    return [
+        Tool(
+            name="create_guest_token",
+            description="创建游客临时token，用于未登录用户使用部分功能",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "会话ID"},
+                    "ip_address": {"type": "string", "description": "用户IP地址（可选）"},
+                    "user_agent": {"type": "string", "description": "用户浏览器信息（可选）"},
+                },
+                "required": ["session_id"],
+            },
+        ),
+        Tool(
+            name="verify_guest_token",
+            description="验证游客token是否有效",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "guest_token": {"type": "string", "description": "游客token"},
+                },
+                "required": ["guest_token"],
+            },
+        ),
+        Tool(
+            name="list_recommended_rules",
+            description="获取系统推荐规则列表（游客专用，无需登录）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "guest_token": {"type": "string", "description": "游客token"},
+                },
+                "required": ["guest_token"],
+            },
+        ),
+    ]
+
+
+async def _handle_create_guest_token(args: dict) -> dict:
+    """创建游客临时token"""
+    session_id = args.get("session_id", "").strip()
+    if not session_id:
+        return {"success": False, "error": "session_id 不能为空"}
+    
+    ip_address = args.get("ip_address")
+    user_agent = args.get("user_agent")
+    
+    result = auth_db.create_guest_token(session_id, ip_address, user_agent)
+    if not result:
+        return {"success": False, "error": "创建游客token失败"}
+    
+    return {
+        "success": True,
+        "token": result["token"],
+        "usage_count": result["usage_count"],
+        "max_usage": result["max_usage"],
+        "expires_at": result["expires_at"]
+    }
+
+
+async def _handle_verify_guest_token(args: dict) -> dict:
+    """验证游客token"""
+    guest_token = args.get("guest_token", "").strip()
+    if not guest_token:
+        return {"success": False, "error": "guest_token 不能为空"}
+    
+    result = auth_db.verify_guest_token(guest_token)
+    if not result:
+        return {"success": False, "valid": False, "error": "token无效"}
+    
+    if not result.get("valid"):
+        return {"success": False, "valid": False, "error": result.get("error", "token已过期")}
+    
+    return {
+        "success": True,
+        "valid": True,
+        "usage_count": result["usage_count"],
+        "max_usage": result["max_usage"],
+        "remaining_usage": result["max_usage"] - result["usage_count"]
+    }
+
+
+async def _handle_list_recommended_rules(args: dict) -> dict:
+    """获取系统推荐规则列表（游客专用）"""
+    guest_token = args.get("guest_token", "").strip()
+    if not guest_token:
+        return {"success": False, "error": "guest_token 不能为空"}
+    
+    # 验证token
+    token_info = auth_db.verify_guest_token(guest_token)
+    if not token_info or not token_info.get("valid"):
+        return {"success": False, "error": "无效的token或token已过期"}
+    
+    # 检查使用次数
+    if token_info["usage_count"] >= token_info["max_usage"]:
+        return {
+            "success": False, 
+            "error": "游客使用次数已达上限，请登录后继续使用",
+            "code": "GUEST_LIMIT_REACHED"
+        }
+    
+    # 获取推荐规则
+    rules = auth_db.list_recommended_rules()
+    
+    return {
+        "success": True,
+        "rules": rules,
+        "remaining_usage": token_info["max_usage"] - token_info["usage_count"]
+    }

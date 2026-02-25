@@ -24,6 +24,14 @@ function formatTime(date: Date): string {
   });
 }
 
+/** 移除 SAVE_RULE / SAVE_NEW_RULE 内部标记，不展示给用户 */
+function stripSaveRuleTag(content: string): string {
+  return content
+    .replace(/\[SAVE_RULE:[^\]]+\]\s*/g, '')
+    .replace(/\[SAVE_NEW_RULE:[^\]]+\]\s*/g, '')
+    .trim();
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -115,71 +123,11 @@ function SystemActionMessage({ message }: { message: Message }) {
   );
 }
 
-/** 打字机效果组件 - 逐字显示文本（仅用于流式输出的新消息） */
+/** 文本显示组件 - 直接显示完整文本（已禁用打字机效果） */
 function TypewriterText({ content, isStreaming }: { content: string; isStreaming: boolean }) {
-  // 追踪是否曾经处于流式状态（用于区分新消息和历史消息）
-  const hasBeenStreamingRef = useRef(isStreaming);
-  const [displayedLength, setDisplayedLength] = useState(() => {
-    // 如果初始时不是流式状态，说明是历史消息，直接显示全部
-    return isStreaming ? 0 : content.length;
-  });
-  const [isTyping, setIsTyping] = useState(false);
-  const prevContentRef = useRef(content);
-  const targetLengthRef = useRef(content.length);
-  
-  // 记录曾经处于流式状态
-  useEffect(() => {
-    if (isStreaming) {
-      hasBeenStreamingRef.current = true;
-    }
-  }, [isStreaming]);
-  
-  useEffect(() => {
-    // 如果从未处于流式状态（历史消息），直接显示全部内容
-    if (!hasBeenStreamingRef.current) {
-      setDisplayedLength(content.length);
-      return;
-    }
-    
-    // 检测新内容
-    const prevContent = prevContentRef.current;
-    const newContent = content;
-    
-    // 如果内容变化了
-    if (newContent !== prevContent) {
-      // 如果是追加内容（流式输出场景）
-      if (newContent.startsWith(prevContent)) {
-        // 保持当前显示位置，继续打字
-        targetLengthRef.current = newContent.length;
-      } else {
-        // 内容完全变化，重新开始
-        setDisplayedLength(0);
-        targetLengthRef.current = newContent.length;
-      }
-      prevContentRef.current = newContent;
-    }
-    
-    // 如果还没显示完，继续打字
-    if (displayedLength < targetLengthRef.current) {
-      setIsTyping(true);
-      const timer = setTimeout(() => {
-        setDisplayedLength((prev) => Math.min(prev + 1, targetLengthRef.current));
-      }, 60); // 每个字符 60ms
-      return () => clearTimeout(timer);
-    } else {
-      setIsTyping(false);
-    }
-  }, [content, displayedLength]);
-  
-  // 历史消息或打字完成后直接显示完整内容
-  const displayContent = !hasBeenStreamingRef.current || (!isStreaming && !isTyping) 
-    ? content 
-    : content.slice(0, displayedLength);
-  const showCursor = hasBeenStreamingRef.current && (isStreaming || isTyping);
-  
   return (
     <>
-      {displayContent.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
+      {content.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
         <span key={i}>
           {part}
           {i < arr.length - 1 && (
@@ -191,8 +139,8 @@ function TypewriterText({ content, isStreaming }: { content: string; isStreaming
           )}
         </span>
       ))}
-      {/* 打字中或流式输出时显示闪烁光标 */}
-      {showCursor && (
+      {/* 流式输出时显示闪烁光标 */}
+      {isStreaming && (
         <span className="streaming-cursor inline-block w-0.5 h-4 bg-blue-500 ml-0.5 align-middle animate-pulse" />
       )}
     </>
@@ -276,7 +224,7 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
             </div>
           ) : (
           <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-            <TypewriterText content={message.content} isStreaming={isStreaming} />
+            <TypewriterText content={stripSaveRuleTag(message.content)} isStreaming={isStreaming} />
           </div>
           )}
         </div>

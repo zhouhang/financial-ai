@@ -8,7 +8,7 @@ This is a Financial AI system with:
 - **finance-mcp/**: Core MCP server (Python FastAPI)
 - **finance-agents/data-agent/**: LangGraph-based agent for reconciliation and data preparation
 - **finance-web/**: React + TypeScript frontend (Vite)
-- **Database**: PostgreSQL (finflux) + MySQL (finance-ai)
+- **Database**: PostgreSQL (tally) + MySQL (finance-ai)
 - **External Services**: Dify (AI orchestration), Tencent LLM
 
 ## Build/Lint/Test Commands
@@ -244,7 +244,7 @@ export interface Message {
 
 ## Database
 
-- **PostgreSQL** (finflux): `localhost:5432` - reconciliation rules, users
+- **PostgreSQL** (tally): `localhost:5432` - reconciliation rules, users
 - **MySQL** (finance-ai): `localhost:3306` - schemas, files metadata
 
 ## Common Tasks

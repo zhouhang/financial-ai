@@ -63,9 +63,11 @@ from .nodes import (
     # 创建规则流程节点
     file_analysis_node,
     field_mapping_node,
+    rule_recommendation_node,
     rule_config_node,
     validation_preview_node,
     save_rule_node,
+    result_evaluation_node,
     # 编辑规则流程节点
     edit_field_mapping_node,
     edit_rule_config_node,
@@ -79,8 +81,10 @@ from .nodes import (
 from .routers import (
     route_after_file_analysis,
     route_after_field_mapping,
+    route_after_rule_recommendation,
     route_after_rule_config,
     route_after_preview,
+    route_after_save_rule,
     route_from_entry,
     build_reconciliation_subgraph,
 )

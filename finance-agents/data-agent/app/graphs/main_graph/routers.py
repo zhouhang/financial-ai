@@ -22,17 +22,22 @@ from app.models import (
 from app.graphs.reconciliation import (
     file_analysis_node,
     field_mapping_node,
+    rule_recommendation_node,
     rule_config_node,
     validation_preview_node,
     save_rule_node,
+    result_evaluation_node,
     edit_field_mapping_node,
     edit_rule_config_node,
     edit_validation_preview_node,
     edit_save_node,
     route_after_file_analysis,
     route_after_field_mapping,
+    route_after_rule_recommendation,
     route_after_rule_config,
     route_after_preview,
+    route_after_save_rule,
+    build_reconciliation_subgraph,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
 from .nodes import (
@@ -52,7 +57,9 @@ def route_after_router(state: AgentState) -> str:
     intent = state.get("user_intent", "")
     phase = state.get("phase", "")
 
-    if intent == UserIntent.CREATE_NEW_RULE.value:
+    if intent == "guest_reconciliation":
+        return "file_analysis"
+    elif intent == UserIntent.CREATE_NEW_RULE.value:
         return "file_analysis"
     elif intent == UserIntent.USE_EXISTING_RULE.value:
         return "task_execution"
@@ -63,9 +70,22 @@ def route_after_router(state: AgentState) -> str:
 
 
 def route_after_reconciliation(state: AgentState) -> str:
-    """对账子图完成后，判断用户是否要立即执行。"""
-    # 如果已保存规则，检查用户是否要立即开始
+    """对账子图完成后，判断用户是否要立即执行。
+    
+    流程：
+    1. 如果使用了推荐规则且未保存 → 直接开始对账（task_execution）
+    2. 如果已保存规则 → 询问是否立即开始
+    3. 否则结束
+    """
+    using_recommended = state.get("using_recommended_rule", False)
+    selected_rule_id = state.get("selected_rule_id")
     saved = state.get("saved_rule_name")
+    
+    # 使用推荐规则但还没保存，直接开始对账
+    if using_recommended and selected_rule_id and not saved:
+        return "task_execution"
+    
+    # 如果已保存规则，检查用户是否要立即开始
     if saved:
         return "ask_start_now"
     return END
@@ -121,9 +141,11 @@ def build_main_graph() -> StateGraph:
     # 对账规则生成节点（直接在主图中，避免子图 replay）
     graph.add_node("file_analysis", file_analysis_node)
     graph.add_node("field_mapping", field_mapping_node)
+    graph.add_node("rule_recommendation", rule_recommendation_node)
     graph.add_node("rule_config", rule_config_node)
     graph.add_node("validation_preview", validation_preview_node)
     graph.add_node("save_rule", save_rule_node)
+    graph.add_node("result_evaluation", result_evaluation_node)
     
     # 其他节点
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
@@ -150,8 +172,12 @@ def build_main_graph() -> StateGraph:
 
     # 对账规则生成流程（展平的）
     graph.add_conditional_edges("file_analysis", route_after_file_analysis, {
-        "field_mapping": "field_mapping",
+        "rule_recommendation": "rule_recommendation",  # 直接进入规则推荐
         END: END,
+    })
+    graph.add_conditional_edges("rule_recommendation", route_after_rule_recommendation, {
+        "field_mapping": "field_mapping",  # 不采纳推荐，进入字段映射
+        "task_execution": "task_execution",  # 确认采用推荐规则，执行对账
     })
     graph.add_conditional_edges("field_mapping", route_after_field_mapping, {
         "field_mapping": "field_mapping",   # 调整意见，重新进入
@@ -163,10 +189,27 @@ def build_main_graph() -> StateGraph:
     })
     graph.add_conditional_edges("validation_preview", route_after_preview, {
         "rule_config": "rule_config",
-        "save_rule": "save_rule",
+        "task_execution": "task_execution",  # 新建规则：先对账再保存（与推荐规则流程一致）
     })
-    graph.add_conditional_edges("save_rule", route_after_reconciliation, {
-        "ask_start_now": "ask_start_now",
+    graph.add_conditional_edges("save_rule", route_after_save_rule, {
+        "result_evaluation": "result_evaluation",  # 使用推荐规则，进入评估
+        "ask_start_now": "ask_start_now",  # 正常流程
+        END: END,
+    })
+    # result_evaluation 后的路由：
+    # - 对账已完成，直接结束（不需要再问是否开始对账）
+    # - 如果用户选择"不要"，返回字段映射
+    def route_after_result_evaluation(state: AgentState) -> str:
+        phase = state.get("phase", "")
+        if phase == ReconciliationPhase.FIELD_MAPPING.value:
+            return "field_mapping"
+        if phase == ReconciliationPhase.RESULT_EVALUATION.value:
+            return "result_evaluation"  # 继续等待输入（如规则名称）
+        return END  # 完成或其他情况
+    
+    graph.add_conditional_edges("result_evaluation", route_after_result_evaluation, {
+        "field_mapping": "field_mapping",
+        "result_evaluation": "result_evaluation",
         END: END,
     })
 
@@ -191,9 +234,21 @@ def build_main_graph() -> StateGraph:
     })
     graph.add_edge("edit_save", END)
 
-    # task_execution → result_analysis → END
+    # task_execution → result_analysis（显示对账结果）→ 根据是否推荐规则决定下一步
     graph.add_edge("task_execution", "result_analysis")
-    graph.add_edge("result_analysis", END)
+    
+    # result_analysis 后：推荐规则或新建规则（先对账）→ result_evaluation（询问保存）
+    def route_after_result_analysis(state: AgentState) -> str:
+        using_recommended = state.get("using_recommended_rule", False)
+        generated_schema = state.get("generated_schema")
+        if using_recommended or generated_schema:
+            return "result_evaluation"
+        return END
+    
+    graph.add_conditional_edges("result_analysis", route_after_result_analysis, {
+        "result_evaluation": "result_evaluation",
+        END: END,
+    })
 
     return graph
 

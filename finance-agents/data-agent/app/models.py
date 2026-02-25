@@ -37,9 +37,11 @@ class ReconciliationPhase(str, Enum):
     IDLE = "idle"
     FILE_ANALYSIS = "file_analysis"
     FIELD_MAPPING = "field_mapping"
+    RULE_RECOMMENDATION = "rule_recommendation"
     RULE_CONFIG = "rule_config"
     VALIDATION_PREVIEW = "validation_preview"
     SAVE_RULE = "save_rule"
+    RESULT_EVALUATION = "result_evaluation"  # 对账结果评估
     # 编辑规则流程
     EDIT_FIELD_MAPPING = "edit_field_mapping"
     EDIT_RULE_CONFIG = "edit_rule_config"
@@ -177,6 +179,7 @@ class AgentState(TypedDict, total=False):
     # ── 认证 ──────────────────────────────────────────────────
     auth_token: Optional[str]         # JWT token
     current_user: Optional[dict]      # 当前登录用户信息
+    guest_token: Optional[str]        # 游客临时token
     
     # ── 管理员 ────────────────────────────────────────────────
     admin_token: Optional[str]        # 管理员 token
@@ -208,6 +211,12 @@ class AgentState(TypedDict, total=False):
 
     # 预览（第2层 – 步骤4，HITL）
     preview_result: Optional[dict[str, Any]]
+
+    # 规则推荐（第2层 – 步骤2.5）
+    recommended_rules: Optional[list[dict[str, Any]]]  # 推荐的规则列表
+    selected_rule_id: Optional[str]  # 用户选择的推荐规则 ID
+    using_recommended_rule: Optional[bool]  # 是否使用推荐规则
+    waiting_for_rule_name: Optional[bool]  # 等待用户输入规则名称
 
     # 保存的规则名称（第2层 – 步骤5）
     saved_rule_name: Optional[str]
