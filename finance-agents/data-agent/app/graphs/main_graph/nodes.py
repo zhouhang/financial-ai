@@ -597,28 +597,18 @@ async def intent_router(state: AgentState) -> dict:
                 if extracted.endswith("规则"):
                     extracted = extracted[:-2].strip()
                 target_name = extracted
-            # 查找匹配的规则：先精确匹配，再模糊匹配（包含关系）
+            # 仅当规则列表中存在与 target_name 完全匹配的规则时才删除
             rule_id = None
             matched_rule_name = None
             for rule in rules:
-                rule_name = rule.get("name", "")
-                # 精确匹配
-                if rule_name == target_name:
+                if rule.get("name") == target_name:
                     rule_id = rule.get("id")
-                    matched_rule_name = rule_name
+                    matched_rule_name = rule.get("name")
                     break
-            # 模糊匹配：如果精确匹配没找到，尝试包含匹配
-            if not rule_id and target_name:
-                for rule in rules:
-                    rule_name = rule.get("name", "")
-                    if target_name in rule_name or rule_name in target_name:
-                        rule_id = rule.get("id")
-                        matched_rule_name = rule_name
-                        break
 
             if not rule_id:
                 return {
-                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。你的规则列表有：{', '.join([r.get('name', '') for r in rules]) if rules else '暂无'}")],
+                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
                     "user_intent": UserIntent.UNKNOWN.value,
                 }
 
