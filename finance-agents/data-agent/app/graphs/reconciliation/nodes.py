@@ -35,6 +35,7 @@ from .helpers import (
     _adjust_field_mappings_with_llm,
     _format_field_mappings,
     _rule_template_to_mappings,
+    _get_file_names_from_rule_template,
     _rule_template_to_config_items,
     _format_edit_field_mappings,
     _build_field_mapping_text,
@@ -149,12 +150,9 @@ async def file_analysis_node(state: AgentState) -> dict:
                 analyses = result.get("analyses", [])
                 warnings = result.get("warnings", [])
 
-                # 构建消息
-                msg_parts = [f"🔍 智能文件分析\n", f"{error_msg}\n"]
+                msg_parts = [f"🔍 文件分析\n{error_msg}"]
                 if warnings:
-                    msg_parts.append("⚠️ 提示：")
-                    for w in warnings:
-                        msg_parts.append(f"  • {w}")
+                    msg_parts.append("⚠️ " + "；".join(warnings[:3]))
 
                 return {
                     "messages": [AIMessage(content="\n".join(msg_parts))],
@@ -166,33 +164,35 @@ async def file_analysis_node(state: AgentState) -> dict:
             warnings = result.get("warnings", [])
             recommendations = result.get("recommendations", {})
 
-            # 构建智能分析结果消息
-            msg_parts = ["🔍 智能文件分析完成 📖 [使用skill.md策略]\n"]
-
-            # 显示分析结果
+            _MAX_COLS = 15
+            msg_parts = ["🔍 **文件分析完成**\n"]
             for a in analyses:
-                guessed_source_label = "业务数据" if a.get("guessed_source") == "business" else "财务数据"
-                confidence = a.get("confidence", 0)
-                confidence_pct = int(confidence * 100) if confidence else 0
-
-                filename_display = a.get("original_filename", a.get("filename", ""))
-                msg_parts.append(f"✅ {filename_display} ({guessed_source_label} {confidence_pct}%)")
-                msg_parts.append(f"   • {len(a.get('columns', []))}列，{a.get('row_count', 0)}行")
-
+                src = "业务" if a.get("guessed_source") == "business" else "财务"
+                conf = int((a.get("confidence") or 0) * 100)
+                fname = a.get("original_filename") or a.get("filename", "")
+                cols = a.get("columns", [])
+                rows = a.get("row_count", 0)
+                msg_parts.append(f"**{fname}** ({src} {conf}%) {rows}行")
+                if cols:
+                    display_cols = cols[:_MAX_COLS]
+                    sample_data = a.get("sample_data", [])[:3]
+                    header_line = "| " + " | ".join(display_cols) + " |"
+                    sep_line = "| " + " | ".join(["---"] * len(display_cols)) + " |"
+                    msg_parts.append(header_line)
+                    msg_parts.append(sep_line)
+                    for sample_row in sample_data:
+                        sample_vals = [str(sample_row.get(c, ""))[:50] for c in display_cols]
+                        msg_parts.append("| " + " | ".join(sample_vals) + " |")
+                    if not sample_data:
+                        msg_parts.append("| " + " | ".join([""] * len(display_cols)) + " |")
                 if a.get("processing_notes"):
-                    msg_parts.append(f"   • {a.get('processing_notes')}")
+                    msg_parts.append(f"  {a.get('processing_notes')}")
                 msg_parts.append("")
-
-            # 显示推荐信息
             if recommendations.get("message"):
                 msg_parts.append(recommendations["message"])
                 msg_parts.append("")
-
-            # 显示警告
             if warnings:
-                msg_parts.append("⚠️ 提示：")
-                for w in warnings:
-                    msg_parts.append(f"  • {w}")
+                msg_parts.append("⚠️ " + "；".join(warnings[:3]))
                 msg_parts.append("")
 
         except Exception as e:
@@ -204,20 +204,29 @@ async def file_analysis_node(state: AgentState) -> dict:
             }
 
     # ── 构建最终输出消息 ─────────────────────────────────────────
+    _MAX_COLS = 15
     if complexity_level == "simple":
-        # 简单场景的原有消息格式
-        summary_parts: list[str] = ["📊 第1步：文件分析完成\n"]
+        summary_parts: list[str] = ["📊 **文件分析完成**\n"]
         for a in analyses:
-            summary_parts.append(f"📄 {a['original_filename'] if a.get('original_filename') else a['filename']}")
-            summary_parts.append(f"   • 列数: {len(a.get('columns', []))}  行数: {a.get('row_count', 0)}")
-            summary_parts.append(f"   • 列名: {', '.join(a.get('columns', [])[:10])}{'...' if len(a.get('columns', [])) > 10 else ''}")
+            fname = a.get('original_filename') or a.get('filename', '')
+            cols = a.get('columns', [])
+            rows = a.get('row_count', 0)
+            summary_parts.append(f"**{fname}** ({rows}行)")
+            if cols:
+                display_cols = cols[:_MAX_COLS]
+                sample_data = a.get("sample_data", [])[:3]
+                header_line = "| " + " | ".join(display_cols) + " |"
+                sep_line = "| " + " | ".join(["---"] * len(display_cols)) + " |"
+                summary_parts.append(header_line)
+                summary_parts.append(sep_line)
+                for sample_row in sample_data:
+                    sample_vals = [str(sample_row.get(c, ""))[:50] for c in display_cols]
+                    summary_parts.append("| " + " | ".join(sample_vals) + " |")
+                if not sample_data:
+                    summary_parts.append("| " + " | ".join([""] * len(display_cols)) + " |")
             summary_parts.append("")
-
-        summary_parts.append("正在为你生成字段映射建议...")
         msg = "\n".join(summary_parts)
     else:
-        # 智能场景使用前面构建的msg_parts
-        msg_parts.append("正在为你生成字段映射建议...")
         msg = "\n".join(msg_parts)
 
     # 使用 LLM 猜测字段映射（在后台完成，不显示给用户）
@@ -251,10 +260,12 @@ def field_mapping_node(state: AgentState) -> dict:
     
     # 构建问题文本
     if adjustment_feedback:
-        # 如果有调整反馈，先显示反馈
         question_text = f"📋 **第2步：确认字段映射**\n\n{adjustment_feedback}\n\n当前字段对应关系：\n{mapping_display}\n\n**请确认是否正确？**"
     else:
-        question_text = f"📋 **第2步：确认字段映射**\n\n我已经分析了这两个文件，为你建议了以下字段对应关系：\n{mapping_display}\n\n**这些对应关系是否正确？**"
+        question_text = (
+            f"📋 **第2步：确认字段映射**\n\n"
+            f"已生成字段映射建议，请确认以下对应关系：\n{mapping_display}\n\n**这些对应关系是否正确？**"
+        )
     
     # interrupt 暂停，等待用户输入
     user_response = interrupt({
@@ -487,54 +498,76 @@ async def rule_recommendation_node(state: AgentState) -> dict:
         match_reason = rule.get("_match_reason", "")
         match_percentage = calculate_match_percentage(matched_fields)
         
-        # 提取字段映射摘要
         biz_fields = template.get("data_sources", {}).get("business", {}).get("field_roles", {})
         fin_fields = template.get("data_sources", {}).get("finance", {}).get("field_roles", {})
-        
-        # 获取规则配置信息（尝试多个字段）
+
+        def _fmt_col(v):
+            if isinstance(v, list):
+                return "、".join(str(x) for x in v)
+            return str(v) if v else ""
+
+        mapping_lines = []
+        for role in biz_fields.keys() & fin_fields.keys():
+            biz_col = biz_fields.get(role)
+            fin_col = fin_fields.get(role)
+            if biz_col and fin_col:
+                mapping_lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+
+        custom_validations = template.get("custom_validations", [])
         rule_config_text = template.get("rule_config_text", "")
-        if not rule_config_text:
-            # 从 custom_validations 或其他配置中提取
-            custom_validations = template.get("custom_validations", [])
-            if custom_validations:
-                rule_config_text = "、".join([v.get("name", "") for v in custom_validations[:3]])
+        data_cleaning_rules = template.get("data_cleaning_rules", {})
+        file_labels = _get_file_names_from_rule_template(template)
         
-        biz_summary = ", ".join([f"{k}→{v}" for k, v in biz_fields.items() if v])
-        fin_summary = ", ".join([f"{k}→{v}" for k, v in fin_fields.items() if v])
+        # 构建配置规则显示，从 data_cleaning_rules 获取
+        config_items = []
         
-        # 添加匹配度图标
-        if match_percentage >= 90:
-            emoji = "✨"
-        else:
-            emoji = "📋"
-        
-        rule_text = f"{idx}. {emoji} **{name}** (匹配度: {match_percentage}%)\n"
-        rule_text += f"   📊 字段映射:\n"
-        rule_text += f"      • 业务: {biz_summary or '无'}\n"
-        rule_text += f"      • 财务: {fin_summary or '无'}\n"
-        
-        if rule_config_text:
-            rule_text += f"   ⚙️ 规则配置:\n"
-            rule_text += f"      {rule_config_text}\n"
-        
-        rule_text += f"   💡 {match_reason}"
-        
+        # 从 data_cleaning_rules 提取每个有 description 的规则项
+        for src in ("business", "finance"):
+            src_label = file_labels.get(src, "业务文件" if src == "business" else "财务文件")
+            src_rules = data_cleaning_rules.get(src, {})
+            # field_transforms
+            for t in src_rules.get("field_transforms", []):
+                desc = t.get("description", "").strip()
+                if desc:
+                    config_items.append(f"{src_label}：{desc}")
+            # aggregations
+            for agg in src_rules.get("aggregations", []):
+                desc = agg.get("description", "").strip()
+                if desc:
+                    config_items.append(f"{src_label}：{desc}")
+            # row_filters
+            for rf in src_rules.get("row_filters", []):
+                desc = rf.get("description", "").strip()
+                if desc:
+                    config_items.append(f"{src_label}：{desc}")
+
+        br = "  \n"
+        rule_text = f"**{idx}. {name}** ({match_percentage}%){br}"
+        if mapping_lines:
+            rule_text += f"**字段映射：**{br}"
+            rule_text += br.join(f"• {line}" for line in mapping_lines)
+        if config_items:
+            if mapping_lines:
+                rule_text += "\n\n"
+            rule_text += f"**配置规则：**{br}"
+            for cfg in config_items:
+                rule_text += f"• {cfg}{br}"
+
         rule_list_text.append(rule_text)
-    
+
     recommendation_text = "\n\n".join(rule_list_text)
-    
+
     question_text = (
-        f"🔍 **为你推荐以下规则**（基于字段映射匹配）：\n\n"
-        f"{recommendation_text}\n\n"
-        f"请输入数字选择规则（如 1、2、3），或输入「创建新规则」继续配置。"
+        f"**推荐规则**\n\n{recommendation_text}\n\n"
+        f"输入数字（1/2/3）选择，或「创建新规则」"
     )
-    
+
     user_response = interrupt({
         "step": "2.5/4",
         "step_title": "规则推荐",
         "question": question_text,
         "recommended_rules": recommended,
-        "hint": "输入数字选择推荐规则，或输入「创建新规则」自行配置",
+        "hint": "数字选择 或 「创建新规则」",
     })
     
     response_str = str(user_response).strip().lower()
@@ -636,33 +669,16 @@ def rule_config_node(state: AgentState) -> dict:
     
     # 区分初始状态和配置中状态
     if len(config_items) == 0:
-        # 初始状态：只显示提示，不显示"当前配置"标题
+        # 初始状态：简洁提示
         question_text = """⚙️ **第3步：配置对账规则参数**
 
-请描述对账规则的配置要求。支持以下类型的配置：
+请输入你的配置要求：
 
-**全局配置**（如金额容差）：
-• "金额容差0.1元"
-
-**聚合类配置**（按字段合并、金额累加等，放入 business/finance 的 aggregations，不放全局）：
-• 未指定文件："按订单号合并金额" → 两个文件都配置
-• 指定文件："文件1按订单号合并" → 只配置业务文件
-
-**针对业务数据(文件1)的配置**：
-• "业务文件的product_price除以100"
-• "文件1的订单号去掉开头单引号，并截取前21位"
-
-**针对财务数据(文件2)的配置**：
-• "财务文件的发生-除以100"
-• "文件2的订单号去除空格"
-
-**为两个文件配置不同规则**：
-• "文件1的金额除以100，文件2的金额不变"
-
-⚠️ 系统会根据字段名自动识别字段所属的文件（以字段映射为准）。
-例如：product_price 在财务数据(文件2)中 → 只在财务文件配置；在业务数据(文件1)中 → 只在业务文件配置
-
-**请输入你的配置要求：**"""
+💡 **操作提示**：
+• 系统智能识别字段所属的文件
+• 支持针对单个文件的规则配置
+• 支持为两个文件配置不同的转换规则
+• 完成后回复「确认」继续"""
     else:
         # 有配置项时：显示当前配置列表
         config_display = _format_rule_config_items(config_items, file_names)
@@ -1253,9 +1269,9 @@ def edit_field_mapping_node(state: AgentState) -> dict:
 
     mapping_display = _format_edit_field_mappings(mappings)
     if adjustment_feedback:
-        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n{adjustment_feedback}\n\n当前映射：\n{mapping_display}\n\n请确认或继续修改。"
+        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n{adjustment_feedback}\n\n{mapping_display}\n\n请确认或继续修改。"
     else:
-        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n当前字段对应关系：\n{mapping_display}\n\n请确认是否正确？回复「确认」继续，或描述需要修改的地方。"
+        question_text = f"📋 **编辑「{rule_name}」- 字段映射**\n\n{mapping_display}\n\n请确认是否正确？回复「确认」继续，或描述需要修改的地方。"
 
     user_response = interrupt({
         "step": "1/3",
@@ -1301,9 +1317,11 @@ def edit_rule_config_node(state: AgentState) -> dict:
     config_items = state.get("rule_config_items") or []
     rule_name = state.get("editing_rule_name", "规则")
     mappings = state.get("confirmed_mappings") or {}
+    rule_template = state.get("editing_rule_template") or {}
+    file_names = _get_file_names_from_rule_template(rule_template)
 
-    config_display = _format_rule_config_items(config_items, {"business": "业务文件", "finance": "财务文件"})
-    question_text = f"⚙️ **编辑「{rule_name}」- 规则配置**\n\n当前配置：\n{config_display}\n\n请确认是否正确？回复「确认」继续，或描述需要添加/删除的配置。"
+    config_display = _format_rule_config_items(config_items, file_names)
+    question_text = f"⚙️ **编辑「{rule_name}」- 规则配置**\n\n{config_display}\n\n请确认是否正确？回复「确认」继续，或描述需要添加/删除的配置。"
 
     user_response = interrupt({
         "step": "2/3",
@@ -1406,12 +1424,13 @@ def edit_validation_preview_node(state: AgentState) -> dict:
     schema = _validate_and_deduplicate_rules(schema)
 
     mapping_display = _format_edit_field_mappings(mappings)
-    config_display = _format_rule_config_items(config_items, {"business": "业务文件", "finance": "财务文件"})
+    file_names = _get_file_names_from_rule_template(rule_template)
+    config_display = _format_rule_config_items(config_items, file_names)
 
     preview_text = (
         f"✅ **编辑「{rule_name}」- 预览**\n\n"
-        f"🔗 **字段映射**\n{mapping_display}\n\n"
-        f"📋 **规则配置**\n{config_display}\n\n"
+        f"🔗 **字段映射**\n\n{mapping_display}\n\n"
+        f"📋 **规则配置**\n\n{config_display}\n\n"
         "确认无误后回复「保存」，将删除旧规则并保存新规则。"
     )
 
@@ -1466,6 +1485,7 @@ async def edit_save_node(state: AgentState) -> dict:
         del_result = await call_mcp_tool("delete_reconciliation_rule", {
             "auth_token": auth_token,
             "rule_id": rule_id,
+            "rule_name": rule_name,  # 校验防止误删
         })
         if not del_result.get("success"):
             return {
@@ -1605,15 +1625,15 @@ async def result_evaluation_node(state: AgentState) -> dict:
                 }
         
         # 游客：提示登录后保存
-        if generated_schema:
-            # 新建规则：使用 SAVE_NEW_RULE 标记，登录后由 /api/save-pending-rule 从 thread 状态恢复并保存
+        # 推荐规则（有 selected_rule_id）：使用 SAVE_RULE 标记，登录后由 /api/copy-rule 复制
+        # 新建规则（无 selected_rule_id 但有 generated_schema）：使用 SAVE_NEW_RULE 标记，登录后由 /api/save-pending-rule 从 thread 状态恢复并保存
+        if selected_rule_id:
             return {
-                "messages": [AIMessage(content=f"[SAVE_NEW_RULE:{rule_name}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则「{rule_name}」。")],
+                "messages": [AIMessage(content=f"[SAVE_RULE:{rule_name}:{selected_rule_id}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则。")],
                 "phase": ReconciliationPhase.COMPLETED.value,
             }
-        # 推荐规则：使用 SAVE_RULE 标记，登录后由 /api/copy-rule 复制
         return {
-            "messages": [AIMessage(content=f"[SAVE_RULE:{rule_name}:{selected_rule_id}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则。")],
+            "messages": [AIMessage(content=f"[SAVE_NEW_RULE:{rule_name}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则「{rule_name}」。")],
             "phase": ReconciliationPhase.COMPLETED.value,
         }
     

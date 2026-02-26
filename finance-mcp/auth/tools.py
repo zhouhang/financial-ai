@@ -160,6 +160,7 @@ def create_auth_tools() -> list[mcp_types.Tool]:
                 "properties": {
                     "auth_token": {"type": "string", "description": "JWT token"},
                     "rule_id": {"type": "string", "description": "规则 ID"},
+                    "rule_name": {"type": "string", "description": "规则名称（可选，用于校验防止误删）"},
                 },
                 "required": ["auth_token", "rule_id"],
             },
@@ -870,15 +871,35 @@ async def _handle_update_rule(args: dict) -> dict:
     }
 
 
+def _remove_from_reconciliation_schemas_config(rule_name_cn: str) -> bool:
+    """从 reconciliation_schemas.json 中移除规则配置"""
+    if not RECONCILIATION_SCHEMAS_FILE or not RECONCILIATION_SCHEMAS_FILE.exists():
+        return True
+    try:
+        with open(RECONCILIATION_SCHEMAS_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        types = config.get("types", [])
+        original_len = len(types)
+        config["types"] = [t for t in types if t.get("name_cn") != rule_name_cn]
+        if len(config["types"]) < original_len:
+            with open(RECONCILIATION_SCHEMAS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            logger.info(f"已从 reconciliation_schemas.json 移除: {rule_name_cn}")
+        return True
+    except Exception as e:
+        logger.warning(f"从 reconciliation_schemas.json 移除规则失败（不影响主操作）: {e}")
+        return False
+
+
 async def _handle_delete_rule(args: dict) -> dict:
     """删除规则
     
     流程:
     1. 从 PostgreSQL 数据库删除规则记录（主操作）
     2. 删除对应的 JSON schema 文件（备份）
+    3. 从 reconciliation_schemas.json 移除配置（备份）
     
     注意: PostgreSQL 是规则的主数据源，删除 PostgreSQL 记录即删除规则。
-    JSON 文件的删除仅为了保持备份的一致性。
     """
     valid, user_info, err = _require_auth(args)
     if not valid:
@@ -893,11 +914,16 @@ async def _handle_delete_rule(args: dict) -> dict:
     if not rule:
         return {"success": False, "error": "规则不存在"}
 
+    # 校验：若调用方传入 rule_name，必须与数据库中的规则名完全一致，防止误删
+    expected_name = args.get("rule_name", "").strip()
+    rule_name = rule.get("name", "")
+    if expected_name and expected_name != rule_name:
+        logger.warning(f"删除校验失败: 期望规则名「{expected_name}」与实际「{rule_name}」不一致，拒绝删除")
+        return {"success": False, "error": f"规则名称不匹配，拒绝删除（期望「{expected_name}」，实际「{rule_name}」）"}
+
     # 检查权限
     if not auth_db.can_user_modify_rule(user_info["user_id"], user_info["role"], rule):
         return {"success": False, "error": "无权删除此规则"}
-
-    rule_name = rule.get("name", "")
     
     # 1️⃣ 删除数据库记录（主操作）
     success = auth_db.delete_rule(rule_id)
@@ -919,6 +945,9 @@ async def _handle_delete_rule(args: dict) -> dict:
             logger.info(f"JSON 备份文件不存在（无需删除）: {schema_path}")
     except Exception as e:
         logger.warning(f"删除 JSON 备份文件失败（不影响主操作）: {e}")
+
+    # 3️⃣ 从 reconciliation_schemas.json 移除配置（备份）
+    _remove_from_reconciliation_schemas_config(rule_name)
 
     return {
         "success": True,

@@ -100,18 +100,21 @@ def build_schema(
     validations: list[dict] = [
         {
             "name": "missing_in_business",
+            "display_name": "业务缺失检测",
             "condition_expr": "fin_exists and not biz_exists",
             "issue_type": "missing_in_business",
             "detail_template": "{fin_file}存在，{biz_file}无此订单记录",
         },
         {
             "name": "missing_in_finance",
+            "display_name": "财务缺失检测",
             "condition_expr": "biz_exists and not fin_exists",
             "issue_type": "missing_in_finance",
             "detail_template": "{biz_file}存在，{fin_file}无此订单记录",
         },
         {
             "name": "amount_mismatch",
+            "display_name": "金额差异检测",
             "condition_expr": (
                 "biz_exists and fin_exists and biz.get('amount') is not None "
                 "and fin.get('amount') is not None "
@@ -131,8 +134,9 @@ def build_schema(
     if check_order_status and has_status_mapping:
         validations.append({
             "name": "order_status_mismatch",
+            "display_name": "订单状态检测",
             "condition_expr": (
-                "biz_exists and str(biz.get('status', '')).lower() != 'success' "
+                "str(biz.get('status', '')).lower() != 'success' "
                 "and str(biz.get('status', '')).lower() != '成功' "
                 "and str(biz.get('status', '')).lower() != '交易成功'"
             ),

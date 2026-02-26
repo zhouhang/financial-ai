@@ -468,53 +468,37 @@ def _adjust_field_mappings_with_llm(
 
 
 def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, Any]]) -> str:
-    """将字段映射格式化为用户友好的描述（文件A的XX列 对应 文件B的YY列）。"""
-    # 提取文件信息
+    """将字段映射格式化为简洁列表：文件1↔文件2，以及各角色的 标签：字段1↔字段2。"""
     business_file = None
     finance_file = None
     for a in analyses:
         if a.get("guessed_source") == "business":
-            business_file = a.get("filename", "文件1")
+            business_file = a.get("original_filename") or a.get("filename", "文件1")
         elif a.get("guessed_source") == "finance":
-            finance_file = a.get("filename", "文件2")
-    
-    # 如果没有识别到类型，使用默认名称
+            finance_file = a.get("original_filename") or a.get("filename", "文件2")
     if not business_file:
-        business_file = analyses[0].get("filename", "文件1") if len(analyses) > 0 else "文件1"
+        business_file = (analyses[0].get("original_filename") or analyses[0].get("filename", "文件1")) if analyses else "文件1"
     if not finance_file:
-        finance_file = analyses[1].get("filename", "文件2") if len(analyses) > 1 else "文件2"
-    
-    lines: list[str] = []
+        finance_file = (analyses[1].get("original_filename") or analyses[1].get("filename", "文件2")) if len(analyses) > 1 else "文件2"
+
     business_map = mappings.get("business", {})
     finance_map = mappings.get("finance", {})
-    
-    # 按角色展示对应关系
-    role_labels = {
-        "order_id": "订单号",
-        "amount": "金额",
-        "date": "日期",
-        "status": "状态"
-    }
-    
-    for role, label in role_labels.items():
-        business_col = business_map.get(role)
-        finance_col = finance_map.get(role)
-        
-        if business_col and finance_col:
-            # 处理列表类型的列名
-            if isinstance(business_col, list):
-                business_col_str = " / ".join(business_col)
-            else:
-                business_col_str = str(business_col)
-            
-            if isinstance(finance_col, list):
-                finance_col_str = " / ".join(finance_col)
-            else:
-                finance_col_str = str(finance_col)
-            
-            lines.append(f"  • **{label}匹配**：`{business_file}` 的 `{business_col_str}` ⇄ `{finance_file}` 的 `{finance_col_str}`")
-    
-    return "\n" + "\n".join(lines) if lines else "\n  （未找到匹配字段）"
+
+    def _fmt_col(v):
+        if isinstance(v, list):
+            return "、".join(str(x) for x in v)
+        return str(v) if v else ""
+
+    lines = [f"- {business_file}↔{finance_file}"]
+    for role in business_map.keys() & finance_map.keys():
+        biz_col = business_map.get(role)
+        fin_col = finance_map.get(role)
+        if biz_col and fin_col:
+            lines.append(f"- {_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+
+    if len(lines) <= 1:
+        return "\n（未找到匹配字段）"
+    return "\n" + "\n".join(lines)
 
 
 def _rule_template_to_mappings(rule_template: dict) -> dict[str, Any]:
@@ -529,20 +513,28 @@ def _rule_template_to_mappings(rule_template: dict) -> dict[str, Any]:
     return mappings
 
 
+def _get_file_names_from_rule_template(rule_template: dict) -> dict[str, str]:
+    """从 rule_template.data_sources 提取 file_pattern 第一个文件名。"""
+    ds = rule_template.get("data_sources", {})
+    biz_fp = ds.get("business", {}).get("file_pattern") or []
+    fin_fp = ds.get("finance", {}).get("file_pattern") or []
+    return {
+        "business": biz_fp[0] if biz_fp else "业务文件",
+        "finance": fin_fp[0] if fin_fp else "财务文件",
+    }
+
+
 def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
-    """将 rule_template 转为 rule_config_items，保留用户原有的具体描述（非通用文案）。"""
+    """将 rule_template 转为 rule_config_items，从 data_cleaning_rules 的 description 获取。
+    不自动添加金额容差（仅当用户显式添加时才显示）。
+    """
     items: list[dict] = []
-    # 1. 金额容差
-    tol = rule_template.get("tolerance", {})
-    if tol.get("amount_diff_max") is not None:
-        items.append({
-            "json_snippet": {"tolerance": dict(tol)},
-            "description": f"金额容差 {tol.get('amount_diff_max', 0.1)} 元",
-        })
-    # 2. 从 data_cleaning_rules 提取每个有 description 的规则项（保留用户原配置）
+    file_labels = _get_file_names_from_rule_template(rule_template)
+
+    # 从 data_cleaning_rules 提取每个有 description 的规则项
     dcr = rule_template.get("data_cleaning_rules", {})
     for src in ("business", "finance"):
-        src_label = "业务文件" if src == "business" else "财务文件"
+        src_label = file_labels.get(src, "业务文件" if src == "business" else "财务文件")
         src_rules = dcr.get(src, {})
         # field_transforms
         for t in src_rules.get("field_transforms", []):
@@ -568,6 +560,7 @@ def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
                     "json_snippet": {"data_cleaning_rules": {src: {"row_filters": [rf]}}},
                     "description": f"{src_label}：{desc}",
                 })
+    
     # 若未提取到任何带描述的项，回退为整体展示（避免空列表）
     if not items:
         biz = dcr.get("business", {})
@@ -581,17 +574,24 @@ def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
 
 
 def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
-    """编辑模式下格式化字段映射（无需 file_analyses）。"""
-    role_labels = {"order_id": "订单号", "amount": "金额", "date": "日期", "status": "状态"}
+    """编辑模式下格式化字段映射（无需 file_analyses）。
+    格式：sp订单号↔sup订单号
+    """
+
+    def _fmt_col(v: Any) -> str:
+        if isinstance(v, list):
+            return "、".join(str(x) for x in v)
+        return str(v) if v else ""
+
+    biz_map = mappings.get("business", {})
+    fin_map = mappings.get("finance", {})
     lines: list[str] = []
-    for role, label in role_labels.items():
-        biz_col = mappings.get("business", {}).get(role)
-        fin_col = mappings.get("finance", {}).get(role)
-        if biz_col or fin_col:
-            biz_str = " / ".join(biz_col) if isinstance(biz_col, list) else str(biz_col or "")
-            fin_str = " / ".join(fin_col) if isinstance(fin_col, list) else str(fin_col or "")
-            lines.append(f"  • **{label}**：业务 `{biz_str}` ⇄ 财务 `{fin_str}`")
-    return "\n".join(lines) if lines else "  （无映射）"
+    for role in biz_map.keys() & fin_map.keys():
+        biz_col = biz_map.get(role)
+        fin_col = fin_map.get(role)
+        if biz_col and fin_col:
+            lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+    return "\n\n".join(lines) if lines else "（无映射）"
 
 
 def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
@@ -601,7 +601,6 @@ def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
     业务: 订单号->第三方订单号, 金额->应结算平台金额, 日期->支付时间
     财务: 订单号->sup订单号, 金额->发生-, 日期->完成时间
     """
-    role_labels = {"order_id": "订单号", "amount": "金额", "date": "日期", "status": "状态"}
     lines = []
     for source, label in [("business", "业务"), ("finance", "财务")]:
         src_map = mappings.get(source, {})
@@ -609,9 +608,8 @@ def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
             continue
         parts = []
         for role, col in src_map.items():
-            rl = role_labels.get(role, role)
             col_str = " / ".join(col) if isinstance(col, list) else str(col)
-            parts.append(f"{rl}->{col_str}")
+            parts.append(f"{role}->{col_str}")
         if parts:
             lines.append(f"{label}: {', '.join(parts)}")
     return "\n".join(lines) if lines else ""
@@ -1169,15 +1167,13 @@ def get_match_reason(matched_fields: list[str]) -> str:
     order_id_matched = any("order_id" in f for f in matched_fields)
 
     if biz_count >= 3 and fin_count >= 3:
-        return "字段完全匹配，推荐使用"
+        return "推荐"
     elif biz_count >= 2 and fin_count >= 2:
-        if order_id_matched:
-            return "关键字段匹配度高"
-        return "部分字段匹配"
+        return "关键字段匹配" if order_id_matched else "部分匹配"
     elif order_id_matched:
         return "订单号匹配"
     else:
-        return "存在字段匹配"
+        return "有匹配"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

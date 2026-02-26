@@ -805,9 +805,11 @@ async def copy_rule(
     authorization: Optional[str] = Header(None),
 ):
     """复制对账规则为个人规则（登录后保存游客创建的推荐规则）"""
+    logger.info(f"[copy-rule] 收到请求, authorization={authorization[:20] if authorization else None}..., body={body}")
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证令牌")
     token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    logger.info(f"[copy-rule] token长度={len(token)}, token前20={token[:20] if token else None}")
     source_rule_id = body.get("source_rule_id")
     new_rule_name = body.get("new_rule_name")
     if not source_rule_id or not new_rule_name:
@@ -818,6 +820,7 @@ async def copy_rule(
             "source_rule_id": source_rule_id,
             "new_rule_name": new_rule_name,
         })
+        logger.info(f"[copy-rule] MCP返回: {result}")
         return result
     except Exception as e:
         logger.error(f"复制规则失败: {e}")

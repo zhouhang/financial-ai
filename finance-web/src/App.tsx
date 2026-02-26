@@ -125,6 +125,8 @@ export default function App() {
   /** 登录框标题提示，如「登录后使用完整功能」；为空时显示默认「登录」/「注册」 */
   const [loginModalTitleHint, setLoginModalTitleHint] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** 规则保存成功提示 */
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
   const isGuest = !authToken;
 
@@ -180,10 +182,12 @@ export default function App() {
     localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
     
     let ruleJustSaved = false;
+    console.log('[handleLoginSuccess] pendingRuleName=', pendingRuleName, 'pendingSourceRuleId=', pendingSourceRuleId, 'pendingIsNewRule=', pendingIsNewRule, 'newToken=', newToken ? 'exists' : 'null');
     if (pendingRuleName && newToken) {
       try {
         if (pendingIsNewRule && pendingThreadId) {
           // 新建规则：从 thread 状态恢复并保存
+          console.log('[handleLoginSuccess] 保存新建规则, threadId=', pendingThreadId);
           const response = await fetch('/api/save-pending-rule', {
             method: 'POST',
             headers: {
@@ -196,6 +200,7 @@ export default function App() {
             }),
           });
           const data = await response.json();
+          console.log('[handleLoginSuccess] save-pending-rule响应:', data);
           if (data.success) {
             ruleJustSaved = true;
             localStorage.removeItem('pending_rule_name');
@@ -206,6 +211,7 @@ export default function App() {
           }
         } else if (pendingSourceRuleId) {
           // 推荐规则：复制
+          console.log('[handleLoginSuccess] 复制规则, sourceRuleId=', pendingSourceRuleId);
           const response = await fetch('/api/copy-rule', {
             method: 'POST',
             headers: {
@@ -218,6 +224,7 @@ export default function App() {
             }),
           });
           const data = await response.json();
+          console.log('[handleLoginSuccess] copy-rule响应:', data);
           if (data.success) {
             ruleJustSaved = true;
             localStorage.removeItem('pending_rule_name');
@@ -226,8 +233,11 @@ export default function App() {
             console.error('复制规则失败:', data.error || data.detail || '未知错误');
           }
         }
+        console.log('[handleLoginSuccess] ruleJustSaved=', ruleJustSaved);
         if (ruleJustSaved) {
           localStorage.removeItem('pending_rule_id');
+          // 显示成功提示
+          setSaveSuccessMessage(`✅ 规则「${pendingRuleName}」已成功保存到您的个人规则列表！`);
         }
       } catch (e) {
         console.error('保存规则失败:', e);
@@ -236,20 +246,18 @@ export default function App() {
     }
     
     setIsLoginModalOpen(false);
+    // 清除游客对话缓存，不保存为登录后会话
     clearConversationsCache();
+    localStorage.removeItem(STORAGE_KEY_GUEST_CONV);
     convIdMapRef.current.clear();
-    const newConv = createConversation();
-    pendingNewConvRef.current = newConv;
     setConversations([]);
-    setActiveConvId(newConv.id);
     setIsLoading(false);
     setTasks([]);
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
-    if (ruleJustSaved) {
-      localStorage.setItem('rule_just_saved', pendingRuleName!);
-    }
+    // 标记刚登录，加载会话列表后选择最近会话
+    justLoggedInRef.current = true;
     void loadConversations();
   }, [clearConversationsCache, loadConversations]);
 
@@ -261,57 +269,33 @@ export default function App() {
   // 追踪登录时的会话ID（本地ID和服务器ID，用于登录成功后清除）
   const loginConvIdRef = useRef<{ localId: string | null; serverId: string | null }>({ localId: null, serverId: null });
   
-  // 登录成功后，会话列表加载完成时自动选择最新会话（排除登录会话）
+  // 登录成功后，会话列表加载完成时自动选择最近会话
   useEffect(() => {
     if (justLoggedInRef.current && serverConversations.length > 0) {
       justLoggedInRef.current = false;
       
-      const loginLocalId = loginConvIdRef.current.localId;
-      // 获取登录会话的服务器ID（可能通过映射表获取）
-      const loginServerId = loginConvIdRef.current.serverId 
-        || (loginLocalId ? convIdMapRef.current.get(loginLocalId) : null);
-      
-      // 清除登录时的本地临时会话
-      if (loginLocalId) {
-        setConversations((prev) => prev.filter((c) => c.id !== loginLocalId));
-      }
-      
       // 清除待确认的新会话
       pendingNewConvRef.current = null;
       
-      // 选择最新的会话，排除登录会话
-      const availableConvs = serverConversations.filter((c) => c.id !== loginServerId);
-      if (availableConvs.length > 0) {
-        const latestConv = availableConvs[0];
-        setActiveConvId(latestConv.id);
-        
-        // 加载会话消息
-        setIsLoadingConversation(true);
-        loadConversation(latestConv.id).then((conv) => {
-          if (conv && conv.messages.length > 0) {
-            setConversations((prev) => {
-              const filtered = prev.filter((c) => c.id !== loginLocalId);
-              const existing = filtered.find((c) => c.id === latestConv.id);
-              if (existing) {
-                return filtered.map((c) =>
-                  c.id === latestConv.id
-                    ? { ...c, messages: conv.messages, title: conv.title }
-                    : c
-                );
-              } else {
-                return [conv, ...filtered];
-              }
-            });
-          }
-          setIsLoadingConversation(false);
-        });
-      } else {
-        // 没有其他会话，创建新对话
-        const newConv = createConversation();
-        pendingNewConvRef.current = newConv;
-        setActiveConvId(newConv.id);
-      }
+      // 选择最近的会话
+      const latestConv = serverConversations[0];
+      setActiveConvId(latestConv.id);
       
+      // 加载会话消息
+      setIsLoadingConversation(true);
+      loadConversation(latestConv.id).then((conv) => {
+        if (conv && conv.messages.length > 0) {
+          setConversations([conv]);
+        }
+        setIsLoadingConversation(false);
+      });
+    } else if (justLoggedInRef.current && serverConversations.length === 0) {
+      // 没有会话，创建新对话
+      justLoggedInRef.current = false;
+      const newConv = createConversation();
+      pendingNewConvRef.current = newConv;
+      setActiveConvId(newConv.id);
+
       // 清除登录会话ID记录
       loginConvIdRef.current = { localId: null, serverId: null };
     }
@@ -541,17 +525,10 @@ export default function App() {
           // 只在创建规则流程（有step字段）时显示 interrupt 消息
           // 使用已有规则时（无step字段）不显示，避免重复提示
           if (step && question) {
-            let content = '';
-            
-            // 添加步骤指示器
-            content += `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-            content += question;
-            
+            let content = question;
             if (hint) {
               content += `\n\n${hint}`;
             }
-            
-            content += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
             
             setConversations((prev) =>
               prev.map((c) =>
@@ -968,6 +945,18 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         titleHint={loginModalTitleHint}
       />
+      {/* 规则保存成功提示 */}
+      {saveSuccessMessage && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg shadow-lg z-50 flex items-center gap-3">
+          <span>{saveSuccessMessage}</span>
+          <button 
+            onClick={() => setSaveSuccessMessage(null)} 
+            className="text-green-500 hover:text-green-700 font-bold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }

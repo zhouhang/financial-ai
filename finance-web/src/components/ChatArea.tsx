@@ -63,14 +63,6 @@ export default function ChatArea({
   onToggleSidebar,
   streamingMessageId,
 }: ChatAreaProps) {
-  // 登录后自动发送消息获取规则列表
-  useEffect(() => {
-    const justSavedRule = localStorage.getItem('rule_just_saved');
-    if (justSavedRule && messages.length === 0 && !isLoading && connectionStatus === 'connected') {
-      localStorage.removeItem('rule_just_saved');
-      onSendMessage(`你好，请介绍自己并展示我的规则列表`, undefined, true);
-    }
-  }, [messages.length, isLoading, connectionStatus, onSendMessage]);
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);

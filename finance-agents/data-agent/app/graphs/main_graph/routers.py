@@ -58,6 +58,10 @@ def route_after_router(state: AgentState) -> str:
     phase = state.get("phase", "")
 
     if intent == "guest_reconciliation":
+        # 已有 file_analyses 时跳过文件分析，直接进入规则推荐，避免重复分析
+        analyses = state.get("file_analyses", [])
+        if analyses:
+            return "rule_recommendation"
         return "file_analysis"
     elif intent == UserIntent.CREATE_NEW_RULE.value:
         return "file_analysis"
@@ -165,6 +169,7 @@ def build_main_graph() -> StateGraph:
     # router 后路由
     graph.add_conditional_edges("router", route_after_router, {
         "file_analysis": "file_analysis",
+        "rule_recommendation": "rule_recommendation",
         "task_execution": "task_execution",
         "edit_field_mapping": "edit_field_mapping",
         END: END,

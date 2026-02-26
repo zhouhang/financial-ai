@@ -79,7 +79,7 @@ def _get_progress_callback(thread_id: str):
 # ── 系统提示词 ────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT_NOT_LOGGED_IN = """\
-你是一个专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+你是 Tally，专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
 
 你可以帮助用户：
 1. 上传业务文件和财务文件进行对账
@@ -89,15 +89,16 @@ SYSTEM_PROMPT_NOT_LOGGED_IN = """\
 
 请根据用户的意图判断下一步操作：
 - 如果用户想上传文件对账，回复 JSON: {{"intent": "guest_reconciliation"}}
-- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，介绍你的功能
+- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，介绍你是 Tally 及你的功能
 
 重要：
 - 所有内容必须在同一条消息中完成，不要分多次回复
 - 不要使用感叹号（！或!）开头
+- 回复言简意赅，善用 Markdown 排版（如 **加粗**、- 列表、标题等）增强可读性
 """
 
 SYSTEM_PROMPT = """\
-你是一个专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+你是 Tally，专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
 当前登录用户：{username}
 
 你可以做以下事情：
@@ -118,10 +119,11 @@ SYSTEM_PROMPT = """\
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
 - 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
-  1. 用「你好，{username}！」开头，带上用户名
+  1. 用「你好，{username}！我是 Tally」开头，带上用户名
   2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
   3. 说明当前已有规则
   4. 询问用户需要什么帮助
+  5. 回复言简意赅，善用 Markdown 排版（**加粗**、- 列表等）增强可读性
 
 注意：
 - **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
@@ -139,11 +141,12 @@ RESULT_ANALYSIS_PROMPT = """\
 {result_json}
 
 重要要求：
-1. 不要使用Markdown格式（不要用*、#、-等符号）
-2. 使用Emoji图标增强可读性
-3. 语言简洁直白，易于理解
+1. 善用 Markdown 排版（**加粗**、- 列表、标题等）增强可读性
+2. 使用 Emoji 图标增强可读性
+3. 语言言简意赅，简洁直白，易于理解
 4. 文件名不要包含时间戳，使用原始上传的文件名
 5. 异常类型直接用文件名表示，不要用"财务数据"、"业务数据"等描述
+6. 【关键】差异/异常的总条数必须使用 summary.unmatched_records（或 issues_count），切勿使用 total_business_records 或 total_finance_records。例如差异列表标题应写「差异 (10条)」而非「差异 (985条)」
 
 示例格式：
 
@@ -567,11 +570,11 @@ async def intent_router(state: AgentState) -> dict:
             # 开始创建新规则，清空旧数据
             uploaded_files = []
         welcome_msg = (
-            "🎯 开始创建新的对账规则\n\n"
+            "🎯 **开始创建新的对账规则**\n\n"
             "我会引导你完成以下4个步骤：\n\n"
-            "1️⃣ 上传并分析文件 - 分析文件结构和列名\n"
-            "2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）\n"
-            "3️⃣ 配置规则参数 - 设置容差、订单号特征等\n"
+            "1️⃣ 上传并分析文件 - 分析文件结构和列名\n\n"
+            "2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）\n\n"
+            "3️⃣ 配置规则参数 - 设置容差、订单号特征等\n\n"
             "4️⃣ 预览并保存 - 查看规则效果并保存\n\n"
             "请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。"
         )
@@ -594,23 +597,33 @@ async def intent_router(state: AgentState) -> dict:
                 if extracted.endswith("规则"):
                     extracted = extracted[:-2].strip()
                 target_name = extracted
-            # 仅当规则列表中存在与 target_name 完全匹配的规则时才删除
+            # 查找匹配的规则：先精确匹配，再模糊匹配（包含关系）
             rule_id = None
             matched_rule_name = None
             for rule in rules:
-                if rule.get("name") == target_name:
+                rule_name = rule.get("name", "")
+                # 精确匹配
+                if rule_name == target_name:
                     rule_id = rule.get("id")
-                    matched_rule_name = rule.get("name")
+                    matched_rule_name = rule_name
                     break
+            # 模糊匹配：如果精确匹配没找到，尝试包含匹配
+            if not rule_id and target_name:
+                for rule in rules:
+                    rule_name = rule.get("name", "")
+                    if target_name in rule_name or rule_name in target_name:
+                        rule_id = rule.get("id")
+                        matched_rule_name = rule_name
+                        break
 
             if not rule_id:
                 return {
-                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
+                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。你的规则列表有：{', '.join([r.get('name', '') for r in rules]) if rules else '暂无'}")],
                     "user_intent": UserIntent.UNKNOWN.value,
                 }
 
-            # 调用删除规则 API
-            result = await delete_rule(auth_token, rule_id)
+            # 调用删除规则 API（传入 rule_name 用于后端校验，防止误删）
+            result = await delete_rule(auth_token, rule_id, rule_name=matched_rule_name)
 
             if result.get("success"):
                 return {
@@ -1015,10 +1028,12 @@ def result_analysis_node(state: AgentState) -> dict:
     # 构建结果 JSON（精简版，避免 token 过多）
     summary = task_result.get("summary", {})
     issues = task_result.get("issues", [])
+    unmatched_count = summary.get("unmatched_records", len(issues))
     
     result_for_llm = {
         "summary": summary,
         "issues_count": len(issues),
+        "unmatched_records": unmatched_count,  # 差异/异常总数，用于差异列表标题
         "issues": issues[:50],  # 传前50条给 LLM（按类型分组需要更多数据）
     }
 

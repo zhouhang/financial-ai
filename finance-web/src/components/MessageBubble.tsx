@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Bot,
   ChevronDown,
@@ -8,7 +8,10 @@ import {
   Pencil,
   User,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import type { Message, MessageAttachment } from '../types';
+import { ResponsiveTable, type TableColumn } from './ResponsiveTable';
+import { useTablePreferences } from '../hooks/useTablePreferences';
 
 interface MessageBubbleProps {
   message: Message;
@@ -123,13 +126,398 @@ function SystemActionMessage({ message }: { message: Message }) {
   );
 }
 
-/** 文本显示组件 - 直接显示完整文本（已禁用打字机效果） */
-function TypewriterText({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+const SPINNER_REGEX = /\{\{?SPINNER\}\}?/;
+
+interface ParsedTable {
+  headers: string[];
+  rows: string[][];
+  isColumnTable?: boolean;
+}
+
+function parseMarkdownTable(content: string): ParsedTable | null {
+  const lines = content.trim().split('\n');
+  if (lines.length < 2) return null;
+
+  const headerLine = lines[0];
+  const separatorLine = lines[1];
+
+  if (!separatorLine.includes('|') || !separatorLine.includes('-')) return null;
+
+  const headers = headerLine
+    .split('|')
+    .slice(1, -1)
+    .map((h) => h.trim());
+
+  const rows: string[][] = [];
+  for (let i = 2; i < lines.length; i++) {
+    const row = lines[i]
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (row.some((c) => c !== '')) {
+      rows.push(row);
+    }
+  }
+
+  if (headers.length === 0) return null;
+
+  const isColumnTable = headers.length === 1 && headers[0] === '列名';
+
+  return { headers, rows, isColumnTable };
+}
+
+function extractFileColumnTables(content: string): {
+  columnTables: { filename: string; columns: string[]; rowCount?: number; sampleRows?: string[][] }[];
+  before: string;
+  after: string;
+} {
+  const results: { filename: string; columns: string[]; rowCount?: number; sampleRows?: string[][] }[] = [];
+  const analysisCompleteIndex = content.indexOf('文件分析完成');
+  const searchStart = analysisCompleteIndex >= 0 ? analysisCompleteIndex : 0;
+  const searchContent = content.slice(searchStart);
+
+  // 支持两种格式：简单 (985行) 和复杂 (财务 85%) 976行
+  const tableBlockRegex = /\*\*([^*]+)\*\*\s*(?:\((\d+)行\)|\([^)]*\)\s*(\d+)行)\s*\n(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)*)/g;
+  let lastTableEnd = 0;
+  let firstFileIndex = searchStart;
+  let match;
+
+  while ((match = tableBlockRegex.exec(searchContent)) !== null) {
+    const filename = match[1].trim();
+    const rowCount = parseInt(match[2] || match[3], 10) || 0;
+    if (filename.includes('文件分析')) continue;
+
+    const tableContent = match[4];
+    const parsed = parseMarkdownTable(tableContent);
+
+    if (parsed && parsed.headers.length > 0) {
+      const columns = parsed.headers.filter((c) => c && !c.startsWith('…'));
+      const sampleRows = parsed.rows;
+      if (columns.length > 0) {
+        if (results.length === 0) firstFileIndex = searchStart + match.index;
+        results.push({ filename, columns, rowCount, sampleRows });
+        lastTableEnd = searchStart + match.index + match[0].length;
+      }
+    }
+  }
+
+  if (results.length >= 1) {
+    return {
+      columnTables: results,
+      before: content.slice(0, firstFileIndex),
+      after: lastTableEnd > 0 ? content.slice(lastTableEnd) : '',
+    };
+  }
+
+  return { columnTables: [], before: content, after: '' };
+}
+
+function mergeColumnTables(tables: { filename: string; columns: string[] }[]): ParsedTable | null {
+  if (tables.length === 0) return null;
+
+  const maxRows = Math.max(...tables.map(t => t.columns.length));
+  
+  const headers = tables.map(t => t.filename);
+  const rows: string[][] = [];
+
+  for (let i = 0; i < maxRows; i++) {
+    const row = tables.map(t => t.columns[i] || '');
+    rows.push(row);
+  }
+
+  return { headers, rows, isColumnTable: true };
+}
+
+function HorizontalColumnTable({
+  filename,
+  columns,
+  rowCount,
+  sampleRows,
+}: {
+  filename: string;
+  columns: string[];
+  rowCount?: number;
+  sampleRows?: string[][];
+}) {
+  const displayName = rowCount != null && rowCount > 0 ? `${filename} (${rowCount} 行)` : filename;
+  return (
+    <div className="my-3">
+      <div className="text-sm font-medium text-gray-700 mb-1">{displayName}</div>
+      <div className="border border-gray-200 rounded-lg overflow-x-auto bg-white" style={{ WebkitOverflowScrolling: 'touch' }}>
+        <table className="text-sm min-w-max">
+          <thead>
+            <tr className="bg-gray-50">
+              {columns.map((col, i) => (
+                <th key={i} className="px-3 py-2 text-left font-medium text-gray-600 whitespace-nowrap border-r border-gray-200 last:border-r-0">
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          {sampleRows && sampleRows.length > 0 && (
+            <tbody>
+              {sampleRows.map((row, ri) => (
+                <tr key={ri}>
+                  {columns.map((_, i) => (
+                    <td key={i} className="px-3 py-2 text-gray-800 whitespace-nowrap border-r border-gray-100 last:border-r-0">
+                      {row[i] ?? ''}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          )}
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function extractTablesFromMarkdown(content: string): { table: ParsedTable; before: string; after: string }[] {
+  const results: { table: ParsedTable; before: string; after: string }[] = [];
+  const tableRegex = /\|[^\n]+\|[^\n]*\n\|[-:\s|]+\|\n((?:\|[^\n]+\|\n?)+)/g;
+  
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = tableRegex.exec(content)) !== null) {
+    const tableContent = match[0];
+    const parsed = parseMarkdownTable(tableContent);
+    
+    if (parsed) {
+      results.push({
+        table: parsed,
+        before: content.slice(lastIndex, match.index),
+        after: '',
+      });
+      lastIndex = match.index + tableContent.length;
+    }
+  }
+  
+  if (results.length > 0) {
+    results[results.length - 1].after = content.slice(lastIndex);
+  }
+  
+  return results;
+}
+
+function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeContent?: string }) {
+  const tableId = useMemo(() => `msg-table-${Math.random().toString(36).slice(2, 9)}`, []);
+  const { preferences, isLoaded, setViewMode, toggleColumnVisibility, setColumnWidth } = useTablePreferences(tableId);
+
+  if (table.isColumnTable && table.headers[0] === '列名' && table.rows.length > 0) {
+    const columns = table.rows.map((r) => r[0] || '').filter(Boolean);
+    const filenameMatch = beforeContent?.match(/\*\*([^*]+)\*\*\s*(?:\((\d+)行\)|\([^)]*\)\s*(\d+)行)/);
+    const filename = filenameMatch?.[1]?.trim() || '文件';
+    const rowCount = parseInt(filenameMatch?.[2] || filenameMatch?.[3] || '0', 10) || 0;
+    return (
+      <HorizontalColumnTable
+        filename={filename}
+        columns={columns}
+        rowCount={rowCount || undefined}
+        sampleRows={[]}
+      />
+    );
+  }
+
+  const columns: TableColumn[] = table.headers.map((header, index) => ({
+    key: `col-${index}`,
+    label: header,
+    width: index === 0 ? 200 : 120,
+    minWidth: 60,
+    essential: index === 0,
+  }));
+
+  const data = table.rows.map((row) => {
+    const rowData: Record<string, unknown> = {};
+    row.forEach((cell, index) => {
+      rowData[`col-${index}`] = cell;
+    });
+    return rowData;
+  });
+
+  if (!isLoaded) {
+    return <div className="animate-pulse h-32 bg-gray-100 rounded"></div>;
+  }
+
+  return (
+    <div className="my-2">
+      <ResponsiveTable
+        data={data}
+        columns={columns}
+        viewMode={preferences.viewMode}
+        columnVisibility={preferences.columnVisibility}
+        columnWidths={preferences.columnWidths}
+        filenameTruncationLength={preferences.filenameTruncationLength}
+        onViewModeChange={setViewMode}
+        onColumnVisibilityChange={toggleColumnVisibility}
+        onColumnWidthChange={setColumnWidth}
+      />
+    </div>
+  );
+}
+
+function preprocessBulletList(content: string): string {
+  return content.replace(/^• (.+)$/gm, '- $1');
+}
+
+/** 渲染带有表格支持的内容 */
+function ContentWithTables({ content }: { content: string }) {
+  const processedContent = useMemo(() => preprocessBulletList(content), [content]);
+  const { columnTables, before, after } = useMemo(() => extractFileColumnTables(processedContent), [processedContent]);
+  const regularTables = useMemo(() => extractTablesFromMarkdown(processedContent), [processedContent]);
+
+  if (columnTables.length >= 1) {
+    return (
+      <>
+        {before && (
+          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <ReactMarkdown>{before}</ReactMarkdown>
+          </div>
+        )}
+        {columnTables.map((table, idx) => (
+          <HorizontalColumnTable
+            key={idx}
+            filename={table.filename}
+            columns={table.columns}
+            rowCount={table.rowCount}
+            sampleRows={table.sampleRows}
+          />
+        ))}
+        {after && (
+          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <ReactMarkdown>{after}</ReactMarkdown>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  if (regularTables.length === 0) {
+    return (
+      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+        <ReactMarkdown
+          components={{
+            p: ({ children }) => <p className="my-1">{children}</p>,
+            ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
+            ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+blockquote: ({ children }) => (
+                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                  {children}
+                </blockquote>
+              ),
+            code: ({ children }) => (
+              <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+            ),
+            table: ({ children }) => <div className="overflow-x-auto my-2">{children}</div>,
+            thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
+            tbody: ({ children }) => <tbody>{children}</tbody>,
+            tr: ({ children }) => <tr className="border-b border-gray-100">{children}</tr>,
+            th: ({ children }) => <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">{children}</th>,
+            td: ({ children }) => <td className="px-3 py-2 text-xs text-gray-700">{children}</td>,
+          }}
+        >
+          {processedContent}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+
+  if (regularTables.length === 0) {
+    return (
+      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+        <ReactMarkdown
+          components={{
+            p: ({ children }) => <p className="my-1">{children}</p>,
+            ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
+            ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+blockquote: ({ children }) => (
+                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                  {children}
+                </blockquote>
+              ),
+            code: ({ children }) => (
+              <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+            ),
+            table: ({ children }) => <div className="overflow-x-auto my-2">{children}</div>,
+            thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
+            tbody: ({ children }) => <tbody>{children}</tbody>,
+            tr: ({ children }) => <tr className="border-b border-gray-100">{children}</tr>,
+            th: ({ children }) => <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">{children}</th>,
+            td: ({ children }) => <td className="px-3 py-2 text-xs text-gray-700">{children}</td>,
+          }}
+        >
+          {processedContent}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+
   return (
     <>
-      {content.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
+      {regularTables.map((item: { table: ParsedTable; before: string; after: string }, idx: number) => (
+        <div key={idx}>
+          {item.before && (
+            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+              <ReactMarkdown
+                components={{
+                  p: ({ children }) => <p className="my-1">{children}</p>,
+                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+blockquote: ({ children }) => (
+                    <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                      {children}
+                    </blockquote>
+                  ),
+                    code: ({ children }) => (
+                      <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                    ),
+                }}
+              >
+                {item.before}
+              </ReactMarkdown>
+            </div>
+          )}
+          <TableRenderer table={item.table} beforeContent={item.before} />
+          {item.after && (
+            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+              <ReactMarkdown
+                components={{
+                  p: ({ children }) => <p className="my-1">{children}</p>,
+                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+blockquote: ({ children }) => (
+                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                  {children}
+                </blockquote>
+              ),
+                  code: ({ children }) => (
+                    <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                  ),
+                }}
+              >
+                {item.after}
+              </ReactMarkdown>
+            </div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** Markdown 消息内容：支持 SPINNER 占位符与流式光标 */
+function MarkdownMessageContent({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+  const parts = content.split(SPINNER_REGEX);
+  return (
+    <>
+      {parts.map((part, i, arr) => (
         <span key={i}>
-          {part}
+          <ContentWithTables content={part} />
           {i < arr.length - 1 && (
             <span className="inline-flex gap-1 ml-0.5 align-middle">
               <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
@@ -139,7 +527,6 @@ function TypewriterText({ content, isStreaming }: { content: string; isStreaming
           )}
         </span>
       ))}
-      {/* 流式输出时显示闪烁光标 */}
       {isStreaming && (
         <span className="streaming-cursor inline-block w-0.5 h-4 bg-blue-500 ml-0.5 align-middle animate-pulse" />
       )}
@@ -223,8 +610,11 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
               <p className="text-xs text-text-muted mt-1">请稍候，正在处理您的请求</p>
             </div>
           ) : (
-          <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-            <TypewriterText content={stripSaveRuleTag(message.content)} isStreaming={isStreaming} />
+          <div className="message-content text-sm text-text-primary leading-relaxed">
+            <MarkdownMessageContent
+              content={stripSaveRuleTag(message.content)}
+              isStreaming={isStreaming}
+            />
           </div>
           )}
         </div>

@@ -313,12 +313,12 @@ async def update_rule(auth_token: str, rule_id: str, **kwargs) -> dict[str, Any]
     return await call_mcp_tool("update_reconciliation_rule", args)
 
 
-async def delete_rule(auth_token: str, rule_id: str) -> dict[str, Any]:
-    """删除规则"""
-    return await call_mcp_tool("delete_reconciliation_rule", {
-        "auth_token": auth_token,
-        "rule_id": rule_id,
-    })
+async def delete_rule(auth_token: str, rule_id: str, rule_name: str = "") -> dict[str, Any]:
+    """删除规则。传入 rule_name 用于后端校验，防止误删其他规则。"""
+    args: dict[str, Any] = {"auth_token": auth_token, "rule_id": rule_id}
+    if rule_name:
+        args["rule_name"] = rule_name
+    return await call_mcp_tool("delete_reconciliation_rule", args)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

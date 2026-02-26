@@ -632,7 +632,7 @@ def copy_rule(source_rule_id: str, new_name: str, user_id: str) -> dict:
                     row["company_id"],
                     row["department_id"],
                     json.dumps(template, ensure_ascii=False),
-                    row["visibility"],
+                    "private",
                     row["tags"] or [],
                     row["version"],
                     "active",
@@ -1267,7 +1267,7 @@ def list_recommended_rules(limit: int = 20) -> list:
     """
     sql = """
     SELECT id, name, description, visibility, version, use_count, status,
-           created_at, key_field_role, field_mapping_hash
+           created_at, key_field_role, field_mapping_hash, rule_template
     FROM reconciliation_rules
     WHERE status = 'active'
     ORDER BY use_count DESC
@@ -1286,6 +1286,7 @@ def list_recommended_rules(limit: int = 20) -> list:
                     item = dict(row)
                     item["id"] = str(item["id"])
                     item["created_at"] = item["created_at"].isoformat() if item["created_at"] else None
+                    # rule_template 已经是 dict 格式，直接返回
                     result.append(item)
                 return result
     except Exception as e:
