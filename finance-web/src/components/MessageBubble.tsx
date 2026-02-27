@@ -20,6 +20,11 @@ interface MessageBubbleProps {
   isStreaming?: boolean;
 }
 
+// 过滤用户消息中的 Agent 前缀
+function filterUserMessage(content: string): string {
+  return content.replace(/^\[AGENT:data_process\]\s*/, '');
+}
+
 function formatTime(date: Date): string {
   return date.toLocaleTimeString('zh-CN', {
     hour: '2-digit',
@@ -647,13 +652,15 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
 /** 用户消息 */
 function UserMessage({ message }: { message: Message }) {
   const hasAttachments = message.attachments && message.attachments.length > 0;
+  // 过滤掉 Agent 前缀
+  const displayContent = filterUserMessage(message.content);
 
   return (
     <div className="flex gap-3 justify-end animate-fade-in-up">
       <div className="flex-1 min-w-0 flex flex-col items-end">
         <div className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-2xl rounded-tr-md px-4 py-3 shadow-md shadow-blue-500/20 max-w-2xl">
           <p className="text-sm text-white leading-relaxed whitespace-pre-wrap">
-            {message.content}
+            {displayContent}
           </p>
         </div>
         {/* 文件附件卡片 - 在气泡外面，文字之后 */}

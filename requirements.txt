@@ -33,3 +33,11 @@ python-dotenv>=1.0.0  # 环境变量管理
 
 # 中文处理
 pypinyin>=0.50.0  # 中文转拼音库，用于规则名称英文转换
+
+# LangGraph 和 LangChain 依赖（对话式规则创建）
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+openai>=1.50.0
+python-dotenv>=1.0.0
