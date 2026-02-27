@@ -603,6 +603,12 @@ async def _handle_list_rules(args: dict) -> dict:
         return {"success": False, "error": "请提供 auth_token 或 guest_token"}
 
     status = args.get("status", "active")
+    
+    # 非管理员只能查询 active 状态
+    user_role = user_info.get("role", "")
+    if status != "active" and user_role != "admin":
+        return {"success": False, "error": "无权查询已删除的规则"}
+    
     rules = auth_db.list_rules_for_user(
         user_id=user_info["user_id"],
         company_id=user_info.get("company_id"),
@@ -895,11 +901,10 @@ async def _handle_delete_rule(args: dict) -> dict:
     """删除规则
     
     流程:
-    1. 从 PostgreSQL 数据库删除规则记录（主操作）
-    2. 删除对应的 JSON schema 文件（备份）
-    3. 从 reconciliation_schemas.json 移除配置（备份）
+    - 普通用户：软删除 (UPDATE status='archived')
+    - 管理员：硬删除 (DELETE FROM)
     
-    注意: PostgreSQL 是规则的主数据源，删除 PostgreSQL 记录即删除规则。
+    注意: PostgreSQL 是规则的主数据源。
     """
     valid, user_info, err = _require_auth(args)
     if not valid:
@@ -925,34 +930,47 @@ async def _handle_delete_rule(args: dict) -> dict:
     if not auth_db.can_user_modify_rule(user_info["user_id"], user_info["role"], rule):
         return {"success": False, "error": "无权删除此规则"}
     
-    # 1️⃣ 删除数据库记录（主操作）
-    success = auth_db.delete_rule(rule_id)
-    if not success:
-        return {"success": False, "error": "删除数据库记录失败"}
-
-    logger.info(f"规则已从 PostgreSQL 删除: {rule_name} (id={rule_id})")
+    user_role = user_info.get("role", "")
     
-    # 2️⃣ 删除对应的 JSON 文件备份
-    try:
-        type_key = _translate_rule_name_to_type_key(rule_name)
-        schema_filename = f"{type_key}_schema.json"
-        schema_path = SCHEMA_DIR / schema_filename
+    # 根据用户角色决定删除方式
+    if user_role == "admin":
+        # 管理员：硬删除
+        success = auth_db.delete_rule(rule_id)
+        if not success:
+            return {"success": False, "error": "删除数据库记录失败"}
+        logger.info(f"管理员删除规则（硬删除）: {rule_name} (id={rule_id})")
         
-        if schema_path.exists():
-            schema_path.unlink()
-            logger.info(f"已删除 JSON 备份文件: {schema_path}")
-        else:
-            logger.info(f"JSON 备份文件不存在（无需删除）: {schema_path}")
-    except Exception as e:
-        logger.warning(f"删除 JSON 备份文件失败（不影响主操作）: {e}")
+        # 删除 JSON 文件备份
+        try:
+            type_key = _translate_rule_name_to_type_key(rule_name)
+            schema_filename = f"{type_key}_schema.json"
+            schema_path = SCHEMA_DIR / schema_filename
+            
+            if schema_path.exists():
+                schema_path.unlink()
+                logger.info(f"已删除 JSON 备份文件: {schema_path}")
+        except Exception as e:
+            logger.warning(f"删除 JSON 备份文件失败（不影响主操作）: {e}")
 
-    # 3️⃣ 从 reconciliation_schemas.json 移除配置（备份）
-    _remove_from_reconciliation_schemas_config(rule_name)
-
-    return {
-        "success": True,
-        "message": f"规则「{rule_name}」已删除",
-    }
+        # 从 reconciliation_schemas.json 移除配置
+        _remove_from_reconciliation_schemas_config(rule_name)
+        
+        return {
+            "success": True,
+            "message": f"规则「{rule_name}」已彻底删除（管理员硬删除）",
+        }
+    else:
+        # 普通用户：软删除
+        updated = auth_db.update_rule(rule_id, status="archived")
+        if not updated:
+            return {"success": False, "error": "软删除失败"}
+        
+        logger.info(f"普通用户删除规则（软删除）: {rule_name} (id={rule_id}), status -> archived")
+        
+        return {
+            "success": True,
+            "message": f"规则「{rule_name}」已删除（状态已归档）",
+        }
 
 
 async def _handle_search_rules_by_mapping(args: dict) -> dict:

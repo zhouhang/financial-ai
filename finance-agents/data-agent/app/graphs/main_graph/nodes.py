@@ -464,12 +464,75 @@ async def auth_handler(state: AgentState) -> dict | None:
 async def intent_router(state: AgentState) -> dict:
     """核心意图识别：为已登录用户识别意图并路由到相应流程。
 
+    增强版：支持所有 workflow 上下文感知
+    - 在 workflow 中时，判断用户是想继续当前流程还是切换意图
+    - 如果是 RESUME_WORKFLOW，返回空消息，让 graph 继续路由到当前 phase 节点
+    - 如果是其他意图，保存 workflow 状态，清空 phase，切换意图
+
     Args:
         state: 当前状态（假设用户已认证）
 
     Returns:
         状态更新字典，包含识别的意图和相应的状态转换
     """
+    # ====== 新增：workflow 上下文感知（覆盖所有 workflow 阶段）======
+    current_phase = state.get("phase", "")
+
+    # 定义所有 workflow 阶段
+    all_workflow_phases = [
+        # 规则创建流程
+        ReconciliationPhase.FILE_ANALYSIS.value,
+        ReconciliationPhase.FIELD_MAPPING.value,
+        ReconciliationPhase.RULE_RECOMMENDATION.value,
+        ReconciliationPhase.RULE_CONFIG.value,
+        ReconciliationPhase.VALIDATION_PREVIEW.value,
+        ReconciliationPhase.SAVE_RULE.value,
+        ReconciliationPhase.RESULT_EVALUATION.value,
+        # 规则编辑流程
+        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        ReconciliationPhase.EDIT_RULE_CONFIG.value,
+        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+        ReconciliationPhase.EDIT_SAVE.value,
+    ]
+
+    if current_phase in all_workflow_phases:
+        # 在任何 workflow 中，判断用户是想继续还是切换意图
+        from app.utils.workflow_intent import classify_intent_in_workflow, save_workflow_context
+
+        messages = list(state.get("messages", []))
+        last_user_msg = (messages[-1].content if messages and hasattr(messages[-1], "content") else "") or ""
+
+        logger.info(f"🔍 [DEBUG] intent_router 进入 workflow 上下文检查: phase={current_phase}, user_msg='{last_user_msg[:100]}'")
+
+        try:
+            intent = await classify_intent_in_workflow(
+                user_msg=last_user_msg,
+                current_phase=current_phase,
+                state=state
+            )
+
+            logger.info(f"🔍 [DEBUG] classify_intent_in_workflow 返回: intent={intent}")
+
+            if intent == UserIntent.RESUME_WORKFLOW.value:
+                # 继续 workflow，返回空，让 graph 路由到当前 phase 的节点
+                logger.info(f"intent_router: 用户想继续 workflow (phase={current_phase})")
+                return {"messages": []}
+            else:
+                # 用户想切换意图，保存 workflow 状态并切换
+                logger.info(f"intent_router: 用户在 workflow 中切换意图 {current_phase} → {intent}")
+                save_workflow_context(state, current_phase)
+                # 清空 phase，设置新意图，LangGraph 会重新路由
+                return {
+                    "phase": "",
+                    "user_intent": intent,
+                    "messages": []
+                }
+        except Exception as e:
+            logger.error(f"workflow 意图分类失败: {e}，降级为继续 workflow")
+            # 降级：出错时默认继续 workflow，避免中断用户流程
+            return {"messages": []}
+
+    # ====== 原有逻辑：正常意图识别 ======
     # 提取通用状态
     auth_token = state.get("auth_token", "")
     current_user = state.get("current_user")
@@ -549,6 +612,13 @@ async def intent_router(state: AgentState) -> dict:
             msg = "\n".join(lines)
         else:
             msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
+
+        # ====== 新增：附加 workflow 恢复提示 ======
+        if state.get("workflow_context"):
+            from app.utils.workflow_intent import generate_resume_prompt
+            resume_prompt = generate_resume_prompt(state["workflow_context"])
+            msg += resume_prompt
+
         return {
             "messages": [AIMessage(content=msg)],
             "user_intent": UserIntent.UNKNOWN.value,
@@ -693,9 +763,8 @@ async def router_node(state: AgentState) -> dict:
         ReconciliationPhase.EDIT_SAVE.value,
     ]
 
-    if current_phase in subgraph_phases:
-        logger.info(f"router_node: 当前在子图执行中 (phase={current_phase})，跳过意图识别")
-        return {"messages": []}
+    # NOTE: 不再跳过意图识别，所有输入（包括 workflow 中的）都走 intent_router
+    # 由 intent_router 判断用户是想继续当前 workflow 还是切换意图
 
     # 2. 尝试管理员处理器（最高优先级）
     admin_result = await admin_handler(state)

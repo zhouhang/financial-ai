@@ -11,6 +11,12 @@ import {
 import type { ConnectionStatus, Message, MessageAttachment, UploadedFile } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
+/** 仅允许上传 Excel 和 CSV 文件 */
+const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
+
+/** 最多上传文件数 */
+const MAX_UPLOAD_FILES = 2;
+
 /** 暂存文件（本地还没上传的） */
 interface StagedFile {
   file: File;
@@ -223,18 +229,35 @@ export default function ChatArea({
     }
   };
 
-  // 选文件 → 暂存到本地（不上传）
+  // 选文件 → 暂存到本地（不上传），仅允许 Excel/CSV，最多 2 个
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const newStaged: StagedFile[] = Array.from(files).map((file) => ({
-      file,
-      name: file.name,
-      size: file.size,
-    }));
+    const rejected: string[] = [];
+    const newStaged: StagedFile[] = [];
+    for (const file of Array.from(files)) {
+      const ext = '.' + (file.name.split('.').pop()?.toLowerCase() || '');
+      if (ALLOWED_EXTENSIONS.includes(ext)) {
+        newStaged.push({ file, name: file.name, size: file.size });
+      } else {
+        rejected.push(file.name);
+      }
+    }
 
-    setStagedFiles((prev) => [...prev, ...newStaged]);
+    if (rejected.length > 0) {
+      alert(`仅支持 Excel 和 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv），以下文件已忽略：\n${rejected.join('\n')}`);
+    }
+    if (newStaged.length > 0) {
+      setStagedFiles((prev) => {
+        const canAdd = Math.max(0, MAX_UPLOAD_FILES - prev.length);
+        const toAdd = newStaged.slice(0, canAdd);
+        if (newStaged.length > canAdd) {
+          alert('最多只能上传 2 个文件');
+        }
+        return [...prev, ...toAdd];
+      });
+    }
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
@@ -414,7 +437,7 @@ export default function ChatArea({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg"
+                  accept=".xlsx,.xls,.xlsm,.xlsb,.csv"
                   multiple
                   onChange={handleFileSelect}
                   className="hidden"
@@ -422,11 +445,11 @@ export default function ChatArea({
                 <button
                   type="button"
                   onClick={handleUploadClick}
-                  disabled={isUploading}
+                  disabled={isUploading || stagedFiles.length >= MAX_UPLOAD_FILES}
                   className="w-9 h-9 rounded-lg flex items-center justify-center
                     text-gray-500 hover:text-blue-500 hover:bg-blue-50
                     transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
-                  title="添加文件（支持多选）"
+                  title={stagedFiles.length >= MAX_UPLOAD_FILES ? '最多上传 2 个文件' : '添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
                 >
                   {isUploading ? (
                     <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />

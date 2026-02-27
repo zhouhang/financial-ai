@@ -468,19 +468,7 @@ def _adjust_field_mappings_with_llm(
 
 
 def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, Any]]) -> str:
-    """将字段映射格式化为简洁列表：文件1↔文件2，以及各角色的 标签：字段1↔字段2。"""
-    business_file = None
-    finance_file = None
-    for a in analyses:
-        if a.get("guessed_source") == "business":
-            business_file = a.get("original_filename") or a.get("filename", "文件1")
-        elif a.get("guessed_source") == "finance":
-            finance_file = a.get("original_filename") or a.get("filename", "文件2")
-    if not business_file:
-        business_file = (analyses[0].get("original_filename") or analyses[0].get("filename", "文件1")) if analyses else "文件1"
-    if not finance_file:
-        finance_file = (analyses[1].get("original_filename") or analyses[1].get("filename", "文件2")) if len(analyses) > 1 else "文件2"
-
+    """将字段映射格式化为 业务列名↔财务列名 形式，按 field_roles 配对。"""
     business_map = mappings.get("business", {})
     finance_map = mappings.get("finance", {})
 
@@ -489,16 +477,19 @@ def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, An
             return "、".join(str(x) for x in v)
         return str(v) if v else ""
 
-    lines = [f"- {business_file}↔{finance_file}"]
-    for role in business_map.keys() & finance_map.keys():
+    # 取 business 与 finance 的 field_roles 公共 key 做配对
+    common_roles = sorted(business_map.keys() & finance_map.keys())
+    lines: list[str] = []
+    for role in common_roles:
         biz_col = business_map.get(role)
         fin_col = finance_map.get(role)
         if biz_col and fin_col:
-            lines.append(f"- {_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+            lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
 
-    if len(lines) <= 1:
-        return "\n（未找到匹配字段）"
-    return "\n" + "\n".join(lines)
+    if not lines:
+        return "（未找到匹配字段）"
+    # 每项前换行，确保 Markdown 渲染时分行显示
+    return "\n\n".join(lines)
 
 
 def _rule_template_to_mappings(rule_template: dict) -> dict[str, Any]:
@@ -574,23 +565,24 @@ def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
 
 
 def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
-    """编辑模式下格式化字段映射（无需 file_analyses）。
-    格式：sp订单号↔sup订单号
-    """
+    """编辑模式下格式化字段映射（无需 file_analyses），按 field_roles 配对，格式：业务列名↔财务列名。"""
+    biz_map = mappings.get("business", {})
+    fin_map = mappings.get("finance", {})
 
     def _fmt_col(v: Any) -> str:
         if isinstance(v, list):
             return "、".join(str(x) for x in v)
         return str(v) if v else ""
 
-    biz_map = mappings.get("business", {})
-    fin_map = mappings.get("finance", {})
+    # 取 business 与 finance 的 field_roles 公共 key 做配对
+    common_roles = sorted(biz_map.keys() & fin_map.keys())
     lines: list[str] = []
-    for role in biz_map.keys() & fin_map.keys():
+    for role in common_roles:
         biz_col = biz_map.get(role)
         fin_col = fin_map.get(role)
         if biz_col and fin_col:
             lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+    # 每项前换行，确保 Markdown 渲染时分行显示
     return "\n\n".join(lines) if lines else "（无映射）"
 
 
@@ -1363,28 +1355,7 @@ async def _classify_sheets_with_llm(sheets: list, file_path: str) -> dict:
     - 失败时使用降级策略_fallback_classify_sheets_by_name
     """
     from app.utils.llm import get_llm
-    from pathlib import Path
     import json
-
-    # 加载skill.md策略（如果存在）
-    skill_strategy = ""
-    skill_path = Path(__file__).parent.parent.parent / "skills" / "intelligent-file-analyzer.skill.md"
-    logger.info(f"尝试加载skill.md: {skill_path}, 存在: {skill_path.exists()}")
-
-    if skill_path.exists():
-        try:
-            skill_content = skill_path.read_text(encoding="utf-8")
-            # 提取"多Sheet识别与分类"部分
-            if "### 1. 多Sheet识别与分类" in skill_content:
-                start_idx = skill_content.find("### 1. 多Sheet识别与分类")
-                end_idx = skill_content.find("### 2.", start_idx)
-                if end_idx > start_idx:
-                    skill_strategy = "\n📖 分析策略参考:\n" + skill_content[start_idx:end_idx].strip()
-                    logger.info(f"✅ 成功加载skill.md策略，长度: {len(skill_strategy)}字符")
-        except Exception as e:
-            logger.warning(f"❌ 加载skill.md失败: {e}")
-    else:
-        logger.warning(f"⚠️ skill.md文件不存在: {skill_path}")
 
     # 优化：限制一次分析的sheet数量（最多15个）
     MAX_SHEETS_PER_CALL = 15
@@ -1421,7 +1392,6 @@ Sheet信息（共{len(sheets_desc)}个）：
 - finance: 财务数据（账单、流水、发票等，包含财务科目、收支等）
 - summary: 汇总表（统计、总结类，不包含明细数据）
 - other: 其他（说明、模板、空表等）
-{skill_strategy}
 
 严格按以下JSON格式回复：
 {{"results": [{{"sheet_name": "...", "type": "business|finance|summary|other", "confidence": 0.85, "reason": "..."}}]}}

@@ -369,25 +369,110 @@ async def websocket_chat(ws: WebSocket):
             try:
                 # 使用 astream_events 捕获 LLM token 级别的流式输出
                 if is_resume:
-                    # resume 前先更新 state 中的 uploaded_files 和 auth_token
-                    update_state: dict[str, Any] = {}
-                    if file_infos:
-                        # 传递文件信息对象（包含 file_path 和 original_filename）
-                        update_state["uploaded_files"] = file_infos
-                    if auth_token:
-                        update_state["auth_token"] = auth_token
-                        # 解析 token 获取用户信息
-                        from app.tools.mcp_client import auth_me
-                        try:
-                            me_result = await auth_me(auth_token)
-                            if me_result.get("success"):
-                                update_state["current_user"] = me_result["user"]
-                        except Exception:
-                            pass
-                    if update_state:
-                        langgraph_app.update_state(config, update_state)
-                        logger.info(f"resume: 更新 state: {list(update_state.keys())}")
-                    input_data = Command(resume=user_msg)
+                    # ====== 新增：workflow 中 resume 时先检测意图 ======
+                    from app.models import ReconciliationPhase, UserIntent
+                    from app.utils.workflow_intent import classify_intent_in_workflow, save_workflow_context
+
+                    snapshot = langgraph_app.get_state(config)
+                    current_phase = snapshot.values.get("phase", "") if snapshot else ""
+
+                    # 定义所有 workflow 阶段
+                    all_workflow_phases = [
+                        ReconciliationPhase.FILE_ANALYSIS.value,
+                        ReconciliationPhase.FIELD_MAPPING.value,
+                        ReconciliationPhase.RULE_RECOMMENDATION.value,
+                        ReconciliationPhase.RULE_CONFIG.value,
+                        ReconciliationPhase.VALIDATION_PREVIEW.value,
+                        ReconciliationPhase.SAVE_RULE.value,
+                        ReconciliationPhase.RESULT_EVALUATION.value,
+                        ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+                        ReconciliationPhase.EDIT_RULE_CONFIG.value,
+                        ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
+                        ReconciliationPhase.EDIT_SAVE.value,
+                    ]
+
+                    # 如果在 workflow 中，检查用户是否想切换意图
+                    if current_phase in all_workflow_phases:
+                        intent = await classify_intent_in_workflow(
+                            user_msg=user_msg,
+                            current_phase=current_phase,
+                            state=snapshot.values
+                        )
+
+                        if intent != UserIntent.RESUME_WORKFLOW.value:
+                            # 用户想切换意图，保存进度，改为非 resume 模式
+                            logger.info(f"server: resume 时检测到意图切换 {current_phase} → {intent}，转为正常消息流程")
+
+                            # 保存 workflow 上下文
+                            save_workflow_context(snapshot.values, current_phase)
+
+                            # 更新 state
+                            update_state: dict[str, Any] = {
+                                "phase": "",  # 清空 phase，退出 workflow
+                                "user_intent": intent,
+                                "workflow_context": snapshot.values.get("workflow_context"),
+                            }
+                            if file_infos:
+                                update_state["uploaded_files"] = file_infos
+                            if auth_token:
+                                update_state["auth_token"] = auth_token
+                                from app.tools.mcp_client import auth_me
+                                try:
+                                    me_result = await auth_me(auth_token)
+                                    if me_result.get("success"):
+                                        update_state["current_user"] = me_result["user"]
+                                except Exception:
+                                    pass
+
+                            langgraph_app.update_state(config, update_state)
+
+                            # 改为正常消息模式，让 router 处理意图
+                            is_resume = False
+                            input_data: dict[str, Any] = {
+                                "messages": [HumanMessage(content=user_msg)],
+                                "uploaded_files": file_infos,
+                            }
+                            if auth_token:
+                                input_data["auth_token"] = auth_token
+                                if "current_user" in update_state:
+                                    input_data["current_user"] = update_state["current_user"]
+                        else:
+                            # 用户想继续 workflow，正常 resume
+                            logger.info(f"server: resume 继续 workflow (phase={current_phase})")
+                            update_state: dict[str, Any] = {}
+                            if file_infos:
+                                update_state["uploaded_files"] = file_infos
+                            if auth_token:
+                                update_state["auth_token"] = auth_token
+                                from app.tools.mcp_client import auth_me
+                                try:
+                                    me_result = await auth_me(auth_token)
+                                    if me_result.get("success"):
+                                        update_state["current_user"] = me_result["user"]
+                                except Exception:
+                                    pass
+                            if update_state:
+                                langgraph_app.update_state(config, update_state)
+                                logger.info(f"resume: 更新 state: {list(update_state.keys())}")
+                            input_data = Command(resume=user_msg)
+                    else:
+                        # 不在 workflow 中，正常 resume
+                        update_state: dict[str, Any] = {}
+                        if file_infos:
+                            update_state["uploaded_files"] = file_infos
+                        if auth_token:
+                            update_state["auth_token"] = auth_token
+                            from app.tools.mcp_client import auth_me
+                            try:
+                                me_result = await auth_me(auth_token)
+                                if me_result.get("success"):
+                                    update_state["current_user"] = me_result["user"]
+                            except Exception:
+                                pass
+                        if update_state:
+                            langgraph_app.update_state(config, update_state)
+                            logger.info(f"resume: 更新 state: {list(update_state.keys())}")
+                        input_data = Command(resume=user_msg)
                 else:
                     # 非 resume 模式：重置 phase 状态，避免之前的任务结果影响新任务
                     try:

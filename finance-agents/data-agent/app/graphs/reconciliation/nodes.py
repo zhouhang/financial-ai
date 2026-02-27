@@ -79,6 +79,7 @@ async def file_analysis_node(state: AgentState) -> dict:
             "question": "📤 第1步：上传文件\n\n请上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。",
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
+
         # interrupt 返回后，重新检查文件
         uploaded = state.get("uploaded_files", [])
         if not uploaded:
@@ -260,11 +261,11 @@ def field_mapping_node(state: AgentState) -> dict:
     
     # 构建问题文本
     if adjustment_feedback:
-        question_text = f"📋 **第2步：确认字段映射**\n\n{adjustment_feedback}\n\n当前字段对应关系：\n{mapping_display}\n\n**请确认是否正确？**"
+        question_text = f"📋 **第2步：确认字段映射**\n\n{adjustment_feedback}\n\n请确认以下字段映射是否正确：\n\n{mapping_display}"
     else:
         question_text = (
             f"📋 **第2步：确认字段映射**\n\n"
-            f"已生成字段映射建议，请确认以下对应关系：\n{mapping_display}\n\n**这些对应关系是否正确？**"
+            f"请确认以下字段映射是否正确：\n\n{mapping_display}"
         )
     
     # interrupt 暂停，等待用户输入
@@ -273,12 +274,10 @@ def field_mapping_node(state: AgentState) -> dict:
         "step_title": "确认字段映射",
         "question": question_text,
         "suggested_mappings": confirmed,
-        "hint": '''💡 **操作提示**：
-  • 如果正确，回复"确认"继续
-  • **调整现有字段**（修改/删除）：例如"文件1的订单号改为X", "文件2删除status"
-  • **添加新字段**：例如"文件1添加status对应Y", "两个文件都添加status"
-  • **混合操作**：例如"文件1: 订单号改为X，添加status为Y; 文件2: 删除status"
-  • 详细描述你需要的所有更改，系统会一次性生成所有操作''',
+        "hint": """**映射确认 请回复：**
+1. **确认** - 映射正确，进入下一步
+2. **调整** - 描述需修改的字段，如「订单号改为X」「删除status」
+3. **查看字段** - 查看完整列名列表""",
     })
 
     response_str = str(user_response).strip()
@@ -559,7 +558,7 @@ async def rule_recommendation_node(state: AgentState) -> dict:
 
     question_text = (
         f"**推荐规则**\n\n{recommendation_text}\n\n"
-        f"输入数字（1/2/3）选择，或「创建新规则」"
+        f"输入数字（1/2/3）选择，或「继续」"
     )
 
     user_response = interrupt({
@@ -567,7 +566,7 @@ async def rule_recommendation_node(state: AgentState) -> dict:
         "step_title": "规则推荐",
         "question": question_text,
         "recommended_rules": recommended,
-        "hint": "数字选择 或 「创建新规则」",
+        "hint": "数字选择 或 「继续」",
     })
     
     response_str = str(user_response).strip().lower()

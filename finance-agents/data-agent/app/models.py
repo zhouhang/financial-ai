@@ -22,6 +22,7 @@ class UserIntent(str, Enum):
     EDIT_RULE = "edit_rule"  # 调整/编辑已有规则
     DELETE_RULE = "delete_rule"
     LIST_RULES = "list_rules"  # 查看规则列表
+    RESUME_WORKFLOW = "resume_workflow"  # 继续当前 workflow
     LOGIN = "login"
     REGISTER = "register"
     # 管理员相关
@@ -223,6 +224,10 @@ class AgentState(TypedDict, total=False):
 
     # 当前阶段跟踪
     phase: str  # ReconciliationPhase 值
+
+    # 工作流上下文保存（用于中断和恢复）
+    workflow_context: Optional[dict[str, Any]]
+    # 结构：{"paused_phase": str, "paused_at": str, "saved_progress": dict}
 
     # 编辑规则流程（edit_rule 意图）
     editing_rule_id: Optional[str]

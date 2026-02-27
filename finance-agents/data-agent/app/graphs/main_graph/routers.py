@@ -242,11 +242,11 @@ def build_main_graph() -> StateGraph:
     # task_execution → result_analysis（显示对账结果）→ 根据是否推荐规则决定下一步
     graph.add_edge("task_execution", "result_analysis")
     
-    # result_analysis 后：推荐规则或新建规则（先对账）→ result_evaluation（询问保存）
+    # result_analysis 后：仅新建规则（先对账）→ result_evaluation（询问保存）
+    # 使用已有/推荐规则对账时不再提示保存为个人规则
     def route_after_result_analysis(state: AgentState) -> str:
-        using_recommended = state.get("using_recommended_rule", False)
         generated_schema = state.get("generated_schema")
-        if using_recommended or generated_schema:
+        if generated_schema:
             return "result_evaluation"
         return END
     

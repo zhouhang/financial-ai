@@ -257,6 +257,7 @@ export default function App() {
     setTaskResult(null);
     setWaitingForFileUpload(false);
     // 标记刚登录，加载会话列表后选择最近会话
+    hasLoadedInitialConvRef.current = false;
     justLoggedInRef.current = true;
     void loadConversations();
   }, [clearConversationsCache, loadConversations]);
@@ -268,7 +269,9 @@ export default function App() {
   const justLoggedInRef = useRef(false);
   // 追踪登录时的会话ID（本地ID和服务器ID，用于登录成功后清除）
   const loginConvIdRef = useRef<{ localId: string | null; serverId: string | null }>({ localId: null, serverId: null });
-  
+  // 追踪是否已加载初始会话（用于防止刷新时重复加载）
+  const hasLoadedInitialConvRef = useRef<boolean>(false);
+
   // 登录成功后，会话列表加载完成时自动选择最近会话
   useEffect(() => {
     if (justLoggedInRef.current && serverConversations.length > 0) {
@@ -303,13 +306,26 @@ export default function App() {
   
   // 刷新页面时，如果有保存的会话ID且不是新对话，尝试加载该会话
   useEffect(() => {
-    if (!initialState.isNewConv && initialState.activeId && serverConversations.length > 0) {
-      // 检查保存的会话是否存在于服务器列表中
-      const savedConvExists = serverConversations.some((c) => c.id === initialState.activeId);
-      if (savedConvExists) {
-        // 加载该会话的消息
-        setIsLoadingConversation(true);
-        loadConversation(initialState.activeId).then((conv) => {
+    // 保护 1: 已经加载过初始对话
+    if (hasLoadedInitialConvRef.current) return;
+
+    // 保护 2: 必要条件不满足
+    if (!authToken || !initialState.activeId || serverConversations.length === 0) return;
+
+    // 保护 3: 如果是新对话，不需要恢复
+    if (initialState.isNewConv) return;
+
+    // 检查 savedConvId 是否在 serverConversations 中
+    const savedConvExists = serverConversations.some((c) => c.id === initialState.activeId);
+
+    if (savedConvExists) {
+      // 标记为已加载（防止重复触发）
+      hasLoadedInitialConvRef.current = true;
+
+      // 加载对话详情
+      setIsLoadingConversation(true);
+      loadConversation(initialState.activeId)
+        .then((conv) => {
           if (conv && conv.messages.length > 0) {
             setConversations((prev) => {
               const existing = prev.find((c) => c.id === initialState.activeId);
@@ -325,16 +341,30 @@ export default function App() {
             });
           }
           setIsLoadingConversation(false);
+        })
+        .catch((err) => {
+          console.error('加载对话失败:', err);
+          setIsLoadingConversation(false);
+          // 降级：切换到第一个可用对话
+          if (serverConversations.length > 0) {
+            setActiveConvId(serverConversations[0].id);
+          }
         });
-      } else {
-        // 保存的会话不存在，选择最新会话
-        const latestConv = serverConversations[0];
+    } else {
+      // savedConvId 不存在，切换到最新对话
+      hasLoadedInitialConvRef.current = true;
+      const latestConv = serverConversations[0];
+      if (latestConv) {
         setActiveConvId(latestConv.id);
       }
     }
-  // 只在 serverConversations 首次加载时执行
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverConversations.length > 0 ? 'loaded' : 'loading']);
+  }, [
+    serverConversations,
+    loadConversation,
+    authToken,
+    initialState.activeId,
+    initialState.isNewConv,
+  ]);
 
   // ── 加载和中断状态 ────────────────────────────────────────
   const [isLoading, setIsLoading] = useState(false);
@@ -345,6 +375,8 @@ export default function App() {
 
   // ── 响应目标会话追踪 ───────────────────────────────────────
   const pendingConvIdRef = useRef<string | null>(null);
+  /** 无对话时发送的第一条消息：暂存会话，供 conversation_created 早于 state 更新时使用 */
+  const pendingSendConvRef = useRef<{ threadId: string; conv: Conversation } | null>(null);
 
   // ── 任务和文件 ────────────────────────────────────────────
   // TODO: 这些状态变量用于任务面板功能，目前仅使用 setter
@@ -561,6 +593,7 @@ export default function App() {
           setWaitingForFileUpload(false);
           setStreamingMessageId(null); // 清除流式状态
           pendingConvIdRef.current = null;
+          pendingSendConvRef.current = null; // 响应完成，清除无对话发送的暂存
           break;
 
         case 'auth':
@@ -612,8 +645,14 @@ export default function App() {
               const current = prev.find((c) => c.id === data.thread_id);
               const rest = prev.filter((c) => c.id !== data.thread_id);
               if (current) {
-                // 保留消息，仅将会话 ID 更新为服务器 ID
                 return [{ ...current, id: data.conversation_id }, ...rest];
+              }
+              // conversation_created 可能早于 handleSendMessage 的 state 更新，使用暂存的会话
+              const pending = pendingSendConvRef.current;
+              if (pending && pending.threadId === data.thread_id) {
+                pendingSendConvRef.current = null;
+                const convWithServerId: Conversation = { ...pending.conv, id: data.conversation_id as string };
+                return [convWithServerId, ...rest];
               }
               return rest;
             });
@@ -736,24 +775,44 @@ export default function App() {
         setStreamingMessageId(null);
       }
       
-      // 如果是待确认的新会话的第一条消息，先将会话添加到列表
-      if (pendingNewConvRef.current && pendingNewConvRef.current.id === activeConvId) {
-        const newConv = pendingNewConvRef.current;
-        // 设置标题为消息内容的前20个字符
-        newConv.title = text.slice(0, 20) + (text.length > 20 ? '...' : '');
+      // 无对话或当前活动会话不在列表中时：先创建对话（含用户消息），再发送，确保 AI 回复前对话已存在
+      const activeConvInList = conversations.some((c) => c.id === activeConvId);
+      const isNewConvFirstMessage = !activeConvInList && activeConvId;
+      if (isNewConvFirstMessage && !silent) {
+        const baseConv = pendingNewConvRef.current?.id === activeConvId
+          ? pendingNewConvRef.current
+          : createConversation();
+        const userMsg: Message = {
+          id: generateId(),
+          role: 'user',
+          content: text,
+          timestamp: new Date(),
+          attachments,
+        };
+        const newConv: Conversation = {
+          ...baseConv,
+          id: activeConvId,
+          title: text.slice(0, 20) + (text.length > 20 ? '...' : ''),
+          messages: [userMsg],
+        };
+        pendingSendConvRef.current = { threadId: newConv.id, conv: newConv };
         setConversations((prev) => [newConv, ...prev]);
         pendingNewConvRef.current = null;
-      }
-      
-      // 只在非静默模式下显示用户消息（表单提交时silent=true，避免暴露密码）
-      if (!silent) {
-      appendMessage({
-        id: generateId(),
-        role: 'user',
-        content: text,
-        timestamp: new Date(),
+      } else if (isNewConvFirstMessage && silent) {
+        const baseConv = pendingNewConvRef.current?.id === activeConvId
+          ? pendingNewConvRef.current
+          : createConversation();
+        const newConv: Conversation = { ...baseConv, id: activeConvId, title: text.slice(0, 20) + (text.length > 20 ? '...' : '') };
+        setConversations((prev) => [newConv, ...prev]);
+        pendingNewConvRef.current = null;
+      } else if (!silent) {
+        appendMessage({
+          id: generateId(),
+          role: 'user',
+          content: text,
+          timestamp: new Date(),
           attachments,
-      });
+        });
       }
 
       pendingConvIdRef.current = activeConvId;
@@ -806,6 +865,7 @@ export default function App() {
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
+    hasLoadedInitialConvRef.current = false;
   }, [clearConversationsCache]);
 
   // ── 新建会话 ──────────────────────────────────────────────
@@ -878,8 +938,10 @@ export default function App() {
       if (remaining.length > 0) {
         setActiveConvId(remaining[0].id);
       } else {
-        // 没有其他会话，清空当前会话（用户可以点击"开始新分析"创建）
-        setActiveConvId('');
+        // 没有其他会话时，自动创建新对话，保持对话框可用
+        const newConv = createConversation();
+        pendingNewConvRef.current = newConv;
+        setActiveConvId(newConv.id);
       }
     }
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
@@ -887,6 +949,7 @@ export default function App() {
   // ── 合并本地和服务器会话 ────────────────────────────────────
   // 服务器会话优先，本地会话补充（未同步的新会话）
   // 如果刚登录，排除登录会话
+  // 无会话时，将待确认的新对话加入列表，确保对话框可正常显示和提交
   const mergedConversations = useCallback(() => {
     const loginLocalId = loginConvIdRef.current.localId;
     const loginServerId = loginConvIdRef.current.serverId;
@@ -898,9 +961,14 @@ export default function App() {
     const serverFiltered = justLoggedInRef.current && loginServerId
       ? serverConversations.filter((c) => c.id !== loginServerId)
       : serverConversations;
-    // 服务器会话 + 本地未同步的会话
-    return [...localOnly, ...serverFiltered];
-  }, [conversations, serverConversations]);
+    const base = [...localOnly, ...serverFiltered];
+    // 无会话时，将待确认的新对话加入列表（用户提交后即创建新对话）
+    const pending = pendingNewConvRef.current;
+    if (pending && activeConvId === pending.id && !base.some((c) => c.id === pending.id)) {
+      return [pending, ...base];
+    }
+    return base;
+  }, [conversations, serverConversations, activeConvId]);
 
   const displayConversations = mergedConversations();
 
