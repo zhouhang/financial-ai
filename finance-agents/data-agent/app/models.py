@@ -30,6 +30,10 @@ class UserIntent(str, Enum):
     CREATE_COMPANY = "create_company"
     CREATE_DEPARTMENT = "create_department"
     ADMIN_LOGOUT = "admin_logout"
+    # 审计整理数字员工
+    AUDIT_DATA_PROCESS = "audit_data_process"
+    # 规则创建（对话式）
+    RULE_CREATION = "rule_creation"
     UNKNOWN = "unknown"
 
 
@@ -228,4 +232,12 @@ class AgentState(TypedDict, total=False):
 
     # 人工参与循环标志
     waiting_for_human: bool
-    human_prompt: Optional[str]
+
+    # ── 规则创建（对话式）──────────────────────────────────────
+    rule_creation_active: Optional[bool]  # 是否正在创建规则
+    rule_creation_step: Optional[str]  # 规则创建步骤：collecting_info, generating_rule, confirming, completed
+    current_rule_name: Optional[str]  # 当前创建的规则名称
+    created_rule_name: Optional[str]  # 已创建的规则名称
+    
+    # ── Agent 类型 ────────────────────────────────────────────
+    agent_type: Optional[str]  # 当前选择的 Agent 类型：reconciliation 或 data_process

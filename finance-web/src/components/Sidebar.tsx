@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import {
-  BarChart3,
-  LogOut,
   MessageSquare,
+  Plus,
   Trash2,
-  User,
-  Zap,
+  History,
 } from 'lucide-react';
-import type { ConnectionStatus, Conversation } from '../types';
+import type { ConnectionStatus, Conversation, AgentType } from '../types';
+import AgentSelector from './AgentSelector';
+
+// 过滤会话标题中的 Agent 前缀
+function filterConvTitle(title: string): string {
+  return title.replace(/^\[AGENT:data_process\]\s*/, '');
+}
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -18,6 +22,8 @@ interface SidebarProps {
   onDeleteConversation?: (id: string) => void;
   currentUser?: Record<string, unknown> | null;
   onLogout?: () => void;
+  selectedAgent?: AgentType;
+  onSelectAgent?: (agent: AgentType) => void;
 }
 
 export default function Sidebar({
@@ -29,78 +35,96 @@ export default function Sidebar({
   onDeleteConversation,
   currentUser,
   onLogout,
+  selectedAgent = 'reconciliation',
+  onSelectAgent,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
+  // 调试：打印 Sidebar 渲染信息
+  console.log('[Sidebar] 渲染', {
+    conversations: conversations?.length,
+    currentUser: currentUser ? '✅' : '❌',
+    selectedAgent,
+  });
+
   const handleDelete = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation(); // 防止触发选择会话
+    e.stopPropagation();
     if (confirm('确定要删除这个会话吗？')) {
       onDeleteConversation?.(id);
     }
   };
-  return (
-    <aside className="w-64 bg-white flex flex-col h-full shrink-0 border-r border-gray-200">
-      {/* ── Brand ── */}
-      <div className="px-4 pt-5 pb-4">
-        <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
-            <BarChart3 className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <h1 className="text-gray-900 font-semibold text-base leading-tight">
-              Tally
-            </h1>
-            <p className="text-gray-500 text-xs">智能财务助手</p>
-          </div>
-        </div>
-      </div>
 
-      {/* ── New Analysis Button ── */}
-      <div className="px-4 mb-3">
-          <button
+  return (
+    <aside 
+      style={{ 
+        width: '256px', 
+        minWidth: '256px',
+        maxWidth: '256px',
+        background: 'white',
+        borderRight: '1px solid #f1f5f9',
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        flexShrink: 0,
+      }}
+    >
+      {/* ── 顶部：新建会话 ── */}
+      <div className="p-3">
+        <button
           onClick={onNewConversation}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-xl
-            bg-gradient-to-r from-blue-500 to-blue-600 text-white font-medium text-sm
-            hover:shadow-lg hover:shadow-blue-500/30 transition-all cursor-pointer"
+          className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg
+            text-gray-700 text-sm font-medium hover:bg-gray-50 hover:border-gray-300
+            transition-all duration-150 cursor-pointer"
         >
-          <Zap className="w-4 h-4" />
-          开启新对话
+          <Plus className="w-4 h-4" />
+          <span>新建会话</span>
         </button>
       </div>
 
-      {/* ── Conversation List ── */}
-      <div className="flex-1 overflow-y-auto px-4">
-        <p className="text-gray-500 text-xs font-medium mb-2">
-          历史记录
-        </p>
-        <div className="space-y-1">
+      {/* ── Agent 选择器 ── */}
+      <AgentSelector
+        selectedAgent={selectedAgent}
+        onSelectAgent={onSelectAgent}
+      />
+
+      {/* ── 历史会话 ── */}
+      <div className="flex-1 overflow-y-auto px-3 py-2">
+        <div className="flex items-center gap-2 px-2 mb-2">
+          <History className="w-3.5 h-3.5 text-gray-400" />
+          <span className="text-xs font-medium text-gray-500">历史会话</span>
+        </div>
+        
+        <div className="space-y-0.5">
           {conversations.map((conv) => (
             <div
               key={conv.id}
-              className={`relative w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer ${
-                activeConversationId === conv.id
+              className={`
+                relative flex items-center gap-2 px-3 py-2.5 rounded-lg
+                text-left transition-all duration-150 cursor-pointer group
+                ${activeConversationId === conv.id
                   ? 'bg-blue-50 text-blue-600'
-                  : 'text-gray-600 hover:bg-gray-50'
-              }`}
+                  : 'text-gray-700 hover:bg-gray-100'
+                }
+              `}
               onClick={() => onSelectConversation(conv.id)}
               onMouseEnter={() => setHoveredId(conv.id)}
               onMouseLeave={() => setHoveredId(null)}
             >
-              <MessageSquare className="w-4 h-4 shrink-0 mt-0.5" />
+              <MessageSquare className={`w-4 h-4 shrink-0 ${activeConversationId === conv.id ? 'text-blue-600' : 'text-gray-400'}`} />
               <div className="flex-1 min-w-0">
-                <span className="block truncate text-sm font-medium">{conv.title}</span>
-                <span className="block text-xs text-gray-400 mt-0.5">
-                  {new Date(conv.updatedAt).toLocaleTimeString('zh-CN', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
+                <span className="block truncate text-sm font-medium">{filterConvTitle(conv.title)}</span>
+                <span className={`block text-xs mt-0.5 ${activeConversationId === conv.id ? 'text-blue-400' : 'text-gray-400'}`}>
+                  {new Date(conv.updatedAt).toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit'
                   })}
                 </span>
               </div>
-              {/* 删除按钮 - 悬停时显示 */}
+              {/* 删除按钮 */}
               {hoveredId === conv.id && onDeleteConversation && (
                 <button
                   onClick={(e) => handleDelete(e, conv.id)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                  className="opacity-0 group-hover:opacity-100 p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all"
                   title="删除会话"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -111,19 +135,21 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* ── User / Status ── */}
-      <div className="px-4 py-4 border-t border-gray-100">
-        {currentUser ? (
-          <div className="flex items-center justify-between mb-2">
+      {/* ── 底部：用户信息 ── */}
+      {currentUser && (
+        <div className="p-3 border-t border-gray-100">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                <User className="w-4 h-4 text-blue-600" />
+                <span className="text-xs font-medium text-blue-600">
+                  {(currentUser.username?.toString() || 'U').charAt(0).toUpperCase()}
+                </span>
               </div>
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-800 truncate">
-                  {currentUser.username as string}
+                  {currentUser.username?.toString() || '用户'}
                 </p>
-                {typeof currentUser.company_name === 'string' && currentUser.company_name && (
+                {currentUser.company_name && typeof currentUser.company_name === 'string' && (
                   <p className="text-xs text-gray-400 truncate">
                     {currentUser.company_name}
                   </p>
@@ -133,16 +159,18 @@ export default function Sidebar({
             {onLogout && (
               <button
                 onClick={onLogout}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer"
+                className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all cursor-pointer"
                 title="退出登录"
               >
-                <LogOut className="w-4 h-4" />
+                <Trash2 className="w-4 h-4" />
               </button>
             )}
           </div>
-        ) : (
-          <p className="text-gray-500 text-xs mb-2">未登录 — 请在对话中登录</p>
-        )}
+        </div>
+      )}
+
+      {/* ── 连接状态 ── */}
+      <div className="px-3 py-2 border-t border-gray-100">
         <div className="flex items-center gap-2">
           <div
             className={`w-2 h-2 rounded-full ${
@@ -153,12 +181,12 @@ export default function Sidebar({
                 : 'bg-red-500'
             }`}
           />
-          <span className="text-gray-700 text-xs font-medium">
+          <span className="text-xs text-gray-500 font-medium">
             {connectionStatus === 'connected'
-              ? '系统就绪'
+              ? '已连接'
               : connectionStatus === 'connecting'
-              ? '正在连接...'
-              : '连接断开'}
+              ? '连接中...'
+              : '未连接'}
           </span>
         </div>
       </div>

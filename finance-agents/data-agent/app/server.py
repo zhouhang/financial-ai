@@ -271,8 +271,9 @@ async def websocket_chat(ws: WebSocket):
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             conversation_id = data.get("conversation_id", "")  # 会话 ID
+            agent_type = data.get("agent_type", "reconciliation")  # Agent 类型
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, conversation_id={conversation_id}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, conversation_id={conversation_id}, agent_type={agent_type}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -389,6 +390,7 @@ async def websocket_chat(ws: WebSocket):
                     input_data: dict[str, Any] = {
                         "messages": [HumanMessage(content=user_msg)],
                         "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
+                        "agent_type": agent_type,  # 传递 Agent 类型
                     }
                     if auth_token:
                         input_data["auth_token"] = auth_token
@@ -569,21 +571,21 @@ async def websocket_chat(ws: WebSocket):
                 if auth_token and user_msg and not user_msg.startswith("{"):
                     try:
                         # 如果没有 conversation_id，检查是否需要创建新会话
-                        if not conversation_id:
-                            # 检查是否已存在该 thread_id 对应的会话（通过查找最新的会话）
-                            # 如果不存在，创建新会话
-                            title = user_msg[:30] + ("..." if len(user_msg) > 30 else "")
-                            conv_result = await mcp_create_conversation(auth_token, title)
-                            if conv_result.get("success"):
-                                conversation_id = conv_result["conversation"]["id"]
-                                # 通知前端新会话 ID
-                                await ws.send_json({
-                                    "type": "conversation_created",
-                                    "conversation_id": conversation_id,
-                                    "title": title,
-                                    "thread_id": thread_id,
-                                })
-                                logger.info(f"创建新会话: {conversation_id}")
+#                         if not conversation_id:
+#                             # 检查是否已存在该 thread_id 对应的会话（通过查找最新的会话）
+#                             # 如果不存在，创建新会话
+#                             title = user_msg[:30] + ("..." if len(user_msg) > 30 else "")
+#                             conv_result = await mcp_create_conversation(auth_token, title)
+#                             if conv_result.get("success"):
+#                                 conversation_id = conv_result["conversation"]["id"]
+#                                 # 通知前端新会话 ID
+#                                 await ws.send_json({
+#                                     "type": "conversation_created",
+#                                     "conversation_id": conversation_id,
+#                                     "title": title,
+#                                     "thread_id": thread_id,
+#                                 })
+#                                 logger.info(f"创建新会话: {conversation_id}")
                         
                         if conversation_id:
                             # 保存用户消息

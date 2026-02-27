@@ -13,7 +13,9 @@ export type SendMessageFn = (
   resume?: boolean,
   authToken?: string,
   attachments?: Array<{ name: string; path: string }>,
-  conversationId?: string
+  conversationId?: string,
+  reserved?: unknown,
+  agentType?: 'reconciliation' | 'data_process'
 ) => boolean;
 
 interface UseWebSocketOptions {
@@ -43,7 +45,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       resume = false,
       authToken?: string,
       attachments?: Array<{ name: string; path: string }>,
-      conversationId?: string
+      conversationId?: string,
+      reserved?: unknown,
+      agentType?: 'reconciliation' | 'data_process'
     ) => {
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
         console.warn('WebSocket is not connected');
@@ -58,19 +62,20 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
         payload.auth_token = authToken;
       }
       if (attachments?.length) {
-        payload.attachments = attachments.map((a) => ({
-          original_filename: a.name,
-          file_path: a.path,
-        }));
+        payload.attachments = attachments;
       }
       if (conversationId) {
         payload.conversation_id = conversationId;
       }
-      wsRef.current.send(JSON.stringify(payload));
+      if (agentType) {
+        payload.agent_type = agentType;
+      }
+      wsRef.current?.send(JSON.stringify(payload));
       return true;
     },
     []
   );
+  
   sendMessageRef.current = sendMessage;
 
   const connect = useCallback(() => {

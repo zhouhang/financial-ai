@@ -5,8 +5,11 @@ import {
   Loader2,
   X,
   FileSpreadsheet,
+  Sparkles,
+  MessageSquare,
 } from 'lucide-react';
-import type { ConnectionStatus, Message, MessageAttachment, UploadedFile } from '../types';
+import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, AgentType } from '../types';
+import { AVAILABLE_AGENTS } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
 /** 暂存文件（本地还没上传的） */
@@ -28,13 +31,14 @@ interface ChatAreaProps {
   isLoading: boolean;
   isLoadingConversation?: boolean;
   connectionStatus: ConnectionStatus;
-  onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean) => void;
+  onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean, agentType?: AgentType) => void;
   onFileUploaded: (file: UploadedFile) => void;
   threadId: string;
   showInput?: boolean;
   currentUser?: Record<string, unknown> | null;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
+  selectedAgent?: AgentType;
 }
 
 export default function ChatArea({
@@ -48,6 +52,7 @@ export default function ChatArea({
   showInput = true,
   currentUser,
   streamingMessageId,
+  selectedAgent = 'reconciliation',
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -156,7 +161,7 @@ export default function ChatArea({
     const finalText = text || `已上传 ${attachments?.length || 0} 个文件，请处理。`;
 
     // 先发送用户消息（显示文件附件）
-    onSendMessage(finalText, attachments);
+    onSendMessage(finalText, attachments, false, selectedAgent);
       
     // 然后通知父组件文件已上传（显示系统消息）
     uploadedList.forEach((f) => onFileUploaded(f));
@@ -209,62 +214,75 @@ export default function ChatArea({
     onSendMessage(jsonMessage, undefined, true); // silent = true
   }, [onSendMessage]);
 
+
   return (
-    <div className="flex-1 flex flex-col min-w-0 bg-surface-secondary relative">
+    <div style={{
+      flex: '1 1 0%',
+      display: 'flex',
+      flexDirection: 'column',
+      minWidth: 0,
+      background: '#f8fafc',
+      height: '100%',
+      overflow: 'hidden',
+    }}>
       {/* ── Header ── */}
-      <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-2.5 h-2.5 rounded-full ${
-              connectionStatus === 'connected'
-                ? 'bg-green-500'
-                : connectionStatus === 'connecting'
-                ? 'bg-yellow-500 animate-pulse'
-                : 'bg-red-500'
-            }`}
-          />
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-base font-semibold text-gray-900">分析会话</h2>
-            <span className="text-xs text-gray-500">
-              Tally 智能财务助手
+      <header style={{
+        height: '48px',
+        background: 'white',
+        borderBottom: '1px solid #f1f5f9',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 16px',
+        flexShrink: 0,
+      }}>
+        <div className="flex items-center gap-2">
+          {/* 当前选中的数字员工 */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 rounded-md">
+            {selectedAgent === 'data_process' ? (
+              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+            ) : (
+              <MessageSquare className="w-3.5 h-3.5 text-blue-600" />
+            )}
+            <span className="text-xs font-medium text-blue-600">
+              {selectedAgent === 'data_process' ? '数据整理数字员工' : '智能对账助手'}
             </span>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className={`text-xs font-medium px-3 py-1.5 rounded-full ${
-              connectionStatus === 'connected'
-                ? 'bg-green-50 text-green-600'
-                : connectionStatus === 'connecting'
-                ? 'bg-yellow-50 text-yellow-600'
-                : 'bg-red-50 text-red-600'
-            }`}
-          >
-            {connectionStatus === 'connected'
-              ? '已连接'
-              : connectionStatus === 'connecting'
-              ? '连接中'
-              : '未连接'}
-          </span>
+          <div className="w-px h-4 bg-gray-200" />
+          <h2 className="text-sm font-medium text-gray-700">分析会话</h2>
         </div>
       </header>
 
       {/* ── AI 正在处理横幅 ── */}
       {isLoading && (
-        <div className="bg-blue-50 border-b border-blue-100 px-6 py-2.5 flex items-center gap-2">
+        <div style={{
+          background: 'white',
+          borderBottom: '1px solid #f1f5f9',
+          padding: '8px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          flexShrink: 0,
+        }}>
           <div className="flex gap-1">
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
           </div>
-          <span className="text-sm text-blue-600 font-medium">
-            AI 正在处理您的请求...
+          <span className="text-xs text-gray-500">
+            AI 正在处理...
           </span>
         </div>
       )}
 
       {/* ── Messages ── */}
-      <div className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
+      <div style={{
+        flex: '1 1 0%',
+        overflowY: 'auto',
+        padding: '24px 16px 0 16px',
+        minHeight: 0,
+        marginBottom: '16px',
+      }}>
         {/* 会话加载中 */}
         {isLoadingConversation && (
           <div className="flex items-center justify-center h-full">
@@ -278,16 +296,16 @@ export default function ChatArea({
         {/* 空状态 */}
         {!isLoadingConversation && messages.length === 0 && !isLoading && (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <div className="text-center max-w-md">
+              <div className="w-16 h-16 rounded-2xl bg-white border border-gray-100 flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </div>
               {currentUser ? (
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
-                    开启新对话，开始交流
+                    开启新对话
                   </h3>
                   <p className="text-sm text-gray-500">
                     上传数据文件或直接描述您的分析需求
@@ -296,7 +314,7 @@ export default function ChatArea({
               ) : (
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
-                    未登录，请在对话中登录
+                    未登录
                   </h3>
                   <p className="text-sm text-gray-500">
                     发送"登录"或"注册"进行身份验证
@@ -322,13 +340,15 @@ export default function ChatArea({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* ── Floating Input Bar ── */}
+      {/* ── Input Bar ── */}
       {showInput && (
-      <div className="absolute bottom-0 left-0 right-0 pointer-events-none z-10">
-        <div className="px-6 pb-3 pointer-events-none">
-          <div className="max-w-4xl mx-auto pointer-events-none">
-            {/* Floating container with shadow */}
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-200 pointer-events-auto overflow-hidden">
+      <div style={{
+        padding: '0 16px 16px 16px',
+        flexShrink: 0,
+      }}>
+        <div style={{ maxWidth: '768px', margin: '0 auto' }}>
+          {/* Input container */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               {/* 暂存文件预览条 */}
               {stagedFiles.length > 0 && (
                 <div className="px-3 pt-3 flex flex-wrap gap-2">
@@ -352,7 +372,7 @@ export default function ChatArea({
                 </div>
               )}
 
-              <div className="flex items-center gap-2.5 p-3">
+              <div className="flex items-center gap-3 p-3">
                 {/* File upload */}
                 <input
                   ref={fileInputRef}
@@ -367,7 +387,7 @@ export default function ChatArea({
                   onClick={handleUploadClick}
                   disabled={isUploading}
                   className="w-9 h-9 rounded-lg flex items-center justify-center
-                    text-gray-500 hover:text-blue-500 hover:bg-blue-50
+                    text-gray-400 hover:text-blue-500 hover:bg-blue-50
                     transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
                   title="添加文件（支持多选）"
                 >
@@ -385,7 +405,7 @@ export default function ChatArea({
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="描述您的分析需求 (Shift+Enter 换行)..."
+                    placeholder="尽管问..."
                     rows={1}
                     className="w-full px-3 py-2 text-sm rounded-lg
                       bg-transparent resize-none
@@ -404,23 +424,22 @@ export default function ChatArea({
                 <button
                   onClick={handleSend}
                   disabled={(!inputText.trim() && stagedFiles.length === 0) || isLoading || isUploading}
-                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0
-                    bg-gradient-to-r from-blue-500 to-blue-600 text-white
-                    hover:shadow-md hover:shadow-blue-500/30 transition-all
-                    disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none cursor-pointer"
+                  className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0
+                    bg-blue-500 text-white
+                    hover:bg-blue-600 transition-colors
+                    disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-500 cursor-pointer"
                 >
                   <Send className="w-4 h-4" />
                 </button>
               </div>
             </div>
-            
+
             {/* Bottom hint text */}
-            <div className="mt-2">
-              <p className="text-center text-[11px] text-gray-400">
-                AI 分析结果仅供参考，请结合实际数据进行判断
+            <div className="mt-3 text-center">
+              <p className="text-xs text-gray-400">
+                智能财务助手
               </p>
             </div>
-          </div>
         </div>
       </div>
       )}

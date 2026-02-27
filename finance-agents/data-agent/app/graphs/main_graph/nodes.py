@@ -107,6 +107,7 @@ SYSTEM_PROMPT = """\
 4. 删除对账规则
 5. 查看规则列表
 6. 帮助用户理解对账结果
+7. **审计数据整理**：处理审计部门的数据整理业务（如货币资金整理、流水分析、应收账款分析、库存商品分析、开户清单核对等）
 
 当前已有的对账规则包括：
 {available_rules}
@@ -117,6 +118,7 @@ SYSTEM_PROMPT = """\
 - 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
+- 如果用户想**处理审计数据**（如"整理货币资金"、"分析银行流水"、"应收账款分析"、"库存商品整理"、"开户清单核对"等），回复 JSON: {"intent": "audit_data_process"}
 - 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
   1. 用「你好，{username}！」开头，带上用户名
   2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
@@ -180,11 +182,15 @@ async def router_node(state: AgentState) -> dict:
         ReconciliationPhase.EDIT_VALIDATION_PREVIEW.value,
         ReconciliationPhase.EDIT_SAVE.value,
     ]
-    
+
     if current_phase in subgraph_phases:
         logger.info(f"router_node: 当前在子图执行中 (phase={current_phase})，跳过意图识别")
         return {"messages": []}
 
+    # 根据 state 中的 agent_type 判断模式
+    agent_type = state.get("agent_type", "reconciliation")
+    is_data_process_mode = (agent_type == "data_process")
+    
     auth_token = state.get("auth_token", "")
     current_user = state.get("current_user")
     messages = list(state.get("messages", []))
@@ -361,8 +367,17 @@ async def router_node(state: AgentState) -> dict:
         
         # 使用 LLM 流式生成回复（支持流式输出）
         llm = get_llm()
-        # 使用 astream 进行流式调用，LangGraph 会自动处理流式输出
-        resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
+        
+        # 根据 agent 模式选择提示词
+        if is_data_process_mode:
+            # 数据整理数字员工模式（未登录）
+            from .data_process_prompt import DATA_PROCESS_AGENT_PROMPT_NOT_LOGGED_IN
+            system_msg = DATA_PROCESS_AGENT_PROMPT_NOT_LOGGED_IN
+        else:
+            # 对账助手模式（未登录）
+            system_msg = SYSTEM_PROMPT_NOT_LOGGED_IN
+        
+        resp = llm.invoke([SystemMessage(content=system_msg)] + messages)
         content = resp.content.strip()
 
         # 尝试解析意图 JSON
@@ -405,8 +420,18 @@ async def router_node(state: AgentState) -> dict:
     ) if rules else "暂无已有规则"
 
     username = current_user.get("username", "用户")
-    # 使用 replace 替代 format，避免规则名称/描述中的 {} 被误解析
-    system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
+    
+    # 根据 state 中的 agent_type 选择提示词
+    agent_type = state.get("agent_type", "reconciliation")
+    is_data_process_mode = (agent_type == "data_process")
+
+    if is_data_process_mode:
+        # 数据整理数字员工模式
+        from .data_process_prompt import DATA_PROCESS_AGENT_PROMPT
+        system_msg = DATA_PROCESS_AGENT_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
+    else:
+        # 对账助手模式
+        system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
 
     llm = get_llm()
     messages = list(state.get("messages", []))

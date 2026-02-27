@@ -55,6 +55,33 @@ export interface UploadedFile {
   uploadedAt: Date;
 }
 
+// ── Agent 类型 ──────────────────────────────────────────────────────────────
+
+export type AgentType = 'reconciliation' | 'data_process';
+
+export interface AgentInfo {
+  id: AgentType;
+  name: string;
+  description: string;
+  icon: string;
+}
+
+// 可用的 Agent 列表
+export const AVAILABLE_AGENTS: AgentInfo[] = [
+  {
+    id: 'reconciliation',
+    name: '智能对账助手',
+    description: '专业的财务对账助手，支持对账规则生成和执行',
+    icon: 'BarChart3',
+  },
+  {
+    id: 'data_process',
+    name: '数据整理数字员工',
+    description: '通用的数据整理平台，支持审计数据整理等业务',
+    icon: 'FileSpreadsheet',
+  },
+];
+
 // ── WebSocket 消息协议 ───────────────────────────────────────────────────
 
 export interface WsIncoming {

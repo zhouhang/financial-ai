@@ -35,6 +35,8 @@ from app.graphs.reconciliation import (
     route_after_preview,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
+from app.graphs.data_process import build_data_process_subgraph
+from app.graphs.rule_creation import build_rule_creation_subgraph
 from .nodes import (
     router_node,
     task_execution_node,
@@ -51,13 +53,22 @@ def route_after_router(state: AgentState) -> str:
     """router 之后的条件路由。"""
     intent = state.get("user_intent", "")
     phase = state.get("phase", "")
-
+    
+    # 检查是否正在创建规则（对话式）
+    rule_creation_active = state.get("rule_creation_active", False)
+    if rule_creation_active:
+        return "rule_creation"
+    
     if intent == UserIntent.CREATE_NEW_RULE.value:
         return "file_analysis"
     elif intent == UserIntent.USE_EXISTING_RULE.value:
         return "task_execution"
     elif intent == UserIntent.EDIT_RULE.value:
         return "edit_field_mapping"
+    elif intent == UserIntent.AUDIT_DATA_PROCESS.value:
+        return "data_process"
+    elif intent == UserIntent.RULE_CREATION.value:
+        return "rule_creation"
     else:
         return END
 
@@ -105,7 +116,7 @@ def _route_after_edit_preview(state: AgentState) -> str:
 
 def build_main_graph() -> StateGraph:
     """构建主 Agent 图。
-    
+
     ⚠️ 对账规则生成的节点直接展平到主图中（不再使用子图），
     这样 interrupt/resume 时不会 replay 之前的节点，避免重复文件分析。
     """
@@ -113,20 +124,28 @@ def build_main_graph() -> StateGraph:
     # 数据准备子图（暂时保留为子图）
     data_preparation_sg = build_data_preparation_subgraph()
 
+    # 审计数据处理子图
+    data_process_sg = build_data_process_subgraph()
+
+    # 规则创建子图（对话式）
+    rule_creation_sg = build_rule_creation_subgraph()
+
     graph = StateGraph(AgentState)
 
     # ── 节点 ──────────────────────────────────────────────────────────────
     graph.add_node("router", router_node)
-    
+
     # 对账规则生成节点（直接在主图中，避免子图 replay）
     graph.add_node("file_analysis", file_analysis_node)
     graph.add_node("field_mapping", field_mapping_node)
     graph.add_node("rule_config", rule_config_node)
     graph.add_node("validation_preview", validation_preview_node)
     graph.add_node("save_rule", save_rule_node)
-    
+
     # 其他节点
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
+    graph.add_node("data_process", data_process_sg.compile())  # 审计数据处理子图
+    graph.add_node("rule_creation", rule_creation_sg.compile())  # 规则创建子图
     graph.add_node("task_execution", task_execution_node)
     graph.add_node("result_analysis", result_analysis_node)
     graph.add_node("ask_start_now", ask_start_now_node)
@@ -145,6 +164,8 @@ def build_main_graph() -> StateGraph:
         "file_analysis": "file_analysis",
         "task_execution": "task_execution",
         "edit_field_mapping": "edit_field_mapping",
+        "data_process": "data_process",  # 审计数据处理
+        "rule_creation": "rule_creation",  # 规则创建
         END: END,
     })
 

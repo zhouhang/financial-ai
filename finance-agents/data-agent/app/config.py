@@ -19,7 +19,7 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
 # Qwen (通义千问) — 兼容 OpenAI 接口
 QWEN_API_KEY: str = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL: str = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL: str = os.getenv("QWEN_MODEL", "qwen-plus")
+QWEN_MODEL: str = os.getenv("QWEN_MODEL", "qwen-max")
 
 # DeepSeek — 兼容 OpenAI 接口
 DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")

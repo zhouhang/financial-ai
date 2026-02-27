@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
+import AgentSelector from './components/AgentSelector';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
 import type {
@@ -9,10 +10,16 @@ import type {
   Task,
   UploadedFile,
   WsOutgoing,
+  AgentType,
 } from './types';
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// 过滤消息中的 Agent 前缀
+function filterAgentPrefix(text: string): string {
+  return text.replace(/^\[AGENT:data_process\]\s*/, '');
 }
 
 function createConversation(): Conversation {
@@ -53,6 +60,30 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // 初始化时使用保存的会话ID或待确认会话的ID
   const [activeConvId, setActiveConvId] = useState<string>(initialState.activeId);
+
+  // ── Agent 选择状态 ──────────────────────────────────────────────
+  const [selectedAgent, setSelectedAgent] = useState<AgentType>("reconciliation");
+
+  // 处理 Agent 切换
+  const handleSelectAgent = useCallback((agent: AgentType) => {
+    // 如果切换了 Agent，创建新会话
+    if (agent !== selectedAgent) {
+      const newConv = createConversation();
+      // 设置标题包含 Agent 名称
+      const agentNames = {
+        'reconciliation': '智能对账',
+        'data_process': '数据整理'
+      };
+      newConv.title = `新会话 - ${agentNames[agent] || '新会话'}`;
+      pendingNewConvRef.current = newConv;
+      setActiveConvId(newConv.id);
+      // 清除任务状态
+      setTasks([]);
+      setUploadedFiles([]);
+      setTaskResult(null);
+    }
+    setSelectedAgent(agent);
+  }, [selectedAgent]);
   
   // ── 当前会话 ──────────────────────────────────────────────
   // 追踪"待确认"的新会话（用户点击新建或刷新页面时，还没发消息）
@@ -570,7 +601,9 @@ export default function App() {
 
   // ── 发送消息 ──────────────────────────────────────────────
   const handleSendMessage = useCallback(
-    (text: string, attachments?: import('./types').MessageAttachment[], silent = false) => {
+    (text: string, attachments?: import('./types').MessageAttachment[], silent = false, agentType?: AgentType) => {
+      // 过滤掉可能的前缀（确保不会重复添加）
+      const cleanText = filterAgentPrefix(text);
       // 如果正在流式输出，中断当前流式输出
       if (streamingMessageId) {
         setStreamingMessageId(null);
@@ -579,8 +612,8 @@ export default function App() {
       // 如果是待确认的新会话的第一条消息，先将会话添加到列表
       if (pendingNewConvRef.current && pendingNewConvRef.current.id === activeConvId) {
         const newConv = pendingNewConvRef.current;
-        // 设置标题为消息内容的前20个字符
-        newConv.title = text.slice(0, 20) + (text.length > 20 ? '...' : '');
+        // 设置标题为消息内容的前 20 个字符（使用过滤后的文本）
+        newConv.title = cleanText.slice(0, 20) + (cleanText.length > 20 ? '...' : '');
         setConversations((prev) => [newConv, ...prev]);
         pendingNewConvRef.current = null;
       }
@@ -590,7 +623,7 @@ export default function App() {
       appendMessage({
         id: generateId(),
         role: 'user',
-        content: text,
+        content: cleanText,
         timestamp: new Date(),
           attachments,
       });
@@ -609,9 +642,12 @@ export default function App() {
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
       const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId);
+      
+      // 注意：不要将前缀发送给后端，前缀只用于前端显示
+      // 通过 selectedAgent 参数传递给后端当前选择的 Agent 类型
+      sendMessage(cleanText, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId, undefined, selectedAgent);
     },
-    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId]
+    [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedAgent]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -747,29 +783,54 @@ export default function App() {
   const displayConversations = mergedConversations();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary">
-      <Sidebar
-        conversations={displayConversations}
-        activeConversationId={activeConvId}
-        connectionStatus={status}
-        onNewConversation={handleNewConversation}
-        onSelectConversation={handleSelectConversation}
-        onDeleteConversation={handleDeleteConversation}
-        currentUser={currentUser}
-        onLogout={handleLogout}
-      />
-      <ChatArea
-        messages={messages}
-        isLoading={isLoading}
-        isLoadingConversation={isLoadingConversation}
-        connectionStatus={status}
-        onSendMessage={handleSendMessage}
-        onFileUploaded={handleFileUploaded}
-        threadId={activeConvId}
-        showInput={!!activeConvId}
-        currentUser={currentUser}
-        streamingMessageId={streamingMessageId}
-      />
+    <div style={{
+      display: 'flex',
+      height: '100vh',
+      width: '100vw',
+      overflow: 'hidden',
+      background: '#f8fafc',
+    }}>
+      <div style={{
+        width: '256px',
+        minWidth: '256px',
+        maxWidth: '256px',
+        height: '100%',
+        overflow: 'hidden',
+      }}>
+        <Sidebar
+          conversations={displayConversations}
+          activeConversationId={activeConvId}
+          connectionStatus={status}
+          onNewConversation={handleNewConversation}
+          onSelectConversation={handleSelectConversation}
+          onDeleteConversation={handleDeleteConversation}
+          currentUser={currentUser}
+          onLogout={handleLogout}
+          selectedAgent={selectedAgent}
+          onSelectAgent={handleSelectAgent}
+        />
+      </div>
+      <div style={{
+        flex: '1 1 0%',
+        display: 'flex',
+        flexDirection: 'column',
+        minWidth: 0,
+        overflow: 'hidden',
+      }}>
+        <ChatArea
+          messages={messages}
+          isLoading={isLoading}
+          isLoadingConversation={isLoadingConversation}
+          connectionStatus={status}
+          onSendMessage={handleSendMessage}
+          onFileUploaded={handleFileUploaded}
+          threadId={activeConvId}
+          showInput={!!activeConvId}
+          currentUser={currentUser}
+          streamingMessageId={streamingMessageId}
+          selectedAgent={selectedAgent}
+        />
+      </div>
     </div>
   );
 }
