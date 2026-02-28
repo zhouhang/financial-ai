@@ -312,13 +312,13 @@ def _format_operations_summary(operations: list[dict[str, Any]], file_names: dic
     
     # 如果没有提供文件名，使用默认值
     if not file_names:
-        file_names = {"business": "文件1（业务数据）", "finance": "文件2（财务数据）"}
+        file_names = {"business": "文件1", "finance": "文件2"}
     else:
         # 补充默认标签
         if "business" not in file_names:
-            file_names["business"] = "文件1（业务数据）"
+            file_names["business"] = "文件1"
         if "finance" not in file_names:
-            file_names["finance"] = "文件2（财务数据）"
+            file_names["finance"] = "文件2"
     
     lines = []
     for op in operations:
@@ -342,7 +342,7 @@ def _format_operations_summary(operations: list[dict[str, Any]], file_names: dic
     return "\n" + "\n".join(lines)
 
 
-def _adjust_field_mappings_with_llm(
+async def _adjust_field_mappings_with_llm(
     current_mappings: dict[str, Any],
     user_instruction: str,
     analyses: list[dict[str, Any]]
@@ -441,15 +441,15 @@ def _adjust_field_mappings_with_llm(
     
     try:
         llm = get_llm(temperature=0.1)
-        resp = llm.invoke(prompt)
+        resp = await llm.ainvoke(prompt)
         content = resp.content.strip()
-        
+
         # 提取 JSON
         if "```" in content:
             m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
             if m:
                 content = m.group(1)
-        
+
         parsed = json.loads(content)
         operations = parsed.get("operations", [])
         
@@ -510,8 +510,8 @@ def _get_file_names_from_rule_template(rule_template: dict) -> dict[str, str]:
     biz_fp = ds.get("business", {}).get("file_pattern") or []
     fin_fp = ds.get("finance", {}).get("file_pattern") or []
     return {
-        "business": biz_fp[0] if biz_fp else "业务文件",
-        "finance": fin_fp[0] if fin_fp else "财务文件",
+        "business": biz_fp[0] if biz_fp else "文件1",
+        "finance": fin_fp[0] if fin_fp else "文件2",
     }
 
 
@@ -525,7 +525,7 @@ def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
     # 从 data_cleaning_rules 提取每个有 description 的规则项
     dcr = rule_template.get("data_cleaning_rules", {})
     for src in ("business", "finance"):
-        src_label = file_labels.get(src, "业务文件" if src == "business" else "财务文件")
+        src_label = file_labels.get(src, "文件1" if src == "business" else "文件2")
         src_rules = dcr.get(src, {})
         # field_transforms
         for t in src_rules.get("field_transforms", []):
@@ -619,7 +619,7 @@ def _build_rule_config_text(config_items: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
+async def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
     """使用 LLM 智能猜测字段映射：原始列名 → 标准角色。"""
     from app.utils.llm import get_llm
 
@@ -661,7 +661,7 @@ def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
 
     try:
         llm = get_llm(temperature=0.1)
-        resp = llm.invoke(prompt)
+        resp = await llm.ainvoke(prompt)
         content = resp.content.strip()
 
         if "```" in content:
@@ -703,7 +703,7 @@ def _preview_schema(schema: dict, analyses: list[dict]) -> dict:
 def _build_dummy_analyses_from_mappings(mappings: dict[str, Any]) -> list[dict]:
     """从 mappings 构建虚拟 analyses，供编辑模式下 _adjust_field_mappings_with_llm 使用。"""
     analyses = []
-    for src, label in [("business", "业务文件"), ("finance", "财务文件")]:
+    for src, label in [("business", "文件1"), ("finance", "文件2")]:
         cols = []
         for role, col in mappings.get(src, {}).items():
             if isinstance(col, list):
@@ -715,7 +715,7 @@ def _build_dummy_analyses_from_mappings(mappings: dict[str, Any]) -> list[dict]:
 
 
 def _analyze_config_target(json_snippet: dict, file_names: dict[str, str] | None = None) -> str:
-    """分析配置片段的目标（业务数据、财务数据或全局）。
+    """分析配置片段的目标（文件1、文件2或全局）。
     
     Args:
         json_snippet: JSON配置片段
@@ -723,7 +723,7 @@ def _analyze_config_target(json_snippet: dict, file_names: dict[str, str] | None
     """
     # 如果没有提供文件名，使用默认值
     if not file_names:
-        file_names = {"business": "业务文件(文件1)", "finance": "财务文件(文件2)"}
+        file_names = {"business": "文件1", "finance": "文件2"}
     
     # 检查是否是数据清理规则
     if "data_cleaning_rules" in json_snippet:
@@ -734,9 +734,9 @@ def _analyze_config_target(json_snippet: dict, file_names: dict[str, str] | None
         if has_business and has_finance:
             return f"📁 {file_names.get('business', '文件1')} + {file_names.get('finance', '文件2')}"
         elif has_business:
-            return f"📁 {file_names.get('business', '业务文件(文件1)')}"
+            return f"📁 {file_names.get('business', '文件1')}"
         elif has_finance:
-            return f"📁 {file_names.get('finance', '财务文件(文件2)')}"
+            return f"📁 {file_names.get('finance', '文件2')}"
     
     # 检查是否是全局规则（容差、过滤等）
     if "tolerance" in json_snippet:
@@ -1329,11 +1329,11 @@ async def _analyze_multi_sheet_files(uploaded_files: list, complexity_info: dict
     }
 
     if has_business and has_finance:
-        recommendations["message"] = "✅ 成功识别出业务数据和财务数据"
+        recommendations["message"] = "✅ 成功识别出两个文件"
     elif has_business:
-        recommendations["message"] = "⚠️ 只识别到业务数据，请补充上传财务数据文件"
+        recommendations["message"] = "⚠️ 只识别到文件1，请补充上传文件2"
     elif has_finance:
-        recommendations["message"] = "⚠️ 只识别到财务数据，请补充上传业务数据文件"
+        recommendations["message"] = "⚠️ 只识别到文件2，请补充上传文件1"
     else:
         recommendations["message"] = "❌ 未识别到有效的对账数据"
 
@@ -1503,9 +1503,9 @@ async def _smart_file_pairing(uploaded_files: list, complexity_info: dict) -> di
             "success": False,
             "analyses": analyses,
             "recommendations": {
-                "message": "❌ 未能识别出有效的业务-财务文件配对"
+                "message": "❌ 未能识别出有效的文件配对"
             },
-            "warnings": [f"业务文件: {len(business_files)}个, 财务文件: {len(finance_files)}个"]
+            "warnings": [f"文件1: {len(business_files)}个, 文件2: {len(finance_files)}个"]
         }
 
     # 简单推荐：选择第一个business和第一个finance
@@ -1578,7 +1578,7 @@ async def _analyze_single_file(uploaded_file: dict, complexity_info: dict) -> di
     analysis = analyses[0]
     guessed_type = analysis.get("guessed_source")
 
-    opposite_type = "财务数据" if guessed_type == "business" else "业务数据"
+    opposite_type = "文件2" if guessed_type == "business" else "文件1"
 
     return {
         "success": False,  # 标记为失败，因为缺少配对文件

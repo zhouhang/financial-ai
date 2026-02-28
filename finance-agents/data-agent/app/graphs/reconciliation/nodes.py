@@ -21,7 +21,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
-from app.models import AgentState, ReconciliationPhase
+from app.models import AgentState, ReconciliationPhase, UserIntent
 from app.utils.schema_builder import build_schema
 from app.tools.mcp_client import call_mcp_tool
 
@@ -57,6 +57,64 @@ from .parsers import _parse_rule_config_json_snippet
 logger = logging.getLogger(__name__)
 
 
+# ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+async def _generate_friendly_response_for_other_intent(
+    user_input: str,
+    current_phase: str,
+    phase_description: str,
+    next_action_hint: str
+) -> str:
+    """
+    用 LLM 生成友好的回复（针对 OTHER 意图）
+
+    Args:
+        user_input: 用户的输入
+        current_phase: 当前阶段名称
+        phase_description: 当前阶段的描述
+        next_action_hint: 下一步操作提示
+
+    Returns:
+        str: 友好的回复内容
+    """
+    from app.utils.llm import get_llm
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    prompt = f"""你是一个友好的对账助手。用户在对账流程中向你提问或想聊天。
+
+**当前阶段**：{phase_description}
+
+**用户说**：{user_input}
+
+请生成一个简短（1-2句话）、友好、自然的回复：
+1. 如果是提问，简单回答或解释
+2. 如果是闲聊，友好回应
+3. 然后温和地引导回到任务
+
+**语气要求**：轻松、口语化、像朋友聊天一样
+
+**示例**：
+- 用户："你是谁？" → "我是你的对账助手呀～专门帮你对比两个文件，找出差异的。"
+- 用户："今天天气真好" → "哈哈，是吗～不过咱们先把对账搞定，然后你就可以出去享受好天气啦！"
+- 用户："什么是对账？" → "对账就是对比两个文件的数据，找出不一致的地方～"
+
+请直接输出回复内容，不要加引号或其他格式。"""
+
+    try:
+        llm = get_llm(temperature=0.7)  # 稍高的温度让回复更自然
+        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        friendly_reply = response.content.strip()
+
+        # 组合友好回复 + 任务引导
+        full_response = f"{friendly_reply}\n\n{next_action_hint}"
+        return full_response
+
+    except Exception as e:
+        logger.error(f"LLM 生成友好回复失败: {e}")
+        # 降级：返回通用友好回复
+        return f"😊 好的～\n\n{next_action_hint}"
+
+
 # ── 节点函数 ─────────────────────────────────────────────────────────────────
 
 async def file_analysis_node(state: AgentState) -> dict:
@@ -76,9 +134,42 @@ async def file_analysis_node(state: AgentState) -> dict:
         user_response = interrupt({
             "step": "1/4",
             "step_title": "上传文件",
-            "question": "📤 第1步：上传文件\n\n请上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。",
+            "question": "📤 第1步：上传文件\n\n请上传需要对账的文件（文件1和文件2各一个 Excel/CSV 文件）。",
             "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
         })
+
+        # ====== interrupt 返回后检查意图（支持游客和登录模式）======
+        auth_token = state.get("auth_token", "")
+
+        if not auth_token:  # 游客模式
+            from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+            intent = await check_user_intent_after_interrupt_guest(
+                user_response=user_response,
+                current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                state=state
+            )
+
+            if intent != UserIntent.RESUME_WORKFLOW.value:
+                logger.info(f"[游客] file_analysis_node: 用户切换意图 {intent}")
+                return await handle_intent_switch_guest(
+                    intent=intent,
+                    current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                    state=state,
+                    user_input=str(user_response).strip()
+                )
+        else:  # 登录模式
+            from app.utils.workflow_intent import check_user_intent_after_interrupt, handle_intent_switch
+
+            intent = await check_user_intent_after_interrupt(
+                user_response=user_response,
+                current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                state=state
+            )
+
+            if intent != UserIntent.RESUME_WORKFLOW.value:
+                logger.info(f"[登录] file_analysis_node: 用户切换意图 {intent}")
+                return await handle_intent_switch(intent, ReconciliationPhase.FILE_ANALYSIS.value, state)
 
         # interrupt 返回后，重新检查文件
         uploaded = state.get("uploaded_files", [])
@@ -231,7 +322,7 @@ async def file_analysis_node(state: AgentState) -> dict:
         msg = "\n".join(msg_parts)
 
     # 使用 LLM 猜测字段映射（在后台完成，不显示给用户）
-    suggested = _guess_field_mappings(analyses)
+    suggested = await _guess_field_mappings(analyses)
 
     return {
         "messages": [AIMessage(content=msg)],
@@ -241,7 +332,7 @@ async def file_analysis_node(state: AgentState) -> dict:
     }
 
 
-def field_mapping_node(state: AgentState) -> dict:
+async def field_mapping_node(state: AgentState) -> dict:
     """第2步 (HITL)：等待用户确认或修改字段映射。
     
     ⚠️ 展平到主图后，interrupt/resume 直接恢复到此节点，无需首次进入检查。
@@ -282,6 +373,27 @@ def field_mapping_node(state: AgentState) -> dict:
 
     response_str = str(user_response).strip()
 
+    # ====== interrupt 返回后检查意图（支持游客和登录模式）======
+    auth_token = state.get("auth_token", "")
+
+    if not auth_token:  # 游客模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+        intent = await check_user_intent_after_interrupt_guest(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.FIELD_MAPPING.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[游客] field_mapping_node: 用户切换意图 {intent}")
+            return await handle_intent_switch_guest(
+                intent=intent,
+                current_phase=ReconciliationPhase.FIELD_MAPPING.value,
+                state=state,
+                user_input=response_str
+            )
+
     # 忽略文件上传的默认消息或空消息
     if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
         # 清除调整反馈，重新 interrupt
@@ -307,7 +419,7 @@ def field_mapping_node(state: AgentState) -> dict:
     logger.info(f"用户调整意见: {response_str}")
     
     # 使用 LLM 调整映射（返回调整后的映射和操作列表）
-    adjusted_mappings, operations = _adjust_field_mappings_with_llm(confirmed, response_str, analyses)
+    adjusted_mappings, operations = await _adjust_field_mappings_with_llm(confirmed, response_str, analyses)
     
     # 检查映射是否有变化（且 operations 非空，避免显示无效更新）
     if adjusted_mappings != confirmed and operations:
@@ -522,7 +634,7 @@ async def rule_recommendation_node(state: AgentState) -> dict:
         
         # 从 data_cleaning_rules 提取每个有 description 的规则项
         for src in ("business", "finance"):
-            src_label = file_labels.get(src, "业务文件" if src == "business" else "财务文件")
+            src_label = file_labels.get(src, "文件1" if src == "business" else "文件2")
             src_rules = data_cleaning_rules.get(src, {})
             # field_transforms
             for t in src_rules.get("field_transforms", []):
@@ -569,12 +681,44 @@ async def rule_recommendation_node(state: AgentState) -> dict:
         "hint": "数字选择 或 「继续」",
     })
     
-    response_str = str(user_response).strip().lower()
-    
+    response_str = str(user_response).strip()
+
     logger.info(f"rule_recommendation_node 处理输入: response={response_str}, using_recommended_rule={state.get('using_recommended_rule')}, selected_rule_id={state.get('selected_rule_id')}, current_phase={state.get('phase')}")
-    
+
+    # ====== interrupt 返回后检查意图（支持游客和登录模式）======
+    if not auth_token:  # 游客模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+        intent = await check_user_intent_after_interrupt_guest(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.RULE_RECOMMENDATION.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[游客] rule_recommendation_node: 用户切换意图 {intent}")
+            return await handle_intent_switch_guest(
+                intent=intent,
+                current_phase=ReconciliationPhase.RULE_RECOMMENDATION.value,
+                state=state,
+                user_input=response_str
+            )
+    else:  # 登录模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt, handle_intent_switch
+
+        intent = await check_user_intent_after_interrupt(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.RULE_RECOMMENDATION.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[登录] rule_recommendation_node: 用户切换意图 {intent}")
+            return await handle_intent_switch(intent, ReconciliationPhase.RULE_RECOMMENDATION.value, state)
+
     # 解析用户选择数字 → 直接执行对账（不再询问确认）
-    if response_str.isdigit():
+    response_lower = response_str.lower()
+    if response_lower.isdigit():
         idx = int(response_str) - 1
         if 0 <= idx < len(recommended):
             selected = recommended[idx]
@@ -640,7 +784,7 @@ async def rule_recommendation_node(state: AgentState) -> dict:
     }
 
 
-def rule_config_node(state: AgentState) -> dict:
+async def rule_config_node(state: AgentState) -> dict:
     """第3步 (HITL)：增量式配置规则参数，支持自然语言添加/删除配置项。
     
     新的配置体验：
@@ -687,7 +831,7 @@ def rule_config_node(state: AgentState) -> dict:
 {config_display}
 
 你可以：
-• 继续添加配置（为业务文件、财务文件或全局配置新规则）
+• 继续添加配置（为文件1、文件2或全局配置新规则）
 • 删除配置（如"删除金额容差"、"去掉订单号过滤"）
 • 回复"确认"完成配置
 
@@ -708,7 +852,28 @@ def rule_config_node(state: AgentState) -> dict:
 
     response_str = str(user_response).strip()
     logger.info(f"rule_config interrupt 返回，用户输入: {response_str}")
-    
+
+    # ====== interrupt 返回后检查意图（支持游客和登录模式）======
+    auth_token = state.get("auth_token", "")
+
+    if not auth_token:  # 游客模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+        intent = await check_user_intent_after_interrupt_guest(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.RULE_CONFIG.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[游客] rule_config_node: 用户切换意图 {intent}")
+            return await handle_intent_switch_guest(
+                intent=intent,
+                current_phase=ReconciliationPhase.RULE_CONFIG.value,
+                state=state,
+                user_input=response_str
+            )
+
     # 忽略文件上传的默认消息或空消息
     if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
         logger.info("忽略空消息或文件上传消息，保持 phase=RULE_CONFIG")
@@ -871,7 +1036,7 @@ def rule_config_node(state: AgentState) -> dict:
     }
 
 
-def validation_preview_node(state: AgentState) -> dict:
+async def validation_preview_node(state: AgentState) -> dict:
     """第4步 (HITL)：生成规则 schema，预览对账效果，等待用户确认。"""
     logger.info("validation_preview_node - 开始执行")
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
@@ -1097,6 +1262,26 @@ def validation_preview_node(state: AgentState) -> dict:
 
     response_str = str(user_response).strip()
 
+    # ====== interrupt 返回后检查意图（游客模式）======
+    auth_token = state.get("auth_token", "")
+    if not auth_token:  # 游客模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+        intent = await check_user_intent_after_interrupt_guest(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.VALIDATION_PREVIEW.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[游客] validation_preview_node: 用户切换意图 {intent}")
+            return await handle_intent_switch_guest(
+                intent=intent,
+                current_phase=ReconciliationPhase.VALIDATION_PREVIEW.value,
+                state=state,
+                user_input=response_str
+            )
+
     if response_str in ("调整", "重新配置", "重来", "adjust"):
         return {
             "messages": [AIMessage(content="好的，让我们重新配置规则参数。")],
@@ -1260,7 +1445,7 @@ async def save_rule_node(state: AgentState) -> dict:
 
 # ── 编辑规则节点 ─────────────────────────────────────────────────────────────
 
-def edit_field_mapping_node(state: AgentState) -> dict:
+async def edit_field_mapping_node(state: AgentState) -> dict:
     """编辑规则 - 第1步：显示当前字段映射，支持修改或确认。"""
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
     adjustment_feedback = state.get("mapping_adjustment_feedback")
@@ -1295,7 +1480,7 @@ def edit_field_mapping_node(state: AgentState) -> dict:
 
     # 用户需要调整
     dummy_analyses = _build_dummy_analyses_from_mappings(mappings)
-    adjusted_mappings, operations = _adjust_field_mappings_with_llm(mappings, response_str, dummy_analyses)
+    adjusted_mappings, operations = await _adjust_field_mappings_with_llm(mappings, response_str, dummy_analyses)
     if adjusted_mappings != mappings and operations:
         ops_summary = _format_operations_summary(operations)
         feedback = f"✅ 已更新：\n{ops_summary}"
@@ -1698,16 +1883,35 @@ async def result_evaluation_node(state: AgentState) -> dict:
         "question": question_text,
         "hint": "输入「保存」或「不要」",
     })
-    
+
     response_str = str(user_response).strip().lower()
-    
+
+    # ====== interrupt 返回后检查意图（游客模式）======
+    if not auth_token:  # 游客模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+        intent = await check_user_intent_after_interrupt_guest(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.RESULT_EVALUATION.value,
+            state=state
+        )
+
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"[游客] result_evaluation_node: 用户切换意图 {intent}")
+            return await handle_intent_switch_guest(
+                intent=intent,
+                current_phase=ReconciliationPhase.RESULT_EVALUATION.value,
+                state=state,
+                user_input=response_str
+            )
+
     if response_str in ("保存", "save", "是", "确认"):
         return {
             "messages": [AIMessage(content="请输入规则名称，将为您保存为个人规则。")],
             "phase": ReconciliationPhase.RESULT_EVALUATION.value,
             "waiting_for_rule_name": True,
         }
-    
+
     return {
         "messages": [AIMessage(content="好的，将返回字段映射界面，您可以重新配置规则。")],
         "phase": ReconciliationPhase.FIELD_MAPPING.value,

@@ -25,7 +25,6 @@ from app.graphs.reconciliation import (
     rule_recommendation_node,
     rule_config_node,
     validation_preview_node,
-    save_rule_node,
     result_evaluation_node,
     edit_field_mapping_node,
     edit_rule_config_node,
@@ -36,15 +35,12 @@ from app.graphs.reconciliation import (
     route_after_rule_recommendation,
     route_after_rule_config,
     route_after_preview,
-    route_after_save_rule,
-    build_reconciliation_subgraph,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
 from .nodes import (
     router_node,
     task_execution_node,
     result_analysis_node,
-    ask_start_now_node,
 )
 
 
@@ -148,14 +144,12 @@ def build_main_graph() -> StateGraph:
     graph.add_node("rule_recommendation", rule_recommendation_node)
     graph.add_node("rule_config", rule_config_node)
     graph.add_node("validation_preview", validation_preview_node)
-    graph.add_node("save_rule", save_rule_node)
     graph.add_node("result_evaluation", result_evaluation_node)
     
     # 其他节点
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
     graph.add_node("task_execution", task_execution_node)
     graph.add_node("result_analysis", result_analysis_node)
-    graph.add_node("ask_start_now", ask_start_now_node)
 
     # ── 边 ────────────────────────────────────────────────────────────────
     graph.set_entry_point("router")
@@ -183,23 +177,22 @@ def build_main_graph() -> StateGraph:
     graph.add_conditional_edges("rule_recommendation", route_after_rule_recommendation, {
         "field_mapping": "field_mapping",  # 不采纳推荐，进入字段映射
         "task_execution": "task_execution",  # 确认采用推荐规则，执行对账
+        END: END,  # 用户取消或退出 workflow（游客模式意图切换）
     })
     graph.add_conditional_edges("field_mapping", route_after_field_mapping, {
         "field_mapping": "field_mapping",   # 调整意见，重新进入
         "rule_config": "rule_config",       # 确认，进入下一步
+        END: END,  # 用户取消或退出 workflow（游客模式意图切换）
     })
     graph.add_conditional_edges("rule_config", route_after_rule_config, {
         "rule_config": "rule_config",                # 调整意见，重新进入
         "validation_preview": "validation_preview",  # 确认，进入下一步
+        END: END,  # 用户取消或退出 workflow（游客模式意图切换）
     })
     graph.add_conditional_edges("validation_preview", route_after_preview, {
         "rule_config": "rule_config",
         "task_execution": "task_execution",  # 新建规则：先对账再保存（与推荐规则流程一致）
-    })
-    graph.add_conditional_edges("save_rule", route_after_save_rule, {
-        "result_evaluation": "result_evaluation",  # 使用推荐规则，进入评估
-        "ask_start_now": "ask_start_now",  # 正常流程
-        END: END,
+        END: END,  # 用户取消或退出 workflow（游客模式意图切换）
     })
     # result_evaluation 后的路由：
     # - 对账已完成，直接结束（不需要再问是否开始对账）
@@ -215,12 +208,6 @@ def build_main_graph() -> StateGraph:
     graph.add_conditional_edges("result_evaluation", route_after_result_evaluation, {
         "field_mapping": "field_mapping",
         "result_evaluation": "result_evaluation",
-        END: END,
-    })
-
-    # 询问是否立即执行
-    graph.add_conditional_edges("ask_start_now", route_after_ask_start, {
-        "task_execution": "task_execution",
         END: END,
     })
 

@@ -15,6 +15,123 @@ from app.models import UserIntent, ReconciliationPhase
 logger = logging.getLogger(__name__)
 
 
+async def classify_intent_in_workflow_guest(
+    user_msg: str,
+    current_phase: str,
+    state: dict[str, Any]
+) -> str:
+    """
+    在游客模式下的 workflow 中分类用户意图（简化版）
+
+    游客模式下的意图选项更少：
+    - RESUME_WORKFLOW: 继续当前流程
+    - LOGIN: 想登录
+    - CANCEL: 取消/退出
+    - UNKNOWN: 其他（默认继续 workflow）
+
+    Args:
+        user_msg: 用户输入的消息
+        current_phase: 当前 workflow 阶段（ReconciliationPhase 值）
+        state: 当前状态字典
+
+    Returns:
+        str: "resume_workflow", "LOGIN", "CANCEL", 或 "unknown"
+    """
+    from app.utils.llm import get_llm
+    from langchain_core.messages import SystemMessage
+
+    # ====== 关键词快速检查 ======
+    user_msg_lower = user_msg.lower().strip()
+
+    logger.info(f"🔍 [游客模式] classify_intent_in_workflow_guest: user_msg='{user_msg[:50]}...'")
+
+    # 登录关键词
+    login_keywords = ["登录", "登陆", "注册", "账号", "想登录", "我要登录"]
+    if any(kw in user_msg_lower for kw in login_keywords):
+        logger.info(f"[游客模式] 关键词匹配: user_msg='{user_msg[:50]}...' → LOGIN")
+        return "LOGIN"
+
+    # 取消关键词
+    cancel_keywords = ["取消", "退出", "不要", "算了", "停止", "不想", "不做了", "放弃", "结束"]
+    if any(kw in user_msg_lower for kw in cancel_keywords):
+        logger.info(f"[游客模式] 关键词匹配: user_msg='{user_msg[:50]}...' → CANCEL")
+        return "CANCEL"
+
+    # 继续关键词（只用明确、不易误匹配的多字词，避免单字导致误匹配）
+    continue_keywords = ["确认", "继续", "好的", "没问题", "可以", "是的", "嗯", "ok", "yes"]
+    if any(kw in user_msg_lower for kw in continue_keywords):
+        logger.info(f"[游客模式] 关键词匹配: user_msg='{user_msg[:50]}...' → RESUME_WORKFLOW")
+        return UserIntent.RESUME_WORKFLOW.value
+
+    # 纯数字输入（选择推荐规则编号、输入数据等）→ 直接认为是继续 workflow，不调用 LLM
+    import re as _re
+    if _re.fullmatch(r'\d+', user_msg_lower):
+        logger.info(f"[游客模式] 纯数字输入: user_msg='{user_msg[:50]}...' → RESUME_WORKFLOW (跳过 LLM)")
+        return UserIntent.RESUME_WORKFLOW.value
+
+    # ====== LLM 分类（处理模糊输入）======
+    phase_name_map = {
+        "file_analysis": "文件分析（等待上传文件或确认）",
+        "field_mapping": "字段映射（等待确认映射或调整）",
+        "rule_recommendation": "规则推荐（等待选择推荐规则或手动配置）",
+        "rule_config": "规则配置（等待配置参数或确认）",
+        "validation_preview": "预览验证（等待确认或调整）",
+        "save_rule": "保存规则（等待输入规则名称）",
+        "result_evaluation": "结果评估（查看对账结果）",
+    }
+
+    current_phase_desc = phase_name_map.get(current_phase, f"工作流阶段：{current_phase}")
+
+    prompt = f"""你是意图分类助手。当前**游客用户**（未登录）正在进行对账规则创建流程。
+
+**当前阶段**：{current_phase_desc}
+**用户输入**：{user_msg}
+
+游客模式下，请判断用户的意图（选择最匹配的一项）：
+
+A. RESUME_WORKFLOW - 继续当前流程
+   - 用户的输入是对当前阶段问题的回答
+   - 例如："确认"、"没问题"、"调整字段A→B"、"继续"、"好的"、"是的"
+
+B. LOGIN - 想登录/注册
+   - 例如："登录"、"我要登录"、"注册"、"想登录"、"有账号"
+
+C. CANCEL - 取消/退出当前操作
+   - 例如："取消"、"退出"、"不要了"、"算了"、"停止"
+
+D. OTHER - 其他闲聊或提问
+   - 例如："这是什么"、"帮助"、"你能做什么"
+
+**重要**：
+- 如果用户输入明确是对当前阶段的回应（确认、输入数据、调整内容），选择 A
+- 如果用户提到登录、注册、账号等，选择 B
+- 如果用户想取消或退出，选择 C
+- 其他情况选择 D
+
+请仅回答：A / B / C / D（不要解释）"""
+
+    try:
+        llm = get_llm()
+        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        choice = response.content.strip().upper()
+
+        mapping = {
+            "A": UserIntent.RESUME_WORKFLOW.value,
+            "B": "LOGIN",
+            "C": "CANCEL",
+            "D": "OTHER"  # 其他闲聊/提问，需要给出提示
+        }
+
+        result = mapping.get(choice, "OTHER")  # 默认为 OTHER，而不是继续 workflow
+        logger.info(f"[游客模式] LLM 意图分类: user_msg='{user_msg[:50]}...' → {result} (phase={current_phase})")
+        return result
+
+    except Exception as e:
+        logger.error(f"[游客模式] LLM 意图分类失败: {e}")
+        # 降级：默认继续 workflow
+        return UserIntent.RESUME_WORKFLOW.value
+
+
 async def classify_intent_in_workflow(
     user_msg: str,
     current_phase: str,
@@ -130,7 +247,7 @@ F. OTHER - 其他意图
     # 调用 LLM（使用当前系统配置的模型）
     try:
         llm = get_llm()
-        response = llm.invoke([SystemMessage(content=prompt)])
+        response = await llm.ainvoke([SystemMessage(content=prompt)])
         choice = response.content.strip().upper()
 
         # 映射回意图枚举
@@ -211,13 +328,127 @@ def save_workflow_context(state: dict[str, Any], current_phase: str):
     logger.info(f"已保存 workflow 上下文: phase={current_phase}, fields={list(saved_progress.keys())}")
 
 
+async def check_user_intent_after_interrupt_guest(
+    user_response: Any,
+    current_phase: str,
+    state: dict[str, Any]
+) -> str:
+    """
+    在游客模式下 interrupt 返回后检查用户意图（简化版）
+
+    Args:
+        user_response: interrupt() 的返回值
+        current_phase: 当前 workflow 阶段
+        state: 当前状态字典
+
+    Returns:
+        str: "resume_workflow", "LOGIN", "CANCEL", 或 "OTHER"
+    """
+    # 获取用户输入
+    user_input = str(user_response).strip() if user_response else ""
+
+    logger.info(f"🔍 [游客模式] interrupt 返回，检查意图: phase={current_phase}, user_input='{user_input[:100]}'")
+
+    # 调用游客模式的意图分类
+    intent = await classify_intent_in_workflow_guest(
+        user_msg=user_input,
+        current_phase=current_phase,
+        state=state
+    )
+
+    logger.info(f"🔍 [游客模式] 意图检测结果: {intent}")
+
+    return intent
+
+
+async def handle_intent_switch_guest(
+    intent: str,
+    current_phase: str,
+    state: dict[str, Any],
+    user_input: str
+) -> dict:
+    """
+    统一处理游客模式下 workflow 中的意图切换
+
+    当游客在 workflow 中输入无关指令时，此函数会：
+    1. 处理常见意图（LOGIN, CANCEL, OTHER）
+    2. 返回普通 dict（清空 phase），由条件边路由到 END
+
+    Args:
+        intent: 用户意图
+        current_phase: 当前 workflow 阶段
+        state: 当前状态字典
+        user_input: 用户的原始输入
+
+    Returns:
+        dict: 状态更新字典（phase="" 让条件边路由到 END）
+    """
+    from langchain_core.messages import AIMessage
+    from app.models import UserIntent
+
+    logger.info(f"handle_intent_switch_guest: 游客切换意图 {current_phase} → {intent}")
+
+    if intent == "LOGIN":
+        # 用户想登录，保存进度并统一提示点击右上角登录
+        save_workflow_context(state, current_phase)
+        return {
+            "messages": [AIMessage(content="💡 请点击右上角登录按钮进行登录。")],
+            "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+
+    elif intent == "CANCEL":
+        # 用户想取消，退出 workflow
+        return {
+            "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
+            "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+
+    elif intent == "OTHER":
+        # 用户的其他提问或闲聊 - 用 LLM 生成友好回复，然后退出 workflow
+        from app.graphs.reconciliation.nodes import _generate_friendly_response_for_other_intent
+
+        phase_descriptions = {
+            "file_analysis": ("等待上传对账文件", "📤 如果想继续，请说「对账」重新开始。"),
+            "field_mapping": ("确认字段映射", "📋 如果想继续，请说「对账」重新开始。"),
+            "rule_recommendation": ("查看推荐规则", "🎯 如果想继续，请说「对账」重新开始。"),
+            "rule_config": ("配置对账规则参数", "⚙️ 如果想继续，请说「对账」重新开始。"),
+            "validation_preview": ("预览对账结果", "👁️ 如果想继续，请说「对账」重新开始。"),
+            "result_evaluation": ("查看对账结果", "📊 如果想继续，请说「对账」重新开始。"),
+        }
+
+        phase_desc, hint = phase_descriptions.get(current_phase, ("对账流程", "如果想继续，请说「对账」重新开始。"))
+
+        friendly_response = await _generate_friendly_response_for_other_intent(
+            user_input=user_input,
+            current_phase=current_phase,
+            phase_description=phase_desc,
+            next_action_hint=hint
+        )
+
+        return {
+            "messages": [AIMessage(content=friendly_response)],
+            "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+
+    else:
+        # 其他未预期的意图，返回通用提示并退出
+        return {
+            "messages": [AIMessage(content="当前流程已暂停。\n\n💡 你可以：\n• 说「对账」重新开始\n• 点击右上角按钮登录")],
+            "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
+            "user_intent": UserIntent.UNKNOWN.value,
+        }
+
+
 async def check_user_intent_after_interrupt(
     user_response: Any,
     current_phase: str,
     state: dict[str, Any]
 ) -> str:
     """
-    在 interrupt 返回后检查用户意图的通用函数
+    在 interrupt 返回后检查用户意图的通用函数（登录用户版）
 
     Args:
         user_response: interrupt() 的返回值

@@ -59,37 +59,26 @@ from .forms import (
 logger = logging.getLogger(__name__)
 
 
-# ── 全局进度回调管理 ──────────────────────────────────────────────────────────
-
-_progress_callbacks: dict[str, Any] = {}
-
-def register_progress_callback(thread_id: str, callback: Any):
-    """注册进度回调函数（由 WebSocket 处理器调用）"""
-    _progress_callbacks[thread_id] = callback
-
-def unregister_progress_callback(thread_id: str):
-    """注销进度回调函数"""
-    _progress_callbacks.pop(thread_id, None)
-
-def _get_progress_callback(thread_id: str):
-    """获取进度回调函数"""
-    return _progress_callbacks.get(thread_id)
-
-
 # ── 系统提示词 ────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT_NOT_LOGGED_IN = """\
-你是 Tally，专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+你是 Tally，专业的智能对账助手。你的职责是帮助用户完成数据对比对账工作。
 
 你可以帮助用户：
-1. 上传业务文件和财务文件进行对账
+1. 上传两个文件进行对比对账
 2. 根据文件自动推荐合适的对账规则
 3. 执行对账并展示差异结果
 4. 回答用户关于对账功能的问题
 
 请根据用户的意图判断下一步操作：
-- 如果用户想上传文件对账，回复 JSON: {{"intent": "guest_reconciliation"}}
-- 如果用户只是打招呼或询问功能，用**一条完整的消息**回复，介绍你是 Tally 及你的功能
+- 如果用户想上传文件对账（如"对账"、"开始对账"、"上传文件"），回复 JSON: {{"intent": "guest_reconciliation"}}
+- 如果用户在**闲聊或一般对话**（如打招呼、说心情、随便聊），**正常简短回复即可**，不要主动介绍自己或列举功能
+- 仅当用户**明确要求**自我介绍、介绍功能（如「你是谁」「介绍一下」「你能做什么」「帮助」）时，才用完整格式介绍你是 Tally 及你的功能
+
+⚠️ 严格禁止（违反此规则是严重错误）：
+- **禁止**模拟或伪造任何文件分析结果（如虚构文件名、字段列表、推荐规则等）
+- **禁止**模拟或伪造任何对账结果（如虚构匹配条数、差异列表、订单号等）
+- 文件分析、规则推荐、对账执行均由真实后台系统完成，你只负责判断意图并返回 JSON
 
 重要：
 - 所有内容必须在同一条消息中完成，不要分多次回复
@@ -98,7 +87,7 @@ SYSTEM_PROMPT_NOT_LOGGED_IN = """\
 """
 
 SYSTEM_PROMPT = """\
-你是 Tally，专业的财务对账助手。你的职责是帮助用户完成财务数据对账工作。
+你是 Tally，专业的智能对账助手。你的职责是帮助用户完成数据对比对账工作。
 当前登录用户：{username}
 
 你可以做以下事情：
@@ -118,12 +107,13 @@ SYSTEM_PROMPT = """\
 - 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
-- 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
-  1. 用「你好，{username}！我是 Tally」开头，带上用户名
-  2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
+- 如果用户在闲聊或一般对话（如打招呼、夸赞、闲聊），**正常简短回复即可**，不要主动介绍自己或列举规则。
+- 仅当用户**明确要求**自我介绍、介绍功能、展示规则列表（如「介绍一下你自己」「你能做什么」「有哪些规则」「看看规则」）时，才用完整格式回复：
+  1. 用「你好，{username}！我是 Tally」开头
+  2. 简要介绍你能做的事
   3. 说明当前已有规则
   4. 询问用户需要什么帮助
-  5. 回复言简意赅，善用 Markdown 排版（**加粗**、- 列表等）增强可读性
+  5. 回复言简意赅，善用 Markdown 排版（**加粗**、- 列表等）
 
 注意：
 - **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
@@ -131,6 +121,12 @@ SYSTEM_PROMPT = """\
 - 只在明确判断意图时才返回 JSON，否则正常对话
 - 删除规则时，必须从用户输入中提取准确的规则名称
 - 只返回一条消息，不要分多次回复
+
+⚠️ 严格禁止（违反此规则是严重错误）：
+- **禁止**模拟或伪造任何文件分析结果（如虚构文件名、字段列表等）
+- **禁止**模拟或伪造任何对账结果（如虚构匹配条数、差异列表、订单号等）
+- **禁止**模拟或伪造规则推荐数据
+- 文件分析、规则推荐、对账执行均由真实后台系统完成，你只负责判断意图并返回 JSON
 """
 
 
@@ -145,7 +141,7 @@ RESULT_ANALYSIS_PROMPT = """\
 2. 使用 Emoji 图标增强可读性
 3. 语言言简意赅，简洁直白，易于理解
 4. 文件名不要包含时间戳，使用原始上传的文件名
-5. 异常类型直接用文件名表示，不要用"财务数据"、"业务数据"等描述
+5. 异常类型直接用文件名表示，不要用"文件1"、"文件2"等描述
 6. 【关键】差异/异常的总条数必须使用 summary.unmatched_records（或 issues_count），切勿使用 total_business_records 或 total_finance_records。例如差异列表标题应写「差异 (10条)」而非「差异 (985条)」
 
 示例格式：
@@ -157,18 +153,19 @@ RESULT_ANALYSIS_PROMPT = """\
 异常记录：5条
 匹配率：95%
 
-异常明细：
+异常明细（必须用表格展示，表头为「异常订单号」「异常原因」，每行一条数据）：
 
-销售数据.xlsx缺失（3条）
-• 订单A001
-• 订单A002
-• 订单A003
+| 异常订单号 | 异常原因 |
+|-----------|----------|
+| 订单A001 | 销售数据.xlsx缺失 |
+| 订单A002 | 销售数据.xlsx缺失 |
+| 订单B001 | 财务报表.xlsx金额差异（差异0.5元） |
+| 订单B002 | 财务报表.xlsx金额差异（差异1.2元） |
 
-财务报表.xlsx金额差异（2条）
-• 订单B001（差异0.5元）
-• 订单B002（差异1.2元）
-
-注意：如果某类型订单数超过20条，只列前20个并注明总数。
+注意：
+- 异常明细必须使用 Markdown 表格，表头固定为「异常订单号」「异常原因」
+- 每行一条异常记录，从 issues 中按 order_id 和 detail 提取
+- 如果某类型订单数超过20条，只列前20个并在表格后注明「（共N条，仅列前20条）」
 """
 
 
@@ -306,6 +303,11 @@ async def admin_handler(state: AgentState) -> dict | None:
 async def auth_handler(state: AgentState) -> dict | None:
     """处理未登录用户的认证流程（登录/注册）。
 
+    增强版：支持游客模式下的 workflow 上下文感知
+    - 在 workflow 中时，判断游客是想继续当前流程还是切换意图
+    - 如果是 RESUME_WORKFLOW，返回空消息，让 graph 继续路由到当前 phase 节点
+    - 如果是其他意图（如想登录），保存 workflow 状态并处理
+
     Args:
         state: 当前状态
 
@@ -321,6 +323,65 @@ async def auth_handler(state: AgentState) -> dict | None:
     # 如果已登录，返回 None（由 intent_router 处理）
     if auth_token and current_user:
         return None
+
+    # ====== 新增：游客模式下的 workflow 上下文感知 ======
+    current_phase = state.get("phase", "")
+
+    # 定义游客可能进入的 workflow 阶段（游客对账流程）
+    guest_workflow_phases = [
+        ReconciliationPhase.FILE_ANALYSIS.value,
+        ReconciliationPhase.FIELD_MAPPING.value,
+        ReconciliationPhase.RULE_RECOMMENDATION.value,
+        ReconciliationPhase.RULE_CONFIG.value,
+        ReconciliationPhase.VALIDATION_PREVIEW.value,
+        ReconciliationPhase.SAVE_RULE.value,
+        ReconciliationPhase.RESULT_EVALUATION.value,
+    ]
+
+    if current_phase in guest_workflow_phases:
+        # 游客在 workflow 中，判断是想继续还是切换意图
+        from app.utils.workflow_intent import classify_intent_in_workflow_guest
+
+        logger.info(f"🔍 [游客模式] auth_handler 进入 workflow 上下文检查: phase={current_phase}, user_msg='{last_user_msg[:100]}'")
+
+        try:
+            intent = await classify_intent_in_workflow_guest(
+                user_msg=last_user_msg,
+                current_phase=current_phase,
+                state=state
+            )
+
+            logger.info(f"🔍 [游客模式] classify_intent_in_workflow_guest 返回: intent={intent}")
+
+            if intent == UserIntent.RESUME_WORKFLOW.value:
+                # 继续 workflow，返回空，让 graph 路由到当前 phase 的节点
+                logger.info(f"auth_handler [游客]: 用户想继续 workflow (phase={current_phase})")
+                return {"messages": []}
+            elif intent == "LOGIN":
+                # 游客想登录，保存 workflow 状态，统一提示点击右上角登录
+                logger.info(f"auth_handler [游客]: 用户在 workflow 中想登录")
+                from app.utils.workflow_intent import save_workflow_context
+                save_workflow_context(state, current_phase)
+                return {
+                    "messages": [AIMessage(content="💡 请点击右上角登录按钮进行登录。")],
+                    "phase": "",  # 清空 phase，退出 workflow
+                }
+            elif intent == "CANCEL":
+                # 游客想取消/退出 workflow
+                logger.info(f"auth_handler [游客]: 用户想取消 workflow")
+                return {
+                    "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「创建规则」开始新的对账，或者「登录」查看已有规则。")],
+                    "phase": "",  # 清空 phase，退出 workflow
+                    "user_intent": UserIntent.UNKNOWN.value,
+                }
+            else:
+                # 其他意图，继续 workflow（降级策略）
+                logger.info(f"auth_handler [游客]: 未识别的意图 {intent}，默认继续 workflow")
+                return {"messages": []}
+        except Exception as e:
+            logger.error(f"[游客模式] workflow 意图分类失败: {e}，降级为继续 workflow")
+            # 降级：出错时默认继续 workflow，避免中断用户流程
+            return {"messages": []}
 
     # 解析表单数据
     form_data = _parse_form_data(last_user_msg)
@@ -393,10 +454,9 @@ async def auth_handler(state: AgentState) -> dict | None:
                         selected_company_id=company_id
                     ))]}
 
-    # 使用 LLM 流式生成回复（支持流式输出）
+    # 使用 LLM 生成回复
     llm = get_llm()
-    # 使用 astream 进行流式调用，LangGraph 会自动处理流式输出
-    resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
+    resp = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
     content = resp.content.strip()
 
     # 尝试解析意图 JSON
@@ -433,27 +493,18 @@ async def auth_handler(state: AgentState) -> dict | None:
             else:
                 # 没有文件，提示上传
                 return {
-                    "messages": [AIMessage(content="好的，请您上传业务文件和财务文件，我会为您推荐合适的规则。")],
+                    "messages": [AIMessage(content="好的，请您上传两个文件，我会为您推荐合适的规则。")],
                     "guest_token": guest_token,
                     "user_intent": "guest_reconciliation",
                 }
         else:
             return {"messages": [AIMessage(content="抱歉，无法创建游客会话，请稍后重试。")]}
     elif intent == "show_login_form":
-        login_html = generate_login_form()
-        # 验证：确保登录表单只包含用户名和密码字段
-        if login_html.count('<input') != 2:
-            logger.error(f"登录表单字段数量错误！期望2个，实际: {login_html.count('<input')}")
-        if 'company_code' in login_html or 'department_code' in login_html:
-            logger.error("登录表单错误地包含了公司编码或部门编码字段！")
-        logger.info(f"返回登录表单，长度: {len(login_html)}, 输入框数量: {login_html.count('<input')}")
-        return {"messages": [AIMessage(content=login_html)]}
+        # 用户要登录，统一提示点击右上角登录按钮
+        return {"messages": [AIMessage(content="💡 请点击右上角登录按钮进行登录。")]}
     elif intent == "show_register_form":
-        # 获取公司列表用于注册表单
-        companies_result = await list_companies_public()
-        register_html = generate_register_form(companies=companies_result.get("companies", []))
-        logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
-        return {"messages": [AIMessage(content=register_html)]}
+        # 用户要注册，统一提示点击右上角登录按钮切换至注册
+        return {"messages": [AIMessage(content="💡 请点击右上角登录按钮，切换至注册进行注册。")]}
     else:
         # LLM 正常回复（引导用户）
         # 去掉开头的"！"或"!"，并确保只有一条消息
@@ -550,7 +601,7 @@ async def intent_router(state: AgentState) -> dict:
 
     llm = get_llm()
     messages = list(state.get("messages", []))
-    resp = llm.invoke([SystemMessage(content=system_msg)] + messages)
+    resp = await llm.ainvoke([SystemMessage(content=system_msg)] + messages)
 
     content = resp.content.strip()
 
@@ -626,7 +677,7 @@ async def intent_router(state: AgentState) -> dict:
     elif intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
         # ⚠️ 修复：切换意图时不要清空 uploaded_files，否则会丢失用户刚上传的新文件
         # （用户换文件后说「使用南京飞翰对账」时，state 已通过 input 合并了新文件，清空会导致仍用旧结果）
-        msg = f"好的，将使用规则「{rule_name}」进行对账。\n\n✨ 请上传对账文件（业务数据和财务数据各一个）"
+        msg = f"好的，将使用规则「{rule_name}」进行对账。\n\n✨ 请上传对账文件（文件1和文件2各一个）"
         return {
             "messages": [AIMessage(content=msg)],
             "user_intent": intent,
@@ -646,7 +697,7 @@ async def intent_router(state: AgentState) -> dict:
             "2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）\n\n"
             "3️⃣ 配置规则参数 - 设置容差、订单号特征等\n\n"
             "4️⃣ 预览并保存 - 查看规则效果并保存\n\n"
-            "请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。"
+            "请先上传需要对账的文件（文件1和文件2各一个 Excel/CSV 文件）。"
         )
         return {
             "messages": [AIMessage(content=welcome_msg)],

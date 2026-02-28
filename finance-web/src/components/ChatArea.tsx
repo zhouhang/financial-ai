@@ -83,7 +83,7 @@ export default function ChatArea({
       messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
     }
   }, [isLoadingConversation, messages.length]);
-  
+
   // 新消息时平滑滚动
   useEffect(() => {
     if (!isLoadingConversation) {
@@ -96,7 +96,6 @@ export default function ChatArea({
     if (!isLoadingConversation && messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg.role === 'assistant') {
-        // 当助手消息内容增长时滚动到底部
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }
     }
@@ -376,10 +375,10 @@ export default function ChatArea({
               ) : (
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
-                    您好！我是 Tally 智能财务助手
+                    您好！我是 Tally 智能对账助手
                   </h3>
                   <p className="text-sm text-gray-500">
-                    我可以帮助您进行财务数据对账，上传文件即可开始
+                    我可以帮助您进行数据对比对账，上传两个文件即可开始
                   </p>
                 </>
               )}

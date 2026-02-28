@@ -77,7 +77,7 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
         field_mapping_desc += "─" * 60 + "\n"
         
         if biz_fields:
-            field_mapping_desc += "📁 业务数据(文件1)字段：\n"
+            field_mapping_desc += "📁 文件1字段：\n"
             for role, field in biz_fields.items():
                 if isinstance(field, list):
                     field_str = " / ".join(field)
@@ -86,7 +86,7 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
                 field_mapping_desc += f"   • {role:10} → {field_str}\n"
         
         if fin_fields:
-            field_mapping_desc += "📁 财务数据(文件2)字段：\n"
+            field_mapping_desc += "📁 文件2字段：\n"
             for role, field in fin_fields.items():
                 if isinstance(field, list):
                     field_str = " / ".join(field)

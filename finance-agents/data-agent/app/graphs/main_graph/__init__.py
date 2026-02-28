@@ -17,10 +17,6 @@ from .forms import (
 
 # ── nodes.py ────────────────────────────────────────────────────────────────
 from .nodes import (
-    # 进度回调管理
-    register_progress_callback,
-    unregister_progress_callback,
-    _get_progress_callback,
     # 系统提示词
     SYSTEM_PROMPT_NOT_LOGGED_IN,
     SYSTEM_PROMPT,
@@ -59,10 +55,6 @@ __all__ = [
     "generate_create_company_form",
     "generate_create_department_form",
     "generate_admin_view",
-    # nodes - 进度回调
-    "register_progress_callback",
-    "unregister_progress_callback",
-    "_get_progress_callback",
     # nodes - 系统提示词
     "SYSTEM_PROMPT_NOT_LOGGED_IN",
     "SYSTEM_PROMPT",

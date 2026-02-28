@@ -16,8 +16,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from app.config import HOST, PORT, MAX_FILE_SIZE
-from app.graphs.main_graph import create_app, register_progress_callback, unregister_progress_callback
-from app.models import ReconciliationPhase  # ⚠️ 新增导入
+from app.graphs.main_graph import create_app
+from app.models import ReconciliationPhase, UserIntent
 from app.utils.db import ensure_tables
 from app.tools.mcp_client import (
     auth_login as mcp_auth_login,
@@ -222,25 +222,6 @@ async def upload_file(
 # WebSocket /chat — 对话
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _send_progress(ws: WebSocket, thread_id: str, message: str):
-    """发送进度消息到 WebSocket（同步函数，由轮询线程调用）"""
-    import asyncio
-    
-    try:
-        # 在当前事件循环中创建任务
-        loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(
-            ws.send_json({
-                "type": "stream",
-                "content": f"\n\n{message}",
-                "thread_id": thread_id,
-            }),
-            loop
-        )
-    except Exception as e:
-        logger.warning(f"发送进度消息失败: {e}")
-
-
 @app.websocket("/chat")
 async def websocket_chat(ws: WebSocket):
     """WebSocket 对话端点。
@@ -255,9 +236,6 @@ async def websocket_chat(ws: WebSocket):
     """
     await ws.accept()
     logger.info("WebSocket 连接已建立")
-    
-    # 用于跟踪当前连接的 thread_id，以便在连接关闭时注销回调
-    current_thread_id = None
 
     try:
         while True:
@@ -305,10 +283,6 @@ async def websocket_chat(ws: WebSocket):
                         "success": False,
                     })
                 continue  # 认证验证完成，不继续处理消息
-
-            # 注册进度回调（每次消息都重新注册，确保使用最新的 ws 连接）
-            current_thread_id = thread_id
-            register_progress_callback(thread_id, lambda msg: _send_progress(ws, thread_id, msg))
 
             config = {"configurable": {"thread_id": thread_id}}
             
@@ -370,7 +344,7 @@ async def websocket_chat(ws: WebSocket):
                 # 使用 astream_events 捕获 LLM token 级别的流式输出
                 if is_resume:
                     # ====== 新增：workflow 中 resume 时先检测意图 ======
-                    from app.models import ReconciliationPhase, UserIntent
+                    # 注意：ReconciliationPhase 已在文件顶部全局导入，此处不重复导入以避免 UnboundLocalError
                     from app.utils.workflow_intent import classify_intent_in_workflow, save_workflow_context
 
                     snapshot = langgraph_app.get_state(config)
@@ -393,68 +367,81 @@ async def websocket_chat(ws: WebSocket):
 
                     # 如果在 workflow 中，检查用户是否想切换意图
                     if current_phase in all_workflow_phases:
-                        intent = await classify_intent_in_workflow(
-                            user_msg=user_msg,
-                            current_phase=current_phase,
-                            state=snapshot.values
-                        )
-
-                        if intent != UserIntent.RESUME_WORKFLOW.value:
-                            # 用户想切换意图，保存进度，改为非 resume 模式
-                            logger.info(f"server: resume 时检测到意图切换 {current_phase} → {intent}，转为正常消息流程")
-
-                            # 保存 workflow 上下文
-                            save_workflow_context(snapshot.values, current_phase)
-
-                            # 更新 state
-                            update_state: dict[str, Any] = {
-                                "phase": "",  # 清空 phase，退出 workflow
-                                "user_intent": intent,
-                                "workflow_context": snapshot.values.get("workflow_context"),
-                            }
-                            if file_infos:
-                                update_state["uploaded_files"] = file_infos
-                            if auth_token:
-                                update_state["auth_token"] = auth_token
-                                from app.tools.mcp_client import auth_me
-                                try:
-                                    me_result = await auth_me(auth_token)
-                                    if me_result.get("success"):
-                                        update_state["current_user"] = me_result["user"]
-                                except Exception:
-                                    pass
-
-                            langgraph_app.update_state(config, update_state)
-
-                            # 改为正常消息模式，让 router 处理意图
-                            is_resume = False
-                            input_data: dict[str, Any] = {
-                                "messages": [HumanMessage(content=user_msg)],
-                                "uploaded_files": file_infos,
-                            }
-                            if auth_token:
-                                input_data["auth_token"] = auth_token
-                                if "current_user" in update_state:
-                                    input_data["current_user"] = update_state["current_user"]
-                        else:
-                            # 用户想继续 workflow，正常 resume
-                            logger.info(f"server: resume 继续 workflow (phase={current_phase})")
+                        # 游客模式：跳过 server 层的意图预检测，直接 resume
+                        # 游客模式的意图处理由各节点（file_analysis_node 等）负责
+                        # 节点中已实现 check_user_intent_after_interrupt_guest + Command(goto=END)
+                        if not auth_token:
+                            logger.info(f"server: [游客模式] 跳过意图预检测，直接 resume (phase={current_phase})")
                             update_state: dict[str, Any] = {}
                             if file_infos:
                                 update_state["uploaded_files"] = file_infos
-                            if auth_token:
-                                update_state["auth_token"] = auth_token
-                                from app.tools.mcp_client import auth_me
-                                try:
-                                    me_result = await auth_me(auth_token)
-                                    if me_result.get("success"):
-                                        update_state["current_user"] = me_result["user"]
-                                except Exception:
-                                    pass
                             if update_state:
                                 langgraph_app.update_state(config, update_state)
-                                logger.info(f"resume: 更新 state: {list(update_state.keys())}")
                             input_data = Command(resume=user_msg)
+                        else:
+                            # 登录用户：在 server 层预检测意图
+                            intent = await classify_intent_in_workflow(
+                                user_msg=user_msg,
+                                current_phase=current_phase,
+                                state=snapshot.values
+                            )
+
+                            if intent != UserIntent.RESUME_WORKFLOW.value:
+                                # 用户想切换意图，保存进度，改为非 resume 模式
+                                logger.info(f"server: resume 时检测到意图切换 {current_phase} → {intent}，转为正常消息流程")
+
+                                # 保存 workflow 上下文
+                                save_workflow_context(snapshot.values, current_phase)
+
+                                # 更新 state
+                                update_state: dict[str, Any] = {
+                                    "phase": "",  # 清空 phase，退出 workflow
+                                    "user_intent": intent,
+                                    "workflow_context": snapshot.values.get("workflow_context"),
+                                }
+                                if file_infos:
+                                    update_state["uploaded_files"] = file_infos
+                                if auth_token:
+                                    update_state["auth_token"] = auth_token
+                                    from app.tools.mcp_client import auth_me
+                                    try:
+                                        me_result = await auth_me(auth_token)
+                                        if me_result.get("success"):
+                                            update_state["current_user"] = me_result["user"]
+                                    except Exception:
+                                        pass
+
+                                langgraph_app.update_state(config, update_state)
+
+                                # 改为正常消息模式，让 router 处理意图
+                                is_resume = False
+                                input_data: dict[str, Any] = {
+                                    "messages": [HumanMessage(content=user_msg)],
+                                    "uploaded_files": file_infos,
+                                }
+                                if auth_token:
+                                    input_data["auth_token"] = auth_token
+                                    if "current_user" in update_state:
+                                        input_data["current_user"] = update_state["current_user"]
+                            else:
+                                # 用户想继续 workflow，正常 resume
+                                logger.info(f"server: resume 继续 workflow (phase={current_phase})")
+                                update_state: dict[str, Any] = {}
+                                if file_infos:
+                                    update_state["uploaded_files"] = file_infos
+                                if auth_token:
+                                    update_state["auth_token"] = auth_token
+                                    from app.tools.mcp_client import auth_me
+                                    try:
+                                        me_result = await auth_me(auth_token)
+                                        if me_result.get("success"):
+                                            update_state["current_user"] = me_result["user"]
+                                    except Exception:
+                                        pass
+                                if update_state:
+                                    langgraph_app.update_state(config, update_state)
+                                    logger.info(f"resume: 更新 state: {list(update_state.keys())}")
+                                input_data = Command(resume=user_msg)
                     else:
                         # 不在 workflow 中，正常 resume
                         update_state: dict[str, Any] = {}
@@ -649,6 +636,19 @@ async def websocket_chat(ws: WebSocket):
                 
                 logger.info(f"astream_events 结束，共 {event_count} 个事件，流式发送 {len(streamed_content)} 字符")
 
+                # Fallback: 补发 on_chain_end 未能捕获的 AI 消息（如 result_evaluation CANCEL）
+                try:
+                    final_state = langgraph_app.get_state(config)
+                    for msg in (final_state.values.get("messages") or []):
+                        if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
+                            content = msg.content.strip()
+                            if content and content not in sent_contents:
+                                sent_contents.add(content)
+                                logger.info(f"[fallback] 补发遗漏消息，长度={len(content)}")
+                                await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
+                except Exception as e:
+                    logger.warning(f"fallback 检查遗漏消息失败: {e}")
+
                 # 检查是否处于中断状态
                 is_interrupted, payload, last_ai = _get_interrupt_info(config)
 
@@ -721,11 +721,6 @@ async def websocket_chat(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket 连接已断开")
-    finally:
-        # 清理：注销进度回调
-        if current_thread_id:
-            unregister_progress_callback(current_thread_id)
-            logger.debug(f"已注销 thread_id={current_thread_id} 的进度回调")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

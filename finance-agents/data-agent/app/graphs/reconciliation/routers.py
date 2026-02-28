@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 def route_after_file_analysis(state: AgentState) -> str:
     """文件分析后路由：直接进入规则推荐节点。"""
+    phase = state.get("phase", "")
+
+    # 如果 phase 为空，说明用户取消或退出了 workflow
+    if not phase:
+        return END
+
     analyses = state.get("file_analyses", [])
     if analyses:
         return "rule_recommendation"  # 直接进入规则推荐
@@ -37,6 +43,11 @@ def route_after_file_analysis(state: AgentState) -> str:
 def route_after_field_mapping(state: AgentState) -> str:
     """字段映射后路由：进入规则配置。"""
     phase = state.get("phase", "")
+
+    # 如果 phase 为空，说明用户取消或退出了 workflow
+    if not phase:
+        return END
+
     if phase == ReconciliationPhase.FIELD_MAPPING.value:
         return "field_mapping"  # 用户输入了调整意见，重新进入
     return "rule_config"  # 确认后进入规则配置
@@ -50,14 +61,19 @@ def route_after_rule_recommendation(state: AgentState) -> str:
     using_recommended = state.get("using_recommended_rule", False)
     selected_rule_id = state.get("selected_rule_id")
     phase = state.get("phase", "")
-    
+
     logger.info(f"route_after_rule_recommendation: phase={phase}, using_recommended={using_recommended}, selected_rule_id={selected_rule_id}")
-    
+
+    # 如果 phase 为空，说明用户取消或退出了 workflow
+    if not phase:
+        logger.info("路由: phase 为空，用户取消 -> END")
+        return END
+
     # 用户已选择规则（通过数字选择），直接进入任务执行
     if using_recommended and selected_rule_id:
         logger.info("路由: 用户已选择规则 -> task_execution")
         return "task_execution"
-    
+
     logger.info("路由: 不采纳推荐 -> field_mapping")
     return "field_mapping"
 
@@ -65,6 +81,11 @@ def route_after_rule_recommendation(state: AgentState) -> str:
 def route_after_rule_config(state: AgentState) -> str:
     """规则配置后路由：如果用户要调整则重新进入 rule_config，否则进入 validation_preview。"""
     phase = state.get("phase", "")
+
+    # 如果 phase 为空，说明用户取消或退出了 workflow
+    if not phase:
+        return END
+
     if phase == ReconciliationPhase.RULE_CONFIG.value:
         return "rule_config"  # 用户输入了调整意见，重新进入
     return "validation_preview"  # 用户确认了，进入下一步
@@ -72,11 +93,17 @@ def route_after_rule_config(state: AgentState) -> str:
 
 def route_after_preview(state: AgentState) -> str:
     """预览后路由：如果用户选择调整则回到 rule_config，否则进入对账执行。
-    
+
     ⚠️ 创建规则流程：配置好规则后必须先对账，再在 result_evaluation 中提示保存。
     绝不在此处路由到 save_rule。
     """
     phase = state.get("phase", "")
+
+    # 如果 phase 为空，说明用户取消或退出了 workflow
+    if not phase:
+        logger.info("route_after_preview: phase 为空，用户取消 -> END")
+        return END
+
     if phase == ReconciliationPhase.RULE_CONFIG.value:
         logger.info("route_after_preview: 用户选择调整 -> rule_config")
         return "rule_config"

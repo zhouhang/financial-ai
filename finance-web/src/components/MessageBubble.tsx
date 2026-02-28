@@ -410,12 +410,18 @@ blockquote: ({ children }) => (
             code: ({ children }) => (
               <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
             ),
-            table: ({ children }) => <div className="overflow-x-auto my-2">{children}</div>,
+            table: ({ children }) => (
+              <div className="overflow-x-auto my-3 rounded-lg border border-gray-200">
+                <table className="w-full border-collapse text-sm">
+                  {children}
+                </table>
+              </div>
+            ),
             thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
-            tbody: ({ children }) => <tbody>{children}</tbody>,
-            tr: ({ children }) => <tr className="border-b border-gray-100">{children}</tr>,
-            th: ({ children }) => <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">{children}</th>,
-            td: ({ children }) => <td className="px-3 py-2 text-xs text-gray-700">{children}</td>,
+            tbody: ({ children }) => <tbody className="bg-white">{children}</tbody>,
+            tr: ({ children }) => <tr className="border-b border-gray-200 last:border-b-0">{children}</tr>,
+            th: ({ children }) => <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-600 border-b border-gray-200">{children}</th>,
+            td: ({ children }) => <td className="px-4 py-2.5 text-gray-700 border-r border-gray-100 last:border-r-0">{children}</td>,
           }}
         >
           {processedContent}
@@ -441,12 +447,18 @@ blockquote: ({ children }) => (
             code: ({ children }) => (
               <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
             ),
-            table: ({ children }) => <div className="overflow-x-auto my-2">{children}</div>,
+            table: ({ children }) => (
+              <div className="overflow-x-auto my-3 rounded-lg border border-gray-200">
+                <table className="w-full border-collapse text-sm">
+                  {children}
+                </table>
+              </div>
+            ),
             thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
-            tbody: ({ children }) => <tbody>{children}</tbody>,
-            tr: ({ children }) => <tr className="border-b border-gray-100">{children}</tr>,
-            th: ({ children }) => <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">{children}</th>,
-            td: ({ children }) => <td className="px-3 py-2 text-xs text-gray-700">{children}</td>,
+            tbody: ({ children }) => <tbody className="bg-white">{children}</tbody>,
+            tr: ({ children }) => <tr className="border-b border-gray-200 last:border-b-0">{children}</tr>,
+            th: ({ children }) => <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-600 border-b border-gray-200">{children}</th>,
+            td: ({ children }) => <td className="px-4 py-2.5 text-gray-700 border-r border-gray-100 last:border-r-0">{children}</td>,
           }}
         >
           {processedContent}
