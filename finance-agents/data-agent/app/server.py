@@ -639,13 +639,20 @@ async def websocket_chat(ws: WebSocket):
                 # Fallback: 补发 on_chain_end 未能捕获的 AI 消息（如 result_evaluation CANCEL）
                 try:
                     final_state = langgraph_app.get_state(config)
-                    for msg in (final_state.values.get("messages") or []):
+                    messages = final_state.values.get("messages") or []
+                    # 只检查最后一条 AI 消息（避免重发旧消息）
+                    last_ai_msg = None
+                    for msg in reversed(messages):
                         if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
-                            content = msg.content.strip()
-                            if content and content not in sent_contents:
-                                sent_contents.add(content)
-                                logger.info(f"[fallback] 补发遗漏消息，长度={len(content)}")
-                                await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
+                            last_ai_msg = msg
+                            break
+
+                    if last_ai_msg:
+                        content = last_ai_msg.content.strip()
+                        if content and content not in sent_contents:
+                            sent_contents.add(content)
+                            logger.info(f"[fallback] 补发遗漏消息，长度={len(content)}")
+                            await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                 except Exception as e:
                     logger.warning(f"fallback 检查遗漏消息失败: {e}")
 

@@ -174,12 +174,58 @@ async def file_analysis_node(state: AgentState) -> dict:
         # interrupt 返回后，重新检查文件
         uploaded = state.get("uploaded_files", [])
         if not uploaded:
-            # 仍然没有文件，返回提示消息
-            return {
-                "messages": [AIMessage(content="⚠️ 未检测到文件上传，请上传文件后再试。")],
-                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
-                "file_analyses": [],  # 空列表，路由函数会返回END
-            }
+            # 仍然没有文件，再次触发 interrupt 继续等待文件上传
+            # 避免返回空 file_analyses 导致工作流结束，进而陷入循环
+            logger.warning(f"[file_analysis_node] interrupt 后仍未检测到文件，再次等待上传")
+            user_response = interrupt({
+                "step": "1/4",
+                "step_title": "上传文件",
+                "question": "⚠️ 未检测到文件上传\n\n📤 请上传需要对账的文件（文件1和文件2各一个 Excel/CSV 文件）。",
+                "hint": "💡 上传文件后，点击发送按钮或直接发送消息",
+            })
+
+            # 再次检查意图
+            auth_token = state.get("auth_token", "")
+            if not auth_token:  # 游客模式
+                from app.utils.workflow_intent import check_user_intent_after_interrupt_guest, handle_intent_switch_guest
+
+                intent = await check_user_intent_after_interrupt_guest(
+                    user_response=user_response,
+                    current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                    state=state
+                )
+
+                if intent != UserIntent.RESUME_WORKFLOW.value:
+                    logger.info(f"[游客] file_analysis_node: 用户切换意图 {intent}")
+                    return await handle_intent_switch_guest(
+                        intent=intent,
+                        current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                        state=state,
+                        user_input=str(user_response).strip()
+                    )
+            else:  # 登录模式
+                from app.utils.workflow_intent import check_user_intent_after_interrupt, handle_intent_switch
+
+                intent = await check_user_intent_after_interrupt(
+                    user_response=user_response,
+                    current_phase=ReconciliationPhase.FILE_ANALYSIS.value,
+                    state=state
+                )
+
+                if intent != UserIntent.RESUME_WORKFLOW.value:
+                    logger.info(f"[登录] file_analysis_node: 用户切换意图 {intent}")
+                    return await handle_intent_switch(intent, ReconciliationPhase.FILE_ANALYSIS.value, state)
+
+            # 再次检查文件
+            uploaded = state.get("uploaded_files", [])
+            if not uploaded:
+                # 还是没有文件，返回错误并结束工作流
+                return {
+                    "messages": [AIMessage(content="⚠️ 未检测到文件上传。\n\n请上传文件后说「对账」重新开始。")],
+                    "phase": "",  # 清空 phase，避免循环
+                    "user_intent": UserIntent.UNKNOWN.value,  # 清空 intent，避免重新进入 file_analysis
+                    "file_analyses": [],
+                }
 
     # ── 智能复杂度检测 ──────────────────────────────────────────
     complexity_level = quick_complexity_check(uploaded)
@@ -322,7 +368,7 @@ async def file_analysis_node(state: AgentState) -> dict:
         msg = "\n".join(msg_parts)
 
     # 使用 LLM 猜测字段映射（在后台完成，不显示给用户）
-    suggested = await _guess_field_mappings(analyses)
+    suggested = _guess_field_mappings(analyses)
 
     return {
         "messages": [AIMessage(content=msg)],
@@ -419,7 +465,7 @@ async def field_mapping_node(state: AgentState) -> dict:
     logger.info(f"用户调整意见: {response_str}")
     
     # 使用 LLM 调整映射（返回调整后的映射和操作列表）
-    adjusted_mappings, operations = await _adjust_field_mappings_with_llm(confirmed, response_str, analyses)
+    adjusted_mappings, operations = _adjust_field_mappings_with_llm(confirmed, response_str, analyses)
     
     # 检查映射是否有变化（且 operations 非空，避免显示无效更新）
     if adjusted_mappings != confirmed and operations:
@@ -844,7 +890,7 @@ async def rule_config_node(state: AgentState) -> dict:
         "question": question_text,
         "current_config_items": config_items,
         "hint": '''💡 **操作提示**：
-  • 系统智能识别字段所属的文件（业务或财务）
+  • 系统智能识别字段所属的文件
   • 支持针对单个文件的规则配置
   • 支持为两个文件配置不同的转换规则
   • 完成后回复"确认"继续''',
@@ -1445,7 +1491,7 @@ async def save_rule_node(state: AgentState) -> dict:
 
 # ── 编辑规则节点 ─────────────────────────────────────────────────────────────
 
-async def edit_field_mapping_node(state: AgentState) -> dict:
+def edit_field_mapping_node(state: AgentState) -> dict:
     """编辑规则 - 第1步：显示当前字段映射，支持修改或确认。"""
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
     adjustment_feedback = state.get("mapping_adjustment_feedback")
@@ -1480,7 +1526,7 @@ async def edit_field_mapping_node(state: AgentState) -> dict:
 
     # 用户需要调整
     dummy_analyses = _build_dummy_analyses_from_mappings(mappings)
-    adjusted_mappings, operations = await _adjust_field_mappings_with_llm(mappings, response_str, dummy_analyses)
+    adjusted_mappings, operations = _adjust_field_mappings_with_llm(mappings, response_str, dummy_analyses)
     if adjusted_mappings != mappings and operations:
         ops_summary = _format_operations_summary(operations)
         feedback = f"✅ 已更新：\n{ops_summary}"
@@ -1710,6 +1756,7 @@ async def edit_save_node(state: AgentState) -> dict:
         "editing_rule_id": None,
         "editing_rule_name": None,
         "editing_rule_template": None,
+        "generated_schema": None,  # 清空 generated_schema，避免后续对账时被误判为新建规则流程
         "phase": ReconciliationPhase.COMPLETED.value,
     }
 

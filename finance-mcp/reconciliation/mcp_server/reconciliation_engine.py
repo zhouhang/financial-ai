@@ -226,8 +226,8 @@ class ReconciliationEngine:
             
             if result:
                 # 获取文件名
-                business_file_name = ", ".join(self.business_file_names) if self.business_file_names else "业务文件"
-                finance_file_name = ", ".join(self.finance_file_names) if self.finance_file_names else "财务文件"
+                business_file_name = ", ".join(self.business_file_names) if self.business_file_names else "文件1"
+                finance_file_name = ", ".join(self.finance_file_names) if self.finance_file_names else "文件2"
                 
                 # 生成详细信息
                 detail_template = validation.get("detail_template", "")

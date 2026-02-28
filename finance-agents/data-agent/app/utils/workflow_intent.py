@@ -112,7 +112,7 @@ D. OTHER - 其他闲聊或提问
 
     try:
         llm = get_llm()
-        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        response = llm.invoke([SystemMessage(content=prompt)])
         choice = response.content.strip().upper()
 
         mapping = {
@@ -247,7 +247,7 @@ F. OTHER - 其他意图
     # 调用 LLM（使用当前系统配置的模型）
     try:
         llm = get_llm()
-        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        response = llm.invoke([SystemMessage(content=prompt)])
         choice = response.content.strip().upper()
 
         # 映射回意图枚举
@@ -389,20 +389,28 @@ async def handle_intent_switch_guest(
     logger.info(f"handle_intent_switch_guest: 游客切换意图 {current_phase} → {intent}")
 
     if intent == "LOGIN":
-        # 用户想登录，保存进度并统一提示点击右上角登录
+        # 用户想登录，保存进度并显示登录表单
         save_workflow_context(state, current_phase)
+        from app.graphs.main_graph.forms import generate_login_form
         return {
-            "messages": [AIMessage(content="💡 请点击右上角登录按钮进行登录。")],
+            "messages": [AIMessage(content=generate_login_form())],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
             "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": [],
+            "file_analyses": [],
+            "workflow_context": {},
         }
 
     elif intent == "CANCEL":
         # 用户想取消，退出 workflow
+        # 清除所有 workflow 相关状态
         return {
             "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
             "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": [],
+            "file_analyses": [],
+            "workflow_context": {},
         }
 
     elif intent == "OTHER":
@@ -431,6 +439,9 @@ async def handle_intent_switch_guest(
             "messages": [AIMessage(content=friendly_response)],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
             "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": [],
+            "file_analyses": [],
+            "workflow_context": {},
         }
 
     else:
@@ -439,6 +450,9 @@ async def handle_intent_switch_guest(
             "messages": [AIMessage(content="当前流程已暂停。\n\n💡 你可以：\n• 说「对账」重新开始\n• 点击右上角按钮登录")],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
             "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": [],
+            "file_analyses": [],
+            "workflow_context": {},
         }
 
 
@@ -518,8 +532,7 @@ async def handle_intent_switch(
             if rules:
                 lines = ["📋 **我的对账规则列表**\n"]
                 for r in rules:
-                    desc = r.get("description", "")
-                    lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+                    lines.append(f"• **{r['name']}**")
                 msg = "\n".join(lines)
             else:
                 msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"

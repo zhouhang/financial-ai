@@ -340,6 +340,8 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
     return <div className="animate-pulse h-32 bg-gray-100 rounded"></div>;
   }
 
+  const isExceptionTable = table.headers.includes('异常订单号') && table.headers.includes('异常原因');
+
   return (
     <div className="my-2">
       <ResponsiveTable
@@ -352,6 +354,7 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
         onViewModeChange={setViewMode}
         onColumnVisibilityChange={toggleColumnVisibility}
         onColumnWidthChange={setColumnWidth}
+        showViewMode={!isExceptionTable}
       />
     </div>
   );

@@ -13,6 +13,8 @@ interface ResponsiveTableProps<T extends Record<string, unknown>> {
   onColumnVisibilityChange: (columnKey: string) => void;
   onColumnWidthChange: (columnKey: string, width: number) => void;
   onFilenameTruncationChange?: (length: number) => void;
+  /** 是否显示视图切换栏（紧凑/标准/展开），默认 true */
+  showViewMode?: boolean;
 }
 
 const VIEW_MODE_STYLES: Record<ViewMode, { padding: string; fontSize: string; rowHeight: string }> = {
@@ -31,6 +33,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
   onViewModeChange,
   onColumnVisibilityChange,
   onColumnWidthChange,
+  showViewMode = true,
 }: ResponsiveTableProps<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
@@ -77,22 +80,26 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
     <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">视图:</span>
-          {(['compact', 'standard', 'expanded'] as ViewMode[]).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => onViewModeChange(mode)}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                viewMode === mode
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-              }`}
-            >
-              {mode === 'compact' ? '紧凑' : mode === 'standard' ? '标准' : '展开'}
-            </button>
-          ))}
-        </div>
+        {showViewMode ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">视图:</span>
+            {(['compact', 'standard', 'expanded'] as ViewMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => onViewModeChange(mode)}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  viewMode === mode
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                }`}
+              >
+                {mode === 'compact' ? '紧凑' : mode === 'standard' ? '标准' : '展开'}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div />
+        )}
         <div className="relative">
           <button
             onClick={() => setShowColumnMenu(!showColumnMenu)}

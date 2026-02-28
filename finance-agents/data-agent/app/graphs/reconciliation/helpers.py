@@ -342,13 +342,13 @@ def _format_operations_summary(operations: list[dict[str, Any]], file_names: dic
     return "\n" + "\n".join(lines)
 
 
-async def _adjust_field_mappings_with_llm(
+def _adjust_field_mappings_with_llm(
     current_mappings: dict[str, Any],
     user_instruction: str,
     analyses: list[dict[str, Any]]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """使用 LLM 根据用户指令调整字段映射。 支持add/update/delete操作和文件级别的控制。
-    
+
     返回：(调整后的映射, 执行的操作列表)
     """
     from app.utils.llm import get_llm
@@ -441,7 +441,7 @@ async def _adjust_field_mappings_with_llm(
     
     try:
         llm = get_llm(temperature=0.1)
-        resp = await llm.ainvoke(prompt)
+        resp = llm.invoke(prompt)
         content = resp.content.strip()
 
         # 提取 JSON
@@ -619,7 +619,7 @@ def _build_rule_config_text(config_items: list[dict]) -> str:
     return "\n".join(parts)
 
 
-async def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
+def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
     """使用 LLM 智能猜测字段映射：原始列名 → 标准角色。"""
     from app.utils.llm import get_llm
 
@@ -661,7 +661,7 @@ async def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any
 
     try:
         llm = get_llm(temperature=0.1)
-        resp = await llm.ainvoke(prompt)
+        resp = llm.invoke(prompt)
         content = resp.content.strip()
 
         if "```" in content:
@@ -758,7 +758,18 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
     """
     if not config_items or len(config_items) == 0:
         return "（暂无配置，请开始添加配置项）"
-    
+
+    def _strip_leading_filename(text: str, names: dict[str, str]) -> str:
+        """若 desc 开头已包含文件名（来自 _rule_template_to_config_items），则去除避免重复显示。"""
+        for label in (names or {}).values():
+            for sep in ("：", ": ", " "):
+                prefix = label + sep
+                if text.startswith(prefix):
+                    return text[len(prefix) :].strip()
+            if text.startswith(label) and len(text) > len(label):
+                return text[len(label) :].lstrip("：: ").strip()
+        return text
+
     lines = []
     for i, item in enumerate(config_items, 1):
         desc = item.get("description") or item.get("content") or item.get("name", "")
@@ -767,10 +778,11 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
         json_snippet = item.get("json_snippet", {})
         target = _analyze_config_target(json_snippet, file_names) if json_snippet else ""
         if target:
+            desc = _strip_leading_filename(desc, file_names or {})
             lines.append(f"  {i}. {target} {desc}")
         else:
             lines.append(f"  {i}. {desc}")
-    
+
     return "\n".join(lines)
 
 

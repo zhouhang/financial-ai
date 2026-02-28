@@ -141,30 +141,33 @@ RESULT_ANALYSIS_PROMPT = """\
 2. 使用 Emoji 图标增强可读性
 3. 语言言简意赅，简洁直白，易于理解
 4. 文件名不要包含时间戳，使用原始上传的文件名
-5. 异常类型直接用文件名表示，不要用"文件1"、"文件2"等描述
+5. 对账概览和异常明细中，必须使用 summary.business_file 和 summary.finance_file 的真实文件名，不要使用「文件1」「文件2」「业务文件」「财务文件」等占位符
 6. 【关键】差异/异常的总条数必须使用 summary.unmatched_records（或 issues_count），切勿使用 total_business_records 或 total_finance_records。例如差异列表标题应写「差异 (10条)」而非「差异 (985条)」
 
-示例格式：
+示例格式（假设 summary.business_file=销售数据.xlsx, summary.finance_file=财务报表.xlsx）：
 
 ✅ 对账完成
 
-总记录：100条
-匹配成功：95条
-异常记录：5条
-匹配率：95%
+**对账概览**
+- **销售数据.xlsx:** (100条)
+- **财务报表.xlsx:** (98条)
+- **匹配成功:** 95条
+- **异常记录:** 5条
+- **匹配率:** 95%
 
-异常明细（必须用表格展示，表头为「异常订单号」「异常原因」，每行一条数据）：
+异常明细（必须用表格展示，表头为「异常订单号」「异常原因」，每行一条数据，异常原因中用真实文件名）：
 
 | 异常订单号 | 异常原因 |
 |-----------|----------|
-| 订单A001 | 销售数据.xlsx缺失 |
-| 订单A002 | 销售数据.xlsx缺失 |
-| 订单B001 | 财务报表.xlsx金额差异（差异0.5元） |
-| 订单B002 | 财务报表.xlsx金额差异（差异1.2元） |
+| 订单A001 | 销售数据.xlsx存在，财务报表.xlsx无此订单记录 |
+| 订单A002 | 销售数据.xlsx存在，财务报表.xlsx无此订单记录 |
+| 订单B001 | 销售数据.xlsx与财务报表.xlsx金额差异（差异0.5元） |
+| 订单B002 | 销售数据.xlsx与财务报表.xlsx金额差异（差异1.2元） |
 
 注意：
 - 异常明细必须使用 Markdown 表格，表头固定为「异常订单号」「异常原因」
 - 每行一条异常记录，从 issues 中按 order_id 和 detail 提取
+- 若 issues 的 detail 中有「文件1」「文件2」，必须替换为 summary.business_file 和 summary.finance_file 的真实文件名
 - 如果某类型订单数超过20条，只列前20个并在表格后注明「（共N条，仅列前20条）」
 """
 
@@ -369,10 +372,25 @@ async def auth_handler(state: AgentState) -> dict | None:
             elif intent == "CANCEL":
                 # 游客想取消/退出 workflow
                 logger.info(f"auth_handler [游客]: 用户想取消 workflow")
+                # 清除所有 workflow 相关状态，确保不会继续执行
                 return {
-                    "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「创建规则」开始新的对账，或者「登录」查看已有规则。")],
+                    "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
                     "phase": "",  # 清空 phase，退出 workflow
                     "user_intent": UserIntent.UNKNOWN.value,
+                    "uploaded_files": [],  # 清除上传的文件
+                    "file_analyses": [],  # 清除文件分析
+                    "workflow_context": {},  # 清除 workflow 上下文
+                }
+            elif intent == "OTHER":
+                # 用户的闲聊/无关内容 - 退出 workflow，让用户重新开始
+                logger.info(f"auth_handler [游客]: 用户闲聊/无关内容，退出 workflow")
+                return {
+                    "messages": [AIMessage(content="好的，流程已暂停。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
+                    "phase": "",  # 清空 phase，退出 workflow
+                    "user_intent": UserIntent.UNKNOWN.value,
+                    "uploaded_files": [],
+                    "file_analyses": [],
+                    "workflow_context": {},
                 }
             else:
                 # 其他意图，继续 workflow（降级策略）
@@ -454,9 +472,24 @@ async def auth_handler(state: AgentState) -> dict | None:
                         selected_company_id=company_id
                     ))]}
 
+    # ====== 检查是否已经在对账流程中（避免重复返回 JSON）======
+    current_user_intent = state.get("user_intent", "")
+
+    # 如果已经在 guest_reconciliation 流程中，不要再调用 LLM 识别意图
+    # 而是直接提示用户上传文件或提供帮助
+    if current_user_intent == "guest_reconciliation":
+        uploaded = state.get("uploaded_files", [])
+        if not uploaded:
+            # 已经在对账流程中，但还没有文件，友好提示
+            logger.info(f"[auth_handler] 用户已在 guest_reconciliation 流程中，提示上传文件")
+            return {
+                "messages": [AIMessage(content="请上传需要对账的两个文件（Excel 或 CSV 格式）。\n\n上传后我会为您分析并推荐合适的对账规则。")],
+                "user_intent": "guest_reconciliation",  # 保持不变
+            }
+
     # 使用 LLM 生成回复
     llm = get_llm()
-    resp = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
+    resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT_NOT_LOGGED_IN)] + messages)
     content = resp.content.strip()
 
     # 尝试解析意图 JSON
@@ -591,9 +624,8 @@ async def intent_router(state: AgentState) -> dict:
 
     # ── 已登录状态：正常意图识别 ──────────────────────────────────
     rules = await list_available_rules(auth_token)
-    rules_text = "\n".join(
-        [f"• {r['name']}（{r.get('description', '')}）" for r in rules]
-    ) if rules else "暂无已有规则"
+    logger.info(f"[DEBUG] list_available_rules 返回 {len(rules)} 条规则: {[r.get('name') for r in rules]}")
+    rules_text = "\n".join([f"• {r['name']}" for r in rules]) if rules else "暂无已有规则"
 
     username = current_user.get("username", "用户")
     # 使用 replace 替代 format，避免规则名称/描述中的 {} 被误解析
@@ -601,7 +633,7 @@ async def intent_router(state: AgentState) -> dict:
 
     llm = get_llm()
     messages = list(state.get("messages", []))
-    resp = await llm.ainvoke([SystemMessage(content=system_msg)] + messages)
+    resp = llm.invoke([SystemMessage(content=system_msg)] + messages)
 
     content = resp.content.strip()
 
@@ -658,8 +690,7 @@ async def intent_router(state: AgentState) -> dict:
         if rules:
             lines = ["📋 **我的对账规则列表**\n"]
             for r in rules:
-                desc = r.get("description", "")
-                lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+                lines.append(f"• **{r['name']}**")
             msg = "\n".join(lines)
         else:
             msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
@@ -718,7 +749,10 @@ async def intent_router(state: AgentState) -> dict:
                 if extracted.endswith("规则"):
                     extracted = extracted[:-2].strip()
                 target_name = extracted
-            # 仅当规则列表中存在与 target_name 完全匹配的规则时才删除
+
+            logger.info(f"[DEBUG] 删除规则: target_name='{target_name}', rules列表={[r.get('name') for r in rules]}")
+
+            # 先在规则列表中查找
             rule_id = None
             matched_rule_name = None
             for rule in rules:
@@ -728,10 +762,19 @@ async def intent_router(state: AgentState) -> dict:
                     break
 
             if not rule_id:
-                return {
-                    "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
-                    "user_intent": UserIntent.UNKNOWN.value,
-                }
+                # ⚠️ 改进：即使列表中没找到，也尝试通过规则名查询并删除（防止缓存问题导致删除失败）
+                logger.warning(f"[DEBUG] 规则列表中未找到「{target_name}」，尝试通过API查询")
+                rule_detail = await get_rule_detail(auth_token, rule_name=target_name)
+                if rule_detail and rule_detail.get("id"):
+                    rule_id = rule_detail.get("id")
+                    matched_rule_name = rule_detail.get("name")
+                    logger.info(f"[DEBUG] API查询成功找到规则: id={rule_id}, name={matched_rule_name}")
+                else:
+                    logger.error(f"[DEBUG] API查询也未找到规则「{target_name}」")
+                    return {
+                        "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
+                        "user_intent": UserIntent.UNKNOWN.value,
+                    }
 
             # 调用删除规则 API（传入 rule_name 用于后端校验，防止误删）
             result = await delete_rule(auth_token, rule_id, rule_name=matched_rule_name)
@@ -1006,8 +1049,7 @@ def task_execution_node(state: AgentState) -> dict:
             if rules:
                 lines = ["📋 **我的对账规则列表**\n"]
                 for r in rules:
-                    desc = r.get("description", "")
-                    lines.append(f"• **{r['name']}**" + (f"（{desc}）" if desc else ""))
+                    lines.append(f"• **{r['name']}**")
                 msg = "\n".join(lines)
             else:
                 msg = "📋 暂无对账规则。\n\n你可以说「创建新规则」来创建第一个对账规则。"
