@@ -1,0 +1,8 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "app.graphs.main_graph.routers:create_app"
+  },
+  "env": "./.env"
+}

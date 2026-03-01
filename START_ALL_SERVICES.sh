@@ -34,6 +34,7 @@ echo "✅ finance-mcp 已启动 (PID: $FINANCE_MCP_PID)"
 sleep 3
 
 # 启动 data-agent
+# 开发调试：可在 finance-agents/data-agent 目录运行 `pip install -e .` 后执行 `langgraph dev --allow-blocking` 接入 LangSmith Studio（端口 2024）；--allow-blocking 可避免当前代码中 llm.invoke 等同步调用触发的 BlockingError
 echo ""
 echo "📌 步骤 3: 启动 data-agent (端口 8100)..."
 cd "$PROJECT_ROOT"

@@ -80,16 +80,21 @@ export default function ChatArea({
   useEffect(() => {
     // 会话加载完成后滚动到底部（不使用动画，直接跳转）
     if (!isLoadingConversation && messages.length > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      // 使用 setTimeout 确保 DOM 完全渲染后再滚动（修复刷新页面不滚动的问题）
+      const timer = setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      }, 50);
+      return () => clearTimeout(timer);
     }
   }, [isLoadingConversation, messages.length]);
 
-  // 新消息时平滑滚动
+  // 新消息时平滑滚动（避免在初始加载时触发）
   useEffect(() => {
-    if (!isLoadingConversation) {
+    // 只在消息数量变化且不在加载会话时才平滑滚动
+    if (!isLoadingConversation && messages.length > 0) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, isLoading, isLoadingConversation]);
+  }, [messages.length, isLoading, isLoadingConversation]);
 
   // 流式消息内容变化时也触发滚动（确保长消息流式输出时页面自动下滑）
   useEffect(() => {

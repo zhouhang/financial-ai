@@ -101,6 +101,7 @@ export function useConversations({
     async (id: string): Promise<Conversation | null> => {
       if (!authToken) return null;
 
+      console.log('[loadConversation] 开始加载会话:', id);
       try {
         const response = await fetch(`/api/conversations/${id}`, {
           headers: {
@@ -110,12 +111,20 @@ export function useConversations({
 
         if (!response.ok) {
           const error = await response.json().catch(() => ({}));
+          console.error('[loadConversation] 请求失败:', error);
           throw new Error(error.detail || '加载会话失败');
         }
 
         const data = await response.json();
+        console.log('[loadConversation] API返回数据:', {
+          success: data.success,
+          hasConversation: !!data.conversation,
+          messagesCount: data.conversation?.messages?.length || 0,
+        });
         if (data.success && data.conversation) {
-          return convertConversation(data.conversation);
+          const converted = convertConversation(data.conversation);
+          console.log('[loadConversation] 转换后消息数:', converted.messages.length);
+          return converted;
         }
         return null;
       } catch (err) {

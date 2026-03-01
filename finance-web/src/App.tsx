@@ -137,15 +137,23 @@ export default function App() {
         || (pendingNewConvRef.current?.id === activeConvId ? pendingNewConvRef.current : null);
       if (conv) {
         localStorage.setItem(STORAGE_KEY_GUEST_CONV, serializeGuestConv(conv));
+        console.log('[localStorage] 保存游客对话:', activeConvId);
       }
     } else {
       const isNewConv = pendingNewConvRef.current?.id === activeConvId;
+      console.log('[localStorage] 检查保存条件:', {
+        isNewConv,
+        activeConvId,
+        pendingNewConvId: pendingNewConvRef.current?.id,
+      });
       if (isNewConv) {
         localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'true');
         localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
+        console.log('[localStorage] 标记为新对话，不保存 activeConvId');
       } else if (activeConvId) {
         localStorage.setItem(STORAGE_KEY_ACTIVE_CONV, activeConvId);
         localStorage.setItem(STORAGE_KEY_IS_NEW_CONV, 'false');
+        console.log('[localStorage] ✅ 保存 activeConvId:', activeConvId);
       }
     }
   }, [isGuest, activeConvId, conversations]);
@@ -306,19 +314,38 @@ export default function App() {
   
   // 刷新页面时，如果有保存的会话ID且不是新对话，尝试加载该会话
   useEffect(() => {
+    console.log('[刷新加载] effect触发', {
+      hasLoaded: hasLoadedInitialConvRef.current,
+      authToken: !!authToken,
+      activeId: initialState.activeId,
+      serverConversationsCount: serverConversations.length,
+      isNewConv: initialState.isNewConv,
+    });
+
     // 保护 1: 已经加载过初始对话
-    if (hasLoadedInitialConvRef.current) return;
+    if (hasLoadedInitialConvRef.current) {
+      console.log('[刷新加载] 跳过：已加载过');
+      return;
+    }
 
     // 保护 2: 必要条件不满足
-    if (!authToken || !initialState.activeId || serverConversations.length === 0) return;
+    if (!authToken || !initialState.activeId || serverConversations.length === 0) {
+      console.log('[刷新加载] 跳过：条件不满足');
+      return;
+    }
 
     // 保护 3: 如果是新对话，不需要恢复
-    if (initialState.isNewConv) return;
+    if (initialState.isNewConv) {
+      console.log('[刷新加载] 跳过：是新对话');
+      return;
+    }
 
     // 检查 savedConvId 是否在 serverConversations 中
     const savedConvExists = serverConversations.some((c) => c.id === initialState.activeId);
+    console.log('[刷新加载] savedConvExists:', savedConvExists, 'activeId:', initialState.activeId);
 
     if (savedConvExists) {
+      console.log('[刷新加载] 开始加载对话:', initialState.activeId);
       // 标记为已加载（防止重复触发）
       hasLoadedInitialConvRef.current = true;
 
@@ -326,6 +353,7 @@ export default function App() {
       setIsLoadingConversation(true);
       loadConversation(initialState.activeId)
         .then((conv) => {
+          console.log('[刷新加载] 加载完成，消息数:', conv?.messages.length || 0);
           if (conv && conv.messages.length > 0) {
             setConversations((prev) => {
               const existing = prev.find((c) => c.id === initialState.activeId);
@@ -343,18 +371,21 @@ export default function App() {
           setIsLoadingConversation(false);
         })
         .catch((err) => {
-          console.error('加载对话失败:', err);
+          console.error('[刷新加载] 加载对话失败:', err);
           setIsLoadingConversation(false);
           // 降级：切换到第一个可用对话
           if (serverConversations.length > 0) {
+            console.log('[刷新加载] 降级到第一个对话:', serverConversations[0].id);
             setActiveConvId(serverConversations[0].id);
           }
         });
     } else {
       // savedConvId 不存在，切换到最新对话
+      console.log('[刷新加载] savedConvId不存在，切换到最新对话');
       hasLoadedInitialConvRef.current = true;
       const latestConv = serverConversations[0];
       if (latestConv) {
+        console.log('[刷新加载] 切换到:', latestConv.id);
         setActiveConvId(latestConv.id);
       }
     }
@@ -636,6 +667,7 @@ export default function App() {
         case 'conversation_created':
           // 服务器创建了新会话，记录映射关系；保留当前消息并切换为服务器 ID（避免闪屏）
           if (data.conversation_id && data.thread_id) {
+            console.log('[conversation_created] 本地ID:', data.thread_id, '→ 服务器ID:', data.conversation_id);
             convIdMapRef.current.set(data.thread_id, data.conversation_id);
             // 如果是登录会话，更新服务器ID
             if (loginConvIdRef.current.localId === data.thread_id) {
