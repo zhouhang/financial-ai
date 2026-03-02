@@ -12,6 +12,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
@@ -43,6 +44,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── 挂载 proc-agent result 目录（供生成文件下载）────────────────────────────────
+_PROC_AGENT_RESULT_DIR = Path(__file__).resolve().parents[3] / "finance-agents" / "proc-agent" / "result"
+_PROC_AGENT_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/result", StaticFiles(directory=str(_PROC_AGENT_RESULT_DIR)), name="result")
 
 # ── LangGraph 实例 ────────────────────────────────────────────────────────────
 
@@ -380,17 +386,15 @@ async def websocket_chat(ws: WebSocket):
                         logger.info(f"resume: 更新 state: {list(update_state.keys())}")
                     input_data = Command(resume=user_msg)
                 else:
-                    # 非 resume 模式：重置 phase 状态，避免之前的任务结果影响新任务
-                    try:
-                        langgraph_app.update_state(config, {"phase": ""})
-                        logger.info(f"新会话: 已重置 LangGraph state (thread={thread_id})")
-                    except Exception as e:
-                        logger.warning(f"重置 LangGraph state 失败: {e}")
-                    
+                    # ⚠️ 不再在非 resume 路径下调用 update_state({"phase": ""}),
+                    # 因为 LangGraph 1.0.x 中 update_state(as_node=None) 会设置
+                    # checkpoint 到一个异常位置，导致条件边路由后的节点不执行。
+                    # 改为直接在 input_data 中传入 phase="" 覆盖旧状态。
                     input_data: dict[str, Any] = {
                         "messages": [HumanMessage(content=user_msg)],
                         "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
                         "agent_type": agent_type,  # 传递 Agent 类型
+                        "phase": "",  # ⚠️ 通过 input 重置 phase，避免旧状态影响新任务
                     }
                     if auth_token:
                         input_data["auth_token"] = auth_token
@@ -487,6 +491,9 @@ async def websocket_chat(ws: WebSocket):
                     # ② router LLM 结束
                     elif kind == "on_chat_model_end" and node_name == "router":
                         if router_mode == "json":
+                            # ⚠️ 修复：将 JSON 意图加入 sent_contents，防止 on_chain_end 再次发送给用户
+                            if router_buffer.strip():
+                                sent_contents.add(router_buffer.strip())
                             logger.info(f"过滤 router JSON 意图，长度={len(router_buffer)}")
                         elif router_mode == "stream":
                             # ⚠️ 修复：发送缓冲中还未发送的内容
@@ -530,12 +537,22 @@ async def websocket_chat(ws: WebSocket):
                             logger.info(f"router 节点已通过流式输出发送内容，跳过 on_chain_end 消息")
                             continue
                         
+                        # ⚠️ 调试：打印 router 节点 on_chain_end 的完整 output 中的关键字段
+                        if node_name == "router":
+                            raw_output = data_obj.get("output", {})
+                            if isinstance(raw_output, dict):
+                                logger.info(f"[DEBUG] router on_chain_end output keys={list(raw_output.keys())}, user_intent={repr(raw_output.get('user_intent'))}")
+                        
                         output = data_obj.get("output", {})
                         if isinstance(output, dict):
                             # 检查是否有新的 auth_token（登录/注册成功）
+                            # ⚠️ 修复：只在 new_token 与请求携带的 auth_token 不同时才发送
+                            # 否则子图（如 data_process）的 on_chain_end 会把已有 auth_token
+                            # 当作新登录 token 发出，前端 justLoggedInRef 被误置 true，
+                            # 导致 loadConversations 后跳转到空白新会话。
                             new_token = output.get("auth_token")
                             new_user = output.get("current_user")
-                            if new_token:
+                            if new_token and new_token != auth_token:
                                 logger.info(f"检测到新 auth_token（登录/注册成功），发送给前端")
                                 await ws.send_json({
                                     "type": "auth",
@@ -570,22 +587,21 @@ async def websocket_chat(ws: WebSocket):
                 # 如果用户已登录且有消息内容，保存到数据库
                 if auth_token and user_msg and not user_msg.startswith("{"):
                     try:
-                        # 如果没有 conversation_id，检查是否需要创建新会话
-#                         if not conversation_id:
-#                             # 检查是否已存在该 thread_id 对应的会话（通过查找最新的会话）
-#                             # 如果不存在，创建新会话
-#                             title = user_msg[:30] + ("..." if len(user_msg) > 30 else "")
-#                             conv_result = await mcp_create_conversation(auth_token, title)
-#                             if conv_result.get("success"):
-#                                 conversation_id = conv_result["conversation"]["id"]
-#                                 # 通知前端新会话 ID
-#                                 await ws.send_json({
-#                                     "type": "conversation_created",
-#                                     "conversation_id": conversation_id,
-#                                     "title": title,
-#                                     "thread_id": thread_id,
-#                                 })
-#                                 logger.info(f"创建新会话: {conversation_id}")
+                        # 如果没有 conversation_id，创建新会话
+                        if not conversation_id:
+                            # 使用用户消息的前30个字符作为会话标题
+                            title = user_msg[:30] + ("..." if len(user_msg) > 30 else "")
+                            conv_result = await mcp_create_conversation(auth_token, title)
+                            if conv_result.get("success"):
+                                conversation_id = conv_result["conversation"]["id"]
+                                # 通知前端新会话 ID
+                                await ws.send_json({
+                                    "type": "conversation_created",
+                                    "conversation_id": conversation_id,
+                                    "title": title,
+                                    "thread_id": thread_id,
+                                })
+                                logger.info(f"创建新会话: {conversation_id}")
                         
                         if conversation_id:
                             # 保存用户消息

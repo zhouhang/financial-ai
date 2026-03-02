@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Bot,
   ChevronDown,
@@ -120,87 +122,140 @@ function SystemActionMessage({ message }: { message: Message }) {
   );
 }
 
-/** 打字机效果组件 - 逐字显示文本（仅用于流式输出的新消息） */
-function TypewriterText({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+/** Markdown 渲染组件，支持流式打字效果 */
+function MarkdownContent({ content, isStreaming }: { content: string; isStreaming: boolean }) {
   // 追踪是否曾经处于流式状态（用于区分新消息和历史消息）
   const hasBeenStreamingRef = useRef(isStreaming);
   const [displayedLength, setDisplayedLength] = useState(() => {
-    // 如果初始时不是流式状态，说明是历史消息，直接显示全部
     return isStreaming ? 0 : content.length;
   });
   const [isTyping, setIsTyping] = useState(false);
   const prevContentRef = useRef(content);
   const targetLengthRef = useRef(content.length);
-  
-  // 记录曾经处于流式状态
+
   useEffect(() => {
-    if (isStreaming) {
-      hasBeenStreamingRef.current = true;
-    }
+    if (isStreaming) hasBeenStreamingRef.current = true;
   }, [isStreaming]);
-  
+
   useEffect(() => {
-    // 如果从未处于流式状态（历史消息），直接显示全部内容
     if (!hasBeenStreamingRef.current) {
       setDisplayedLength(content.length);
       return;
     }
-    
-    // 检测新内容
-    const prevContent = prevContentRef.current;
     const newContent = content;
-    
-    // 如果内容变化了
-    if (newContent !== prevContent) {
-      // 如果是追加内容（流式输出场景）
-      if (newContent.startsWith(prevContent)) {
-        // 保持当前显示位置，继续打字
+    if (newContent !== prevContentRef.current) {
+      if (newContent.startsWith(prevContentRef.current)) {
         targetLengthRef.current = newContent.length;
       } else {
-        // 内容完全变化，重新开始
         setDisplayedLength(0);
         targetLengthRef.current = newContent.length;
       }
       prevContentRef.current = newContent;
     }
-    
-    // 如果还没显示完，继续打字
     if (displayedLength < targetLengthRef.current) {
       setIsTyping(true);
       const timer = setTimeout(() => {
-        setDisplayedLength((prev) => Math.min(prev + 1, targetLengthRef.current));
-      }, 60); // 每个字符 60ms
+        setDisplayedLength((prev) => Math.min(prev + 3, targetLengthRef.current));
+      }, 16);
       return () => clearTimeout(timer);
     } else {
       setIsTyping(false);
     }
   }, [content, displayedLength]);
-  
-  // 历史消息或打字完成后直接显示完整内容
-  const displayContent = !hasBeenStreamingRef.current || (!isStreaming && !isTyping) 
-    ? content 
-    : content.slice(0, displayedLength);
+
+  const displayContent =
+    !hasBeenStreamingRef.current || (!isStreaming && !isTyping)
+      ? content
+      : content.slice(0, displayedLength);
   const showCursor = hasBeenStreamingRef.current && (isStreaming || isTyping);
-  
+
   return (
-    <>
-      {displayContent.split(/\{\{?SPINNER\}\}?/).map((part, i, arr) => (
-        <span key={i}>
-          {part}
-          {i < arr.length - 1 && (
-            <span className="inline-flex gap-1 ml-0.5 align-middle">
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-            </span>
-          )}
-        </span>
-      ))}
-      {/* 打字中或流式输出时显示闪烁光标 */}
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // 链接：下载文件用 fetch+blob 触发，普通链接新标签打开
+          a: ({ href, children }) => {
+            const isDownload =
+              href &&
+              (href.includes('/result/') ||
+                href.match(/\.(xlsx|xls|csv|zip|pdf)(\?|$)/i));
+
+            const handleDownload = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+              if (!href) return;
+              e.preventDefault();
+              // 将绝对 URL 中的 host 剥离，走 Vite 代理（/result/...）
+              let proxyUrl = href;
+              try {
+                const u = new URL(href);
+                proxyUrl = u.pathname + u.search;
+              } catch {
+                // 已经是相对路径
+              }
+              try {
+                const resp = await fetch(proxyUrl);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const blob = await resp.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = decodeURIComponent(proxyUrl.split('/').pop() || 'download');
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+              } catch (err) {
+                console.error('Download failed:', err);
+                window.open(href, '_blank');
+              }
+            };
+
+            return (
+              <a
+                href={href}
+                onClick={isDownload ? handleDownload : undefined}
+                target={!isDownload ? '_blank' : undefined}
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-800 underline underline-offset-2 cursor-pointer"
+              >
+                {children}
+              </a>
+            );
+          },
+          // 强调
+          strong: ({ children }) => (
+            <strong className="font-semibold text-text-primary">{children}</strong>
+          ),
+          // 无序列表
+          ul: ({ children }) => (
+            <ul className="list-disc list-inside space-y-1 my-2 pl-1">{children}</ul>
+          ),
+          // 有序列表
+          ol: ({ children }) => (
+            <ol className="list-decimal list-inside space-y-1 my-2 pl-1">{children}</ol>
+          ),
+          li: ({ children }) => <li className="text-sm">{children}</li>,
+          // 段落
+          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+          // 代码块
+          code: ({ children, className }) => {
+            const isBlock = className?.startsWith('language-');
+            return isBlock ? (
+              <pre className="bg-gray-50 rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-gray-200">
+                <code>{children}</code>
+              </pre>
+            ) : (
+              <code className="bg-gray-100 rounded px-1 py-0.5 text-xs font-mono">{children}</code>
+            );
+          },
+        }}
+      >
+        {displayContent}
+      </ReactMarkdown>
       {showCursor && (
         <span className="streaming-cursor inline-block w-0.5 h-4 bg-blue-500 ml-0.5 align-middle animate-pulse" />
       )}
-    </>
+    </div>
   );
 }
 
@@ -280,8 +335,8 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
               <p className="text-xs text-text-muted mt-1">请稍候，正在处理您的请求</p>
             </div>
           ) : (
-          <div className="message-content text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-            <TypewriterText content={message.content} isStreaming={isStreaming} />
+          <div className="message-content text-sm text-text-primary leading-relaxed">
+            <MarkdownContent content={message.content} isStreaming={isStreaming} />
           </div>
           )}
         </div>

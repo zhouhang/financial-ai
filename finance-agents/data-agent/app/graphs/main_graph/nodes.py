@@ -601,6 +601,20 @@ async def router_node(state: AgentState) -> dict:
             "rule_config_items": config_items,
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
+    elif intent == UserIntent.AUDIT_DATA_PROCESS.value:
+        # 审计/核算数据处理：进入 data_process 子图
+        files_hint = ""
+        if not uploaded_files:
+            files_hint = "\n\n请先上传需要处理的数据文件（Excel/CSV）。"
+        else:
+            files_hint = f"\n\n已检测到 {len(uploaded_files)} 个上传文件，正在分析处理..."
+        return {
+            "messages": [AIMessage(content=f"⏳ 正在识别数据处理意图，准备执行...{files_hint}")],
+            "user_intent": UserIntent.AUDIT_DATA_PROCESS.value,
+            "user_request": last_user_msg,
+            "uploaded_files": uploaded_files,
+            "rule_creation_active": False,  # ⚠️ 清除可能残留的 rule_creation_active 状态
+        }
     else:
         # 普通对话
         return {

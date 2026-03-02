@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  LogOut,
   MessageSquare,
   Plus,
   Trash2,
@@ -162,7 +163,7 @@ export default function Sidebar({
                 className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all cursor-pointer"
                 title="退出登录"
               >
-                <Trash2 className="w-4 h-4" />
+                <LogOut className="w-4 h-4" />
               </button>
             )}
           </div>
