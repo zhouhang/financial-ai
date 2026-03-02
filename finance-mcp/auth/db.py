@@ -541,21 +541,36 @@ def migrate_existing_rules_hash():
         raise
 
 
-def search_rules_by_field_mapping(field_mapping_hash: str, limit: int = 3) -> list[dict]:
-    """根据字段映射哈希搜索匹配规则"""
+def search_rules_by_field_mapping(field_mapping_hash: str, limit: int = 3, user_id: str | None = None) -> list[dict]:
+    """根据字段映射哈希搜索匹配规则
+    
+    Args:
+        field_mapping_hash: 字段映射哈希
+        limit: 返回结果数量限制
+        user_id: 可选的当前用户ID，用于过滤掉自己创建的规则
+    """
+    params: list = [field_mapping_hash]
     sql = """
     SELECT r.id, r.name, r.description, r.rule_template, r.field_mapping_hash,
            r.created_at, r.created_by
     FROM reconciliation_rules r
     WHERE r.field_mapping_hash = %s 
       AND r.status = 'active'
-    LIMIT %s
     """
+    
+    # 如果提供了 user_id，排除当前用户创建的规则
+    if user_id:
+        sql += " AND r.created_by::text != %s"
+        params.append(user_id)
+    
+    sql += " LIMIT %s"
+    params.append(limit)
+    
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (field_mapping_hash, limit))
+                cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
                 return [_serialize_rule_row(r, include_template=True) for r in rows]
     except Exception as e:

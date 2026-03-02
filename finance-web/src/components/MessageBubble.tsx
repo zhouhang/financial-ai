@@ -553,6 +553,8 @@ function MarkdownMessageContent({ content, isStreaming }: { content: string; isS
 function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
   const isHtmlForm = message.content.includes('<form');
+  const isHtmlTable = message.content.includes('<table');
+  const isHtmlContent = isHtmlForm || isHtmlTable;
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
 
   useEffect(() => {
@@ -606,10 +608,10 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
       </div>
       <div className="flex-1 min-w-0">
         <div className="bg-white rounded-2xl rounded-tl-md px-4 py-3 shadow-sm border border-border/50 max-w-2xl">
-          {isHtmlForm ? (
-            <div 
+          {isHtmlContent ? (
+            <div
               ref={formRef}
-              className="auth-form-wrapper"
+              className={isHtmlForm ? "auth-form-wrapper" : "html-content-wrapper text-sm text-text-primary leading-relaxed"}
               dangerouslySetInnerHTML={{ __html: message.content }}
             />
           ) : isSavingMessage ? (

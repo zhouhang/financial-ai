@@ -540,12 +540,6 @@ INSERT INTO public.reconciliation_rules VALUES ('05e8f9ce-06f6-41dd-92b1-81b9f37
 
 
 --
--- Data for Name: uploaded_files; Type: TABLE DATA; Schema: public; Owner: -
---
-
-
-
---
 -- Name: admins_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 

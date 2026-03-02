@@ -129,6 +129,7 @@ async def file_analysis_node(state: AgentState) -> dict:
     from .helpers import quick_complexity_check, invoke_intelligent_analyzer
 
     uploaded = state.get("uploaded_files", [])
+    logger.info(f"🔍 [file_analysis_node] uploaded_files: {len(uploaded)} files: {uploaded}")
     if not uploaded:
         # 使用 interrupt 等待用户上传文件
         user_response = interrupt({
@@ -227,6 +228,76 @@ async def file_analysis_node(state: AgentState) -> dict:
                     "file_analyses": [],
                 }
 
+    # ── 文件验证（对所有场景） ──────────────────────────────────────
+    # 提取文件路径
+    file_paths = []
+    original_filenames_map = {}
+    for item in uploaded:
+        if isinstance(item, dict):
+            file_path = item.get("file_path", "")
+            original_filename = item.get("original_filename", "")
+            if file_path:
+                file_paths.append(file_path)
+                if original_filename:
+                    original_filenames_map[file_path] = original_filename
+        else:
+            file_paths.append(item)
+
+    file_count = len(file_paths)
+    logger.info(f"开始文件验证，文件数量: {file_count}")
+    logger.info(f"🔍 [DEBUG] file_analysis_node 收到的 uploaded_files: {uploaded}")
+    logger.info(f"🔍 [DEBUG] 提取的文件路径: {file_paths}")
+    logger.info(f"🔍 [DEBUG] 原始文件名映射: {original_filenames_map}")
+
+    # 验证逻辑：根据文件数量和格式返回不同的错误
+    validation_error_message = None
+
+    if file_count == 1:
+        # 问题1：只有一个文件
+        logger.warning("只有一个文件，无法完成对账")
+        from .helpers import build_single_file_error_message
+        validation_error_message = build_single_file_error_message()
+
+    elif file_count == 2:
+        # 检查文件格式
+        from app.utils.file_validation import is_standard_format
+        validation_result = is_standard_format(file_paths)
+
+        if not validation_result.is_standard:
+            logger.warning(f"文件格式验证失败: {validation_result.reason}")
+            from .helpers import build_format_error_message
+            validation_error_message = build_format_error_message(
+                validation_result=validation_result,
+                file_paths=file_paths,
+                original_filenames_map=original_filenames_map
+            )
+
+    elif file_count > 2:
+        # 超过2个文件
+        logger.warning(f"文件数量过多: {file_count}个")
+        validation_error_message = f"⚠️ 上传了{file_count}个文件，对账只需要2个文件（业务文件和财务文件）。\n\n请重新上传正确数量的文件。"
+
+    # 如果验证失败，直接返回提示消息（避免在 resume 场景下 interrupt 被自动消息消费）
+    if validation_error_message:
+        logger.warning("文件验证失败，返回提示并等待用户重新上传")
+
+        # 删除已上传的文件
+        auth_token = state.get("auth_token", "")
+        if file_paths:
+            from app.graphs.reconciliation.helpers import delete_uploaded_files
+            await delete_uploaded_files(uploaded, auth_token)
+
+        # 清空 uploaded_files 并返回提示；下次用户上传新文件后再继续 file_analysis
+        return {
+            "messages": [AIMessage(content=validation_error_message)],
+            "phase": ReconciliationPhase.FILE_ANALYSIS.value,  # 保持在 file_analysis 阶段
+            "uploaded_files": [],  # 清空，等待用户上传新文件
+            "file_analyses": [],  # 没有分析结果
+        }
+
+    # 验证通过，继续后续逻辑
+    logger.info(f"文件验证通过，文件数量: {file_count}")
+
     # ── 智能复杂度检测 ──────────────────────────────────────────
     complexity_level = quick_complexity_check(uploaded)
     logger.info(f"文件复杂度检测: {complexity_level}, 文件数: {len(uploaded)}")
@@ -236,22 +307,7 @@ async def file_analysis_node(state: AgentState) -> dict:
         # 简单场景：使用现有快速分析逻辑
         logger.info("使用快速分析路径")
 
-        # 提取文件路径和原始文件名映射
-        file_paths = []
-        original_filenames_map = {}
-
-        for item in uploaded:
-            if isinstance(item, dict):
-                file_path = item.get("file_path", "")
-                original_filename = item.get("original_filename", "")
-                if file_path:
-                    file_paths.append(file_path)
-                    if original_filename:
-                        original_filenames_map[file_path] = original_filename
-            else:
-                # 兼容旧格式（直接是文件路径字符串）
-                file_paths.append(item)
-
+        # 文件路径已在上面提取，直接使用
         try:
             analyze_args = {"file_paths": file_paths}
             if original_filenames_map:
@@ -579,7 +635,8 @@ async def rule_recommendation_node(state: AgentState) -> dict:
                     
                     # 获取当前用户ID，过滤掉用户自己的规则
                     current_user = state.get("current_user", {})
-                    current_user_id = current_user.get("user_id") if isinstance(current_user, dict) else None
+                    current_user_id = current_user.get("id") if isinstance(current_user, dict) else None
+                    logger.info(f"[DEBUG] current_user: {current_user}, current_user_id: {current_user_id}")
                     
                     if current_user_id:
                         original_count = len(all_rules)

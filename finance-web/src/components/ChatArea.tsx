@@ -48,6 +48,8 @@ interface ChatAreaProps {
   /** 侧边栏是否收起 */
   sidebarCollapsed?: boolean;
   /** 切换侧边栏收起/展开 */
+  /** 认证 token */
+  authToken?: string | null;
   onToggleSidebar?: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
@@ -68,6 +70,7 @@ export default function ChatArea({
   sidebarCollapsed = false,
   onToggleSidebar,
   streamingMessageId,
+  authToken,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -167,6 +170,10 @@ export default function ChatArea({
           formData.append('thread_id', threadId);
           // ⚠️ 修复：第一个文件时设置 is_first_file=1，其他为0（避免字符串"false"被当成真值）
           formData.append('is_first_file', index === 0 ? '1' : '0');
+          // 如果有 auth_token，添加到表单（游客模式下为空）
+          if (authToken) {
+            formData.append('auth_token', authToken);
+          }
 
           const resp = await fetch('/api/upload', {
             method: 'POST',

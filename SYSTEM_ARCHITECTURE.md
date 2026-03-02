@@ -189,8 +189,7 @@ finance-mcp/
   - `finance_files`, `business_files` (JSONB)
   - `status`, `progress`
   - `result_summary`, `result_details` (JSONB)
-- `uploaded_files` - 上传文件表
-  - `expires_at` - 支持自动过期
+- 文件上传记录由 `file_uploads` 表（见 `finance-mcp/auth/migrations/004_file_ownership.sql`）管理
 
 #### 审计
 - `audit_logs` - 审计日志
@@ -342,7 +341,7 @@ npm run dev
 - 实现任务历史查询
 
 ### 3. 文件管理规范化
-- 使用 `uploaded_files` 表记录所有上传文件
+- 使用 `file_uploads` 表（004_file_ownership）记录上传文件及所有权
 - 实现文件自动过期清理
 - 文件分类和检索
 

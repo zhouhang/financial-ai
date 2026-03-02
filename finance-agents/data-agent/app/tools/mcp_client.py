@@ -77,7 +77,7 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
             logger.info(f"导入对账工具处理器: {tool_name}")
             from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
             result = await handle_tool_call(tool_name, arguments)
-            logger.info(f"对账工具调用成功: {tool_name}")
+            logger.info(f"对账工具调用成功: {tool_name}, result.get('success')={result.get('success')}, result.get('error')={result.get('error')}")
             return result
     except ImportError as e:
         logger.error(f"导入模块失败: {e}, 工具名: {tool_name}, sys.path 前3项: {sys.path[:3]}")

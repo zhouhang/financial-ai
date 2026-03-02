@@ -229,26 +229,8 @@ CREATE TABLE public.rule_usage_logs (
 COMMENT ON TABLE public.rule_usage_logs IS '规则使用日志';
 
 -- =============================================================================
--- 13. uploaded_files (depends on users, reconciliation_tasks)
+-- 13. Primary keys & unique constraints
 -- =============================================================================
-CREATE TABLE public.uploaded_files (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    uploaded_by uuid NOT NULL,
-    filename character varying(255) NOT NULL,
-    original_filename character varying(255) NOT NULL,
-    file_path text NOT NULL,
-    file_size bigint,
-    mime_type character varying(100),
-    file_category character varying(50),
-    task_id uuid,
-    metadata jsonb,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    expires_at timestamp with time zone
-);
-COMMENT ON TABLE public.uploaded_files IS '上传文件记录';
-
--- =============================================================================
--- 14. Primary keys & unique constraints
 -- =============================================================================
 ALTER TABLE ONLY public.admins ADD CONSTRAINT admins_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.admins ADD CONSTRAINT admins_username_key UNIQUE (username);
@@ -267,8 +249,6 @@ ALTER TABLE ONLY public.reconciliation_tasks ADD CONSTRAINT reconciliation_tasks
 ALTER TABLE ONLY public.rule_versions ADD CONSTRAINT rule_versions_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.rule_versions ADD CONSTRAINT rule_versions_rule_id_version_key UNIQUE (rule_id, version);
 ALTER TABLE ONLY public.rule_usage_logs ADD CONSTRAINT rule_usage_logs_pkey PRIMARY KEY (id);
-ALTER TABLE ONLY public.uploaded_files ADD CONSTRAINT uploaded_files_pkey PRIMARY KEY (id);
-
 -- =============================================================================
 -- 15. Foreign keys
 -- =============================================================================
@@ -292,8 +272,6 @@ ALTER TABLE ONLY public.rule_usage_logs ADD CONSTRAINT rule_usage_logs_rule_id_f
 ALTER TABLE ONLY public.rule_usage_logs ADD CONSTRAINT rule_usage_logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.rule_usage_logs ADD CONSTRAINT rule_usage_logs_department_id_fkey FOREIGN KEY (department_id) REFERENCES public.departments(id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.rule_usage_logs ADD CONSTRAINT rule_usage_logs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.reconciliation_tasks(id) ON DELETE SET NULL;
-ALTER TABLE ONLY public.uploaded_files ADD CONSTRAINT uploaded_files_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.users(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.uploaded_files ADD CONSTRAINT uploaded_files_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.reconciliation_tasks(id) ON DELETE SET NULL;
 
 -- =============================================================================
 -- 16. Indexes
@@ -335,9 +313,6 @@ CREATE INDEX idx_rule_versions_created ON public.rule_versions USING btree (crea
 CREATE INDEX idx_usage_logs_rule ON public.rule_usage_logs USING btree (rule_id);
 CREATE INDEX idx_usage_logs_user ON public.rule_usage_logs USING btree (user_id);
 CREATE INDEX idx_usage_logs_created ON public.rule_usage_logs USING btree (created_at DESC);
-CREATE INDEX idx_files_uploaded_by ON public.uploaded_files USING btree (uploaded_by);
-CREATE INDEX idx_files_task ON public.uploaded_files USING btree (task_id);
-CREATE INDEX idx_files_created ON public.uploaded_files USING btree (created_at DESC);
 
 -- =============================================================================
 -- 17. Triggers

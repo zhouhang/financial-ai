@@ -40,6 +40,10 @@ echo "📌 步骤 3: 启动 data-agent (端口 8100)..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
 cd finance-agents/data-agent
+# 在 Python 启动前导出 LangSmith 环境变量（必须在进程启动时已存在，否则 LangSmith 追踪不生效）
+set -a
+[ -f .env ] && source .env
+set +a
 nohup python -m app.server > "$LOG_DIR/data-agent.log" 2>&1 &
 DATA_AGENT_PID=$!
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
