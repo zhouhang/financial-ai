@@ -1345,7 +1345,7 @@ async def validation_preview_node(state: AgentState) -> dict:
         f"• 业务记录数：{preview.get('biz_count', 'N/A')}\n"
         f"• 财务记录数：{preview.get('fin_count', 'N/A')}\n"
         f"• 预计可匹配：{preview.get('estimated_match', 'N/A')}条\n\n"
-        f"🔗 **字段映射**{mapping_display}\n\n"
+        f"🔗 **字段映射**\n{mapping_display}\n\n\n"
         f"📋 **你配置的规则**\n{config_display}\n\n"
         f"规则看起来合理吗？"
     )
