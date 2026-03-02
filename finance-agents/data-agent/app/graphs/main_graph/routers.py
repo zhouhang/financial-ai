@@ -11,8 +11,11 @@
 
 from __future__ import annotations
 
+import logging
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
+
+logger = logging.getLogger(__name__)
 
 from app.models import (
     AgentState,
@@ -35,8 +38,18 @@ from app.graphs.reconciliation import (
     route_after_preview,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
-from app.graphs.data_process import build_data_process_subgraph
 from app.graphs.rule_creation import build_rule_creation_subgraph
+from app.graphs.data_process.nodes import (
+    list_skills_node,
+    generate_script_node,
+    execute_script_node,
+    get_result_node,
+)
+from app.graphs.data_process.routers import (
+    route_after_list_skills,
+    route_after_generate_script,
+    route_after_execute_script,
+)
 from .nodes import (
     router_node,
     task_execution_node,
@@ -53,24 +66,37 @@ def route_after_router(state: AgentState) -> str:
     """router 之后的条件路由。"""
     intent = state.get("user_intent", "")
     phase = state.get("phase", "")
-    
-    # 检查是否正在创建规则（对话式）
     rule_creation_active = state.get("rule_creation_active", False)
+
+    logger.info(
+        f"route_after_router: intent={repr(intent)}, phase={repr(phase)}, "
+        f"rule_creation_active={rule_creation_active}, "
+        f"AUDIT_DATA_PROCESS={repr(UserIntent.AUDIT_DATA_PROCESS.value)}"
+    )
+
+    # ⚠️ AUDIT_DATA_PROCESS 优先级最高，清空 rule_creation_active 不影响此路由
+    if intent == UserIntent.AUDIT_DATA_PROCESS.value:
+        logger.info("route_after_router → dp_list_skills")
+        return "dp_list_skills"  # ⚠️ 直接返回节点名，避免 LangGraph 1.0.x 非对等路径映射 bug
+
+    # 检查是否正在创建规则（对话式），此优先级低于 AUDIT_DATA_PROCESS
     if rule_creation_active:
+        logger.info(f"route_after_router → rule_creation (rule_creation_active=True)")
         return "rule_creation"
-    
+
     if intent == UserIntent.CREATE_NEW_RULE.value:
-        return "file_analysis"
+        result = "file_analysis"
     elif intent == UserIntent.USE_EXISTING_RULE.value:
-        return "task_execution"
+        result = "task_execution"
     elif intent == UserIntent.EDIT_RULE.value:
-        return "edit_field_mapping"
-    elif intent == UserIntent.AUDIT_DATA_PROCESS.value:
-        return "data_process"
+        result = "edit_field_mapping"
     elif intent == UserIntent.RULE_CREATION.value:
-        return "rule_creation"
+        result = "rule_creation"
     else:
-        return END
+        result = END
+
+    logger.info(f"route_after_router → {repr(result)}")
+    return result
 
 
 def route_after_reconciliation(state: AgentState) -> str:
@@ -119,13 +145,11 @@ def build_main_graph() -> StateGraph:
 
     ⚠️ 对账规则生成的节点直接展平到主图中（不再使用子图），
     这样 interrupt/resume 时不会 replay 之前的节点，避免重复文件分析。
+    ⚠️ data_process 节点同样展平（LangGraph 1.0.x 中编译子图作为节点存在路由问题）。
     """
 
     # 数据准备子图（暂时保留为子图）
     data_preparation_sg = build_data_preparation_subgraph()
-
-    # 审计数据处理子图
-    data_process_sg = build_data_process_subgraph()
 
     # 规则创建子图（对话式）
     rule_creation_sg = build_rule_creation_subgraph()
@@ -142,9 +166,14 @@ def build_main_graph() -> StateGraph:
     graph.add_node("validation_preview", validation_preview_node)
     graph.add_node("save_rule", save_rule_node)
 
+    # 审计数据处理节点（展平，避免 LangGraph 1.0.x 子图路由问题）
+    graph.add_node("dp_list_skills", list_skills_node)
+    graph.add_node("dp_generate_script", generate_script_node)
+    graph.add_node("dp_execute_script", execute_script_node)
+    graph.add_node("dp_get_result", get_result_node)
+
     # 其他节点
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
-    graph.add_node("data_process", data_process_sg.compile())  # 审计数据处理子图
     graph.add_node("rule_creation", rule_creation_sg.compile())  # 规则创建子图
     graph.add_node("task_execution", task_execution_node)
     graph.add_node("result_analysis", result_analysis_node)
@@ -159,15 +188,30 @@ def build_main_graph() -> StateGraph:
     graph.add_node("edit_validation_preview", edit_validation_preview_node)
     graph.add_node("edit_save", edit_save_node)
 
-    # router 后路由
+    # router 后路由（⚠️ 所有 key 与 value 对等，避免 LangGraph 1.0.x 非对等路径映射 bug）
     graph.add_conditional_edges("router", route_after_router, {
         "file_analysis": "file_analysis",
         "task_execution": "task_execution",
         "edit_field_mapping": "edit_field_mapping",
-        "data_process": "data_process",  # 审计数据处理
-        "rule_creation": "rule_creation",  # 规则创建
+        "dp_list_skills": "dp_list_skills",  # 审计数据处理入口（route_after_router 直接返回此名）
+        "rule_creation": "rule_creation",
         END: END,
     })
+
+    # 审计数据处理流程（展平节点，⚠️ 所有路径映射均对等）
+    graph.add_conditional_edges("dp_list_skills", route_after_list_skills, {
+        "dp_generate_script": "dp_generate_script",
+        END: END,
+    })
+    graph.add_conditional_edges("dp_generate_script", route_after_generate_script, {
+        "dp_execute_script": "dp_execute_script",
+        END: END,
+    })
+    graph.add_conditional_edges("dp_execute_script", route_after_execute_script, {
+        "dp_get_result": "dp_get_result",
+        END: END,
+    })
+    graph.add_edge("dp_get_result", END)
 
     # 对账规则生成流程（展平的）
     graph.add_conditional_edges("file_analysis", route_after_file_analysis, {

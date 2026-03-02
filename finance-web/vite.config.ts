@@ -13,6 +13,10 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, ''),
         ws: true,
       },
+      '/result': {
+        target: 'http://localhost:8100',
+        changeOrigin: true,
+      },
     },
   },
 })

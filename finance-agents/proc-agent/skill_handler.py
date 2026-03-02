@@ -1,8 +1,10 @@
 """技能处理器模块
 
 审计数据整理技能的主处理器，协调意图识别、规则加载、脚本执行等流程。
+支持审计类 skill（audit）和核算类 skill（recognition）两大类别。
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,17 +14,18 @@ from .intent_recognizer import (
     identify_intent,
     get_rule_file,
     get_script_file,
-    IntentType
+    IntentType,
+    CHAT_ID_REQUIRED_INTENTS,
 )
 from .script_executor import execute_script, execute_script_in_process, ScriptExecutionResult
 
 
-# 获取 audit-agent 根目录
+# 获取 proc-agent 根目录
 AUDIT_AGENT_DIR = Path(__file__).parent
 
 
 class AuditDataSkillResult:
-    """审计数据技能执行结果"""
+    """审计/核算数据技能执行结果"""
 
     def __init__(
         self,
@@ -82,14 +85,16 @@ def handle_error(
 def process_audit_data(
     user_request: str,
     files: List[str],
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    chat_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """处理审计数据整理请求
+    """处理审计/核算数据整理请求
 
     参数:
         user_request: 用户的自然语言请求
         files: 上传的文件路径列表
-        output_dir: 输出目录，默认为 result/
+        output_dir: 输出目录，默认为 result/（审计类）或 result/{chat_id}/（核算类）
+        chat_id: 用户会话 ID，核算类 skill 用于隔离输出目录
 
     返回:
         处理结果字典
@@ -102,6 +107,10 @@ def process_audit_data(
         intent_type, score = identify_intent(user_request)
         result.intent_type = intent_type
         result.metadata["intent_score"] = score
+
+        # 根据意图类型设置 skill_id
+        if intent_type == IntentType.RECOGNITION_REPORT:
+            result.skill_id = "RECOGNITION-REPORT-GEN-001"
 
         # 步骤 2: 获取规则文件和脚本文件路径
         rule_file = get_rule_file(intent_type)
@@ -131,30 +140,55 @@ def process_audit_data(
             )
             return result.to_dict()
 
-        # 步骤 4: 设置输出目录
-        if not output_dir:
-            output_dir = str(AUDIT_AGENT_DIR / "result")
+        # 步骤 4: 判断是否为需要 chat_id 的 recognition 类 skill
+        is_recognition = intent_type in CHAT_ID_REQUIRED_INTENTS
+        effective_chat_id = chat_id or "default"
+
+        # 步骤 5: 设置输出目录
+        if is_recognition:
+            # recognition skill 使用 result/{chat_id}/ 隔离目录
+            if not output_dir:
+                output_dir = str(AUDIT_AGENT_DIR / "result" / effective_chat_id)
+        else:
+            if not output_dir:
+                output_dir = str(AUDIT_AGENT_DIR / "result")
         os.makedirs(output_dir, exist_ok=True)
 
-        # 步骤 5: 执行脚本
+        # 步骤 6: 执行脚本
         result.status = "running"
-        exec_result = execute_script_in_process(
-            script_path=str(script_path),
-            input_files=files,
-            output_dir=output_dir
-        )
+
+        if is_recognition:
+            # recognition skill 通过子进程执行，传递 --chat-id 参数
+            exec_result = execute_script(
+                script_path=str(script_path),
+                input_files=files,
+                output_dir=output_dir,
+                extra_args={"--chat-id": effective_chat_id},
+                timeout=300,
+            )
+        else:
+            # 审计类 skill 使用进程内执行
+            exec_result = execute_script_in_process(
+                script_path=str(script_path),
+                input_files=files,
+                output_dir=output_dir,
+            )
 
         if exec_result.success:
             result.status = "success"
             result.metadata["execution_output"] = exec_result.output
             result.metadata["result_file"] = exec_result.result_file
 
-            # 查找生成的结果文件
-            if output_dir:
-                result_files = []
-                for ext in ["*.xlsx", "*.md", "*.csv"]:
-                    result_files.extend(Path(output_dir).glob(ext))
-                result.data["result_files"] = [str(f) for f in result_files]
+            if is_recognition:
+                # 解析 recognition 脚本的 JSON 输出，提取下载 URL
+                _parse_recognition_output(exec_result.output, result, output_dir)
+            else:
+                # 审计类：扫描输出目录中的结果文件
+                if output_dir:
+                    result_files = []
+                    for ext in ["*.xlsx", "*.md", "*.csv"]:
+                        result_files.extend(Path(output_dir).glob(ext))
+                    result.data["result_files"] = [str(f) for f in result_files]
         else:
             result.status = "error"
             result.error = handle_error(
@@ -175,8 +209,63 @@ def process_audit_data(
     return result.to_dict()
 
 
+def _parse_recognition_output(
+    output: str,
+    result: "AuditDataSkillResult",
+    output_dir: str,
+) -> None:
+    """解析 recognition_rule.py 的 JSON 标准输出，填充结果。
+
+    recognition 脚本将 JSON 结果打印到 stdout，格式为：
+    {
+        "status": "success",
+        "result_files": ["..."],
+        "download_urls": ["..."],
+        "metadata": {...}
+    }
+    """
+    # 尝试从输出中提取 JSON 块
+    try:
+        # 找到最后一个完整的 JSON 对象
+        json_match = None
+        for line in output.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    json_match = json.loads(line)
+                except json.JSONDecodeError:
+                    pass
+        # 尝试整体解析
+        if json_match is None:
+            import re
+            m = re.search(r"\{.*\}", output, re.DOTALL)
+            if m:
+                json_match = json.loads(m.group())
+
+        if json_match:
+            script_status = json_match.get("status", "")
+            result.data["result_files"] = json_match.get("result_files", [])
+            result.data["download_urls"] = json_match.get("download_urls", [])
+            result.metadata.update(json_match.get("metadata", {}))
+            if script_status in ("success", "partial_success"):
+                result.status = "success"
+            elif script_status == "error":
+                result.status = "error"
+                result.error = json_match.get("error", {})
+            return
+    except Exception:
+        pass
+
+    # 解析失败时，回退到扫描目录
+    if output_dir:
+        result_files = []
+        for ext in ["*.xlsx", "*.md", "*.csv"]:
+            result_files.extend(Path(output_dir).glob(ext))
+        result.data["result_files"] = [str(f) for f in result_files]
+
+
 def list_skills() -> list[dict]:
-    """列出所有可用的技能
+    """列出所有可用的技能（含审计类和核算类）
 
     返回:
         技能列表
@@ -184,7 +273,7 @@ def list_skills() -> list[dict]:
     from .intent_recognizer import list_available_intents
     from .rule_manager import get_rule_manager
 
-    # 获取内置技能
+    # 获取内置技能（含 recognition_report）
     skills = list_available_intents()
 
     # 获取用户创建的规则

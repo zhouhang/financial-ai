@@ -199,10 +199,17 @@ export default function App() {
   }, [serverConversations, loadConversation]);
   
   // 刷新页面时，如果有保存的会话ID且不是新对话，尝试加载该会话
+  const hasLoadedSavedConvRef = useRef(false);
   useEffect(() => {
+    // 只在首次加载且有保存的会话ID时执行
+    if (hasLoadedSavedConvRef.current) return;
+    
     if (!initialState.isNewConv && initialState.activeId && serverConversations.length > 0) {
+      hasLoadedSavedConvRef.current = true;
+      
       // 检查保存的会话是否存在于服务器列表中
       const savedConvExists = serverConversations.some((c) => c.id === initialState.activeId);
+      
       if (savedConvExists) {
         // 加载该会话的消息
         setIsLoadingConversation(true);
@@ -229,9 +236,7 @@ export default function App() {
         setActiveConvId(latestConv.id);
       }
     }
-  // 只在 serverConversations 首次加载时执行
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverConversations.length > 0 ? 'loaded' : 'loading']);
+  }, [serverConversations, loadConversation]);
 
   // ── 加载和中断状态 ────────────────────────────────────────
   const [isLoading, setIsLoading] = useState(false);
@@ -488,17 +493,31 @@ export default function App() {
           break;
 
         case 'conversation_created':
-          // 服务器创建了新会话，记录映射关系并移除本地临时会话
+          // 服务器创建了新会话，记录映射关系并更新本地会话
           if (data.conversation_id && data.thread_id) {
             convIdMapRef.current.set(data.thread_id, data.conversation_id);
             // 如果是登录会话，更新服务器ID
             if (loginConvIdRef.current.localId === data.thread_id) {
               loginConvIdRef.current.serverId = data.conversation_id;
             }
-            // 移除本地临时会话（避免与服务器会话重复）
-            setConversations((prev) => prev.filter((c) => c.id !== data.thread_id));
+            
+            // 更新本地会话的ID为服务器ID（保留已有消息）
+            setConversations((prev) => {
+              const localConv = prev.find((c) => c.id === data.thread_id);
+              if (localConv) {
+                // 找到本地会话，更新ID和标题
+                return prev.map((c) => 
+                  c.id === data.thread_id 
+                    ? { ...c, id: data.conversation_id, title: data.title || c.title }
+                    : c
+                );
+              }
+              return prev;
+            });
+            
             // 刷新会话列表（从服务器获取正式会话）
             loadConversations();
+            
             // 更新当前活动会话ID为服务器ID
             if (activeConvId === data.thread_id) {
               setActiveConvId(data.conversation_id);

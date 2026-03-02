@@ -39,14 +39,16 @@ def execute_script(
     script_path: str,
     input_files: Optional[list] = None,
     output_dir: Optional[str] = None,
+    extra_args: Optional[Dict[str, str]] = None,
     timeout: int = 300
 ) -> ScriptExecutionResult:
-    """执行 Python 脚本
+    """执行 Python 脚本（通过子进程）
 
     参数:
         script_path: 脚本文件路径
         input_files: 输入文件路径列表
         output_dir: 输出目录
+        extra_args: 额外的命令行参数，格式 {"--chat-id": "xxx"}
         timeout: 超时时间（秒），默认 5 分钟
 
     返回:
@@ -72,6 +74,11 @@ def execute_script(
     # 添加输出目录参数
     if output_dir:
         cmd.extend(["--output-dir", str(output_dir)])
+
+    # 添加额外参数（如 --chat-id）
+    if extra_args:
+        for arg_name, arg_value in extra_args.items():
+            cmd.extend([arg_name, str(arg_value)])
 
     try:
         # 执行脚本
