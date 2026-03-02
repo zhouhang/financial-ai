@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ── 路由函数 ─────────────────────────────────────────────────────────────────
 
 def route_after_file_analysis(state: AgentState) -> str:
-    """文件分析后路由：直接进入规则推荐节点。"""
+    """文件分析后路由：如果有分析结果则进入规则推荐，如果验证失败但有文件则循环回 file_analysis。"""
     phase = state.get("phase", "")
 
     # 如果 phase 为空，说明用户取消或退出了 workflow
@@ -36,7 +36,14 @@ def route_after_file_analysis(state: AgentState) -> str:
 
     analyses = state.get("file_analyses", [])
     if analyses:
-        return "rule_recommendation"  # 直接进入规则推荐
+        return "rule_recommendation"  # 有分析结果，进入规则推荐
+
+    # 如果没有分析结果，但 uploaded_files 不为空，说明验证失败需要重新验证
+    uploaded_files = state.get("uploaded_files", [])
+    if uploaded_files:
+        logger.info("文件验证失败，循环回 file_analysis 重新验证")
+        return "file_analysis"  # 循环回 file_analysis
+
     return END
 
 
@@ -177,6 +184,7 @@ def build_reconciliation_subgraph() -> StateGraph:
     })
 
     sg.add_conditional_edges("file_analysis", route_after_file_analysis, {
+        "file_analysis": "file_analysis",  # 允许循环回自己（验证失败时）
         "rule_recommendation": "rule_recommendation",
         END: END,
     })

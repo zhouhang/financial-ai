@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+# 必须在 langchain/langgraph 导入之前加载 .env，否则 LangSmith 会缓存未设置的环境变量，追踪失效
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 import json
 import logging
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header, Body
@@ -63,6 +67,19 @@ _thread_files_snapshot: dict[str, list[str]] = {}  # 保存上一次的文件路
 
 @app.on_event("startup")
 async def on_startup():
+    # 启动时打印 LangSmith 追踪配置（便于排查追踪不生效问题）
+    import os
+    tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
+    project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT")
+    api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+    if tracing and api_key:
+        logger.info(f"LangSmith 追踪已启用: project={project or 'default'}")
+    else:
+        logger.warning(
+            "LangSmith 追踪未启用: LANGSMITH_TRACING=%s, LANGSMITH_API_KEY=%s",
+            "未设置" if not tracing else "已设置",
+            "未设置" if not api_key else "已设置",
+        )
     try:
         ensure_tables()
     except Exception as e:
@@ -114,6 +131,8 @@ async def upload_file(
     file: UploadFile = File(...),
     thread_id: str = Form("default"),
     is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
+    auth_token: str = Form(""),  # 登录用户的 auth_token
+    guest_token: str = Form(""),  # 游客的 guest_token
 ):
     """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
 
@@ -121,6 +140,8 @@ async def upload_file(
         file: 上传的文件
         thread_id: 会话 ID
         is_first_file: 是否是本批上传的第一个文件 ("1"=True, "0"=False)
+        auth_token: 登录用户的认证 token（与 guest_token 二选一）
+        guest_token: 游客的临时 token（与 auth_token 二选一）
     """
     import base64
     import os
@@ -167,18 +188,56 @@ async def upload_file(
     is_first = is_first_file == "1"
     if is_first:
         _thread_files[thread_id] = []
+        _thread_files_snapshot[thread_id] = []
         logger.info(f"清空 thread={thread_id} 的历史文件，开始新批次上传")
+
+        # 同时清空 LangGraph state 中的 uploaded_files，确保状态同步
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            langgraph_app.update_state(config, {
+                "uploaded_files": [],
+                "file_analyses": [],
+            })
+            logger.info(f"已同步清空 state.uploaded_files (thread={thread_id})")
+        except Exception as e:
+            logger.warning(f"清空 state.uploaded_files 失败: {e}")
+
+    # ⚠️ 如果前端没有传递 token，从 LangGraph state 中获取
+    if not auth_token and not guest_token:
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = langgraph_app.get_state(config)
+            state_auth_token = snapshot.values.get("auth_token", "")
+            state_guest_token = snapshot.values.get("guest_token", "")
+            if state_auth_token:
+                auth_token = state_auth_token
+                logger.info(f"从 state 获取 auth_token (thread={thread_id})")
+            elif state_guest_token:
+                guest_token = state_guest_token
+                logger.info(f"从 state 获取 guest_token (thread={thread_id})")
+        except Exception as e:
+            logger.warning(f"无法从 state 获取 token: {e}")
 
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
-        result = await call_mcp_tool("file_upload", {
+        mcp_args = {
             "files": [
                 {
                     "filename": file.filename,
                     "content": content_b64
                 }
             ]
-        })
+        }
+        # 传递 token 给 MCP 工具（auth_token 或 guest_token）
+        if auth_token:
+            mcp_args["auth_token"] = auth_token
+        elif guest_token:
+            mcp_args["guest_token"] = guest_token
+
+        result = await call_mcp_tool("file_upload", mcp_args)
+
+        # 🔍 临时调试：打印 MCP 返回的完整结果
+        logger.info(f"🔍 [DEBUG] MCP file_upload 返回结果: {result}")
 
         # 检查上传结果
         if not result.get("success"):
@@ -204,7 +263,9 @@ async def upload_file(
         # ⚠️ 修复：更新轻量级快照（只保存文件路径，用于快速比较）
         _thread_files_snapshot[thread_id] = [f.get("file_path", f) if isinstance(f, dict) else f for f in _thread_files[thread_id]]
 
+        current_file_count = len(_thread_files[thread_id])
         logger.info(f"文件已通过 MCP 工具上传: {file_path} (thread={thread_id})")
+        logger.info(f"🔍 [DEBUG] 当前 thread={thread_id} 共有 {current_file_count} 个文件: {[f.get('original_filename', 'unknown') for f in _thread_files[thread_id]]}")
         return {
             "file_path": file_path,
             "filename": file.filename,
@@ -289,6 +350,7 @@ async def websocket_chat(ws: WebSocket):
             # ⚠️ 不再在收到消息时清空 _thread_files：用户可能刚上传完文件再发消息，
             # 若此时 phase=COMPLETED 会误清空刚上传的文件，导致「未检测到文件上传」
             file_infos = _thread_files.get(thread_id, [])
+            logger.info(f"🔍 [DEBUG] thread_id={thread_id}, _thread_files keys={list(_thread_files.keys())}, file_infos={len(file_infos)} files")
             # ⚠️ 仅在用户发送新消息（非 resume）且对账已完成时清空旧文件
             # 用户回复「不要」是 resume，表示不采纳规则、返回重新配置，应保留文件
             try:
@@ -380,11 +442,26 @@ async def websocket_chat(ws: WebSocket):
                             input_data = Command(resume=user_msg)
                         else:
                             # 登录用户：在 server 层预检测意图
-                            intent = await classify_intent_in_workflow(
-                                user_msg=user_msg,
-                                current_phase=current_phase,
-                                state=snapshot.values
-                            )
+                            # 特殊处理：如果是文件上传提示（系统自动生成），直接认为是继续 workflow
+                            import re
+                            file_upload_patterns = [
+                                r'已上传\s*\d+\s*个文件',
+                                r'上传了\s*\d+\s*个文件',
+                                r'文件已上传',
+                                r'请处理.*文件'
+                            ]
+                            is_file_upload_msg = any(re.search(p, user_msg.lower()) for p in file_upload_patterns)
+
+                            if is_file_upload_msg:
+                                # 文件上传提示，跳过意图检测，直接 resume
+                                logger.info(f"server: 检测到文件上传提示，跳过意图检测，直接 resume")
+                                intent = UserIntent.RESUME_WORKFLOW.value
+                            else:
+                                intent = await classify_intent_in_workflow(
+                                    user_msg=user_msg,
+                                    current_phase=current_phase,
+                                    state=snapshot.values
+                                )
 
                             if intent != UserIntent.RESUME_WORKFLOW.value:
                                 # 用户想切换意图，保存进度，改为非 resume 模式
@@ -426,9 +503,12 @@ async def websocket_chat(ws: WebSocket):
                             else:
                                 # 用户想继续 workflow，正常 resume
                                 logger.info(f"server: resume 继续 workflow (phase={current_phase})")
+                                logger.info(f"🔍 [DEBUG] file_infos={file_infos}")
                                 update_state: dict[str, Any] = {}
                                 if file_infos:
                                     update_state["uploaded_files"] = file_infos
+                                    logger.info(f"🔍 [DEBUG] 设置 update_state['uploaded_files'] = {len(file_infos)} 个文件")
+                                    logger.info(f"🔍 [DEBUG] 文件详情: {[f.get('original_filename', 'unknown') if isinstance(f, dict) else f for f in file_infos]}")
                                 if auth_token:
                                     update_state["auth_token"] = auth_token
                                     from app.tools.mcp_client import auth_me
@@ -441,6 +521,13 @@ async def websocket_chat(ws: WebSocket):
                                 if update_state:
                                     langgraph_app.update_state(config, update_state)
                                     logger.info(f"resume: 更新 state: {list(update_state.keys())}")
+                                    # 验证更新是否成功
+                                    try:
+                                        updated_snapshot = langgraph_app.get_state(config)
+                                        actual_file_count = len(updated_snapshot.values.get("uploaded_files", []))
+                                        logger.info(f"🔍 [DEBUG] state 更新后，实际 uploaded_files 数量: {actual_file_count}")
+                                    except Exception as e:
+                                        logger.warning(f"验证 state 更新失败: {e}")
                                 input_data = Command(resume=user_msg)
                     else:
                         # 不在 workflow 中，正常 resume
@@ -461,27 +548,75 @@ async def websocket_chat(ws: WebSocket):
                             logger.info(f"resume: 更新 state: {list(update_state.keys())}")
                         input_data = Command(resume=user_msg)
                 else:
-                    # 非 resume 模式：重置 phase 状态，避免之前的任务结果影响新任务
+                    # 非 resume 模式：通常重置 phase，但文件上传消息除外
+                    # ⚠️ 检测文件上传消息：即使 resume=false，也应该保持 workflow 状态
+                    import re
+                    file_upload_patterns = [
+                        r'已上传\s*\d+\s*个文件',
+                        r'上传了\s*\d+\s*个文件',
+                        r'文件已上传',
+                        r'请处理.*文件'
+                    ]
+                    is_file_upload_msg = any(re.search(p, user_msg.lower()) for p in file_upload_patterns)
+
+                    # 获取当前 phase
                     try:
-                        langgraph_app.update_state(config, {"phase": ""})
-                        logger.info(f"新会话: 已重置 LangGraph state (thread={thread_id})")
-                    except Exception as e:
-                        logger.warning(f"重置 LangGraph state 失败: {e}")
-                    
-                    input_data: dict[str, Any] = {
-                        "messages": [HumanMessage(content=user_msg)],
-                        "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
-                    }
-                    if auth_token:
-                        input_data["auth_token"] = auth_token
-                        # 解析 token 获取用户信息
-                        from app.tools.mcp_client import auth_me
+                        snapshot = langgraph_app.get_state(config)
+                        current_phase = snapshot.values.get("phase", "") if snapshot else ""
+                    except Exception:
+                        current_phase = ""
+
+                    # 如果是文件上传消息且在 workflow 中，保持 phase，改为 resume 模式
+                    if is_file_upload_msg and current_phase:
+                        logger.info(f"检测到文件上传消息 (resume=false)，保持 phase={current_phase}，改为 resume 模式")
+                        update_state: dict[str, Any] = {}
+                        if file_infos:
+                            update_state["uploaded_files"] = file_infos
+                            logger.info(f"🔍 [DEBUG] (resume=false) 设置 update_state['uploaded_files'] = {len(file_infos)} 个文件")
+                            logger.info(f"🔍 [DEBUG] (resume=false) 文件详情: {[f.get('original_filename', 'unknown') if isinstance(f, dict) else f for f in file_infos]}")
+                        if auth_token:
+                            update_state["auth_token"] = auth_token
+                            from app.tools.mcp_client import auth_me
+                            try:
+                                me_result = await auth_me(auth_token)
+                                if me_result.get("success"):
+                                    update_state["current_user"] = me_result["user"]
+                            except Exception:
+                                pass
+                        if update_state:
+                            langgraph_app.update_state(config, update_state)
+                            logger.info(f"更新 state: {list(update_state.keys())}")
+                            # 验证更新是否成功
+                            try:
+                                updated_snapshot = langgraph_app.get_state(config)
+                                actual_file_count = len(updated_snapshot.values.get("uploaded_files", []))
+                                logger.info(f"🔍 [DEBUG] (resume=false) state 更新后，实际 uploaded_files 数量: {actual_file_count}")
+                            except Exception as e:
+                                logger.warning(f"验证 state 更新失败: {e}")
+                        input_data = Command(resume=user_msg)
+                    else:
+                        # 正常的新会话：重置 phase 状态
                         try:
-                            me_result = await auth_me(auth_token)
-                            if me_result.get("success"):
-                                input_data["current_user"] = me_result["user"]
-                        except Exception:
-                            pass
+                            langgraph_app.update_state(config, {"phase": ""})
+                            logger.info(f"新会话: 已重置 LangGraph state (thread={thread_id})")
+                        except Exception as e:
+                            logger.warning(f"重置 LangGraph state 失败: {e}")
+
+                        # 构建新会话的 input_data
+                        input_data: dict[str, Any] = {
+                            "messages": [HumanMessage(content=user_msg)],
+                            "uploaded_files": file_infos,  # 传递完整对象（含 file_path、original_filename）
+                        }
+                        if auth_token:
+                            input_data["auth_token"] = auth_token
+                            # 解析 token 获取用户信息
+                            from app.tools.mcp_client import auth_me
+                            try:
+                                me_result = await auth_me(auth_token)
+                                if me_result.get("success"):
+                                    input_data["current_user"] = me_result["user"]
+                            except Exception:
+                                pass
                 
                 logger.info(f"开始执行 LangGraph: thread_id={thread_id}")
                 

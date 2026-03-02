@@ -372,6 +372,10 @@ async def auth_handler(state: AgentState) -> dict | None:
             elif intent == "CANCEL":
                 # 游客想取消/退出 workflow
                 logger.info(f"auth_handler [游客]: 用户想取消 workflow")
+                # 删除已上传的文件
+                from app.graphs.reconciliation.helpers import delete_uploaded_files
+                await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
                 # 清除所有 workflow 相关状态，确保不会继续执行
                 return {
                     "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
@@ -384,6 +388,11 @@ async def auth_handler(state: AgentState) -> dict | None:
             elif intent == "OTHER":
                 # 用户的闲聊/无关内容 - 退出 workflow，让用户重新开始
                 logger.info(f"auth_handler [游客]: 用户闲聊/无关内容，退出 workflow")
+
+                # 删除已上传的文件
+                from app.graphs.reconciliation.helpers import delete_uploaded_files
+                await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
                 return {
                     "messages": [AIMessage(content="好的，流程已暂停。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
                     "phase": "",  # 清空 phase，退出 workflow

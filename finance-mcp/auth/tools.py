@@ -979,15 +979,20 @@ async def _handle_search_rules_by_mapping(args: dict) -> dict:
     auth_token = args.get("auth_token", "")
     guest_token = args.get("guest_token", "")
     
+    user_id: str | None = None
+    
     if auth_token:
         valid, user_info, err = _require_auth(args)
         if not valid:
             return {"success": False, "error": err}
+        # 提取用户ID用于过滤自己的规则
+        user_id = user_info.get("user_id") if user_info else None
     elif guest_token:
         # 验证游客token
         token_info = auth_db.verify_guest_token(guest_token)
         if not token_info or not token_info.get("valid"):
             return {"success": False, "error": "无效的游客token或token已过期"}
+        # 访客用户没有user_id，不过滤
     else:
         return {"success": False, "error": "请提供 auth_token 或 guest_token"}
 
@@ -998,7 +1003,7 @@ async def _handle_search_rules_by_mapping(args: dict) -> dict:
     limit = args.get("limit", 3)
 
     try:
-        rules = auth_db.search_rules_by_field_mapping(field_mapping_hash, limit)
+        rules = auth_db.search_rules_by_field_mapping(field_mapping_hash, limit, user_id)
         return {
             "success": True,
             "rules": rules,

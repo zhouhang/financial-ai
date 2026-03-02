@@ -59,13 +59,23 @@ def is_standard_format(file_paths: list[str | Path]) -> FileValidationResult:
     total_sheet_count = 0
 
     for file_path in file_paths:
-        file_path = Path(file_path)
+        file_path_str = str(file_path)
+
+        # 转换为绝对路径（如果是相对路径 /uploads/... 则转换为 MCP 服务器的上传目录）
+        if file_path_str.startswith('/uploads/'):
+            # MCP 服务器的上传目录
+            import os
+            mcp_root = Path(__file__).parent.parent.parent.parent.parent / 'finance-mcp'
+            file_path = mcp_root / file_path_str.lstrip('/')
+        else:
+            file_path = Path(file_path_str)
 
         # 检查文件扩展名
-        if file_path.suffix.lower() not in ['.xlsx', '.xls']:
+        file_ext = file_path.suffix.lower()
+        if file_ext not in ['.xlsx', '.xls', '.csv']:
             return FileValidationResult(
                 is_standard=False,
-                reason=f"文件 '{file_path.name}' 不是 Excel 文件",
+                reason=f"文件 '{file_path.name}' 格式不支持（仅支持 Excel 或 CSV）",
                 file_count=file_count,
                 total_sheet_count=0,
                 details=details
@@ -82,12 +92,16 @@ def is_standard_format(file_paths: list[str | Path]) -> FileValidationResult:
             )
 
         try:
-            # 分析文件
-            file_info = _analyze_excel_file(file_path)
+            # 分析文件（Excel 或 CSV）
+            if file_ext == '.csv':
+                file_info = _analyze_csv_file(file_path)
+            else:
+                file_info = _analyze_excel_file(file_path)
+
             details.append(file_info)
             total_sheet_count += file_info['sheet_count']
 
-            # 检查 sheet 数量
+            # 检查 sheet 数量（CSV 文件视为只有 1 个 sheet）
             if file_info['sheet_count'] != 1:
                 return FileValidationResult(
                     is_standard=False,
@@ -218,6 +232,55 @@ def _analyze_sheet_openpyxl(sheet, sheet_name: str) -> dict[str, Any]:
         'data_row_count': estimated_data_rows,  # 使用估计值
         'headers': headers
     }
+
+
+def _analyze_csv_file(file_path: Path) -> dict[str, Any]:
+    """分析 CSV 文件的结构
+
+    Args:
+        file_path: CSV 文件路径
+
+    Returns:
+        文件信息字典（格式与 _analyze_excel_file 一致）
+    """
+    import pandas as pd
+    import chardet
+
+    try:
+        # 自动检测编码
+        with open(file_path, 'rb') as f:
+            raw_data = f.read()
+            detected = chardet.detect(raw_data)
+            encoding = detected.get('encoding', 'utf-8')
+
+        # 读取 CSV 文件
+        df = pd.read_csv(file_path, encoding=encoding, nrows=5)
+
+        has_header = len(df.columns) > 0
+        headers = list(df.columns) if has_header else []
+
+        # 获取实际行数
+        df_full = pd.read_csv(file_path, encoding=encoding)
+        data_row_count = len(df_full)
+
+        # CSV 文件视为只有 1 个 sheet
+        sheet_info = {
+            'sheet_name': 'CSV',
+            'has_header': has_header,
+            'data_row_count': data_row_count,
+            'headers': headers
+        }
+
+        return {
+            'filename': file_path.name,
+            'filepath': str(file_path),
+            'sheet_count': 1,  # CSV 文件视为只有 1 个 sheet
+            'sheets': [sheet_info]
+        }
+
+    except Exception as e:
+        logger.error(f"CSV 文件分析失败 {file_path}: {e}")
+        raise
 
 
 def _analyze_excel_file_pandas(file_path: Path) -> dict[str, Any]:

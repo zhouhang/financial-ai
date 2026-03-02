@@ -171,6 +171,7 @@ def build_main_graph() -> StateGraph:
 
     # 对账规则生成流程（展平的）
     graph.add_conditional_edges("file_analysis", route_after_file_analysis, {
+        "file_analysis": "file_analysis",  # 验证失败时循环回自己
         "rule_recommendation": "rule_recommendation",  # 直接进入规则推荐
         END: END,
     })

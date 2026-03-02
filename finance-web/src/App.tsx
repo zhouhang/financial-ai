@@ -1030,6 +1030,7 @@ export default function App() {
         showInput={!!activeConvId}
         currentUser={currentUser}
         conversationTitle={activeConv?.title}
+        authToken={authToken}
         onLogin={() => {
           setLoginModalTitleHint(null);
           setIsLoginModalOpen(true);

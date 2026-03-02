@@ -152,3 +152,62 @@
   align-items: center;
   gap: 0.5rem;
 }
+
+/* HTML Content Wrapper (for tables, etc.) */
+.html-content-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: 0.875rem; /* text-sm，与 message-content 保持一致 */
+  line-height: 1.625;
+  color: var(--color-text-primary);
+}
+
+.html-content-wrapper strong,
+.html-content-wrapper b {
+  font-weight: 600;
+  font-size: inherit; /* 加粗不放大字号 */
+}
+
+.html-content-wrapper table {
+  border-collapse: collapse;
+  width: auto;
+  margin: 0.5rem 0;
+}
+
+.html-content-wrapper table thead {
+  background-color: #f9fafb;
+}
+
+.html-content-wrapper table th {
+  padding: 0.75rem;
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.875rem;
+  color: #4b5563;
+  white-space: nowrap;
+  border-right: 1px solid #e5e7eb;
+}
+
+.html-content-wrapper table th:last-child {
+  border-right: 0;
+}
+
+.html-content-wrapper table td {
+  padding: 0.75rem;
+  font-size: 0.875rem;
+  color: #1f2937;
+  white-space: nowrap;
+  border-right: 1px solid #f3f4f6;
+}
+
+.html-content-wrapper table td:last-child {
+  border-right: 0;
+}
+
+.html-content-wrapper table tr {
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.html-content-wrapper table tr:last-child {
+  border-bottom: 0;
+}

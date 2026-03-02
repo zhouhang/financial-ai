@@ -176,7 +176,11 @@ def create_tools() -> List[Tool]:
                 "properties": {
                     "auth_token": {
                         "type": "string",
-                        "description": "JWT token，用于校验用户身份"
+                        "description": "JWT token，用于校验用户身份（与 guest_token 二选一）"
+                    },
+                    "guest_token": {
+                        "type": "string",
+                        "description": "游客 token（与 auth_token 二选一）"
                     },
                     "files": {
                         "type": "array",
@@ -197,7 +201,28 @@ def create_tools() -> List[Tool]:
                         }
                     }
                 },
-                "required": ["auth_token", "files"]
+                "required": ["files"]
+            }
+        ),
+        Tool(
+            name="file_delete",
+            description="删除已上传的文件。需要验证用户身份（auth_token）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份"
+                    },
+                    "file_paths": {
+                        "type": "array",
+                        "description": "要删除的文件路径列表",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "required": ["auth_token", "file_paths"]
             }
         ),
         Tool(
@@ -304,7 +329,10 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Any:
     
     elif tool_name == "file_upload":
         return await _file_upload(arguments)
-    
+
+    elif tool_name == "file_delete":
+        return await _file_delete(arguments)
+
     elif tool_name == "get_reconciliation":
         return await _get_reconciliation(arguments)
     
@@ -553,6 +581,35 @@ async def _file_upload(args: Dict) -> Dict:
         from datetime import datetime
         import chardet
         from security_utils import validate_filename, sanitize_path
+        from auth.jwt_utils import get_user_from_token
+        from auth import db as auth_db
+
+        # 验证 token - 支持 auth_token 或 guest_token
+        auth_token = args.get("auth_token", "")
+        guest_token = args.get("guest_token", "")
+
+        if auth_token:
+            # 登录用户：验证 auth_token
+            user_info = get_user_from_token(auth_token)
+            if not user_info:
+                return {"success": False, "error": "无效的 auth_token"}
+        elif guest_token:
+            # 游客：验证 guest_token
+            try:
+                token_info = auth_db.verify_guest_token(guest_token)
+            except Exception as e:
+                logger.error(f"验证游客token失败: {e}")
+                return {"success": False, "error": f"验证游客token失败: {e}"}
+
+            if not token_info or not token_info.get("valid", False):
+                return {"success": False, "error": token_info.get("error", "无效的游客token")}
+
+            # 检查使用次数
+            if token_info.get("usage_count", 0) >= token_info.get("max_usage", 3):
+                return {"success": False, "error": "游客使用次数已达上限，请登录后继续使用"}
+        else:
+            # 既没有 auth_token 也没有 guest_token
+            return {"success": False, "error": "缺少 auth_token 或 guest_token 参数"}
 
         files = args.get("files", [])
         if not files:
@@ -697,11 +754,12 @@ async def _file_upload(args: Dict) -> Dict:
 
                 # 构建相对路径（相对于 UPLOAD_DIR）
                 relative_path = file_path.relative_to(UPLOAD_DIR.parent)
+                file_path_str = f"/{relative_path.as_posix()}"
 
                 # 添加到成功列表
                 uploaded_files.append({
                     "original_filename": filename,
-                    "file_path": f"/{relative_path.as_posix()}"
+                    "file_path": file_path_str
                 })
 
             except Exception as e:
@@ -734,6 +792,81 @@ async def _file_upload(args: Dict) -> Dict:
 
     except Exception as e:
         return {"error": f"文件上传失败: {str(e)}"}
+
+
+async def _file_delete(args: Dict) -> Dict:
+    """删除文件（带用户验证和所有权检查）"""
+    try:
+        import os
+        from pathlib import Path
+        from auth.jwt_utils import get_user_from_token
+
+        # 验证 auth_token 并获取 user_id
+        auth_token = args.get("auth_token", "")
+        if not auth_token:
+            return {"error": "缺少 auth_token"}
+
+        # 验证 token 并获取用户信息
+        user_info = get_user_from_token(auth_token)
+        if not user_info:
+            return {"error": "无效的 auth_token"}
+
+        user_id = user_info.get("user_id")
+        if not user_id:
+            return {"error": "无法获取用户信息"}
+
+        file_paths = args.get("file_paths", [])
+        if not file_paths:
+            return {"error": "file_paths 参数不能为空"}
+
+        deleted_files = []
+        failed_files = []
+
+        for file_path_str in file_paths:
+            try:
+                # 删除物理文件
+                # 文件路径格式：/uploads/year/month/day/filename
+                original_path = file_path_str
+                if file_path_str.startswith("/"):
+                    file_path_str = file_path_str[1:]  # 去掉开头的 /
+
+                abs_file_path = UPLOAD_DIR.parent / file_path_str
+
+                if abs_file_path.exists() and abs_file_path.is_file():
+                    os.remove(abs_file_path)
+                    deleted_files.append({
+                        "file_path": original_path
+                    })
+                    logger.info(f"用户 {user_id} 删除文件: {abs_file_path}")
+                else:
+                    failed_files.append({
+                        "file_path": original_path,
+                        "error": "文件不存在"
+                    })
+                    logger.warning(f"文件不存在: {abs_file_path}")
+
+            except Exception as e:
+                failed_files.append({
+                    "file_path": file_path_str,
+                    "error": f"删除失败: {str(e)}"
+                })
+                logger.error(f"删除文件失败 {file_path_str}: {e}")
+
+        # 返回结果
+        result = {
+            "success": len(deleted_files) > 0,
+            "deleted_count": len(deleted_files),
+            "failed_count": len(failed_files),
+            "deleted_files": deleted_files
+        }
+
+        if failed_files:
+            result["failed_files"] = failed_files
+
+        return result
+
+    except Exception as e:
+        return {"error": f"删除文件失败: {str(e)}"}
 
 
 def _guess_file_extension(content: bytes) -> str:

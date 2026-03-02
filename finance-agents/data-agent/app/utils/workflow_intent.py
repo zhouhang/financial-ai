@@ -391,6 +391,11 @@ async def handle_intent_switch_guest(
     if intent == "LOGIN":
         # 用户想登录，保存进度并显示登录表单
         save_workflow_context(state, current_phase)
+
+        # 删除已上传的文件
+        from app.graphs.reconciliation.helpers import delete_uploaded_files
+        await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
         from app.graphs.main_graph.forms import generate_login_form
         return {
             "messages": [AIMessage(content=generate_login_form())],
@@ -403,6 +408,10 @@ async def handle_intent_switch_guest(
 
     elif intent == "CANCEL":
         # 用户想取消，退出 workflow
+        # 删除已上传的文件
+        from app.graphs.reconciliation.helpers import delete_uploaded_files
+        await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
         # 清除所有 workflow 相关状态
         return {
             "messages": [AIMessage(content="已取消当前操作。\n\n你可以说「对账」开始新的对账，或者点击右上角按钮登录。")],
@@ -435,6 +444,10 @@ async def handle_intent_switch_guest(
             next_action_hint=hint
         )
 
+        # 删除已上传的文件
+        from app.graphs.reconciliation.helpers import delete_uploaded_files
+        await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
         return {
             "messages": [AIMessage(content=friendly_response)],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
@@ -446,6 +459,10 @@ async def handle_intent_switch_guest(
 
     else:
         # 其他未预期的意图，返回通用提示并退出
+        # 删除已上传的文件
+        from app.graphs.reconciliation.helpers import delete_uploaded_files
+        await delete_uploaded_files(state.get("uploaded_files", []), state.get("auth_token", ""))
+
         return {
             "messages": [AIMessage(content="当前流程已暂停。\n\n💡 你可以：\n• 说「对账」重新开始\n• 点击右上角按钮登录")],
             "phase": "",  # 清空 phase，路由函数检测到 phase="" 后返回 END
