@@ -266,3 +266,18 @@ class AgentState(TypedDict, total=False):
     
     # ── Agent 类型 ────────────────────────────────────────────
     agent_type: Optional[str]  # 当前选择的 Agent 类型：reconciliation 或 data_process
+
+    # ── 审计/核算数据处理 ──────────────────────────────────────
+    user_request: Optional[str]  # 用户的原始请求文本（供 data_process 子图使用）
+    available_skills: Optional[list]  # 可用技能列表
+    selected_skill_id: Optional[str]  # 选中的技能 ID
+    intent_score: Optional[float]  # 意图置信度分数
+    script_path: Optional[str]  # 处理脚本路径
+    script_status: Optional[str]  # 脚本状态：ready / error
+    skill_detail: Optional[dict]  # 技能详情
+    execution_status: Optional[str]  # 执行状态：success / error
+    execution_result: Optional[dict]  # 执行结果
+    error_message: Optional[str]  # 错误消息
+    formatted_result: Optional[str]  # 格式化后的结果文本
+    result_files: Optional[list]  # 结果文件路径列表
+    output_dir: Optional[str]  # 输出目录

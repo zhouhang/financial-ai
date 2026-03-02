@@ -1,0 +1,133 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/28.2.5 Chrome/138.0.7204.251 Electron/37.6.1 Safari/537.36" version="28.2.5">
+  <diagram name="Page-1" id="X2HPma42vUu5EHh1bNRm">
+    <mxGraphModel dx="1803" dy="671" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-4" value="业务系统" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="120" y="80" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-5" value="财务中台" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="80" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-6" value="ERP" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="80" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-7" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="Yn-j3fo-q1bxZwJxkXyJ-4">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="230" y="190" as="sourcePoint" />
+            <mxPoint x="180" y="560" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-8" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="409.5" y="120" as="sourcePoint" />
+            <mxPoint x="410" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-9" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="679.5" y="120" as="sourcePoint" />
+            <mxPoint x="680" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-11" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="180" y="170" as="sourcePoint" />
+            <mxPoint x="410" y="170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-12" value="业务数据，包括订单，退单" style="edgeLabel;resizable=0;html=1;;align=center;verticalAlign=middle;" connectable="0" vertex="1" parent="Yn-j3fo-q1bxZwJxkXyJ-11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-13" value="金蝶" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="800" y="80" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-14" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="859.5" y="120" as="sourcePoint" />
+            <mxPoint x="860" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-15" value="数据清洗&lt;div&gt;统计&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="410" y="180" width="30" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-16" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="410" y="370" as="sourcePoint" />
+            <mxPoint x="550" y="370" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-21" value="对核单表&lt;div&gt;进行检查&lt;div&gt;（关联交易、&lt;/div&gt;&lt;div&gt;毛利异常）&lt;/div&gt;&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=#FFFFFF;fontColor=#FF0000;" vertex="1" connectable="0" parent="Yn-j3fo-q1bxZwJxkXyJ-16">
+          <mxGeometry x="0.0154" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-18" value="生成核单表" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="410" y="260" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-19" value="Actor" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" vertex="1" parent="1">
+          <mxGeometry x="534" y="70" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-20" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="549.5" y="135" as="sourcePoint" />
+            <mxPoint x="547" y="560" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-22" value="数据修复&lt;div&gt;（可以修复的，重刷数据；不能的话走线下入账流程）&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="414" y="430" width="110" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-23" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="410" y="500" as="sourcePoint" />
+            <mxPoint x="860" y="500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-24" value="同步修复后的数据至金蝶&lt;div&gt;线下入账也同步至金蝶&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="Yn-j3fo-q1bxZwJxkXyJ-23">
+          <mxGeometry x="0.0536" y="-3" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-25" value="银行系统" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-40" y="80" width="90" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-26" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="-1" y="120" as="sourcePoint" />
+            <mxPoint x="-1" y="560" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-27" value="" style="endArrow=classic;html=1;rounded=0;fillColor=#fff2cc;strokeColor=#d6b656;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint y="330" as="sourcePoint" />
+            <mxPoint x="410" y="330" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-28" value="日流水(记账)数据" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="Yn-j3fo-q1bxZwJxkXyJ-27">
+          <mxGeometry x="0.1098" y="-4" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-29" value="进&lt;div&gt;销&lt;/div&gt;&lt;div&gt;存&lt;div&gt;单&lt;/div&gt;&lt;div&gt;据&lt;/div&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="680" y="170" width="30" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-32" value="资&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;金&lt;/span&gt;&lt;div&gt;对账&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="550" y="298" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-33" value="" style="endArrow=classic;html=1;rounded=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;fillColor=#fff2cc;strokeColor=#d6b656;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="680" y="334" as="sourcePoint" />
+            <mxPoint x="610" y="334" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Yn-j3fo-q1bxZwJxkXyJ-34" value="" style="endArrow=classic;html=1;rounded=0;fillColor=#fff2cc;strokeColor=#d6b656;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="410" y="337" as="sourcePoint" />
+            <mxPoint x="550" y="337" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
