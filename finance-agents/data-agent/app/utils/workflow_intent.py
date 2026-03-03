@@ -562,12 +562,16 @@ async def handle_intent_switch(
             return {
                 "messages": [AIMessage(content=msg)],
                 "phase": "",  # 清空 phase，退出 workflow
+                "uploaded_files": [],
+                "file_analyses": [],
             }
         except Exception as e:
             logger.error(f"获取规则列表失败: {e}")
             return {
                 "messages": [AIMessage(content=f"❌ 获取规则列表失败: {str(e)}")],
                 "phase": "",
+                "uploaded_files": [],
+                "file_analyses": [],
             }
 
     elif intent == UserIntent.CREATE_NEW_RULE.value:
@@ -591,16 +595,22 @@ async def handle_intent_switch(
                 "messages": [AIMessage(content=msg)],
                 "phase": "",
                 "user_intent": intent,
+                # 切换意图时清空工作流文件，重新创建规则需要重新上传
+                "uploaded_files": [],
+                "file_analyses": [],
             },
             goto="router"
         )
 
     else:
         # 其他意图：跳转回 router 处理
+        # ⚠️ 清空工作流上传的文件，防止退出后使用已有规则对账时误用这些文件
         return Command(
             update={
                 "phase": "",
                 "user_intent": intent,
+                "uploaded_files": [],
+                "file_analyses": [],
             },
             goto="router"
         )

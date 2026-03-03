@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -131,123 +133,136 @@ def _format_operations_summary(operations: list[dict[str, Any]], file_names: dic
 
 
 def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, Any]], bullet_style: bool = False) -> str:
-    """将字段映射格式化为可读文本。
-    
+    """将字段映射格式化为 业务列名↔财务列名 形式，按 field_roles 配对。
+
     Args:
-        mappings: 字段映射字典
-        analyses: 文件分析结果列表
-        bullet_style: 是否使用 bullet 样式（默认表格样式）
+        bullet_style: 若为 True，每项前加 • 并与数据统计样式一致
     """
-    if not mappings:
-        return "（无字段映射）"
+    biz_map = mappings.get("business", {})
+    fin_map = mappings.get("finance", {})
     
-    # 构建文件名映射
-    file_names = {}
-    for a in analyses:
-        src = a.get("guessed_source")
-        if src:
-            file_names[src] = a.get("original_filename", src)
+    def _fmt_col(v: Any) -> str:
+        if isinstance(v, list):
+            return "、".join(str(x) for x in v)
+        return str(v) if v else ""
     
-    lines = []
-    for source in ("business", "finance"):
-        src_map = mappings.get(source, {})
-        if not src_map:
-            continue
-        
-        label = file_names.get(source, "文件1" if source == "business" else "文件2")
-        
-        if bullet_style:
-            lines.append(f"**{label}**:")
-            for role, column in src_map.items():
-                lines.append(f"  - {role}: {column}")
-        else:
-            lines.append(f"**{label}**:")
-            table_lines = ["  | 字段 | 列名 |", "  | --- | --- |"]
-            for role, column in src_map.items():
-                col_str = ", ".join(column) if isinstance(column, list) else column
-                table_lines.append(f"  | {role} | {col_str} |")
-            lines.extend(table_lines)
+    # 取 business 与 finance 的 field_roles 公共 key 做配对
+    common_roles = sorted(biz_map.keys() & fin_map.keys())
+    lines: list[str] = []
+    for role in common_roles:
+        biz_col = biz_map.get(role)
+        fin_col = fin_map.get(role)
+        if biz_col and fin_col:
+            item = f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}"
+            lines.append(f"• {item}" if bullet_style else item)
     
-    return "\n".join(lines) if lines else "（无字段映射）"
+    if not lines:
+        return "（未找到匹配字段）"
+    return "\n".join(lines) if bullet_style else "\n\n".join(lines)
 
 
 def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
-    """格式化字段映射供编辑使用"""
-    if not mappings:
-        return "无映射"
-    
-    lines = []
-    for source in ("business", "finance"):
-        src_map = mappings.get(source, {})
-        if not src_map:
-            continue
-        
-        lines.append(f"**{source}**:")
-        for role, column in src_map.items():
-            col_str = ", ".join(column) if isinstance(column, list) else column
-            lines.append(f"  - {role}: {col_str}")
-    
-    return "\n".join(lines) if lines else "无映射"
+    """编辑模式下格式化字段映射（无需 file_analyses），按 field_roles 配对，格式：业务列名↔财务列名，bullet style。"""
+    biz_map = mappings.get("business", {})
+    fin_map = mappings.get("finance", {})
+
+    def _fmt_col(v: Any) -> str:
+        if isinstance(v, list):
+            return "、".join(str(x) for x in v)
+        return str(v) if v else ""
+
+    # 取 business 与 finance 的 field_roles 公共 key 做配对
+    common_roles = sorted(biz_map.keys() & fin_map.keys())
+    lines: list[str] = []
+    for role in common_roles:
+        biz_col = biz_map.get(role)
+        fin_col = fin_map.get(role)
+        if biz_col and fin_col:
+            item = f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}"
+            lines.append(f"• {item}")
+    return "\n".join(lines) if lines else "（无映射）"
 
 
 def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
-    """构建字段映射描述文本"""
-    return _format_field_mappings(mappings, [], bullet_style=True)
+    """将字段映射构建为可保存的自然语言描述，供编辑规则时展示。
+
+    格式示例：
+    业务: 订单号->第三方订单号, 金额->应结算平台金额, 日期->支付时间
+    财务: 订单号->sup订单号, 金额->发生-, 日期->完成时间
+    """
+    lines = []
+    for source, label in [("business", "业务"), ("finance", "财务")]:
+        src_map = mappings.get(source, {})
+        if not src_map:
+            continue
+        parts = []
+        for role, col in src_map.items():
+            col_str = " / ".join(col) if isinstance(col, list) else str(col)
+            parts.append(f"{role}->{col_str}")
+        if parts:
+            lines.append(f"{label}: {', '.join(parts)}")
+    return "\n".join(lines) if lines else ""
 
 
 def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
-    """根据文件分析结果自动猜测字段映射。
-    
-    目前仅自动猜测 order_id, amount, date 三个核心字段。
-    """
-    if not analyses:
-        return {}
-    
-    mappings = {"business": {}, "finance": {}}
-    
-    for analysis in analyses:
-        source = analysis.get("guessed_source")
-        if not source or source not in mappings:
+    """使用 LLM 智能猜测字段映射：原始列名 → 标准角色。"""
+    from app.utils.llm import get_llm
+
+    mappings: dict[str, dict] = {"business": {}, "finance": {}}
+
+    # 构建文件信息
+    files_info = []
+    for a in analyses:
+        if "error" in a or not a.get("guessed_source"):
             continue
-        
-        headers = analysis.get("headers", [])
-        if not headers:
-            continue
-        
-        # 转为小写便于匹配
-        headers_lower = [h.lower() for h in headers]
-        
-        # order_id 匹配
-        order_id_patterns = ["order", "订单", "id", "no", "单号", "编号"]
-        for pattern in order_id_patterns:
-            for i, h in enumerate(headers_lower):
-                if pattern in h:
-                    mappings[source]["order_id"] = headers[i]
-                    break
-            if "order_id" in mappings[source]:
-                break
-        
-        # amount 匹配
-        amount_patterns = ["amount", "金额", "amt", "sum", "total", "钱"]
-        for pattern in amount_patterns:
-            for i, h in enumerate(headers_lower):
-                if pattern in h:
-                    mappings[source]["amount"] = headers[i]
-                    break
-            if "amount" in mappings[source]:
-                break
-        
-        # date 匹配
-        date_patterns = ["date", "日期", "time", "时间", "day"]
-        for pattern in date_patterns:
-            for i, h in enumerate(headers_lower):
-                if pattern in h:
-                    mappings[source]["date"] = headers[i]
-                    break
-            if "date" in mappings[source]:
-                break
-    
-    # 清理空值
+        cols_str = ", ".join(a.get("columns", []))
+        sample_str = ""
+        for row in a.get("sample_data", [])[:3]:
+            sample_str += "  " + str(row) + "\n"
+        fname = a.get("original_filename") or a.get("filename", "")
+        files_info.append(
+            f"文件: {fname} (类型: {a['guessed_source']})\n"
+            f"  列名: {cols_str}\n"
+            f"  示例数据:\n{sample_str}"
+        )
+
+    if not files_info:
+        return mappings
+
+    prompt = (
+        "你是一个财务数据分析专家。以下是用户上传的对账文件信息。\n"
+        "请为每个文件的列名匹配到以下标准角色（**只猜测以下 3 个必需角色**）：\n"
+        "- order_id: 订单号/交易号（用于两边数据匹配的关键字段，如订单编号、订单号、单号、第三方订单号等）\n"
+        "- amount: 金额\n"
+        "- date: 日期/时间\n\n"
+        "**规则：**\n"
+        "- 如果一个角色可能对应多个列名，全部列出。\n"
+        "- 如果某个角色没有对应的列，不要包含。\n"
+        "- **禁止在初始猜测中包含 status**。即使用户文件有「订单状态」「结算状态」等列，也不要映射。用户若需要状态映射，会在确认时主动添加。\n\n"
+        + "\n".join(files_info)
+        + "\n\n请严格按以下 JSON 格式回复，不要添加其他内容：\n"
+        '{"business": {"order_id": "列名或[列名1,列名2]", "amount": "...", "date": "..."}, '
+        '"finance": {"order_id": "...", "amount": "...", "date": "..."}}'
+    )
+
+    try:
+        llm = get_llm(temperature=0.1)
+        resp = llm.invoke(prompt)
+        content = resp.content.strip()
+
+        if "```" in content:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if m:
+                content = m.group(1)
+
+        parsed = json.loads(content)
+        for source in ("business", "finance"):
+            if source in parsed and isinstance(parsed[source], dict):
+                mappings[source] = parsed[source]
+
+    except Exception as e:
+        logger.warning(f"LLM 字段映射猜测失败: {e}")
+
     return {k: v for k, v in mappings.items() if v}
 
 

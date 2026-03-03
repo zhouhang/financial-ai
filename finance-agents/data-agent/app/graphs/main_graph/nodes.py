@@ -615,10 +615,13 @@ async def intent_router(state: AgentState) -> dict:
                 logger.info(f"intent_router: 用户在 workflow 中切换意图 {current_phase} → {intent}")
                 save_workflow_context(state, current_phase)
                 # 清空 phase，设置新意图，LangGraph 会重新路由
+                # ⚠️ 同时清空工作流上传的文件和分析结果，防止退出规则创建后使用已有规则对账时误用这些文件
                 return {
                     "phase": "",
                     "user_intent": intent,
-                    "messages": []
+                    "messages": [],
+                    "uploaded_files": [],
+                    "file_analyses": [],
                 }
         except Exception as e:
             logger.error(f"workflow 意图分类失败: {e}，降级为继续 workflow")
@@ -717,12 +720,13 @@ async def intent_router(state: AgentState) -> dict:
     elif intent == UserIntent.USE_EXISTING_RULE.value and rule_name:
         # ⚠️ 修复：切换意图时不要清空 uploaded_files，否则会丢失用户刚上传的新文件
         # （用户换文件后说「使用南京飞翰对账」时，state 已通过 input 合并了新文件，清空会导致仍用旧结果）
+        # 先进入 file_analysis 校验文件格式，通过后再执行对账
         msg = f"好的，将使用规则「{rule_name}」进行对账。\n\n✨ 请上传对账文件（文件1和文件2各一个）"
         return {
             "messages": [AIMessage(content=msg)],
             "user_intent": intent,
             "selected_rule_name": rule_name,
-            "phase": ReconciliationPhase.TASK_EXECUTION.value,
+            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
             "execution_step": TaskExecutionStep.NOT_STARTED.value,
             "uploaded_files": uploaded_files,
         }
@@ -792,6 +796,12 @@ async def intent_router(state: AgentState) -> dict:
                 return {
                     "messages": [AIMessage(content=f"✅ 规则「{matched_rule_name}」已删除")],
                     "user_intent": UserIntent.UNKNOWN.value,
+                    # 清空编辑流程相关状态，防止重新登录后恢复编辑该规则导致其被重新创建
+                    "phase": ReconciliationPhase.COMPLETED.value,
+                    "editing_rule_id": None,
+                    "editing_rule_name": None,
+                    "editing_rule_template": None,
+                    "generated_schema": None,
                 }
             else:
                 error_msg = result.get("error", "删除失败")
@@ -1100,10 +1110,35 @@ def task_execution_node(state: AgentState) -> dict:
         }
 
     task_id = start_result.get("task_id", "")
-    
+
+    # 构建文件显示名（优先 original_filename）
+    file_display_names = []
+    if uploaded_files:
+        for item in uploaded_files:
+            if isinstance(item, dict):
+                name = item.get("original_filename") or item.get("file_path", "")
+            else:
+                name = str(item)
+            if name:
+                file_display_names.append(name.split("/")[-1].split("\\")[-1])
+    elif files:
+        for a in state.get("file_analyses", []):
+            name = a.get("original_filename") or a.get("file_path", "")
+            if name:
+                file_display_names.append(name.split("/")[-1].split("\\")[-1])
+    if not file_display_names:
+        file_display_names = [f.split("/")[-1].split("\\")[-1] for f in files if f]
+    file_names_str = " ".join(file_display_names) if file_display_names else f"{len(files)} 个"
+
     # ── 启动成功，立即返回消息并开始轮询 ──
     messages_to_send = [
-        AIMessage(content=f"🚀 对账任务已启动\n\n规则：{display_name}\n文件：{len(files)} 个\n任务ID：{task_id}\n\n⏳ 正在执行对账，预计需要 10-60 秒\n\n进度：开始加载数据"),
+        AIMessage(content=(
+            f"🚀 对账任务已启动\n\n"
+            f"规则：{display_name}\n"
+            f"文件：{file_names_str}\n\n"
+            f"⏳ 正在执行对账，预计需要 10-60 秒\n\n"
+            f"进度：开始加载数据"
+        )),
     ]
 
     # ── 轮询 ──
