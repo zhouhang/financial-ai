@@ -15,6 +15,8 @@ interface ResponsiveTableProps<T extends Record<string, unknown>> {
   onFilenameTruncationChange?: (length: number) => void;
   /** 是否显示视图切换栏（紧凑/标准/展开），默认 true */
   showViewMode?: boolean;
+  /** 是否显示工具栏（视图切换 + 列按钮），默认 true；异常明细表可设为 false 去掉顶栏 */
+  showToolbar?: boolean;
 }
 
 const VIEW_MODE_STYLES: Record<ViewMode, { padding: string; fontSize: string; rowHeight: string }> = {
@@ -34,6 +36,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
   onColumnVisibilityChange,
   onColumnWidthChange,
   showViewMode = true,
+  showToolbar = true,
 }: ResponsiveTableProps<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
@@ -79,6 +82,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
       {/* Toolbar */}
+      {showToolbar && (
       <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
         {showViewMode ? (
           <div className="flex items-center gap-2">
@@ -129,6 +133,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
           )}
         </div>
       </div>
+      )}
 
       {/* Table Container */}
       <div ref={containerRef} className="overflow-x-auto">

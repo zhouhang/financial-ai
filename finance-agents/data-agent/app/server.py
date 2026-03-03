@@ -689,6 +689,7 @@ async def websocket_chat(ws: WebSocket):
                                 _no_stream_nodes = [
                                     "file_analysis", "field_mapping", "rule_config", "validation_preview",
                                     "edit_field_mapping", "edit_rule_config",
+                                    "result_analysis",  # 对账结果表格一次性展示，避免逐行渲染生硬
                                 ]
                                 if node_name not in _no_stream_nodes:
                                     streamed_content += token

@@ -30,7 +30,7 @@ export default function InterruptDialog({
           <div>
             <p className="text-sm font-medium text-text-primary whitespace-pre-line">{question}</p>
             {hint && (
-              <p className="text-xs text-text-secondary mt-1">{hint}</p>
+              <p className="text-xs text-text-secondary mt-1 whitespace-pre-line">{hint}</p>
             )}
           </div>
         </div>

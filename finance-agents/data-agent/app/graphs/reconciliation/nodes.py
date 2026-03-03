@@ -449,8 +449,8 @@ async def field_mapping_node(state: AgentState) -> dict:
     # 检查是否有待处理的调整意见
     adjustment_feedback = state.get("mapping_adjustment_feedback")
     
-    # 构建详细的字段映射展示
-    mapping_display = _format_field_mappings(confirmed, analyses)
+    # 构建详细的字段映射展示（bullet_style 与数据统计一致）
+    mapping_display = _format_field_mappings(confirmed, analyses, bullet_style=True)
     
     # 构建问题文本
     if adjustment_feedback:
@@ -915,16 +915,21 @@ async def rule_config_node(state: AgentState) -> dict:
     
     # 区分初始状态和配置中状态
     if len(config_items) == 0:
-        # 初始状态：简洁提示
+        # 初始状态：包含操作提示、「你可以」
         question_text = """⚙️ **第3步：配置对账规则参数**
 
 请输入你的配置要求：
 
+你可以：
+- 添加配置（描述你的规则要求，如"金额容差0.01"、"按订单号合并"）
+- 回复"确认"跳过（如果不需要配置规则）
+
 💡 **操作提示**：
-• 系统智能识别字段所属的文件
-• 支持针对单个文件的规则配置
-• 支持为两个文件配置不同的转换规则
-• 完成后回复「确认」继续"""
+
+- 系统智能识别字段所属的文件
+- 支持针对单个文件的规则配置
+- 支持为两个文件配置不同的转换规则
+- 完成后回复「确认」继续"""
     else:
         # 有配置项时：显示当前配置列表
         config_display = _format_rule_config_items(config_items, file_names)
@@ -934,23 +939,24 @@ async def rule_config_node(state: AgentState) -> dict:
 {config_display}
 
 你可以：
-• 继续添加配置（为文件1、文件2或全局配置新规则）
-• 删除配置（如"删除金额容差"、"去掉订单号过滤"）
-• 回复"确认"完成配置
-
-**请输入：**"""
+- 继续添加配置（为文件1、文件2或全局配置新规则）
+- 删除配置（如"删除金额容差"、"去掉订单号过滤"）
+- 回复"确认"完成配置"""
     
     # interrupt 暂停，等待用户输入
+    # 初始状态 question 已含操作提示，hint 留空避免重复；有配置项时 question 不含操作提示，用 hint 补充
+    interrupt_hint = "" if len(config_items) == 0 else '''💡 **操作提示**：
+
+- 系统智能识别字段所属的文件
+- 支持针对单个文件的规则配置
+- 支持为两个文件配置不同的转换规则
+- 完成后回复"确认"继续'''
     user_response = interrupt({
         "step": "3/4",
         "step_title": "配置规则参数",
         "question": question_text,
         "current_config_items": config_items,
-        "hint": '''💡 **操作提示**：
-  • 系统智能识别字段所属的文件
-  • 支持针对单个文件的规则配置
-  • 支持为两个文件配置不同的转换规则
-  • 完成后回复"确认"继续''',
+        "hint": interrupt_hint,
     })
 
     response_str = str(user_response).strip()
@@ -1022,9 +1028,14 @@ async def rule_config_node(state: AgentState) -> dict:
             "user_input": response_str,
         }
         new_config_items.append(new_item)
-        # 显示更新后的配置列表
+        # 显示更新后的配置列表（描述中去掉「两个文件」字样）
         updated_config_display = _format_rule_config_items(new_config_items, file_names)
-        feedback_msg = f"✅ 已添加配置：{parsed_result.get('description', '未知配置')}\n\n> {response_str}\n\n当前配置：\n{updated_config_display}"
+        add_desc = parsed_result.get("description", "未知配置")
+        for sfx in ("（两个文件）", "(两个文件)"):
+            if add_desc.endswith(sfx):
+                add_desc = add_desc[: -len(sfx)].rstrip().rstrip("，, ") or "未知配置"
+                break
+        feedback_msg = f"✅ 已添加配置：{add_desc}\n\n> {response_str}\n\n当前配置：\n{updated_config_display}"
         logger.info(f"添加配置项: {parsed_result.get('description')}, 当前配置项数量: {len(new_config_items)}")
     
     elif action == "delete":
@@ -1315,8 +1326,8 @@ async def validation_preview_node(state: AgentState) -> dict:
     # 简单预览（统计匹配信息）
     preview = _preview_schema(schema, analyses)
 
-    # 字段映射展示
-    mapping_display = _format_field_mappings(mappings, analyses)
+    # 字段映射展示（bullet_style 与数据统计一致）
+    mapping_display = _format_field_mappings(mappings, analyses, bullet_style=True)
 
     # 构建文件名映射（优先用 original_filename，用户更易识别）
     file_names = {}
@@ -1345,7 +1356,7 @@ async def validation_preview_node(state: AgentState) -> dict:
         f"• 业务记录数：{preview.get('biz_count', 'N/A')}\n"
         f"• 财务记录数：{preview.get('fin_count', 'N/A')}\n"
         f"• 预计可匹配：{preview.get('estimated_match', 'N/A')}条\n\n"
-        f"🔗 **字段映射**\n{mapping_display}\n\n\n"
+        f"🔗 **字段映射**\n\n{mapping_display}\n\n\n"
         f"📋 **你配置的规则**\n{config_display}\n\n"
         f"规则看起来合理吗？"
     )

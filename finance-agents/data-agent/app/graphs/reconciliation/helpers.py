@@ -522,8 +522,12 @@ def _adjust_field_mappings_with_llm(
         return current_mappings, []
 
 
-def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, Any]]) -> str:
-    """将字段映射格式化为 业务列名↔财务列名 形式，按 field_roles 配对。"""
+def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, Any]], bullet_style: bool = False) -> str:
+    """将字段映射格式化为 业务列名↔财务列名 形式，按 field_roles 配对。
+
+    Args:
+        bullet_style: 若为 True，每项前加 • 并与数据统计样式一致
+    """
     business_map = mappings.get("business", {})
     finance_map = mappings.get("finance", {})
 
@@ -539,12 +543,12 @@ def _format_field_mappings(mappings: dict[str, Any], analyses: list[dict[str, An
         biz_col = business_map.get(role)
         fin_col = finance_map.get(role)
         if biz_col and fin_col:
-            lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
+            item = f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}"
+            lines.append(f"• {item}" if bullet_style else item)
 
     if not lines:
         return "（未找到匹配字段）"
-    # 每项前换行，确保 Markdown 渲染时分行显示
-    return "\n\n".join(lines)
+    return "\n".join(lines) if bullet_style else "\n\n".join(lines)
 
 
 def _rule_template_to_mappings(rule_template: dict) -> dict[str, Any]:
@@ -620,7 +624,7 @@ def _rule_template_to_config_items(rule_template: dict) -> list[dict]:
 
 
 def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
-    """编辑模式下格式化字段映射（无需 file_analyses），按 field_roles 配对，格式：业务列名↔财务列名。"""
+    """编辑模式下格式化字段映射（无需 file_analyses），按 field_roles 配对，格式：业务列名↔财务列名，bullet style。"""
     biz_map = mappings.get("business", {})
     fin_map = mappings.get("finance", {})
 
@@ -636,9 +640,9 @@ def _format_edit_field_mappings(mappings: dict[str, Any]) -> str:
         biz_col = biz_map.get(role)
         fin_col = fin_map.get(role)
         if biz_col and fin_col:
-            lines.append(f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}")
-    # 每项前换行，确保 Markdown 渲染时分行显示
-    return "\n\n".join(lines) if lines else "（无映射）"
+            item = f"{_fmt_col(biz_col)}↔{_fmt_col(fin_col)}"
+            lines.append(f"• {item}")
+    return "\n".join(lines) if lines else "（无映射）"
 
 
 def _build_field_mapping_text(mappings: dict[str, Any]) -> str:
@@ -814,6 +818,13 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
     if not config_items or len(config_items) == 0:
         return "（暂无配置，请开始添加配置项）"
 
+    def _strip_two_files_suffix(text: str) -> str:
+        """去掉描述中的「（两个文件）」字样，避免重复（目标已标明文件范围）。"""
+        for suffix in ("（两个文件）", "(两个文件)"):
+            if text.endswith(suffix):
+                return text[: -len(suffix)].rstrip().rstrip("，, ")
+        return text
+
     def _strip_leading_filename(text: str, names: dict[str, str]) -> str:
         """若 desc 开头已包含文件名（来自 _rule_template_to_config_items），则去除避免重复显示。"""
         for label in (names or {}).values():
@@ -826,7 +837,8 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
         return text
 
     lines = []
-    for i, item in enumerate(config_items, 1):
+    idx = 1
+    for item in config_items:
         desc = item.get("description") or item.get("content") or item.get("name", "")
         if not desc:
             desc = "未知配置"
@@ -834,9 +846,21 @@ def _format_rule_config_items(config_items: list[dict] = None, file_names: dict[
         target = _analyze_config_target(json_snippet, file_names) if json_snippet else ""
         if target:
             desc = _strip_leading_filename(desc, file_names or {})
-            lines.append(f"  {i}. {target} {desc}")
+            desc = _strip_two_files_suffix(desc)
+            # 两个文件时，分两行显示（参照第二张图样式）
+            if " + " in target:
+                parts = [p.strip() for p in target.split(" + ")]
+                for part in parts:
+                    if part and not part.startswith("📁"):
+                        part = "📁 " + part
+                    lines.append(f"  {idx}. {part} {desc}")
+                    idx += 1
+            else:
+                lines.append(f"  {idx}. {target} {desc}")
+                idx += 1
         else:
-            lines.append(f"  {i}. {desc}")
+            lines.append(f"  {idx}. {desc}")
+            idx += 1
 
     return "\n".join(lines)
 
