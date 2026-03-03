@@ -9,6 +9,32 @@ import {
 } from 'lucide-react';
 import type { ConnectionStatus, Conversation } from '../types';
 
+/** 历史对话时间格式化：今天→时间，昨天→昨天，2-7天→过去7天，8-30天→过去30天，1月-1年→月份，1年+→年份 */
+function formatConversationTime(date: Date | string): string {
+  const d = new Date(date);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dateStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.floor((todayStart.getTime() - dateStart.getTime()) / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) {
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (diffDays === 1) {
+    return '昨天';
+  }
+  if (diffDays >= 2 && diffDays <= 7) {
+    return '过去7天';
+  }
+  if (diffDays >= 8 && diffDays <= 30) {
+    return '过去30天';
+  }
+  if (diffDays <= 365) {
+    return d.toLocaleDateString('zh-CN', { month: 'long', year: 'numeric' });
+  }
+  return d.toLocaleDateString('zh-CN', { year: 'numeric' });
+}
+
 interface SidebarProps {
   conversations: Conversation[];
   activeConversationId: string | null;
@@ -99,10 +125,7 @@ export default function Sidebar({
                 <div className="flex-1 min-w-0">
                   <span className="block truncate text-sm font-medium">{conv.title}</span>
                   <span className="block text-xs text-gray-400 mt-0.5">
-                    {new Date(conv.updatedAt).toLocaleTimeString('zh-CN', {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                    {formatConversationTime(conv.updatedAt)}
                   </span>
                 </div>
               )}

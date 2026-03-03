@@ -161,14 +161,12 @@ export default function App() {
   // ── 服务器会话管理（需在 handleLoginSuccess 之前，供其使用）──────────────────────────────────────────
   const {
     serverConversations,
-    isLoading: _isLoadingConversations,
+    isLoading: isLoadingConversations,
     loadConversations,
     loadConversation,
     deleteConversation: deleteServerConversation,
     clearCache: clearConversationsCache,
   } = useConversations({ authToken });
-  // TODO: 使用 _isLoadingConversations 显示加载状态
-  void _isLoadingConversations;
 
   const convIdMapRef = useRef<Map<string, string>>(new Map());
 
@@ -280,37 +278,50 @@ export default function App() {
   // 追踪是否已加载初始会话（用于防止刷新时重复加载）
   const hasLoadedInitialConvRef = useRef<boolean>(false);
 
-  // 登录成功后，会话列表加载完成时自动选择最近会话
+  // 登录成功后，等会话列表加载完成，选中最近对话（不创建新对话）
   useEffect(() => {
-    if (justLoggedInRef.current && serverConversations.length > 0) {
+    console.log('[登录选择对话] effect触发', {
+      authToken: !!authToken,
+      justLoggedIn: justLoggedInRef.current,
+      isLoadingConversations,
+      serverConversationsLength: serverConversations.length,
+    });
+    // 未登录时不处理
+    if (!authToken) return;
+    // 未标记刚登录时不处理
+    if (!justLoggedInRef.current) return;
+    
+    // 等待会话列表加载完成：
+    // 1. 如果正在加载，等待
+    // 2. 如果刚登录但还未开始加载（serverConversations为空），也等待
+    if (isLoadingConversations || serverConversations.length === 0) return;
+
+    console.log('[登录选择对话] 准备加载对话, serverConversations=', serverConversations);
+    if (serverConversations.length > 0) {
       justLoggedInRef.current = false;
-      
-      // 清除待确认的新会话
       pendingNewConvRef.current = null;
-      
-      // 选择最近的会话
       const latestConv = serverConversations[0];
-      setActiveConvId(latestConv.id);
-      
-      // 加载会话消息
+      console.log('[登录选择对话] 加载最近对话:', latestConv.id, latestConv.title);
       setIsLoadingConversation(true);
       loadConversation(latestConv.id).then((conv) => {
-        if (conv && conv.messages.length > 0) {
+        if (conv) {
           setConversations([conv]);
+          setActiveConvId(conv.id);
+        } else {
+          setActiveConvId(latestConv.id);
         }
         setIsLoadingConversation(false);
       });
-    } else if (justLoggedInRef.current && serverConversations.length === 0) {
-      // 没有会话，创建新对话
+    } else {
+      // 无历史对话时才创建新对话（有历史时始终选中最近一个）
+      console.log('[登录选择对话] 无历史对话，创建新对话');
       justLoggedInRef.current = false;
       const newConv = createConversation();
       pendingNewConvRef.current = newConv;
       setActiveConvId(newConv.id);
-
-      // 清除登录会话ID记录
       loginConvIdRef.current = { localId: null, serverId: null };
     }
-  }, [serverConversations, loadConversation]);
+  }, [authToken, serverConversations, isLoadingConversations, loadConversation]);
   
   // 刷新页面时，如果有保存的会话ID且不是新对话，尝试加载该会话
   useEffect(() => {

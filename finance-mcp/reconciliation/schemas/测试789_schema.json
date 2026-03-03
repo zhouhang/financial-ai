@@ -1,14 +1,14 @@
 {
   "version": "1.0",
-  "description": "测试1",
+  "description": "测试789",
   "data_sources": {
     "business": {
       "file_pattern": [
-        "1767597466118_*.csv",
         "1767597466118_*.xls",
-        "1767597466118_*.xlsx",
         "1767597466118_*.xlsm",
-        "1767597466118_*.xlsb"
+        "1767597466118_*.xlsx",
+        "1767597466118_*.xlsb",
+        "1767597466118_*.csv"
       ],
       "field_roles": {
         "order_id": [
@@ -20,11 +20,11 @@
     },
     "finance": {
       "file_pattern": [
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx",
         "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv",
         "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
         "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx"
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb"
       ],
       "field_roles": {
         "order_id": [
@@ -75,7 +75,7 @@
             "amount": "sum",
             "date": "first"
           },
-          "description": "相同的订单号按金额累加合并"
+          "description": "相同订单号按金额累加合并"
         }
       ],
       "global_transforms": [
@@ -127,7 +127,7 @@
             "amount": "sum",
             "date": "first"
           },
-          "description": "相同的订单号按金额累加合并"
+          "description": "相同订单号按金额累加合并"
         }
       ],
       "global_transforms": [
@@ -178,5 +178,5 @@
     }
   ],
   "field_mapping_text": "业务: order_id->sp订单号, amount->销售额, date->订单时间\n财务: order_id->sup订单号, amount->发生-, date->完成时间",
-  "rule_config_text": "去掉订单号前单引号\n截取订单号前21位\n相同的订单号按金额累加合并"
+  "rule_config_text": "去掉订单号前单引号\n订单号截取前21位\n相同订单号按金额累加合并"
 }

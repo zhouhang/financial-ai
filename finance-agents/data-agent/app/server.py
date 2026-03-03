@@ -689,6 +689,7 @@ async def websocket_chat(ws: WebSocket):
                                 _no_stream_nodes = [
                                     "file_analysis", "field_mapping", "rule_config", "validation_preview",
                                     "edit_field_mapping", "edit_rule_config",
+                                    "result_analysis",  # 对账结果表格一次性展示，避免逐行渲染生硬
                                 ]
                                 if node_name not in _no_stream_nodes:
                                     streamed_content += token
@@ -1076,12 +1077,17 @@ async def save_pending_rule(
             _build_field_mapping_text,
             _build_rule_config_text,
             _expand_file_patterns,
+            _merge_json_snippets,
+            _validate_and_deduplicate_rules,
         )
         schema_to_save = schema.copy()
         schema_to_save["description"] = rule_name
+        config_items = state.get("rule_config_items", [])
+        if config_items:
+            schema_to_save = _merge_json_snippets(schema_to_save, config_items)
+            schema_to_save = _validate_and_deduplicate_rules(schema_to_save)
         _rewrite_schema_transforms_to_mapped_fields(schema_to_save)
         mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
-        config_items = state.get("rule_config_items", [])
         schema_to_save["field_mapping_text"] = _build_field_mapping_text(mappings)
         schema_to_save["rule_config_text"] = _build_rule_config_text(config_items)
         for src in ("business", "finance"):

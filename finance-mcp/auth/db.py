@@ -264,7 +264,7 @@ def list_all_active_rules(status: str = "active") -> list[dict]:
         return []
 
 
-def get_rule_by_id(rule_id: str) -> Optional[dict]:
+def get_rule_by_id(rule_id: str, active_only: bool = True) -> Optional[dict]:
     """根据 ID 获取规则详情（含 rule_template）"""
     sql = """
     SELECT r.*, u.username AS created_by_name
@@ -272,6 +272,8 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
     JOIN users u ON r.created_by = u.id
     WHERE r.id = %s
     """
+    if active_only:
+        sql += " AND r.status = 'active'"
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -286,7 +288,7 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
         return None
 
 
-def get_rule_by_name(name: str, created_by: str = None) -> Optional[dict]:
+def get_rule_by_name(name: str, created_by: str = None, active_only: bool = True) -> Optional[dict]:
     """根据名称获取规则详情"""
     sql = """
     SELECT r.*, u.username AS created_by_name
@@ -295,6 +297,8 @@ def get_rule_by_name(name: str, created_by: str = None) -> Optional[dict]:
     WHERE r.name = %s
     """
     params = [name]
+    if active_only:
+        sql += " AND r.status = 'active'"
     if created_by:
         sql += " AND r.created_by = %s"
         params.append(created_by)

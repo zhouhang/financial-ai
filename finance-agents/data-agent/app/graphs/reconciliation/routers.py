@@ -9,7 +9,7 @@ import logging
 
 from langgraph.graph import END, StateGraph
 
-from app.models import AgentState, ReconciliationPhase
+from app.models import AgentState, ReconciliationPhase, UserIntent
 from .nodes import (
     entry_router_node,
     file_analysis_node,
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ── 路由函数 ─────────────────────────────────────────────────────────────────
 
 def route_after_file_analysis(state: AgentState) -> str:
-    """文件分析后路由：如果有分析结果则进入规则推荐，如果验证失败但有文件则循环回 file_analysis。"""
+    """文件分析后路由：如果有分析结果则进入规则推荐或任务执行，如果验证失败但有文件则循环回 file_analysis。"""
     phase = state.get("phase", "")
 
     # 如果 phase 为空，说明用户取消或退出了 workflow
@@ -36,7 +36,11 @@ def route_after_file_analysis(state: AgentState) -> str:
 
     analyses = state.get("file_analyses", [])
     if analyses:
-        return "rule_recommendation"  # 有分析结果，进入规则推荐
+        # 使用规则流程：校验通过后直接进入任务执行
+        if state.get("user_intent") == UserIntent.USE_EXISTING_RULE.value:
+            logger.info("文件验证通过，使用规则流程 -> task_execution")
+            return "task_execution"
+        return "rule_recommendation"  # 创建规则流程，进入规则推荐
 
     # 如果没有分析结果，但 uploaded_files 不为空，说明验证失败需要重新验证
     uploaded_files = state.get("uploaded_files", [])

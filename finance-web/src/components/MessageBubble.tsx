@@ -355,6 +355,7 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
         onColumnVisibilityChange={toggleColumnVisibility}
         onColumnWidthChange={setColumnWidth}
         showViewMode={!isExceptionTable}
+        showToolbar={!isExceptionTable}
       />
     </div>
   );

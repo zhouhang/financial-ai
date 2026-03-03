@@ -125,7 +125,16 @@ def _parse_rule_config_json_snippet(user_input: str, current_config_items: list[
 - 用户未指定文件 → 放 business.aggregations 和 finance.aggregations
 - 用户指定文件1 → 只放 business.aggregations
 - 用户指定文件2 → 只放 finance.aggregations
-示例（用户未指定，两个都放）：{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}}}, "description": "按订单号合并金额（两个文件）"}'''
+示例（用户未指定，两个都放）：{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "按订单号合并，金额累加"}]}}}, "description": "按订单号合并金额（两个文件）"}
+
+[示例8] ⚠️ 单条添加「去掉订单号前单引号」- 根据字段映射用业务/财务的订单号列名，未指定文件时两个都配置：
+{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"field_transforms": [{"field": "order_id", "transform": "str(row.get('sp订单号', '')).lstrip(\\"'\\") if pd.notna(row.get('sp订单号', '')) else row.get('sp订单号', '')", "description": "订单号去掉前面的单引号"}]}, "finance": {"field_transforms": [{"field": "order_id", "transform": "str(row.get('sup订单号', '')).lstrip(\\"'\\") if pd.notna(row.get('sup订单号', '')) else row.get('sup订单号', '')", "description": "订单号去掉前面的单引号"}]}}}, "description": "去掉订单号前单引号"}
+
+[示例9] ⚠️ 单条添加「截取订单号前21位」- 列名从字段映射获取：
+{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"field_transforms": [{"field": "order_id", "transform": "str(row.get('sp订单号', ''))[:21] if pd.notna(row.get('sp订单号', '')) else row.get('sp订单号', '')", "description": "截取订单号前21位"}]}, "finance": {"field_transforms": [{"field": "order_id", "transform": "str(row.get('sup订单号', ''))[:21] if pd.notna(row.get('sup订单号', '')) else row.get('sup订单号', '')", "description": "截取订单号前21位"}]}}}, "description": "截取订单号前21位"}
+
+[示例10] ⚠️ 单条添加「相同订单号按金额累加合并」- 放 aggregations，两个文件都配置：
+{"action": "add", "json_snippet": {"data_cleaning_rules": {"business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "相同订单号按金额累加合并"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"amount": "sum", "date": "first"}, "description": "相同订单号按金额累加合并"}]}}}, "description": "相同订单号按金额累加合并"}'''
     
     # 使用 replace 替代 f-string，避免 template_json 中的 {"amount":"sum","date":"first"} 等
     # 被下游 .format() 误解析为 Invalid format specifier

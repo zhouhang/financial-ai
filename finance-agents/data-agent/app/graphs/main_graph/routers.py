@@ -62,7 +62,7 @@ def route_after_router(state: AgentState) -> str:
     elif intent == UserIntent.CREATE_NEW_RULE.value:
         return "file_analysis"
     elif intent == UserIntent.USE_EXISTING_RULE.value:
-        return "task_execution"
+        return "file_analysis"
     elif intent == UserIntent.EDIT_RULE.value:
         return "edit_field_mapping"
     else:
@@ -172,7 +172,8 @@ def build_main_graph() -> StateGraph:
     # 对账规则生成流程（展平的）
     graph.add_conditional_edges("file_analysis", route_after_file_analysis, {
         "file_analysis": "file_analysis",  # 验证失败时循环回自己
-        "rule_recommendation": "rule_recommendation",  # 直接进入规则推荐
+        "rule_recommendation": "rule_recommendation",  # 创建规则流程，进入规则推荐
+        "task_execution": "task_execution",  # 使用规则流程，校验通过后执行对账
         END: END,
     })
     graph.add_conditional_edges("rule_recommendation", route_after_rule_recommendation, {
