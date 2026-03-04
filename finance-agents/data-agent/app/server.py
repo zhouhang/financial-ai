@@ -356,6 +356,7 @@ async def websocket_chat(ws: WebSocket):
             try:
                 snapshot = langgraph_app.get_state(config)
                 current_phase = (snapshot.values.get("phase") or "").strip()
+                state_uploaded_files = snapshot.values.get("uploaded_files", []) if snapshot else []
                 if (
                     not is_resume
                     and current_phase == ReconciliationPhase.COMPLETED.value
@@ -365,18 +366,39 @@ async def websocket_chat(ws: WebSocket):
                     _thread_files_snapshot[thread_id] = []
                     file_infos = []
                     logger.info(f"对账已完成且为新消息，清空旧文件 (thread={thread_id})")
+                # 文件校验失败后，节点会把 state.uploaded_files 清空并回到 FILE_ANALYSIS。
+                # 若此时用户重新上传，优先信任本次消息附件，避免复用 _thread_files 的旧文件。
+                if (
+                    current_phase == ReconciliationPhase.FILE_ANALYSIS.value
+                    and not state_uploaded_files
+                    and msg_attachments
+                ):
+                    _thread_files[thread_id] = []
+                    _thread_files_snapshot[thread_id] = []
+                    file_infos = []
+                    logger.info(f"检测到 FILE_ANALYSIS 且 state 无文件，清空缓存文件以接收新上传 (thread={thread_id})")
             except Exception as e:
                 logger.warning(f"获取 phase 失败: {e}")
-            # 若 _thread_files 为空但消息附带附件（前端上传后随消息发送），则使用附件作为文件来源
-            if not file_infos and msg_attachments:
-                file_infos = [
-                    {"file_path": a.get("file_path", ""), "original_filename": a.get("original_filename", a.get("name", ""))}
+            # 前端附件字段是 path；兼容 file_path/path 两种键，且优先使用本次附件覆盖缓存
+            if msg_attachments:
+                attachment_files = [
+                    {
+                        "file_path": a.get("file_path") or a.get("path", ""),
+                        "original_filename": a.get("original_filename", a.get("name", "")),
+                    }
                     for a in msg_attachments
-                    if a.get("file_path")
+                    if (a.get("file_path") or a.get("path"))
                 ]
-                if file_infos:
-                    _thread_files[thread_id] = file_infos
-                    _thread_files_snapshot[thread_id] = [f.get("file_path", "") for f in file_infos]
+                if attachment_files:
+                    cached_paths = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
+                    incoming_paths = [f.get("file_path", "") for f in attachment_files]
+                    if set(cached_paths) != set(incoming_paths):
+                        logger.info(
+                            f"检测到附件文件与缓存不一致，使用附件覆盖缓存 (thread={thread_id}): cached={len(cached_paths)}, incoming={len(incoming_paths)}"
+                        )
+                    file_infos = attachment_files
+                    _thread_files[thread_id] = attachment_files
+                    _thread_files_snapshot[thread_id] = incoming_paths
                     logger.info(f"使用消息附带的 {len(file_infos)} 个文件 (thread={thread_id})")
             # 提取文件路径列表（兼容旧代码）
             files = [f.get("file_path", f) if isinstance(f, dict) else f for f in file_infos]
@@ -531,22 +553,55 @@ async def websocket_chat(ws: WebSocket):
                                 input_data = Command(resume=user_msg)
                     else:
                         # 不在 workflow 中，正常 resume
-                        update_state: dict[str, Any] = {}
-                        if file_infos:
-                            update_state["uploaded_files"] = file_infos
-                        if auth_token:
-                            update_state["auth_token"] = auth_token
-                            from app.tools.mcp_client import auth_me
-                            try:
-                                me_result = await auth_me(auth_token)
-                                if me_result.get("success"):
-                                    update_state["current_user"] = me_result["user"]
-                            except Exception:
-                                pass
-                        if update_state:
+                        # 特殊处理：若 phase=completed 且用户发送「已上传X个文件」消息，说明是失败后重传文件，
+                        # 应强制回到 FILE_ANALYSIS，而不是继续 completed 状态。
+                        import re
+                        file_upload_patterns = [
+                            r'已上传\s*\d+\s*个文件',
+                            r'上传了\s*\d+\s*个文件',
+                            r'文件已上传',
+                            r'请处理.*文件'
+                        ]
+                        is_file_upload_msg = any(re.search(p, user_msg.lower()) for p in file_upload_patterns)
+                        if is_file_upload_msg and current_phase == ReconciliationPhase.COMPLETED.value and file_infos:
+                            logger.info("server: resume 场景检测到 completed 后重传文件，切换到 FILE_ANALYSIS")
+                            update_state: dict[str, Any] = {
+                                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                                "uploaded_files": file_infos,
+                                "file_analyses": [],
+                            }
+                            if auth_token:
+                                update_state["auth_token"] = auth_token
+                                from app.tools.mcp_client import auth_me
+                                try:
+                                    me_result = await auth_me(auth_token)
+                                    if me_result.get("success"):
+                                        update_state["current_user"] = me_result["user"]
+                                except Exception:
+                                    pass
                             langgraph_app.update_state(config, update_state)
-                            logger.info(f"resume: 更新 state: {list(update_state.keys())}")
-                        input_data = Command(resume=user_msg)
+                            is_resume = False
+                            input_data = {
+                                "messages": [HumanMessage(content=user_msg)],
+                                "uploaded_files": file_infos,
+                            }
+                        else:
+                            update_state = {}
+                            if file_infos:
+                                update_state["uploaded_files"] = file_infos
+                            if auth_token:
+                                update_state["auth_token"] = auth_token
+                                from app.tools.mcp_client import auth_me
+                                try:
+                                    me_result = await auth_me(auth_token)
+                                    if me_result.get("success"):
+                                        update_state["current_user"] = me_result["user"]
+                                except Exception:
+                                    pass
+                            if update_state:
+                                langgraph_app.update_state(config, update_state)
+                                logger.info(f"resume: 更新 state: {list(update_state.keys())}")
+                            input_data = Command(resume=user_msg)
                 else:
                     # 非 resume 模式：通常重置 phase，但文件上传消息除外
                     # ⚠️ 检测文件上传消息：即使 resume=false，也应该保持 workflow 状态
@@ -566,8 +621,34 @@ async def websocket_chat(ws: WebSocket):
                     except Exception:
                         current_phase = ""
 
-                    # 如果是文件上传消息且在 workflow 中，保持 phase，改为 resume 模式
-                    if is_file_upload_msg and current_phase:
+                    # file_analysis 阶段上传文件：这是新一轮校验，必须走正常消息流程（不能 Command(resume)，否则可能无事件并回退旧消息）
+                    if is_file_upload_msg and current_phase == ReconciliationPhase.FILE_ANALYSIS.value and file_infos:
+                        logger.info("检测到 FILE_ANALYSIS 阶段上传文件，使用正常消息流程重新分析")
+                        update_state: dict[str, Any] = {
+                            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                            "uploaded_files": file_infos,
+                            "file_analyses": [],
+                        }
+                        if auth_token:
+                            update_state["auth_token"] = auth_token
+                            from app.tools.mcp_client import auth_me
+                            try:
+                                me_result = await auth_me(auth_token)
+                                if me_result.get("success"):
+                                    update_state["current_user"] = me_result["user"]
+                            except Exception:
+                                pass
+                        langgraph_app.update_state(config, update_state)
+                        input_data = {
+                            "messages": [HumanMessage(content=user_msg)],
+                            "uploaded_files": file_infos,
+                        }
+                        if auth_token:
+                            input_data["auth_token"] = auth_token
+                            if "current_user" in update_state:
+                                input_data["current_user"] = update_state["current_user"]
+                    # 其他 workflow 阶段（除 completed）的文件上传提示，保持 phase，改为 resume 模式
+                    elif is_file_upload_msg and current_phase and current_phase != ReconciliationPhase.COMPLETED.value:
                         logger.info(f"检测到文件上传消息 (resume=false)，保持 phase={current_phase}，改为 resume 模式")
                         update_state: dict[str, Any] = {}
                         if file_infos:
@@ -594,6 +675,32 @@ async def websocket_chat(ws: WebSocket):
                             except Exception as e:
                                 logger.warning(f"验证 state 更新失败: {e}")
                         input_data = Command(resume=user_msg)
+                    # 如果是 completed 后重传文件，强制回到 FILE_ANALYSIS 重新校验
+                    elif is_file_upload_msg and current_phase == ReconciliationPhase.COMPLETED.value and file_infos:
+                        logger.info("检测到 completed 后重传文件，强制 phase=FILE_ANALYSIS")
+                        update_state: dict[str, Any] = {
+                            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                            "uploaded_files": file_infos,
+                            "file_analyses": [],
+                        }
+                        if auth_token:
+                            update_state["auth_token"] = auth_token
+                            from app.tools.mcp_client import auth_me
+                            try:
+                                me_result = await auth_me(auth_token)
+                                if me_result.get("success"):
+                                    update_state["current_user"] = me_result["user"]
+                            except Exception:
+                                pass
+                        langgraph_app.update_state(config, update_state)
+                        input_data = {
+                            "messages": [HumanMessage(content=user_msg)],
+                            "uploaded_files": file_infos,
+                        }
+                        if auth_token:
+                            input_data["auth_token"] = auth_token
+                            if "current_user" in update_state:
+                                input_data["current_user"] = update_state["current_user"]
                     else:
                         # 正常的新会话：重置 phase 状态
                         try:
@@ -667,6 +774,9 @@ async def websocket_chat(ws: WebSocket):
                                     if stripped:
                                         if stripped[0] in ("{", "`"):
                                             router_mode = "json"  # JSON 意图，继续缓冲
+                                        # 过滤 router 探测阶段的单字符噪声（如 "A"），避免误切换到 stream
+                                        elif len(stripped) == 1 and stripped.isalpha():
+                                            continue
                                         else:
                                             router_mode = "stream"  # 普通对话，立即流式
                                             streamed_content += router_buffer
@@ -715,7 +825,10 @@ async def websocket_chat(ws: WebSocket):
                         elif router_mode == "detect" and router_buffer.strip():
                             # 只有少量 token，未触发检测，作为 message 发送
                             content = router_buffer.strip()
-                            if content not in sent_contents:
+                            # 过滤无意义的单字符抖动输出（例如偶发的 "A"）
+                            if len(content) == 1 and content.isalpha():
+                                logger.info(f"忽略 router 单字符输出噪声: {content!r}")
+                            elif content not in sent_contents:
                                 sent_contents.add(content)
                                 await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                         router_buffer = ""

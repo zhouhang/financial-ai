@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import re
@@ -57,6 +58,139 @@ from .forms import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_line_payload(error_detail: str, prefix: str) -> str:
+    """提取错误详情中指定前缀后的负载字符串。"""
+    for raw_line in (error_detail or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return ""
+
+
+def _build_field_roles_table(field_roles: dict[str, Any]) -> str:
+    """将 field_roles 渲染为表格（仅列名，无测试数据）。
+    若某 key 的 value 为数组，表头显示「元素1 或 元素2」。
+    """
+    ordered_roles = ["date", "amount", "order_id", "status"]
+    columns: list[str] = []
+
+    for role in ordered_roles:
+        if role not in field_roles:
+            continue
+        role_value = field_roles[role]
+        if isinstance(role_value, list):
+            valid_cols = [str(x) for x in role_value if str(x).strip()]
+            if not valid_cols:
+                continue
+            columns.append(" 或 ".join(valid_cols))
+        else:
+            col_name = str(role_value).strip()
+            if not col_name:
+                continue
+            columns.append(col_name)
+
+    # 若没有标准角色，兜底展示原始字段
+    if not columns:
+        for role, role_value in field_roles.items():
+            if isinstance(role_value, list):
+                valid_cols = [str(x) for x in role_value if str(x).strip()]
+                if not valid_cols:
+                    continue
+                columns.append(" 或 ".join(valid_cols))
+            else:
+                col_name = str(role_value).strip()
+                if not col_name:
+                    continue
+                columns.append(col_name)
+
+    if not columns:
+        return "（未配置列名要求）"
+
+    # 使用与 error_helpers 一致的 HTML 表格样式
+    table_html = ['<table class="text-sm min-w-max">']
+    table_html.append("  <thead>")
+    table_html.append('    <tr class="bg-gray-50">')
+    for col in columns:
+        table_html.append(
+            f'      <th class="px-3 py-2 text-left font-medium text-gray-600 whitespace-nowrap border-r border-gray-200 last:border-r-0">{col}</th>'
+        )
+    table_html.append("    </tr>")
+    table_html.append("  </thead>")
+    table_html.append("</table>")
+
+    return "\n".join(table_html)
+
+
+def _format_file_mapping_error_message(error_detail: str, rule_name: str) -> str | None:
+    """将文件匹配失败错误改写为更友好的上传指引。"""
+    if not error_detail:
+        return None
+    if "business.field_roles:" not in error_detail or "finance.field_roles:" not in error_detail:
+        return None
+
+    biz_text = _extract_line_payload(error_detail, "business.field_roles:")
+    fin_text = _extract_line_payload(error_detail, "finance.field_roles:")
+    unmatched_text = _extract_line_payload(error_detail, "未匹配文件:")
+
+    try:
+        biz_roles = ast.literal_eval(biz_text) if biz_text else {}
+    except Exception:
+        biz_roles = {}
+    try:
+        fin_roles = ast.literal_eval(fin_text) if fin_text else {}
+    except Exception:
+        fin_roles = {}
+    try:
+        unmatched_files = ast.literal_eval(unmatched_text) if unmatched_text else []
+    except Exception:
+        unmatched_files = []
+
+    # 兜底：若结构异常，返回 None 让上层保留原始错误
+    if not isinstance(biz_roles, dict) or not isinstance(fin_roles, dict):
+        return None
+    if not isinstance(unmatched_files, list):
+        unmatched_files = []
+
+    biz_table = _build_field_roles_table(biz_roles)
+    fin_table = _build_field_roles_table(fin_roles)
+
+    lines = [
+        f"### ❌ 上传文件列名未能与「{rule_name}」匹配",
+        "",
+        f"{rule_name}规则要求文件列名如下",
+        "",
+        "#### 文件1列名要求",
+        biz_table,
+        "",
+        "#### 文件2列名要求",
+        fin_table,
+    ]
+
+    if unmatched_files:
+        lines.extend(["", "#### 未匹配文件："])
+        lines.extend([f"- `{name}`" for name in unmatched_files])
+
+    return "\n".join(lines)
+
+
+def _is_upload_validation_error(error_detail: str) -> bool:
+    """判断错误是否属于上传文件不符合要求。"""
+    if not error_detail:
+        return False
+
+    keywords = [
+        "未匹配文件",
+        "business.field_roles:",
+        "finance.field_roles:",
+        "上传了",
+        "对账只需要2个文件",
+        "文件格式验证失败",
+        "只有一个文件",
+        "不支持的文件格式",
+    ]
+    return any(k in error_detail for k in keywords)
 
 
 # ── 系统提示词 ────────────────────────────────────────────────────────────────
@@ -672,6 +806,15 @@ async def intent_router(state: AgentState) -> dict:
         rule_name = ""
         logger.info(f"router: 用户说「{last_user_msg[:30]}...」强制识别为 list_rules，避免误触发对账")
 
+    # ⚠️ 删除规则兜底：不依赖 LLM JSON，用户明确以“删除/删掉”开头时强制识别为 delete_rule
+    delete_match = re.search(r"^\s*(?:删除|删掉)\s*([^\s,，。]+?)(?:\s*规则)?\s*$", last_user_msg)
+    if delete_match:
+        extracted_name = (delete_match.group(1) or "").strip()
+        if extracted_name:
+            intent = UserIntent.DELETE_RULE.value
+            rule_name = extracted_name
+            logger.info(f"router: 删除关键词兜底生效，规则名='{rule_name}'")
+
     # ⚠️ 兜底：对账完成后用户说"调整/编辑/修改XX规则"时，强制识别为 edit_rule，避免误触发再次对账
     edit_rule_keywords = ("调整", "编辑", "修改")
     if (state.get("phase", "") == ReconciliationPhase.COMPLETED.value
@@ -793,6 +936,15 @@ async def intent_router(state: AgentState) -> dict:
             result = await delete_rule(auth_token, rule_id, rule_name=matched_rule_name)
 
             if result.get("success"):
+                # 删除后二次校验，避免“看起来删了但列表仍显示”的假象
+                refreshed_rules = await list_available_rules(auth_token)
+                still_exists = any(str(r.get("id")) == str(rule_id) for r in refreshed_rules)
+                if still_exists:
+                    logger.warning(f"[DEBUG] 删除后校验仍存在: id={rule_id}, name={matched_rule_name}")
+                    return {
+                        "messages": [AIMessage(content=f"⚠️ 规则「{matched_rule_name}」删除请求已提交，但列表仍显示，请稍后刷新重试。")],
+                        "user_intent": UserIntent.UNKNOWN.value,
+                    }
                 return {
                     "messages": [AIMessage(content=f"✅ 规则「{matched_rule_name}」已删除")],
                     "user_intent": UserIntent.UNKNOWN.value,
@@ -1128,14 +1280,19 @@ def task_execution_node(state: AgentState) -> dict:
                 file_display_names.append(name.split("/")[-1].split("\\")[-1])
     if not file_display_names:
         file_display_names = [f.split("/")[-1].split("\\")[-1] for f in files if f]
-    file_names_str = " ".join(file_display_names) if file_display_names else f"{len(files)} 个"
+    # 规则、文件每项一行，bullet 样式（如图2）
+    detail_lines = [f"- 规则：{display_name}"]
+    if file_display_names:
+        for fn in file_display_names:
+            detail_lines.append(f"- {fn}")
+    else:
+        detail_lines.append(f"- 文件：{len(files)} 个")
 
     # ── 启动成功，立即返回消息并开始轮询 ──
     messages_to_send = [
         AIMessage(content=(
             f"🚀 对账任务已启动\n\n"
-            f"规则：{display_name}\n"
-            f"文件：{file_names_str}\n\n"
+            f"{chr(10).join(detail_lines)}\n\n"
             f"⏳ 正在执行对账，预计需要 10-60 秒\n\n"
             f"进度：开始加载数据"
         )),
@@ -1184,9 +1341,34 @@ def task_execution_node(state: AgentState) -> dict:
         }
     else:
         error_detail = poll_result.get("error", "")
+        # 文件不符合要求：回到上传步骤并清空已上传文件，便于用户重传
+        if _is_upload_validation_error(error_detail):
+            formatted_mapping_error = _format_file_mapping_error_message(
+                error_detail=error_detail,
+                rule_name=display_name,
+            )
+            err_msg = formatted_mapping_error or f"❌ {error_detail}" if error_detail else "❌ 上传文件不符合要求，请重新上传。"
+            messages_to_send.append(AIMessage(content=err_msg))
+            return {
+                "messages": messages_to_send,
+                "task_id": task_id,
+                "task_status": status,
+                "phase": ReconciliationPhase.FILE_ANALYSIS.value,
+                "execution_step": TaskExecutionStep.NOT_STARTED.value,
+                "uploaded_files": [],
+                "file_analyses": [],
+            }
+
         err_msg = f"❌ 对账任务失败（状态: {status}）"
         if error_detail:
-            err_msg += f"\n\n{error_detail}"
+            formatted_mapping_error = _format_file_mapping_error_message(
+                error_detail=error_detail,
+                rule_name=display_name,
+            )
+            if formatted_mapping_error:
+                err_msg = formatted_mapping_error
+            else:
+                err_msg += f"\n\n{error_detail}"
         else:
             err_msg += "，请检查日志或重试。"
         messages_to_send.append(AIMessage(content=err_msg))
@@ -1212,13 +1394,13 @@ def result_analysis_node(state: AgentState) -> dict:
     task_result = state.get("task_result")
     task_status = state.get("task_status", "")
 
-    # 如果任务未完成，跳过分析
+    # 如果任务未完成，跳过分析并保留当前流程状态（尤其是上传校验失败后的 FILE_ANALYSIS 重传场景）
     if task_status != "completed" or not task_result:
         logger.info(f"跳过结果分析: task_status={task_status}")
         return {
-            "phase": ReconciliationPhase.COMPLETED.value,
-            "execution_step": TaskExecutionStep.DONE.value,
-            "selected_rule_name": None,
+            "phase": state.get("phase", ReconciliationPhase.COMPLETED.value),
+            "execution_step": state.get("execution_step", TaskExecutionStep.DONE.value),
+            "selected_rule_name": state.get("selected_rule_name"),
         }
 
     # 构建结果 JSON（精简版，避免 token 过多）

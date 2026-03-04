@@ -1,36 +1,40 @@
 {
   "version": "1.0",
-  "description": "测试789",
+  "description": "真腾讯异业",
   "data_sources": {
     "business": {
       "file_pattern": [
-        "1767597466118_*.xls",
-        "1767597466118_*.xlsm",
-        "1767597466118_*.xlsx",
-        "1767597466118_*.xlsb",
-        "1767597466118_*.csv"
+        "2025-12-01~2025-12-01对账流水_*.xlsx",
+        "2025-12-01~2025-12-01对账流水_*.csv",
+        "2025-12-01~2025-12-01对账流水_*.xls",
+        "2025-12-01~2025-12-01对账流水_*.xlsm",
+        "2025-12-01~2025-12-01对账流水_*.xlsb"
       ],
       "field_roles": {
         "order_id": [
-          "sp订单号"
+          "roc_oid"
         ],
-        "amount": "销售额",
-        "date": "订单时间"
+        "amount": "product_price",
+        "date": [
+          "ftran_time"
+        ]
       }
     },
     "finance": {
       "file_pattern": [
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb"
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsm",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xls",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsb",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.csv",
+        "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsx"
       ],
       "field_roles": {
         "order_id": [
           "sup订单号"
         ],
-        "amount": "发生-",
+        "amount": [
+          "发生-"
+        ],
         "date": "完成时间"
       }
     }
@@ -57,14 +61,13 @@
         {
           "field": "order_id",
           "operation": "expr",
-          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
-          "description": "订单号去掉前面的单引号"
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号，并截取前21位"
         },
         {
-          "field": "order_id",
-          "operation": "expr",
-          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
-          "description": "截取订单号前21位"
+          "field": "amount",
+          "transform": "float(row.get('amount', 0)) / 100 if pd.notna(row.get('amount', 0)) else None",
+          "description": "product_price除以100"
         }
       ],
       "row_filters": [],
@@ -109,17 +112,16 @@
         {
           "field": "order_id",
           "operation": "expr",
-          "expression": "str(row.get('order_id', '')).lstrip(\"'\") if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
-          "description": "订单号去掉前面的单引号"
-        },
-        {
-          "field": "order_id",
-          "operation": "expr",
-          "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
-          "description": "截取订单号前21位"
+          "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
+          "description": "订单号去掉前面的单引号，并截取前21位"
         }
       ],
-      "row_filters": [],
+      "row_filters": [
+        {
+          "condition": "str(row.get('order_id', '')).startswith('104')",
+          "description": "仅保留104开头的订单号"
+        }
+      ],
       "aggregations": [
         {
           "group_by": "order_id",
@@ -177,6 +179,6 @@
       "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"
     }
   ],
-  "field_mapping_text": "业务: order_id->sp订单号, amount->销售额, date->订单时间\n财务: order_id->sup订单号, amount->发生-, date->完成时间",
-  "rule_config_text": "去掉订单号前单引号\n订单号截取前21位\n相同订单号按金额累加合并"
+  "field_mapping_text": "业务: order_id->roc_oid, amount->product_price, date->ftran_time\n财务: order_id->sup订单号, amount->发生-, date->完成时间",
+  "rule_config_text": "去掉订单号前单引号，并截取前21位\n订单号以104开头\n相同订单号按金额累加合并\nproduct_price除以100"
 }

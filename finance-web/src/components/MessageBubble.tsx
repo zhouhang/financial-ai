@@ -172,7 +172,7 @@ function extractFileColumnTables(content: string): {
   after: string;
 } {
   const results: { filename: string; columns: string[]; rowCount?: number; sampleRows?: string[][] }[] = [];
-  const analysisCompleteIndex = content.indexOf('文件分析完成');
+  const analysisCompleteIndex = content.indexOf('文件展示如下');
   const searchStart = analysisCompleteIndex >= 0 ? analysisCompleteIndex : 0;
   const searchContent = content.slice(searchStart);
 
@@ -341,6 +341,8 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
   }
 
   const isExceptionTable = table.headers.includes('异常订单号') && table.headers.includes('异常原因');
+  const isColumnRequirementsTable = beforeContent?.includes('列名要求') || beforeContent?.includes('列名未能与');
+  const hideToolbar = isExceptionTable || isColumnRequirementsTable;
 
   return (
     <div className="my-2">
@@ -354,15 +356,40 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
         onViewModeChange={setViewMode}
         onColumnVisibilityChange={toggleColumnVisibility}
         onColumnWidthChange={setColumnWidth}
-        showViewMode={!isExceptionTable}
-        showToolbar={!isExceptionTable}
+        showViewMode={!hideToolbar}
+        showToolbar={!hideToolbar}
       />
     </div>
   );
 }
 
 function preprocessBulletList(content: string): string {
-  return content.replace(/^• (.+)$/gm, '- $1');
+  let normalized = content.replace(/^• (.+)$/gm, '- $1');
+  // 兼容后端/中间层把换行压平成空格的场景，尽量恢复 Markdown 结构
+  normalized = normalized
+    .replace(/\\n/g, '\n')
+    .replace(/([^\n])\s+(#{2,6}\s)/g, '$1\n\n$2')
+    .replace(/([^\n])\s+(-\s+`[^`]+`)/g, '$1\n$2');
+  return normalized;
+}
+
+/** 将内容按 HTML 表格拆分为 [文本, 表格, 文本, ...]，确保非表格文字走 Markdown 渲染 */
+function splitByHtmlTables(content: string): ({ type: 'markdown'; text: string } | { type: 'html'; html: string })[] {
+  const tableRegex = /<table[\s\S]*?<\/table>/gi;
+  const parts: ({ type: 'markdown'; text: string } | { type: 'html'; html: string })[] = [];
+  let lastIndex = 0;
+  let match;
+  while ((match = tableRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'markdown', text: content.slice(lastIndex, match.index) });
+    }
+    parts.push({ type: 'html', html: match[0] });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < content.length) {
+    parts.push({ type: 'markdown', text: content.slice(lastIndex) });
+  }
+  return parts;
 }
 
 /** 渲染带有表格支持的内容 */
@@ -398,75 +425,48 @@ function ContentWithTables({ content }: { content: string }) {
   }
 
   if (regularTables.length === 0) {
-    return (
-      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-        <ReactMarkdown
-          components={{
-            p: ({ children }) => <p className="my-1">{children}</p>,
-            ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-            ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
-            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                  {children}
-                </blockquote>
-              ),
-            code: ({ children }) => (
-              <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-            ),
-            table: ({ children }) => (
-              <div className="overflow-x-auto my-3 rounded-lg border border-gray-200">
-                <table className="w-full border-collapse text-sm">
-                  {children}
-                </table>
-              </div>
-            ),
-            thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
-            tbody: ({ children }) => <tbody className="bg-white">{children}</tbody>,
-            tr: ({ children }) => <tr className="border-b border-gray-200 last:border-b-0">{children}</tr>,
-            th: ({ children }) => <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-600 border-b border-gray-200">{children}</th>,
-            td: ({ children }) => <td className="px-4 py-2.5 text-gray-700 border-r border-gray-100 last:border-r-0">{children}</td>,
-          }}
-        >
-          {processedContent}
-        </ReactMarkdown>
-      </div>
-    );
-  }
+    const htmlTableParts = splitByHtmlTables(processedContent);
+    const hasHtmlTables = htmlTableParts.some((p) => p.type === 'html');
+    const markdownComponents = {
+      p: ({ children }: { children?: React.ReactNode }) => <p className="my-1">{children}</p>,
+      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc list-inside my-1">{children}</ul>,
+      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+      strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold">{children}</strong>,
+      blockquote: ({ children }: { children?: React.ReactNode }) => (
+        <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">{children}</blockquote>
+      ),
+      code: ({ children }: { children?: React.ReactNode }) => (
+        <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+      ),
+    };
 
-  if (regularTables.length === 0) {
+    if (hasHtmlTables && htmlTableParts.length > 0) {
+      return (
+        <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+          {htmlTableParts.map((part, idx) =>
+            part.type === 'markdown' ? (
+              part.text.trim() ? (
+                <ReactMarkdown key={idx} components={markdownComponents}>
+                  {part.text}
+                </ReactMarkdown>
+              ) : (
+                <span key={idx} />
+              )
+            ) : (
+              <div
+                key={idx}
+                className="overflow-x-auto my-3 [&_table]:text-sm [&_table]:min-w-max"
+                dangerouslySetInnerHTML={{ __html: part.html }}
+              />
+            )
+          )}
+        </div>
+      );
+    }
+
     return (
       <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-        <ReactMarkdown
-          components={{
-            p: ({ children }) => <p className="my-1">{children}</p>,
-            ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-            ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
-            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                  {children}
-                </blockquote>
-              ),
-            code: ({ children }) => (
-              <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-            ),
-            table: ({ children }) => (
-              <div className="overflow-x-auto my-3 rounded-lg border border-gray-200">
-                <table className="w-full border-collapse text-sm">
-                  {children}
-                </table>
-              </div>
-            ),
-            thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
-            tbody: ({ children }) => <tbody className="bg-white">{children}</tbody>,
-            tr: ({ children }) => <tr className="border-b border-gray-200 last:border-b-0">{children}</tr>,
-            th: ({ children }) => <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-600 border-b border-gray-200">{children}</th>,
-            td: ({ children }) => <td className="px-4 py-2.5 text-gray-700 border-r border-gray-100 last:border-r-0">{children}</td>,
-          }}
-        >
-          {processedContent}
-        </ReactMarkdown>
+        <ReactMarkdown components={markdownComponents}>{processedContent}</ReactMarkdown>
       </div>
     );
   }
@@ -554,8 +554,8 @@ function MarkdownMessageContent({ content, isStreaming }: { content: string; isS
 function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
   const isHtmlForm = message.content.includes('<form');
-  const isHtmlTable = message.content.includes('<table');
-  const isHtmlContent = isHtmlForm || isHtmlTable;
+  // 表格消息也走 Markdown 渲染管线（ContentWithTables）以支持表格外文本的 Markdown
+  const isHtmlContent = isHtmlForm;
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
 
   useEffect(() => {
