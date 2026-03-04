@@ -46,7 +46,15 @@ class ReconciliationEngine:
         """
         # 1. 文件匹配
         matched_files = self.file_matcher.match_files(file_paths)
-        
+        match_report = self.file_matcher.get_last_match_report()
+
+        unmatched_files = match_report.get("unmatched_files", [])
+        ambiguous_files = match_report.get("ambiguous_files", [])
+
+        # 若存在未匹配或歧义文件，立即终止，避免继续进入清洗/对账
+        if unmatched_files or ambiguous_files:
+            raise ValueError(self._build_match_error_message(match_report))
+
         # 提取文件名（用于 detail 中显示）
         self.business_file_names = [Path(fp).name for fp in matched_files.get("business", [])]
         self.finance_file_names = [Path(fp).name for fp in matched_files.get("finance", [])]
@@ -54,6 +62,10 @@ class ReconciliationEngine:
         # 调试日志
         logger.info(f"对账引擎 - 输入文件路径: {file_paths}")
         logger.info(f"对账引擎 - 文件匹配结果: business={len(matched_files.get('business', []))}, finance={len(matched_files.get('finance', []))}")
+
+        # 必须至少能确定 business 和 finance 各有一个可用文件
+        if not matched_files.get("business") or not matched_files.get("finance"):
+            raise ValueError(self._build_match_error_message(match_report))
         
         # 2. 加载和清洗数据
         business_df = pd.DataFrame()
@@ -96,6 +108,42 @@ class ReconciliationEngine:
             "issues": [issue.to_dict() for issue in issues],
             "metadata": metadata.to_dict()
         }
+
+    def _build_match_error_message(self, match_report: Dict) -> str:
+        """构造文件匹配失败提示，返回给 data-agent 直接展示。"""
+        expected = match_report.get("expected_field_roles", {})
+        biz_roles = expected.get("business", {})
+        fin_roles = expected.get("finance", {})
+        unmatched_files = match_report.get("unmatched_files", [])
+        ambiguous_files = match_report.get("ambiguous_files", [])
+        matched = match_report.get("matched", {})
+
+        lines = [
+            "请按有 business.field_roles 和 finance.field_roles 的文件重新上传后重试。",
+            f"business.field_roles: {biz_roles}",
+            f"finance.field_roles: {fin_roles}",
+        ]
+
+        if unmatched_files:
+            names = [str(item.get("file_name", "")) for item in unmatched_files]
+            lines.append(f"未匹配文件: {names}")
+
+        if ambiguous_files:
+            details = []
+            for item in ambiguous_files:
+                details.append(
+                    {
+                        "file_name": item.get("file_name"),
+                        "candidates": item.get("candidates", []),
+                    }
+                )
+            lines.append(f"归属歧义文件: {details}")
+
+        lines.append(
+            f"当前可用匹配结果: business={len(matched.get('business', []))}, "
+            f"finance={len(matched.get('finance', []))}"
+        )
+        return "\n".join(lines)
     
     def _perform_reconciliation(self, business_df: pd.DataFrame, finance_df: pd.DataFrame) -> List[ReconciliationIssue]:
         """执行对账逻辑"""
@@ -450,4 +498,3 @@ class ReconciliationEngine:
         """获取字典的字段值"""
         value = d.get(field)
         return str(value) if value is not None else None
-

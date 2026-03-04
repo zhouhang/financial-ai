@@ -221,8 +221,7 @@ async def file_analysis_node(state: "AgentState") -> dict:
             warnings = result.get("warnings", [])
             recommendations = result.get("recommendations", {})
 
-            _MAX_COLS = 15
-            msg_parts = ["🔍 **文件分析完成**\n"]
+            msg_parts = ["🔍 **文件展示如下（数据仅展示前三条）**\n"]
             for a in analyses:
                 src = "业务" if a.get("guessed_source") == "business" else "财务"
                 conf = int((a.get("confidence") or 0) * 100)
@@ -231,7 +230,7 @@ async def file_analysis_node(state: "AgentState") -> dict:
                 rows = a.get("row_count", 0)
                 msg_parts.append(f"**{fname}** ({src} {conf}%) {rows}行")
                 if cols:
-                    display_cols = cols[:_MAX_COLS]
+                    display_cols = cols
                     sample_data = a.get("sample_data", [])[:3]
                     header_line = "| " + " | ".join(display_cols) + " |"
                     sep_line = "| " + " | ".join(["---"] * len(display_cols)) + " |"
@@ -260,16 +259,15 @@ async def file_analysis_node(state: "AgentState") -> dict:
                 "file_analyses": [],
             }
 
-    _MAX_COLS = 15
     if complexity_level == "simple":
-        summary_parts: list[str] = ["📊 **文件分析完成**\n"]
+        summary_parts: list[str] = ["📊 **文件展示如下（数据仅展示前三条）**\n"]
         for a in analyses:
             fname = a.get('original_filename') or a.get('filename', '')
             cols = a.get('columns', [])
             rows = a.get('row_count', 0)
             summary_parts.append(f"**{fname}** ({rows}行)")
             if cols:
-                display_cols = cols[:_MAX_COLS]
+                display_cols = cols
                 sample_data = a.get("sample_data", [])[:3]
                 header_line = "| " + " | ".join(display_cols) + " |"
                 sep_line = "| " + " | ".join(["---"] * len(display_cols)) + " |"
@@ -293,6 +291,15 @@ async def file_analysis_node(state: "AgentState") -> dict:
         phase = ReconciliationPhase.TASK_EXECUTION.value
     else:
         phase = ReconciliationPhase.FIELD_MAPPING.value
+
+    # 使用已有规则执行对账时，上传后不再额外回复「文件展示如下...」
+    if intent == UserIntent.USE_EXISTING_RULE.value:
+        return {
+            "messages": [],
+            "file_analyses": analyses,
+            "suggested_mappings": suggested,
+            "phase": phase,
+        }
 
     return {
         "messages": [AIMessage(content=msg)],

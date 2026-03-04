@@ -6,12 +6,11 @@
 from __future__ import annotations
 
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 
 
-async def rule_config_node(state: AgentState) -> dict:
+async def rule_config_node(state) -> dict:
     """第3步 (HITL)：增量式配置规则参数，支持自然语言添加/删除配置项。
 
     新的配置体验：
