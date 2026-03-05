@@ -176,6 +176,8 @@ class AgentState(TypedDict, total=False):
 
     # 会话
     thread_id: str
+    workflow_type: Optional[str]   # 当前工作流类型: reconciliation / data_preparation
+    workflow_run_id: Optional[str]  # 当前工作流运行ID（用于文件与缓存隔离）
 
     # ── 认证 ──────────────────────────────────────────────────
     auth_token: Optional[str]         # JWT token
@@ -192,6 +194,15 @@ class AgentState(TypedDict, total=False):
 
     # 上传的文件
     uploaded_files: list[str]
+    
+    # 工作流分区上下文（避免 reconciliation 与 data_preparation 相互污染）
+    reconciliation_ctx: Optional[dict[str, Any]]
+    data_preparation_ctx: Optional[dict[str, Any]]
+
+    # 对账分析缓存/中断控制（兼容字段，后续逐步迁移到 reconciliation_ctx）
+    analysis_key: Optional[str]
+    analysis_cache: Optional[dict[str, Any]]
+    pending_interrupt: Optional[dict[str, Any]]
 
     # 文件分析（第2层 – 步骤1）
     file_analyses: list[dict[str, Any]]

@@ -32,6 +32,14 @@ from app.graphs.reconciliation.save_nodes import (  # noqa: F401
     edit_save_node,
     result_evaluation_node,
 )
+from app.graphs.reconciliation.execution_nodes import (  # noqa: F401
+    _do_start_task,
+    _do_poll,
+    _run_async_safe,
+    task_execution_node,
+    result_analysis_node,
+    ask_start_now_node,
+)
 
 from app.graphs.reconciliation.edit_nodes import (  # noqa: F401
     edit_field_mapping_node,
@@ -94,6 +102,12 @@ __all__ = [
     "edit_validation_preview_node",
     "edit_save_node",
     "result_evaluation_node",
+    "_do_start_task",
+    "_do_poll",
+    "_run_async_safe",
+    "task_execution_node",
+    "result_analysis_node",
+    "ask_start_now_node",
     "entry_router_node",
     "_generate_friendly_response_for_other_intent",
 ]

@@ -53,6 +53,17 @@ from app.graphs.reconciliation.parsers import (
     _parse_rule_config_with_llm,
 )
 
+# ── 分析缓存/中断闸门辅助函数 ─────────────────────────────
+from app.graphs.reconciliation.analysis_cache_helpers import (
+    build_reconciliation_ctx_update,
+    compute_analysis_key,
+    is_analysis_cache_hit,
+    write_analysis_cache,
+    check_pending_interrupt,
+    set_pending_interrupt,
+    clear_pending_interrupt,
+)
+
 # ── 节点函数 ─────────────────────────────────────────────
 from app.graphs.reconciliation.nodes import (
     file_analysis_node,
@@ -68,6 +79,14 @@ from app.graphs.reconciliation.nodes import (
     edit_save_node,
     entry_router_node,
     _generate_friendly_response_for_other_intent,
+)
+from app.graphs.reconciliation.execution_nodes import (
+    _do_start_task,
+    _do_poll,
+    _run_async_safe,
+    task_execution_node,
+    result_analysis_node,
+    ask_start_now_node,
 )
 
 # ── 路由函数 ─────────────────────────────────────────────
@@ -116,6 +135,14 @@ __all__ = [
     # 解析函数
     "_parse_rule_config_json_snippet",
     "_parse_rule_config_with_llm",
+    # 分析缓存/中断闸门辅助函数
+    "build_reconciliation_ctx_update",
+    "compute_analysis_key",
+    "is_analysis_cache_hit",
+    "write_analysis_cache",
+    "check_pending_interrupt",
+    "set_pending_interrupt",
+    "clear_pending_interrupt",
     # 节点函数
     "file_analysis_node",
     "field_mapping_node",
@@ -127,6 +154,12 @@ __all__ = [
     "edit_validation_preview_node",
     "edit_save_node",
     "entry_router_node",
+    "_do_start_task",
+    "_do_poll",
+    "_run_async_safe",
+    "task_execution_node",
+    "result_analysis_node",
+    "ask_start_now_node",
     # 路由函数
     "route_after_file_analysis",
     "route_after_field_mapping",

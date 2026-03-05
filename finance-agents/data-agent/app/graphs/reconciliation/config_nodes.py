@@ -110,6 +110,17 @@ async def rule_config_node(state) -> dict:
                 state=state,
                 user_input=response_str
             )
+    else:  # 登录模式
+        from app.utils.workflow_intent import check_user_intent_after_interrupt, handle_intent_switch
+
+        intent = await check_user_intent_after_interrupt(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.RULE_CONFIG.value,
+            state=state
+        )
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            logger.info(f"rule_config_node: 用户切换意图 {intent}")
+            return await handle_intent_switch(intent, ReconciliationPhase.RULE_CONFIG.value, state, response_str)
 
     # 忽略文件上传的默认消息或空消息
     if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):

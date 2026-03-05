@@ -76,6 +76,14 @@ async def field_mapping_node(state: "AgentState") -> dict:
                 state=state,
                 user_input=response_str
             )
+    else:
+        intent = await check_user_intent_after_interrupt(
+            user_response=user_response,
+            current_phase=ReconciliationPhase.FIELD_MAPPING.value,
+            state=state
+        )
+        if intent != UserIntent.RESUME_WORKFLOW.value:
+            return await handle_intent_switch(intent, ReconciliationPhase.FIELD_MAPPING.value, state, response_str)
 
     if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
         return {

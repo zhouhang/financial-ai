@@ -66,24 +66,29 @@ def _apply_field_mapping_operations(
         elif action == "delete_column":
             # 仅删除某个字段的单个列别名（不删除整个字段）
             if role in new_mappings[target] and column:
+                columns_to_remove = column if isinstance(column, list) else [column]
+                columns_to_remove = [str(c).strip() for c in columns_to_remove if str(c).strip()]
+                if not columns_to_remove:
+                    logger.warning(f"⚠️ delete_column 未提供有效列名: {op}")
+                    continue
                 existing = new_mappings[target][role]
                 
                 # 如果是列表，移除指定的列
                 if isinstance(existing, list):
-                    updated_list = [col for col in existing if col != column]
+                    updated_list = [col for col in existing if str(col).strip() not in set(columns_to_remove)]
                     if updated_list:  # 还有其他列
                         new_mappings[target][role] = updated_list
-                        logger.info(f"✅ 从{target}.{role}中删除列别名: {column} (剩余: {updated_list})")
+                        logger.info(f"✅ 从{target}.{role}中删除列别名: {columns_to_remove} (剩余: {updated_list})")
                     else:  # 没有其他列了，删除整个字段
                         del new_mappings[target][role]
                         logger.info(f"✅ 删除字段映射: {target}.{role} (最后一个列别名已移除)")
                 
                 # 如果是字符串，检查是否相同
-                elif existing == column:
+                elif str(existing).strip() in set(columns_to_remove):
                     del new_mappings[target][role]
                     logger.info(f"✅ 删除字段映射: {target}.{role}")
                 else:
-                    logger.warning(f"⚠️ 列别名 {column} 不存在于 {target}.{role} 中 (当前: {existing})")
+                    logger.warning(f"⚠️ 列别名 {columns_to_remove} 不存在于 {target}.{role} 中 (当前: {existing})")
             else:
                 logger.warning(f"⚠️ 字段 {role} 不存在于 {target} 中，跳过删除列别名")
     
@@ -110,24 +115,29 @@ def _format_operations_summary(operations: list[dict[str, Any]], file_names: dic
         if "finance" not in file_names:
             file_names["finance"] = "文件2"
     
+    def _fmt_col(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            return "、".join(str(x) for x in v)
+        return str(v)
+
     lines = []
     for op in operations:
         action = op.get("action")
         target = op.get("target")
-        role = op.get("role")
         column = op.get("column")
-        description = op.get("description", "")
-        
         target_label = file_names.get(target, f"文件（{target}）")
-        
+        col_str = _fmt_col(column)
+
         if action == "add":
-            lines.append(f"  ➕ {target_label} 添加 {role}: {column}")
+            lines.append(f"  ➕ {target_label} 添加 {col_str}")
         elif action == "update":
-            lines.append(f"  ✏️ {target_label} 修改 {role}: {column}")
+            lines.append(f"  ✏️ {target_label} 修改 {col_str}")
         elif action == "delete":
-            lines.append(f"  ❌ {target_label} 删除 {role} 字段")
+            lines.append(f"  ❌ {target_label} 删除字段")
         elif action == "delete_column":
-            lines.append(f"  🚫 {target_label} 从 {role} 中移除列别名: {column}")
+            lines.append(f"  🚫 {target_label} 移除列别名: {col_str}")
     
     return "\n" + "\n".join(lines)
 

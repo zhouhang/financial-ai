@@ -10,37 +10,33 @@
       "field_roles": {
         "date": "完成时间",
         "amount": "发生-",
-        "order_id": [
-          "sup订单号"
-        ]
+        "order_id": "sup订单号"
       },
       "file_pattern": [
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
         "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls",
         "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb",
-        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm"
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm",
+        "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx"
       ]
     },
     "business": {
       "field_roles": {
-        "date": "订单时间",
         "amount": "销售额",
-        "order_id": [
-          "sp订单号"
-        ]
+        "order_id": "sp订单号",
+        "date": "订单时间"
       },
       "file_pattern": [
-        "1767597466118_*.xlsm",
-        "1767597466118_*.xlsx",
-        "1767597466118_*.csv",
         "1767597466118_*.xlsb",
-        "1767597466118_*.xls"
+        "1767597466118_*.csv",
+        "1767597466118_*.xls",
+        "1767597466118_*.xlsm",
+        "1767597466118_*.xlsx"
       ]
     }
   },
   "key_field_role": "order_id",
-  "rule_config_text": "1767597466118_*.xlsm：订单号去掉前面的单引号\n1767597466118_*.xlsm：截取订单号前21位\n1767597466118_*.xlsm：相同订单号按金额累加合并\nads_finance_d_inc_channel_details_20260105152012277_0_*.xls：订单号去掉前面的单引号\nads_finance_d_inc_channel_details_20260105152012277_0_*.xls：截取订单号前21位\nads_finance_d_inc_channel_details_20260105152012277_0_*.xls：相同订单号按金额累加合并",
+  "rule_config_text": "1767597466118_*.xlsb：订单号去掉前面的单引号\n1767597466118_*.xlsb：截取订单号前21位\n1767597466118_*.xlsb：相同订单号按金额累加合并\nads_finance_d_inc_channel_details_20260105152012277_0_*.csv：订单号去掉前面的单引号\nads_finance_d_inc_channel_details_20260105152012277_0_*.csv：截取订单号前21位\nads_finance_d_inc_channel_details_20260105152012277_0_*.csv：相同订单号按金额累加合并\n增加金额取绝对值\n增加订单号以104开头\n增加金额保留2位小数",
   "custom_validations": [
     {
       "name": "missing_in_business",
@@ -64,7 +60,7 @@
       "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"
     }
   ],
-  "field_mapping_text": "业务: date->订单时间, amount->销售额, order_id->sp订单号\n财务: date->完成时间, amount->发生-, order_id->sup订单号",
+  "field_mapping_text": "业务: amount->销售额, order_id->sp订单号, date->订单时间\n财务: date->完成时间, amount->发生-, order_id->sup订单号",
   "data_cleaning_rules": {
     "global": {
       "global_transforms": [
@@ -91,6 +87,17 @@
           "operation": "expr",
           "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
           "description": "截取订单号前21位"
+        },
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
         }
       ],
       "aggregations": [
@@ -102,7 +109,8 @@
           },
           "description": "相同订单号按金额累加合并"
         }
-      ]
+      ],
+      "row_filters": []
     },
     "finance": {
       "field_transforms": [
@@ -117,6 +125,17 @@
           "operation": "expr",
           "expression": "str(row.get('order_id', ''))[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
           "description": "截取订单号前21位"
+        },
+        {
+          "field": "amount",
+          "operation": "abs",
+          "description": "金额取绝对值（发生-字段可能为负）"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 2,
+          "description": "金额保留2位小数"
         }
       ],
       "aggregations": [
@@ -127,6 +146,12 @@
             "amount": "sum"
           },
           "description": "相同订单号按金额累加合并"
+        }
+      ],
+      "row_filters": [
+        {
+          "condition": "str(row.get('order_id', '')).startswith('104')",
+          "description": "仅保留104开头的订单号"
         }
       ]
     }
