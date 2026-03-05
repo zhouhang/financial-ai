@@ -27,6 +27,12 @@ async def rule_recommendation_node(state: AgentState) -> dict:
     from langgraph.types import interrupt
     from app.tools.mcp_client import call_mcp_tool
     from app.graphs.reconciliation.helpers import _get_file_names_from_rule_template
+    from app.graphs.reconciliation.analysis_cache_helpers import (
+        build_reconciliation_ctx_update,
+        check_pending_interrupt,
+        clear_pending_interrupt,
+        compute_analysis_key,
+    )
     import hashlib
     import json
     
@@ -34,7 +40,17 @@ async def rule_recommendation_node(state: AgentState) -> dict:
     
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
     auth_token = state.get("auth_token", "")
-    file_analyses = state.get("file_analyses", [])
+    reconciliation_ctx = state.get("reconciliation_ctx") or {}
+    file_analyses = reconciliation_ctx.get("file_analyses") or state.get("file_analyses", [])
+    run_id = state.get("workflow_run_id") or reconciliation_ctx.get("run_id") or "default"
+    uploaded = reconciliation_ctx.get("uploaded_files") or state.get("uploaded_files", [])
+    analysis_key = compute_analysis_key(uploaded, {
+        "intent": state.get("user_intent", ""),
+        "selected_rule_id": state.get("selected_rule_id", ""),
+        "selected_rule_name": state.get("selected_rule_name", ""),
+    })
+    if check_pending_interrupt(state, "rule_recommendation", analysis_key, str(run_id)):
+        logger.info("rule_recommendation_node 命中 pending_interrupt 闸门，按重放模式执行")
     
     # 计算字段映射哈希
     def compute_hash(m: dict) -> str:
@@ -174,13 +190,15 @@ async def rule_recommendation_node(state: AgentState) -> dict:
     # 如果没有高匹配度的推荐规则，直接跳过推荐流程
     if not recommended:
         logger.info("没有匹配度>=90%的规则，跳过推荐流程")
-        return {
+        update = {
             "messages": [],
             "recommended_rules": [],
             "using_recommended_rule": False,
             "rule_config_items": [],  # 新建规则时第三步从空配置开始
             "phase": ReconciliationPhase.FIELD_MAPPING.value,
         }
+        update.update(clear_pending_interrupt(state, "rule_recommendation"))
+        return update
     
     # 构建推荐结果展示（优化格式）
     rule_list_text = []
@@ -269,6 +287,17 @@ async def rule_recommendation_node(state: AgentState) -> dict:
     
     response_str = str(user_response).strip()
 
+    # 上传后自动占位消息可能被同轮 resume 透传到此 interrupt，需忽略并保持在推荐步骤。
+    if not response_str or (response_str.startswith("已上传") and response_str.endswith("请处理。")):
+        update = {
+            "messages": [],
+            "recommended_rules": recommended,
+            "phase": ReconciliationPhase.RULE_RECOMMENDATION.value,
+        }
+        update.update(build_reconciliation_ctx_update(state, run_id=run_id))
+        update.update(clear_pending_interrupt(state, "rule_recommendation"))
+        return update
+
     logger.info(f"rule_recommendation_node 处理输入: response={response_str}, using_recommended_rule={state.get('using_recommended_rule')}, selected_rule_id={state.get('selected_rule_id')}, current_phase={state.get('phase')}")
 
     # ====== interrupt 返回后检查意图（支持游客和登录模式）======
@@ -345,7 +374,7 @@ async def rule_recommendation_node(state: AgentState) -> dict:
             logger.info(f"用户选择推荐规则 {selected['name']}，直接执行对账，phase=TASK_EXECUTION")
             
             # 用户选择数字后直接执行对账，不再询问确认
-            return {
+            update = {
                 "messages": [AIMessage(content=f"✅ 已选择规则「{selected['name']}」，正在开始对账...")],
                 "recommended_rules": recommended,
                 "selected_rule_id": selected["id"],
@@ -358,9 +387,12 @@ async def rule_recommendation_node(state: AgentState) -> dict:
                 "cleaning_descriptions": cleaning_descriptions,
                 "phase": ReconciliationPhase.TASK_EXECUTION.value,  # 直接进入任务执行
             }
+            update.update(build_reconciliation_ctx_update(state, run_id=run_id))
+            update.update(clear_pending_interrupt(state, "rule_recommendation"))
+            return update
     
     # 用户选择创建新规则
-    return {
+    update = {
         "messages": [AIMessage(content="好的，将继续创建新规则。")],
         "recommended_rules": recommended,
         "selected_rule_id": None,
@@ -368,6 +400,9 @@ async def rule_recommendation_node(state: AgentState) -> dict:
         "rule_config_items": [],  # 新建规则时清空，避免残留旧格式配置
         "phase": ReconciliationPhase.FIELD_MAPPING.value,  # 回到字段映射流程
     }
+    update.update(build_reconciliation_ctx_update(state, run_id=run_id))
+    update.update(clear_pending_interrupt(state, "rule_recommendation"))
+    return update
 
 
 

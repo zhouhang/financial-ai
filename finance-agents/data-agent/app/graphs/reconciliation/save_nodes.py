@@ -270,7 +270,23 @@ async def result_evaluation_node(state: "AgentState") -> dict:
     from langchain_core.messages import AIMessage
     from langgraph.types import interrupt
     from app.tools.mcp_client import call_mcp_tool
+    from app.graphs.reconciliation.analysis_cache_helpers import (
+        build_reconciliation_ctx_update,
+        check_pending_interrupt,
+        clear_pending_interrupt,
+        compute_analysis_key,
+    )
     logger.info(f"result_evaluation_node 进入，当前 phase={state.get('phase', '')}")
+    reconciliation_ctx = state.get("reconciliation_ctx") or {}
+    run_id = state.get("workflow_run_id") or reconciliation_ctx.get("run_id") or "default"
+    uploaded = reconciliation_ctx.get("uploaded_files") or state.get("uploaded_files", [])
+    analysis_key = compute_analysis_key(uploaded, {
+        "intent": state.get("user_intent", ""),
+        "selected_rule_id": state.get("selected_rule_id", ""),
+        "selected_rule_name": state.get("selected_rule_name", ""),
+    })
+    if check_pending_interrupt(state, "result_evaluation", analysis_key, str(run_id)):
+        logger.info("result_evaluation_node 命中 pending_interrupt 闸门，按重放模式执行")
     
     preview_result = state.get("preview_result", {})
     using_recommended = state.get("using_recommended_rule", False)
@@ -337,33 +353,43 @@ async def result_evaluation_node(state: "AgentState") -> dict:
                         "saved_rule_name": rule_name,
                         "phase": ReconciliationPhase.COMPLETED.value,
                         "waiting_for_rule_name": False,
+                        **build_reconciliation_ctx_update(state, run_id=run_id),
+                        **clear_pending_interrupt(state, "result_evaluation"),
                     }
                 else:
-                    return {
+                    update = {
                         "messages": [AIMessage(content=f"❌ 保存失败: {result.get('error', '未知错误')}")],
                         "phase": ReconciliationPhase.RESULT_EVALUATION.value,
                         "waiting_for_rule_name": True,
                     }
+                    update.update(clear_pending_interrupt(state, "result_evaluation"))
+                    return update
             except Exception as e:
                 logger.error(f"保存规则失败: {e}")
-                return {
+                update = {
                     "messages": [AIMessage(content=f"❌ 保存失败: {str(e)}")],
                     "phase": ReconciliationPhase.RESULT_EVALUATION.value,
                     "waiting_for_rule_name": True,
                 }
+                update.update(clear_pending_interrupt(state, "result_evaluation"))
+                return update
         
         # 游客：提示登录后保存
         # 推荐规则（有 selected_rule_id）：使用 SAVE_RULE 标记，登录后由 /api/copy-rule 复制
         # 新建规则（无 selected_rule_id 但有 generated_schema）：使用 SAVE_NEW_RULE 标记，登录后由 /api/save-pending-rule 从 thread 状态恢复并保存
         if selected_rule_id:
-            return {
+            update = {
                 "messages": [AIMessage(content=f"[SAVE_RULE:{rule_name}:{selected_rule_id}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则。")],
                 "phase": ReconciliationPhase.COMPLETED.value,
             }
-        return {
+            update.update(clear_pending_interrupt(state, "result_evaluation"))
+            return update
+        update = {
             "messages": [AIMessage(content=f"[SAVE_NEW_RULE:{rule_name}]💡 请点击右上角「登录」按钮进行登录，登录后自动保存规则「{rule_name}」。")],
             "phase": ReconciliationPhase.COMPLETED.value,
         }
+        update.update(clear_pending_interrupt(state, "result_evaluation"))
+        return update
     
     # 首次进入：需为推荐规则或新建规则（有 generated_schema）才显示评估
     generated_schema = state.get("generated_schema")
@@ -450,16 +476,21 @@ async def result_evaluation_node(state: "AgentState") -> dict:
             )
 
     if response_str in ("保存", "save", "是", "确认"):
-        return {
+        update = {
             "messages": [AIMessage(content="请输入规则名称，将为您保存为个人规则。")],
             "phase": ReconciliationPhase.RESULT_EVALUATION.value,
             "waiting_for_rule_name": True,
         }
+        update.update(clear_pending_interrupt(state, "result_evaluation"))
+        return update
 
-    return {
+    update = {
         "messages": [AIMessage(content="好的，将返回字段映射界面，您可以重新配置规则。")],
         "phase": ReconciliationPhase.FIELD_MAPPING.value,
     }
+    update.update(build_reconciliation_ctx_update(state, run_id=run_id))
+    update.update(clear_pending_interrupt(state, "result_evaluation"))
+    return update
 
 
 # ── 入口路由节点 ─────────────────────────────────────────────────────────────

@@ -509,7 +509,8 @@ async def check_user_intent_after_interrupt(
 async def handle_intent_switch(
     intent: str,
     current_phase: str,
-    state: dict[str, Any]
+    state: dict[str, Any],
+    user_input: str = ""
 ) -> dict:
     """
     统一处理 workflow 中的意图切换
@@ -603,17 +604,15 @@ async def handle_intent_switch(
         )
 
     else:
-        # 其他意图：跳转回 router 处理
-        # ⚠️ 清空工作流上传的文件，防止退出后使用已有规则对账时误用这些文件
-        return Command(
-            update={
-                "phase": "",
-                "user_intent": intent,
-                "uploaded_files": [],
-                "file_analyses": [],
-            },
-            goto="router"
-        )
+        # 无关输入：直接跳出 workflow（与游客模式一致的退出策略），下一条消息走主意图识别。
+        return {
+            "messages": [AIMessage(content="已退出当前流程。")],
+            "phase": "",
+            "user_intent": UserIntent.UNKNOWN.value,
+            "uploaded_files": [],
+            "file_analyses": [],
+            "workflow_context": {},
+        }
 
 
 def generate_resume_prompt(workflow_context: dict[str, Any]) -> str:

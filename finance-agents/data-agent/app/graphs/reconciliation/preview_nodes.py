@@ -28,11 +28,27 @@ async def validation_preview_node(state: "AgentState") -> dict:
         _format_field_mappings,
         _format_rule_config_items,
     )
+    from app.graphs.reconciliation.analysis_cache_helpers import (
+        build_reconciliation_ctx_update,
+        check_pending_interrupt,
+        clear_pending_interrupt,
+        compute_analysis_key,
+    )
 
     logger.info("validation_preview_node - 开始执行")
     mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
     config_items = state.get("rule_config_items", [])  # 新的配置项列表
-    analyses = state.get("file_analyses", [])
+    reconciliation_ctx = state.get("reconciliation_ctx") or {}
+    analyses = reconciliation_ctx.get("file_analyses") or state.get("file_analyses", [])
+    run_id = state.get("workflow_run_id") or reconciliation_ctx.get("run_id") or "default"
+    uploaded = reconciliation_ctx.get("uploaded_files") or state.get("uploaded_files", [])
+    analysis_key = compute_analysis_key(uploaded, {
+        "intent": state.get("user_intent", ""),
+        "selected_rule_id": state.get("selected_rule_id", ""),
+        "selected_rule_name": state.get("selected_rule_name", ""),
+    })
+    if check_pending_interrupt(state, "validation_preview", analysis_key, str(run_id)):
+        logger.info("validation_preview_node 命中 pending_interrupt 闸门，按重放模式执行")
     logger.info(f"validation_preview_node - 初始状态: analyses数量={len(analyses)}, config_items数量={len(config_items)}")
 
     # ⚠️ 提取文件模式：使用带时间戳的文件名生成匹配模式，时间戳部分用*替换
@@ -274,22 +290,27 @@ async def validation_preview_node(state: "AgentState") -> dict:
             )
 
     if response_str in ("调整", "重新配置", "重来", "adjust"):
-        return {
+        update = {
             "messages": [AIMessage(content="好的，让我们重新配置规则参数。")],
             "phase": ReconciliationPhase.RULE_CONFIG.value,
             "generated_schema": None,
         }
+        update.update(clear_pending_interrupt(state, "validation_preview"))
+        return update
 
     # ⚠️ 功能关键：与推荐规则流程一致，必须先执行对账，再在 result_evaluation 中提示保存
     # 绝不在此处进入 save_rule（先对账再保存）
     logger.info("validation_preview_node: 用户确认规则 -> phase=TASK_EXECUTION，将执行对账")
-    return {
+    update = {
         "messages": [AIMessage(content="✅ 规则确认完毕，正在执行对账...")],
         "generated_schema": schema,
         "preview_result": preview,
         "selected_rule_name": "新规则_待确认",  # 用于 task_execution 显示
         "phase": ReconciliationPhase.TASK_EXECUTION.value,
     }
+    update.update(build_reconciliation_ctx_update(state, run_id=run_id))
+    update.update(clear_pending_interrupt(state, "validation_preview"))
+    return update
 
 
 
