@@ -273,6 +273,9 @@ check_*.json
 # macOS
 .DS_Store
 
+# LangGraph CLI 本地开发缓存（langgraph dev 生成的运行时数据）
+.langgraph_api/
+
 # 以 . 开头的目录和文件（保留项目所需配置）
 .*
 !.git/
