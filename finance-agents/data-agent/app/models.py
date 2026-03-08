@@ -31,8 +31,8 @@ class UserIntent(str, Enum):
     CREATE_COMPANY = "create_company"
     CREATE_DEPARTMENT = "create_department"
     ADMIN_LOGOUT = "admin_logout"
-    # 审计整理数字员工
-    AUDIT_DATA_PROCESS = "audit_data_process"
+    # 数据整理员工
+    DATA_PROCESS = "data_process"
     # 规则创建（对话式）
     RULE_CREATION = "rule_creation"
     UNKNOWN = "unknown"

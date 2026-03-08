@@ -60,52 +60,20 @@ def analyze_excel_file(file_path, max_rows=20):
 
 def main():
     """主函数"""
-    # 使用最新的文件（按时间排序）
-    base_dir = "/Users/fanyuli/Desktop/workspace/financial-ai/finance-mcp/uploads"
+    # 直接分析指定的Excel文件路径
+    target_file = "/Users/fanyuli/Desktop/workspace/financial-ai/finance-mcp/uploads/2026/3/8/手工凭证原表202507月_155026.xlsx"
     
-    # 查找最新的手工凭证文件
-    manual_vouchers = []
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if "手工凭证原表202507月" in file and file.endswith(".xlsx"):
-                full_path = os.path.join(root, file)
-                manual_vouchers.append((full_path, os.path.getmtime(full_path)))
+    print("开始分析指定的Excel文件:")
+    print(f"目标文件: {target_file}")
     
-    # 查找最新的BI费用明细表
-    bi_expense_files = []
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if "BI费用明细表202507月" in file and file.endswith(".xlsx"):
-                full_path = os.path.join(root, file)
-                bi_expense_files.append((full_path, os.path.getmtime(full_path)))
+    # 检查文件是否存在
+    if not os.path.exists(target_file):
+        print(f"错误: 文件不存在 - {target_file}")
+        print("请检查文件路径是否正确。")
+        return
     
-    # 查找最新的BI损益毛利明细表
-    bi_profit_files = []
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if "BI损益毛利明细表原表202507月" in file and file.endswith(".xlsx"):
-                full_path = os.path.join(root, file)
-                bi_profit_files.append((full_path, os.path.getmtime(full_path)))
-    
-    # 按修改时间排序，获取最新的文件
-    manual_vouchers.sort(key=lambda x: x[1], reverse=True)
-    bi_expense_files.sort(key=lambda x: x[1], reverse=True)
-    bi_profit_files.sort(key=lambda x: x[1], reverse=True)
-    
-    print("找到的Excel文件:")
-    print(f"手工凭证文件: {len(manual_vouchers)} 个")
-    print(f"BI费用明细表: {len(bi_expense_files)} 个")
-    print(f"BI损益毛利明细表: {len(bi_profit_files)} 个")
-    
-    # 分析最新的文件
-    if manual_vouchers:
-        analyze_excel_file(manual_vouchers[0][0])
-    
-    if bi_expense_files:
-        analyze_excel_file(bi_expense_files[0][0])
-    
-    if bi_profit_files:
-        analyze_excel_file(bi_profit_files[0][0])
+    # 分析指定的文件
+    analyze_excel_file(target_file)
 
 if __name__ == "__main__":
     main()

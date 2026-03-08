@@ -36,6 +36,7 @@ interface ChatAreaProps {
   threadId: string;
   showInput?: boolean;
   currentUser?: Record<string, unknown> | null;
+  authToken?: string | null;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
   selectedAgent?: AgentType;
@@ -51,6 +52,7 @@ export default function ChatArea({
   threadId,
   showInput = true,
   currentUser,
+  authToken,
   streamingMessageId,
   selectedAgent = 'reconciliation',
 }: ChatAreaProps) {
@@ -122,6 +124,9 @@ export default function ChatArea({
           formData.append('thread_id', threadId);
           // ⚠️ 修复：第一个文件时设置 is_first_file=1，其他为0（避免字符串"false"被当成真值）
           formData.append('is_first_file', index === 0 ? '1' : '0');
+          if (authToken) {
+            formData.append('auth_token', authToken);
+          }
 
           const resp = await fetch('/api/upload', {
             method: 'POST',
@@ -174,7 +179,7 @@ export default function ChatArea({
     uploadedList.forEach((f) => onFileUploaded(f));
     
     setInputText('');
-  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage, selectedAgent]);
+  }, [inputText, isLoading, isUploading, stagedFiles, threadId, authToken, onFileUploaded, onSendMessage, selectedAgent]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {

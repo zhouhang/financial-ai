@@ -305,9 +305,85 @@ export default function App() {
     (data: WsOutgoing) => {
       const targetConvId = pendingConvIdRef.current || activeConvId;
       switch (data.type) {
+        case 'skill_hit':
+          // deep_agent 命中 skill：展示为独立的 Skill 命中卡片
+          setIsLoading(false);
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== targetConvId) return c;
+              const skillHit = {
+                skillId: data.skill_id || '',
+                skillName: data.skill_name || '',
+                skillDescription: data.skill_description || '',
+                skillTags: data.skill_tags || [],
+                skillIcon: data.skill_icon || '🧩',
+                skillInputFiles: (data.skill_input_files || []) as import('./types').SkillInputFile[],
+              };
+              return {
+                ...c,
+                messages: [
+                  ...c.messages,
+                  {
+                    id: generateId(),
+                    role: 'assistant' as const,
+                    content: '',
+                    skillHit,
+                    timestamp: new Date(),
+                  },
+                ],
+                updatedAt: new Date(),
+              };
+            })
+          );
+          break;
+
+        case 'thinking':
+          // deep_agent 思考过程：展示为可折叠的思考块
+          setIsLoading(false);
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== targetConvId) return c;
+              const thinkingContent = data.content || '';
+              // 查找是否已有 thinking 消息（同一节点多次思考时累积）
+              const lastMsg = c.messages[c.messages.length - 1];
+              if (lastMsg?.isThinking) {
+                // 既有思考消息则屁加内容
+                const updatedMessages = [...c.messages];
+                updatedMessages[updatedMessages.length - 1] = {
+                  ...lastMsg,
+                  thinkingContent: (lastMsg.thinkingContent || '') + '\n\n' + thinkingContent,
+                };
+                return { ...c, messages: updatedMessages, updatedAt: new Date() };
+              }
+              // 创建新的思考消息
+              return {
+                ...c,
+                messages: [
+                  ...c.messages,
+                  {
+                    id: generateId(),
+                    role: 'assistant' as const,
+                    content: '',
+                    thinkingContent,
+                    isThinking: true,
+                    timestamp: new Date(),
+                  },
+                ],
+                updatedAt: new Date(),
+              };
+            })
+          );
+          break;
+
         case 'stream':
           // 流式输出：逐步更新消息内容
           setIsLoading(false);
+          // subtype='new_bubble' 时，强制新建气泡（清空当前流式 ID 即可实现分段）
+          if (data.subtype === 'new_bubble') {
+            setStreamingMessageId(null);
+            // 如果这张卡片本身没内容，直接跳过，下一条 token 进来时再建气泡
+            if (!data.content) break;
+          }
           setConversations((prev) =>
             prev.map((c) => {
               if (c.id !== targetConvId) return c;
@@ -856,6 +932,7 @@ export default function App() {
           threadId={activeConvId}
           showInput={!!activeConvId}
           currentUser={currentUser}
+          authToken={authToken}
           streamingMessageId={streamingMessageId}
           selectedAgent={selectedAgent}
         />

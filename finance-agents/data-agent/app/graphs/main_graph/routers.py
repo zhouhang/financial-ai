@@ -67,15 +67,15 @@ def route_after_router(state: AgentState) -> str:
     logger.info(
         f"route_after_router: intent={repr(intent)}, phase={repr(phase)}, "
         f"rule_creation_active={rule_creation_active}, "
-        f"AUDIT_DATA_PROCESS={repr(UserIntent.AUDIT_DATA_PROCESS.value)}"
+        f"DATA_PROCESS={repr(UserIntent.DATA_PROCESS.value)}"
     )
 
-    # ⚠️ AUDIT_DATA_PROCESS 优先级最高，清空 rule_creation_active 不影响此路由
-    if intent == UserIntent.AUDIT_DATA_PROCESS.value:
+    # ✅ DATA_PROCESS 优先级最高，清空 rule_creation_active 不影响此路由
+    if intent == UserIntent.DATA_PROCESS.value:
         logger.info("route_after_router → dp_deep_agent")
-        return "dp_deep_agent"  # 直接进入 Deep Agent（skill 检索由 create_deep_agent 自动处理）
+        return "dp_deep_agent"
 
-    # 检查是否正在创建规则（对话式），此优先级低于 AUDIT_DATA_PROCESS
+    # 检查是否正在创建规则（对话式），此优先级低于 DATA_PROCESS
     if rule_creation_active:
         logger.info(f"route_after_router → rule_creation (rule_creation_active=True)")
         return "rule_creation"

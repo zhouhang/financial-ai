@@ -115,6 +115,8 @@ async def upload_file(
     file: UploadFile = File(...),
     thread_id: str = Form("default"),
     is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
+    auth_token: str = Form(""),      # 认证 token（已登录用户）
+    guest_token: str = Form(""),     # 游客 token（未登录用户）
 ):
     """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
 
@@ -172,14 +174,21 @@ async def upload_file(
 
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
-        result = await call_mcp_tool("file_upload", {
+        # 构建调用参数（必须传入 auth_token 或 guest_token）
+        upload_params: dict[str, Any] = {
             "files": [
                 {
                     "filename": file.filename,
                     "content": content_b64
                 }
             ]
-        })
+        }
+        if auth_token:
+            upload_params["auth_token"] = auth_token
+        elif guest_token:
+            upload_params["guest_token"] = guest_token
+        
+        result = await call_mcp_tool("file_upload", upload_params)
 
         # 检查上传结果
         if not result.get("success"):
@@ -414,6 +423,7 @@ async def websocket_chat(ws: WebSocket):
                 # result_analysis 等: 直接流式
                 # task_execution: 手动 AIMessage → message
                 # resume 时: 跳过 router 旧消息
+                # deep_agent 节点: LLM stream 不直接推送，改为 thinking 类型包装（可折叠）
                 # ⚠️ 修复：添加消息缓冲机制防止分段
                 streamed_content = ""
                 router_buffer = ""
@@ -424,6 +434,8 @@ async def websocket_chat(ws: WebSocket):
                 message_buffer = ""
                 BUFFER_SIZE = 100  # 累积 100 字符后发送一次
                 current_streaming_node = None  # 跟踪当前流式输出的节点
+                # deep_agent 思考过程缓冲
+                deep_agent_thinking_buffer = ""
 
                 # resume 时，记录已有的 AI 消息内容，避免重发
                 if is_resume:
@@ -472,6 +484,9 @@ async def websocket_chat(ws: WebSocket):
                                         message_buffer = ""
                                 else:  # json
                                     router_buffer += token
+                            elif node_name == "deep_agent":
+                                # deep_agent 节点: LLM 思考过程不直接流式，累积到 thinking buffer
+                                deep_agent_thinking_buffer += token
                             else:
                                 # 其他节点：过滤掉内部 LLM 输出（字段映射/规则配置的解析，不应显示 raw JSON）
                                 # 只有 result_analysis 等面向用户的节点才流式输出
@@ -513,14 +528,29 @@ async def websocket_chat(ws: WebSocket):
                         router_mode = "detect"
                         current_streaming_node = None
                     
+                    # ③ deep_agent LLM 结束：将思考缓冲以 thinking 类型发送
+                    elif kind == "on_chat_model_end" and node_name == "deep_agent":
+                        if deep_agent_thinking_buffer.strip():
+                            logger.info(f"[deep_agent] 思考过程完成，将以 thinking 类型发送，长度={len(deep_agent_thinking_buffer)}")
+                            await ws.send_json({
+                                "type": "thinking",
+                                "content": deep_agent_thinking_buffer.strip(),
+                                "thread_id": thread_id,
+                            })
+                            sent_contents.add(deep_agent_thinking_buffer.strip())
+                        deep_agent_thinking_buffer = ""
+                    
                     # ③ 其他 LLM 结束：记录用于去重
-                    elif kind == "on_chat_model_end" and node_name and node_name != "router":
+                    elif kind == "on_chat_model_end" and node_name and node_name not in ("router", "deep_agent"):
                         # ⚠️ 修复：发送缓冲中还未发送的内容
                         if message_buffer and current_streaming_node == node_name:
                             await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
                             logger.info(f"[{node_name}] 流式输出完成，发送最后缓冲，长度={len(message_buffer)}")
                             message_buffer = ""
                             current_streaming_node = None
+                        # 发送 new_bubble 信号：让前端为这个节点后续流 token 开新对话框
+                        await ws.send_json({"type": "stream", "subtype": "new_bubble", "content": "", "thread_id": thread_id})
+                        logger.info(f"[{node_name}] LLM 轮次结束，发送 new_bubble 分气泡信号")
                         output = data_obj.get("output")
                         if output and hasattr(output, "content") and output.content:
                             sent_contents.add(output.content.strip())
@@ -545,6 +575,24 @@ async def websocket_chat(ws: WebSocket):
                         
                         output = data_obj.get("output", {})
                         if isinstance(output, dict):
+                            # ── deep_agent 节点: 检测 skill 命中，推送 skill_hit 消息 ──
+                            if node_name == "deep_agent":
+                                exec_result = output.get("execution_result") or {}
+                                skill_meta = exec_result.get("skill_meta") or {}
+                                skill_id = exec_result.get("selected_skill_id", "") or output.get("selected_skill_id", "")
+                                if skill_id and skill_id != "deep_agent" and skill_meta:
+                                    logger.info(f"[deep_agent] skill 命中={skill_id}，推送 skill_hit")
+                                    await ws.send_json({
+                                        "type": "skill_hit",
+                                        "skill_id": skill_id,
+                                        "skill_name": skill_meta.get("name", skill_id),
+                                        "skill_description": skill_meta.get("description", ""),
+                                        "skill_tags": skill_meta.get("tags", []),
+                                        "skill_icon": skill_meta.get("icon", "🧩"),
+                                        "skill_input_files": skill_meta.get("input_files", []),
+                                        "thread_id": thread_id,
+                                    })
+
                             # 检查是否有新的 auth_token（登录/注册成功）
                             # ⚠️ 修复：只在 new_token 与请求携带的 auth_token 不同时才发送
                             # 否则子图（如 data_process）的 on_chain_end 会把已有 auth_token

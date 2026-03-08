@@ -115,6 +115,15 @@ def deep_agent_node(state: AgentState) -> Dict[str, Any]:
             abs_path = str(Path(FINANCE_MCP_UPLOAD_DIR) / rel)
         else:
             abs_path = path
+        # 记录路径是否实际存在，方便调试
+        exists = Path(abs_path).exists()
+        logger.info(
+            f"deep_agent_node: 文件路径解析: 原始={path!r} → 绝对={abs_path!r} 存在={exists}"
+        )
+        if not exists:
+            logger.warning(
+                f"deep_agent_node: 文件不存在! FINANCE_MCP_UPLOAD_DIR={FINANCE_MCP_UPLOAD_DIR!r}"
+            )
         resolved_paths.append(abs_path)
     file_paths = resolved_paths
 
@@ -142,11 +151,21 @@ def deep_agent_node(state: AgentState) -> Dict[str, Any]:
 
     execution_status = "success" if result.get("success") else "error"
 
+    # ── skill 命中元数据 ────────────────────────────────────────────────────
+    # skill_meta 含完整命中信息，由 server.py 以 skill_hit WS 类型推送给前端（展示为独立卡片）
+    skill_id_hit = result.get("selected_skill_id", "")
+    skill_meta = result.get("skill_meta") or {}
+    if skill_id_hit and skill_id_hit != "deep_agent":
+        skill_name_hit = skill_meta.get("name", "") or result.get("selected_skill_name", "")
+        logger.info(f"deep_agent_node: skill 命中={skill_id_hit} ({skill_name_hit})，将以 skill_hit WS 类型推送")
+
     return {
         "execution_status": execution_status,
         "execution_result": result,
         "error_message": result.get("error") if execution_status == "error" else None,
-        "selected_skill_id": result.get("selected_skill_id", ""),
+        "selected_skill_id": skill_id_hit,
+        # messages 不再插入 AIMessage 文字，改由 server.py 通过 skill_hit 类型 WS 消息推送
+        "messages": [],
     }
 
 

@@ -118,7 +118,7 @@ SYSTEM_PROMPT = """\
 - 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
-- 如果用户想**处理审计数据**（如"整理货币资金"、"分析银行流水"、"应收账款分析"、"库存商品整理"、"开户清单核对"等），回复 JSON: {"intent": "audit_data_process"}
+- 如果用户想**处理审计数据**（如"整理货币资金"、"分析銀行流水"、"应收账款分析"、"库存商品整理"、"开户清单核对"等），回复 JSON: {"intent": "data_process"}
 - 如果用户在闲聊或询问信息（如打招呼、问能做什么），正常用中文回复即可。此时请：
   1. 用「你好，{username}！」开头，带上用户名
   2. 简要介绍你能做的事（包括：执行对账、创建规则、编辑规则、删除规则、查看规则列表、理解对账结果）
@@ -408,6 +408,21 @@ async def router_node(state: AgentState) -> dict:
             register_html = generate_register_form(companies=companies_result.get("companies", []))
             logger.info(f"返回注册表单，长度: {len(register_html)}, 输入框数量: {register_html.count('<input')}")
             return {"messages": [AIMessage(content=register_html)]}
+        elif intent == "data_process":
+            # 未登录时也支持识别数据处理意图
+            files_hint = ""
+            uploaded_files = state.get("uploaded_files", [])
+            if not uploaded_files:
+                files_hint = "\n\n请先上传需要处理的数据文件（Excel/CSV）。"
+            else:
+                files_hint = f"\n\n已检测到 {len(uploaded_files)} 个上传文件，正在分析处理..."
+            return {
+                "messages": [AIMessage(content=f"⏳ 正在识别数据处理意图，准备执行...{files_hint}")],
+                "user_intent": UserIntent.DATA_PROCESS.value,
+                "user_request": last_user_msg,
+                "uploaded_files": uploaded_files,
+                "rule_creation_active": False,
+            }
         else:
             # LLM 正常回复（引导用户）
             # 去掉开头的"！"或"!"，并确保只有一条消息
@@ -604,9 +619,8 @@ async def router_node(state: AgentState) -> dict:
             "rule_config_items": config_items,
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
-    elif intent == UserIntent.AUDIT_DATA_PROCESS.value or intent == "data_process":
-        # 审计/核算数据处理：进入 data_process 子图
-        # 支持两种意图：audit_data_process（旧） 和 data_process（新）
+    elif intent == UserIntent.DATA_PROCESS.value:
+        # 数据整理员工：进入 data_process 子图
         files_hint = ""
         if not uploaded_files:
             files_hint = "\n\n请先上传需要处理的数据文件（Excel/CSV）。"
@@ -614,7 +628,7 @@ async def router_node(state: AgentState) -> dict:
             files_hint = f"\n\n已检测到 {len(uploaded_files)} 个上传文件，正在分析处理..."
         return {
             "messages": [AIMessage(content=f"⏳ 正在识别数据处理意图，准备执行...{files_hint}")],
-            "user_intent": UserIntent.AUDIT_DATA_PROCESS.value,
+            "user_intent": UserIntent.DATA_PROCESS.value,
             "user_request": last_user_msg,
             "uploaded_files": uploaded_files,
             "rule_creation_active": False,  # ⚠️ 清除可能残留的 rule_creation_active 状态

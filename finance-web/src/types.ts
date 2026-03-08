@@ -10,6 +10,23 @@ export interface MessageAttachment {
   path?: string;
 }
 
+// ── Skill 命中卡片类型 ─────────────────────────────────────────
+
+export interface SkillInputFile {
+  name: string;
+  required: boolean;
+  hint?: string;
+}
+
+export interface SkillHitInfo {
+  skillId: string;
+  skillName: string;
+  skillDescription: string;
+  skillTags: string[];
+  skillIcon: string;
+  skillInputFiles: SkillInputFile[];
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -23,6 +40,12 @@ export interface Message {
   actionDetail?: string;
   /** 系统消息是否完成 */
   actionDone?: boolean;
+  /** deep_agent 思考过程内容（折叠展示） */
+  thinkingContent?: string;
+  /** 是否为 deep_agent 思考过程消息 */
+  isThinking?: boolean;
+  /** skill 命中信息（展示为独立卡片） */
+  skillHit?: SkillHitInfo;
 }
 
 // ── 会话类型 ──────────────────────────────────────────────────────────────
@@ -90,9 +113,18 @@ export interface WsIncoming {
   resume?: boolean;
 }
 
+/**
+ * stream 消息的子类型（subtype）
+ * - 'continue'  ：默认，继续在当前气泡内累积内容
+ * - 'new_bubble'：强制开启新气泡，将后续内容放到独立对话框内
+ */
+export type StreamSubtype = 'continue' | 'new_bubble';
+
 export interface WsOutgoing {
-  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify' | 'conversation_created';
+  type: 'message' | 'stream' | 'thinking' | 'skill_hit' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify' | 'conversation_created';
   content?: string;
+  /** stream 类型专用 - 分气泡控制 */
+  subtype?: StreamSubtype;
   payload?: Record<string, unknown>;
   thread_id?: string;
   node?: string;
@@ -103,6 +135,13 @@ export interface WsOutgoing {
   success?: boolean;
   /** conversation_created 类型专用 */
   conversation_id?: string;
+  /** skill_hit 类型专用 */
+  skill_id?: string;
+  skill_name?: string;
+  skill_description?: string;
+  skill_tags?: string[];
+  skill_icon?: string;
+  skill_input_files?: SkillInputFile[];
 }
 
 // ── 连接状态 ─────────────────────────────────────────────────────────────

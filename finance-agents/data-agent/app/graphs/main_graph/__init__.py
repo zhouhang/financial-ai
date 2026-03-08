@@ -26,6 +26,9 @@ from .nodes import (
     task_execution_node,
     result_analysis_node,
     ask_start_now_node,
+    # 进度回调
+    register_progress_callback,
+    unregister_progress_callback,
     # 内部辅助函数（暴露以便测试）
     _do_start_task,
     _do_poll,
@@ -59,6 +62,9 @@ __all__ = [
     "task_execution_node",
     "result_analysis_node",
     "ask_start_now_node",
+    # nodes - 进度回调
+    "register_progress_callback",
+    "unregister_progress_callback",
     # nodes - 内部辅助
     "_do_start_task",
     "_do_poll",
