@@ -42,7 +42,7 @@
     }
   },
   "key_field_role": "order_id",
-  "rule_config_text": "官网_*.xlsb：订单号去掉前面的单引号，并截取前21位\n官网_*.xlsb：相同订单号按金额累加合并\n合单_*.xlsx：订单号去掉前面的单引号，并截取前21位\n合单_*.xlsx：相同订单号按金额累加合并",
+  "rule_config_text": "官网_*.xlsb：订单号去掉前面的单引号，并截取前21位\n官网_*.xlsb：相同订单号按金额累加合并\n合单_*.xlsx：订单号去掉前面的单引号，并截取前21位\n合单_*.xlsx：相同订单号按金额累加合并\n添加金额保留1位小数",
   "custom_validations": [
     {
       "name": "missing_in_business",
@@ -84,6 +84,12 @@
           "operation": "expr",
           "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
           "description": "订单号去掉前面的单引号，并截取前21位"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 1,
+          "description": "金额保留1位小数"
         }
       ],
       "aggregations": [
@@ -104,6 +110,12 @@
           "operation": "expr",
           "expression": "str(row.get('order_id', '')).lstrip(\"'\")[:21] if pd.notna(row.get('order_id', '')) else row.get('order_id', '')",
           "description": "订单号去掉前面的单引号，并截取前21位"
+        },
+        {
+          "field": "amount",
+          "operation": "round",
+          "decimals": 1,
+          "description": "金额保留1位小数"
         }
       ],
       "aggregations": [
