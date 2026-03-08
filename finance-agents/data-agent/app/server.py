@@ -561,7 +561,15 @@ async def websocket_chat(ws: WebSocket):
                                     "thread_id": thread_id,
                                 })
                             
-                            for msg in output.get("messages", []):
+                            # 处理 messages（兼容 Overwrite 类型和普通列表）
+                            messages_output = output.get("messages", [])
+                            # 如果是 Overwrite 类型，提取其 value
+                            if hasattr(messages_output, 'value'):
+                                messages_output = messages_output.value
+                            if not isinstance(messages_output, (list, tuple)):
+                                messages_output = []
+                            
+                            for msg in messages_output:
                                 if hasattr(msg, "type") and msg.type == "ai":
                                     content = (msg.content if hasattr(msg, "content") else "").strip()
                                     if content and content not in sent_contents:

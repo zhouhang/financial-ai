@@ -40,12 +40,10 @@ from app.graphs.reconciliation import (
 from app.graphs.data_preparation import build_data_preparation_subgraph
 from app.graphs.rule_creation import build_rule_creation_subgraph
 from app.graphs.data_process.nodes import (
-    skill_retrieve_node,
     deep_agent_node,
     get_result_node,
 )
 from app.graphs.data_process.routers import (
-    route_after_skill_retrieve,
     route_after_deep_agent,
 )
 from .nodes import (
@@ -74,8 +72,8 @@ def route_after_router(state: AgentState) -> str:
 
     # ⚠️ AUDIT_DATA_PROCESS 优先级最高，清空 rule_creation_active 不影响此路由
     if intent == UserIntent.AUDIT_DATA_PROCESS.value:
-        logger.info("route_after_router → dp_skill_retrieve")
-        return "dp_skill_retrieve"  # ⚠️ 直接返回节点名，避免 LangGraph 1.0.x 非对等路径映射 bug
+        logger.info("route_after_router → dp_deep_agent")
+        return "dp_deep_agent"  # 直接进入 Deep Agent（skill 检索由 create_deep_agent 自动处理）
 
     # 检查是否正在创建规则（对话式），此优先级低于 AUDIT_DATA_PROCESS
     if rule_creation_active:
@@ -164,8 +162,7 @@ def build_main_graph() -> StateGraph:
     graph.add_node("validation_preview", validation_preview_node)
     graph.add_node("save_rule", save_rule_node)
 
-    # 审计数据处理节点（展平，Deep Agent 架构，避免 LangGraph 1.0.x 子图路由问题）
-    graph.add_node("dp_skill_retrieve", skill_retrieve_node)
+    # 审计数据处理节点（展平，Deep Agent 架构，简化为 2 节点）
     graph.add_node("dp_deep_agent", deep_agent_node)
     graph.add_node("dp_get_result", get_result_node)
 
@@ -190,16 +187,12 @@ def build_main_graph() -> StateGraph:
         "file_analysis": "file_analysis",
         "task_execution": "task_execution",
         "edit_field_mapping": "edit_field_mapping",
-        "dp_skill_retrieve": "dp_skill_retrieve",  # 审计数据处理入口（Deep Agent 架构）
+        "dp_deep_agent": "dp_deep_agent",  # 审计数据处理入口（简化架构，直接进入 Deep Agent）
         "rule_creation": "rule_creation",
         END: END,
     })
 
-    # 审计数据处理流程（Deep Agent，展平节点，⚠️ 所有路径映射均对等）
-    graph.add_conditional_edges("dp_skill_retrieve", route_after_skill_retrieve, {
-        "dp_deep_agent": "dp_deep_agent",
-        END: END,
-    })
+    # 审计数据处理流程（Deep Agent，简化为 2 节点）
     graph.add_conditional_edges("dp_deep_agent", route_after_deep_agent, {
         "dp_get_result": "dp_get_result",
         END: END,

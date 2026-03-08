@@ -10,10 +10,9 @@
         ↓
     LLM 推理 → 执行工具 → 返回结果
 
-节点说明：
-  1. skill_retrieve_node: 提取用户请求，准备 Deep Agent 输入
-  2. deep_agent_node: 调用 create_deep_agent，自动处理 skill 匹配与执行
-  3. get_result_node: 格式化执行结果并写入 messages
+节点说明（简化架构）：
+  1. deep_agent_node: 提取请求 + 调用 create_deep_agent，自动处理 skill 匹配与执行
+  2. get_result_node: 格式化执行结果并写入 messages
 """
 
 from __future__ import annotations
@@ -59,26 +58,26 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 节点 1: skill_retrieve_node
-# 提取用户请求，准备 Deep Agent 输入（skill 检索由 create_deep_agent 自动处理）
+# 节点 1: deep_agent_node（入口节点）
+# 提取请求 + 调用 create_deep_agent，自动处理 skill 匹配与执行
 # ══════════════════════════════════════════════════════════════════════════════
 
-def skill_retrieve_node(state: AgentState) -> Dict[str, Any]:
-    """请求准备节点
+def deep_agent_node(state: AgentState) -> Dict[str, Any]:
+    """Deep Agent 节点（入口节点）
 
-    提取用户请求文本和上传文件，准备 Deep Agent 输入。
-    
-    注意：skill 检索由 create_deep_agent 自动处理：
-    - Agent 启动时读取 skills/ 目录下所有 SKILL.md 的 frontmatter
-    - 根据用户请求自动匹配相关 skill（progressive disclosure）
-    - 无需手动构建 tools_subset
+    使用 create_deep_agent 驱动 LLM 推理，自动：
+    - 读取 skills/ 目录下的 SKILL.md frontmatter
+    - 根据用户请求匹配相关 skill（progressive disclosure）
+    - 执行对应的处理工具
 
     输入：messages、uploaded_files
-    输出：user_request、uploaded_files、dp_retrieve_done
+    输出：execution_status、execution_result、error_message、user_request
     """
-    logger.info("skill_retrieve_node: 准备 Deep Agent 输入")
+    logger.info("deep_agent_node: 启动 Deep Agent")
 
-    # ── 提取用户请求 ──────────────────────────────────────────────────────
+    from proc_agent.deep_agent import run_deep_agent, PROC_AGENT_DIR
+
+    # ── 提取用户请求（原 skill_retrieve_node 逻辑）──────────────────────────
     user_request = state.get("user_request", "")
     if not user_request:
         messages = list(state.get("messages", []))
@@ -86,45 +85,16 @@ def skill_retrieve_node(state: AgentState) -> Dict[str, Any]:
             if hasattr(msg, "type") and msg.type == "human" and hasattr(msg, "content"):
                 user_request = msg.content
                 break
+    if not user_request:
+        user_request = "处理数据"
 
-    uploaded_files = state.get("uploaded_files", [])
-
-    logger.info(
-        f"skill_retrieve_node: 请求={repr(user_request[:50]) if user_request else '无'}, "
-        f"文件数={len(uploaded_files)}"
-    )
-
-    return {
-        "user_request": user_request,
-        "uploaded_files": uploaded_files,
-        "dp_retrieve_done": True,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 节点 2: deep_agent_node
-# 调用 create_deep_agent，自动处理 skill 匹配与执行
-# ══════════════════════════════════════════════════════════════════════════════
-
-def deep_agent_node(state: AgentState) -> Dict[str, Any]:
-    """Deep Agent 节点
-
-    使用 create_deep_agent 驱动 LLM 推理，自动：
-    - 读取 skills/ 目录下的 SKILL.md frontmatter
-    - 根据用户请求匹配相关 skill（progressive disclosure）
-    - 执行对应的处理工具
-
-    输入：user_request、uploaded_files
-    输出：execution_status、execution_result、error_message
-    """
-    logger.info("deep_agent_node: 启动 Deep Agent")
-
-    from proc_agent.deep_agent import run_deep_agent, PROC_AGENT_DIR
-
-    user_request = state.get("user_request", "处理数据")
     uploaded_files = state.get("uploaded_files", [])
     output_dir = state.get("output_dir")
     thread_id = state.get("thread_id") or "default"
+
+    logger.info(
+        f"deep_agent_node: 请求={repr(user_request[:50]) if user_request else '无'}, "
+        f"文件数={len(uploaded_files)}")
 
     # ── 解析文件路径 ──────────────────────────────────────────────────────
     file_paths = []
@@ -181,7 +151,7 @@ def deep_agent_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 节点 3: get_result_node
+# 节点 2: get_result_node
 # 格式化结果并写入 messages
 # ══════════════════════════════════════════════════════════════════════════════
 
