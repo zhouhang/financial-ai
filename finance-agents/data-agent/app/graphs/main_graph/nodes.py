@@ -190,6 +190,7 @@ async def router_node(state: AgentState) -> dict:
     # 根据 state 中的 agent_type 判断模式
     agent_type = state.get("agent_type", "reconciliation")
     is_data_process_mode = (agent_type == "data_process")
+    logger.info(f"router_node: agent_type={agent_type}, is_data_process_mode={is_data_process_mode}")
     
     auth_token = state.get("auth_token", "")
     current_user = state.get("current_user")
@@ -371,7 +372,7 @@ async def router_node(state: AgentState) -> dict:
         # 根据 agent 模式选择提示词
         if is_data_process_mode:
             # 数据整理数字员工模式（未登录）
-            from .data_process_prompt import DATA_PROCESS_AGENT_PROMPT_NOT_LOGGED_IN
+            from ..data_process.prompts import DATA_PROCESS_AGENT_PROMPT_NOT_LOGGED_IN
             system_msg = DATA_PROCESS_AGENT_PROMPT_NOT_LOGGED_IN
         else:
             # 对账助手模式（未登录）
@@ -427,11 +428,13 @@ async def router_node(state: AgentState) -> dict:
 
     if is_data_process_mode:
         # 数据整理数字员工模式
-        from .data_process_prompt import DATA_PROCESS_AGENT_PROMPT
+        from ..data_process.prompts import DATA_PROCESS_AGENT_PROMPT
         system_msg = DATA_PROCESS_AGENT_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
+        logger.info(f"router_node: 使用 DATA_PROCESS_AGENT_PROMPT，前100字符: {system_msg[:100]}")
     else:
         # 对账助手模式
         system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
+        logger.info(f"router_node: 使用 SYSTEM_PROMPT，前100字符: {system_msg[:100]}")
 
     llm = get_llm()
     messages = list(state.get("messages", []))
@@ -601,8 +604,9 @@ async def router_node(state: AgentState) -> dict:
             "rule_config_items": config_items,
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
-    elif intent == UserIntent.AUDIT_DATA_PROCESS.value:
+    elif intent == UserIntent.AUDIT_DATA_PROCESS.value or intent == "data_process":
         # 审计/核算数据处理：进入 data_process 子图
+        # 支持两种意图：audit_data_process（旧） 和 data_process（新）
         files_hint = ""
         if not uploaded_files:
             files_hint = "\n\n请先上传需要处理的数据文件（Excel/CSV）。"

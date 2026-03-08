@@ -35,6 +35,7 @@ function createConversation(): Conversation {
 // localStorage 键名
 const STORAGE_KEY_ACTIVE_CONV = 'finflux_active_conversation_id';
 const STORAGE_KEY_IS_NEW_CONV = 'finflux_is_new_conversation';
+const STORAGE_KEY_SELECTED_AGENT = 'finflux_selected_agent';
 
 // 创建初始会话（在组件外部，确保只创建一次）
 const initialPendingConv = createConversation();
@@ -62,7 +63,15 @@ export default function App() {
   const [activeConvId, setActiveConvId] = useState<string>(initialState.activeId);
 
   // ── Agent 选择状态 ──────────────────────────────────────────────
-  const [selectedAgent, setSelectedAgent] = useState<AgentType>("reconciliation");
+  const [selectedAgent, setSelectedAgent] = useState<AgentType>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY_SELECTED_AGENT);
+    return (saved === 'data_process' || saved === 'reconciliation') ? saved : 'reconciliation';
+  });
+
+  // 持久化 selectedAgent 到 localStorage
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_SELECTED_AGENT, selectedAgent);
+  }, [selectedAgent]);
 
   // 处理 Agent 切换
   const handleSelectAgent = useCallback((agent: AgentType) => {
@@ -664,6 +673,7 @@ export default function App() {
       
       // 注意：不要将前缀发送给后端，前缀只用于前端显示
       // 通过 selectedAgent 参数传递给后端当前选择的 Agent 类型
+      console.log('[DEBUG] handleSendMessage: selectedAgent=', selectedAgent, 'activeConvId=', activeConvId);
       sendMessage(cleanText, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId, undefined, selectedAgent);
     },
     [appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedAgent]

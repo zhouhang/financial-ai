@@ -1,3 +1,12 @@
+---
+name: recognition-report-filler
+description: 将手工凭证 Excel 中的数据提取并填充到 BI 报表中。触发关键词：手工凭证、BI费用明细、BI费用、BI损益、损益毛利、核算报表、核算明细、毛利分析、供应商毛利、代运营毛利、费用归集。输入文件：手工凭证.xlsx + 已有的BI费用明细表.xlsx + 已有的BI损益毛利明细表.xlsx。输出：填充后的 BI费用明细表.xlsx 和 BI损益毛利明细表.xlsx。
+metadata:
+  author: 数据整理数字员工团队
+  version: "2.0"
+allowed-tools: read_file, write_file, execute_python
+---
+
 # Skill: 核算报表填充 (Recognition Report Filler)
 
 ## 基本信息

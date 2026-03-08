@@ -1,3 +1,12 @@
+---
+name: audit-data-organizer
+description: 处理审计部门的数据整理业务。支持的业务类型包括：货币资金整理（关键词：货币资金、现金、银行存款、资金明细）、流水分析（关键词：流水、交易明细、银行流水、异常交易）、应收账款分析（关键词：应收、账款、客户往来）、库存商品分析（关键词：库存、存货、进销存）、开户清单核对（关键词：开户、清单、账户核对）。输入 Excel 文件（科目余额表、银行对账单、流水明细等），输出标准化 Excel 和 Markdown 格式结果。
+metadata:
+  author: 数据整理数字员工团队
+  version: "3.0"
+allowed-tools: read_file, write_file, execute_python
+---
+
 # Skill: 审计数据整理 (Audit Data Organizer)
 
 ## 基本信息

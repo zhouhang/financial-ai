@@ -65,16 +65,23 @@ export default function ChatArea({
   useEffect(() => {
     // 会话加载完成后滚动到底部（不使用动画，直接跳转）
     if (!isLoadingConversation && messages.length > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      // 使用 setTimeout 确保 DOM 更新完成后再滚动
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      }, 0);
     }
   }, [isLoadingConversation, messages.length]);
   
-  // 新消息时平滑滚动
+  // 新消息或消息内容更新时平滑滚动
+  const lastMessageContent = messages[messages.length - 1]?.content;
   useEffect(() => {
-    if (!isLoadingConversation) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!isLoadingConversation && messages.length > 0) {
+      // 使用 requestAnimationFrame 确保在渲染帧后滚动
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      });
     }
-  }, [messages, isLoading, isLoadingConversation]);
+  }, [messages.length, lastMessageContent, isLoading, isLoadingConversation]);
 
   // 聚焦输入框
   useEffect(() => {
@@ -167,7 +174,7 @@ export default function ChatArea({
     uploadedList.forEach((f) => onFileUploaded(f));
     
     setInputText('');
-  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage]);
+  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage, selectedAgent]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -293,25 +300,66 @@ export default function ChatArea({
           </div>
         )}
         
-        {/* 空状态 */}
+        {/* 空状态 - 根据 Agent 类型显示不同介绍 */}
         {!isLoadingConversation && messages.length === 0 && !isLoading && (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center max-w-md">
+            <div className="text-center max-w-lg px-4">
+              {/* Agent 图标 */}
               <div className="w-16 h-16 rounded-2xl bg-white border border-gray-100 flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                {selectedAgent === 'data_process' ? (
+                  <Sparkles className="w-8 h-8 text-blue-500" />
+                ) : (
+                  <MessageSquare className="w-8 h-8 text-blue-500" />
+                )}
               </div>
+              
               {currentUser ? (
-                <>
-                  <h3 className="text-base font-medium text-gray-800 mb-2">
-                    开启新对话
-                  </h3>
-                  <p className="text-sm text-gray-500">
-                    上传数据文件或直接描述您的分析需求
-                  </p>
-                </>
+                /* 已登录 - 显示 Agent 介绍 */
+                selectedAgent === 'data_process' ? (
+                  /* 数据整理数字员工介绍 */
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                      数据整理数字员工
+                    </h3>
+                    <div className="text-sm text-gray-600 text-left space-y-3">
+                      <p>我配置了多个专业技能，可以自动识别您的需求：</p>
+                      <div className="bg-blue-50 rounded-lg p-3">
+                        <p className="font-medium text-blue-700 mb-1">📊 审计数据整理</p>
+                        <p className="text-xs text-blue-600">货币资金 · 流水分析 · 应收账款 · 库存商品 · 开户清单</p>
+                      </div>
+                      <div className="bg-green-50 rounded-lg p-3">
+                        <p className="font-medium text-green-700 mb-1">📈 核算报表填充</p>
+                        <p className="text-xs text-green-600">手工凭证 · BI费用明细 · BI损益毛利</p>
+                      </div>
+                      <p className="text-gray-500 text-xs pt-2">
+                        💡 使用方式：上传 Excel 文件 + 描述您的需求
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  /* 智能对账助手介绍 */
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                      智能对账助手
+                    </h3>
+                    <div className="text-sm text-gray-600 text-left space-y-3">
+                      <p>我可以帮助您完成财务数据对账工作：</p>
+                      <div className="bg-indigo-50 rounded-lg p-3">
+                        <p className="font-medium text-indigo-700 mb-1">📝 对账规则</p>
+                        <p className="text-xs text-indigo-600">创建规则 · 编辑规则 · 管理规则</p>
+                      </div>
+                      <div className="bg-purple-50 rounded-lg p-3">
+                        <p className="font-medium text-purple-700 mb-1">⚙️ 执行对账</p>
+                        <p className="text-xs text-purple-600">上传数据 · 自动匹配 · 结果分析</p>
+                      </div>
+                      <p className="text-gray-500 text-xs pt-2">
+                        💡 使用方式：上传业务数据和财务数据，选择对账规则执行
+                      </p>
+                    </div>
+                  </>
+                )
               ) : (
+                /* 未登录状态 */
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
                     未登录
