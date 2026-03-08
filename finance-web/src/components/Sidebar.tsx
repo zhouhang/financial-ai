@@ -1,38 +1,17 @@
 import { useState } from 'react';
 import {
-  BarChart3,
   LogOut,
   MessageSquare,
+  Plus,
   Trash2,
-  User,
-  Zap,
+  History,
 } from 'lucide-react';
-import type { ConnectionStatus, Conversation } from '../types';
+import type { ConnectionStatus, Conversation, AgentType } from '../types';
+import AgentSelector from './AgentSelector';
 
-/** 历史对话时间格式化：今天→时间，昨天→昨天，2-7天→过去7天，8-30天→过去30天，1月-1年→月份，1年+→年份 */
-function formatConversationTime(date: Date | string): string {
-  const d = new Date(date);
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dateStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const diffDays = Math.floor((todayStart.getTime() - dateStart.getTime()) / (24 * 60 * 60 * 1000));
-
-  if (diffDays === 0) {
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-  }
-  if (diffDays === 1) {
-    return '昨天';
-  }
-  if (diffDays >= 2 && diffDays <= 7) {
-    return '过去7天';
-  }
-  if (diffDays >= 8 && diffDays <= 30) {
-    return '过去30天';
-  }
-  if (diffDays <= 365) {
-    return d.toLocaleDateString('zh-CN', { month: 'long', year: 'numeric' });
-  }
-  return d.toLocaleDateString('zh-CN', { year: 'numeric' });
+// 过滤会话标题中的 Agent 前缀
+function filterConvTitle(title: string): string {
+  return title.replace(/^\[AGENT:data_process\]\s*/, '');
 }
 
 interface SidebarProps {
@@ -44,7 +23,8 @@ interface SidebarProps {
   onDeleteConversation?: (id: string) => void;
   currentUser?: Record<string, unknown> | null;
   onLogout?: () => void;
-  collapsed?: boolean;
+  selectedAgent?: AgentType;
+  onSelectAgent?: (agent: AgentType) => void;
 }
 
 export default function Sidebar({
@@ -56,83 +36,96 @@ export default function Sidebar({
   onDeleteConversation,
   currentUser,
   onLogout,
-  collapsed = false,
+  selectedAgent = 'reconciliation',
+  onSelectAgent,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
+  // 调试：打印 Sidebar 渲染信息
+  console.log('[Sidebar] 渲染', {
+    conversations: conversations?.length,
+    currentUser: currentUser ? '✅' : '❌',
+    selectedAgent,
+  });
+
   const handleDelete = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation(); // 防止触发选择会话
+    e.stopPropagation();
     if (confirm('确定要删除这个会话吗？')) {
       onDeleteConversation?.(id);
     }
   };
-  return (
-    <aside
-      className={`relative bg-white flex flex-col h-full shrink-0 border-r border-gray-200 transition-all duration-200 overflow-hidden ${
-        collapsed ? 'w-16' : 'w-64'
-      }`}
-    >
-      {/* ── Brand ── */}
-      <div className={`pt-5 pb-4 flex items-center ${collapsed ? 'justify-center px-0' : 'gap-3 px-4'}`}>
-        <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shrink-0">
-          <BarChart3 className="w-6 h-6 text-white" />
-        </div>
-        {!collapsed && (
-          <div className="flex-1 min-w-0">
-            <h1 className="text-gray-900 font-semibold text-base leading-tight">Tally</h1>
-            <p className="text-gray-500 text-xs">智能财务助手</p>
-          </div>
-        )}
-      </div>
 
-      {/* ── New Analysis Button ── */}
-      <div className={`mb-3 ${collapsed ? 'px-2' : 'px-4'}`}>
+  return (
+    <aside 
+      style={{ 
+        width: '256px', 
+        minWidth: '256px',
+        maxWidth: '256px',
+        background: 'white',
+        borderRight: '1px solid #f1f5f9',
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        flexShrink: 0,
+      }}
+    >
+      {/* ── 顶部：新建会话 ── */}
+      <div className="p-3">
         <button
           onClick={onNewConversation}
-          className={`w-full flex items-center justify-center py-3 rounded-xl
-            bg-gradient-to-r from-blue-500 to-blue-600 text-white font-medium text-sm
-            hover:shadow-lg hover:shadow-blue-500/30 transition-all cursor-pointer ${collapsed ? 'px-0' : 'gap-2'}`}
-          title={collapsed ? '开启新对话' : undefined}
+          className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg
+            text-gray-700 text-sm font-medium hover:bg-gray-50 hover:border-gray-300
+            transition-all duration-150 cursor-pointer"
         >
-          <Zap className="w-4 h-4 shrink-0" />
-          {!collapsed && <span>开启新对话</span>}
+          <Plus className="w-4 h-4" />
+          <span>新建会话</span>
         </button>
       </div>
 
-      {/* ── Conversation List ── */}
-      <div className={`flex-1 overflow-y-auto ${collapsed ? 'px-2' : 'px-4'}`}>
-        {!collapsed && (
-          <p className="text-gray-500 text-xs font-medium mb-2">历史对话</p>
-        )}
-        <div className="space-y-1">
+      {/* ── Agent 选择器 ── */}
+      <AgentSelector
+        selectedAgent={selectedAgent}
+        onSelectAgent={onSelectAgent}
+      />
+
+      {/* ── 历史会话 ── */}
+      <div className="flex-1 overflow-y-auto px-3 py-2">
+        <div className="flex items-center gap-2 px-2 mb-2">
+          <History className="w-3.5 h-3.5 text-gray-400" />
+          <span className="text-xs font-medium text-gray-500">历史会话</span>
+        </div>
+        
+        <div className="space-y-0.5">
           {conversations.map((conv) => (
             <div
               key={conv.id}
-              className={`relative flex items-center rounded-lg transition-all cursor-pointer ${
-                collapsed ? 'justify-center px-2 py-2.5' : 'items-start gap-2.5 px-3 py-2.5'
-              } ${
-                activeConversationId === conv.id
+              className={`
+                relative flex items-center gap-2 px-3 py-2.5 rounded-lg
+                text-left transition-all duration-150 cursor-pointer group
+                ${activeConversationId === conv.id
                   ? 'bg-blue-50 text-blue-600'
-                  : 'text-gray-600 hover:bg-gray-50'
-              }`}
+                  : 'text-gray-700 hover:bg-gray-100'
+                }
+              `}
               onClick={() => onSelectConversation(conv.id)}
               onMouseEnter={() => setHoveredId(conv.id)}
               onMouseLeave={() => setHoveredId(null)}
-              title={collapsed ? conv.title : undefined}
             >
-              <MessageSquare className="w-4 h-4 shrink-0 mt-0.5" />
-              {!collapsed && (
-                <div className="flex-1 min-w-0">
-                  <span className="block truncate text-sm font-medium">{conv.title}</span>
-                  <span className="block text-xs text-gray-400 mt-0.5">
-                    {formatConversationTime(conv.updatedAt)}
-                  </span>
-                </div>
-              )}
-              {!collapsed && hoveredId === conv.id && onDeleteConversation && (
+              <MessageSquare className={`w-4 h-4 shrink-0 ${activeConversationId === conv.id ? 'text-blue-600' : 'text-gray-400'}`} />
+              <div className="flex-1 min-w-0">
+                <span className="block truncate text-sm font-medium">{filterConvTitle(conv.title)}</span>
+                <span className={`block text-xs mt-0.5 ${activeConversationId === conv.id ? 'text-blue-400' : 'text-gray-400'}`}>
+                  {new Date(conv.updatedAt).toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })}
+                </span>
+              </div>
+              {/* 删除按钮 */}
+              {hoveredId === conv.id && onDeleteConversation && (
                 <button
                   onClick={(e) => handleDelete(e, conv.id)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                  className="opacity-0 group-hover:opacity-100 p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all"
                   title="删除会话"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -143,47 +136,45 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* ── User / Status ── */}
-      <div className={`py-4 border-t border-gray-100 ${collapsed ? 'px-2' : 'px-4'}`}>
-        {currentUser && !collapsed && (
-          <div className="flex items-center justify-between mb-2">
+      {/* ── 底部：用户信息 ── */}
+      {currentUser && (
+        <div className="p-3 border-t border-gray-100">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                <User className="w-4 h-4 text-blue-600" />
+                <span className="text-xs font-medium text-blue-600">
+                  {(currentUser.username?.toString() || 'U').charAt(0).toUpperCase()}
+                </span>
               </div>
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-800 truncate">
-                  {currentUser.username as string}
+                  {currentUser.username?.toString() || '用户'}
                 </p>
-                {typeof currentUser.company_name === 'string' && currentUser.company_name && (
-                  <p className="text-xs text-gray-400 truncate">{currentUser.company_name}</p>
+                {currentUser.company_name && typeof currentUser.company_name === 'string' && (
+                  <p className="text-xs text-gray-400 truncate">
+                    {currentUser.company_name}
+                  </p>
                 )}
               </div>
             </div>
             {onLogout && (
               <button
                 onClick={onLogout}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer"
+                className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all cursor-pointer"
                 title="退出登录"
               >
                 <LogOut className="w-4 h-4" />
               </button>
             )}
           </div>
-        )}
-        {currentUser && collapsed && (
-          <div className="flex justify-center mb-2">
-            <div
-              className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center"
-              title={currentUser.username as string}
-            >
-              <User className="w-4 h-4 text-blue-600" />
-            </div>
-          </div>
-        )}
-        <div className={`flex items-center gap-2 ${collapsed ? 'justify-center' : ''}`}>
+        </div>
+      )}
+
+      {/* ── 连接状态 ── */}
+      <div className="px-3 py-2 border-t border-gray-100">
+        <div className="flex items-center gap-2">
           <div
-            className={`w-2 h-2 rounded-full shrink-0 ${
+            className={`w-2 h-2 rounded-full ${
               connectionStatus === 'connected'
                 ? 'bg-green-500'
                 : connectionStatus === 'connecting'
@@ -191,15 +182,13 @@ export default function Sidebar({
                 : 'bg-red-500'
             }`}
           />
-          {!collapsed && (
-            <span className="text-gray-700 text-xs font-medium">
-              {connectionStatus === 'connected'
-                ? '系统就绪'
-                : connectionStatus === 'connecting'
-                ? '正在连接...'
-                : '连接断开'}
-            </span>
-          )}
+          <span className="text-xs text-gray-500 font-medium">
+            {connectionStatus === 'connected'
+              ? '已连接'
+              : connectionStatus === 'connecting'
+              ? '连接中...'
+              : '未连接'}
+          </span>
         </div>
       </div>
     </aside>

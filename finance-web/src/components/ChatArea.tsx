@@ -1,21 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ChevronLeft,
-  ChevronRight,
   Paperclip,
   Send,
   Loader2,
   X,
   FileSpreadsheet,
+  Sparkles,
+  MessageSquare,
 } from 'lucide-react';
-import type { ConnectionStatus, Message, MessageAttachment, UploadedFile } from '../types';
+import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, AgentType } from '../types';
+import { AVAILABLE_AGENTS } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
-
-/** 仅允许上传 Excel 和 CSV 文件 */
-const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
-
-/** 最多上传文件数 */
-const MAX_UPLOAD_FILES = 2;
 
 /** 暂存文件（本地还没上传的） */
 interface StagedFile {
@@ -36,23 +31,14 @@ interface ChatAreaProps {
   isLoading: boolean;
   isLoadingConversation?: boolean;
   connectionStatus: ConnectionStatus;
-  onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean) => void;
+  onSendMessage: (text: string, attachments?: MessageAttachment[], silent?: boolean, agentType?: AgentType) => void;
   onFileUploaded: (file: UploadedFile) => void;
   threadId: string;
   showInput?: boolean;
   currentUser?: Record<string, unknown> | null;
-  /** 对话名称，显示在顶部左侧 */
-  conversationTitle?: string;
-  /** 未登录时显示登录按钮，点击回调 */
-  onLogin?: () => void;
-  /** 侧边栏是否收起 */
-  sidebarCollapsed?: boolean;
-  /** 切换侧边栏收起/展开 */
-  /** 认证 token */
-  authToken?: string | null;
-  onToggleSidebar?: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
+  selectedAgent?: AgentType;
 }
 
 export default function ChatArea({
@@ -65,12 +51,8 @@ export default function ChatArea({
   threadId,
   showInput = true,
   currentUser,
-  conversationTitle,
-  onLogin,
-  sidebarCollapsed = false,
-  onToggleSidebar,
   streamingMessageId,
-  authToken,
+  selectedAgent = 'reconciliation',
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -83,31 +65,23 @@ export default function ChatArea({
   useEffect(() => {
     // 会话加载完成后滚动到底部（不使用动画，直接跳转）
     if (!isLoadingConversation && messages.length > 0) {
-      // 使用 setTimeout 确保 DOM 完全渲染后再滚动（修复刷新页面不滚动的问题）
-      const timer = setTimeout(() => {
+      // 使用 setTimeout 确保 DOM 更新完成后再滚动
+      setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-      }, 50);
-      return () => clearTimeout(timer);
+      }, 0);
     }
   }, [isLoadingConversation, messages.length]);
-
-  // 新消息时平滑滚动（避免在初始加载时触发）
-  useEffect(() => {
-    // 只在消息数量变化且不在加载会话时才平滑滚动
-    if (!isLoadingConversation && messages.length > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages.length, isLoading, isLoadingConversation]);
-
-  // 流式消息内容变化时也触发滚动（确保长消息流式输出时页面自动下滑）
+  
+  // 新消息或消息内容更新时平滑滚动
+  const lastMessageContent = messages[messages.length - 1]?.content;
   useEffect(() => {
     if (!isLoadingConversation && messages.length > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg.role === 'assistant') {
+      // 使用 requestAnimationFrame 确保在渲染帧后滚动
+      requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }
+      });
     }
-  }, [messages.map(m => m.content).join(''), isLoadingConversation]);
+  }, [messages.length, lastMessageContent, isLoading, isLoadingConversation]);
 
   // 聚焦输入框
   useEffect(() => {
@@ -115,28 +89,6 @@ export default function ChatArea({
       inputRef.current.focus();
     }
   }, [showInput, threadId]);
-
-  // 解析消息中的 SAVE_RULE / SAVE_NEW_RULE 标记，写入 localStorage 供登录后保存使用
-  useEffect(() => {
-    for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        const saveRuleMatch = msg.content.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
-        if (saveRuleMatch) {
-          localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
-          localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
-          localStorage.removeItem('pending_thread_id');
-          localStorage.removeItem('pending_is_new_rule');
-        }
-        const saveNewRuleMatch = msg.content.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
-        if (saveNewRuleMatch) {
-          localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
-          localStorage.setItem('pending_thread_id', threadId);
-          localStorage.setItem('pending_is_new_rule', 'true');
-          localStorage.removeItem('pending_source_rule_id');
-        }
-      }
-    }
-  }, [messages, threadId]);
 
   // 暴露聚焦函数给父组件
   useEffect(() => {
@@ -170,10 +122,6 @@ export default function ChatArea({
           formData.append('thread_id', threadId);
           // ⚠️ 修复：第一个文件时设置 is_first_file=1，其他为0（避免字符串"false"被当成真值）
           formData.append('is_first_file', index === 0 ? '1' : '0');
-          // 如果有 auth_token，添加到表单（游客模式下为空）
-          if (authToken) {
-            formData.append('auth_token', authToken);
-          }
 
           const resp = await fetch('/api/upload', {
             method: 'POST',
@@ -220,55 +168,33 @@ export default function ChatArea({
     const finalText = text || `已上传 ${attachments?.length || 0} 个文件，请处理。`;
 
     // 先发送用户消息（显示文件附件）
-    onSendMessage(finalText, attachments);
+    onSendMessage(finalText, attachments, false, selectedAgent);
       
     // 然后通知父组件文件已上传（显示系统消息）
     uploadedList.forEach((f) => onFileUploaded(f));
     
     setInputText('');
-  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage]);
+  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage, selectedAgent]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // 忽略输入法组合过程中的按键事件（中文、日文等）
-    if (e.nativeEvent.isComposing) {
-      return;
-    }
-
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
-    }
+        }
   };
 
-  // 选文件 → 暂存到本地（不上传），仅允许 Excel/CSV，最多 2 个
+  // 选文件 → 暂存到本地（不上传）
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const rejected: string[] = [];
-    const newStaged: StagedFile[] = [];
-    for (const file of Array.from(files)) {
-      const ext = '.' + (file.name.split('.').pop()?.toLowerCase() || '');
-      if (ALLOWED_EXTENSIONS.includes(ext)) {
-        newStaged.push({ file, name: file.name, size: file.size });
-      } else {
-        rejected.push(file.name);
-      }
-    }
+    const newStaged: StagedFile[] = Array.from(files).map((file) => ({
+      file,
+      name: file.name,
+      size: file.size,
+    }));
 
-    if (rejected.length > 0) {
-      alert(`仅支持 Excel 和 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv），以下文件已忽略：\n${rejected.join('\n')}`);
-    }
-    if (newStaged.length > 0) {
-      setStagedFiles((prev) => {
-        const canAdd = Math.max(0, MAX_UPLOAD_FILES - prev.length);
-        const toAdd = newStaged.slice(0, canAdd);
-        if (newStaged.length > canAdd) {
-          alert('最多只能上传 2 个文件');
-        }
-        return [...prev, ...toAdd];
-      });
-    }
+    setStagedFiles((prev) => [...prev, ...newStaged]);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
@@ -295,67 +221,75 @@ export default function ChatArea({
     onSendMessage(jsonMessage, undefined, true); // silent = true
   }, [onSendMessage]);
 
+
   return (
-    <div className="flex-1 flex flex-col min-w-0 bg-surface-secondary relative">
+    <div style={{
+      flex: '1 1 0%',
+      display: 'flex',
+      flexDirection: 'column',
+      minWidth: 0,
+      background: '#f8fafc',
+      height: '100%',
+      overflow: 'hidden',
+    }}>
       {/* ── Header ── */}
-      <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          {onToggleSidebar && (
-            <button
-              onClick={onToggleSidebar}
-              className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors shrink-0"
-              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            >
-              {sidebarCollapsed ? (
-                <ChevronRight className="w-5 h-5" />
-              ) : (
-                <ChevronLeft className="w-5 h-5" />
-              )}
-            </button>
-          )}
-          <div
-            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-              connectionStatus === 'connected'
-                ? 'bg-green-500'
-                : connectionStatus === 'connecting'
-                ? 'bg-yellow-500 animate-pulse'
-                : 'bg-red-500'
-            }`}
-          />
-          <span className="text-sm font-medium text-gray-800 truncate">
-            {conversationTitle || 'Tally 智能财务助手'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {!currentUser && onLogin ? (
-            <button
-              onClick={onLogin}
-              className="px-4 py-2 text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-            >
-              登录
-            </button>
-          ) : currentUser ? null : (
-            <span
-              className={`text-xs font-medium px-3 py-1.5 rounded-full ${
-                connectionStatus === 'connected'
-                  ? 'bg-green-50 text-green-600'
-                  : connectionStatus === 'connecting'
-                  ? 'bg-yellow-50 text-yellow-600'
-                  : 'bg-red-50 text-red-600'
-              }`}
-            >
-              {connectionStatus === 'connected'
-                ? '已连接'
-                : connectionStatus === 'connecting'
-                ? '连接中'
-                : '未连接'}
+      <header style={{
+        height: '48px',
+        background: 'white',
+        borderBottom: '1px solid #f1f5f9',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 16px',
+        flexShrink: 0,
+      }}>
+        <div className="flex items-center gap-2">
+          {/* 当前选中的数字员工 */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 rounded-md">
+            {selectedAgent === 'data_process' ? (
+              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+            ) : (
+              <MessageSquare className="w-3.5 h-3.5 text-blue-600" />
+            )}
+            <span className="text-xs font-medium text-blue-600">
+              {selectedAgent === 'data_process' ? '数据整理数字员工' : '智能对账助手'}
             </span>
-          )}
+          </div>
+          <div className="w-px h-4 bg-gray-200" />
+          <h2 className="text-sm font-medium text-gray-700">分析会话</h2>
         </div>
       </header>
 
+      {/* ── AI 正在处理横幅 ── */}
+      {isLoading && (
+        <div style={{
+          background: 'white',
+          borderBottom: '1px solid #f1f5f9',
+          padding: '8px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          flexShrink: 0,
+        }}>
+          <div className="flex gap-1">
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+          </div>
+          <span className="text-xs text-gray-500">
+            AI 正在处理...
+          </span>
+        </div>
+      )}
+
       {/* ── Messages ── */}
-      <div className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
+      <div style={{
+        flex: '1 1 0%',
+        overflowY: 'auto',
+        padding: '24px 16px 0 16px',
+        minHeight: 0,
+        marginBottom: '16px',
+      }}>
         {/* 会话加载中 */}
         {isLoadingConversation && (
           <div className="flex items-center justify-center h-full">
@@ -366,31 +300,72 @@ export default function ChatArea({
           </div>
         )}
         
-        {/* 空状态 */}
+        {/* 空状态 - 根据 Agent 类型显示不同介绍 */}
         {!isLoadingConversation && messages.length === 0 && !isLoading && (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+            <div className="text-center max-w-lg px-4">
+              {/* Agent 图标 */}
+              <div className="w-16 h-16 rounded-2xl bg-white border border-gray-100 flex items-center justify-center mx-auto mb-4">
+                {selectedAgent === 'data_process' ? (
+                  <Sparkles className="w-8 h-8 text-blue-500" />
+                ) : (
+                  <MessageSquare className="w-8 h-8 text-blue-500" />
+                )}
               </div>
+              
               {currentUser ? (
-                <>
-                  <h3 className="text-base font-medium text-gray-800 mb-2">
-                    开启新对话，开始交流
-                  </h3>
-                  <p className="text-sm text-gray-500">
-                    上传数据文件或直接描述您的分析需求
-                  </p>
-                </>
+                /* 已登录 - 显示 Agent 介绍 */
+                selectedAgent === 'data_process' ? (
+                  /* 数据整理数字员工介绍 */
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                      数据整理数字员工
+                    </h3>
+                    <div className="text-sm text-gray-600 text-left space-y-3">
+                      <p>我配置了多个专业技能，可以自动识别您的需求：</p>
+                      <div className="bg-blue-50 rounded-lg p-3">
+                        <p className="font-medium text-blue-700 mb-1">📊 审计数据整理</p>
+                        <p className="text-xs text-blue-600">货币资金 · 流水分析 · 应收账款 · 库存商品 · 开户清单</p>
+                      </div>
+                      <div className="bg-green-50 rounded-lg p-3">
+                        <p className="font-medium text-green-700 mb-1">📈 核算报表填充</p>
+                        <p className="text-xs text-green-600">手工凭证 · BI费用明细 · BI损益毛利</p>
+                      </div>
+                      <p className="text-gray-500 text-xs pt-2">
+                        💡 使用方式：上传 Excel 文件 + 描述您的需求
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  /* 智能对账助手介绍 */
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                      智能对账助手
+                    </h3>
+                    <div className="text-sm text-gray-600 text-left space-y-3">
+                      <p>我可以帮助您完成财务数据对账工作：</p>
+                      <div className="bg-indigo-50 rounded-lg p-3">
+                        <p className="font-medium text-indigo-700 mb-1">📝 对账规则</p>
+                        <p className="text-xs text-indigo-600">创建规则 · 编辑规则 · 管理规则</p>
+                      </div>
+                      <div className="bg-purple-50 rounded-lg p-3">
+                        <p className="font-medium text-purple-700 mb-1">⚙️ 执行对账</p>
+                        <p className="text-xs text-purple-600">上传数据 · 自动匹配 · 结果分析</p>
+                      </div>
+                      <p className="text-gray-500 text-xs pt-2">
+                        💡 使用方式：上传业务数据和财务数据，选择对账规则执行
+                      </p>
+                    </div>
+                  </>
+                )
               ) : (
+                /* 未登录状态 */
                 <>
                   <h3 className="text-base font-medium text-gray-800 mb-2">
-                    您好！我是 Tally 智能对账助手
+                    未登录
                   </h3>
                   <p className="text-sm text-gray-500">
-                    我可以帮助您进行数据对比对账，上传两个文件即可开始
+                    发送"登录"或"注册"进行身份验证
                   </p>
                 </>
               )}
@@ -413,13 +388,15 @@ export default function ChatArea({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* ── Floating Input Bar ── */}
+      {/* ── Input Bar ── */}
       {showInput && (
-      <div className="absolute bottom-0 left-0 right-0 pointer-events-none z-10">
-        <div className="px-6 pb-3 pointer-events-none">
-          <div className="max-w-4xl mx-auto pointer-events-none">
-            {/* Floating container with shadow */}
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-200 pointer-events-auto overflow-hidden">
+      <div style={{
+        padding: '0 16px 16px 16px',
+        flexShrink: 0,
+      }}>
+        <div style={{ maxWidth: '768px', margin: '0 auto' }}>
+          {/* Input container */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               {/* 暂存文件预览条 */}
               {stagedFiles.length > 0 && (
                 <div className="px-3 pt-3 flex flex-wrap gap-2">
@@ -443,12 +420,12 @@ export default function ChatArea({
                 </div>
               )}
 
-              <div className="flex items-center gap-2.5 p-3">
+              <div className="flex items-center gap-3 p-3">
                 {/* File upload */}
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".xlsx,.xls,.xlsm,.xlsb,.csv"
+                  accept=".csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg"
                   multiple
                   onChange={handleFileSelect}
                   className="hidden"
@@ -456,11 +433,11 @@ export default function ChatArea({
                 <button
                   type="button"
                   onClick={handleUploadClick}
-                  disabled={isUploading || stagedFiles.length >= MAX_UPLOAD_FILES}
+                  disabled={isUploading}
                   className="w-9 h-9 rounded-lg flex items-center justify-center
-                    text-gray-500 hover:text-blue-500 hover:bg-blue-50
+                    text-gray-400 hover:text-blue-500 hover:bg-blue-50
                     transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
-                  title={stagedFiles.length >= MAX_UPLOAD_FILES ? '最多上传 2 个文件' : '添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
+                  title="添加文件（支持多选）"
                 >
                   {isUploading ? (
                     <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />
@@ -476,7 +453,7 @@ export default function ChatArea({
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="描述您的分析需求 (Shift+Enter 换行)..."
+                    placeholder="尽管问..."
                     rows={1}
                     className="w-full px-3 py-2 text-sm rounded-lg
                       bg-transparent resize-none
@@ -495,23 +472,22 @@ export default function ChatArea({
                 <button
                   onClick={handleSend}
                   disabled={(!inputText.trim() && stagedFiles.length === 0) || isLoading || isUploading}
-                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0
-                    bg-gradient-to-r from-blue-500 to-blue-600 text-white
-                    hover:shadow-md hover:shadow-blue-500/30 transition-all
-                    disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none cursor-pointer"
+                  className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0
+                    bg-blue-500 text-white
+                    hover:bg-blue-600 transition-colors
+                    disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-500 cursor-pointer"
                 >
                   <Send className="w-4 h-4" />
                 </button>
               </div>
             </div>
-            
+
             {/* Bottom hint text */}
-            <div className="mt-2">
-              <p className="text-center text-[11px] text-gray-400">
-                AI 分析结果仅供参考，请结合实际数据进行判断
+            <div className="mt-3 text-center">
+              <p className="text-xs text-gray-400">
+                智能财务助手
               </p>
             </div>
-          </div>
         </div>
       </div>
       )}

@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Bot,
   ChevronDown,
@@ -8,10 +10,7 @@ import {
   Pencil,
   User,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import type { Message, MessageAttachment } from '../types';
-import { ResponsiveTable, type TableColumn } from './ResponsiveTable';
-import { useTablePreferences } from '../hooks/useTablePreferences';
 
 interface MessageBubbleProps {
   message: Message;
@@ -30,14 +29,6 @@ function formatTime(date: Date): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-/** 移除 SAVE_RULE / SAVE_NEW_RULE 内部标记，不展示给用户 */
-function stripSaveRuleTag(content: string): string {
-  return content
-    .replace(/\[SAVE_RULE:[^\]]+\]\s*/g, '')
-    .replace(/\[SAVE_NEW_RULE:[^\]]+\]\s*/g, '')
-    .trim();
 }
 
 function formatFileSize(bytes: number): string {
@@ -131,427 +122,140 @@ function SystemActionMessage({ message }: { message: Message }) {
   );
 }
 
-const SPINNER_REGEX = /\{\{?SPINNER\}\}?/;
-
-interface ParsedTable {
-  headers: string[];
-  rows: string[][];
-  isColumnTable?: boolean;
-}
-
-function parseMarkdownTable(content: string): ParsedTable | null {
-  const lines = content.trim().split('\n');
-  if (lines.length < 2) return null;
-
-  const headerLine = lines[0];
-  const separatorLine = lines[1];
-
-  if (!separatorLine.includes('|') || !separatorLine.includes('-')) return null;
-
-  const headers = headerLine
-    .split('|')
-    .slice(1, -1)
-    .map((h) => h.trim());
-
-  const rows: string[][] = [];
-  for (let i = 2; i < lines.length; i++) {
-    const row = lines[i]
-      .split('|')
-      .slice(1, -1)
-      .map((cell) => cell.trim());
-    if (row.some((c) => c !== '')) {
-      rows.push(row);
-    }
-  }
-
-  if (headers.length === 0) return null;
-
-  const isColumnTable = headers.length === 1 && headers[0] === '列名';
-
-  return { headers, rows, isColumnTable };
-}
-
-function extractFileColumnTables(content: string): {
-  columnTables: { filename: string; columns: string[]; rowCount?: number; sampleRows?: string[][] }[];
-  before: string;
-  after: string;
-} {
-  const results: { filename: string; columns: string[]; rowCount?: number; sampleRows?: string[][] }[] = [];
-  const analysisCompleteIndex = content.indexOf('文件展示如下');
-  const searchStart = analysisCompleteIndex >= 0 ? analysisCompleteIndex : 0;
-  const searchContent = content.slice(searchStart);
-
-  // 支持两种格式：简单 (985行) 和复杂 (财务 85%) 976行
-  const tableBlockRegex = /\*\*([^*]+)\*\*\s*(?:\((\d+)行\)|\([^)]*\)\s*(\d+)行)\s*\n(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)*)/g;
-  let lastTableEnd = 0;
-  let firstFileIndex = searchStart;
-  let match;
-
-  while ((match = tableBlockRegex.exec(searchContent)) !== null) {
-    const filename = match[1].trim();
-    const rowCount = parseInt(match[2] || match[3], 10) || 0;
-    if (filename.includes('文件分析')) continue;
-
-    const tableContent = match[4];
-    const parsed = parseMarkdownTable(tableContent);
-
-    if (parsed && parsed.headers.length > 0) {
-      const columns = parsed.headers.filter((c) => c && !c.startsWith('…'));
-      const sampleRows = parsed.rows;
-      if (columns.length > 0) {
-        if (results.length === 0) firstFileIndex = searchStart + match.index;
-        results.push({ filename, columns, rowCount, sampleRows });
-        lastTableEnd = searchStart + match.index + match[0].length;
-      }
-    }
-  }
-
-  if (results.length >= 1) {
-    return {
-      columnTables: results,
-      before: content.slice(0, firstFileIndex),
-      after: lastTableEnd > 0 ? content.slice(lastTableEnd) : '',
-    };
-  }
-
-  return { columnTables: [], before: content, after: '' };
-}
-
-function mergeColumnTables(tables: { filename: string; columns: string[] }[]): ParsedTable | null {
-  if (tables.length === 0) return null;
-
-  const maxRows = Math.max(...tables.map(t => t.columns.length));
-  
-  const headers = tables.map(t => t.filename);
-  const rows: string[][] = [];
-
-  for (let i = 0; i < maxRows; i++) {
-    const row = tables.map(t => t.columns[i] || '');
-    rows.push(row);
-  }
-
-  return { headers, rows, isColumnTable: true };
-}
-
-function HorizontalColumnTable({
-  filename,
-  columns,
-  rowCount,
-  sampleRows,
-}: {
-  filename: string;
-  columns: string[];
-  rowCount?: number;
-  sampleRows?: string[][];
-}) {
-  const displayName = rowCount != null && rowCount > 0 ? `${filename} (${rowCount} 行)` : filename;
-  return (
-    <div className="my-3">
-      <div className="text-sm font-medium text-gray-700 mb-1">{displayName}</div>
-      <div className="border border-gray-200 rounded-lg overflow-x-auto bg-white" style={{ WebkitOverflowScrolling: 'touch' }}>
-        <table className="text-sm min-w-max">
-          <thead>
-            <tr className="bg-gray-50">
-              {columns.map((col, i) => (
-                <th key={i} className="px-3 py-2 text-left font-medium text-gray-600 whitespace-nowrap border-r border-gray-200 last:border-r-0">
-                  {col}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          {sampleRows && sampleRows.length > 0 && (
-            <tbody>
-              {sampleRows.map((row, ri) => (
-                <tr key={ri}>
-                  {columns.map((_, i) => (
-                    <td key={i} className="px-3 py-2 text-gray-800 whitespace-nowrap border-r border-gray-100 last:border-r-0">
-                      {row[i] ?? ''}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          )}
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function extractTablesFromMarkdown(content: string): { table: ParsedTable; before: string; after: string }[] {
-  const results: { table: ParsedTable; before: string; after: string }[] = [];
-  const tableRegex = /\|[^\n]+\|[^\n]*\n\|[-:\s|]+\|\n((?:\|[^\n]+\|\n?)+)/g;
-  
-  let lastIndex = 0;
-  let match;
-  
-  while ((match = tableRegex.exec(content)) !== null) {
-    const tableContent = match[0];
-    const parsed = parseMarkdownTable(tableContent);
-    
-    if (parsed) {
-      results.push({
-        table: parsed,
-        before: content.slice(lastIndex, match.index),
-        after: '',
-      });
-      lastIndex = match.index + tableContent.length;
-    }
-  }
-  
-  if (results.length > 0) {
-    results[results.length - 1].after = content.slice(lastIndex);
-  }
-  
-  return results;
-}
-
-function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeContent?: string }) {
-  const tableId = useMemo(() => `msg-table-${Math.random().toString(36).slice(2, 9)}`, []);
-  const { preferences, isLoaded, setViewMode, toggleColumnVisibility, setColumnWidth } = useTablePreferences(tableId);
-
-  if (table.isColumnTable && table.headers[0] === '列名' && table.rows.length > 0) {
-    const columns = table.rows.map((r) => r[0] || '').filter(Boolean);
-    const filenameMatch = beforeContent?.match(/\*\*([^*]+)\*\*\s*(?:\((\d+)行\)|\([^)]*\)\s*(\d+)行)/);
-    const filename = filenameMatch?.[1]?.trim() || '文件';
-    const rowCount = parseInt(filenameMatch?.[2] || filenameMatch?.[3] || '0', 10) || 0;
-    return (
-      <HorizontalColumnTable
-        filename={filename}
-        columns={columns}
-        rowCount={rowCount || undefined}
-        sampleRows={[]}
-      />
-    );
-  }
-
-  const columns: TableColumn[] = table.headers.map((header, index) => ({
-    key: `col-${index}`,
-    label: header,
-    width: index === 0 ? 200 : 120,
-    minWidth: 60,
-    essential: index === 0,
-  }));
-
-  const data = table.rows.map((row) => {
-    const rowData: Record<string, unknown> = {};
-    row.forEach((cell, index) => {
-      rowData[`col-${index}`] = cell;
-    });
-    return rowData;
+/** Markdown 渲染组件，支持流式打字效果 */
+function MarkdownContent({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+  // 追踪是否曾经处于流式状态（用于区分新消息和历史消息）
+  const hasBeenStreamingRef = useRef(isStreaming);
+  const [displayedLength, setDisplayedLength] = useState(() => {
+    return isStreaming ? 0 : content.length;
   });
+  const [isTyping, setIsTyping] = useState(false);
+  const prevContentRef = useRef(content);
+  const targetLengthRef = useRef(content.length);
 
-  if (!isLoaded) {
-    return <div className="animate-pulse h-32 bg-gray-100 rounded"></div>;
-  }
+  useEffect(() => {
+    if (isStreaming) hasBeenStreamingRef.current = true;
+  }, [isStreaming]);
 
-  const isExceptionTable = table.headers.includes('异常订单号') && table.headers.includes('异常原因');
-  const isColumnRequirementsTable = beforeContent?.includes('列名要求') || beforeContent?.includes('列名未能与');
-  const hideToolbar = isExceptionTable || isColumnRequirementsTable;
+  useEffect(() => {
+    if (!hasBeenStreamingRef.current) {
+      setDisplayedLength(content.length);
+      return;
+    }
+    const newContent = content;
+    if (newContent !== prevContentRef.current) {
+      if (newContent.startsWith(prevContentRef.current)) {
+        targetLengthRef.current = newContent.length;
+      } else {
+        setDisplayedLength(0);
+        targetLengthRef.current = newContent.length;
+      }
+      prevContentRef.current = newContent;
+    }
+    if (displayedLength < targetLengthRef.current) {
+      setIsTyping(true);
+      const timer = setTimeout(() => {
+        setDisplayedLength((prev) => Math.min(prev + 3, targetLengthRef.current));
+      }, 16);
+      return () => clearTimeout(timer);
+    } else {
+      setIsTyping(false);
+    }
+  }, [content, displayedLength]);
+
+  const displayContent =
+    !hasBeenStreamingRef.current || (!isStreaming && !isTyping)
+      ? content
+      : content.slice(0, displayedLength);
+  const showCursor = hasBeenStreamingRef.current && (isStreaming || isTyping);
 
   return (
-    <div className="my-2">
-      <ResponsiveTable
-        data={data}
-        columns={columns}
-        viewMode={preferences.viewMode}
-        columnVisibility={preferences.columnVisibility}
-        columnWidths={preferences.columnWidths}
-        filenameTruncationLength={preferences.filenameTruncationLength}
-        onViewModeChange={setViewMode}
-        onColumnVisibilityChange={toggleColumnVisibility}
-        onColumnWidthChange={setColumnWidth}
-        showViewMode={!hideToolbar}
-        showToolbar={!hideToolbar}
-      />
-    </div>
-  );
-}
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // 链接：下载文件用 fetch+blob 触发，普通链接新标签打开
+          a: ({ href, children }) => {
+            const isDownload =
+              href &&
+              (href.includes('/result/') ||
+                href.match(/\.(xlsx|xls|csv|zip|pdf)(\?|$)/i));
 
-function preprocessBulletList(content: string): string {
-  let normalized = content.replace(/^• (.+)$/gm, '- $1');
-  // 兼容后端/中间层把换行压平成空格的场景，尽量恢复 Markdown 结构
-  normalized = normalized
-    .replace(/\\n/g, '\n')
-    .replace(/([^\n])\s+(#{2,6}\s)/g, '$1\n\n$2')
-    .replace(/([^\n])\s+(-\s+`[^`]+`)/g, '$1\n$2');
-  return normalized;
-}
+            const handleDownload = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+              if (!href) return;
+              e.preventDefault();
+              // 将绝对 URL 中的 host 剥离，走 Vite 代理（/result/...）
+              let proxyUrl = href;
+              try {
+                const u = new URL(href);
+                proxyUrl = u.pathname + u.search;
+              } catch {
+                // 已经是相对路径
+              }
+              try {
+                const resp = await fetch(proxyUrl);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const blob = await resp.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = decodeURIComponent(proxyUrl.split('/').pop() || 'download');
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+              } catch (err) {
+                console.error('Download failed:', err);
+                window.open(href, '_blank');
+              }
+            };
 
-/** 将内容按 HTML 表格拆分为 [文本, 表格, 文本, ...]，确保非表格文字走 Markdown 渲染 */
-function splitByHtmlTables(content: string): ({ type: 'markdown'; text: string } | { type: 'html'; html: string })[] {
-  const tableRegex = /<table[\s\S]*?<\/table>/gi;
-  const parts: ({ type: 'markdown'; text: string } | { type: 'html'; html: string })[] = [];
-  let lastIndex = 0;
-  let match;
-  while ((match = tableRegex.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ type: 'markdown', text: content.slice(lastIndex, match.index) });
-    }
-    parts.push({ type: 'html', html: match[0] });
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < content.length) {
-    parts.push({ type: 'markdown', text: content.slice(lastIndex) });
-  }
-  return parts;
-}
-
-/** 渲染带有表格支持的内容 */
-function ContentWithTables({ content }: { content: string }) {
-  const processedContent = useMemo(() => preprocessBulletList(content), [content]);
-  const { columnTables, before, after } = useMemo(() => extractFileColumnTables(processedContent), [processedContent]);
-  const regularTables = useMemo(() => extractTablesFromMarkdown(processedContent), [processedContent]);
-
-  if (columnTables.length >= 1) {
-    return (
-      <>
-        {before && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-            <ReactMarkdown>{before}</ReactMarkdown>
-          </div>
-        )}
-        {columnTables.map((table, idx) => (
-          <HorizontalColumnTable
-            key={idx}
-            filename={table.filename}
-            columns={table.columns}
-            rowCount={table.rowCount}
-            sampleRows={table.sampleRows}
-          />
-        ))}
-        {after && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-            <ReactMarkdown>{after}</ReactMarkdown>
-          </div>
-        )}
-      </>
-    );
-  }
-
-  if (regularTables.length === 0) {
-    const htmlTableParts = splitByHtmlTables(processedContent);
-    const hasHtmlTables = htmlTableParts.some((p) => p.type === 'html');
-    const markdownComponents = {
-      p: ({ children }: { children?: React.ReactNode }) => <p className="my-1">{children}</p>,
-      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
-      strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold">{children}</strong>,
-      blockquote: ({ children }: { children?: React.ReactNode }) => (
-        <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">{children}</blockquote>
-      ),
-      code: ({ children }: { children?: React.ReactNode }) => (
-        <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-      ),
-    };
-
-    if (hasHtmlTables && htmlTableParts.length > 0) {
-      return (
-        <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-          {htmlTableParts.map((part, idx) =>
-            part.type === 'markdown' ? (
-              part.text.trim() ? (
-                <ReactMarkdown key={idx} components={markdownComponents}>
-                  {part.text}
-                </ReactMarkdown>
-              ) : (
-                <span key={idx} />
-              )
+            return (
+              <a
+                href={href}
+                onClick={isDownload ? handleDownload : undefined}
+                target={!isDownload ? '_blank' : undefined}
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-800 underline underline-offset-2 cursor-pointer"
+              >
+                {children}
+              </a>
+            );
+          },
+          // 强调
+          strong: ({ children }) => (
+            <strong className="font-semibold text-text-primary">{children}</strong>
+          ),
+          // 无序列表
+          ul: ({ children }) => (
+            <ul className="list-disc list-inside space-y-1 my-2 pl-1">{children}</ul>
+          ),
+          // 有序列表
+          ol: ({ children }) => (
+            <ol className="list-decimal list-inside space-y-1 my-2 pl-1">{children}</ol>
+          ),
+          li: ({ children }) => <li className="text-sm">{children}</li>,
+          // 段落
+          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+          // 代码块
+          code: ({ children, className }) => {
+            const isBlock = className?.startsWith('language-');
+            return isBlock ? (
+              <pre className="bg-gray-50 rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-gray-200">
+                <code>{children}</code>
+              </pre>
             ) : (
-              <div
-                key={idx}
-                className="overflow-x-auto my-3 [&_table]:text-sm [&_table]:min-w-max"
-                dangerouslySetInnerHTML={{ __html: part.html }}
-              />
-            )
-          )}
-        </div>
-      );
-    }
-
-    return (
-      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-        <ReactMarkdown components={markdownComponents}>{processedContent}</ReactMarkdown>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      {regularTables.map((item: { table: ParsedTable; before: string; after: string }, idx: number) => (
-        <div key={idx}>
-          {item.before && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-              <ReactMarkdown
-                components={{
-                  p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
-                  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                    <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                      {children}
-                    </blockquote>
-                  ),
-                    code: ({ children }) => (
-                      <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-                    ),
-                }}
-              >
-                {item.before}
-              </ReactMarkdown>
-            </div>
-          )}
-          <TableRenderer table={item.table} beforeContent={item.before} />
-          {item.after && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
-              <ReactMarkdown
-                components={{
-                  p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
-                  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                  {children}
-                </blockquote>
-              ),
-                  code: ({ children }) => (
-                    <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-                  ),
-                }}
-              >
-                {item.after}
-              </ReactMarkdown>
-            </div>
-          )}
-        </div>
-      ))}
-    </>
-  );
-}
-
-/** Markdown 消息内容：支持 SPINNER 占位符与流式光标 */
-function MarkdownMessageContent({ content, isStreaming }: { content: string; isStreaming: boolean }) {
-  const parts = content.split(SPINNER_REGEX);
-  return (
-    <>
-      {parts.map((part, i, arr) => (
-        <span key={i}>
-          <ContentWithTables content={part} />
-          {i < arr.length - 1 && (
-            <span className="inline-flex gap-1 ml-0.5 align-middle">
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-              <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
-            </span>
-          )}
-        </span>
-      ))}
-      {isStreaming && (
+              <code className="bg-gray-100 rounded px-1 py-0.5 text-xs font-mono">{children}</code>
+            );
+          },
+        }}
+      >
+        {displayContent}
+      </ReactMarkdown>
+      {showCursor && (
         <span className="streaming-cursor inline-block w-0.5 h-4 bg-blue-500 ml-0.5 align-middle animate-pulse" />
       )}
-    </>
+    </div>
   );
 }
 
@@ -559,8 +263,6 @@ function MarkdownMessageContent({ content, isStreaming }: { content: string; isS
 function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
   const isHtmlForm = message.content.includes('<form');
-  // 表格消息也走 Markdown 渲染管线（ContentWithTables）以支持表格外文本的 Markdown
-  const isHtmlContent = isHtmlForm;
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
 
   useEffect(() => {
@@ -614,10 +316,10 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
       </div>
       <div className="flex-1 min-w-0">
         <div className="bg-white rounded-2xl rounded-tl-md px-4 py-3 shadow-sm border border-border/50 max-w-2xl">
-          {isHtmlContent ? (
-            <div
+          {isHtmlForm ? (
+            <div 
               ref={formRef}
-              className={isHtmlForm ? "auth-form-wrapper" : "html-content-wrapper text-sm text-text-primary leading-relaxed"}
+              className="auth-form-wrapper"
               dangerouslySetInnerHTML={{ __html: message.content }}
             />
           ) : isSavingMessage ? (
@@ -634,10 +336,7 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
             </div>
           ) : (
           <div className="message-content text-sm text-text-primary leading-relaxed">
-            <MarkdownMessageContent
-              content={stripSaveRuleTag(message.content)}
-              isStreaming={isStreaming}
-            />
+            <MarkdownContent content={message.content} isStreaming={isStreaming} />
           </div>
           )}
         </div>
