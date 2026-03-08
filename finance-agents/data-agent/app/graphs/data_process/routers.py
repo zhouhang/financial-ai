@@ -1,7 +1,11 @@
-"""审计数据处理子图路由函数
+"""审计数据处理子图路由函数（Deep Agent 架构）
 
 包含子图内部的条件路由函数。
-⚠️ 所有路由函数直接返回主图中的实际节点名（dp_generate_script 等），
+
+新架构三节点流程：
+  skill_retrieve → deep_agent → get_result
+
+⚠️ 所有路由函数直接返回主图中的实际节点名（dp_deep_agent 等），
    避免 LangGraph 1.0.x 非对等路径映射 bug。
 """
 
@@ -12,28 +16,20 @@ from langgraph.graph import END
 from app.models import AgentState
 
 
-def route_after_list_skills(state: AgentState) -> str:
-    """列出技能后路由：直接返回主图节点名"""
-    selected_skill_id = state.get("selected_skill_id")
+def route_after_skill_retrieve(state: AgentState) -> str:
+    """Skill 检索完成后路由：有候选 skill 则进入 Deep Agent，否则结束"""
+    tools_subset = state.get("tools_subset") or []
+    retrieve_done = state.get("dp_retrieve_done", False)
 
-    if selected_skill_id:
-        return "dp_generate_script"  # 直接返回主图节点名
+    if retrieve_done and tools_subset:
+        return "dp_deep_agent"  # 直接返回主图节点名
     return END
 
 
-def route_after_generate_script(state: AgentState) -> str:
-    """生成脚本后路由：直接返回主图节点名"""
-    script_status = state.get("script_status")
+def route_after_deep_agent(state: AgentState) -> str:
+    """Deep Agent 执行完成后路由：无论成功还是失败，都展示结果"""
+    execution_status = state.get("execution_status", "")
 
-    if script_status == "ready":
-        return "dp_execute_script"  # 直接返回主图节点名
-    return END
-
-
-def route_after_execute_script(state: AgentState) -> str:
-    """执行脚本后路由：直接返回主图节点名"""
-    execution_status = state.get("execution_status")
-
-    if execution_status in ["success", "error"]:
+    if execution_status in ("success", "error"):
         return "dp_get_result"  # 直接返回主图节点名
     return END

@@ -1,15 +1,25 @@
-"""审计数据处理子图节点函数
+"""审计数据处理子图节点函数（Deep Agent 架构）
 
-包含审计数据整理子图的各个节点函数：
-- list_skills_node: 列出所有可用的技能
-- generate_script_node: 生成或加载脚本
-- execute_script_node: 执行脚本
-- get_result_node: 获取执行结果
+基于 deepagents 包的 create_deep_agent 实现，核心流程：
+
+    create_deep_agent(skills=["/skills/"])
+        ↓
+    Agent 启动时读取 SKILL.md frontmatter (name, description)
+        ↓
+    用户请求 → Agent 自动匹配 skill → progressive disclosure 加载完整 skill
+        ↓
+    LLM 推理 → 执行工具 → 返回结果
+
+节点说明：
+  1. skill_retrieve_node: 提取用户请求，准备 Deep Agent 输入
+  2. deep_agent_node: 调用 create_deep_agent，自动处理 skill 匹配与执行
+  3. get_result_node: 格式化执行结果并写入 messages
 """
 
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -45,24 +55,30 @@ def _ensure_proc_agent_importable() -> None:
 
 _ensure_proc_agent_importable()
 
-
-import logging
-logger_dp = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
-def list_skills_node(state: AgentState) -> Dict[str, Any]:
-    """列出所有可用的审计数据整理技能
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点 1: skill_retrieve_node
+# 提取用户请求，准备 Deep Agent 输入（skill 检索由 create_deep_agent 自动处理）
+# ══════════════════════════════════════════════════════════════════════════════
 
-    输入：state 中的用户请求
-    输出：available_skills, selected_skill_id
+def skill_retrieve_node(state: AgentState) -> Dict[str, Any]:
+    """请求准备节点
+
+    提取用户请求文本和上传文件，准备 Deep Agent 输入。
+    
+    注意：skill 检索由 create_deep_agent 自动处理：
+    - Agent 启动时读取 skills/ 目录下所有 SKILL.md 的 frontmatter
+    - 根据用户请求自动匹配相关 skill（progressive disclosure）
+    - 无需手动构建 tools_subset
+
+    输入：messages、uploaded_files
+    输出：user_request、uploaded_files、dp_retrieve_done
     """
-    logger_dp.info("list_skills_node 被调用！state keys=" + str(list(state.keys())))
-    print("[DEBUG dp_list_skills] list_skills_node called!", flush=True)
-    # 直接调用 audit-agent 模块
-    from proc_agent.skill_handler import list_skills, get_skill_detail
-    from proc_agent.intent_recognizer import identify_intent
+    logger.info("skill_retrieve_node: 准备 Deep Agent 输入")
 
-    # 优先从 user_request 字段获取，其次从最后一条用户消息中提取
+    # ── 提取用户请求 ──────────────────────────────────────────────────────
     user_request = state.get("user_request", "")
     if not user_request:
         messages = list(state.get("messages", []))
@@ -73,98 +89,44 @@ def list_skills_node(state: AgentState) -> Dict[str, Any]:
 
     uploaded_files = state.get("uploaded_files", [])
 
-    # 识别用户意图
-    intent_type, score = identify_intent(user_request)
-
-    # 获取所有可用技能
-    skills = list_skills()
-
-    # 根据意图选择技能
-    selected_skill = next((s for s in skills if s["id"] == intent_type), None)
+    logger.info(
+        f"skill_retrieve_node: 请求={repr(user_request[:50]) if user_request else '无'}, "
+        f"文件数={len(uploaded_files)}"
+    )
 
     return {
-        "available_skills": skills,
-        "selected_skill_id": intent_type,
-        "intent_score": score,
         "user_request": user_request,
-        "uploaded_files": uploaded_files
+        "uploaded_files": uploaded_files,
+        "dp_retrieve_done": True,
     }
 
 
-def generate_script_node(state: AgentState) -> Dict[str, Any]:
-    """生成或加载脚本
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点 2: deep_agent_node
+# 调用 create_deep_agent，自动处理 skill 匹配与执行
+# ══════════════════════════════════════════════════════════════════════════════
 
-    输入：selected_skill_id
-    输出：script_path, script_status
+def deep_agent_node(state: AgentState) -> Dict[str, Any]:
+    """Deep Agent 节点
+
+    使用 create_deep_agent 驱动 LLM 推理，自动：
+    - 读取 skills/ 目录下的 SKILL.md frontmatter
+    - 根据用户请求匹配相关 skill（progressive disclosure）
+    - 执行对应的处理工具
+
+    输入：user_request、uploaded_files
+    输出：execution_status、execution_result、error_message
     """
-    from proc_agent.skill_handler import get_skill_detail
-    from proc_agent.intent_recognizer import get_script_file
-    from pathlib import Path
+    logger.info("deep_agent_node: 启动 Deep Agent")
 
-    selected_skill_id = state.get("selected_skill_id")
+    from proc_agent.deep_agent import run_deep_agent, PROC_AGENT_DIR
 
-    # 获取技能详情
-    skill_detail = get_skill_detail(selected_skill_id)
-    if not skill_detail:
-        return {
-            "script_status": "error",
-            "error_message": f"未找到技能：{selected_skill_id}"
-        }
-
-    # 获取脚本路径
-    script_file = get_script_file(selected_skill_id)
-    if not script_file:
-        return {
-            "script_status": "error",
-            "error_message": f"未找到脚本文件映射：{selected_skill_id}"
-        }
-
-    # 检查脚本是否存在
-    from proc_agent import PROC_AGENT_DIR
-    script_path = PROC_AGENT_DIR / script_file
-
-    if not script_path.exists():
-        return {
-            "script_status": "error",
-            "error_message": f"脚本文件不存在：{script_path}",
-            "script_path": str(script_path)
-        }
-
-    return {
-        "script_path": str(script_path),
-        "script_status": "ready",
-        "skill_detail": skill_detail
-    }
-
-
-def execute_script_node(state: AgentState) -> Dict[str, Any]:
-    """执行脚本处理数据
-
-    输入：script_path, uploaded_files, output_dir
-    输出：execution_status, execution_result
-    """
-    from proc_agent.skill_handler import process_audit_data
-
-    script_path = state.get("script_path")
+    user_request = state.get("user_request", "处理数据")
     uploaded_files = state.get("uploaded_files", [])
     output_dir = state.get("output_dir")
+    thread_id = state.get("thread_id") or "default"
 
-    if not script_path:
-        return {
-            "execution_status": "error",
-            "error_message": "脚本路径为空"
-        }
-
-    # 获取用户请求
-    user_request = state.get("user_request", "处理审计数据")
-    if not user_request:
-        messages = list(state.get("messages", []))
-        for msg in reversed(messages):
-            if hasattr(msg, "type") and msg.type == "human" and hasattr(msg, "content"):
-                user_request = msg.content
-                break
-
-    # 提取文件路径（uploaded_files 可能是 dict 列表或字符串列表）
+    # ── 解析文件路径 ──────────────────────────────────────────────────────
     file_paths = []
     for f in uploaded_files:
         if isinstance(f, dict):
@@ -175,12 +137,10 @@ def execute_script_node(state: AgentState) -> Dict[str, Any]:
             file_paths.append(f)
 
     # 将 /uploads/... 虚拟路径转换为绝对文件系统路径
-    # MCP 服务器返回的路径格式为 /uploads/年/月/日/文件名，需拼接 FINANCE_MCP_UPLOAD_DIR 前缀
     from app.config import FINANCE_MCP_UPLOAD_DIR
     resolved_paths = []
     for path in file_paths:
         if path.startswith("/uploads/"):
-            # /uploads/2026/3/3/file.xlsx → {FINANCE_MCP_UPLOAD_DIR}/2026/3/3/file.xlsx
             rel = path[len("/uploads/"):]
             abs_path = str(Path(FINANCE_MCP_UPLOAD_DIR) / rel)
         else:
@@ -188,53 +148,76 @@ def execute_script_node(state: AgentState) -> Dict[str, Any]:
         resolved_paths.append(abs_path)
     file_paths = resolved_paths
 
-    # 使用 thread_id 作为 chat_id 隔离输出目录
-    chat_id = state.get("thread_id") or "default"
+    # ── 设置输出目录 ──────────────────────────────────────────────────────
+    if not output_dir:
+        # 默认使用 proc-agent/result/{thread_id}
+        output_dir = str(PROC_AGENT_DIR / "result" / thread_id)
 
-    # 执行脚本
-    result = process_audit_data(
+    # ── 运行 Deep Agent ───────────────────────────────────────────────────
+    # create_deep_agent 已自动处理：
+    # - 从 /skills/ 加载所有 SKILL.md 的 frontmatter
+    # - 根据 user_request 自动匹配相关 skill
+    # - progressive disclosure 加载完整 skill 内容
+    # - LLM 推理并执行工具
+    result = run_deep_agent(
         user_request=user_request,
-        files=file_paths,
+        input_files=file_paths,
         output_dir=output_dir,
-        chat_id=chat_id,
+        chat_id=thread_id,
     )
 
+    # run_deep_agent 返回 DeepAgentResult，需要转为 dict
+    if hasattr(result, 'to_dict'):
+        result = result.to_dict()
+
+    execution_status = "success" if result.get("success") else "error"
+
     return {
-        "execution_status": result.get("status", "error"),
+        "execution_status": execution_status,
         "execution_result": result,
-        "error_message": result.get("error", {}).get("message") if result.get("status") == "error" else None
+        "error_message": result.get("error") if execution_status == "error" else None,
+        "selected_skill_id": result.get("selected_skill_id", ""),
     }
 
 
-def get_result_node(state: AgentState) -> Dict[str, Any]:
-    """获取并格式化执行结果
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点 3: get_result_node
+# 格式化结果并写入 messages
+# ══════════════════════════════════════════════════════════════════════════════
 
-    输入：execution_result
-    输出：formatted_result, messages
+def get_result_node(state: AgentState) -> Dict[str, Any]:
+    """结果展示节点
+
+    获取 Deep Agent 执行结果并格式化为用户友好的消息。
+
+    输入：execution_status、execution_result
+    输出：formatted_result、messages、result_files
     """
     execution_status = state.get("execution_status")
-    execution_result = state.get("execution_result")
+    execution_result = state.get("execution_result") or {}
+    selected_skill_id = state.get("selected_skill_id", "")
 
     if execution_status == "error":
-        error_message = state.get("error_message", "执行失败")
-        # 尝试从 execution_result 中获取更详细的错误信息
-        if execution_result and isinstance(execution_result, dict):
-            err = execution_result.get("error", {})
-            if isinstance(err, dict):
-                error_message = err.get("message", error_message)
+        error_msg = (
+            state.get("error_message")
+            or execution_result.get("error", "执行失败")
+        )
+        formatted = f"❌ 数据处理失败：{error_msg}"
         return {
-            "formatted_result": f"❌ 执行失败：{error_message}",
-            "messages": [AIMessage(content=f"执行失败：{error_message}")]
+            "formatted_result": formatted,
+            "messages": [AIMessage(content=formatted)],
         }
 
-    # 格式化成功结果
-    result_data = execution_result.get("data", {}) if execution_result else {}
-    result_files = result_data.get("result_files", [])
-    download_urls = result_data.get("download_urls", [])
-    intent_type = execution_result.get("intent_type", "") if execution_result else ""
+    # ── 解析成功结果 ──────────────────────────────────────────────────────
+    skill_name = execution_result.get("selected_skill_name", selected_skill_id)
+    tool_result = execution_result.get("tool_result") or {}
+    result_files: list = tool_result.get("result_files", [])
+    result_data: dict = tool_result.get("result_data") or {}
+    download_urls: list = result_data.get("download_urls", [])
 
     result_text = "✅ 数据处理成功！\n\n"
-    result_text += f"业务类型：{intent_type}\n"
+    if skill_name:
+        result_text += f"执行技能：{skill_name}\n"
     result_text += f"生成文件：{len(result_files)} 个\n"
 
     if download_urls:
@@ -247,8 +230,13 @@ def get_result_node(state: AgentState) -> Dict[str, Any]:
         for file_path in result_files:
             result_text += f"- {file_path}\n"
 
+    # 附加 LLM 推理说明（如果有）
+    llm_response = execution_result.get("llm_response", "")
+    if llm_response and len(llm_response) > 10:
+        result_text += f"\n**处理说明：**\n{llm_response[:300]}\n"
+
     return {
         "formatted_result": result_text,
         "messages": [AIMessage(content=result_text)],
-        "result_files": result_files
+        "result_files": result_files,
     }

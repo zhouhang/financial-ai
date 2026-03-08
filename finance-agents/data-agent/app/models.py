@@ -267,17 +267,23 @@ class AgentState(TypedDict, total=False):
     # ── Agent 类型 ────────────────────────────────────────────
     agent_type: Optional[str]  # 当前选择的 Agent 类型：reconciliation 或 data_process
 
-    # ── 审计/核算数据处理 ──────────────────────────────────────
+    # ── 审计/核算数据处理（Deep Agent 架构）──────────────────────────────────
     user_request: Optional[str]  # 用户的原始请求文本（供 data_process 子图使用）
-    available_skills: Optional[list]  # 可用技能列表
-    selected_skill_id: Optional[str]  # 选中的技能 ID
-    intent_score: Optional[float]  # 意图置信度分数
-    script_path: Optional[str]  # 处理脚本路径
-    script_status: Optional[str]  # 脚本状态：ready / error
-    skill_detail: Optional[dict]  # 技能详情
+    # skill retriever 输出
+    retrieved_skills: Optional[list]  # 检索到的 skill 列表（带分数）
+    tools_subset: Optional[list]   # Deep Agent 的 tools subset（skill schema 列表）
+    dp_retrieve_done: Optional[bool]  # skill_retrieve_node 完成标志
+    # deep_agent 输出
+    selected_skill_id: Optional[str]  # Deep Agent 选中的 skill ID
     execution_status: Optional[str]  # 执行状态：success / error
     execution_result: Optional[dict]  # 执行结果
     error_message: Optional[str]  # 错误消息
     formatted_result: Optional[str]  # 格式化后的结果文本
     result_files: Optional[list]  # 结果文件路径列表
     output_dir: Optional[str]  # 输出目录
+    # 兼容旧字段
+    available_skills: Optional[list]  # 可用技能列表（与 retrieved_skills 同步）
+    intent_score: Optional[float]  # 意图置信度分数（兼容旧字段）
+    script_path: Optional[str]  # 处理脚本路径（兼容旧字段）
+    script_status: Optional[str]  # 脚本状态：ready / error（兼容旧字段）
+    skill_detail: Optional[dict]  # 技能详情（兼容旧字段）
