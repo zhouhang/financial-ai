@@ -81,3 +81,24 @@ export interface WsOutgoing {
 // ── 连接状态 ─────────────────────────────────────────────────────────────
 
 export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
+
+// ── 数字员工和规则类型 ───────────────────────────────────────────────────
+
+export interface DigitalEmployee {
+  id: number;
+  code: string;
+  name: string;
+  desc_text?: string;
+  type: string;
+  memo?: string;
+}
+
+export interface EmployeeRule {
+  id: number;
+  code: string;
+  name: string;
+  desc_text?: string;
+  type: string;
+  parent_code?: string;
+  memo?: string;
+}

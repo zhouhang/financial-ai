@@ -1,13 +1,16 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   BarChart3,
+  ChevronDown,
+  ChevronRight,
   LogOut,
   MessageSquare,
   Trash2,
   User,
+  Users,
   Zap,
 } from 'lucide-react';
-import type { ConnectionStatus, Conversation } from '../types';
+import type { ConnectionStatus, Conversation, DigitalEmployee, EmployeeRule } from '../types';
 
 /** 历史对话时间格式化：今天→时间，昨天→昨天，2-7天→过去7天，8-30天→过去30天，1月-1年→月份，1年+→年份 */
 function formatConversationTime(date: Date | string): string {
@@ -45,6 +48,8 @@ interface SidebarProps {
   currentUser?: Record<string, unknown> | null;
   onLogout?: () => void;
   collapsed?: boolean;
+  onSelectRule?: (employee: DigitalEmployee, rule: EmployeeRule) => void;
+  selectedRuleCode?: string | null;
 }
 
 export default function Sidebar({
@@ -57,8 +62,63 @@ export default function Sidebar({
   currentUser,
   onLogout,
   collapsed = false,
+  onSelectRule,
+  selectedRuleCode,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  
+  // 数字员工状态
+  const [employees, setEmployees] = useState<DigitalEmployee[]>([]);
+  const [expandedEmployeeCode, setExpandedEmployeeCode] = useState<string | null>(null);
+  const [employeeRules, setEmployeeRules] = useState<Record<string, EmployeeRule[]>>({});
+  const [loadingRules, setLoadingRules] = useState<string | null>(null);
+  
+  // 加载数字员工列表
+  useEffect(() => {
+    const fetchEmployees = async () => {
+      try {
+        const response = await fetch('/api/proc/list_digital_employees');
+        const data = await response.json();
+        if (data.success && data.employees) {
+          setEmployees(data.employees);
+        }
+      } catch (error) {
+        console.error('加载数字员工列表失败:', error);
+      }
+    };
+    fetchEmployees();
+  }, []);
+  
+  // 点击数字员工，展开/收起规则列表
+  const handleEmployeeClick = async (employee: DigitalEmployee) => {
+    if (expandedEmployeeCode === employee.code) {
+      setExpandedEmployeeCode(null);
+      return;
+    }
+    
+    setExpandedEmployeeCode(employee.code);
+    
+    // 如果还没加载过该员工的规则，则加载
+    if (!employeeRules[employee.code]) {
+      setLoadingRules(employee.code);
+      try {
+        const response = await fetch(`/api/proc/list_rules_by_employee?employee_code=${employee.code}`);
+        const data = await response.json();
+        if (data.success && data.rules) {
+          setEmployeeRules(prev => ({ ...prev, [employee.code]: data.rules }));
+        }
+      } catch (error) {
+        console.error('加载规则列表失败:', error);
+      } finally {
+        setLoadingRules(null);
+      }
+    }
+  };
+  
+  // 点击规则
+  const handleRuleClick = (employee: DigitalEmployee, rule: EmployeeRule) => {
+    onSelectRule?.(employee, rule);
+  };
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation(); // 防止触发选择会话
@@ -99,6 +159,65 @@ export default function Sidebar({
         </button>
       </div>
 
+      {/* ── Digital Employees Section ── */}
+      {!collapsed && employees.length > 0 && (
+        <div className="px-4 mb-3">
+          <p className="text-gray-500 text-xs font-medium mb-2">选择数字员工</p>
+          <div className="space-y-1">
+            {employees.map((emp) => (
+              <div key={emp.code}>
+                {/* 数字员工项 */}
+                <div
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all ${
+                    expandedEmployeeCode === emp.code
+                      ? 'bg-blue-50 text-blue-600'
+                      : 'text-gray-600 hover:bg-gray-50'
+                  }`}
+                  onClick={() => handleEmployeeClick(emp)}
+                >
+                  {expandedEmployeeCode === emp.code ? (
+                    <ChevronDown className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 shrink-0" />
+                  )}
+                  <Users className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 truncate text-sm font-medium">{emp.name}</span>
+                </div>
+                
+                {/* 规则列表（二级菜单） */}
+                {expandedEmployeeCode === emp.code && (
+                  <div className="ml-6 mt-1 space-y-1">
+                    {loadingRules === emp.code ? (
+                      <div className="px-3 py-2 text-xs text-gray-400">加载中...</div>
+                    ) : employeeRules[emp.code]?.length ? (
+                      employeeRules[emp.code].map((rule) => (
+                        <div
+                          key={rule.code}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all ${
+                            selectedRuleCode === rule.code
+                              ? 'bg-blue-100 text-blue-700 font-medium'
+                              : 'text-gray-600 hover:bg-gray-50'
+                          }`}
+                          onClick={() => handleRuleClick(emp, rule)}
+                          title={rule.desc_text || rule.name}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            selectedRuleCode === rule.code ? 'bg-blue-500' : 'bg-gray-400'
+                          }`} />
+                          <span className="truncate text-sm">{rule.name}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-3 py-2 text-xs text-gray-400">暂无规则</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      
       {/* ── Conversation List ── */}
       <div className={`flex-1 overflow-y-auto ${collapsed ? 'px-2' : 'px-4'}`}>
         {!collapsed && (

@@ -8,7 +8,7 @@ import {
   X,
   FileSpreadsheet,
 } from 'lucide-react';
-import type { ConnectionStatus, Message, MessageAttachment, UploadedFile } from '../types';
+import type { ConnectionStatus, DigitalEmployee, EmployeeRule, Message, MessageAttachment, UploadedFile } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
@@ -53,6 +53,10 @@ interface ChatAreaProps {
   onToggleSidebar?: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
+  /** 选中的数字员工 */
+  selectedEmployee?: DigitalEmployee | null;
+  /** 选中的规则 */
+  selectedRule?: EmployeeRule | null;
 }
 
 export default function ChatArea({
@@ -71,6 +75,8 @@ export default function ChatArea({
   onToggleSidebar,
   streamingMessageId,
   authToken,
+  selectedEmployee,
+  selectedRule,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -313,6 +319,16 @@ export default function ChatArea({
               )}
             </button>
           )}
+          
+          {/* 选中的数字员工和规则显示 */}
+          {selectedEmployee && selectedRule ? (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100">
+              <span className="text-xs text-blue-600 font-medium">{selectedEmployee.name}</span>
+              <span className="text-gray-400">/</span>
+              <span className="text-xs text-blue-700 font-medium">{selectedRule.name}</span>
+            </div>
+          ) : null}
+          
           <div
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
               connectionStatus === 'connected'

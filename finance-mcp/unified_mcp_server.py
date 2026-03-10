@@ -103,6 +103,14 @@ _GUEST_TOOL_NAMES = {
     "create_guest_token", "verify_guest_token", "list_recommended_rules"
 }
 
+# Proc 模块工具名集合（数字员工和规则管理）
+_PROC_TOOL_NAMES = {
+    "list_digital_employees",
+    "list_rules_by_employee",
+    "get_file_validation_rule",
+    "get_proc_rule",
+}
+
 
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
@@ -134,7 +142,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
             result = await handle_prep_call(name, arguments)
 
         # 5) Proc 模块（数字员工和规则管理）
-        elif name in ["list_digital_employees", "list_rules_by_employee"]:
+        elif name in _PROC_TOOL_NAMES:
             result = await handle_proc_call(name, arguments)
 
         else:

@@ -88,7 +88,7 @@ SYSTEM_PROMPT_NOT_LOGGED_IN = """\
 """
 
 SYSTEM_PROMPT = """\
-你是 Tally，专业的智能对账助手。你的职责是帮助用户完成数据对比对账工作。
+你是 Tally，专业的智能对账助手。你的职责是帮助用户完成数据对比对账和数据整理工作。
 当前登录用户：{username}
 
 你可以做以下事情：
@@ -98,16 +98,18 @@ SYSTEM_PROMPT = """\
 4. 删除对账规则
 5. 查看规则列表
 6. 帮助用户理解对账结果
+7. 执行数据整理任务（如核算整理规则）
 
 当前已有的对账规则包括：
 {available_rules}
 
 请根据用户的意图判断下一步操作：
-- 如果用户想**查看规则列表**（如"我的规则列表"、"看看有哪些规则"、"规则列表"），回复 JSON: {{"intent": "list_rules"}}
-- 如果用户想**使用已有规则对账**（如"用XX规则对账"、"执行XX对账"），回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
-- 如果用户想**调整/编辑已有规则**（如"调整XX规则"、"编辑XX"、"修改XX规则"），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
+- 如果用户想**查看规则列表**（如“我的规则列表”、“看看有哪些规则”、“规则列表”），回复 JSON: {{"intent": "list_rules"}}
+- 如果用户想**使用已有规则对账**（如“用XX规则对账”、“执行XX对账”），回复 JSON: {{"intent": "use_existing_rule", "rule_name": "规则名称"}}
+- 如果用户想**调整/编辑已有规则**（如“调整XX规则”、“编辑XX”、“修改XX规则”），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
+- 如果用户想**执行数据整理**（如“数据整理”、“核算整理”、“使用核算规则”），回复 JSON: {{"intent": "data_process", "rule_code": "recognition"}}
 - 如果用户在闲聊或一般对话（如打招呼、夸赞、闲聊），**正常简短回复即可**，不要主动介绍自己或列举规则。
 - 仅当用户**明确要求**自我介绍、介绍功能、展示规则列表（如「介绍一下你自己」「你能做什么」「有哪些规则」「看看规则」）时，才用完整格式回复：
   1. 用「你好，{username}！我是 Tally」开头
@@ -117,8 +119,8 @@ SYSTEM_PROMPT = """\
   5. 回复言简意赅，善用 Markdown 排版（**加粗**、- 列表等）
 
 注意：
-- **查看规则列表**与**使用规则对账**要严格区分：说"规则列表"、"看看规则"、"有哪些规则"→ list_rules；说"用XX对账"、"执行对账"→ use_existing_rule
-- **调整/编辑规则**与**使用规则对账**要严格区分：说"调整XX"、"编辑XX"、"修改XX规则"→ edit_rule；说"用XX对账"、"执行对账"→ use_existing_rule
+- **查看规则列表**与**使用规则对账**要严格区分：说“规则列表”、“看看规则”、“有哪些规则”→ list_rules；说“用XX对账”、“执行对账”→ use_existing_rule
+- **调整/编辑规则**与**使用规则对账**要严格区分：说“调整XX”、“编辑XX”、“修改XX规则”→ edit_rule；说“用XX对账”、“执行对账”→ use_existing_rule
 - 只在明确判断意图时才返回 JSON，否则正常对话
 - 删除规则时，必须从用户输入中提取准确的规则名称
 - 只返回一条消息，不要分多次回复
@@ -879,6 +881,38 @@ async def intent_router(state: AgentState) -> dict:
             "suggested_mappings": mappings,
             "rule_config_items": config_items,
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
+        }
+    elif intent == UserIntent.DATA_PROCESS.value:
+        # 数据整理意图：进入 proc_graph 子图
+        # 从解析的 JSON 中提取 rule_code，默认为 "recognition"
+        try:
+            rule_code = parsed.get("rule_code", "recognition")
+        except:
+            rule_code = "recognition"
+        
+        # 检查是否有上传的文件
+        uploaded = state.get("uploaded_files", [])
+        if not uploaded:
+            welcome_msg = (
+                "📊 **开始数据整理任务**\n\n"
+                f"已选择规则：**{rule_code}**\n\n"
+                "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
+            )
+        else:
+            welcome_msg = (
+                "📊 **开始数据整理任务**\n\n"
+                f"已选择规则：**{rule_code}**\n"
+                f"已上传文件：{len(uploaded)} 个\n\n"
+                "正在校验文件并加载规则..."
+            )
+        
+        logger.info(f"[intent_router] DATA_PROCESS: rule_code={rule_code}, files={len(uploaded)}")
+        
+        return {
+            "messages": [AIMessage(content=welcome_msg)],
+            "user_intent": UserIntent.DATA_PROCESS.value,
+            "selected_rule_code": rule_code,
+            "proc_graph_ctx": {"rule_code": rule_code},  # 初始化子图上下文
         }
     else:
         # 普通对话

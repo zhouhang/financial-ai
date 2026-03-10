@@ -11,8 +11,15 @@ from mcp import types as mcp_types
 # 导入数据库配置
 from db_config import get_db_connection
 
-# 配置日志
-logger = logging.getLogger(__name__)
+# 配置日志（使用根 logger 确保日志能正确输出）
+logger = logging.getLogger("proc.mcp_server.tools")
+
+# 确保 logger 有 handler（如果还没有配置，添加默认的 StreamHandler）
+if not logger.handlers and not logging.getLogger().handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -53,6 +60,42 @@ def create_tools() -> list[Tool]:
                 },
                 "required": ["employee_code"]
             }
+        ),
+        Tool(
+            name="get_file_validation_rule",
+            description="根据 rule_code 获取文件校验规则的 JSON 配置。从 bus_file_rules 表中查询对应的 rule 字段。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份（可选）"
+                    },
+                    "rule_code": {
+                        "type": "string",
+                        "description": "规则编码（rule_code）"
+                    }
+                },
+                "required": ["rule_code"]
+            }
+        ),
+        Tool(
+            name="get_proc_rule",
+            description="根据 rule_code 获取整理规则的 JSON 配置。从 bus_proc_rules 表中查询对应的 rule 字段。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验用户身份（可选）"
+                    },
+                    "rule_code": {
+                        "type": "string",
+                        "description": "规则编码（rule_code）"
+                    }
+                },
+                "required": ["rule_code"]
+            }
         )
     ]
 
@@ -70,6 +113,7 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
     """
     conn = None
     try:
+        logger.info("[SQL] 开始查询数字员工列表")
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -87,8 +131,10 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
             ORDER BY id DESC
         """
         
+        logger.debug(f"[SQL] 执行查询: {sql.strip()}")
         cur.execute(sql)
         rows = cur.fetchall()
+        logger.info(f"[SQL] 查询数字员工列表成功，返回 {len(rows)} 条记录")
         
         employees = []
         for row in rows:
@@ -105,7 +151,7 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
         return employees
         
     except Exception as e:
-        logger.error(f"获取数字员工列表失败: {e}")
+        logger.error(f"[SQL] 获取数字员工列表失败: {e}", exc_info=True)
         raise
     finally:
         if conn:
@@ -126,6 +172,7 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
     """
     conn = None
     try:
+        logger.info(f"[SQL] 开始查询员工规则列表，employee_code={employee_code}")
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -144,8 +191,10 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
             ORDER BY id DESC
         """
         
+        logger.debug(f"[SQL] 执行查询: {sql.strip()}, 参数: employee_code={employee_code}")
         cur.execute(sql, (employee_code,))
         rows = cur.fetchall()
+        logger.info(f"[SQL] 查询员工规则列表成功，employee_code={employee_code}，返回 {len(rows)} 条记录")
         
         rules = []
         for row in rows:
@@ -163,7 +212,135 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
         return rules
         
     except Exception as e:
-        logger.error(f"获取规则列表失败: {e}")
+        logger.error(f"[SQL] 获取规则列表失败，employee_code={employee_code}: {e}", exc_info=True)
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def _get_file_validation_rule(rule_code: str) -> Optional[Dict[str, Any]]:
+    """
+    根据 rule_code 从 bus_file_rules 表获取文件校验规则完整记录
+    
+    Args:
+        rule_code: 规则编码
+        
+    Returns:
+        完整记录对象（包含 id, rule_code, rule, memo 字段），如果未找到则返回 None
+    """
+    conn = None
+    try:
+        logger.info(f"[SQL] 开始查询文件校验规则，rule_code={rule_code}")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 查询表中的所有字段: id, rule_code, rule, memo
+        sql = """
+            SELECT 
+                id,
+                rule_code,
+                rule,
+                memo
+            FROM bus_file_rules
+            WHERE rule_code = %s
+            LIMIT 1
+        """
+        
+        logger.debug(f"[SQL] 执行查询: {sql.strip()}, 参数: rule_code={rule_code}")
+        cur.execute(sql, (rule_code,))
+        row = cur.fetchone()
+        
+        cur.close()
+        
+        if row:
+            # 解析 rule 字段（可能是 JSON 字符串）
+            rule_data = row[2]
+            if isinstance(rule_data, str):
+                try:
+                    rule_data = json.loads(rule_data)
+                except json.JSONDecodeError:
+                    pass  # 保持原始字符串
+            
+            result = {
+                "id": row[0],
+                "rule_code": row[1],
+                "rule": rule_data,
+                "memo": row[3]
+            }
+            
+            logger.info(f"[SQL] 查询文件校验规则成功，rule_code={rule_code}，id={result['id']}")
+            return result
+        
+        logger.warning(f"[SQL] 查询文件校验规则，rule_code={rule_code}，未找到记录")
+        return None
+        
+    except Exception as e:
+        logger.error(f"[SQL] 获取文件校验规则失败，rule_code={rule_code}: {e}", exc_info=True)
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def _get_proc_rule(rule_code: str) -> Optional[Dict[str, Any]]:
+    """
+    根据 rule_code 从 bus_proc_rules 表获取整理规则完整记录
+    
+    Args:
+        rule_code: 规则编码
+        
+    Returns:
+        完整记录对象（包含 id, rule_code, rule, memo 字段），如果未找到则返回 None
+    """
+    conn = None
+    try:
+        logger.info(f"[SQL] 开始查询整理规则，rule_code={rule_code}")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 查询表中的所有字段: id, rule_code, rule, memo
+        sql = """
+            SELECT 
+                id,
+                rule_code,
+                rule,
+                memo
+            FROM bus_proc_rules
+            WHERE rule_code = %s
+            LIMIT 1
+        """
+        
+        logger.debug(f"[SQL] 执行查询: {sql.strip()}, 参数: rule_code={rule_code}")
+        cur.execute(sql, (rule_code,))
+        row = cur.fetchone()
+        
+        cur.close()
+        
+        if row:
+            # 解析 rule 字段（可能是 JSON 字符串或已解析的 dict）
+            rule_data = row[2]
+            if isinstance(rule_data, str):
+                try:
+                    rule_data = json.loads(rule_data)
+                except json.JSONDecodeError:
+                    pass  # 保持原始字符串
+            
+            result = {
+                "id": row[0],
+                "rule_code": row[1],
+                "rule": rule_data,
+                "memo": row[3]
+            }
+            
+            logger.info(f"[SQL] 查询整理规则成功，rule_code={rule_code}，id={result['id']}")
+            return result
+        
+        logger.warning(f"[SQL] 查询整理规则，rule_code={rule_code}，未找到记录")
+        return None
+        
+    except Exception as e:
+        logger.error(f"[SQL] 获取整理规则失败，rule_code={rule_code}: {e}", exc_info=True)
         raise
     finally:
         if conn:
@@ -190,6 +367,10 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             return await _handle_list_digital_employees(arguments)
         elif name == "list_rules_by_employee":
             return await _handle_list_rules_by_employee(arguments)
+        elif name == "get_file_validation_rule":
+            return await _handle_get_file_validation_rule(arguments)
+        elif name == "get_proc_rule":
+            return await _handle_get_proc_rule(arguments)
         else:
             return {"error": f"未知的工具: {name}"}
             
@@ -262,4 +443,92 @@ async def _handle_list_rules_by_employee(arguments: dict) -> dict:
         return {
             "success": False,
             "error": f"获取规则列表失败: {str(e)}"
+        }
+
+
+async def _handle_get_file_validation_rule(arguments: dict) -> dict:
+    """
+    处理 get_file_validation_rule 工具调用
+    
+    Args:
+        arguments: 工具参数，包含 rule_code 和可选的 auth_token
+        
+    Returns:
+        文件校验规则 JSON
+    """
+    rule_code = arguments.get("rule_code", "").strip()
+    
+    if not rule_code:
+        return {
+            "success": False,
+            "error": "rule_code 不能为空"
+        }
+    
+    try:
+        # 获取文件校验规则
+        rule = _get_file_validation_rule(rule_code)
+        
+        if rule is None:
+            return {
+                "success": False,
+                "rule_code": rule_code,
+                "error": f"未找到 rule_code 为 '{rule_code}' 的文件校验规则"
+            }
+        
+        return {
+            "success": True,
+            "rule_code": rule_code,
+            "data": rule,
+            "message": f"成功获取文件校验规则"
+        }
+        
+    except Exception as e:
+        logger.error(f"获取文件校验规则失败: {e}")
+        return {
+            "success": False,
+            "error": f"获取文件校验规则失败: {str(e)}"
+        }
+
+
+async def _handle_get_proc_rule(arguments: dict) -> dict:
+    """
+    处理 get_proc_rule 工具调用
+    
+    Args:
+        arguments: 工具参数，包含 rule_code 和可选的 auth_token
+        
+    Returns:
+        整理规则 JSON
+    """
+    rule_code = arguments.get("rule_code", "").strip()
+    
+    if not rule_code:
+        return {
+            "success": False,
+            "error": "rule_code 不能为空"
+        }
+    
+    try:
+        # 获取整理规则
+        rule = _get_proc_rule(rule_code)
+        
+        if rule is None:
+            return {
+                "success": False,
+                "rule_code": rule_code,
+                "error": f"未找到 rule_code 为 '{rule_code}' 的整理规则"
+            }
+        
+        return {
+            "success": True,
+            "rule_code": rule_code,
+            "data": rule,
+            "message": f"成功获取整理规则"
+        }
+        
+    except Exception as e:
+        logger.error(f"获取整理规则失败: {e}")
+        return {
+            "success": False,
+            "error": f"获取整理规则失败: {str(e)}"
         }

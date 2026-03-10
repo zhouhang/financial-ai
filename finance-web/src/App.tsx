@@ -6,6 +6,8 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
 import type {
   Conversation,
+  DigitalEmployee,
+  EmployeeRule,
   Message,
   Task,
   UploadedFile,
@@ -127,6 +129,10 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   /** 规则保存成功提示 */
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  
+  /** 选中的数字员工和规则 */
+  const [selectedEmployee, setSelectedEmployee] = useState<DigitalEmployee | null>(null);
+  const [selectedRule, setSelectedRule] = useState<EmployeeRule | null>(null);
 
   const isGuest = !authToken;
 
@@ -989,6 +995,14 @@ export default function App() {
     }
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
 
+  // ── 选择数字员工规则 ──────────────────────────────────────────
+  const handleSelectRule = useCallback((employee: DigitalEmployee, rule: EmployeeRule) => {
+    setSelectedEmployee(employee);
+    setSelectedRule(rule);
+    console.log('选中规则:', employee.name, '-', rule.name);
+    // TODO: 可以在这里触发其他操作，如发送消息给AI、开始新对话等
+  }, []);
+
   // ── 合并本地和服务器会话 ────────────────────────────────────
   // 服务器会话优先，本地会话补充（未同步的新会话）
   // 如果刚登录，排除登录会话
@@ -1027,6 +1041,8 @@ export default function App() {
         onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
+        onSelectRule={handleSelectRule}
+        selectedRuleCode={selectedRule?.code}
       />
       <ChatArea
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
@@ -1047,6 +1063,8 @@ export default function App() {
           setIsLoginModalOpen(true);
         }}
         streamingMessageId={streamingMessageId}
+        selectedEmployee={selectedEmployee}
+        selectedRule={selectedRule}
       />
       <LoginModal
         isOpen={isLoginModalOpen}

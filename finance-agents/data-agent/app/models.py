@@ -204,6 +204,7 @@ class AgentState(TypedDict, total=False):
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值
     selected_rule_name: Optional[str]
+    selected_rule_code: Optional[str]  # 数据整理规则编码，如 "recognition"
 
     # 上传的文件
     uploaded_files: list[str]

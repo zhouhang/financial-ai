@@ -70,6 +70,8 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
     _proc_tools = {
         "list_digital_employees",
         "list_rules_by_employee",
+        "get_file_validation_rule",
+        "get_proc_rule",
     }
 
     try:
@@ -505,3 +507,45 @@ async def list_rules_by_employee(employee_code: str, auth_token: str = "") -> di
     if auth_token:
         args["auth_token"] = auth_token
     return await call_mcp_tool("list_rules_by_employee", args)
+
+
+async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
+    """根据 rule_code 获取文件校验规则 JSON
+    
+    Args:
+        rule_code: 规则编码
+        auth_token: JWT token（可选）
+        
+    Returns:
+        {
+            "success": bool,
+            "rule_code": str,
+            "rule": dict,  # 文件校验规则 JSON
+            "message": str
+        }
+    """
+    args: dict[str, Any] = {"rule_code": rule_code}
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("get_file_validation_rule", args)
+
+
+async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
+    """根据 rule_code 获取整理规则 JSON
+    
+    Args:
+        rule_code: 规则编码
+        auth_token: JWT token（可选）
+        
+    Returns:
+        {
+            "success": bool,
+            "rule_code": str,
+            "rule": dict,  # 整理规则 JSON
+            "message": str
+        }
+    """
+    args: dict[str, Any] = {"rule_code": rule_code}
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("get_proc_rule", args)

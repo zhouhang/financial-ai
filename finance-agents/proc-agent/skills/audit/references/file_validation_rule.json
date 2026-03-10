@@ -1,0 +1,92 @@
+{
+  "file_validation_rules": {
+    "version": "1.0",
+    "description": "文件上传合法性校验规则，用于验证用户上传的文件是否符合系统要求",
+    "validation_config": {
+      "match_strategy": "exact",
+      "match_strategy_description": "exact表示全量列名精确匹配，文件列名必须与规则定义的列名集合完全一致",
+      "case_sensitive": false,
+      "case_sensitive_description": "列名匹配是否区分大小写",
+      "ignore_whitespace": true,
+      "ignore_whitespace_description": "是否忽略列名中的空格"
+    },
+    "table_schemas": [
+      {
+        "table_id": "MANUAL_VOUCHER",
+        "table_name": "手工凭证表",
+        "table_type": "source",
+        "is_ness":true,
+        "file_type":["xls","xlsx","csv"],
+        "description": "手工凭证数据源表，包含凭证的基本信息和金额数据",
+        "required_columns": [
+          "月份", "科目编码", "科目名称", "公司名称", "借方发生额", "贷方发生额", "摘要", "凭证号"
+        ],
+        "optional_columns": [
+          "取值类型", "币种", "商品大类", "平台", "行政组织", "业务时间", "制单人", "来源类型"
+        ],
+        "all_columns": [
+          "月份", "取值类型", "科目编码", "科目名称", "公司名称", "币种", "商品大类", "平台", "行政组织", "业务时间", "借方发生额", "贷方发生额", "摘要", "凭证号", "制单人", "来源类型"
+        ],
+        "column_aliases": {
+          "月份": ["月", "month", "期间"],
+          "科目编码": ["科目代码", "account_code"],
+          "科目名称": ["科目", "account_name"],
+          "公司名称": ["公司", "company", "company_name"],
+          "借方发生额": ["借方金额", "debit", "借方"],
+          "贷方发生额": ["贷方金额", "credit", "贷方"],
+          "摘要": ["备注", "description", "remark"],
+          "凭证号": ["凭证编号", "voucher_no", "单据号"]
+        }
+      },
+      {
+        "table_id": "BI_EXPENSE_DETAIL",
+        "table_name": "BI费用明细表",
+        "table_type": "target",
+        "is_ness":false,
+        "file_type":["xls","xlsx","csv"],
+        "description": "BI费用明细表（手工类），用于记录费用明细数据",
+        "required_columns": [
+          "日期", "所属公司", "数据来源", "行政中心", "利润中心", "eas一级科目", "eas不含税金额"
+        ],
+        "optional_columns": [
+          "客户", "店铺平台", "rp单据", "费用二级项目", "费用三级项目", "账单上提取规则", "是否归属店铺", "是否参与综合", "eas含税金额", "eas税额", "费用项目", "报表取数", "报表利润中心id", "报表利润中心", "报表费用类型", "是否公摊", "中心群", "摘要备注", "月分区", "备注"
+        ],
+        "all_columns": [
+          "日期", "所属公司", "客户", "店铺平台", "数据来源", "rp单据", "行政中心", "利润中心", "eas一级科目", "费用二级项目", "费用三级项目", "账单上提取规则", "是否归属店铺", "是否参与综合", "eas含税金额", "eas不含税金额", "eas税额", "费用项目", "报表取数", "报表利润中心id", "报表利润中心", "报表费用类型", "是否公摊", "中心群", "摘要备注", "月分区", "备注"
+        ],
+        "column_aliases": {
+          "日期": ["date", "业务日期"],
+          "所属公司": ["公司", "company"],
+          "数据来源": ["来源", "source"],
+          "eas一级科目": ["一级科目", "科目一级"],
+          "eas不含税金额": ["不含税金额", "金额"]
+        }
+      },
+      {
+        "table_id": "BI_PROFIT_LOSS_DETAIL",
+        "table_name": "BI损益毛利明细表",
+        "table_type": "target",
+        "is_ness":false,
+        "file_type":["xls","xlsx","csv"],
+        "description": "BI损益毛利明细表（手工类），用于记录损益和毛利数据",
+        "required_columns": [
+          "日期", "数据源", "公司", "科目名称", "eas收入不含税", "eas成本不含税"
+        ],
+        "optional_columns": [
+          "订单类型", "店铺名称加平台", "客户", "是否关联客户", "商品大类", "供应商", "是否关联供应商", "核算类型或返点类型", "eas科目", "含税销售额", "含税采购成本", "含税差额收入", "eas税额", "eas差额收入不含税", "收入类型", "收入明细"
+        ],
+        "all_columns": [
+          "日期", "数据源", "订单类型", "公司", "店铺名称加平台", "客户", "是否关联客户", "商品大类", "供应商", "是否关联供应商", "核算类型或返点类型", "eas科目", "科目名称", "含税销售额", "含税采购成本", "含税差额收入", "eas收入不含税", "eas成本不含税", "eas税额", "eas差额收入不含税", "收入类型", "收入明细"
+        ],
+        "column_aliases": {
+          "日期": ["date", "业务日期"],
+          "数据源": ["数据来源", "source"],
+          "公司": ["所属公司", "company"],
+          "科目名称": ["科目", "account_name"],
+          "eas收入不含税": ["收入不含税", "不含税收入"],
+          "eas成本不含税": ["成本不含税", "不含税成本"]
+        }
+      }
+    ]
+  }
+}
