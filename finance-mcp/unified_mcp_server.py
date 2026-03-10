@@ -33,6 +33,9 @@ from data_preparation.mcp_server.config import OUTPUT_DIR, REPORT_DIR as PREP_RE
 # 导入认证和规则管理模块
 from auth.tools import create_auth_tools, handle_auth_tool_call, _create_guest_tools, _handle_create_guest_token, _handle_verify_guest_token, _handle_list_recommended_rules
 
+# 导入 proc 模块（数字员工和规则管理）
+from proc.mcp_server.tools import create_tools as create_proc_tools, handle_tool_call as handle_proc_call
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -75,7 +78,14 @@ async def list_tools() -> list[types.Tool]:
         logger.error(f"加载数据整理工具失败: {str(e)}", exc_info=True)
         prep_tools = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools
+    try:
+        proc_tools = create_proc_tools()
+        logger.info(f"Proc 工具数量: {len(proc_tools)}")
+    except Exception as e:
+        logger.error(f"加载 Proc 工具失败: {str(e)}", exc_info=True)
+        proc_tools = []
+    
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + proc_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -123,6 +133,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         elif name.startswith("data_preparation_"):
             result = await handle_prep_call(name, arguments)
 
+        # 5) Proc 模块（数字员工和规则管理）
+        elif name in ["list_digital_employees", "list_rules_by_employee"]:
+            result = await handle_proc_call(name, arguments)
+
         else:
             result = {"error": f"未知的工具: {name}"}
         
@@ -157,7 +171,7 @@ async def health_check(request):
         "status": "healthy",
         "service": "financial-mcp-server",
         "version": "1.0.0",
-        "modules": ["reconciliation", "data_preparation"]
+        "modules": ["reconciliation", "data_preparation", "proc"]
     })
 
 
@@ -527,13 +541,16 @@ async def main():
         tools = await list_tools()
         recon_tools = [t for t in tools if t.name.startswith("reconciliation_") or t.name == "file_upload" or t.name == "get_reconciliation"]
         prep_tools = [t for t in tools if t.name.startswith("data_preparation_")]
+        proc_tools = [t for t in tools if t.name in ["list_digital_employees", "list_rules_by_employee"]]
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         recon_tools = []
         prep_tools = []
+        proc_tools = []
     
     recon_tools_text = "\n".join([f"  {i+1}. {t.name:<30} - {t.description}" for i, t in enumerate(recon_tools)])
     prep_tools_text = "\n".join([f"  {len(recon_tools)+i+1}. {t.name:<30} - {t.description}" for i, t in enumerate(prep_tools)])
+    proc_tools_text = "\n".join([f"  {len(recon_tools)+len(prep_tools)+i+1}. {t.name:<30} - {t.description}" for i, t in enumerate(proc_tools)])
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
@@ -556,6 +573,10 @@ async def main():
 🛠️  可用工具（数据整理模块，{len(prep_tools)}个）:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {prep_tools_text}
+
+🛠️  可用工具（Proc 模块，{len(proc_tools)}个）:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{proc_tools_text}
 
 📖 使用说明:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

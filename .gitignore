@@ -292,3 +292,5 @@ finance-ai/finance-mcp/data_preparation/report
 finance-ai/finance-mcp/reconciliation/output
 finance-ai/finance-mcp/reconciliation/report
 finance-ui/.vite/
+/START_ALL_SERVICES.sh
+/STOP_ALL_SERVICES.sh

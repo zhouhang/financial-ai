@@ -32,6 +32,7 @@ class UserIntent(str, Enum):
     CREATE_DEPARTMENT = "create_department"
     ADMIN_LOGOUT = "admin_logout"
     UNKNOWN = "unknown"
+    DATA_PROCESS = "data_process"          # 数据整理
 
 
 class ReconciliationPhase(str, Enum):
@@ -50,6 +51,18 @@ class ReconciliationPhase(str, Enum):
     EDIT_SAVE = "edit_save"
     TASK_EXECUTION = "task_execution"
     COMPLETED = "completed"
+
+
+class ProcAgentPhase(str, Enum):
+    """数据整理子图（proc_agent）的阶段枚举。"""
+    IDLE = "idle"
+    GETTING_RULE = "getting_rule"          # 正在读取规则
+    RULE_NOT_FOUND = "rule_not_found"      # 规则不存在
+    CHECKING_FILES = "checking_files"      # 正在校验文件
+    FILE_CHECK_FAILED = "file_check_failed" # 文件校验失败
+    EXECUTING = "executing"                # 正在执行整理
+    SHOWING_RESULT = "showing_result"      # 展示结果
+    COMPLETED = "completed"                # 已完成
 
 
 class TaskExecutionStep(str, Enum):
@@ -254,3 +267,7 @@ class AgentState(TypedDict, total=False):
     # 人工参与循环标志
     waiting_for_human: bool
     human_prompt: Optional[str]
+
+    # ── proc_graph 数据整理子图上下文 ─────────────────────────────────────────
+    # 与 reconciliation_ctx / data_preparation_ctx 并列，完全隔离
+    proc_graph_ctx: Optional[dict[str, Any]]

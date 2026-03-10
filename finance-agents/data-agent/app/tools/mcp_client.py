@@ -66,12 +66,24 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "create_guest_token", "verify_guest_token", "list_recommended_rules",
     }
 
+    # Proc 模块工具（数字员工和规则管理）
+    _proc_tools = {
+        "list_digital_employees",
+        "list_rules_by_employee",
+    }
+
     try:
         if tool_name in _auth_tools:
             logger.info(f"导入认证工具处理器: {tool_name}")
             from auth.tools import handle_auth_tool_call  # type: ignore
             result = await handle_auth_tool_call(tool_name, arguments)
             logger.info(f"认证工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
+            return result
+        elif tool_name in _proc_tools:
+            logger.info(f"导入 Proc 工具处理器: {tool_name}")
+            from proc.mcp_server.tools import handle_tool_call as handle_proc_tool_call  # type: ignore
+            result = await handle_proc_tool_call(tool_name, arguments)
+            logger.info(f"Proc 工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
             return result
         else:
             logger.info(f"导入对账工具处理器: {tool_name}")
@@ -447,3 +459,49 @@ async def save_message(auth_token: str, conversation_id: str, role: str, content
     if attachments:
         args["attachments"] = attachments
     return await call_mcp_tool("save_message", args)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 高级辅助函数 - Proc 模块（数字员工和规则管理）
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def list_digital_employees(auth_token: str = "") -> dict[str, Any]:
+    """获取数字员工列表
+    
+    Args:
+        auth_token: JWT token（可选）
+        
+    Returns:
+        {
+            "success": bool,
+            "count": int,
+            "employees": list[dict],
+            "message": str
+        }
+    """
+    args: dict[str, Any] = {}
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("list_digital_employees", args)
+
+
+async def list_rules_by_employee(employee_code: str, auth_token: str = "") -> dict[str, Any]:
+    """根据数字员工 code 获取规则列表
+    
+    Args:
+        employee_code: 数字员工的 code
+        auth_token: JWT token（可选）
+        
+    Returns:
+        {
+            "success": bool,
+            "count": int,
+            "employee_code": str,
+            "rules": list[dict],
+            "message": str
+        }
+    """
+    args: dict[str, Any] = {"employee_code": employee_code}
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("list_rules_by_employee", args)

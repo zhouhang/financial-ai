@@ -41,6 +41,9 @@ from app.tools.mcp_client import (
     call_mcp_tool,
 )
 
+# 导入 proc_graph 路由
+from app.graphs.proc_graph.api import router as proc_router
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -50,6 +53,9 @@ logger = logging.getLogger(__name__)
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Financial Data Agent", version="0.1.0")
+
+# 注册 proc_graph 路由
+app.include_router(proc_router)
 
 app.add_middleware(
     CORSMiddleware,
