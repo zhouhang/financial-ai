@@ -3,7 +3,7 @@
 
 set -e  # 遇到错误立即退出
 
-PROJECT_ROOT="/Users/fanyuli/Desktop/workspace/financial-ai"
+PROJECT_ROOT="/Users/kevin/workspace/financial-ai"
 LOG_DIR="$PROJECT_ROOT/logs"
 
 # 创建日志目录
