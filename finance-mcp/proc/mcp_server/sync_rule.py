@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -209,7 +210,8 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
 
     # ── 5. 写出 Excel 文件 ───────────────────────────────────────────────────
     safe_target = re.sub(r'[\\/:*?"<>|]', "_", target_table)
-    output_filename = f"{rule_id}_{safe_target}.xlsx"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    output_filename = f"{safe_target}_{rule_id}_{timestamp}.xlsx"
     output_path = str(Path(output_dir) / output_filename)
 
     _write_excel(result_df, field_mappings, output_path)

@@ -292,3 +292,7 @@ finance-ai/finance-mcp/data_preparation/report
 finance-ai/finance-mcp/reconciliation/output
 finance-ai/finance-mcp/reconciliation/report
 finance-ui/.vite/
+/finance-agents/proc-agent
+/docs
+/temp
+/finance-mcp/proc/output

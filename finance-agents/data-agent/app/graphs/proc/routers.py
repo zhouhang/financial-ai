@@ -25,7 +25,7 @@ from app.graphs.proc.nodes import (
 # ── 停顿配置 ─────────────────────────────────────────────────────────────────────────────
 # 每个节点成功完成后的停顿时长（秒），0 表示不停顿。
 # 修改此处即可全局调整，无需修改各节点函数。
-_NODE_PAUSE_SECONDS: float = 1.0
+_NODE_PAUSE_SECONDS: float = 0
 
 
 def _with_pause(node_fn: Callable[[AgentState], dict]) -> Callable[[AgentState], dict]:
