@@ -44,7 +44,7 @@ def create_tools() -> list[Tool]:
                         "description": "JWT token，用于校验用户身份（可选）"
                     }
                 },
-                "required": []
+                "required": ["auth_token"]
             }
         ),
         Tool(
@@ -62,7 +62,7 @@ def create_tools() -> list[Tool]:
                         "description": "数字员工的 code（parent_code）"
                     }
                 },
-                "required": ["employee_code"]
+                "required": ["employee_code", "auth_token"]
             }
         ),
         Tool(
@@ -80,7 +80,7 @@ def create_tools() -> list[Tool]:
                         "description": "规则编码（rule_code）"
                     }
                 },
-                "required": ["rule_code"]
+                "required": ["rule_code", "auth_token"]
             }
         ),
         Tool(
@@ -98,7 +98,7 @@ def create_tools() -> list[Tool]:
                         "description": "规则编码（rule_code）"
                     }
                 },
-                "required": ["rule_code"]
+                "required": ["rule_code", "auth_token"]
             }
         )
     ]
