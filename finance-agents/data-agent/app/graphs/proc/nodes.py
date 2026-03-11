@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -389,9 +388,6 @@ def get_proc_rule_node(state: AgentState) -> dict:
         current_node="check_file_node"
     )
 
-    # 添加短暂停顿以便前端展示
-    time.sleep(1)
-
     ctx.update({
         "phase": ProcAgentPhase.CHECKING_FILES.value,
         "rule": rule,
@@ -551,9 +547,6 @@ def check_file_node(state: AgentState) -> dict:
         current_node="proc_task_execute_node"
     )
 
-    # 添加短暂停顿以便前端展示
-    time.sleep(1)
-
     ctx.update({
         "phase": ProcAgentPhase.EXECUTING.value,
         "file_match_results": matched_results,   # [{file_name, table_id, table_name}]
@@ -570,15 +563,14 @@ def check_file_node(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def proc_task_execute_node(state: AgentState) -> dict:
-    """按规则中的 field_mappings 执行数据整理。
+    """按 JSON 规则确定性执行数据整理。
 
-    当前实现将规则结构解析为执行计划并记录日志；
-    实际数据转换逻辑由后续迭代接入 MCP 数据整理工具完成。
+    调用 MCP sync_rule_execute 工具，根据文件校验结果和 rule_code
+    执行字段映射和数据转换，生成目标 Excel 文件。
     """
     ctx = _get_proc_ctx(state)
-    rule: dict = ctx.get("rule") or {}
     rule_code: str = ctx.get("rule_code", "")
-    uploaded_files: list[str] = list(state.get("uploaded_files") or [])
+    file_match_results: list[dict] = ctx.get("file_match_results", [])
 
     # 开始执行提示
     progress_msg = _build_progress_message(
@@ -590,40 +582,121 @@ def proc_task_execute_node(state: AgentState) -> dict:
         messages.append(AIMessage(content=progress_msg))
 
     logger.info(f"[proc_graph] proc_task_execute_node rule_code={rule_code!r}")
+    logger.info(f"[proc_graph] file_match_results={[m.get('file_name') for m in file_match_results]}")
+
+    # ── 检查文件校验结果 ─────────────────────────────────────────────────────
+    if not file_match_results:
+        error_msg = "未找到文件校验结果，请先完成文件校验步骤"
+        logger.error(f"[proc_graph] {error_msg}")
+        ctx.update({
+            "phase": ProcAgentPhase.SHOWING_RESULT.value,
+            "exec_status": "error",
+            "exec_error": error_msg,
+        })
+        return {
+            "messages": messages,
+            "proc_graph_ctx": ctx,
+        }
+
+    # ── 准备 sync_rule_execute 参数 ──────────────────────────────────────────
+    # file_match_results 格式: [{file_name, table_id, table_name}]
+    # 需要补充 file_path（从 uploaded_files 或 state 中获取）
+    uploaded_files_raw: list = list(state.get("uploaded_files") or [])
+
+    # 构建 file_name -> file_path 映射
+    # ⚠️ key 必须用存储路径的 basename（与 check_file_node 中 os.path.basename(abs_path) 保持一致）
+    # uploaded_files 格式: {"file_path": "/uploads/...", "original_filename": "xxx.xlsx"}
+    file_path_map: dict[str, str] = {}
+    for item in uploaded_files_raw:
+        if isinstance(item, dict):
+            fp = item.get("file_path") or item.get("path") or ""
+        else:
+            fp = str(item)
+        if fp:
+            abs_fp = _to_abs_path(fp)
+            # key = 存储路径文件名（与 file_match_results[i].file_name 来源相同）
+            file_path_map[os.path.basename(abs_fp)] = abs_fp
+    logger.info(f"[proc_graph] file_path_map keys={list(file_path_map.keys())}")
+
+    # 构建 uploaded_files 参数（sync_rule_execute 需要的格式）
+    sync_uploaded_files: list[dict] = []
+    for match in file_match_results:
+        file_name = match.get("file_name", "")
+        table_name = match.get("table_name", "")
+        table_id = match.get("table_id", "")
+        file_path = file_path_map.get(file_name, "")
+        if file_path:
+            sync_uploaded_files.append({
+                "file_name": file_name,
+                "file_path": file_path,
+                "table_id": table_id,
+                "table_name": table_name,
+            })
+
+    if not sync_uploaded_files:
+        error_msg = "无法构建文件路径映射，请检查上传文件状态"
+        logger.error(f"[proc_graph] {error_msg}")
+        ctx.update({
+            "phase": ProcAgentPhase.SHOWING_RESULT.value,
+            "exec_status": "error",
+            "exec_error": error_msg,
+        })
+        return {
+            "messages": messages,
+            "proc_graph_ctx": ctx,
+        }
+
+    # ── 调用 sync_rule_execute 工具 ──────────────────────────────────────────
+    from app.tools.mcp_client import execute_sync_rule
 
     try:
-        rules_list: list[dict] = rule.get("rules", [])
-        execution_plan: list[dict] = []
-
-        for r in rules_list:
-            plan_item = {
-                "rule_id": r.get("rule_id", ""),
-                "description": r.get("description", ""),
-                "source_table": r.get("source_table") or r.get("source_tables", []),
-                "target_table": r.get("target_table", ""),
-                "mapping_count": len(r.get("field_mappings", [])),
-            }
-            execution_plan.append(plan_item)
-
         logger.info(
-            f"[proc_graph] 执行计划生成完成，共 {len(execution_plan)} 条规则，"
-            f"文件：{[os.path.basename(f) for f in uploaded_files]}"
+            f"[proc_graph] 调用 sync_rule_execute，"
+            f"files={[m['file_name'] for m in sync_uploaded_files]}"
         )
+        sync_result = _run_async(
+            execute_sync_rule(
+                uploaded_files=sync_uploaded_files,
+                rule_code=rule_code,
+            )
+        )
+    except Exception as e:
+        error_msg = f"调用数据整理服务失败: {e}"
+        logger.error(f"[proc_graph] {error_msg}", exc_info=True)
+        ctx.update({
+            "phase": ProcAgentPhase.SHOWING_RESULT.value,
+            "exec_status": "error",
+            "exec_error": error_msg,
+        })
+        return {
+            "messages": messages,
+            "proc_graph_ctx": ctx,
+        }
 
-        # 完成提示：本节点已完成，开始下一个节点
+    logger.info(
+        f"[proc_graph] sync_rule_execute 结果: "
+        f"success={sync_result.get('success')}, "
+        f"generated={sync_result.get('generated_count', 0)}"
+    )
+
+    # ── 处理执行结果 ─────────────────────────────────────────────────────────
+    if not sync_result.get("success"):
+        error_msg = sync_result.get("error", "数据整理执行失败")
+        errors = sync_result.get("errors", [])
+        if errors:
+            error_msg += f"\n\n详细错误:\n" + "\n".join(f"- {e}" for e in errors)
+
+        # 完成提示（本节点失败，进入结果展示）
         completion_msg = _build_progress_message(
             completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node"],
             current_node="result_node"
         )
 
-        # 添加短暂停顿以便前端展示
-        time.sleep(1)
-
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
-            "execution_plan": execution_plan,
-            "exec_status": "success",
-            "processed_files": [os.path.basename(f) for f in uploaded_files],
+            "exec_status": "error",
+            "exec_error": error_msg,
+            "sync_result": sync_result,
         })
 
         return {
@@ -631,18 +704,39 @@ def proc_task_execute_node(state: AgentState) -> dict:
             "proc_graph_ctx": ctx,
         }
 
-    except Exception as e:
-        logger.error(f"[proc_graph] 执行阶段异常：{e}")
-        ctx.update({
-            "phase": ProcAgentPhase.SHOWING_RESULT.value,
-            "exec_status": "error",
-            "exec_error": str(e),
+    # ── 执行成功 ─────────────────────────────────────────────────────────────
+    generated_files: list[dict] = sync_result.get("generated_files", [])
+
+    # 构建执行计划摘要（用于 result_node 展示）
+    execution_plan: list[dict] = []
+    for gf in generated_files:
+        execution_plan.append({
+            "rule_id": gf.get("rule_id", ""),
+            "description": f"生成目标表: {gf.get('target_table', '')}",
+            "source_table": "",
+            "target_table": gf.get("target_table", ""),
+            "mapping_count": gf.get("row_count", 0),
         })
 
-        return {
-            "messages": messages,
-            "proc_graph_ctx": ctx,
-        }
+    # 完成提示：本节点已完成，开始下一个节点
+    completion_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node"],
+        current_node="result_node"
+    )
+
+    ctx.update({
+        "phase": ProcAgentPhase.SHOWING_RESULT.value,
+        "exec_status": "success",
+        "execution_plan": execution_plan,
+        "processed_files": [gf.get("output_file", "") for gf in generated_files],
+        "generated_files": generated_files,
+        "sync_result": sync_result,
+    })
+
+    return {
+        "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+        "proc_graph_ctx": ctx,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -665,30 +759,30 @@ def result_node(state: AgentState) -> dict:
         messages.append(AIMessage(content=progress_msg))
 
     if exec_status == "success":
-        execution_plan: list[dict] = ctx.get("execution_plan", [])
-        processed_files: list[str] = ctx.get("processed_files", [])
-
-        plan_lines = []
-        for item in execution_plan:
-            plan_lines.append(
-                f"- **{item['rule_id']}**：{item['description']}"
-                f"（字段映射数：{item['mapping_count']}）"
-            )
-        plan_text = "\n".join(plan_lines) if plan_lines else "（无规则详情）"
-
-        # 所有节点完成
+        generated_files: list[dict] = ctx.get("generated_files", [])
+        
+        # 构建生成文件清单
+        file_lines = []
+        for gf in generated_files:
+            file_name = os.path.basename(gf.get("output_file", ""))
+            target_table = gf.get("target_table", "")
+            row_count = gf.get("row_count", 0)
+            file_lines.append(f"- **{target_table}** \u2192 `{file_name}`\uff08\u5171 {row_count} \u884c\uff09")
+        
+        file_list_text = "\n".join(file_lines) if file_lines else "\uff08\u65e0\u751f\u6210\u6587\u4ef6\uff09"
+        
+        # \u6240\u6709\u8282\u70b9\u5b8c\u6210
         all_completed_msg = _build_progress_message(
             completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node", "result_node"],
             current_node=None
         )
-
+        
         msg = (
             f"{all_completed_msg}\n\n"
-            f"数据整理任务已完成。\n\n"
-            f"**规则编码：** {rule_code}\n"
-            f"**处理文件：** {', '.join(processed_files) if processed_files else '（无）'}\n\n"
-            f"**执行计划摘要：**\n{plan_text}\n\n"
-            f"如需重新处理或使用其他规则，请告知。"
+            f"\u6570\u636e\u6574\u7406\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\n\n"
+            f"\u89c4\u5219\u7f16\u7801\uff1a{rule_code}\n\n"
+            f"\u5df2\u751f\u6210 {len(generated_files)} \u4e2a\u6587\u4ef6\uff1a\n{file_list_text}\n\n"
+            f"\u5982\u9700\u91cd\u65b0\u5904\u7406\u6216\u4f7f\u7528\u5176\u4ed6\u89c4\u5219\uff0c\u8bf7\u544a\u77e5\u3002"
         )
     else:
         exec_error: str = ctx.get("exec_error", "未知错误")

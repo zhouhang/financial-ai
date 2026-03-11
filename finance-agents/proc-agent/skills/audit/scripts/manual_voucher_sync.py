@@ -233,7 +233,7 @@ def _apply_conditional_extract(row: pd.Series, mapping: dict[str, Any]) -> Any:
             continue
         match = re.search(pattern, raw_value)
         if match:
-            group_idx = cond.get("extract_group", 0)
+            group_idx = cond.get("extract_group", 1)  # 默认取第 1 个捕获组（即括号内内容）
             try:
                 return match.group(group_idx)
             except IndexError:

@@ -10,7 +10,7 @@
       "global_filter": {
         "description": "从手工凭证表中过滤相关数据的总体规则",
         "source_column": "科目名称",
-        "operator": "in",
+        "operator": "starts_with",
         "values": [
           "研发支出_费用化支出",
           "主营业务成本_直接服务费",
@@ -113,16 +113,16 @@
         {
           "target_field": "eas含税金额",
           "rule_type": "formula",
-          "formula": "eas不含税金额 * (1 + 税率)",
-          "description": "eas含税金额 = eas不含税金额 * (1+税率)，该列为计算列",
+          "formula": "round(eas不含税金额 * (1 + 税率), 2)",
+          "description": "eas含税金额 = eas不含税金额 * (1+税率)，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["eas不含税金额", "税率"]
         },
         {
           "target_field": "eas不含税金额",
           "rule_type": "formula",
-          "formula": "借方发生额 + 贷方发生额",
-          "description": "eas不含税金额 = 借方发生额 + 贷方发生额，其中借方发生额和贷方发生额的值来自来手工凭证表",
+          "formula": "round(借方发生额 + 贷方发生额, 2)",
+          "description": "eas不含税金额 = 借方发生额 + 贷方发生额，结果保留2位小数，其中借方发生额和贷方发生额的值来自来手工凭证表",
           "source_fields": [
             {"field": "借方发生额", "source_table": "手工凭证表"},
             {"field": "贷方发生额", "source_table": "手工凭证表"}
@@ -131,8 +131,8 @@
         {
           "target_field": "eas税额",
           "rule_type": "formula",
-          "formula": "eas含税金额 - eas不含税金额",
-          "description": "eas税额 = eas含税金额 - eas不含税金额，该列为计算列",
+          "formula": "round(eas含税金额 - eas不含税金额, 2)",
+          "description": "eas税额 = eas含税金额 - eas不含税金额，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["eas含税金额", "eas不含税金额"]
         },
@@ -188,27 +188,13 @@
         },
         {
           "target_field": "税率",
-          "rule_type": "parse_from_field",
+          "rule_type": "regex_extract",
           "source_field": "摘要",
-          "parse_rules": [
-            {
-              "step": 1,
-              "description": "按&分割摘要，提取调整类型列",
-              "split_by": "&",
-              "extract_index": 1,
-              "result_field": "调整类型"
-            },
-            {
-              "step": 2,
-              "description": "从调整类型中按+分割，提取税率",
-              "split_by": "+",
-              "extract_index": 1,
-              "result_field": "税率",
-              "fallback": 0,
-              "fallback_description": "若为空则税率为零"
-            }
-          ],
-          "description": "从手工凭证表的摘要列按'&'分出'调整类型'列，为'调整费用'；按'+'，分列出'税率'，若为空，则税率为零"
+          "extract_pattern": "(?:调整费用|调整收入|调整成本)\\+([\\d.]+%)",
+          "extract_group": 1,
+          "value_type": "float_percent",
+          "fallback": 0,
+          "description": "从摘要列中提取税率：在'调整费用/调整收入/调整成本'后找'+'，截取+到%之间的数字除以100作为税率（如+6%取得0.06），摘要中无匹配则税率为0"
         }
       ]
     },
@@ -270,7 +256,7 @@
           "source_field": "摘要",
           "conditions": [
             {
-              "condition": "摘要内容包含'调整收入'",
+              "condition": { "field": "摘要", "op": "contains", "value": "调整收入" },
               "action": "从'调整收入'关键词后的+号开始提取客户信息",
               "extract_pattern": "调整收入.*?\\+(.+?)(?:\\+|$)",
               "extract_group": 1
@@ -298,7 +284,12 @@
           "source_field": "摘要",
           "conditions": [
             {
-              "condition": "摘要内容包含'调整成本'或'调整费用'",
+              "condition": {
+                "or": [
+                  { "field": "摘要", "op": "contains", "value": "调整成本" },
+                  { "field": "摘要", "op": "contains", "value": "调整费用" }
+                ]
+              },
               "action": "从'调整成本'或'调整费用'后的+号开始取供应商",
               "extract_pattern": "(?:调整成本|调整费用).*?\\+(.+?)(?:\\+|$)",
               "extract_group": 1
@@ -321,11 +312,11 @@
           "source_field": "科目名称",
           "conditions": [
             {
-              "condition": "科目名称等于'主营业务收入_寄售收入'",
+              "condition": { "field": "科目名称", "op": "eq", "value": "主营业务收入_寄售收入" },
               "value": "净额"
             },
             {
-              "condition": "其他",
+              "condition": { "default": true },
               "value": "总额"
             }
           ],
@@ -344,24 +335,24 @@
         {
           "target_field": "含税销售额",
           "rule_type": "formula",
-          "formula": "eas收入不含税 * (1 + 税率)",
-          "description": "含税销售额=eas收入不含税*(1+税率)；该列为计算列",
+          "formula": "round(eas收入不含税 * (1 + 税率), 2)",
+          "description": "含税销售额=eas收入不含税*(1+税率)，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["eas收入不含税", "税率"]
         },
         {
           "target_field": "含税采购成本",
           "rule_type": "formula",
-          "formula": "eas成本不含税 * (1 + 税率)",
-          "description": "含税采购成本=eas成本不含税*(1+税率)；该列为计算列",
+          "formula": "round(eas成本不含税 * (1 + 税率), 2)",
+          "description": "含税采购成本=eas成本不含税*(1+税率)，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["eas成本不含税", "税率"]
         },
         {
           "target_field": "含税差额收入",
           "rule_type": "formula",
-          "formula": "含税销售额 - 含税采购成本",
-          "description": "含税差额收入=含税销售额-含税采购成本；该列为计算列",
+          "formula": "round(含税销售额 - 含税采购成本, 2)",
+          "description": "含税差额收入=含税销售额-含税采购成本，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["含税销售额", "含税采购成本"]
         },
@@ -371,13 +362,23 @@
           "source_field": "科目名称",
           "conditions": [
             {
-              "condition": "摘要里取'调整类型'为'调整收入'，且科目名称为'主营业务收入_寄售收入'",
+              "condition": {
+                "and": [
+                  { "field": "摘要", "op": "contains", "value": "调整收入" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_寄售收入" }
+                ]
+              },
               "formula": "贷方发生额",
               "eas成本不含税": 0,
               "description": "eas收入不含税为'贷方发生额'，'eas成本不含税'为零"
             },
             {
-              "condition": "科目名称为'主营业务收入_销售收入'或'主营业务收入_技术服务收入'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "startswith", "value": "主营业务收入_销售收入" },
+                  { "field": "科目名称", "op": "startswith", "value": "主营业务收入_技术服务收入" }
+                ]
+              },
               "formula": "贷方发生额",
               "eas成本不含税": 0,
               "description": "eas收入不含税为'贷方发生额'，'eas成本不含税'为零"
@@ -391,13 +392,23 @@
           "source_field": "科目名称",
           "conditions": [
             {
-              "condition": "摘要里取'调整类型'为'调整成本'，且科目名称为'主营业务收入_寄售收入'",
+              "condition": {
+                "and": [
+                  { "field": "摘要", "op": "contains", "value": "调整成本" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_寄售收入" }
+                ]
+              },
               "formula": "-贷方发生额",
               "eas收入不含税": 0,
               "description": "eas收入不含税为零，'eas成本不含税'为负数'贷方发生额'"
             },
             {
-              "condition": "科目名称为'主营业务成本_销售成本'或'主营业务成本_技术服务成本'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "startswith", "value": "主营业务成本_销售成本" },
+                  { "field": "科目名称", "op": "startswith", "value": "主营业务成本_技术服务成本" }
+                ]
+              },
               "formula": "借方发生额",
               "eas收入不含税": 0,
               "description": "eas收入不含税为零，'eas成本不含税'为'借方发生额'"
@@ -408,16 +419,16 @@
         {
           "target_field": "eas税额",
           "rule_type": "formula",
-          "formula": "含税销售额 - eas收入不含税",
-          "description": "eas税额=含税销售额-eas收入不含税；该列为计算列",
+          "formula": "round(含税销售额 - eas收入不含税, 2)",
+          "description": "eas税额=含税销售额-eas收入不含税，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["含税销售额", "eas收入不含税"]
         },
         {
           "target_field": "eas差额收入不含税",
           "rule_type": "formula",
-          "formula": "eas收入不含税 - eas成本不含税",
-          "description": "eas差额收入不含税=eas收入不含税-eas成本不含税；该列为计算列",
+          "formula": "round(eas收入不含税 - eas成本不含税, 2)",
+          "description": "eas差额收入不含税=eas收入不含税-eas成本不含税，结果保留2位小数，该列为计算列",
           "is_computed": true,
           "depends_on": ["eas收入不含税", "eas成本不含税"]
         },
@@ -445,29 +456,49 @@
           "source_field": "科目名称",
           "conditions": [
             {
-              "condition": "科目名称为'主营业务收入_销售收入_销售收入-13%'或'主营业务成本_销售成本_销售成本-13%'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_销售收入_销售收入-13%" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务成本_销售成本_销售成本-13%" }
+                ]
+              },
               "value": 0.13,
               "description": "税率为13%"
             },
             {
-              "condition": "科目名称为'主营业务收入_销售收入_销售收入-9%'或'主营业务成本_销售成本_销售成本-9%'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_销售收入_销售收入-9%" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务成本_销售成本_销售成本-9%" }
+                ]
+              },
               "value": 0.09,
               "description": "税率为9%"
             },
             {
-              "condition": "科目名称为'主营业务收入_销售收入_销售收入-3%'或'主营业务成本_销售成本_销售成本-3%'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_销售收入_销售收入-3%" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务成本_销售成本_销售成本-3%" }
+                ]
+              },
               "value": 0.03,
               "description": "税率为3%"
             },
             {
-              "condition": "科目名称为'主营业务收入_销售收入_销售收入-1%'或'主营业务成本_销售成本_销售成本-1%'",
+              "condition": {
+                "or": [
+                  { "field": "科目名称", "op": "eq", "value": "主营业务收入_销售收入_销售收入-1%" },
+                  { "field": "科目名称", "op": "eq", "value": "主营业务成本_销售成本_销售成本-1%" }
+                ]
+              },
               "value": 0.01,
               "description": "税率为1%"
             },
             {
-              "condition": "其他科目",
+              "condition": { "default": true },
               "value": 0.06,
-              "description": "税率为6%"
+              "description": "其他科目税率为6%"
             }
           ],
           "description": "根据科目名称判断税率：含-13%的为13%，含-9%的为9%，含-3%的为3%，含-1%的为1%，其他为6%"

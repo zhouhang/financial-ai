@@ -73,6 +73,7 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "get_file_validation_rule",
         "get_proc_rule",
         "validate_uploaded_files",
+        "sync_rule_execute",
     }
 
     try:
@@ -88,6 +89,9 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
             if tool_name == "validate_uploaded_files":
                 from proc.mcp_server.file_validate_tool import handle_file_validate_tool_call  # type: ignore
                 result = await handle_file_validate_tool_call(tool_name, arguments)
+            elif tool_name == "sync_rule_execute":
+                from proc.mcp_server.sync_rule import handle_sync_rule_tool_call  # type: ignore
+                result = await handle_sync_rule_tool_call(tool_name, arguments)
             else:
                 from proc.mcp_server.tools import handle_tool_call as handle_proc_tool_call  # type: ignore
                 result = await handle_proc_tool_call(tool_name, arguments)
@@ -579,6 +583,32 @@ async def validate_uploaded_files(
         }
     """
     return await call_mcp_tool("validate_uploaded_files", {
+        "uploaded_files": uploaded_files,
+        "rule_code": rule_code,
+    })
+
+
+async def execute_sync_rule(
+    uploaded_files: list[dict[str, Any]],
+    rule_code: str,
+) -> dict[str, Any]:
+    """根据规则编码执行数据整理规则，生成目标 Excel 文件。
+    
+    Args:
+        uploaded_files: 文件校验结果列表，格式 [{"file_name": str, "file_path": str, "table_id": str, "table_name": str}]
+        rule_code: 整理规则编码，用于从数据库查询对应的规则 JSON；输出目录由 MCP 服务端的 config 决定
+        
+    Returns:
+        {
+            "success": bool,
+            "rule_code": str,
+            "generated_files": [{"rule_id": str, "target_table": str, "output_file": str, "row_count": int}],
+            "generated_count": int,
+            "errors": [str],
+            "message": str
+        }
+    """
+    return await call_mcp_tool("sync_rule_execute", {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     })

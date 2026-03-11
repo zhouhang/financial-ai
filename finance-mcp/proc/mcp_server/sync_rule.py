@@ -10,6 +10,7 @@
   - extract             : 按分隔符提取第 N 级子串
   - formula             : 数学公式计算（依赖其他目标字段）
   - parse_from_field    : 多步骤解析字段值
+  - regex_extract       : 正则提取字段值（支持 value_type=float_percent 自动除以100）
   - conditional_value   : 条件匹配取固定值
   - conditional_formula : 条件匹配取公式结果
   - lookup              : 从 lookup_table 查找对应值（运行时查表）
@@ -67,12 +68,8 @@ def create_sync_rule_tools() -> list[Tool]:
                         "type": "string",
                         "description": "整理规则编码，用于从 bus_proc_rules 表中获取规则 JSON",
                     },
-                    "output_dir": {
-                        "type": "string",
-                        "description": "生成文件的存放目录（绝对路径）。若目录不存在会自动创建。",
-                    },
                 },
-                "required": ["uploaded_files", "rule_code", "output_dir"],
+                "required": ["uploaded_files", "rule_code"],
             },
         )
     ]
@@ -93,19 +90,19 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
     from proc.mcp_server.tools import _get_proc_rule
 
+    from proc.config.config import OUTPUT_DIR
+
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
     rule_code: str = (arguments.get("rule_code") or "").strip()
-    output_dir: str = (arguments.get("output_dir") or "").strip()
 
     # ── 参数校验 ──────────────────────────────────────────────────────────────
     if not uploaded_files:
         return {"success": False, "error": "uploaded_files 不能为空"}
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
-    if not output_dir:
-        return {"success": False, "error": "output_dir 不能为空"}
 
-    # ── 创建输出目录 ──────────────────────────────────────────────────────────
+    # ── 确定输出目录（按 rule_code 分子目录）────────────────────────────────
+    output_dir = str(Path(OUTPUT_DIR) / rule_code)
     try:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -409,8 +406,14 @@ def _compute_column(
     elif rule_type == "parse_from_field":
         return _rt_parse_from_field(fm, source_df, n)
 
+    elif rule_type == "regex_extract":
+        return _rt_regex_extract(fm, source_df, n)
+
     elif rule_type == "conditional_value":
         return _rt_conditional_value(fm, source_df, n)
+
+    elif rule_type == "conditional_extract":
+        return _rt_conditional_extract(fm, source_df, n)
 
     elif rule_type == "conditional_formula":
         return _rt_conditional_formula(fm, source_df, result, n)
@@ -470,9 +473,13 @@ def _rt_formula(
     """
     简单数学公式计算。支持四则运算。
     操作数可以是源 DataFrame 中的列，也可以是已计算的目标列。
+
+    配置项：
+      round : 整数，指定结果保留的小数位数（四舍五入），不配置则不进行舍入
     """
     formula: str = fm.get("formula", "")
     source_fields: list[dict] = fm.get("source_fields", [])
+    round_digits: Optional[int] = fm.get("round")
 
     # 收集操作数名称（来自 source_fields 定义 或 depends_on）
     depends_on: list[str] = fm.get("depends_on", [])
@@ -490,12 +497,76 @@ def _rt_formula(
                 env[col_name] = _safe_num(col_data[i])
         try:
             val = _eval_formula(formula, env)
+            # 四舍五入处理
+            if round_digits is not None and val is not None and isinstance(val, (int, float)):
+                val = round(val, round_digits)
         except Exception as e:
             logger.debug(f"[sync_rule] formula 计算失败 row={i}: {e}")
             val = None
         results_list.append(val)
 
     return results_list
+
+
+# ── regex_extract ────────────────────────────────────────────────────────────
+
+def _rt_regex_extract(fm: dict, source_df: pd.DataFrame, n: int) -> list:
+    """
+    正则提取字段值。
+
+    配置说明：
+      extract_pattern : 正则表达式（含捕获组）
+      extract_group   : 取第几个捕获组，默认 1
+      value_type      : 值类型转换
+                        - "float_percent" : 将提取的数字字符串除以 100，转为小数税率（如 "6" => 0.06）
+                        - "float"         : 转为浮点数
+                        - "int"           : 转为整数
+                        - 其他/不填       : 保留字符串
+      fallback        : 无匹配时的默认值，默认 None
+    """
+    src = fm.get("source_field", "")
+    pattern = fm.get("extract_pattern", "")
+    group_idx = int(fm.get("extract_group", 1))
+    value_type = fm.get("value_type", "")
+    fallback = fm.get("fallback")  # None 表示无默认值
+
+    if src not in source_df.columns:
+        logger.warning(f"[sync_rule] regex_extract 源字段 '{src}' 不存在")
+        return [fallback] * n
+
+    compiled = re.compile(pattern) if pattern else None
+
+    def extract_one(val: Any) -> Any:
+        if pd.isna(val) or not compiled:
+            return fallback
+        m = compiled.search(str(val))
+        if not m:
+            return fallback
+        try:
+            raw = m.group(group_idx)
+        except IndexError:
+            return fallback
+        # 类型转换
+        if value_type == "float_percent":
+            try:
+                # 去掉末尾的 % 再转为浮点数，然后除以 100
+                num_str = str(raw).rstrip('%')
+                return float(num_str) / 100.0
+            except (ValueError, TypeError):
+                return fallback
+        elif value_type == "float":
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return fallback
+        elif value_type == "int":
+            try:
+                return int(raw)
+            except (ValueError, TypeError):
+                return fallback
+        return raw
+
+    return source_df[src].apply(extract_one).tolist()
 
 
 # ── parse_from_field ─────────────────────────────────────────────────────────
@@ -542,7 +613,10 @@ def _rt_conditional_value(fm: dict, source_df: pd.DataFrame, n: int) -> list:
     """
     根据条件映射固定值。
     conditions 顺序匹配，第一个匹配的 condition 取其 value。
-    最后一个 condition 为 "其他" 或 "other" 时作为默认值。
+
+    condition 支持两种格式：
+      1. 结构化对象：{ "or": [...] } / { "and": [...] } / { "default": true }（兜底）
+      2. 字符串（向后兼容）："其他" / "其它" / "other" / "default" 作为兜底，其余按语法解析
     """
     src = fm.get("source_field", "")
     conditions: list[dict] = fm.get("conditions", [])
@@ -551,34 +625,188 @@ def _rt_conditional_value(fm: dict, source_df: pd.DataFrame, n: int) -> list:
         return [None] * n
 
     def match_one(val: Any) -> Any:
+        row = None  # 懒加载，仅结构化 condition 需要整行数据
         val_str = str(val) if not pd.isna(val) else ""
+        fallback_value = None
+        fallback_set = False
+
         for cond in conditions:
-            condition_str = cond.get("condition", "")
+            condition = cond.get("condition", "")
             cond_value = cond.get("value")
-            # 默认条件
+
+            # ── 结构化 condition ────────────────────────────────────────────
+            if isinstance(condition, dict):
+                # { "default": true } 作为兜底
+                if condition.get("default") is True:
+                    if not fallback_set:
+                        fallback_value = cond_value
+                        fallback_set = True
+                    continue
+                # 其他结构化条件需要整行数据，懒加载
+                # 注意：此处 source_df 在 apply 外无法直接用，改为传入行索引
+                # 因 apply 里无法获取行号，直接用 val_str 对比 source_field 列值做简化匹配
+                # 完整行匹配通过 _apply_field_mappings 时逐行调用，这里用 val_str 对比
+                matched = _match_condition_for_value(condition, val_str, src)
+                if matched is True:
+                    return cond_value
+                elif matched is None:
+                    # 无法解析，作为兜底
+                    if not fallback_set:
+                        fallback_value = cond_value
+                        fallback_set = True
+                continue
+
+            # ── 字符串 condition（向后兼容）────────────────────────────────
+            condition_str = condition if isinstance(condition, str) else ""
+            # 1. 明确默认条件
             if condition_str in ("其他", "other", "其它", "default"):
-                return cond_value
-            # 等于条件
+                if not fallback_set:
+                    fallback_value = cond_value
+                    fallback_set = True
+                continue
+            # 2. 等于条件
             if "等于" in condition_str:
-                m = re.search(r"['\"'\"](.*?)['\"'\"]", condition_str)
+                m = re.search(r"['\"\u2018\u201c](.*?)['\"\u2019\u201d]", condition_str)
                 if m and val_str == m.group(1):
                     return cond_value
-            # 包含条件
+            # 3. 包含 / 为 条件
             elif "包含" in condition_str or "为" in condition_str:
-                targets = re.findall(r"['\"'\"](.*?)['\"'\"]", condition_str)
+                targets = re.findall(r"['\"\u2018\u201c](.*?)['\"\u2019\u201d]", condition_str)
                 if any(t in val_str for t in targets):
                     return cond_value
-            # 科目名称百分比税率 — 直接匹配 condition 文本中的科目
+            # 4. 或 条件
             elif "或" in condition_str:
-                targets = re.findall(r"['\"'\"](.*?)['\"'\"]", condition_str)
+                targets = re.findall(r"['\"\u2018\u201c](.*?)['\"\u2019\u201d]", condition_str)
                 if val_str in targets:
                     return cond_value
-        return None
+            else:
+                # 5. 无法解析的 condition——记为兜底
+                if not fallback_set:
+                    fallback_value = cond_value
+                    fallback_set = True
+
+        return fallback_value
 
     return source_df[src].apply(match_one).tolist()
 
 
+def _match_condition_for_value(condition: dict, val_str: str, src_field: str) -> Optional[bool]:
+    """
+    _rt_conditional_value 专用的结构化条件匹配（仅基于当前字段值，不跨列）。
+    适用于条件中所有子条件都针对同一字段（source_field）的场景。
+    返回 True/False/None（None 表示条件无法解析）。
+    """
+    sub_conds: list[dict] = condition.get("and") or condition.get("or") or []
+    logic = "and" if "and" in condition else "or"
+    if not sub_conds:
+        return None
+    results: list[bool] = []
+    for sub in sub_conds:
+        op = sub.get("op", "eq")
+        val = sub.get("value", "")
+        if op == "eq":
+            results.append(val_str == str(val))
+        elif op == "contains":
+            results.append(str(val) in val_str)
+        elif op == "startswith":
+            results.append(val_str.startswith(str(val)))
+        elif op == "in":
+            results.append(val_str in [str(v) for v in (val if isinstance(val, list) else [val])])
+        else:
+            results.append(False)
+    return all(results) if logic == "and" else any(results)
+
+
 # ── conditional_formula ──────────────────────────────────────────────────────
+
+def _rt_conditional_extract(fm: dict, source_df: pd.DataFrame, n: int) -> list:
+    """
+    根据条件匹配提取字段子串。
+    匹配则用 extract_pattern 正则从源字段中提取，返回 extract_group 指定的捕获组（默认 1）。
+    """
+    src = fm.get("source_field", "")
+    conditions: list[dict] = fm.get("conditions", [])
+
+    if src not in source_df.columns:
+        return [None] * n
+
+    def extract_one(val: Any) -> Any:
+        if pd.isna(val):
+            return None
+        val_str = str(val)
+        for cond in conditions:
+            pattern = cond.get("extract_pattern")
+            if not pattern:
+                continue
+            m = re.search(pattern, val_str)
+            if m:
+                group_idx = cond.get("extract_group", 1)  # 默认取第 1 个捕获组
+                try:
+                    return m.group(group_idx)
+                except IndexError:
+                    continue
+        return None
+
+    return source_df[src].apply(extract_one).tolist()
+
+
+def _match_condition(condition: Any, row: "pd.Series", source_df: pd.DataFrame) -> Optional[bool]:
+    """
+    判断单行数据是否匹配 condition 定义。
+
+    condition 支持两种格式：
+      1. 结构化对象（推荐）：
+         { "and": [ {"field": "摘要", "op": "contains", "value": "调整收入"}, ... ] }
+         { "or":  [ {"field": "科目名称", "op": "eq", "value": "主营业务收入_寄售收入"}, ... ] }
+         单子条件 op 支持："eq"（等于）、"contains"（子串包含）、"startswith"（前缀）、"in"（在列表中）
+
+      2. 字符串（遗留格式，仅匹配科目名称字段）：
+         "科目名称为'主营业务收入_销售收入'或'主营业务收入_技术服务收入'"
+         返回 None 表示该格式无法确定匹配，由调用方决定是否作为兜底。
+
+    Returns:
+        True  = 命中
+        False = 未命中
+        None  = 无法解析（字符串格式且无科目关键词）
+    """
+    if isinstance(condition, dict):
+        # ── 结构化对象解析 ────────────────────────────────────────────────────
+        sub_conds: list[dict] = condition.get("and") or condition.get("or") or []
+        logic = "and" if "and" in condition else "or"
+        results: list[bool] = []
+        for sub in sub_conds:
+            field = sub.get("field", "")
+            op = sub.get("op", "eq")
+            val = sub.get("value", "")
+            # 取当前行该字段的值
+            if field in source_df.columns:
+                cell = row.get(field, "")
+                cell_str = "" if (cell is None or (isinstance(cell, float) and pd.isna(cell))) else str(cell)
+            else:
+                cell_str = ""
+            if op == "eq":
+                match = cell_str == str(val)
+            elif op == "contains":
+                match = str(val) in cell_str
+            elif op == "startswith":
+                match = cell_str.startswith(str(val))
+            elif op == "in":
+                match = cell_str in [str(v) for v in (val if isinstance(val, list) else [val])]
+            else:
+                match = False
+            results.append(match)
+        if not results:
+            return None
+        return all(results) if logic == "and" else any(results)
+
+    elif isinstance(condition, str):
+        # ── 字符串格式（向后兼容，仅用科目名称字段匹配）────────────────────
+        condition_str = condition
+        # 取 source_field 对应的列值（外层会传入，这里不直接可用，返回 None 由外层决定）
+        return None  # 由 _rt_conditional_formula 中的字符串分支单独处理
+
+    return None
+
 
 def _rt_conditional_formula(
     fm: dict,
@@ -588,32 +816,60 @@ def _rt_conditional_formula(
 ) -> list:
     """
     根据条件选择不同公式计算。
-    若条件描述无法严格解析，则取第一个条件的公式作为默认。
+
+    condition 支持结构化对象（优先）和字符串（向后兑容）两种格式。
+    所有条件均未命中且至少有一个条件可解析时，返回 0。
     """
     src = fm.get("source_field", "")
     conditions: list[dict] = fm.get("conditions", [])
 
     results_list: list[Any] = []
     for i in range(n):
-        row_src_val = source_df.iloc[i].get(src, "") if src in source_df.columns else ""
+        row = source_df.iloc[i]
+        row_src_val = row.get(src, "") if src in source_df.columns else ""
         row_src_str = str(row_src_val) if not pd.isna(row_src_val) else ""
 
         chosen_formula: Optional[str] = None
-        for cond in conditions:
-            condition_str = cond.get("condition", "")
-            formula_expr = cond.get("formula", "")
-            # 简单匹配：condition 文本中引号内的科目名与当前值对比
-            quoted = re.findall(r"['\"'\"](.*?)['\"'\"]", condition_str)
-            if not quoted:
-                # 无法解析条件，作为默认
-                chosen_formula = formula_expr
-                break
-            if any(q in row_src_str or row_src_str.startswith(q) for q in quoted):
-                chosen_formula = formula_expr
-                break
+        fallback_formula: Optional[str] = None
+        has_parseable_condition = False  # 是否存在可解析的条件
 
-        if chosen_formula is None and conditions:
-            chosen_formula = conditions[0].get("formula", "")
+        for cond in conditions:
+            condition = cond.get("condition")
+            formula_expr = cond.get("formula", "")
+
+            if isinstance(condition, dict):
+                # ── 结构化条件：直接调用 _match_condition ───────────────────────
+                has_parseable_condition = True
+                if _match_condition(condition, row, source_df) is True:
+                    chosen_formula = formula_expr
+                    break
+
+            elif isinstance(condition, str):
+                # ── 字符串条件：仅匹配科目名称字段（向后兑容）────────────────
+                if "科目名称" in condition:
+                    after = condition[condition.index("科目名称"):]
+                    quoted = re.findall(r"['\"\u2018\u201c](.*?)['\"\u2019\u201d]", after)
+                else:
+                    quoted = re.findall(r"['\"\u2018\u201c](.*?)['\"\u2019\u201d]", condition)
+
+                if not quoted:
+                    # 无法解析到任何关键词，记为兜底公式
+                    if fallback_formula is None:
+                        fallback_formula = formula_expr
+                    continue
+
+                has_parseable_condition = True
+                if any(q == row_src_str or row_src_str.startswith(q) or q in row_src_str for q in quoted):
+                    chosen_formula = formula_expr
+                    break
+
+        if chosen_formula is None:
+            if has_parseable_condition:
+                # 存在可解析条件但均未命中，返回 0
+                chosen_formula = "0"
+            else:
+                # 全部无法解析，使用兜底公式
+                chosen_formula = fallback_formula or (conditions[0].get("formula", "") if conditions else None)
 
         if chosen_formula:
             env: dict[str, Any] = {}
@@ -721,7 +977,11 @@ def _safe_num(val: Any) -> Any:
 def _eval_formula(formula: str, env: dict[str, Any]) -> Any:
     """
     安全地计算简单数学公式。
-    只允许四则运算和括号，操作数为 env 中定义的变量名。
+    支持四则运算、括号和 round() 函数，操作数为 env 中定义的变量名。
+
+    示例：
+      - "eas不含税金额 * (1 + 税率)"
+      - "round(eas不含税金额 * (1 + 税率), 2)"
     """
     # 将变量名替换为数值字符串
     expr = formula
@@ -732,11 +992,20 @@ def _eval_formula(formula: str, env: dict[str, Any]) -> Any:
         # 只替换完整的变量名（非字母数字边界）
         expr = re.sub(r'(?<![a-zA-Z0-9_])' + re.escape(var_name) + r'(?![a-zA-Z0-9_])', num_str, expr)
 
-    # 安全检查：只允许数字、运算符、括号和空格
-    if not re.match(r'^[\d\s\+\-\*/\.\(\)]+$', expr.strip()):
+    # 安全检查：允许数字、运算符、括号、空格、逗号、round函数
+    # 先处理 round 函数调用，将其转换为 Python 的 round()
+    expr_stripped = expr.strip()
+
+    # 允许 round(...) 函数调用
+    allowed_pattern = r'^[\d\s\+\-\*/\.\(\),]+$|^round\s*\([\d\s\+\-\*/\.\(\),]+\)$'
+    if not re.match(allowed_pattern, expr_stripped):
         raise ValueError(f"公式含有非法字符: {expr!r}")
 
-    return eval(expr)  # nosec: 已限制只含数字和运算符
+    # 构建安全的 eval 环境，只允许 round 函数
+    safe_globals = {"__builtins__": {}}
+    safe_locals = {"round": round}
+
+    return eval(expr, safe_globals, safe_locals)  # nosec: 已限制只含数字、运算符和round
 
 
 def _write_excel(df: pd.DataFrame, field_mappings: list[dict], output_path: str) -> None:
