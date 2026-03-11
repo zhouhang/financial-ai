@@ -35,6 +35,7 @@ from auth.tools import create_auth_tools, handle_auth_tool_call, _create_guest_t
 
 # 导入 proc 模块（数字员工和规则管理）
 from proc.mcp_server.tools import create_tools as create_proc_tools, handle_tool_call as handle_proc_call
+from proc.mcp_server.file_validate_tool import create_file_validate_tools, handle_file_validate_tool_call
 
 # 配置日志
 logging.basicConfig(
@@ -84,8 +85,15 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载 Proc 工具失败: {str(e)}", exc_info=True)
         proc_tools = []
+
+    try:
+        file_validate_tools = create_file_validate_tools()
+        logger.info(f"文件校验工具数量: {len(file_validate_tools)}")
+    except Exception as e:
+        logger.error(f"加载文件校验工具失败: {str(e)}", exc_info=True)
+        file_validate_tools = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + proc_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + proc_tools + file_validate_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -109,6 +117,11 @@ _PROC_TOOL_NAMES = {
     "list_rules_by_employee",
     "get_file_validation_rule",
     "get_proc_rule",
+}
+
+# 文件校验工具名集合
+_FILE_VALIDATE_TOOL_NAMES = {
+    "validate_uploaded_files",
 }
 
 
@@ -144,6 +157,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         # 5) Proc 模块（数字员工和规则管理）
         elif name in _PROC_TOOL_NAMES:
             result = await handle_proc_call(name, arguments)
+
+        # 6) 文件校验模块
+        elif name in _FILE_VALIDATE_TOOL_NAMES:
+            result = await handle_file_validate_tool_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -549,7 +566,7 @@ async def main():
         tools = await list_tools()
         recon_tools = [t for t in tools if t.name.startswith("reconciliation_") or t.name == "file_upload" or t.name == "get_reconciliation"]
         prep_tools = [t for t in tools if t.name.startswith("data_preparation_")]
-        proc_tools = [t for t in tools if t.name in ["list_digital_employees", "list_rules_by_employee"]]
+        proc_tools = [t for t in tools if t.name in _PROC_TOOL_NAMES or t.name in _FILE_VALIDATE_TOOL_NAMES]
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         recon_tools = []

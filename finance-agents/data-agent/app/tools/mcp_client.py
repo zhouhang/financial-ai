@@ -72,6 +72,7 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
         "list_rules_by_employee",
         "get_file_validation_rule",
         "get_proc_rule",
+        "validate_uploaded_files",
     }
 
     try:
@@ -83,8 +84,13 @@ async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> di
             return result
         elif tool_name in _proc_tools:
             logger.info(f"导入 Proc 工具处理器: {tool_name}")
-            from proc.mcp_server.tools import handle_tool_call as handle_proc_tool_call  # type: ignore
-            result = await handle_proc_tool_call(tool_name, arguments)
+            # validate_uploaded_files 在单独的 file_validate_tool 模块中
+            if tool_name == "validate_uploaded_files":
+                from proc.mcp_server.file_validate_tool import handle_file_validate_tool_call  # type: ignore
+                result = await handle_file_validate_tool_call(tool_name, arguments)
+            else:
+                from proc.mcp_server.tools import handle_tool_call as handle_proc_tool_call  # type: ignore
+                result = await handle_proc_tool_call(tool_name, arguments)
             logger.info(f"Proc 工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
             return result
         else:
@@ -549,3 +555,30 @@ async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
     if auth_token:
         args["auth_token"] = auth_token
     return await call_mcp_tool("get_proc_rule", args)
+
+
+async def validate_uploaded_files(
+    uploaded_files: list[dict[str, Any]],
+    rule_code: str,
+) -> dict[str, Any]:
+    """根据规则编码校验上传文件列表，判断每个文件属于哪个预定义的表。
+    
+    Args:
+        uploaded_files: 上传文件列表，格式 [{"file_name": "xxx.xlsx", "columns": ["列1", ...]}]
+        rule_code: 文件校验规则编码，用于从数据库查询对应的校验规则配置
+        
+    Returns:
+        {
+            "success": bool,
+            "matched_results": [{"file_name": str, "table_id": str, "table_name": str}],
+            "unmatched_files": [str],
+            "message": str,
+            # 失败时还包含:
+            "error": str,
+            "missing_necessary_tables": [{"table_id": str, "table_name": str}]
+        }
+    """
+    return await call_mcp_tool("validate_uploaded_files", {
+        "uploaded_files": uploaded_files,
+        "rule_code": rule_code,
+    })

@@ -14,6 +14,10 @@ from db_config import get_db_connection
 # 配置日志（使用根 logger 确保日志能正确输出）
 logger = logging.getLogger("proc.mcp_server.tools")
 
+# ── 文件校验规则缓存 ────────────────────────────────────────────────────────
+# key: rule_code, value: 完整规则记录字典
+_file_validation_rule_cache: Dict[str, Dict[str, Any]] = {}
+
 # 确保 logger 有 handler（如果还没有配置，添加默认的 StreamHandler）
 if not logger.handlers and not logging.getLogger().handlers:
     handler = logging.StreamHandler()
@@ -221,7 +225,8 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
 
 def _get_file_validation_rule(rule_code: str) -> Optional[Dict[str, Any]]:
     """
-    根据 rule_code 从 bus_file_rules 表获取文件校验规则完整记录
+    根据 rule_code 从 bus_file_rules 表获取文件校验规则完整记录。
+    命中后结果会缓存在内存中，后续相同 rule_code 的请求直接从缓存返回。
     
     Args:
         rule_code: 规则编码
@@ -229,6 +234,10 @@ def _get_file_validation_rule(rule_code: str) -> Optional[Dict[str, Any]]:
     Returns:
         完整记录对象（包含 id, rule_code, rule, memo 字段），如果未找到则返回 None
     """
+    # ── 优先读缓存 ────────────────────────────────────────────────────────────────
+    if rule_code in _file_validation_rule_cache:
+        logger.info(f"[Cache] 命中文件校验规则缓存，rule_code={rule_code}")
+        return _file_validation_rule_cache[rule_code]
     conn = None
     try:
         logger.info(f"[SQL] 开始查询文件校验规则，rule_code={rule_code}")
@@ -270,6 +279,9 @@ def _get_file_validation_rule(rule_code: str) -> Optional[Dict[str, Any]]:
             }
             
             logger.info(f"[SQL] 查询文件校验规则成功，rule_code={rule_code}，id={result['id']}")
+            # ── 写入缓存 ───────────────────────────────────────────────────────────
+            _file_validation_rule_cache[rule_code] = result
+            logger.info(f"[Cache] 已缓存文件校验规则，rule_code={rule_code}")
             return result
         
         logger.warning(f"[SQL] 查询文件校验规则，rule_code={rule_code}，未找到记录")

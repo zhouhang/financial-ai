@@ -17,10 +17,13 @@ import asyncio
 import json
 import logging
 import os
+import time
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from app.config import UPLOAD_DIR
 from app.models import AgentState, ProcAgentPhase
 
 logger = logging.getLogger(__name__)
@@ -34,10 +37,26 @@ SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
+def _to_abs_path(file_path: str) -> str:
+    """将上传文件的相对路径转为绝对路径。
+
+    file_path 可能是 /uploads/2026/3/11/xxx.xlsx（相对路径），
+    需要拼接 UPLOAD_DIR 根目录才能在本机找到文件。
+    如果已经是存在的绝对路径则直接返回。
+    """
+    p = Path(file_path)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    # 去掉开头的 /uploads 或 uploads 前缀，拼接 UPLOAD_DIR
+    rel = file_path.lstrip("/")
+    if rel.startswith("uploads/"):
+        rel = rel[len("uploads/"):]
+    return str(Path(UPLOAD_DIR) / rel)
+
+
 def _get_proc_ctx(state: AgentState) -> dict[str, Any]:
     """安全地获取 proc_graph_ctx，不存在则返回空字典。"""
     return dict(state.get("proc_graph_ctx") or {})
-
 
 def _run_async(coro):
     """在同步上下文中运行异步协程。"""
@@ -79,9 +98,18 @@ def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None
         logger.info(f"[proc_graph] 获取整理规则结果: success={proc_rule_result.get('success')}")
         
         # 检查是否获取成功
-        if not file_rule_result.get("success") and not proc_rule_result.get("success"):
-            logger.warning(f"[proc_graph] 未找到规则 rule_code={rule_code}")
+        file_success = file_rule_result.get("success", False)
+        proc_success = proc_rule_result.get("success", False)
+
+        if not file_success and not proc_success:
+            logger.warning(f"[proc_graph] 未找到规则 rule_code={rule_code}（文件校验规则和整理规则均不存在）")
             return None
+
+        if not file_success:
+            logger.warning(f"[proc_graph] 未找到文件校验规则 rule_code={rule_code}")
+
+        if not proc_success:
+            logger.warning(f"[proc_graph] 未找到整理规则 rule_code={rule_code}")
         
         # 合并规则
         combined_rule = {
@@ -226,20 +254,85 @@ def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
 # 节点 0：welcome_node — 展示欢迎信息，引导用户上传文件
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 节点流程定义（用于 welcome_node 展示和进度提示）
+_PROC_NODE_FLOW = [
+    {"name": "读取规则", "desc": "从数据库加载数据整理规则定义", "node": "get_proc_rule_node"},
+    {"name": "文件校验", "desc": "校验上传文件格式、列名是否符合规则要求", "node": "check_file_node"},
+    {"name": "执行整理", "desc": "按照规则执行数据转换和整理", "node": "proc_task_execute_node"},
+    {"name": "结果展示", "desc": "展示处理结果和生成的执行计划", "node": "result_node"},
+]
+
+
+def _build_flow_overview() -> str:
+    """构建节点流程概览文本。"""
+    lines = ["📋 **处理流程**（共4个步骤）：\n"]
+    for idx, step in enumerate(_PROC_NODE_FLOW, 1):
+        lines.append(f"{idx}. **{step['name']}** — {step['desc']}")
+    return "\n".join(lines)
+
+
+def _build_progress_message(completed_nodes: list[str], current_node: str | None = None) -> str:
+    """构建进度提示消息。
+
+    每个任务项单独一行展示：
+    - 已完成：✅ 任务名称
+    - 执行中：⏳ 正在进行 任务名称 的工作...
+    - 即将执行：📍 接下来将执行 任务名称
+
+    Args:
+        completed_nodes: 已完成的节点名称列表
+        current_node: 当前正在执行的节点名称（可选）
+
+    Returns:
+        格式化的进度提示文本
+    """
+    lines = []
+
+    # 已完成的节点 - 每个单独一行
+    for node_name in completed_nodes:
+        for step in _PROC_NODE_FLOW:
+            if step["node"] == node_name:
+                lines.append(f"✅ {step['name']}")
+                break
+
+    # 当前正在执行的节点
+    if current_node:
+        for step in _PROC_NODE_FLOW:
+            if step["node"] == current_node:
+                lines.append(f"⏳ 正在进行 **{step['name']}** 的工作...")
+                break
+
+    # 下一个即将执行的节点
+    if current_node:
+        found_current = False
+        for step in _PROC_NODE_FLOW:
+            if found_current:
+                lines.append(f"📍 接下来将执行 **{step['name']}**")
+                break
+            if step["node"] == current_node:
+                found_current = True
+
+    # 使用双换行符确保前端正确分行显示
+    return "\n\n".join(lines) if lines else ""
+
+
 def welcome_node(state: AgentState) -> dict:
     """展示数据整理任务开始的欢迎信息。
 
-    显示已选择的规则名称，并引导用户上传待整理的数据文件。
+    显示已选择的规则名称、处理流程概览，并引导用户上传待整理的数据文件。
     完成后 phase 不改变，直接流转到 get_proc_rule_node。
     """
     ctx = _get_proc_ctx(state)
     rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
 
     rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
+    flow_overview = _build_flow_overview()
 
     msg = (
         f"📊 **开始数据整理任务**\n\n"
         f"已选择规则：{rule_display}\n\n"
+        f"{flow_overview}\n\n"
+        f"请上传需要整理的数据文件，系统将自动按上述流程处理。"
     )
 
     logger.info(f"[proc_graph] welcome_node rule_code={rule_code!r}")
@@ -259,37 +352,55 @@ def get_proc_rule_node(state: AgentState) -> dict:
     - 若规则不存在：直接回复用户，phase → RULE_NOT_FOUND
     """
     ctx = _get_proc_ctx(state)
-    
+
     # 优先从 ctx 中获取 rule_code，其次从 state 中获取
     rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
     auth_token: str = state.get("auth_token") or ""
 
     logger.info(f"[proc_graph] get_proc_rule_node rule_code={rule_code!r}")
 
+    # 开始执行提示
+    progress_msg = _build_progress_message(completed_nodes=[], current_node="get_proc_rule_node")
+    messages: list = list(state.get("messages") or [])
+    if progress_msg:
+        messages.append(AIMessage(content=progress_msg))
+
     if not rule_code:
         msg = "未指定数据整理规则编码，请告知您要使用的规则。"
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
-            "messages": [AIMessage(content=msg)],
+            "messages": messages + [AIMessage(content=msg)],
             "proc_graph_ctx": ctx,
         }
-    
+
     rule = _load_rule_from_pg(rule_code=rule_code, auth_token=auth_token)
-    
+
     if rule is None:
         msg = f"未找到规则编码为「{rule_code}」的数据整理规则。\n请确认规则编码是否正确，或联系管理员获取可用的规则列表。"
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
-            "messages": [AIMessage(content=msg)],
+            "messages": messages + [AIMessage(content=msg)],
             "proc_graph_ctx": ctx,
         }
-    
+
+    # 完成提示：本节点已完成，开始下一个节点
+    completion_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node"],
+        current_node="check_file_node"
+    )
+
+    # 添加短暂停顿以便前端展示
+    time.sleep(1)
+
     ctx.update({
         "phase": ProcAgentPhase.CHECKING_FILES.value,
         "rule": rule,
         "rule_code": rule_code,
     })
-    return {"proc_graph_ctx": ctx}
+    return {
+        "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+        "proc_graph_ctx": ctx,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -299,47 +410,158 @@ def get_proc_rule_node(state: AgentState) -> dict:
 def check_file_node(state: AgentState) -> dict:
     """校验已上传文件是否满足规则要求。
 
+    通过调用 MCP 工具 validate_uploaded_files 执行校验：
+    - 读取每个文件的列名
+    - 调用 validate_uploaded_files tool 进行全量列名精确匹配
     - 通过：phase → EXECUTING
     - 不通过：回复错误原因，phase → FILE_CHECK_FAILED
     """
     ctx = _get_proc_ctx(state)
-    rule: dict = ctx.get("rule") or {}
     rule_code: str = ctx.get("rule_code", "")
-    uploaded_files: list[str] = list(state.get("uploaded_files") or [])
+    raw_files: list = list(state.get("uploaded_files") or [])
+
+    # 开始执行提示
+    progress_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node"],
+        current_node="check_file_node"
+    )
+    messages: list = list(state.get("messages") or [])
+    if progress_msg:
+        messages.append(AIMessage(content=progress_msg))
+
+    # uploaded_files 可能是 str 路径或 dict（{file_path, original_filename}），统一提取绝对路径
+    uploaded_files: list[str] = []
+    for item in raw_files:
+        if isinstance(item, dict):
+            fp = item.get("file_path") or item.get("path") or ""
+        else:
+            fp = str(item)
+        if fp:
+            uploaded_files.append(_to_abs_path(fp))
 
     logger.info(
         f"[proc_graph] check_file_node rule_code={rule_code!r} "
         f"files={[os.path.basename(f) for f in uploaded_files]}"
     )
 
-    ok, reason = _validate_files(uploaded_files, rule)
-
-    if not ok:
-        file_validation = rule.get("file_validation_rules", {})
-        table_schemas = file_validation.get("table_schemas", [])
-        required_cols_all = [
-            col
-            for s in table_schemas
-            if s.get("table_type") == "source"
-            for col in s.get("required_columns", [])
-        ]
-        required_count = len([s for s in table_schemas if s.get("table_type") == "source"])
-
-        msg = (
-            f"文件校验失败：\n\n{reason}\n\n"
-            f"**规则要求：**\n"
-            f"- 支持文件类型：{', '.join(sorted(SUPPORTED_EXTENSIONS))}\n"
-            f"- 需要上传文件数：{max(required_count, 1)} 个\n"
-            f"- 必需列：{required_cols_all if required_cols_all else '（规则未指定）'}"
-        )
+    # ── 1. 基础判断：文件列表不能为空 ───────────────────────────────────────
+    if not uploaded_files:
+        reason = "未检测到已上传的文件，请先上传所需文件后再试。"
+        msg = f"文件校验失败：\n\n{reason}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
-            "messages": [AIMessage(content=msg)],
+            "messages": messages + [AIMessage(content=msg)],
             "proc_graph_ctx": ctx,
         }
 
-    ctx.update({"phase": ProcAgentPhase.EXECUTING.value})
-    return {"proc_graph_ctx": ctx}
+    # ── 2. 文件类型校验 ──────────────────────────────────────────────────
+    for fp in uploaded_files:
+        ext = os.path.splitext(fp)[-1].lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            reason = (
+                f"文件「{os.path.basename(fp)}」格式不支持（{ext}），"
+                f"请上传 {', '.join(sorted(SUPPORTED_EXTENSIONS))} 格式的文件。"
+            )
+            msg = f"文件校验失败：\n\n{reason}"
+            ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+            return {
+                "messages": messages + [AIMessage(content=msg)],
+                "proc_graph_ctx": ctx,
+            }
+
+    # ── 3. 读取各文件列名，构建 tool 参数 ────────────────────────────────
+    files_with_columns: list[dict] = []
+    for fp in uploaded_files:
+        try:
+            columns = _read_header(fp, ignore_whitespace=True)
+            files_with_columns.append({
+                "file_name": os.path.basename(fp),
+                "columns": columns,
+            })
+            logger.info(
+                f"[proc_graph] 读取列名成功: {os.path.basename(fp)}, 共 {len(columns)} 列"
+            )
+        except Exception as e:
+            reason = f"读取文件「{os.path.basename(fp)}」表头失败：{e}"
+            msg = f"文件校验失败：\n\n{reason}"
+            ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+            return {
+                "messages": messages + [AIMessage(content=msg)],
+                "proc_graph_ctx": ctx,
+            }
+
+    # ── 4. 调用 MCP tool validate_uploaded_files 执行全量列名精确匹配 ─────────
+    from app.tools.mcp_client import validate_uploaded_files as mcp_validate_files
+
+    try:
+        validate_result = _run_async(
+            mcp_validate_files(
+                uploaded_files=files_with_columns,
+                rule_code=rule_code,
+            )
+        )
+    except Exception as e:
+        reason = f"调用文件校验服务失败：{e}"
+        logger.error(f"[proc_graph] check_file_node 校验工具调用异常: {e}")
+        msg = f"文件校验失败：\n\n{reason}"
+        ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+        return {
+            "messages": messages + [AIMessage(content=msg)],
+            "proc_graph_ctx": ctx,
+        }
+
+    logger.info(
+        f"[proc_graph] check_file_node 校验结果: success={validate_result.get('success')}, "
+        f"matched={len(validate_result.get('matched_results', []))}, "
+        f"unmatched={validate_result.get('unmatched_count', 0)}"
+    )
+
+    # ── 5. 处理校验结果 ──────────────────────────────────────────────────────
+    if not validate_result.get("success"):
+        error_msg = validate_result.get("error", "文件校验未通过")
+
+        # 展示未匹配信息和缺少的必传表
+        missing_tables = validate_result.get("missing_necessary_tables", [])
+        unmatched_files = validate_result.get("unmatched_files", [])
+
+        detail_lines = []
+        if missing_tables:
+            missing_names = ", ".join(t["table_name"] for t in missing_tables)
+            detail_lines.append(f"缺少必传文件类型：{missing_names}")
+        if unmatched_files:
+            detail_lines.append(f"未能识别的文件：{', '.join(unmatched_files)}")
+
+        detail_text = "\n".join(f"- {line}" for line in detail_lines) if detail_lines else ""
+        msg = (
+            f"文件校验失败：\n\n{error_msg}"
+            + (f"\n\n**详情：**\n{detail_text}" if detail_text else "")
+        )
+        ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": error_msg})
+        return {
+            "messages": messages + [AIMessage(content=msg)],
+            "proc_graph_ctx": ctx,
+        }
+
+    # ── 6. 校验通过：将匹配结果写入 ctx ─────────────────────────────────
+    matched_results: list[dict] = validate_result.get("matched_results", [])
+
+    # 完成提示：本节点已完成，开始下一个节点
+    completion_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node", "check_file_node"],
+        current_node="proc_task_execute_node"
+    )
+
+    # 添加短暂停顿以便前端展示
+    time.sleep(1)
+
+    ctx.update({
+        "phase": ProcAgentPhase.EXECUTING.value,
+        "file_match_results": matched_results,   # [{file_name, table_id, table_name}]
+    })
+    return {
+        "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+        "proc_graph_ctx": ctx,
+    }
 
 
 
@@ -357,6 +579,15 @@ def proc_task_execute_node(state: AgentState) -> dict:
     rule: dict = ctx.get("rule") or {}
     rule_code: str = ctx.get("rule_code", "")
     uploaded_files: list[str] = list(state.get("uploaded_files") or [])
+
+    # 开始执行提示
+    progress_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node", "check_file_node"],
+        current_node="proc_task_execute_node"
+    )
+    messages: list = list(state.get("messages") or [])
+    if progress_msg:
+        messages.append(AIMessage(content=progress_msg))
 
     logger.info(f"[proc_graph] proc_task_execute_node rule_code={rule_code!r}")
 
@@ -379,12 +610,26 @@ def proc_task_execute_node(state: AgentState) -> dict:
             f"文件：{[os.path.basename(f) for f in uploaded_files]}"
         )
 
+        # 完成提示：本节点已完成，开始下一个节点
+        completion_msg = _build_progress_message(
+            completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node"],
+            current_node="result_node"
+        )
+
+        # 添加短暂停顿以便前端展示
+        time.sleep(1)
+
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
             "execution_plan": execution_plan,
             "exec_status": "success",
             "processed_files": [os.path.basename(f) for f in uploaded_files],
         })
+
+        return {
+            "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+            "proc_graph_ctx": ctx,
+        }
 
     except Exception as e:
         logger.error(f"[proc_graph] 执行阶段异常：{e}")
@@ -394,7 +639,10 @@ def proc_task_execute_node(state: AgentState) -> dict:
             "exec_error": str(e),
         })
 
-    return {"proc_graph_ctx": ctx}
+        return {
+            "messages": messages,
+            "proc_graph_ctx": ctx,
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -406,6 +654,15 @@ def result_node(state: AgentState) -> dict:
     ctx = _get_proc_ctx(state)
     rule_code: str = ctx.get("rule_code", "（未知规则）")
     exec_status: str = ctx.get("exec_status", "error")
+
+    # 开始执行提示
+    progress_msg = _build_progress_message(
+        completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node"],
+        current_node="result_node"
+    )
+    messages: list = list(state.get("messages") or [])
+    if progress_msg:
+        messages.append(AIMessage(content=progress_msg))
 
     if exec_status == "success":
         execution_plan: list[dict] = ctx.get("execution_plan", [])
@@ -419,7 +676,14 @@ def result_node(state: AgentState) -> dict:
             )
         plan_text = "\n".join(plan_lines) if plan_lines else "（无规则详情）"
 
+        # 所有节点完成
+        all_completed_msg = _build_progress_message(
+            completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node", "result_node"],
+            current_node=None
+        )
+
         msg = (
+            f"{all_completed_msg}\n\n"
             f"数据整理任务已完成。\n\n"
             f"**规则编码：** {rule_code}\n"
             f"**处理文件：** {', '.join(processed_files) if processed_files else '（无）'}\n\n"
@@ -437,6 +701,6 @@ def result_node(state: AgentState) -> dict:
 
     ctx.update({"phase": ProcAgentPhase.COMPLETED.value})
     return {
-        "messages": [AIMessage(content=msg)],
+        "messages": messages + [AIMessage(content=msg)],
         "proc_graph_ctx": ctx,
     }
