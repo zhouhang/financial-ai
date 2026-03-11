@@ -5,7 +5,7 @@
       "rule_id": "MANUAL_VOUCHER_SYNC_001",
       "description": "手工凭证表同步到BI费用明细表（手工类）的字段映射规则",
       "version": "1.0",
-      "source_tables": ["手工凭证表","收入类型表"],
+      "source_tables": "手工凭证表",
       "target_table": "BI费用明细表（手工类）",
       "global_filter": {
         "description": "从手工凭证表中过滤相关数据的总体规则",
