@@ -22,7 +22,7 @@ from app.graphs.reconciliation import (
     build_reconciliation_subgraph,
 )
 from app.graphs.data_preparation import build_data_preparation_subgraph
-from app.graphs.proc_graph import build_proc_graph_subgraph
+from app.graphs.proc import build_proc_graph_subgraph
 from .nodes import (
     router_node,
 )

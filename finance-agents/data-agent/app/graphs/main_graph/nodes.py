@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.utils.llm import get_llm
 from app.models import (
@@ -571,6 +571,29 @@ async def intent_router(state: AgentState) -> dict:
     Returns:
         状态更新字典，包含识别的意图和相应的状态转换
     """
+    # ====== 新增：前端显式选择数字员工时，直接路由（跳过 LLM 意图识别）======
+    selected_employee_code = state.get("selected_employee_code", "")
+    if selected_employee_code == "data_process":
+        # 用户选择了"数据整理员工"，直接进入 proc 子图
+        rule_code = state.get("selected_rule_code") or "recognition"
+        uploaded = state.get("uploaded_files", [])
+        # 取用户实际输入的消息内容，而非固定 welcome_msg
+        _msgs = list(state.get("messages", []))
+        last_user_input = (
+            _msgs[-1].content
+            if _msgs and hasattr(_msgs[-1], "content")
+            else ""
+        ) or ""
+
+        logger.info(f"[intent_router] 前端显式选择 data_process，直接路由: rule_code={rule_code}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
+        return {
+            "messages": [HumanMessage(content=last_user_input)] if last_user_input else [],
+            "uploaded": uploaded,
+            "user_intent": UserIntent.DATA_PROCESS.value,
+            "selected_rule_code": rule_code,
+            "proc_graph_ctx": {"rule_code": rule_code},
+        }
+
     # ====== 新增：workflow 上下文感知（覆盖所有 workflow 阶段）======
     current_phase = state.get("phase", "")
 
@@ -883,12 +906,15 @@ async def intent_router(state: AgentState) -> dict:
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
     elif intent == UserIntent.DATA_PROCESS.value:
-        # 数据整理意图：进入 proc_graph 子图
-        # 从解析的 JSON 中提取 rule_code，默认为 "recognition"
-        try:
-            rule_code = parsed.get("rule_code", "recognition")
-        except:
-            rule_code = "recognition"
+        # 数据整理意图：进入 proc 子图
+        # 优先从 state 中读取前端传递的 rule_code，其次从 LLM 解析，最后默认 "recognition"
+        rule_code = state.get("selected_rule_code") or ""
+        if not rule_code:
+            # 从 LLM 解析的 JSON 中提取
+            try:
+                rule_code = parsed.get("rule_code", "recognition")
+            except:
+                rule_code = "recognition"
         
         # 检查是否有上传的文件
         uploaded = state.get("uploaded_files", [])

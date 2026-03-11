@@ -42,7 +42,7 @@ from app.tools.mcp_client import (
 )
 
 # 导入 proc_graph 路由
-from app.graphs.proc_graph.api import router as proc_router
+from app.graphs.proc.api import router as proc_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -326,8 +326,10 @@ async def websocket_chat(ws: WebSocket):
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             conversation_id = data.get("conversation_id", "")  # 会话 ID
+            employee_code = data.get("employee_code", "")  # 数字员工编码（如 "data_process"）
+            rule_code = data.get("rule_code", "")  # 规则编码（如 "recognition"）
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, conversation_id={conversation_id}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -479,6 +481,20 @@ async def websocket_chat(ws: WebSocket):
                         )
                 except Exception as e:
                     logger.warning(f"退出 workflow 后清空 thread 文件缓存失败: {e}")
+
+                # ⚙️ 如果前端传递了 employee_code/rule_code，写入 state（用于路由和 proc 子图）
+                if employee_code or rule_code:
+                    try:
+                        update_state = {}
+                        if employee_code:
+                            update_state["selected_employee_code"] = employee_code
+                        if rule_code:
+                            update_state["selected_rule_code"] = rule_code
+                            update_state["proc_graph_ctx"] = {"rule_code": rule_code}
+                        langgraph_app.update_state(config, update_state)
+                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code} 到 state (thread={thread_id})")
+                    except Exception as e:
+                        logger.warning(f"写入 employee/rule code 失败: {e}")
 
                 logger.info(f"开始执行 LangGraph: thread_id={thread_id}")
                 

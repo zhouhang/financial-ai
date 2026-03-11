@@ -1,4 +1,4 @@
-"""proc_graph 子图路由函数与子图构建模块
+"""proc 子图路由函数与子图构建模块
 
 包含：
 - route_after_get_rule    : get_proc_rule_node 之后的条件路由
@@ -11,7 +11,8 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from app.models import AgentState, ProcAgentPhase
-from app.graphs.proc_graph.nodes import (
+from app.graphs.proc.nodes import (
+    welcome_node,
     get_proc_rule_node,
     check_file_node,
     proc_task_execute_node,
@@ -49,11 +50,12 @@ def build_proc_graph_subgraph() -> StateGraph:
     """构建数据整理子图。
 
     流程图：
-        get_proc_rule_node
-            ├─ 规则不存在 → END
-            └─ 规则存在 → check_file_node
-                              ├─ 校验失败 → END
-                              └─ 校验通过 → proc_task_execute_node → result_node → END
+        welcome_node
+            └─ get_proc_rule_node
+                    ├─ 规则不存在 → END
+                    └─ 规则存在 → check_file_node
+                                      ├─ 校验失败 → END
+                                      └─ 校验通过 → proc_task_execute_node → result_node → END
 
     Returns:
         未编译的 StateGraph，由主图调用 .compile() 后注册为子图节点。
@@ -61,15 +63,18 @@ def build_proc_graph_subgraph() -> StateGraph:
     sg = StateGraph(AgentState)
 
     # ── 节点 ─────────────────────────────────────────────────────────────────
+    sg.add_node("welcome_node", welcome_node)
     sg.add_node("get_proc_rule_node", get_proc_rule_node)
     sg.add_node("check_file_node", check_file_node)
     sg.add_node("proc_task_execute_node", proc_task_execute_node)
     sg.add_node("result_node", result_node)
 
     # ── 入口 ─────────────────────────────────────────────────────────────────
-    sg.set_entry_point("get_proc_rule_node")
+    sg.set_entry_point("welcome_node")
 
     # ── 边 ───────────────────────────────────────────────────────────────────
+    sg.add_edge("welcome_node", "get_proc_rule_node")
+
     sg.add_conditional_edges(
         "get_proc_rule_node",
         route_after_get_rule,

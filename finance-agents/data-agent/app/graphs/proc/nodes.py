@@ -1,4 +1,4 @@
-"""proc_graph 子图节点函数模块
+"""proc 子图节点函数模块
 
 包含数据整理工作流的4个核心节点：
 
@@ -220,6 +220,32 @@ def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
         return row
     else:
         raise ValueError(f"不支持的文件类型：{ext}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点 0：welcome_node — 展示欢迎信息，引导用户上传文件
+# ══════════════════════════════════════════════════════════════════════════════
+
+def welcome_node(state: AgentState) -> dict:
+    """展示数据整理任务开始的欢迎信息。
+
+    显示已选择的规则名称，并引导用户上传待整理的数据文件。
+    完成后 phase 不改变，直接流转到 get_proc_rule_node。
+    """
+    ctx = _get_proc_ctx(state)
+    rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
+
+    rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
+
+    msg = (
+        f"📊 **开始数据整理任务**\n\n"
+        f"已选择规则：{rule_display}\n\n"
+    )
+
+    logger.info(f"[proc_graph] welcome_node rule_code={rule_code!r}")
+    return {
+        "messages": [AIMessage(content=msg)],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

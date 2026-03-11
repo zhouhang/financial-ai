@@ -1,16 +1,16 @@
-"""数据整理子图模块 (proc_graph)
+"""数据整理子图模块 (proc)
 
 包含数据整理工作流的节点、路由和子图构建函数。
 
 流程：
-  get_proc_rule_node  →  规则存在？
+  welcome_node → get_proc_rule_node  →  规则存在？
     ├─ 否 → 返回：规则不存在 → END
     └─ 是 → check_file_node → 校验通过？
                 ├─ 否 → 返回：文件校验失败 → END
                 └─ 是 → proc_task_execute_node → result_node → END
 
 文件结构：
-  proc_graph/
+  proc/
   ├── __init__.py          # 本文件，重新导出所有公共接口
   ├── prompts.py           # 各节点系统提示词
   ├── nodes.py             # 节点函数
@@ -20,7 +20,8 @@
 from __future__ import annotations
 
 # ── 节点函数 ──────────────────────────────────────────────────────────────────
-from app.graphs.proc_graph.nodes import (
+from app.graphs.proc.nodes import (
+    welcome_node,
     get_proc_rule_node,
     check_file_node,
     proc_task_execute_node,
@@ -28,7 +29,7 @@ from app.graphs.proc_graph.nodes import (
 )
 
 # ── 路由函数 & 子图构建 ────────────────────────────────────────────────────────
-from app.graphs.proc_graph.routers import (
+from app.graphs.proc.routers import (
     route_after_get_rule,
     route_after_check_file,
     build_proc_graph_subgraph,
@@ -36,6 +37,7 @@ from app.graphs.proc_graph.routers import (
 
 __all__ = [
     # 节点函数
+    "welcome_node",
     "get_proc_rule_node",
     "check_file_node",
     "proc_task_execute_node",
