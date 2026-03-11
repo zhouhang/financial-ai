@@ -59,7 +59,7 @@ async def delete_uploaded_files(uploaded_files: list, auth_token: str = "") -> N
 
     # 调用 MCP 工具删除文件
     try:
-        from app.tools.mcp_client import call_mcp_tool
+        from tools.mcp_client import call_mcp_tool
 
         result = await call_mcp_tool("file_delete", {
             "auth_token": auth_token,
@@ -406,7 +406,7 @@ def _adjust_field_mappings_with_llm(
 
     返回：(调整后的映射, 执行的操作列表)
     """
-    from app.utils.llm import get_llm
+    from utils.llm import get_llm
     
     # 构建当前映射的描述
     current_desc = []
@@ -680,7 +680,7 @@ def _build_rule_config_text(config_items: list[dict]) -> str:
 
 def _guess_field_mappings(analyses: list[dict[str, Any]]) -> dict[str, Any]:
     """使用 LLM 智能猜测字段映射：原始列名 → 标准角色。"""
-    from app.utils.llm import get_llm
+    from utils.llm import get_llm
 
     mappings: dict[str, dict] = {"business": {}, "finance": {}}
 
@@ -1302,9 +1302,9 @@ async def invoke_intelligent_analyzer(uploaded_files: list, complexity_level: st
             "warnings": list  # 警告信息
         }
     """
-    from app.tools.mcp_client import call_mcp_tool
+    from tools.mcp_client import call_mcp_tool
     from langchain_core.messages import SystemMessage, HumanMessage
-    from app.utils.llm import get_llm
+    from utils.llm import get_llm
     import json
     from pathlib import Path
 
@@ -1353,9 +1353,9 @@ async def invoke_intelligent_analyzer(uploaded_files: list, complexity_level: st
 
 async def _analyze_multi_sheet_files(uploaded_files: list, complexity_info: dict) -> dict:
     """分析包含多sheet的Excel文件"""
-    from app.tools.mcp_client import call_mcp_tool
+    from tools.mcp_client import call_mcp_tool
     from langchain_core.messages import SystemMessage, HumanMessage
-    from app.utils.llm import get_llm
+    from utils.llm import get_llm
     import json
 
     logger.info("处理多sheet文件场景")
@@ -1445,7 +1445,7 @@ async def _classify_sheets_with_llm(sheets: list, file_path: str) -> dict:
     - 添加30秒超时保护，超时则降级到基于名称判断
     - 失败时使用降级策略_fallback_classify_sheets_by_name
     """
-    from app.utils.llm import get_llm
+    from utils.llm import get_llm
     import json
 
     # 优化：限制一次分析的sheet数量（最多15个）
@@ -1561,7 +1561,7 @@ def _fallback_classify_sheets_by_name(sheets: list) -> dict:
 
 async def _smart_file_pairing(uploaded_files: list, complexity_info: dict) -> dict:
     """智能文件配对（>2个文件）"""
-    from app.tools.mcp_client import call_mcp_tool
+    from tools.mcp_client import call_mcp_tool
 
     logger.info(f"智能配对场景，共{len(uploaded_files)}个文件")
 
@@ -1637,7 +1637,7 @@ async def _smart_file_pairing(uploaded_files: list, complexity_info: dict) -> di
 
 async def _analyze_single_file(uploaded_file: dict, complexity_info: dict) -> dict:
     """分析单个文件（尝试拆分或提示缺失）"""
-    from app.tools.mcp_client import call_mcp_tool
+    from tools.mcp_client import call_mcp_tool
 
     logger.info("单文件场景，尝试识别类型")
 
@@ -1720,7 +1720,7 @@ async def _analyze_with_format_normalization(uploaded_files: list, complexity_in
 
 async def _fallback_to_simple_analysis(uploaded_files: list) -> dict:
     """降级到简单分析（使用现有的analyze_files工具）"""
-    from app.tools.mcp_client import call_mcp_tool
+    from tools.mcp_client import call_mcp_tool
 
     logger.info("降级到简单文件分析")
 

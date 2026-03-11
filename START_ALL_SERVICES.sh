@@ -44,7 +44,7 @@ cd finance-agents/data-agent
 set -a
 [ -f .env ] && source .env
 set +a
-nohup python -m app.server > "$LOG_DIR/data-agent.log" 2>&1 &
+nohup python -m server > "$LOG_DIR/data-agent.log" 2>&1 &
 DATA_AGENT_PID=$!
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
 
