@@ -531,11 +531,46 @@ async def check_file_node(state: AgentState) -> dict:
     # ── 6. 校验通过：将匹配结果写入 ctx ─────────────────────────────────
     matched_results: list[dict] = validate_result.get("matched_results", [])
 
+    # 构建文件匹配结果提示（每个文件对应的表规则）
+    match_lines = []
+    for m in matched_results:
+        fname = m.get("file_name", "")
+        tname = m.get("table_name", "")
+        if fname and tname:
+            match_lines.append(f"- **{fname}** → {tname}")
+
+    unmatched_files: list = validate_result.get("unmatched_files", [])
+    # 构建文件名 -> 列名 的映射，用于展示未匹配文件的原始列
+    file_columns_map: dict[str, list[str]] = {
+        f["file_name"]: f.get("columns", [])
+        for f in files_with_columns
+    }
+    unmatch_lines = []
+    for f in unmatched_files:
+        cols = file_columns_map.get(f, [])
+        cols_text = "、".join(cols) if cols else "（无法读取列名）"
+        unmatch_lines.append(
+            f"- **{f}** ⚠️ 未能识别\n"
+            f"  - 原因：该文件不在规则预定义的表范围内，将被跳过\n"
+            f"  - 文件列名：{cols_text}"
+        )
+
+    summary_parts = []
+    if match_lines:
+        summary_parts.append("✅ **已匹配：**\n" + "\n".join(match_lines))
+    if unmatch_lines:
+        summary_parts.append("⚠️ **未匹配：**\n" + "\n".join(unmatch_lines))
+
+    file_match_summary = (
+        "\n\n**文件识别结果：**\n" + "\n\n".join(summary_parts)
+        if summary_parts else ""
+    )
+
     # 完成提示：本节点已完成，开始下一个节点
     completion_msg = _build_progress_message(
         completed_nodes=["get_proc_rule_node", "check_file_node"],
         current_node="proc_task_execute_node"
-    )
+    ) + file_match_summary
 
     ctx.update({
         "phase": ProcAgentPhase.EXECUTING.value,
