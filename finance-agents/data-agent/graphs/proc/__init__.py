@@ -32,7 +32,7 @@ from graphs.proc.nodes import (
 from graphs.proc.routers import (
     route_after_get_rule,
     route_after_check_file,
-    build_proc_graph_subgraph,
+    build_proc_subgraph,
 )
 
 __all__ = [
@@ -46,5 +46,5 @@ __all__ = [
     "route_after_get_rule",
     "route_after_check_file",
     # 子图构建
-    "build_proc_graph_subgraph",
+    "build_proc_subgraph",
 ]

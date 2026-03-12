@@ -7,13 +7,12 @@
   3. proc_task_execute_node  —— 按 JSON 规则确定性执行数据整理
   4. result_node             —— 展示处理结果或返回错误信息
 
-节点间通过 AgentState 的 proc_graph_ctx 子字典传递中间状态，
+节点间通过 AgentState 的 proc_ctx 子字典传递中间状态，
 不污染主图其他字段。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -32,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 # 支持的文件扩展名（小写）
 SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
-
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
@@ -54,24 +52,13 @@ def _to_abs_path(file_path: str) -> str:
 
 
 def _get_proc_ctx(state: AgentState) -> dict[str, Any]:
-    """安全地获取 proc_graph_ctx，不存在则返回空字典。"""
-    return dict(state.get("proc_graph_ctx") or {})
+    """安全地获取 proc_ctx，不存在则返回空字典。"""
+    return dict(state.get("proc_ctx") or {})
 
-def _run_async(coro):
-    """在同步上下文中运行异步协程。"""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+# _run_async 已移除：节点改为 async def，直接 await MCP 调用，避免跨事件循环 Future 问题
 
 
-def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
+async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
     """从 PG（通过 MCP 工具）加载数据整理规则。
     
     同时获取：
@@ -89,26 +76,26 @@ def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None
 
     try:
         # 1. 获取文件校验规则
-        file_rule_result = _run_async(get_file_validation_rule(rule_code=rule_code, auth_token=auth_token))
-        logger.info(f"[proc_graph] 获取文件校验规则结果: success={file_rule_result.get('success')}")
+        file_rule_result = await get_file_validation_rule(rule_code=rule_code, auth_token=auth_token)
+        logger.info(f"[proc] 获取文件校验规则结果: success={file_rule_result.get('success')}")
         
         # 2. 获取整理规则
-        proc_rule_result = _run_async(get_proc_rule(rule_code=rule_code, auth_token=auth_token))
-        logger.info(f"[proc_graph] 获取整理规则结果: success={proc_rule_result.get('success')}")
+        proc_rule_result = await get_proc_rule(rule_code=rule_code, auth_token=auth_token)
+        logger.info(f"[proc] 获取整理规则结果: success={proc_rule_result.get('success')}")
         
         # 检查是否获取成功
         file_success = file_rule_result.get("success", False)
         proc_success = proc_rule_result.get("success", False)
 
         if not file_success and not proc_success:
-            logger.warning(f"[proc_graph] 未找到规则 rule_code={rule_code}（文件校验规则和整理规则均不存在）")
+            logger.warning(f"[proc] 未找到规则 rule_code={rule_code}（文件校验规则和整理规则均不存在）")
             return None
 
         if not file_success:
-            logger.warning(f"[proc_graph] 未找到文件校验规则 rule_code={rule_code}")
+            logger.warning(f"[proc] 未找到文件校验规则 rule_code={rule_code}")
 
         if not proc_success:
-            logger.warning(f"[proc_graph] 未找到整理规则 rule_code={rule_code}")
+            logger.warning(f"[proc] 未找到整理规则 rule_code={rule_code}")
         
         # 合并规则
         combined_rule = {
@@ -133,14 +120,14 @@ def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None
             combined_rule["proc_rule_memo"] = proc_data.get("memo", "")
         
         logger.info(
-            f"[proc_graph] 规则加载成功 rule_code={rule_code}, "
+            f"[proc] 规则加载成功 rule_code={rule_code}, "
             f"文件校验规则={'file_validation_rules' in combined_rule}, "
             f"整理规则数={len(combined_rule.get('rules', []))}"
         )
         return combined_rule
         
     except Exception as e:
-        logger.error(f"[proc_graph] 读取规则失败 rule_code={rule_code}: {e}")
+        logger.error(f"[proc] 读取规则失败 rule_code={rule_code}: {e}")
         return None
 
 
@@ -323,8 +310,13 @@ def welcome_node(state: AgentState) -> dict:
     """
     ctx = _get_proc_ctx(state)
     rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
+    rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
 
-    rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
+    # 构建规则展示文本：有 name 就显示「名称（编码）」，没有则仅显示编码
+    if rule_name:
+        rule_display = f"**{rule_name}**（{rule_code}）"
+    else:
+        rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
     flow_overview = _build_flow_overview()
 
     msg = (
@@ -334,7 +326,7 @@ def welcome_node(state: AgentState) -> dict:
         f"请上传需要整理的数据文件，系统将自动按上述流程处理。"
     )
 
-    logger.info(f"[proc_graph] welcome_node rule_code={rule_code!r}")
+    logger.info(f"[proc] welcome_node rule_code={rule_code!r}, rule_name={rule_name!r}")
     return {
         "messages": [AIMessage(content=msg)],
     }
@@ -344,10 +336,10 @@ def welcome_node(state: AgentState) -> dict:
 # 节点 1：get_proc_rule_node — 从 PG 读取规则
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_proc_rule_node(state: AgentState) -> dict:
+async def get_proc_rule_node(state: AgentState) -> dict:
     """从 PostgreSQL 读取数据整理规则。
 
-    - 若规则存在：将规则写入 proc_graph_ctx，phase → CHECKING_FILES
+    - 若规则存在：将规则写入 proc_ctx，phase → CHECKING_FILES
     - 若规则不存在：直接回复用户，phase → RULE_NOT_FOUND
     """
     ctx = _get_proc_ctx(state)
@@ -356,7 +348,7 @@ def get_proc_rule_node(state: AgentState) -> dict:
     rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
     auth_token: str = state.get("auth_token") or ""
 
-    logger.info(f"[proc_graph] get_proc_rule_node rule_code={rule_code!r}")
+    logger.info(f"[proc] get_proc_rule_node rule_code={rule_code!r}")
 
     # 开始执行提示
     progress_msg = _build_progress_message(completed_nodes=[], current_node="get_proc_rule_node")
@@ -369,17 +361,17 @@ def get_proc_rule_node(state: AgentState) -> dict:
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
             "messages": messages + [AIMessage(content=msg)],
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
-    rule = _load_rule_from_pg(rule_code=rule_code, auth_token=auth_token)
+    rule = await _load_rule_from_pg(rule_code=rule_code, auth_token=auth_token)
 
     if rule is None:
         msg = f"未找到规则编码为「{rule_code}」的数据整理规则。\n请确认规则编码是否正确，或联系管理员获取可用的规则列表。"
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
             "messages": messages + [AIMessage(content=msg)],
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # 完成提示：本节点已完成，开始下一个节点
@@ -395,7 +387,7 @@ def get_proc_rule_node(state: AgentState) -> dict:
     })
     return {
         "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
-        "proc_graph_ctx": ctx,
+        "proc_ctx": ctx,
     }
 
 
@@ -403,7 +395,7 @@ def get_proc_rule_node(state: AgentState) -> dict:
 # 节点 2：check_file_node — 文件类型/数量/表头校验
 # ══════════════════════════════════════════════════════════════════════════════
 
-def check_file_node(state: AgentState) -> dict:
+async def check_file_node(state: AgentState) -> dict:
     """校验已上传文件是否满足规则要求。
 
     通过调用 MCP 工具 validate_uploaded_files 执行校验：
@@ -436,7 +428,7 @@ def check_file_node(state: AgentState) -> dict:
             uploaded_files.append(_to_abs_path(fp))
 
     logger.info(
-        f"[proc_graph] check_file_node rule_code={rule_code!r} "
+        f"[proc] check_file_node rule_code={rule_code!r} "
         f"files={[os.path.basename(f) for f in uploaded_files]}"
     )
 
@@ -447,7 +439,7 @@ def check_file_node(state: AgentState) -> dict:
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
             "messages": messages + [AIMessage(content=msg)],
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # ── 2. 文件类型校验 ──────────────────────────────────────────────────
@@ -462,7 +454,7 @@ def check_file_node(state: AgentState) -> dict:
             ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
             return {
                 "messages": messages + [AIMessage(content=msg)],
-                "proc_graph_ctx": ctx,
+                "proc_ctx": ctx,
             }
 
     # ── 3. 读取各文件列名，构建 tool 参数 ────────────────────────────────
@@ -475,7 +467,7 @@ def check_file_node(state: AgentState) -> dict:
                 "columns": columns,
             })
             logger.info(
-                f"[proc_graph] 读取列名成功: {os.path.basename(fp)}, 共 {len(columns)} 列"
+                f"[proc] 读取列名成功: {os.path.basename(fp)}, 共 {len(columns)} 列"
             )
         except Exception as e:
             reason = f"读取文件「{os.path.basename(fp)}」表头失败：{e}"
@@ -483,31 +475,29 @@ def check_file_node(state: AgentState) -> dict:
             ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
             return {
                 "messages": messages + [AIMessage(content=msg)],
-                "proc_graph_ctx": ctx,
+                "proc_ctx": ctx,
             }
 
     # ── 4. 调用 MCP tool validate_uploaded_files 执行全量列名精确匹配 ─────────
     from tools.mcp_client import validate_uploaded_files as mcp_validate_files
 
     try:
-        validate_result = _run_async(
-            mcp_validate_files(
-                uploaded_files=files_with_columns,
-                rule_code=rule_code,
-            )
+        validate_result = await mcp_validate_files(
+            uploaded_files=files_with_columns,
+            rule_code=rule_code,
         )
     except Exception as e:
         reason = f"调用文件校验服务失败：{e}"
-        logger.error(f"[proc_graph] check_file_node 校验工具调用异常: {e}")
+        logger.error(f"[proc] check_file_node 校验工具调用异常: {e}")
         msg = f"文件校验失败：\n\n{reason}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
             "messages": messages + [AIMessage(content=msg)],
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     logger.info(
-        f"[proc_graph] check_file_node 校验结果: success={validate_result.get('success')}, "
+        f"[proc] check_file_node 校验结果: success={validate_result.get('success')}, "
         f"matched={len(validate_result.get('matched_results', []))}, "
         f"unmatched={validate_result.get('unmatched_count', 0)}"
     )
@@ -535,7 +525,7 @@ def check_file_node(state: AgentState) -> dict:
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": error_msg})
         return {
             "messages": messages + [AIMessage(content=msg)],
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # ── 6. 校验通过：将匹配结果写入 ctx ─────────────────────────────────
@@ -553,7 +543,7 @@ def check_file_node(state: AgentState) -> dict:
     })
     return {
         "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
-        "proc_graph_ctx": ctx,
+        "proc_ctx": ctx,
     }
 
 
@@ -562,7 +552,7 @@ def check_file_node(state: AgentState) -> dict:
 # 节点 3：proc_task_execute_node — 按 JSON 规则确定性执行数据整理
 # ══════════════════════════════════════════════════════════════════════════════
 
-def proc_task_execute_node(state: AgentState) -> dict:
+async def proc_task_execute_node(state: AgentState) -> dict:
     """按 JSON 规则确定性执行数据整理。
 
     调用 MCP sync_rule_execute 工具，根据文件校验结果和 rule_code
@@ -581,13 +571,13 @@ def proc_task_execute_node(state: AgentState) -> dict:
     if progress_msg:
         messages.append(AIMessage(content=progress_msg))
 
-    logger.info(f"[proc_graph] proc_task_execute_node rule_code={rule_code!r}")
-    logger.info(f"[proc_graph] file_match_results={[m.get('file_name') for m in file_match_results]}")
+    logger.info(f"[proc] proc_task_execute_node rule_code={rule_code!r}")
+    logger.info(f"[proc] file_match_results={[m.get('file_name') for m in file_match_results]}")
 
     # ── 检查文件校验结果 ─────────────────────────────────────────────────────
     if not file_match_results:
         error_msg = "未找到文件校验结果，请先完成文件校验步骤"
-        logger.error(f"[proc_graph] {error_msg}")
+        logger.error(f"[proc] {error_msg}")
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
             "exec_status": "error",
@@ -595,7 +585,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
         })
         return {
             "messages": messages,
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # ── 准备 sync_rule_execute 参数 ──────────────────────────────────────────
@@ -616,7 +606,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
             abs_fp = _to_abs_path(fp)
             # key = 存储路径文件名（与 file_match_results[i].file_name 来源相同）
             file_path_map[os.path.basename(abs_fp)] = abs_fp
-    logger.info(f"[proc_graph] file_path_map keys={list(file_path_map.keys())}")
+    logger.info(f"[proc] file_path_map keys={list(file_path_map.keys())}")
 
     # 构建 uploaded_files 参数（sync_rule_execute 需要的格式）
     sync_uploaded_files: list[dict] = []
@@ -635,7 +625,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
 
     if not sync_uploaded_files:
         error_msg = "无法构建文件路径映射，请检查上传文件状态"
-        logger.error(f"[proc_graph] {error_msg}")
+        logger.error(f"[proc] {error_msg}")
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
             "exec_status": "error",
@@ -643,7 +633,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
         })
         return {
             "messages": messages,
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # ── 调用 sync_rule_execute 工具 ──────────────────────────────────────────
@@ -651,18 +641,16 @@ def proc_task_execute_node(state: AgentState) -> dict:
 
     try:
         logger.info(
-            f"[proc_graph] 调用 sync_rule_execute，"
+            f"[proc] 调用 sync_rule_execute，"
             f"files={[m['file_name'] for m in sync_uploaded_files]}"
         )
-        sync_result = _run_async(
-            execute_sync_rule(
-                uploaded_files=sync_uploaded_files,
-                rule_code=rule_code,
-            )
+        sync_result = await execute_sync_rule(
+            uploaded_files=sync_uploaded_files,
+            rule_code=rule_code,
         )
     except Exception as e:
         error_msg = f"调用数据整理服务失败: {e}"
-        logger.error(f"[proc_graph] {error_msg}", exc_info=True)
+        logger.error(f"[proc] {error_msg}", exc_info=True)
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
             "exec_status": "error",
@@ -670,11 +658,11 @@ def proc_task_execute_node(state: AgentState) -> dict:
         })
         return {
             "messages": messages,
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     logger.info(
-        f"[proc_graph] sync_rule_execute 结果: "
+        f"[proc] sync_rule_execute 结果: "
         f"success={sync_result.get('success')}, "
         f"generated={sync_result.get('generated_count', 0)}"
     )
@@ -701,7 +689,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
 
         return {
             "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
-            "proc_graph_ctx": ctx,
+            "proc_ctx": ctx,
         }
 
     # ── 执行成功 ─────────────────────────────────────────────────────────────
@@ -735,7 +723,7 @@ def proc_task_execute_node(state: AgentState) -> dict:
 
     return {
         "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
-        "proc_graph_ctx": ctx,
+        "proc_ctx": ctx,
     }
 
 
@@ -760,18 +748,34 @@ def result_node(state: AgentState) -> dict:
 
     if exec_status == "success":
         generated_files: list[dict] = ctx.get("generated_files", [])
+        rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
         
-        # 构建生成文件清单
+        # 构建规则展示文本
+        if rule_name:
+            rule_display = f"{rule_name}（{rule_code}）"
+        else:
+            rule_display = rule_code
+
+        # 构建 MCP 服务基础 URL（用于生成文件下载链接）
+        from config import FINANCE_MCP_BASE_URL
+        mcp_base_url = FINANCE_MCP_BASE_URL.rstrip("/")
+        
+        # 构建生成文件清单（含可点击下载链接）
         file_lines = []
         for gf in generated_files:
-            file_name = os.path.basename(gf.get("output_file", ""))
+            output_file: str = gf.get("output_file", "")
+            file_name = os.path.basename(output_file)
             target_table = gf.get("target_table", "")
             row_count = gf.get("row_count", 0)
-            file_lines.append(f"- **{target_table}** \u2192 `{file_name}`\uff08\u5171 {row_count} \u884c\uff09")
+            # 生成下载 URL: /proc/download/{rule_code}/{filename}
+            download_url = f"{mcp_base_url}/proc/download/{rule_code}/{file_name}"
+            file_lines.append(
+                f"- **[{target_table}]({download_url})** — {row_count}行"
+            )
         
-        file_list_text = "\n".join(file_lines) if file_lines else "\uff08\u65e0\u751f\u6210\u6587\u4ef6\uff09"
+        file_list_text = "\n".join(file_lines) if file_lines else "（无生成文件）"
         
-        # \u6240\u6709\u8282\u70b9\u5b8c\u6210
+        # 所有节点完成
         all_completed_msg = _build_progress_message(
             completed_nodes=["get_proc_rule_node", "check_file_node", "proc_task_execute_node", "result_node"],
             current_node=None
@@ -779,16 +783,18 @@ def result_node(state: AgentState) -> dict:
         
         msg = (
             f"{all_completed_msg}\n\n"
-            f"\u6570\u636e\u6574\u7406\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\n\n"
-            f"\u89c4\u5219\u7f16\u7801\uff1a{rule_code}\n\n"
-            f"\u5df2\u751f\u6210 {len(generated_files)} \u4e2a\u6587\u4ef6\uff1a\n{file_list_text}\n\n"
-            f"\u5982\u9700\u91cd\u65b0\u5904\u7406\u6216\u4f7f\u7528\u5176\u4ed6\u89c4\u5219\uff0c\u8bf7\u544a\u77e5\u3002"
+            f"数据整理任务已完成。\n\n"
+            f"规则：{rule_display}\n\n"
+            f"已生成 {len(generated_files)} 个文件：\n{file_list_text}\n\n"
+            f"如需重新处理或使用其他规则，请告知。"
         )
     else:
         exec_error: str = ctx.get("exec_error", "未知错误")
+        rule_name_else: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
+        rule_display_else = f"{rule_name_else}（{rule_code}）" if rule_name_else else rule_code
         msg = (
             f"数据整理任务执行失败。\n\n"
-            f"**规则编码：** {rule_code}\n"
+            f"**规则：** {rule_display_else}\n"
             f"**错误信息：** {exec_error}\n\n"
             f"请检查上传文件是否符合规则要求，或联系管理员排查问题。"
         )
@@ -796,5 +802,5 @@ def result_node(state: AgentState) -> dict:
     ctx.update({"phase": ProcAgentPhase.COMPLETED.value})
     return {
         "messages": messages + [AIMessage(content=msg)],
-        "proc_graph_ctx": ctx,
+        "proc_ctx": ctx,
     }

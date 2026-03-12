@@ -576,6 +576,7 @@ async def intent_router(state: AgentState) -> dict:
     if selected_employee_code == "data_process":
         # 用户选择了"数据整理员工"，直接进入 proc 子图
         rule_code = state.get("selected_rule_code") or "recognition"
+        rule_name = state.get("selected_rule_name") or ""
         uploaded = state.get("uploaded_files", [])
         # 取用户实际输入的消息内容，而非固定 welcome_msg
         _msgs = list(state.get("messages", []))
@@ -585,13 +586,14 @@ async def intent_router(state: AgentState) -> dict:
             else ""
         ) or ""
 
-        logger.info(f"[intent_router] 前端显式选择 data_process，直接路由: rule_code={rule_code}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
+        logger.info(f"[intent_router] 前端显式选择 data_process，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
         return {
             "messages": [HumanMessage(content=last_user_input)] if last_user_input else [],
             "uploaded": uploaded,
             "user_intent": UserIntent.DATA_PROCESS.value,
             "selected_rule_code": rule_code,
-            "proc_graph_ctx": {"rule_code": rule_code},
+            "selected_rule_name": rule_name,
+            "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},
         }
 
     # ====== 新增：workflow 上下文感知（覆盖所有 workflow 阶段）======
@@ -909,6 +911,7 @@ async def intent_router(state: AgentState) -> dict:
         # 数据整理意图：进入 proc 子图
         # 优先从 state 中读取前端传递的 rule_code，其次从 LLM 解析，最后默认 "recognition"
         rule_code = state.get("selected_rule_code") or ""
+        rule_name = state.get("selected_rule_name") or ""
         if not rule_code:
             # 从 LLM 解析的 JSON 中提取
             try:
@@ -916,29 +919,33 @@ async def intent_router(state: AgentState) -> dict:
             except:
                 rule_code = "recognition"
         
+        # 构建规则展示文本
+        rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
+
         # 检查是否有上传的文件
         uploaded = state.get("uploaded_files", [])
         if not uploaded:
             welcome_msg = (
                 "📊 **开始数据整理任务**\n\n"
-                f"已选择规则：**{rule_code}**\n\n"
+                f"已选择规则：**{rule_display}**\n\n"
                 "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
             )
         else:
             welcome_msg = (
                 "📊 **开始数据整理任务**\n\n"
-                f"已选择规则：**{rule_code}**\n"
+                f"已选择规则：**{rule_display}**\n"
                 f"已上传文件：{len(uploaded)} 个\n\n"
                 "正在校验文件并加载规则..."
             )
         
-        logger.info(f"[intent_router] DATA_PROCESS: rule_code={rule_code}, files={len(uploaded)}")
+        logger.info(f"[intent_router] DATA_PROCESS: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}")
         
         return {
             "messages": [AIMessage(content=welcome_msg)],
             "user_intent": UserIntent.DATA_PROCESS.value,
             "selected_rule_code": rule_code,
-            "proc_graph_ctx": {"rule_code": rule_code},  # 初始化子图上下文
+            "selected_rule_name": rule_name,
+            "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},  # 初始化子图上下文
         }
     else:
         # 普通对话

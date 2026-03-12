@@ -3,11 +3,12 @@
 包含：
 - route_after_get_rule    : get_proc_rule_node 之后的条件路由
 - route_after_check_file  : check_file_node 之后的条件路由
-- build_proc_graph_subgraph : 构建并返回 StateGraph（未编译）
+- build_proc_subgraph : 构建并返回 StateGraph（未编译）
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Callable
 
@@ -28,19 +29,26 @@ from graphs.proc.nodes import (
 _NODE_PAUSE_SECONDS: float = 0
 
 
-def _with_pause(node_fn: Callable[[AgentState], dict]) -> Callable[[AgentState], dict]:
-    """节点包装器：在节点执行完成后追加停顿。
-
-    在 build_proc_graph_subgraph 中统一注入，节点内部不需包含任何 time.sleep 调用。
-    """
-    def wrapper(state: AgentState) -> dict:
-        result = node_fn(state)
-        if _NODE_PAUSE_SECONDS > 0:
-            time.sleep(_NODE_PAUSE_SECONDS)
-        return result
-    wrapper.__name__ = node_fn.__name__
-    wrapper.__doc__ = node_fn.__doc__
-    return wrapper
+def _with_pause(node_fn: Callable) -> Callable:
+    """节点包装器：在节点执行完成后追加停顿。支持同步和异步节点函数。"""
+    if asyncio.iscoroutinefunction(node_fn):
+        async def async_wrapper(state: AgentState) -> dict:
+            result = await node_fn(state)
+            if _NODE_PAUSE_SECONDS > 0:
+                await asyncio.sleep(_NODE_PAUSE_SECONDS)
+            return result
+        async_wrapper.__name__ = node_fn.__name__
+        async_wrapper.__doc__ = node_fn.__doc__
+        return async_wrapper
+    else:
+        def sync_wrapper(state: AgentState) -> dict:
+            result = node_fn(state)
+            if _NODE_PAUSE_SECONDS > 0:
+                time.sleep(_NODE_PAUSE_SECONDS)
+            return result
+        sync_wrapper.__name__ = node_fn.__name__
+        sync_wrapper.__doc__ = node_fn.__doc__
+        return sync_wrapper
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,7 +57,7 @@ def _with_pause(node_fn: Callable[[AgentState], dict]) -> Callable[[AgentState],
 
 def route_after_get_rule(state: AgentState) -> str:
     """get_proc_rule_node 之后：规则存在则继续，否则结束。"""
-    ctx = state.get("proc_graph_ctx") or {}
+    ctx = state.get("proc_ctx") or {}
     phase = ctx.get("phase", "")
     if phase == ProcAgentPhase.RULE_NOT_FOUND.value:
         return END
@@ -58,7 +66,7 @@ def route_after_get_rule(state: AgentState) -> str:
 
 def route_after_check_file(state: AgentState) -> str:
     """check_file_node 之后：校验通过则执行，否则结束。"""
-    ctx = state.get("proc_graph_ctx") or {}
+    ctx = state.get("proc_ctx") or {}
     phase = ctx.get("phase", "")
     if phase == ProcAgentPhase.FILE_CHECK_FAILED.value:
         return END
@@ -69,7 +77,7 @@ def route_after_check_file(state: AgentState) -> str:
 # 子图构建
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_proc_graph_subgraph() -> StateGraph:
+def build_proc_subgraph() -> StateGraph:
     """构建数据整理子图。
 
     流程图：

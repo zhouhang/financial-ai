@@ -1,4 +1,4 @@
-"""proc_graph RESTful API 路由
+"""proc RESTful API 路由
 
 提供数字员工和规则管理的 HTTP 接口：
 - GET /proc/list_digital_employees    - 获取数字员工列表

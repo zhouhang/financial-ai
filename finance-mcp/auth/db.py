@@ -13,6 +13,15 @@ from psycopg2 import OperationalError, InterfaceError
 logger = logging.getLogger(__name__)
 
 
+def _serialize_datetimes(d: dict) -> dict:
+    """将字典中所有 datetime 对象转为 ISO 格式字符串（原地修改并返回）"""
+    from datetime import datetime, date
+    for k, v in d.items():
+        if isinstance(v, (datetime, date)):
+            d[k] = v.isoformat()
+    return d
+
+
 def _get_db_config() -> dict:
     """获取数据库连接配置 - 引用统一的 db_config"""
     from db_config import db_config
@@ -872,6 +881,7 @@ def create_conversation(user_id: str, title: str = None) -> dict | None:
                 result = dict(row)
                 result["id"] = str(result["id"])
                 result["user_id"] = str(result["user_id"])
+                _serialize_datetimes(result)
                 return result
     except Exception as e:
         logger.error(f"创建会话失败: {e}")
@@ -895,6 +905,7 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
                     result = dict(row)
                     result["id"] = str(result["id"])
                     result["user_id"] = str(result["user_id"])
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -922,6 +933,7 @@ def list_conversations(user_id: str, limit: int = 50, offset: int = 0) -> list[d
                     item = dict(row)
                     item["id"] = str(item["id"])
                     item["user_id"] = str(item["user_id"])
+                    _serialize_datetimes(item)
                     result.append(item)
                 return result
     except Exception as e:
@@ -962,6 +974,7 @@ def update_conversation(conversation_id: str, user_id: str, title: str = None, s
                     result = dict(row)
                     result["id"] = str(result["id"])
                     result["user_id"] = str(result["user_id"])
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -1034,6 +1047,7 @@ def save_message(conversation_id: str, role: str, content: str, metadata: dict =
                     # 确保总是返回 attachments 字段（即使是空数组）
                     if "attachments" not in result:
                         result["attachments"] = []
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -1132,6 +1146,7 @@ def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> lis
                         # 确保 attachments 总是一个列表
                         if "attachments" not in item or item.get("attachments") is None:
                             item["attachments"] = []
+                        _serialize_datetimes(item)
                         result.append(item)
                 return result
     except Exception as e:

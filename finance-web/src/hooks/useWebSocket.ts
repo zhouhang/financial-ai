@@ -15,7 +15,8 @@ export type SendMessageFn = (
   attachments?: Array<{ name: string; path: string }>,
   conversationId?: string,
   employeeCode?: string,
-  ruleCode?: string
+  ruleCode?: string,
+  ruleName?: string
 ) => boolean;
 
 interface UseWebSocketOptions {
@@ -47,7 +48,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       attachments?: Array<{ name: string; path: string }>,
       conversationId?: string,
       employeeCode?: string,
-      ruleCode?: string
+      ruleCode?: string,
+      ruleName?: string
     ) => {
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
         console.warn('WebSocket is not connected');
@@ -75,6 +77,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       }
       if (ruleCode) {
         payload.rule_code = ruleCode;
+      }
+      if (ruleName) {
+        payload.rule_name = ruleName;
       }
       wsRef.current.send(JSON.stringify(payload));
       return true;

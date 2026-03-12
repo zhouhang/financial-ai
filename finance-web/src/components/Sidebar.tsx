@@ -50,6 +50,7 @@ interface SidebarProps {
   collapsed?: boolean;
   onSelectRule?: (employee: DigitalEmployee, rule: EmployeeRule) => void;
   selectedRuleCode?: string | null;
+  authToken?: string | null;
 }
 
 export default function Sidebar({
@@ -64,6 +65,7 @@ export default function Sidebar({
   collapsed = false,
   onSelectRule,
   selectedRuleCode,
+  authToken,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   
@@ -73,11 +75,14 @@ export default function Sidebar({
   const [employeeRules, setEmployeeRules] = useState<Record<string, EmployeeRule[]>>({});
   const [loadingRules, setLoadingRules] = useState<string | null>(null);
   
-  // 加载数字员工列表
+  // 加载数字员工列表（依赖 authToken，登录成功后重新加载）
   useEffect(() => {
+    if (!authToken) return;
     const fetchEmployees = async () => {
       try {
-        const response = await fetch('/api/proc/list_digital_employees');
+        const response = await fetch('/api/proc/list_digital_employees', {
+          headers: { 'Authorization': `Bearer ${authToken}` },
+        });
         const data = await response.json();
         if (data.success && data.employees) {
           setEmployees(data.employees);
@@ -87,7 +92,7 @@ export default function Sidebar({
       }
     };
     fetchEmployees();
-  }, []);
+  }, [authToken]);
   
   // 点击数字员工，展开/收起规则列表
   const handleEmployeeClick = async (employee: DigitalEmployee) => {
@@ -102,7 +107,9 @@ export default function Sidebar({
     if (!employeeRules[employee.code]) {
       setLoadingRules(employee.code);
       try {
-        const response = await fetch(`/api/proc/list_rules_by_employee?employee_code=${employee.code}`);
+        const response = await fetch(`/api/proc/list_rules_by_employee?employee_code=${employee.code}`, {
+          headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
+        });
         const data = await response.json();
         if (data.success && data.rules) {
           setEmployeeRules(prev => ({ ...prev, [employee.code]: data.rules }));
