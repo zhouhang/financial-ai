@@ -165,6 +165,17 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
             f"成功生成 {len(generated_files)} 个文件"
             + (f"，{len(errors)} 个规则执行失败" if errors else "")
         ),
+        "merged_files": [
+            {
+                "rule_id": f.get("rule_id"),
+                "generated_file_path": f.get("output_file"),
+                "merged_file_path": f.get("merge_result", {}).get("merged_file_path"),
+                "merged": f.get("merge_result", {}).get("merged", False),
+                "merge_message": f.get("merge_result", {}).get("message"),
+            }
+            for f in generated_files
+            if f.get("merge_result")
+        ],
     }
 
 
@@ -182,14 +193,17 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
         output_dir: 输出目录
 
     Returns:
-        { rule_id, output_file, row_count }
+        { rule_id, output_file, row_count, merge_result(可选) }
     """
+    from proc.mcp_server.merge_rule import execute_merge
+
     rule_id: str = rule.get("rule_id", "UNKNOWN")
     source_tables = rule.get("source_tables") or rule.get("source_table") or ""
     target_table: str = rule.get("target_table", rule_id)
     field_mappings: list[dict] = rule.get("field_mappings", [])
     global_filter: Optional[dict] = rule.get("global_filter")
     lookup_tables_def: list[dict] = rule.get("lookup_tables", [])
+    merge_config: Optional[dict] = rule.get("merge")
 
     # ── 1. 读取源表数据 ──────────────────────────────────────────────────────
     source_df = _load_source_df(source_tables, table_file_map)
@@ -222,12 +236,43 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
 
     _write_excel(result_df, field_mappings, output_path)
 
-    return {
+    result = {
         "rule_id": rule_id,
         "target_table": target_table,
         "output_file": output_path,
         "row_count": len(result_df),
     }
+
+    # ── 6. 执行 merge 操作（如果规则中配置了 merge 节点）─────────────────────
+    if merge_config:
+        try:
+            merge_result = execute_merge(
+                merge_config=merge_config,
+                generated_file_path=output_path,
+                table_file_map=table_file_map,
+                output_dir=output_dir,
+                rule_id=rule_id,
+            )
+            result["merge_result"] = merge_result
+            if merge_result.get("merged"):
+                logger.info(
+                    f"[sync_rule] [{rule_id}] merge 完成，"
+                    f"合并文件：{merge_result.get('merged_file_path')}"
+                )
+            else:
+                logger.info(
+                    f"[sync_rule] [{rule_id}] merge 未执行：{merge_result.get('message')}"
+                )
+        except Exception as e:
+            logger.error(f"[sync_rule] [{rule_id}] merge 执行异常: {e}", exc_info=True)
+            result["merge_result"] = {
+                "merged": False,
+                "generated_file_path": output_path,
+                "merged_file_path": None,
+                "message": f"merge 执行异常: {e}",
+            }
+
+    return result
 
 
 # ════════════════════════════════════════════════════════════════════════════

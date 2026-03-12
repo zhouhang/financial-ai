@@ -14,8 +14,8 @@ import MessageBubble, { LoadingIndicator } from './MessageBubble';
 /** 仅允许上传 Excel 和 CSV 文件 */
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
 
-/** 最多上传文件数 */
-const MAX_UPLOAD_FILES = 2;
+/** 最多上传文件数（无限制） */
+const MAX_UPLOAD_FILES = Number.MAX_SAFE_INTEGER;
 
 /** 暂存文件（本地还没上传的） */
 interface StagedFile {
@@ -266,14 +266,7 @@ export default function ChatArea({
       alert(`仅支持 Excel 和 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv），以下文件已忽略：\n${rejected.join('\n')}`);
     }
     if (newStaged.length > 0) {
-      setStagedFiles((prev) => {
-        const canAdd = Math.max(0, MAX_UPLOAD_FILES - prev.length);
-        const toAdd = newStaged.slice(0, canAdd);
-        if (newStaged.length > canAdd) {
-          alert('最多只能上传 2 个文件');
-        }
-        return [...prev, ...toAdd];
-      });
+      setStagedFiles((prev) => [...prev, ...newStaged]);
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
@@ -472,11 +465,11 @@ export default function ChatArea({
                 <button
                   type="button"
                   onClick={handleUploadClick}
-                  disabled={isUploading || stagedFiles.length >= MAX_UPLOAD_FILES}
+                  disabled={isUploading}
                   className="w-9 h-9 rounded-lg flex items-center justify-center
                     text-gray-500 hover:text-blue-500 hover:bg-blue-50
                     transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
-                  title={stagedFiles.length >= MAX_UPLOAD_FILES ? '最多上传 2 个文件' : '添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
+                  title={'添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
                 >
                   {isUploading ? (
                     <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />
