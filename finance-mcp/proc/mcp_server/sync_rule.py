@@ -172,6 +172,7 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
                 "merged_file_path": f.get("merge_result", {}).get("merged_file_path"),
                 "merged": f.get("merge_result", {}).get("merged", False),
                 "merge_message": f.get("merge_result", {}).get("message"),
+                "match_field": f.get("merge_result", {}).get("match_field", ""),
             }
             for f in generated_files
             if f.get("merge_result")
@@ -253,6 +254,9 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
                 output_dir=output_dir,
                 rule_id=rule_id,
             )
+            # 将 match_field 加入 merge_result，用于前端友好展示
+            target_file_match = merge_config.get("target_file_match", {})
+            merge_result["match_field"] = target_file_match.get("match_field", "")
             result["merge_result"] = merge_result
             if merge_result.get("merged"):
                 logger.info(
@@ -269,6 +273,7 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
                 "merged": False,
                 "generated_file_path": output_path,
                 "merged_file_path": None,
+                "match_field": "",
                 "message": f"merge 执行异常: {e}",
             }
 

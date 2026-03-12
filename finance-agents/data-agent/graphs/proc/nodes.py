@@ -729,6 +729,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
 
     # ── 执行成功 ─────────────────────────────────────────────────────────────
     generated_files: list[dict] = sync_result.get("generated_files", [])
+    merged_files: list[dict] = sync_result.get("merged_files", [])
 
     # 构建执行计划摘要（用于 result_node 展示）
     execution_plan: list[dict] = []
@@ -753,6 +754,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         "execution_plan": execution_plan,
         "processed_files": [gf.get("output_file", "") for gf in generated_files],
         "generated_files": generated_files,
+        "merged_files": merged_files,
         "sync_result": sync_result,
     })
 
@@ -783,6 +785,7 @@ def result_node(state: AgentState) -> dict:
 
     if exec_status == "success":
         generated_files: list[dict] = ctx.get("generated_files", [])
+        merged_files: list[dict] = ctx.get("merged_files", [])
         rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
         
         # 构建规则展示文本
@@ -809,6 +812,23 @@ def result_node(state: AgentState) -> dict:
             )
         
         file_list_text = "\n".join(file_lines) if file_lines else "（无生成文件）"
+
+        # 构建合并文件清单（如果有）
+        merged_file_lines = []
+        for mf in merged_files:
+            if mf.get("merged") and mf.get("merged_file_path"):
+                merged_path: str = mf.get("merged_file_path", "")
+                merged_name = os.path.basename(merged_path)
+                # 使用 match_field + (合并) 作为展示名称
+                match_field = mf.get("match_field", "")
+                display_name = f"{match_field}(合并)" if match_field else "合并文件"
+                # 生成下载 URL: /proc/download/{rule_code}/{filename}
+                download_url = f"{mcp_base_url}/proc/download/{rule_code}/{merged_name}"
+                merged_file_lines.append(
+                    f"- **[{display_name}]({download_url})**"
+                )
+        
+        merged_file_text = "\n".join(merged_file_lines) if merged_file_lines else ""
         
         # 所有节点完成
         all_completed_msg = _build_progress_message(
@@ -820,9 +840,11 @@ def result_node(state: AgentState) -> dict:
             f"{all_completed_msg}\n\n"
             f"数据整理任务已完成。\n\n"
             f"规则：{rule_display}\n\n"
-            f"已生成 {len(generated_files)} 个文件：\n{file_list_text}\n\n"
-            f"如需重新处理或使用其他规则，请告知。"
+            f"已生成 {len(generated_files)} 个文件：\n{file_list_text}\n"
         )
+        if merged_file_text:
+            msg += f"\n**合并文件：**\n{merged_file_text}\n"
+        msg += f"\n如需重新处理或使用其他规则，请告知。"
     else:
         exec_error: str = ctx.get("exec_error", "未知错误")
         rule_name_else: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""

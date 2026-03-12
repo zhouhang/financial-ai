@@ -118,7 +118,10 @@ def execute_merge(
     merged_df = _do_merge(df_generated, df_target, merge_strategy, rule_id)
 
     # ── 写出合并结果文件 ──────────────────────────────────────────────────────
-    merged_file_path = _write_merged_file(merged_df, output_dir, rule_id)
+    # 从 merge_config 中获取 match_field 作为文件名前缀
+    target_file_match = merge_config.get("target_file_match", {})
+    match_field = target_file_match.get("match_field", "")
+    merged_file_path = _write_merged_file(merged_df, output_dir, rule_id, match_field)
 
     logger.info(
         f"[merge_rule] [{rule_id}] merge 完成，合并后 {len(merged_df)} 行，"
@@ -276,11 +279,21 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
         raise ValueError(f"不支持的文件格式: {ext}")
 
 
-def _write_merged_file(df: pd.DataFrame, output_dir: str, rule_id: str) -> str:
-    """将合并后的 DataFrame 写出为 xlsx 文件，返回文件路径"""
+def _write_merged_file(df: pd.DataFrame, output_dir: str, rule_id: str, match_field: str = "") -> str:
+    """将合并后的 DataFrame 写出为 xlsx 文件，返回文件路径
+    
+    Args:
+        df: 合并后的 DataFrame
+        output_dir: 输出目录
+        rule_id: 规则 ID
+        match_field: 用于文件名的前缀（如 "BI费用明细表"）
+    """
+    # 使用 match_field 作为文件名前缀，如果没有则使用 "merged"
+    file_prefix = match_field if match_field else "merged"
+    safe_prefix = re.sub(r'[\\/:*?"<>|]', "_", file_prefix)
     safe_rule_id = re.sub(r'[\\/:*?"<>|]', "_", rule_id)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    filename = f"merged_{safe_rule_id}_{timestamp}.xlsx"
+    filename = f"{safe_prefix}(合并)_{safe_rule_id}_{timestamp}.xlsx"
     output_path = str(Path(output_dir) / filename)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
