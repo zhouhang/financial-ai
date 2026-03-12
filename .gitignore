@@ -273,18 +273,16 @@ check_*.json
 # macOS
 .DS_Store
 
-# 以 . 开头的目录和文件（保留项目所需配置）
+# 以 . 开头的目录（任意层级）及其内容
+**/.*/
+
+# 以 . 开头的目录和文件（仅保留必要配置）
 .*
 !.git/
 !.gitignore
 !.gitattributes
 !.env.example
 !.cursorrules
-!.claude/
-!.cursor/
-!.opencode/
-!.qoder/
-!.qwen/
 
 finance-ai/finance-mcp/uploads
 finance-ai/finance-mcp/data_preparation/output
