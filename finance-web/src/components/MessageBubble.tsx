@@ -438,6 +438,16 @@ function ContentWithTables({ content }: { content: string }) {
       code: ({ children }: { children?: React.ReactNode }) => (
         <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
       ),
+      a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-600 hover:text-blue-800 underline cursor-pointer"
+        >
+          {children}
+        </a>
+      ),
     };
 
     if (hasHtmlTables && htmlTableParts.length > 0) {
@@ -483,14 +493,17 @@ function ContentWithTables({ content }: { content: string }) {
                   ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
                   ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
+                  blockquote: ({ children }) => (
                     <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
                       {children}
                     </blockquote>
                   ),
-                    code: ({ children }) => (
-                      <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-                    ),
+                  code: ({ children }) => (
+                    <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                  ),
+                  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline cursor-pointer">{children}</a>
+                  ),
                 }}
               >
                 {item.before}
@@ -506,13 +519,16 @@ blockquote: ({ children }) => (
                   ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
                   ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                  {children}
-                </blockquote>
-              ),
+                  blockquote: ({ children }) => (
+                    <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                      {children}
+                    </blockquote>
+                  ),
                   code: ({ children }) => (
                     <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                  ),
+                  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline cursor-pointer">{children}</a>
                   ),
                 }}
               >

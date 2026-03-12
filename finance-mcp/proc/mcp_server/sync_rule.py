@@ -67,7 +67,7 @@ def create_sync_rule_tools() -> list[Tool]:
                     },
                     "rule_code": {
                         "type": "string",
-                        "description": "整理规则编码，用于从 bus_proc_rules 表中获取规则 JSON",
+                        "description": "整理规则编码，用于从 bus_rules 表中获取规则 JSON",
                     },
                 },
                 "required": ["uploaded_files", "rule_code"],
@@ -89,8 +89,7 @@ async def handle_sync_rule_tool_call(name: str, arguments: dict) -> dict:
 
 async def _handle_sync_rule_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
-    from proc.mcp_server.tools import _get_proc_rule
-
+    from bus_rules.mcp_server.tools import get_rule_from_bus
     from proc.config.config import OUTPUT_DIR
 
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
@@ -109,12 +108,19 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
     except Exception as e:
         return {"success": False, "error": f"创建输出目录失败: {e}"}
 
-    # ── 获取整理规则 ──────────────────────────────────────────────────────────
-    rule_record = _get_proc_rule(rule_code)
+    # ── 获取整理规则（rule_type=2 为数据整理规则）────────────────────────────
+    rule_record = get_rule_from_bus(rule_code, 2)
     if rule_record is None:
         return {"success": False, "error": f"未找到 rule_code='{rule_code}' 的整理规则"}
 
-    rule_data: dict = rule_record.get("rule") or {}
+    # rule 字段在 PostgreSQL JSON 列中，psycopg2 可能返回 str 或 dict，统一处理
+    raw_rule = rule_record.get("rule") or {}
+    if isinstance(raw_rule, str):
+        try:
+            raw_rule = json.loads(raw_rule)
+        except Exception:
+            raw_rule = {}
+    rule_data: dict = raw_rule
     rules_list: list[dict] = rule_data.get("rules", [])
     if not rules_list:
         return {"success": False, "error": f"规则 '{rule_code}' 中未定义任何 rules 项"}

@@ -877,7 +877,7 @@ export default function App() {
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
       const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId, selectedEmployee?.code, selectedRule?.code);
+      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId, selectedEmployee?.code, selectedRule?.code, selectedRule?.name);
     },
     [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedEmployee, selectedRule]
   );
@@ -1043,6 +1043,7 @@ export default function App() {
         onLogout={handleLogout}
         onSelectRule={handleSelectRule}
         selectedRuleCode={selectedRule?.code}
+        authToken={authToken}
       />
       <ChatArea
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}

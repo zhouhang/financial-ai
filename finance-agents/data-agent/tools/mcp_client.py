@@ -2,14 +2,21 @@
 
 所有规则管理和认证操作均通过 finance-mcp 的 MCP 工具完成，
 data-agent 不再直接读取 JSON 配置文件或操作数据库。
-"""
 
+MCP SSE 协议说明：
+  - POST /messages/?session_id=xxx 投递请求，服务端返回 202 Accepted
+  - 实际结果通过持续保持的 SSE 连接（/sse）异步推送回来
+  - 使用 request_id 匹配请求与响应
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -18,141 +25,261 @@ from config import FINANCE_MCP_BASE_URL
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+_RESULT_WAIT_TIMEOUT = 60.0  # 等待 SSE 结果超时秒数
+
+# ===========================================================================
+# MCP SSE 会话管理
+# ===========================================================================
+
+class _McpSession:
+    """管理单个 MCP SSE 会话：维持 SSE 长连接并匹配请求/响应。"""
+
+    def __init__(self):
+        self.session_id: str | None = None
+        self._pending: dict[int, asyncio.Future] = {}  # request_id -> Future
+        self._req_counter = 0
+        self._sse_task: asyncio.Task | None = None
+        self._client: httpx.AsyncClient | None = None
+
+    def _next_id(self) -> int:
+        self._req_counter += 1
+        return self._req_counter
+
+    async def connect(self) -> bool:
+        """建立 SSE 长连接，获取 session_id，完成 MCP 游标握手，并启动后台监听任务。"""
+        if self._sse_task and not self._sse_task.done():
+            return self.session_id is not None
+
+        try:
+            logger.info("建立 MCP SSE 长连接...")
+            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+            session_ready = asyncio.get_event_loop().create_future()
+            self._sse_task = asyncio.create_task(
+                self._sse_listener(session_ready)
+            )
+            # 等待 session_id 就绪（最多 15 秒）
+            await asyncio.wait_for(session_ready, timeout=15.0)
+            if not self.session_id:
+                return False
+            # 完成 MCP 协议握手
+            await self._handshake()
+            return True
+        except asyncio.TimeoutError:
+            logger.error("等待 SSE session_id 超时")
+            return False
+        except Exception as e:
+            logger.error(f"SSE 连接失败: {e}", exc_info=True)
+            return False
+
+    async def _handshake(self):
+        """完成 MCP 协议握手：发送 initialize 并等待响应，再发 notifications/initialized。"""
+        logger.info("开始 MCP 协议握手...")
+        
+        # 发送 initialize 请求
+        init_id = self._next_id()
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[init_id] = fut
+        
+        init_body = {
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "data-agent", "version": "1.0"},
+            },
+        }
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
+                json=init_body,
+            )
+        if r.status_code not in (200, 202):
+            self._pending.pop(init_id, None)
+            raise RuntimeError(f"initialize 失败: {r.status_code} {r.text}")
+        
+        # 等待 initialize 响应
+        try:
+            await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            self._pending.pop(init_id, None)
+            raise RuntimeError("initialize 响应超时")
+        
+        # 发送 notifications/initialized
+        notif_body = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            await c.post(
+                f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
+                json=notif_body,
+            )
+        
+        logger.info("MCP 协议握手完成")
+
+    async def _sse_listener(self, session_ready: asyncio.Future):
+        """后台持续监听 SSE 事件流，将结果分发给等待中的 Future。"""
+        try:
+            async with self._client.stream("GET", f"{FINANCE_MCP_BASE_URL}/sse") as resp:
+                if resp.status_code != 200:
+                    logger.error(f"SSE 连接失败: {resp.status_code}")
+                    if not session_ready.done():
+                        session_ready.set_result(None)
+                    return
+
+                is_endpoint_event = False
+                event_type: str | None = None
+                data_lines: list[str] = []
+
+                async for line in resp.aiter_lines():
+                    logger.debug(f"SSE 原始行: {line!r}")
+
+                    if line.startswith("event:"):
+                        event_type = line[6:].strip()
+                        continue
+
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].strip())
+                        continue
+
+                    if line == "":  # 空行 = 事件结束
+                        data_str = "\n".join(data_lines)
+                        data_lines = []
+
+                        if event_type == "endpoint":
+                            # 解析 session_id
+                            decoded = unquote(data_str)
+                            m = re.search(r"session_id=([^&\s]+)", decoded)
+                            if m:
+                                self.session_id = m.group(1)
+                                logger.info(f"MCP session_id 就绪: {self.session_id}")
+                                if not session_ready.done():
+                                    session_ready.set_result(self.session_id)
+
+                        elif event_type == "message" and data_str:
+                            # JSON-RPC 响应，按 id 分发
+                            try:
+                                msg = json.loads(data_str)
+                                req_id = msg.get("id")
+                                if req_id is not None and req_id in self._pending:
+                                    fut = self._pending.pop(req_id)
+                                    if not fut.done():
+                                        fut.set_result(msg)
+                            except Exception as e:
+                                logger.error(f"解析 SSE 消息失败: {e}, data={data_str!r}")
+
+                        event_type = None
+
+        except asyncio.CancelledError:
+            logger.info("SSE 监听任务已取消")
+        except Exception as e:
+            logger.error(f"SSE 监听异常: {e}", exc_info=True)
+        finally:
+            # 将所有等待中的 Future 标记为错误
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("SSE 连接已断开"))
+            self._pending.clear()
+            self.session_id = None
+            if not session_ready.done():
+                session_ready.set_result(None)
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """发送工具调用请求并等待 SSE 响应。"""
+        # 确保连接就绪
+        if not self.session_id or (self._sse_task and self._sse_task.done()):
+            ok = await self.connect()
+            if not ok:
+                return {"success": False, "error": "无法建立 MCP SSE 连接"}
+
+        req_id = self._next_id()
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[req_id] = fut
+
+        request_body = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as post_client:
+                resp = await post_client.post(
+                    f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
+                    json=request_body,
+                )
+
+            if resp.status_code not in (200, 202):
+                self._pending.pop(req_id, None)
+                logger.error(f"MCP 投递失败: {resp.status_code}, {resp.text}")
+                # session 过期时重置
+                if resp.status_code in (400, 404):
+                    logger.info("session 可能已过期，重置连接")
+                    self.session_id = None
+                    if self._sse_task:
+                        self._sse_task.cancel()
+                return {"success": False, "error": f"MCP 投递失败: {resp.status_code}"}
+
+            logger.info(f"MCP 请求已投递 (id={req_id}, tool={tool_name})，等待 SSE 响应...")
+
+            # 等待 SSE 推送结果
+            try:
+                jsonrpc_resp = await asyncio.wait_for(fut, timeout=_RESULT_WAIT_TIMEOUT)
+            except asyncio.TimeoutError:
+                self._pending.pop(req_id, None)
+                logger.error(f"等待 MCP 响应超时: tool={tool_name}")
+                return {"success": False, "error": "等待 MCP 响应超时"}
+
+            # 提取结果
+            if "error" in jsonrpc_resp:
+                err = jsonrpc_resp["error"]
+                logger.error(f"MCP 工具返回错误: {err}")
+                return {"success": False, "error": err.get("message", str(err))}
+
+            result = jsonrpc_resp.get("result", {})
+            # result 通常是 {"content": [{"type": "text", "text": "..."}]}
+            if isinstance(result, dict) and "content" in result:
+                content = result["content"]
+                if isinstance(content, list) and content:
+                    text = content[0].get("text", "")
+                    # 检查 isError 标志——MCP schema 校验失败时 isError=true
+                    if result.get("isError"):
+                        logger.error(f"MCP 工具执行错误: {text}")
+                        return {"success": False, "error": text}
+                    try:
+                        return json.loads(text)
+                    except Exception:
+                        return {"success": True, "result": text}
+            return result
+
+        except Exception as e:
+            self._pending.pop(req_id, None)
+            logger.error(f"MCP 调用异常: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+
+# 全局单例会话
+_mcp_session = _McpSession()
 
 
 # ===========================================================================
-# 底层：通过进程内导入调用 MCP 工具
+# 底层：公共调用入口
 # ===========================================================================
 
 async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """调用 finance-mcp 工具。
 
-    优先使用进程内直接调用（两个服务在同一台机器上），
-    失败则回退到 HTTP 方式。
+    通过 MCP SSE 协议调用 finance-mcp 服务：
+    - 维持持久 SSE 长连接接收结果
+    - POST /messages/ 投递请求（服务端返回 202）
+    - 等待 SSE 流推送 JSON-RPC 响应
     """
-    try:
-        return await _call_tool_in_process(tool_name, arguments)
-    except Exception:
-        logger.warning("进程内 MCP 调用失败，回退到 HTTP", exc_info=True)
-        return await _call_tool_http(tool_name, arguments)
-
-
-async def _call_tool_in_process(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """导入 finance-mcp 工具处理器并直接调用。"""
-    import sys
-    mcp_root = str(Path(__file__).resolve().parents[3] / "finance-mcp")
-    if mcp_root not in sys.path:
-        sys.path.insert(0, mcp_root)
-    
-    logger.info(f"尝试进程内调用工具: {tool_name}, mcp_root={mcp_root}")
-    
-    # 认证和规则管理工具 -> auth/tools.py
-    _auth_tools = {
-        "auth_register", "auth_login", "auth_me",
-        "list_reconciliation_rules", "get_reconciliation_rule",
-        "save_reconciliation_rule", "update_reconciliation_rule",
-        "delete_reconciliation_rule",
-        "search_rules_by_mapping", "copy_reconciliation_rule",
-        "batch_get_reconciliation_rules",
-        # 管理员功能
-        "admin_login", "create_company", "create_department",
-        "list_companies", "list_departments", "get_admin_view",
-        # 公开 API
-        "list_companies_public", "list_departments_public",
-        # 会话管理
-        "create_conversation", "list_conversations", "get_conversation",
-        "update_conversation", "delete_conversation", "save_message",
-        # 游客认证
-        "create_guest_token", "verify_guest_token", "list_recommended_rules",
-    }
-
-    # Proc 模块工具（数字员工和规则管理）
-    _proc_tools = {
-        "list_digital_employees",
-        "list_rules_by_employee",
-        "get_file_validation_rule",
-        "get_proc_rule",
-        "validate_uploaded_files",
-        "sync_rule_execute",
-    }
-
-    try:
-        if tool_name in _auth_tools:
-            logger.info(f"导入认证工具处理器: {tool_name}")
-            from auth.tools import handle_auth_tool_call  # type: ignore
-            result = await handle_auth_tool_call(tool_name, arguments)
-            logger.info(f"认证工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
-            return result
-        elif tool_name in _proc_tools:
-            logger.info(f"导入 Proc 工具处理器: {tool_name}")
-            # validate_uploaded_files 在单独的 file_validate_tool 模块中
-            if tool_name == "validate_uploaded_files":
-                from proc.mcp_server.file_validate_tool import handle_file_validate_tool_call  # type: ignore
-                result = await handle_file_validate_tool_call(tool_name, arguments)
-            elif tool_name == "sync_rule_execute":
-                from proc.mcp_server.sync_rule import handle_sync_rule_tool_call  # type: ignore
-                result = await handle_sync_rule_tool_call(tool_name, arguments)
-            else:
-                from proc.mcp_server.tools import handle_tool_call as handle_proc_tool_call  # type: ignore
-                result = await handle_proc_tool_call(tool_name, arguments)
-            logger.info(f"Proc 工具调用成功: {tool_name}, 结果: {result.get('success', '未知')}")
-            return result
-        else:
-            logger.info(f"导入对账工具处理器: {tool_name}")
-            from reconciliation.mcp_server.tools import handle_tool_call  # type: ignore
-            result = await handle_tool_call(tool_name, arguments)
-            logger.info(f"对账工具调用成功: {tool_name}, result.get('success')={result.get('success')}, result.get('error')={result.get('error')}")
-            return result
-    except ImportError as e:
-        logger.error(f"导入模块失败: {e}, 工具名: {tool_name}, sys.path 前3项: {sys.path[:3]}")
-        raise
-    except Exception as e:
-        logger.error(f"工具调用失败: {e}, 工具名: {tool_name}")
-        raise
-
-
-async def _call_tool_http(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """通过 HTTP 调用 MCP 服务的工具。
-    
-    向 MCP 服务的消息端点发送请求。
-    """
-    try:
-        logger.info(f"使用 HTTP 调用 MCP 工具: {tool_name}")
-        
-        # 构建 MCP 协议的工具调用请求
-        request_body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            }
-        }
-        
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.post(
-                f"{FINANCE_MCP_BASE_URL}/messages/",
-                json=request_body,
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"MCP 服务返回错误: {response.status_code}, 内容: {response.text}")
-                return {
-                    "success": False,
-                    "error": f"MCP 服务错误: {response.status_code}",
-                }
-            
-            result = response.json()
-            logger.info(f"HTTP MCP 调用成功: {tool_name}")
-            return result.get("result", result)
-            
-    except Exception as e:
-        logger.error(f"HTTP MCP 调用失败: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": f"HTTP 调用失败: {str(e)}",
-        }
+    return await _mcp_session.call_tool(tool_name, arguments)
 
 
 # ===========================================================================
@@ -477,11 +604,11 @@ async def save_message(auth_token: str, conversation_id: str, role: str, content
 # 高级辅助函数 - Proc 模块（数字员工和规则管理）
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def list_digital_employees(auth_token: str = "") -> dict[str, Any]:
+async def list_digital_employees(auth_token: str) -> dict[str, Any]:
     """获取数字员工列表
     
     Args:
-        auth_token: JWT token（可选）
+        auth_token: JWT token（用户登录后获取，必填）
         
     Returns:
         {
@@ -491,18 +618,17 @@ async def list_digital_employees(auth_token: str = "") -> dict[str, Any]:
             "message": str
         }
     """
-    args: dict[str, Any] = {}
-    if auth_token:
-        args["auth_token"] = auth_token
-    return await call_mcp_tool("list_digital_employees", args)
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    return await call_mcp_tool("list_digital_employees", {"auth_token": auth_token})
 
 
-async def list_rules_by_employee(employee_code: str, auth_token: str = "") -> dict[str, Any]:
+async def list_rules_by_employee(employee_code: str, auth_token: str) -> dict[str, Any]:
     """根据数字员工 code 获取规则列表
     
     Args:
         employee_code: 数字员工的 code
-        auth_token: JWT token（可选）
+        auth_token: JWT token（用户登录后获取，必填）
         
     Returns:
         {
@@ -513,14 +639,13 @@ async def list_rules_by_employee(employee_code: str, auth_token: str = "") -> di
             "message": str
         }
     """
-    args: dict[str, Any] = {"employee_code": employee_code}
-    if auth_token:
-        args["auth_token"] = auth_token
-    return await call_mcp_tool("list_rules_by_employee", args)
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    return await call_mcp_tool("list_rules_by_employee", {"auth_token": auth_token, "employee_code": employee_code})
 
 
 async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
-    """根据 rule_code 获取文件校验规则 JSON
+    """根据 rule_code 获取文件校验规则 JSON（通过 bus_rules 服务，rule_type=1）
     
     Args:
         rule_code: 规则编码
@@ -530,18 +655,18 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
         {
             "success": bool,
             "rule_code": str,
-            "rule": dict,  # 文件校验规则 JSON
+            "data": dict,  # 包含 id, rule_code, rule, memo
             "message": str
         }
     """
-    args: dict[str, Any] = {"rule_code": rule_code}
+    args: dict[str, Any] = {"rule_code": rule_code, "rule_type": 1}
     if auth_token:
         args["auth_token"] = auth_token
-    return await call_mcp_tool("get_file_validation_rule", args)
+    return await call_mcp_tool("get_rule_from_bus", args)
 
 
 async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
-    """根据 rule_code 获取整理规则 JSON
+    """根据 rule_code 获取整理规则 JSON（通过 bus_rules 服务，rule_type=2）
     
     Args:
         rule_code: 规则编码
@@ -551,14 +676,14 @@ async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
         {
             "success": bool,
             "rule_code": str,
-            "rule": dict,  # 整理规则 JSON
+            "data": dict,  # 包含 id, rule_code, rule, memo
             "message": str
         }
     """
-    args: dict[str, Any] = {"rule_code": rule_code}
+    args: dict[str, Any] = {"rule_code": rule_code, "rule_type": 2}
     if auth_token:
         args["auth_token"] = auth_token
-    return await call_mcp_tool("get_proc_rule", args)
+    return await call_mcp_tool("get_rule_from_bus", args)
 
 
 async def validate_uploaded_files(

@@ -22,7 +22,7 @@ from graphs.reconciliation import (
     build_reconciliation_subgraph,
 )
 from graphs.data_preparation import build_data_preparation_subgraph
-from graphs.proc import build_proc_graph_subgraph
+from graphs.proc import build_proc_subgraph
 from .nodes import (
     router_node,
 )
@@ -46,7 +46,7 @@ def route_after_router(state: AgentState) -> str:
     elif intent == UserIntent.EDIT_RULE.value:
         return "reconciliation_subgraph"
     elif intent == UserIntent.DATA_PROCESS.value:
-        return "proc_graph_subgraph"
+        return "proc_subgraph"
     else:
         return END
 
@@ -61,7 +61,7 @@ def build_main_graph() -> StateGraph:
     # 数据准备子图（暂时保留为子图）
     data_preparation_sg = build_data_preparation_subgraph()
     reconciliation_sg = build_reconciliation_subgraph()
-    proc_graph_sg = build_proc_graph_subgraph()
+    proc_sg = build_proc_subgraph()
 
     graph = StateGraph(AgentState)
 
@@ -71,7 +71,7 @@ def build_main_graph() -> StateGraph:
     # 子图节点（reconciliation 收回子图，内部依赖 analysis_key + cache + pending_interrupt 防重放）
     graph.add_node("reconciliation_subgraph", reconciliation_sg.compile())
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
-    graph.add_node("proc_graph_subgraph", proc_graph_sg.compile())
+    graph.add_node("proc_subgraph", proc_sg.compile())
 
     # ── 边 ────────────────────────────────────────────────────────────────
     graph.set_entry_point("router")
@@ -79,12 +79,12 @@ def build_main_graph() -> StateGraph:
     # router 后路由
     graph.add_conditional_edges("router", route_after_router, {
         "reconciliation_subgraph": "reconciliation_subgraph",
-        "proc_graph_subgraph": "proc_graph_subgraph",
+        "proc_subgraph": "proc_subgraph",
         END: END,
     })
 
     graph.add_edge("reconciliation_subgraph", END)
-    graph.add_edge("proc_graph_subgraph", END)
+    graph.add_edge("proc_subgraph", END)
 
     return graph
 

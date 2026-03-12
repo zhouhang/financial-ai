@@ -270,6 +270,6 @@ class AgentState(TypedDict, total=False):
     waiting_for_human: bool
     human_prompt: Optional[str]
 
-    # ── proc_graph 数据整理子图上下文 ─────────────────────────────────────────
+    # ── proc 数据整理子图上下文 ─────────────────────────────────────────
     # 与 reconciliation_ctx / data_preparation_ctx 并列，完全隔离
-    proc_graph_ctx: Optional[dict[str, Any]]
+    proc_ctx: Optional[dict[str, Any]]

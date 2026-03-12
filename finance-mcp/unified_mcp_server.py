@@ -33,10 +33,15 @@ from data_preparation.mcp_server.config import OUTPUT_DIR, REPORT_DIR as PREP_RE
 # 导入认证和规则管理模块
 from auth.tools import create_auth_tools, handle_auth_tool_call, _create_guest_tools, _handle_create_guest_token, _handle_verify_guest_token, _handle_list_recommended_rules
 
-# 导入 proc 模块（数字员工和规则管理）
-from proc.mcp_server.tools import create_tools as create_proc_tools, handle_tool_call as handle_proc_call
-from proc.mcp_server.file_validate_tool import create_file_validate_tools, handle_file_validate_tool_call
+# 导入 tools 模块（文件校验和数据同步）
+from tools.file_validate_tool import create_file_validate_tools, handle_file_validate_tool_call
 from proc.mcp_server.sync_rule import create_sync_rule_tools, handle_sync_rule_tool_call
+
+# 导入 bus_rules 模块（统一的规则查询接口）
+from bus_rules.mcp_server.tools import create_tools as create_bus_rules_tools, handle_tool_call as handle_bus_rules_call
+
+# 导入 bus_agent_rules 模块（数字员工管理）
+from bus_agent_rules.mcp_server.tools import create_tools as create_bus_agent_rules_tools, handle_tool_call as handle_bus_agent_rules_call
 
 # 配置日志
 logging.basicConfig(
@@ -81,11 +86,11 @@ async def list_tools() -> list[types.Tool]:
         prep_tools = []
     
     try:
-        proc_tools = create_proc_tools()
-        logger.info(f"Proc 工具数量: {len(proc_tools)}")
+        bus_agent_rules_tools = create_bus_agent_rules_tools()
+        logger.info(f"Bus Agent Rules 工具数量: {len(bus_agent_rules_tools)}")
     except Exception as e:
-        logger.error(f"加载 Proc 工具失败: {str(e)}", exc_info=True)
-        proc_tools = []
+        logger.error(f"加载 Bus Agent Rules 工具失败: {str(e)}", exc_info=True)
+        bus_agent_rules_tools = []
 
     try:
         file_validate_tools = create_file_validate_tools()
@@ -100,8 +105,15 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载数据同步规则工具失败: {str(e)}", exc_info=True)
         sync_rule_tools = []
+
+    try:
+        bus_rules_tools = create_bus_rules_tools()
+        logger.info(f"Bus Rules 工具数量: {len(bus_rules_tools)}")
+    except Exception as e:
+        logger.error(f"加载 Bus Rules 工具失败: {str(e)}", exc_info=True)
+        bus_rules_tools = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + proc_tools + file_validate_tools + sync_rule_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + bus_agent_rules_tools + file_validate_tools + sync_rule_tools + bus_rules_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -112,6 +124,14 @@ _AUTH_TOOL_NAMES = {
     "list_reconciliation_rules", "get_reconciliation_rule",
     "save_reconciliation_rule", "update_reconciliation_rule",
     "delete_reconciliation_rule",
+    "search_rules_by_mapping", "copy_reconciliation_rule", "batch_get_reconciliation_rules",
+    # 管理员功能
+    "admin_login", "create_company", "create_department",
+    "list_companies", "list_departments", "get_admin_view",
+    "list_companies_public", "list_departments_public",
+    # 会话管理
+    "create_conversation", "list_conversations", "get_conversation",
+    "update_conversation", "delete_conversation", "save_message",
 }
 
 # 游客工具名集合
@@ -119,12 +139,10 @@ _GUEST_TOOL_NAMES = {
     "create_guest_token", "verify_guest_token", "list_recommended_rules"
 }
 
-# Proc 模块工具名集合（数字员工和规则管理）
-_PROC_TOOL_NAMES = {
+# Bus Agent Rules 模块工具名集合（数字员工管理）
+_BUS_AGENT_RULES_TOOL_NAMES = {
     "list_digital_employees",
     "list_rules_by_employee",
-    "get_file_validation_rule",
-    "get_proc_rule",
 }
 
 # 文件校验工具名集合
@@ -135,6 +153,11 @@ _FILE_VALIDATE_TOOL_NAMES = {
 # 数据同步规则工具名集合
 _SYNC_RULE_TOOL_NAMES = {
     "sync_rule_execute",
+}
+
+# Bus Rules 工具名集合（统一的规则查询接口）
+_BUS_RULES_TOOL_NAMES = {
+    "get_rule_from_bus",
 }
 
 
@@ -167,9 +190,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         elif name.startswith("data_preparation_"):
             result = await handle_prep_call(name, arguments)
 
-        # 5) Proc 模块（数字员工和规则管理）
-        elif name in _PROC_TOOL_NAMES:
-            result = await handle_proc_call(name, arguments)
+        # 5) Bus Agent Rules 模块（数字员工管理）
+        elif name in _BUS_AGENT_RULES_TOOL_NAMES:
+            result = await handle_bus_agent_rules_call(name, arguments)
 
         # 6) 文件校验模块
         elif name in _FILE_VALIDATE_TOOL_NAMES:
@@ -178,6 +201,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         # 7) 数据同步规则模块
         elif name in _SYNC_RULE_TOOL_NAMES:
             result = await handle_sync_rule_tool_call(name, arguments)
+
+        # 8) Bus Rules 模块（统一的规则查询接口）
+        elif name in _BUS_RULES_TOOL_NAMES:
+            result = await handle_bus_rules_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -429,6 +456,43 @@ async def preview_file(request):
         return JSONResponse({"error": f"预览失败: {str(e)}"}, status_code=500)
 
 
+async def download_proc_file(request):
+    """Proc 模块生成文件的下载端点。
+
+    路径格式: /proc/download/{rule_code}/{filename}
+    对应 sync_rule 生成的输出文件目录: proc/output/{rule_code}/{filename}
+    """
+    rule_code = request.path_params.get("rule_code", "")
+    filename = request.path_params.get("filename", "")
+
+    # 基本安全校验：禁止路径遍历
+    if not rule_code or not filename or "." in rule_code or "/" in rule_code or "\\" in rule_code:
+        return JSONResponse({"error": "无效的参数"}, status_code=400)
+    # 文件名只允许 xlsx / xls / csv，禁止含路径分隔符
+    if "/" in filename or "\\" in filename:
+        return JSONResponse({"error": "无效的文件名"}, status_code=400)
+
+    from proc.config.config import OUTPUT_DIR as PROC_OUTPUT_DIR
+
+    file_path = Path(PROC_OUTPUT_DIR) / rule_code / filename
+    logger.info(f"[proc/download] 请求下载: rule_code={rule_code!r} filename={filename!r} path={file_path}")
+
+    if not file_path.exists() or not file_path.is_file():
+        logger.warning(f"[proc/download] 文件不存在: {file_path}")
+        return JSONResponse({"error": f"文件不存在: {filename}"}, status_code=404)
+
+    # 对中文文件名使用 RFC 5987 编码，避免 Content-Disposition 头部崩溃
+    from urllib.parse import quote
+    encoded_filename = quote(filename, safe='')
+    return FileResponse(
+        str(file_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        },
+    )
+
+
 async def get_report(request):
     """获取详细报告"""
     task_id = request.path_params.get("task_id")
@@ -568,6 +632,7 @@ routes = [
     Route("/download/{task_id}", endpoint=download_file),
     Route("/preview/{task_id}", endpoint=preview_file),
     Route("/report/{task_id}", endpoint=get_report),
+    Route("/proc/download/{rule_code}/{filename}", endpoint=download_proc_file),
 ]
 
 app = Starlette(routes=routes)
@@ -583,7 +648,7 @@ async def main():
         tools = await list_tools()
         recon_tools = [t for t in tools if t.name.startswith("reconciliation_") or t.name == "file_upload" or t.name == "get_reconciliation"]
         prep_tools = [t for t in tools if t.name.startswith("data_preparation_")]
-        proc_tools = [t for t in tools if t.name in _PROC_TOOL_NAMES or t.name in _FILE_VALIDATE_TOOL_NAMES or t.name in _SYNC_RULE_TOOL_NAMES]
+        proc_tools = [t for t in tools if t.name in _FILE_VALIDATE_TOOL_NAMES or t.name in _SYNC_RULE_TOOL_NAMES]
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         recon_tools = []

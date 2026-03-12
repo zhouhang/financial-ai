@@ -41,7 +41,7 @@ from tools.mcp_client import (
     call_mcp_tool,
 )
 
-# 导入 proc_graph 路由
+# 导入 proc 路由
 from graphs.proc.api import router as proc_router
 
 logging.basicConfig(
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Financial Data Agent", version="0.1.0")
 
-# 注册 proc_graph 路由
+# 注册 proc 路由
 app.include_router(proc_router)
 
 app.add_middleware(
@@ -156,17 +156,17 @@ async def upload_file(
     """
     import base64
     import os
-    import sys
     from tools.mcp_client import call_mcp_tool
-    
-    # Add finance-mcp to path to access security utilities
-    finance_mcp_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), '..', '..', '..', 'finance-mcp')
-    )
-    if finance_mcp_path not in sys.path:
-        sys.path.insert(0, finance_mcp_path)
-    
-    from security_utils import validate_filename
+
+    def validate_filename(filename: str) -> bool:
+        """验证文件名格式，防止路径遍历攻击"""
+        if not filename or len(filename) > 255:
+            return False
+        if '/' in filename or '\\' in filename or '..' in filename:
+            return False
+        if any(c in filename for c in ['<', '>', ':', '"', '|', '?', '*', '\0']):
+            return False
+        return True
 
     # Validate thread_id to prevent injection attacks
     if not thread_id or not isinstance(thread_id, str) or len(thread_id) > 100:
@@ -328,8 +328,9 @@ async def websocket_chat(ws: WebSocket):
             conversation_id = data.get("conversation_id", "")  # 会话 ID
             employee_code = data.get("employee_code", "")  # 数字员工编码（如 "data_process"）
             rule_code = data.get("rule_code", "")  # 规则编码（如 "recognition"）
+            rule_name = data.get("rule_name", "")  # 规则名称（如 "手工凭证整理"）
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -482,19 +483,21 @@ async def websocket_chat(ws: WebSocket):
                 except Exception as e:
                     logger.warning(f"退出 workflow 后清空 thread 文件缓存失败: {e}")
 
-                # ⚙️ 如果前端传递了 employee_code/rule_code，写入 state（用于路由和 proc 子图）
-                if employee_code or rule_code:
+                # ⚙️ 如果前端传递了 employee_code/rule_code/rule_name，写入 state（用于路由和 proc 子图）
+                if employee_code or rule_code or rule_name:
                     try:
                         update_state = {}
                         if employee_code:
                             update_state["selected_employee_code"] = employee_code
                         if rule_code:
                             update_state["selected_rule_code"] = rule_code
-                            update_state["proc_graph_ctx"] = {"rule_code": rule_code}
+                            update_state["proc_ctx"] = {"rule_code": rule_code}
+                        if rule_name:
+                            update_state["selected_rule_name"] = rule_name
                         langgraph_app.update_state(config, update_state)
-                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code} 到 state (thread={thread_id})")
+                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name} 到 state (thread={thread_id})")
                     except Exception as e:
-                        logger.warning(f"写入 employee/rule code 失败: {e}")
+                        logger.warning(f"写入 employee/rule code/name 失败: {e}")
 
                 logger.info(f"开始执行 LangGraph: thread_id={thread_id}")
                 
