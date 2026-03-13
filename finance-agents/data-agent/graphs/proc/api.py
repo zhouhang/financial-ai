@@ -32,6 +32,7 @@ class Employee(BaseModel):
     desc_text: Optional[str] = None
     type: str
     memo: Optional[str] = None
+    file_rule_code: Optional[str] = None
 
 
 class Rule(BaseModel):
@@ -43,6 +44,7 @@ class Rule(BaseModel):
     type: str
     parent_code: Optional[str] = None
     memo: Optional[str] = None
+    file_rule_code: Optional[str] = None
 
 
 class EmployeesResponse(BaseModel):

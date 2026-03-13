@@ -23,6 +23,7 @@ from graphs.reconciliation import (
 )
 from graphs.data_preparation import build_data_preparation_subgraph
 from graphs.proc import build_proc_subgraph
+from graphs.recon import build_recon_subgraph
 from .nodes import (
     router_node,
 )
@@ -45,8 +46,10 @@ def route_after_router(state: AgentState) -> str:
         return "reconciliation_subgraph"
     elif intent == UserIntent.EDIT_RULE.value:
         return "reconciliation_subgraph"
-    elif intent == UserIntent.DATA_PROCESS.value:
+    elif intent == UserIntent.AGENT_RECOG.value:
         return "proc_subgraph"
+    elif intent == UserIntent.AGENT_RECON.value:
+        return "recon_subgraph"
     else:
         return END
 
@@ -62,6 +65,7 @@ def build_main_graph() -> StateGraph:
     data_preparation_sg = build_data_preparation_subgraph()
     reconciliation_sg = build_reconciliation_subgraph()
     proc_sg = build_proc_subgraph()
+    recon_sg = build_recon_subgraph()
 
     graph = StateGraph(AgentState)
 
@@ -72,6 +76,7 @@ def build_main_graph() -> StateGraph:
     graph.add_node("reconciliation_subgraph", reconciliation_sg.compile())
     graph.add_node("data_preparation_subgraph", data_preparation_sg.compile())
     graph.add_node("proc_subgraph", proc_sg.compile())
+    graph.add_node("recon_subgraph", recon_sg.compile())
 
     # ── 边 ────────────────────────────────────────────────────────────────
     graph.set_entry_point("router")
@@ -80,11 +85,13 @@ def build_main_graph() -> StateGraph:
     graph.add_conditional_edges("router", route_after_router, {
         "reconciliation_subgraph": "reconciliation_subgraph",
         "proc_subgraph": "proc_subgraph",
+        "recon_subgraph": "recon_subgraph",
         END: END,
     })
 
     graph.add_edge("reconciliation_subgraph", END)
     graph.add_edge("proc_subgraph", END)
+    graph.add_edge("recon_subgraph", END)
 
     return graph
 

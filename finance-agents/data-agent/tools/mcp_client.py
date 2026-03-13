@@ -659,14 +659,14 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
             "message": str
         }
     """
-    args: dict[str, Any] = {"rule_code": rule_code, "rule_type": 1}
+    args: dict[str, Any] = {"rule_code": rule_code}
     if auth_token:
         args["auth_token"] = auth_token
     return await call_mcp_tool("get_rule_from_bus", args)
 
 
 async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
-    """根据 rule_code 获取整理规则 JSON（通过 bus_rules 服务，rule_type=2）
+    """根据 rule_code 获取整理规则 JSON（通过 bus_rules 服务）
     
     Args:
         rule_code: 规则编码
@@ -680,7 +680,7 @@ async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
             "message": str
         }
     """
-    args: dict[str, Any] = {"rule_code": rule_code, "rule_type": 2}
+    args: dict[str, Any] = {"rule_code": rule_code}
     if auth_token:
         args["auth_token"] = auth_token
     return await call_mcp_tool("get_rule_from_bus", args)
@@ -737,3 +737,36 @@ async def execute_proc_rule(
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     })
+
+
+async def execute_recon_task(
+    files: list[dict[str, Any]],
+    rule_code: str,
+    auth_token: str = "",
+) -> dict[str, Any]:
+    """执行对账任务，生成差异报告。
+    
+    Args:
+        files: 文件列表，格式 [{"file_name": str, "file_path": str, "table_id": str, "table_name": str}]
+        rule_code: 对账规则编码
+        auth_token: JWT token（可选）
+        
+    Returns:
+        {
+            "success": bool,
+            "rule_code": str,
+            "matched_count": int,
+            "unmatched_count": int,
+            "differences": [{"type": str, "description": str, ...}],
+            "report_file": str,  # 差异报告文件路径
+            "errors": [str],
+            "message": str
+        }
+    """
+    args: dict[str, Any] = {
+        "files": files,
+        "rule_code": rule_code,
+    }
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("recon_task_execution", args)

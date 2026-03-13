@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-# ── get_proc_rule_node 提示词 ─────────────────────────────────────────────────
+# ── get_rule_node 提示词 ─────────────────────────────────────────────────
 
 PROC_RULE_NOT_FOUND_PROMPT = """\
 未找到名称为「{rule_name}」的数据整理规则。

@@ -326,11 +326,12 @@ async def websocket_chat(ws: WebSocket):
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             conversation_id = data.get("conversation_id", "")  # 会话 ID
-            employee_code = data.get("employee_code", "")  # 数字员工编码（如 "data_process"）
+            employee_code = data.get("employee_code", "")  # 数字员工编码（如 "agent-recog"）
             rule_code = data.get("rule_code", "")  # 规则编码（如 "recognition"）
             rule_name = data.get("rule_name", "")  # 规则名称（如 "手工凭证整理"）
+            file_rule_code = data.get("file_rule_code", "")  # 文件校验规则编码
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -483,8 +484,8 @@ async def websocket_chat(ws: WebSocket):
                 except Exception as e:
                     logger.warning(f"退出 workflow 后清空 thread 文件缓存失败: {e}")
 
-                # ⚙️ 如果前端传递了 employee_code/rule_code/rule_name，写入 state（用于路由和 proc 子图）
-                if employee_code or rule_code or rule_name:
+                # ⚙️ 如果前端传递了 employee_code/rule_code/rule_name/file_rule_code，写入 state（用于路由和 proc 子图）
+                if employee_code or rule_code or rule_name or file_rule_code:
                     try:
                         update_state = {}
                         if employee_code:
@@ -494,8 +495,14 @@ async def websocket_chat(ws: WebSocket):
                             update_state["proc_ctx"] = {"rule_code": rule_code}
                         if rule_name:
                             update_state["selected_rule_name"] = rule_name
+                        if file_rule_code:
+                            update_state["file_rule_code"] = file_rule_code
+                            # 同时写入 proc_ctx
+                            proc_ctx = update_state.get("proc_ctx", {})
+                            proc_ctx["file_rule_code"] = file_rule_code
+                            update_state["proc_ctx"] = proc_ctx
                         langgraph_app.update_state(config, update_state)
-                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name} 到 state (thread={thread_id})")
+                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code} 到 state (thread={thread_id})")
                     except Exception as e:
                         logger.warning(f"写入 employee/rule code/name 失败: {e}")
 

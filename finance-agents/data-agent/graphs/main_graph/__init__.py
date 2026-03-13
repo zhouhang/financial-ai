@@ -41,6 +41,12 @@ from .routers import (
     create_app,
 )
 
+# ── public_nodes.py ──────────────────────────────────────────────────────────
+from .public_nodes import (
+    get_rule_node,
+    check_file_node,
+)
+
 
 __all__ = [
     # forms
@@ -68,4 +74,7 @@ __all__ = [
     # routers - 图构建
     "build_main_graph",
     "create_app",
+    # public_nodes - 公共节点
+    "get_rule_node",
+    "check_file_node",
 ]

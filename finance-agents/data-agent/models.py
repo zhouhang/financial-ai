@@ -32,7 +32,8 @@ class UserIntent(str, Enum):
     CREATE_DEPARTMENT = "create_department"
     ADMIN_LOGOUT = "admin_logout"
     UNKNOWN = "unknown"
-    DATA_PROCESS = "data_process"          # 数据整理
+    AGENT_RECOG = "agent-recog"              # 数据整理（核算识别）
+    AGENT_RECON = "agent-recon"              # 对账执行
 
 
 class ReconciliationPhase(str, Enum):
@@ -61,6 +62,19 @@ class ProcAgentPhase(str, Enum):
     CHECKING_FILES = "checking_files"      # 正在校验文件
     FILE_CHECK_FAILED = "file_check_failed" # 文件校验失败
     EXECUTING = "executing"                # 正在执行整理
+    SHOWING_RESULT = "showing_result"      # 展示结果
+    COMPLETED = "completed"                # 已完成
+
+
+class ReconAgentPhase(str, Enum):
+    """对账执行子图（recon_agent）的阶段枚举。"""
+    IDLE = "idle"
+    GETTING_RULE = "getting_rule"          # 正在读取规则
+    RULE_NOT_FOUND = "rule_not_found"      # 规则不存在
+    CHECKING_FILES = "checking_files"      # 正在校验文件
+    FILE_CHECK_FAILED = "file_check_failed" # 文件校验失败
+    EXECUTING = "executing"                # 正在执行对账
+    EXEC_FAILED = "exec_failed"            # 对账执行失败
     SHOWING_RESULT = "showing_result"      # 展示结果
     COMPLETED = "completed"                # 已完成
 
@@ -203,7 +217,7 @@ class AgentState(TypedDict, total=False):
 
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值
-    selected_employee_code: Optional[str]  # 选中的数字员工编码，如 "data_process"
+    selected_employee_code: Optional[str]  # 选中的数字员工编码，如 "agent-recog"
     selected_rule_name: Optional[str]
     selected_rule_code: Optional[str]  # 数据整理规则编码，如 "recognition"
 
@@ -273,3 +287,7 @@ class AgentState(TypedDict, total=False):
     # ── proc 数据整理子图上下文 ─────────────────────────────────────────
     # 与 reconciliation_ctx / data_preparation_ctx 并列，完全隔离
     proc_ctx: Optional[dict[str, Any]]
+
+    # ── recon 对账执行子图上下文 ───────────────────────────────────────────
+    # 与 proc_ctx 并列，完全隔离
+    recon_ctx: Optional[dict[str, Any]]

@@ -109,7 +109,7 @@ SYSTEM_PROMPT = """\
 - 如果用户想**调整/编辑已有规则**（如“调整XX规则”、“编辑XX”、“修改XX规则”），回复 JSON: {{"intent": "edit_rule", "rule_name": "规则名称"}}
 - 如果用户想创建新规则，回复 JSON: {{"intent": "create_new_rule"}}
 - 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
-- 如果用户想**执行数据整理**（如“数据整理”、“核算整理”、“使用核算规则”），回复 JSON: {{"intent": "data_process", "rule_code": "recognition"}}
+- 如果用户想**执行数据整理**（如"数据整理"、"核算整理"、"使用核算规则"），回复 JSON: {{"intent": "agent-recog", "rule_code": "recognition"}}
 - 如果用户在闲聊或一般对话（如打招呼、夸赞、闲聊），**正常简短回复即可**，不要主动介绍自己或列举规则。
 - 仅当用户**明确要求**自我介绍、介绍功能、展示规则列表（如「介绍一下你自己」「你能做什么」「有哪些规则」「看看规则」）时，才用完整格式回复：
   1. 用「你好，{username}！我是 Tally」开头
@@ -573,9 +573,9 @@ async def intent_router(state: AgentState) -> dict:
     """
     # ====== 新增：前端显式选择数字员工时，直接路由（跳过 LLM 意图识别）======
     selected_employee_code = state.get("selected_employee_code", "")
-    if selected_employee_code == "data_process":
+    if selected_employee_code == UserIntent.AGENT_RECOG.value:
         # 用户选择了"数据整理员工"，直接进入 proc 子图
-        rule_code = state.get("selected_rule_code") or "recognition"
+        rule_code = state.get("selected_rule_code") or ""
         rule_name = state.get("selected_rule_name") or ""
         uploaded = state.get("uploaded_files", [])
         # 取用户实际输入的消息内容，而非固定 welcome_msg
@@ -586,14 +586,71 @@ async def intent_router(state: AgentState) -> dict:
             else ""
         ) or ""
 
-        logger.info(f"[intent_router] 前端显式选择 data_process，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
+        # ⚠️ 必须选择 rule_code，不能默认
+        if not rule_code:
+            logger.warning(f"[intent_router] 前端选择 {UserIntent.AGENT_RECOG.value} 但未选择 rule_code")
+            return {
+                "messages": [AIMessage(content="❌ 请先选择要使用的整理规则。\n\n请在左侧规则列表中选择一个规则后再开始。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+
+        logger.info(f"[intent_router] 前端显式选择 {UserIntent.AGENT_RECOG.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
         return {
             "messages": [HumanMessage(content=last_user_input)] if last_user_input else [],
             "uploaded": uploaded,
-            "user_intent": UserIntent.DATA_PROCESS.value,
+            "user_intent": UserIntent.AGENT_RECOG.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,
             "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},
+        }
+
+    if selected_employee_code == UserIntent.AGENT_RECON.value:
+        # 用户选择了"对账执行员工"，直接进入 recon 子图
+        rule_code = state.get("selected_rule_code") or ""
+        rule_name = state.get("selected_rule_name") or ""
+        uploaded = state.get("uploaded_files", [])
+        # 取用户实际输入的消息内容
+        _msgs = list(state.get("messages", []))
+        last_user_input = (
+            _msgs[-1].content
+            if _msgs and hasattr(_msgs[-1], "content")
+            else ""
+        ) or ""
+
+        # ⚠️ 必须选择 rule_code
+        if not rule_code:
+            logger.warning(f"[intent_router] 前端选择 {UserIntent.AGENT_RECON.value} 但未选择 rule_code")
+            return {
+                "messages": [AIMessage(content="❌ 请先选择要使用的对账规则。\n\n请在左侧规则列表中选择一个规则后再开始。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+
+        logger.info(f"[intent_router] 前端显式选择 {UserIntent.AGENT_RECON.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
+
+        # 构建规则展示文本
+        rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
+
+        # 检查是否有上传的文件
+        if not uploaded:
+            welcome_msg = (
+                "📊 **开始对账执行任务**\n\n"
+                f"已选择规则：**{rule_display}**\n\n"
+                "请先上传需要对账的数据文件（Excel 或 CSV 格式）。"
+            )
+        else:
+            welcome_msg = (
+                "📊 **开始对账执行任务**\n\n"
+                f"已选择规则：**{rule_display}**\n"
+                f"已上传文件：{len(uploaded)} 个\n\n"
+                "正在校验文件并加载规则..."
+            )
+
+        return {
+            "messages": [AIMessage(content=welcome_msg)],
+            "user_intent": UserIntent.AGENT_RECON.value,
+            "selected_rule_code": rule_code,
+            "selected_rule_name": rule_name,
+            "recon_ctx": {"rule_code": rule_code, "rule_name": rule_name},
         }
 
     # ====== 新增：workflow 上下文感知（覆盖所有 workflow 阶段）======
@@ -907,18 +964,27 @@ async def intent_router(state: AgentState) -> dict:
             "rule_config_items": config_items,
             "phase": ReconciliationPhase.EDIT_FIELD_MAPPING.value,
         }
-    elif intent == UserIntent.DATA_PROCESS.value:
+    elif intent == UserIntent.AGENT_RECOG.value:
         # 数据整理意图：进入 proc 子图
-        # 优先从 state 中读取前端传递的 rule_code，其次从 LLM 解析，最后默认 "recognition"
+        # 优先从 state 中读取前端传递的 rule_code，其次从 LLM 解析
         rule_code = state.get("selected_rule_code") or ""
         rule_name = state.get("selected_rule_name") or ""
+
+        # 尝试从 LLM 解析的 JSON 中提取 rule_code
         if not rule_code:
-            # 从 LLM 解析的 JSON 中提取
             try:
-                rule_code = parsed.get("rule_code", "recognition")
+                rule_code = parsed.get("rule_code", "")
             except:
-                rule_code = "recognition"
-        
+                pass
+
+        # ⚠️ 必须选择 rule_code，不能默认
+        if not rule_code:
+            logger.warning(f"[intent_router] LLM 识别为 AGENT_RECOG 但未提供 rule_code")
+            return {
+                "messages": [AIMessage(content="❌ 请指定要使用的整理规则。\n\n例如：「使用 recognition 规则整理数据」或在左侧规则列表中选择一个规则。")],
+                "user_intent": UserIntent.UNKNOWN.value,
+            }
+
         # 构建规则展示文本
         rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
 
@@ -938,11 +1004,11 @@ async def intent_router(state: AgentState) -> dict:
                 "正在校验文件并加载规则..."
             )
         
-        logger.info(f"[intent_router] DATA_PROCESS: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}")
+        logger.info(f"[intent_router] AGENT_RECOG: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}")
         
         return {
             "messages": [AIMessage(content=welcome_msg)],
-            "user_intent": UserIntent.DATA_PROCESS.value,
+            "user_intent": UserIntent.AGENT_RECOG.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,
             "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},  # 初始化子图上下文
