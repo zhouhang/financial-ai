@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 # Tool 定义
 # ════════════════════════════════════════════════════════════════════════════
 
-def create_sync_rule_tools() -> list[Tool]:
+def create_proc_rule_tools() -> list[Tool]:
     """创建数据同步规则工具列表"""
     return [
         Tool(
-            name="sync_rule_execute",
+            name="proc_rule_execute",
             description=(
                 "根据规则编码（rule_code）从数据库获取数据整理规则，"
                 "对上传文件执行字段映射和数据转换，生成目标 Excel 文件。\n"
@@ -80,16 +80,16 @@ def create_sync_rule_tools() -> list[Tool]:
 # Tool 调用入口
 # ════════════════════════════════════════════════════════════════════════════
 
-async def handle_sync_rule_tool_call(name: str, arguments: dict) -> dict:
-    """处理 sync_rule_execute 工具调用"""
-    if name == "sync_rule_execute":
-        return await _handle_sync_rule_execute(arguments)
+async def handle_proc_rule_tool_call(name: str, arguments: dict) -> dict:
+    """处理 proc_rule_execute 工具调用"""
+    if name == "proc_rule_execute":
+        return await _handle_proc_rule_execute(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
-async def _handle_sync_rule_execute(arguments: dict) -> dict:
+async def _handle_proc_rule_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
-    from bus_rules.mcp_server.tools import get_rule_from_bus
+    from tools.rules import get_rule_from_bus
     from proc.config.config import OUTPUT_DIR
 
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
@@ -134,7 +134,7 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
             table_file_map[tname] = fpath
 
     logger.info(
-        f"[sync_rule] 开始执行，rule_code={rule_code!r}，"
+        f"[proc_rule] 开始执行，rule_code={rule_code!r}，"
         f"文件映射={list(table_file_map.keys())}，rules数量={len(rules_list)}"
     )
 
@@ -147,12 +147,12 @@ async def _handle_sync_rule_execute(arguments: dict) -> dict:
             result = _execute_single_rule(rule, table_file_map, output_dir)
             generated_files.append(result)
             logger.info(
-                f"[sync_rule] 规则 {rule.get('rule_id')!r} 执行成功，"
+                f"[proc_rule] 规则 {rule.get('rule_id')!r} 执行成功，"
                 f"输出文件：{result['output_file']}"
             )
         except Exception as e:
             msg = f"规则 {rule.get('rule_id')!r} 执行失败: {e}"
-            logger.error(f"[sync_rule] {msg}", exc_info=True)
+            logger.error(f"[proc_rule] {msg}", exc_info=True)
             errors.append(msg)
 
     return {
@@ -213,7 +213,7 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
     if global_filter:
         source_df = _apply_global_filter(source_df, global_filter)
 
-    logger.info(f"[sync_rule] [{rule_id}] 源数据过滤后行数：{len(source_df)}")
+    logger.info(f"[proc_rule] [{rule_id}] 源数据过滤后行数：{len(source_df)}")
 
     # ── 3. 加载 lookup 表（如果有）──────────────────────────────────────────
     lookup_data: dict[str, pd.DataFrame] = {}
@@ -222,9 +222,9 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
         if lt_name in table_file_map:
             try:
                 lookup_data[lt_name] = _read_file_as_df(table_file_map[lt_name])
-                logger.info(f"[sync_rule] [{rule_id}] 加载 lookup 表 '{lt_name}'，{len(lookup_data[lt_name])} 行")
+                logger.info(f"[proc_rule] [{rule_id}] 加载 lookup 表 '{lt_name}'，{len(lookup_data[lt_name])} 行")
             except Exception as e:
-                logger.warning(f"[sync_rule] [{rule_id}] 加载 lookup 表 '{lt_name}' 失败: {e}")
+                logger.warning(f"[proc_rule] [{rule_id}] 加载 lookup 表 '{lt_name}' 失败: {e}")
 
     # ── 4. 按 field_mappings 构建目标 DataFrame ──────────────────────────────
     result_df = _apply_field_mappings(source_df, field_mappings, lookup_data, rule_id)
@@ -260,15 +260,15 @@ def _execute_single_rule(rule: dict, table_file_map: dict[str, str], output_dir:
             result["merge_result"] = merge_result
             if merge_result.get("merged"):
                 logger.info(
-                    f"[sync_rule] [{rule_id}] merge 完成，"
+                    f"[proc_rule] [{rule_id}] merge 完成，"
                     f"合并文件：{merge_result.get('merged_file_path')}"
                 )
             else:
                 logger.info(
-                    f"[sync_rule] [{rule_id}] merge 未执行：{merge_result.get('message')}"
+                    f"[proc_rule] [{rule_id}] merge 未执行：{merge_result.get('message')}"
                 )
         except Exception as e:
-            logger.error(f"[sync_rule] [{rule_id}] merge 执行异常: {e}", exc_info=True)
+            logger.error(f"[proc_rule] [{rule_id}] merge 执行异常: {e}", exc_info=True)
             result["merge_result"] = {
                 "merged": False,
                 "generated_file_path": output_path,
@@ -344,7 +344,7 @@ def _apply_global_filter(df: pd.DataFrame, gf: dict) -> pd.DataFrame:
     exclude_values: list = gf.get("exclude_values", [])
 
     if col not in df.columns:
-        logger.warning(f"[sync_rule] global_filter 列 '{col}' 不存在，跳过过滤")
+        logger.warning(f"[proc_rule] global_filter 列 '{col}' 不存在，跳过过滤")
         return df
 
     col_series = df[col].astype(str)
@@ -355,7 +355,7 @@ def _apply_global_filter(df: pd.DataFrame, gf: dict) -> pd.DataFrame:
         pattern = "|".join(re.escape(v) for v in values)
         mask = col_series.str.match(f"^({pattern})")
     else:
-        logger.warning(f"[sync_rule] 未知 global_filter operator: {operator}，跳过过滤")
+        logger.warning(f"[proc_rule] 未知 global_filter operator: {operator}，跳过过滤")
         return df
 
     if exclude_values:
@@ -399,7 +399,7 @@ def _apply_field_mappings(
             col_data = _compute_column(fm, source_df, result, lookup_data)
             result[target] = col_data
         except Exception as e:
-            logger.warning(f"[sync_rule] [{rule_id}] 字段 '{target}' 计算失败，填充空值: {e}")
+            logger.warning(f"[proc_rule] [{rule_id}] 字段 '{target}' 计算失败，填充空值: {e}")
             result[target] = [None] * n_rows
 
     # 第二轮：处理计算列（多轮直到收敛，最多 10 轮防死循环）
@@ -417,7 +417,7 @@ def _apply_field_mappings(
                     col_data = _compute_column(fm, source_df, result, lookup_data)
                     result[target] = col_data
                 except Exception as e:
-                    logger.warning(f"[sync_rule] [{rule_id}] 计算列 '{target}' 失败，填充空值: {e}")
+                    logger.warning(f"[proc_rule] [{rule_id}] 计算列 '{target}' 失败，填充空值: {e}")
                     result[target] = [None] * n_rows
             else:
                 still_deferred.append(fm)
@@ -480,7 +480,7 @@ def _compute_column(
         return _rt_lookup(fm, source_df, result, lookup_data, n)
 
     else:
-        logger.warning(f"[sync_rule] 未知 rule_type='{rule_type}'，目标列 '{target}' 填充空值")
+        logger.warning(f"[proc_rule] 未知 rule_type='{rule_type}'，目标列 '{target}' 填充空值")
         return [None] * n
 
 
@@ -489,7 +489,7 @@ def _compute_column(
 def _rt_direct_mapping(fm: dict, source_df: pd.DataFrame, n: int) -> list:
     src = fm.get("source_field", "")
     if src not in source_df.columns:
-        logger.warning(f"[sync_rule] direct_mapping 源字段 '{src}' 不存在")
+        logger.warning(f"[proc_rule] direct_mapping 源字段 '{src}' 不存在")
         return [None] * n
     return source_df[src].tolist()
 
@@ -559,7 +559,7 @@ def _rt_formula(
             if round_digits is not None and val is not None and isinstance(val, (int, float)):
                 val = round(val, round_digits)
         except Exception as e:
-            logger.debug(f"[sync_rule] formula 计算失败 row={i}: {e}")
+            logger.debug(f"[proc_rule] formula 计算失败 row={i}: {e}")
             val = None
         results_list.append(val)
 
@@ -589,7 +589,7 @@ def _rt_regex_extract(fm: dict, source_df: pd.DataFrame, n: int) -> list:
     fallback = fm.get("fallback")  # None 表示无默认值
 
     if src not in source_df.columns:
-        logger.warning(f"[sync_rule] regex_extract 源字段 '{src}' 不存在")
+        logger.warning(f"[proc_rule] regex_extract 源字段 '{src}' 不存在")
         return [fallback] * n
 
     compiled = re.compile(pattern) if pattern else None
@@ -630,7 +630,7 @@ def _rt_regex_extract(fm: dict, source_df: pd.DataFrame, n: int) -> list:
 # ── parse_from_field ─────────────────────────────────────────────────────────
 
 def _rt_parse_from_field(fm: dict, source_df: pd.DataFrame, n: int) -> list:
-    """多步骤解析字段值（见 manual_voucher_sync_rule.json 中的税率解析）"""
+    """多步骤解析字段值（见 manual_voucher_proc_rule.json 中的税率解析）"""
     src = fm.get("source_field", "")
     parse_rules: list[dict] = fm.get("parse_rules", [])
 
@@ -979,7 +979,7 @@ def _rt_lookup(
         return None
 
     if lookup_table_name not in lookup_data:
-        logger.warning(f"[sync_rule] lookup 表 '{lookup_table_name}' 未加载，填充默认值")
+        logger.warning(f"[proc_rule] lookup 表 '{lookup_table_name}' 未加载，填充默认值")
         return [no_match_result] * n
 
     ldf = lookup_data[lookup_table_name]

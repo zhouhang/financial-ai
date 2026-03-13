@@ -713,7 +713,7 @@ async def validate_uploaded_files(
     })
 
 
-async def execute_sync_rule(
+async def execute_proc_rule(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
 ) -> dict[str, Any]:
@@ -733,7 +733,7 @@ async def execute_sync_rule(
             "message": str
         }
     """
-    return await call_mcp_tool("sync_rule_execute", {
+    return await call_mcp_tool("proc_rule_execute", {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     })

@@ -35,13 +35,10 @@ from auth.tools import create_auth_tools, handle_auth_tool_call, _create_guest_t
 
 # 导入 tools 模块（文件校验和数据同步）
 from tools.file_validate_tool import create_file_validate_tools, handle_file_validate_tool_call
-from proc.mcp_server.sync_rule import create_sync_rule_tools, handle_sync_rule_tool_call
+from proc.mcp_server.proc_rule import create_proc_rule_tools, handle_proc_rule_tool_call
 
-# 导入 bus_rules 模块（统一的规则查询接口）
-from bus_rules.mcp_server.tools import create_tools as create_bus_rules_tools, handle_tool_call as handle_bus_rules_call
-
-# 导入 bus_agent_rules 模块（数字员工管理）
-from bus_agent_rules.mcp_server.tools import create_tools as create_bus_agent_rules_tools, handle_tool_call as handle_bus_agent_rules_call
+# 导入 rules 模块（规则查询 + 数字员工管理）
+from tools.rules import create_tools as create_rules_tools, handle_tool_call as handle_rules_call, get_rule_from_bus
 
 # 配置日志
 logging.basicConfig(
@@ -86,13 +83,6 @@ async def list_tools() -> list[types.Tool]:
         prep_tools = []
     
     try:
-        bus_agent_rules_tools = create_bus_agent_rules_tools()
-        logger.info(f"Bus Agent Rules 工具数量: {len(bus_agent_rules_tools)}")
-    except Exception as e:
-        logger.error(f"加载 Bus Agent Rules 工具失败: {str(e)}", exc_info=True)
-        bus_agent_rules_tools = []
-
-    try:
         file_validate_tools = create_file_validate_tools()
         logger.info(f"文件校验工具数量: {len(file_validate_tools)}")
     except Exception as e:
@@ -100,20 +90,20 @@ async def list_tools() -> list[types.Tool]:
         file_validate_tools = []
 
     try:
-        sync_rule_tools = create_sync_rule_tools()
+        sync_rule_tools = create_proc_rule_tools()
         logger.info(f"数据同步规则工具数量: {len(sync_rule_tools)}")
     except Exception as e:
         logger.error(f"加载数据同步规则工具失败: {str(e)}", exc_info=True)
         sync_rule_tools = []
 
     try:
-        bus_rules_tools = create_bus_rules_tools()
-        logger.info(f"Bus Rules 工具数量: {len(bus_rules_tools)}")
+        rules_tools = create_rules_tools()
+        logger.info(f"Rules 工具数量: {len(rules_tools)}")
     except Exception as e:
-        logger.error(f"加载 Bus Rules 工具失败: {str(e)}", exc_info=True)
-        bus_rules_tools = []
+        logger.error(f"加载 Rules 工具失败: {str(e)}", exc_info=True)
+        rules_tools = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + bus_agent_rules_tools + file_validate_tools + sync_rule_tools + bus_rules_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + file_validate_tools + sync_rule_tools + rules_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -139,12 +129,6 @@ _GUEST_TOOL_NAMES = {
     "create_guest_token", "verify_guest_token", "list_recommended_rules"
 }
 
-# Bus Agent Rules 模块工具名集合（数字员工管理）
-_BUS_AGENT_RULES_TOOL_NAMES = {
-    "list_digital_employees",
-    "list_rules_by_employee",
-}
-
 # 文件校验工具名集合
 _FILE_VALIDATE_TOOL_NAMES = {
     "validate_uploaded_files",
@@ -152,12 +136,14 @@ _FILE_VALIDATE_TOOL_NAMES = {
 
 # 数据同步规则工具名集合
 _SYNC_RULE_TOOL_NAMES = {
-    "sync_rule_execute",
+    "proc_rule_execute",
 }
 
-# Bus Rules 工具名集合（统一的规则查询接口）
-_BUS_RULES_TOOL_NAMES = {
+# Rules 工具名集合（规则查询 + 数字员工管理）
+_RULES_TOOL_NAMES = {
     "get_rule_from_bus",
+    "list_digital_employees",
+    "list_rules_by_employee",
 }
 
 
@@ -190,21 +176,17 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         elif name.startswith("data_preparation_"):
             result = await handle_prep_call(name, arguments)
 
-        # 5) Bus Agent Rules 模块（数字员工管理）
-        elif name in _BUS_AGENT_RULES_TOOL_NAMES:
-            result = await handle_bus_agent_rules_call(name, arguments)
-
-        # 6) 文件校验模块
+        # 5) 文件校验模块
         elif name in _FILE_VALIDATE_TOOL_NAMES:
             result = await handle_file_validate_tool_call(name, arguments)
 
-        # 7) 数据同步规则模块
+        # 6) 数据同步规则模块
         elif name in _SYNC_RULE_TOOL_NAMES:
-            result = await handle_sync_rule_tool_call(name, arguments)
+            result = await handle_proc_rule_tool_call(name, arguments)
 
-        # 8) Bus Rules 模块（统一的规则查询接口）
-        elif name in _BUS_RULES_TOOL_NAMES:
-            result = await handle_bus_rules_call(name, arguments)
+        # 7) Rules 模块（规则查询 + 数字员工管理）
+        elif name in _RULES_TOOL_NAMES:
+            result = await handle_rules_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -460,7 +442,7 @@ async def download_proc_file(request):
     """Proc 模块生成文件的下载端点。
 
     路径格式: /proc/download/{rule_code}/{filename}
-    对应 sync_rule 生成的输出文件目录: proc/output/{rule_code}/{filename}
+    对应 proc_rule 生成的输出文件目录: proc/output/{rule_code}/{filename}
     """
     rule_code = request.path_params.get("rule_code", "")
     filename = request.path_params.get("filename", "")

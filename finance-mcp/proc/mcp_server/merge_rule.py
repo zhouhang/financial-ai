@@ -4,7 +4,7 @@
 根据规则中的 merge 节点配置，将新生成文件的内容与已上传的目标文件进行合并，
 生成最终合并文件（xlsx）。
 
-merge 节点配置说明（来自 sync_rule.json）：
+merge 节点配置说明（来自 proc_rule.json）：
   enabled          : 是否启用 merge，true 时才执行
   target_file_match:
     match_by       : 匹配方式，目前支持 "target_table"（按表名称匹配上传文件）

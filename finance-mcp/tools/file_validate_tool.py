@@ -15,8 +15,8 @@ from typing import Dict, Any, List, Optional, Set
 
 from mcp import Tool
 
-# 导入文件校验规则查询函数（从 bus_rules.mcp_server.tools 直接导入）
-from bus_rules.mcp_server.tools import get_rule_from_bus
+# 导入文件校验规则查询函数（从 rules.mcp_server.tools 直接导入）
+from tools.rules import get_rule_from_bus
 
 # 配置日志
 logger = logging.getLogger("proc.mcp_server.file_validate_tool")

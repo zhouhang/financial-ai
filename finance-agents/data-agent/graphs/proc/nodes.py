@@ -390,7 +390,6 @@ async def get_proc_rule_node(state: AgentState) -> dict:
         "proc_ctx": ctx,
     }
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 节点 2：check_file_node — 文件类型/数量/表头校验
 # ══════════════════════════════════════════════════════════════════════════════
@@ -581,8 +580,6 @@ async def check_file_node(state: AgentState) -> dict:
         "proc_ctx": ctx,
     }
 
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 节点 3：proc_task_execute_node — 按 JSON 规则确定性执行数据整理
 # ══════════════════════════════════════════════════════════════════════════════
@@ -590,7 +587,7 @@ async def check_file_node(state: AgentState) -> dict:
 async def proc_task_execute_node(state: AgentState) -> dict:
     """按 JSON 规则确定性执行数据整理。
 
-    调用 MCP sync_rule_execute 工具，根据文件校验结果和 rule_code
+    调用 MCP proc_rule_execute 工具，根据文件校验结果和 rule_code
     执行字段映射和数据转换，生成目标 Excel 文件。
     """
     ctx = _get_proc_ctx(state)
@@ -623,7 +620,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "proc_ctx": ctx,
         }
 
-    # ── 准备 sync_rule_execute 参数 ──────────────────────────────────────────
+    # ── 准备 proc_rule_execute 参数 ──────────────────────────────────────────
     # file_match_results 格式: [{file_name, table_id, table_name}]
     # 需要补充 file_path（从 uploaded_files 或 state 中获取）
     uploaded_files_raw: list = list(state.get("uploaded_files") or [])
@@ -643,7 +640,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             file_path_map[os.path.basename(abs_fp)] = abs_fp
     logger.info(f"[proc] file_path_map keys={list(file_path_map.keys())}")
 
-    # 构建 uploaded_files 参数（sync_rule_execute 需要的格式）
+    # 构建 uploaded_files 参数（proc_rule_execute 需要的格式）
     sync_uploaded_files: list[dict] = []
     for match in file_match_results:
         file_name = match.get("file_name", "")
@@ -671,15 +668,15 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "proc_ctx": ctx,
         }
 
-    # ── 调用 sync_rule_execute 工具 ──────────────────────────────────────────
-    from tools.mcp_client import execute_sync_rule
+    # ── 调用 proc_rule_execute 工具 ──────────────────────────────────────────
+    from tools.mcp_client import execute_proc_rule
 
     try:
         logger.info(
-            f"[proc] 调用 sync_rule_execute，"
+            f"[proc] 调用 proc_rule_execute，"
             f"files={[m['file_name'] for m in sync_uploaded_files]}"
         )
-        sync_result = await execute_sync_rule(
+        sync_result = await execute_proc_rule(
             uploaded_files=sync_uploaded_files,
             rule_code=rule_code,
         )
@@ -697,7 +694,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         }
 
     logger.info(
-        f"[proc] sync_rule_execute 结果: "
+        f"[proc] proc_rule_execute 结果: "
         f"success={sync_result.get('success')}, "
         f"generated={sync_result.get('generated_count', 0)}"
     )
@@ -762,7 +759,6 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
         "proc_ctx": ctx,
     }
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 节点 4：result_node — 展示处理结果或返回错误信息
