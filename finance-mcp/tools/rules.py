@@ -19,7 +19,7 @@ from auth.jwt_utils import get_user_from_token
 logger = logging.getLogger("tools.rules")
 
 # ── bus_rules 规则缓存 ────────────────────────────────────────────────────────
-_rule_cache: Dict[tuple[str, int], Optional[Dict[str, Any]]] = {}
+_rule_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -32,8 +32,7 @@ def create_tools() -> list[Tool]:
         Tool(
             name="get_rule_from_bus",
             description=(
-                "从 bus_rules 表获取指定 rule_code 和 rule_type 的规则完整记录。"
-                "支持所有 rule_type：1=文件校验规则, 2=数据整理规则, 3+=后续扩展类型。"
+                "从 bus_rules 表获取指定 rule_code 的规则完整记录。"
             ),
             inputSchema={
                 "type": "object",
@@ -42,16 +41,12 @@ def create_tools() -> list[Tool]:
                         "type": "string",
                         "description": "规则编码（rule_code）",
                     },
-                    "rule_type": {
-                        "type": "integer",
-                        "description": "规则类型：1=文件校验规则, 2=数据整理规则, 3+=其他类型",
-                    },
                     "auth_token": {
                         "type": "string",
                         "description": "JWT token，用于校验用户身份（可选）",
                     },
                 },
-                "required": ["rule_code", "rule_type"],
+                "required": ["rule_code"],
             },
         ),
         Tool(
@@ -112,40 +107,39 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 # bus_rules：规则查询
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_rule_from_bus(rule_code: str, rule_type: int) -> Optional[Dict[str, Any]]:
-    """从 bus_rules 表获取指定 rule_code 和 rule_type 的规则完整记录
+def get_rule_from_bus(rule_code: str) -> Optional[Dict[str, Any]]:
+    """从 bus_rules 表获取指定 rule_code 的规则完整记录
 
     Args:
         rule_code: 规则编码
-        rule_type: 规则类型（1=文件校验，2=数据整理）
 
     Returns:
         规则字典，包含 id, rule_code, rule, memo 等字段；未找到返回 None
     """
-    cache_key = (rule_code, rule_type)
+    cache_key = rule_code
 
     if cache_key in _rule_cache:
-        logger.info(f"[Cache] 命中缓存: rule_code={rule_code}, rule_type={rule_type}")
+        logger.info(f"[Cache] 命中缓存: rule_code={rule_code}")
         return _rule_cache[cache_key]
 
     conn = None
     try:
-        logger.info(f"[SQL] 查询 bus_rules: rule_code={rule_code}, rule_type={rule_type}")
+        logger.info(f"[SQL] 查询 bus_rules: rule_code={rule_code}")
         conn = get_db_connection()
         cur = conn.cursor()
 
         sql = """
             SELECT id, rule_code, rule, memo
             FROM bus_rules
-            WHERE rule_code = %s AND rule_type = %s::varchar
+            WHERE rule_code = %s
             LIMIT 1
         """
-        cur.execute(sql, (rule_code, rule_type))
+        cur.execute(sql, (rule_code,))
         row = cur.fetchone()
         cur.close()
 
         if row is None:
-            logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}, rule_type={rule_type}")
+            logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}")
             _rule_cache[cache_key] = None
             return None
 
@@ -156,7 +150,7 @@ def get_rule_from_bus(rule_code: str, rule_type: int) -> Optional[Dict[str, Any]
             "memo": row[3],
         }
         _rule_cache[cache_key] = result
-        logger.info(f"[SQL] 查询成功，已缓存: rule_code={rule_code}, rule_type={rule_type}")
+        logger.info(f"[SQL] 查询成功，已缓存: rule_code={rule_code}")
         return result
 
     except Exception as e:
@@ -169,31 +163,21 @@ def get_rule_from_bus(rule_code: str, rule_type: int) -> Optional[Dict[str, Any]
 
 async def _handle_get_rule_from_bus(arguments: dict) -> dict:
     rule_code = arguments.get("rule_code", "").strip()
-    rule_type = arguments.get("rule_type")
 
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
-    if rule_type is None:
-        return {"success": False, "error": "rule_type 不能为空"}
 
     try:
-        rule_type = int(rule_type)
-    except (ValueError, TypeError):
-        return {"success": False, "error": f"rule_type 必须是整数，当前值: {rule_type}"}
-
-    try:
-        rule = get_rule_from_bus(rule_code, rule_type)
+        rule = get_rule_from_bus(rule_code)
         if rule is None:
             return {
                 "success": False,
                 "rule_code": rule_code,
-                "rule_type": rule_type,
-                "error": f"未找到 rule_code 为 '{rule_code}' 且 rule_type 为 {rule_type} 的规则",
+                "error": f"未找到 rule_code 为 '{rule_code}' 的规则",
             }
         return {
             "success": True,
             "rule_code": rule_code,
-            "rule_type": rule_type,
             "data": rule,
             "message": "成功获取规则",
         }
@@ -215,7 +199,7 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
         cur = conn.cursor()
 
         sql = """
-            SELECT id, code, name, desc_text, type, memo
+            SELECT id, code, name, desc_text, type, memo, file_rule_code
             FROM bus_agent_rules
             WHERE type = '1'
             ORDER BY id DESC
@@ -225,7 +209,7 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
         logger.info(f"[SQL] 查询数字员工列表成功，返回 {len(rows)} 条记录")
 
         employees = [
-            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3], "type": r[4], "memo": r[5]}
+            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3], "type": r[4], "memo": r[5], "file_rule_code": r[6]}
             for r in rows
         ]
         cur.close()
@@ -248,7 +232,7 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
         cur = conn.cursor()
 
         sql = """
-            SELECT id, code, name, desc_text, type, parent_code, memo
+            SELECT id, code, name, desc_text, type, parent_code, memo, file_rule_code
             FROM bus_agent_rules
             WHERE parent_code = %s
             ORDER BY id DESC
@@ -259,7 +243,7 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
 
         rules = [
             {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3],
-             "type": r[4], "parent_code": r[5], "memo": r[6]}
+             "type": r[4], "parent_code": r[5], "memo": r[6], "file_rule_code": r[7]}
             for r in rows
         ]
         cur.close()

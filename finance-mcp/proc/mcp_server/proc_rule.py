@@ -108,8 +108,8 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
     except Exception as e:
         return {"success": False, "error": f"创建输出目录失败: {e}"}
 
-    # ── 获取整理规则（rule_type=2 为数据整理规则）────────────────────────────
-    rule_record = get_rule_from_bus(rule_code, 2)
+    # ── 获取整理规则 ────────────────────────────────────────────────────────
+    rule_record = get_rule_from_bus(rule_code)
     if rule_record is None:
         return {"success": False, "error": f"未找到 rule_code='{rule_code}' 的整理规则"}
 

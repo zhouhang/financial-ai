@@ -40,6 +40,9 @@ from proc.mcp_server.proc_rule import create_proc_rule_tools, handle_proc_rule_t
 # 导入 rules 模块（规则查询 + 数字员工管理）
 from tools.rules import create_tools as create_rules_tools, handle_tool_call as handle_rules_call, get_rule_from_bus
 
+# 导入审计核对模块
+from recon.mcp_server.audit_reconc_tool import create_audit_reconc_tools, handle_audit_reconc_tool_call
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -102,8 +105,15 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载 Rules 工具失败: {str(e)}", exc_info=True)
         rules_tools = []
+
+    try:
+        audit_reconc_tools = create_audit_reconc_tools()
+        logger.info(f"审计核对工具数量: {len(audit_reconc_tools)}")
+    except Exception as e:
+        logger.error(f"加载审计核对工具失败: {str(e)}", exc_info=True)
+        audit_reconc_tools = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + file_validate_tools + sync_rule_tools + rules_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + file_validate_tools + sync_rule_tools + rules_tools + audit_reconc_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -144,6 +154,12 @@ _RULES_TOOL_NAMES = {
     "get_rule_from_bus",
     "list_digital_employees",
     "list_rules_by_employee",
+}
+
+# 审计核对工具名集合
+_AUDIT_RECONC_TOOL_NAMES = {
+    "audit_reconc_execute",
+    "audit_reconc_list_rules",
 }
 
 
@@ -187,6 +203,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         # 7) Rules 模块（规则查询 + 数字员工管理）
         elif name in _RULES_TOOL_NAMES:
             result = await handle_rules_call(name, arguments)
+
+        # 8) 审计核对模块
+        elif name in _AUDIT_RECONC_TOOL_NAMES:
+            result = await handle_audit_reconc_tool_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}

@@ -378,7 +378,7 @@ async def _handle_validate_uploaded_files(arguments: dict) -> dict:
 
     # ── 根据 rule_code 从数据库获取校验规则（含缓存）────────────────────────
     try:
-        rule_record = get_rule_from_bus(rule_code, 1)  # rule_type=1 表示文件校验规则
+        rule_record = get_rule_from_bus(rule_code)
     except Exception as e:
         logger.error(f"[文件校验] 获取校验规则失败，rule_code={rule_code}: {e}", exc_info=True)
         return {

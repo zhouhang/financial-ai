@@ -1,24 +1,25 @@
 """
 数据整理规则 Merge 操作模块
 
-根据规则中的 merge 节点配置，将新生成文件的内容与已上传的目标文件进行合并，
-生成最终合并文件（xlsx）。
+支持两种 merge 模式：
 
-merge 节点配置说明（来自 proc_rule.json）：
-  enabled          : 是否启用 merge，true 时才执行
-  target_file_match:
-    match_by       : 匹配方式，目前支持 "target_table"（按表名称匹配上传文件）
-    match_field    : 与 match_by 对应的匹配值（即要匹配的目标表名）
-  merge_strategy:
-    type           : 合并方式，目前支持 "append_rows"（追加行）
-    column_mismatch_policy:
-      policy       : 列不一致策略，"union_columns" 取两者全量列，缺失列填充空值
-      fill_missing_value: 缺失列填充值，默认 null
-  output:
-    return_fields  : 返回给调用侧的字段列表（generated_file_path + merged_file_path）
+1. 单规则 merge（原有模式）：
+   根据 sync_rule.json 中各规则的 merge 节点配置，将新生成文件与已上传的目标文件进行合并
+
+2. 批量文件 merge（新增模式）：
+   根据 merge.json 配置（存储在 bus_rules 表，rule_code='verif_recog_merge'），
+   将文件校验阶段识别出的同类表（相同 table_name）的多个文件合并为一个文件
+
+配置说明：
+  merge.json 格式：
+    merge_rules[].table_name     : 表名，用于匹配文件校验阶段关联的 table_name
+    merge_rules[].merge_type     : 合并类型，append_rows / aggregate_by_key
+    merge_rules[].merge_config   : 合并配置
+    merge_rules[].output         : 输出配置
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -31,7 +32,453 @@ logger = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 公共入口
+# 批量文件合并（基于 merge.json 配置）
+# ════════════════════════════════════════════════════════════════════════════
+
+MERGE_RULE_CODE = "verif_recog_merge"
+
+
+def load_merge_rules_from_db() -> Optional[dict]:
+    """
+    从 bus_rules 表加载 merge.json 配置
+    
+    Returns:
+        merge.json 的完整内容，如果未找到则返回 None
+    """
+    try:
+        from db_config import get_db_connection
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rule FROM bus_rules WHERE rule_code = %s LIMIT 1",
+                    (MERGE_RULE_CODE,)
+                )
+                row = cur.fetchone()
+                if row is None:
+                    logger.warning(f"[merge_rule] 未找到 rule_code='{MERGE_RULE_CODE}' 的合并规则")
+                    return None
+                
+                rule_content = row[0]
+                # 如果是字符串则解析为 JSON
+                if isinstance(rule_content, str):
+                    rule_content = json.loads(rule_content)
+                
+                logger.info(f"[merge_rule] 成功加载 merge 规则，共 {len(rule_content.get('merge_rules', []))} 条")
+                return rule_content
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"[merge_rule] 加载 merge 规则失败: {e}")
+        return None
+
+
+def find_merge_rule_by_table_name(merge_rules_config: dict, table_name: str) -> Optional[dict]:
+    """
+    根据 table_name 查找匹配的 merge 规则
+    
+    Args:
+        merge_rules_config: merge.json 的完整内容
+        table_name: 要匹配的表名
+    
+    Returns:
+        匹配的 merge 规则配置，未找到返回 None
+    """
+    merge_rules = merge_rules_config.get("merge_rules", [])
+    
+    for rule in merge_rules:
+        if not rule.get("enabled", True):
+            continue
+        
+        rule_table_name = rule.get("table_name", "")
+        if rule_table_name == table_name:
+            logger.info(f"[merge_rule] 找到匹配的 merge 规则: rule_id={rule.get('rule_id')}, table_name={table_name}")
+            return rule
+    
+    return None
+
+
+def execute_batch_merge(
+    validated_files: list[dict],
+    output_dir: str,
+    merge_rules_config: Optional[dict] = None,
+) -> dict:
+    """
+    批量文件合并：根据文件校验结果，将相同 table_name 的文件合并
+    
+    Args:
+        validated_files: 文件校验结果列表，每个元素包含:
+            - file_path: 文件路径
+            - table_name: 文件校验阶段关联的表名
+        output_dir: 输出目录
+        merge_rules_config: merge.json 配置，如果不传则从数据库加载
+    
+    Returns:
+        {
+            "success": True/False,
+            "merged_files": [  # 合并生成的文件列表
+                {
+                    "table_name": str,
+                    "merged_file_path": str,
+                    "source_files": [str],  # 参与合并的源文件
+                    "total_rows": int,
+                    "message": str
+                }
+            ],
+            "skipped": [  # 未合并的表名及原因
+                {"table_name": str, "reason": str}
+            ],
+            "message": str
+        }
+    """
+    # 加载 merge 规则
+    if merge_rules_config is None:
+        merge_rules_config = load_merge_rules_from_db()
+    
+    if merge_rules_config is None:
+        return {
+            "success": False,
+            "merged_files": [],
+            "skipped": [],
+            "message": "未找到 merge 规则配置"
+        }
+    
+    # 按 table_name 分组文件
+    table_files_map: dict[str, list[str]] = {}
+    for item in validated_files:
+        table_name = item.get("table_name", "")
+        file_path = item.get("file_path", "")
+        if table_name and file_path:
+            if table_name not in table_files_map:
+                table_files_map[table_name] = []
+            table_files_map[table_name].append(file_path)
+    
+    logger.info(f"[merge_rule] 文件分组结果: {', '.join([f'{k}: {len(v)}个文件' for k, v in table_files_map.items()])}")
+    
+    merged_files = []
+    skipped = []
+    
+    for table_name, file_paths in table_files_map.items():
+        # 查找匹配的 merge 规则
+        merge_rule = find_merge_rule_by_table_name(merge_rules_config, table_name)
+        
+        if merge_rule is None:
+            skipped.append({
+                "table_name": table_name,
+                "reason": f"未找到 table_name='{table_name}' 的 merge 规则"
+            })
+            continue
+        
+        if len(file_paths) < 2:
+            skipped.append({
+                "table_name": table_name,
+                "reason": f"只有 {len(file_paths)} 个文件，无需合并"
+            })
+            continue
+        
+        # 执行合并
+        result = _execute_multi_file_merge(
+            file_paths=file_paths,
+            merge_rule=merge_rule,
+            output_dir=output_dir,
+            table_name=table_name
+        )
+        
+        if result["success"]:
+            merged_files.append({
+                "table_name": table_name,
+                "merged_file_path": result["merged_file_path"],
+                "source_files": file_paths,
+                "total_rows": result["total_rows"],
+                "message": result["message"]
+            })
+        else:
+            skipped.append({
+                "table_name": table_name,
+                "reason": result["message"]
+            })
+    
+    return {
+        "success": True,
+        "merged_files": merged_files,
+        "skipped": skipped,
+        "message": f"合并完成：成功 {len(merged_files)} 个，跳过 {len(skipped)} 个"
+    }
+
+
+def _execute_multi_file_merge(
+    file_paths: list[str],
+    merge_rule: dict,
+    output_dir: str,
+    table_name: str,
+) -> dict:
+    """
+    执行多文件合并
+    
+    Args:
+        file_paths: 要合并的文件路径列表
+        merge_rule: merge 规则配置
+        output_dir: 输出目录
+        table_name: 表名
+    
+    Returns:
+        {"success": bool, "merged_file_path": str, "total_rows": int, "message": str}
+    """
+    rule_id = merge_rule.get("rule_id", "UNKNOWN")
+    merge_type = merge_rule.get("merge_type", "append_rows")
+    merge_config = merge_rule.get("merge_config", {})
+    output_config = merge_rule.get("output", {})
+    
+    logger.info(f"[merge_rule] [{rule_id}] 开始合并 {len(file_paths)} 个文件，合并类型: {merge_type}")
+    
+    # 读取所有文件
+    dataframes = []
+    for fp in file_paths:
+        try:
+            df = _read_file_as_df(fp)
+            dataframes.append(df)
+            logger.info(f"[merge_rule] [{rule_id}] 读取文件: {fp}, {len(df)} 行")
+        except Exception as e:
+            logger.error(f"[merge_rule] [{rule_id}] 读取文件失败: {fp}, {e}")
+            return {
+                "success": False,
+                "merged_file_path": None,
+                "total_rows": 0,
+                "message": f"读取文件失败: {fp}, {e}"
+            }
+    
+    if not dataframes:
+        return {
+            "success": False,
+            "merged_file_path": None,
+            "total_rows": 0,
+            "message": "没有成功读取的文件"
+        }
+    
+    # 执行合并
+    if merge_type == "append_rows":
+        merged_df = _merge_multiple_append_rows(dataframes, merge_config, rule_id)
+    elif merge_type == "aggregate_by_key":
+        merged_df = _merge_aggregate_by_key(dataframes, merge_config, rule_id)
+    else:
+        logger.warning(f"[merge_rule] [{rule_id}] 不支持的 merge_type='{merge_type}'，默认使用 append_rows")
+        merged_df = _merge_multiple_append_rows(dataframes, merge_config, rule_id)
+    
+    # 写出合并结果
+    file_format = output_config.get("format", "xlsx")
+    merged_file_path = _write_batch_merged_file(
+        df=merged_df,
+        output_dir=output_dir,
+        table_name=table_name,
+        rule_id=rule_id,
+        file_format=file_format
+    )
+    
+    logger.info(f"[merge_rule] [{rule_id}] 合并完成，共 {len(merged_df)} 行，输出: {merged_file_path}")
+    
+    return {
+        "success": True,
+        "merged_file_path": merged_file_path,
+        "total_rows": len(merged_df),
+        "message": f"合并 {len(file_paths)} 个文件成功，共 {len(merged_df)} 行"
+    }
+
+
+def _merge_multiple_append_rows(
+    dataframes: list[pd.DataFrame],
+    merge_config: dict,
+    rule_id: str,
+) -> pd.DataFrame:
+    """
+    多文件追加行合并
+    
+    Args:
+        dataframes: DataFrame 列表
+        merge_config: 合并配置
+        rule_id: 规则 ID
+    
+    Returns:
+        合并后的 DataFrame
+    """
+    mismatch_policy = merge_config.get("column_mismatch_policy", {})
+    col_policy = mismatch_policy.get("policy", "union_columns")
+    fill_val = mismatch_policy.get("fill_missing_value", None)
+    
+    # 收集所有列
+    all_columns = []
+    for df in dataframes:
+        for col in df.columns:
+            if col not in all_columns:
+                all_columns.append(col)
+    
+    logger.info(f"[merge_rule] [{rule_id}] 列并集共 {len(all_columns)} 列")
+    
+    # 补全各 DataFrame 的缺失列
+    aligned_dfs = []
+    for df in dataframes:
+        df_copy = df.copy()
+        for col in all_columns:
+            if col not in df_copy.columns:
+                df_copy[col] = fill_val
+        aligned_dfs.append(df_copy[all_columns])
+    
+    # 拼接
+    merged = pd.concat(aligned_dfs, ignore_index=True)
+    
+    # 去重
+    dedup_config = merge_config.get("deduplication", {})
+    if dedup_config.get("enabled", False):
+        key_columns = dedup_config.get("key_columns", [])
+        if key_columns:
+            before_count = len(merged)
+            merged = merged.drop_duplicates(subset=key_columns, keep="first")
+            logger.info(f"[merge_rule] [{rule_id}] 去重（key={key_columns}）：{before_count} -> {len(merged)} 行")
+    
+    # 排序
+    sort_config = merge_config.get("sort_after_merge", {})
+    if sort_config.get("enabled", False):
+        sort_columns = sort_config.get("sort_columns", [])
+        ascending = sort_config.get("ascending", True)
+        if sort_columns:
+            merged = merged.sort_values(by=sort_columns, ascending=ascending)
+            logger.info(f"[merge_rule] [{rule_id}] 排序：by={sort_columns}, ascending={ascending}")
+    
+    return merged
+
+
+def _merge_aggregate_by_key(
+    dataframes: list[pd.DataFrame],
+    merge_config: dict,
+    rule_id: str,
+) -> pd.DataFrame:
+    """
+    按键聚合合并
+    
+    Args:
+        dataframes: DataFrame 列表
+        merge_config: 合并配置
+        rule_id: 规则 ID
+    
+    Returns:
+        合并后的 DataFrame
+    """
+    # 先追加合并
+    mismatch_policy = merge_config.get("column_mismatch_policy", {})
+    fill_val = mismatch_policy.get("fill_missing_value", None)
+    
+    all_columns = []
+    for df in dataframes:
+        for col in df.columns:
+            if col not in all_columns:
+                all_columns.append(col)
+    
+    aligned_dfs = []
+    for df in dataframes:
+        df_copy = df.copy()
+        for col in all_columns:
+            if col not in df_copy.columns:
+                df_copy[col] = fill_val
+        aligned_dfs.append(df_copy[all_columns])
+    
+    combined = pd.concat(aligned_dfs, ignore_index=True)
+    
+    # 获取键列和聚合规则
+    key_columns_config = merge_config.get("key_columns", {})
+    key_columns = key_columns_config.get("columns", [])
+    
+    if not key_columns:
+        logger.warning(f"[merge_rule] [{rule_id}] aggregate_by_key 未配置 key_columns，退化为 append_rows")
+        return combined
+    
+    aggregation_rules = merge_config.get("aggregation_rules", {})
+    default_numeric_rule = aggregation_rules.get("default_numeric_rule", "sum")
+    default_text_rule = aggregation_rules.get("default_text_rule", "first")
+    column_rules = aggregation_rules.get("column_rules", [])
+    
+    # 构建聚合字典
+    agg_dict = {}
+    for col in combined.columns:
+        if col in key_columns:
+            continue
+        
+        # 查找自定义规则
+        col_rule = None
+        for cr in column_rules:
+            if cr.get("column") == col:
+                col_rule = cr
+                break
+        
+        if col_rule:
+            agg_type = col_rule.get("aggregation", "first")
+            separator = col_rule.get("separator", "; ")
+            distinct = col_rule.get("distinct", False)
+            
+            if agg_type == "concat":
+                if distinct:
+                    agg_dict[col] = lambda x, sep=separator: sep.join(str(v) for v in x.dropna().unique())
+                else:
+                    agg_dict[col] = lambda x, sep=separator: sep.join(str(v) for v in x.dropna())
+            else:
+                agg_dict[col] = agg_type
+        else:
+            # 根据数据类型使用默认规则
+            if pd.api.types.is_numeric_dtype(combined[col]):
+                agg_dict[col] = default_numeric_rule
+            else:
+                agg_dict[col] = default_text_rule
+    
+    logger.info(f"[merge_rule] [{rule_id}] 按 {key_columns} 聚合")
+    
+    try:
+        merged = combined.groupby(key_columns, as_index=False).agg(agg_dict)
+    except Exception as e:
+        logger.error(f"[merge_rule] [{rule_id}] 聚合失败: {e}，退化为 append_rows")
+        return combined
+    
+    return merged
+
+
+def _write_batch_merged_file(
+    df: pd.DataFrame,
+    output_dir: str,
+    table_name: str,
+    rule_id: str,
+    file_format: str = "xlsx",
+) -> str:
+    """
+    写出批量合并结果文件
+    
+    Args:
+        df: 合并后的 DataFrame
+        output_dir: 输出目录
+        table_name: 表名
+        rule_id: 规则 ID
+        file_format: 文件格式
+    
+    Returns:
+        输出文件路径
+    """
+    safe_table_name = re.sub(r'[\\/:*?"<>|]', "_", table_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{safe_table_name}_merged_{timestamp}.{file_format}"
+    output_path = str(Path(output_dir) / filename)
+    
+    if file_format == "xlsx":
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Sheet1")
+    elif file_format == "csv":
+        df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    else:
+        # 默认 xlsx
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Sheet1")
+    
+    return output_path
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 单规则合并（原有模式，基于 sync_rule.json 的 merge 节点）
 # ════════════════════════════════════════════════════════════════════════════
 
 def execute_merge(

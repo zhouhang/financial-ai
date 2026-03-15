@@ -101,4 +101,5 @@ export interface EmployeeRule {
   type: string;
   parent_code?: string;
   memo?: string;
+  file_rule_code?: string;  // 文件校验规则编码
 }
