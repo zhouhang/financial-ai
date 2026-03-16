@@ -462,9 +462,25 @@ async def websocket_chat(ws: WebSocket):
                     file_infos=file_infos,
                     has_attachments=bool(msg_attachments),
                 )
-
+            
+                # ⚠️ 将前端传入的参数放入 input_data，确保 intent_router 能立即获取
+                # （update_state 是异步的，可能在下个节点才生效）
+                # 注意：如果 input_data 是 Command 对象（resume 场景），则无法注入参数
+                if isinstance(input_data, dict):
+                    if file_rule_code:
+                        input_data["file_rule_code"] = file_rule_code
+                    if rule_code:
+                        input_data["selected_rule_code"] = rule_code
+                    if rule_name:
+                        input_data["selected_rule_name"] = rule_name
+                    if employee_code:
+                        input_data["selected_employee_code"] = employee_code
+                    logger.info(f"[DEBUG] input_data 已注入参数: file_rule_code={file_rule_code}, rule_code={rule_code}")
+                else:
+                    logger.warning(f"[DEBUG] input_data 不是 dict 类型，无法注入参数: {type(input_data)}")
+            
                 # 游客在 workflow 中输入无关内容后会退出流程（转为非 resume 且不带文件）。
-                # 这里清空 thread 级文件缓存，避免下一条“对账”复用旧文件并重放展示。
+                # 这里清空 thread 级文件缓存，避免下一条"对账"复用旧文件并重放展示。
                 try:
                     should_clear_guest_files = (
                         not auth_token
@@ -483,8 +499,8 @@ async def websocket_chat(ws: WebSocket):
                         )
                 except Exception as e:
                     logger.warning(f"退出 workflow 后清空 thread 文件缓存失败: {e}")
-
-                # ⚙️ 如果前端传递了 employee_code/rule_code/rule_name/file_rule_code，写入 state（用于路由和 proc 子图）
+            
+                # ⚙️ 同时通过 update_state 写入 state（用于后续 resume 时恢复）
                 if employee_code or rule_code or rule_name or file_rule_code:
                     try:
                         update_state = {}
@@ -492,15 +508,10 @@ async def websocket_chat(ws: WebSocket):
                             update_state["selected_employee_code"] = employee_code
                         if rule_code:
                             update_state["selected_rule_code"] = rule_code
-                            update_state["proc_ctx"] = {"rule_code": rule_code}
                         if rule_name:
                             update_state["selected_rule_name"] = rule_name
                         if file_rule_code:
                             update_state["file_rule_code"] = file_rule_code
-                            # 同时写入 proc_ctx
-                            proc_ctx = update_state.get("proc_ctx", {})
-                            proc_ctx["file_rule_code"] = file_rule_code
-                            update_state["proc_ctx"] = proc_ctx
                         langgraph_app.update_state(config, update_state)
                         logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code} 到 state (thread={thread_id})")
                     except Exception as e:

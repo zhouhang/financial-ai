@@ -48,7 +48,7 @@ def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
 async def get_rule_node_for_recon(state: AgentState) -> dict:
     """从 PostgreSQL 读取规则（适配 recon_ctx）。
 
-    通过调用公共节点 get_rule_node 实现，将 recon_ctx 映射到 proc_ctx。
+    通过调用公共节点 get_rule_node 实现，将 proc_ctx 结果映射到 recon_ctx。
 
     - 若规则存在：将规则写入 recon_ctx，phase → CHECKING_FILES
     - 若规则不存在：直接回复用户，phase → RULE_NOT_FOUND
@@ -58,16 +58,18 @@ async def get_rule_node_for_recon(state: AgentState) -> dict:
 
     logger.info(f"[recon] get_rule_node_for_recon rule_code={rule_code!r}")
 
-    # 临时将 recon_ctx 复制到 proc_ctx 以复用公共节点
-    temp_state = dict(state)
-    temp_state["proc_ctx"] = ctx
+    # 构建适配 state：将 recon_ctx 映射为 proc_ctx 供公共节点使用
+    adapted_state = {
+        **state,
+        "proc_ctx": ctx,  # 公共节点操作 proc_ctx
+    }
 
     # 调用公共节点
-    result = await get_rule_node(temp_state)
+    result = await get_rule_node(adapted_state)
 
-    # 将结果从 proc_ctx 复制回 recon_ctx
-    result_ctx = result.get("proc_ctx", {})
-    ctx.update(result_ctx)
+    # 将公共节点的 proc_ctx 结果映射回 recon_ctx
+    result_proc_ctx = result.get("proc_ctx", {})
+    ctx.update(result_proc_ctx)
 
     # 转换 phase（ProcAgentPhase -> ReconAgentPhase）
     phase = ctx.get("phase", "")
@@ -92,57 +94,41 @@ async def get_rule_node_for_recon(state: AgentState) -> dict:
 
 async def check_file_node_for_recon(state: AgentState) -> dict:
     """校验已上传文件是否满足对账规则要求（适配 recon_ctx）。
+
+    通过调用公共节点 check_file_node 实现，将 proc_ctx 结果映射到 recon_ctx。
     """
     ctx = _get_recon_ctx(state)
-    file_rule_code: str = ctx.get("file_rule_code") or ctx.get("rule_code") or ""
-    raw_files: list = list(state.get("uploaded_files") or [])
-
-    messages: list = list(state.get("messages") or [])
-
-    # 提取文件路径
-    uploaded_files: list[str] = []
-    for item in raw_files:
-        if isinstance(item, dict):
-            fp = item.get("file_path") or item.get("path") or ""
-        else:
-            fp = str(item)
-        if fp:
-            uploaded_files.append(_to_abs_path(fp))
+    file_rule_code: str = ctx.get("file_rule_code") or ""
 
     logger.info(
-        f"[recon] check_file_node_for_recon file_rule_code={file_rule_code!r} "
-        f"files={[fp.split('/')[-1] for fp in uploaded_files]}"
+        f"[recon] check_file_node_for_recon file_rule_code={file_rule_code!r}"
     )
 
-    # 文件列表不能为空
-    if not uploaded_files:
-        reason = "未检测到已上传的文件，请先上传所需文件后再试。"
-        msg = f"文件校验失败：\n\n{reason}"
-        ctx.update({"phase": ReconAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
-        return {
-            "messages": messages + [AIMessage(content=msg)],
-            "recon_ctx": ctx,
-        }
+    # 构建适配 state：将 recon_ctx 映射为 proc_ctx 供公共节点使用
+    adapted_state = {
+        **state,
+        "proc_ctx": ctx,           # 公共节点操作 proc_ctx
+        "file_rule_code": file_rule_code,
+    }
 
-    # 临时将 recon_ctx 复制到 proc_ctx 以复用公共节点
-    temp_state = dict(state)
-    temp_state["proc_ctx"] = ctx
-    temp_state["file_rule_code"] = file_rule_code
+    # 调用公共节点
+    result = await check_file_node(adapted_state)
 
-    # 调用公共节点（已在顶部导入）
-    result = await check_file_node(temp_state)
-    
-    # 将结果从 proc_ctx 复制回 recon_ctx
-    result_ctx = result.get("proc_ctx", {})
-    ctx.update(result_ctx)
-    
-    # 转换 phase
+    # 将公共节点的 proc_ctx 结果映射回 recon_ctx
+    result_proc_ctx = result.get("proc_ctx", {})
+    ctx.update(result_proc_ctx)
+
+    # 转换 phase（ProcAgentPhase -> ReconAgentPhase）
     phase = ctx.get("phase", "")
-    if phase == "executing":  # ProcAgentPhase.EXECUTING
-        ctx["phase"] = ReconAgentPhase.EXECUTING.value
-    
+    phase_mapping = {
+        "file_check_failed": ReconAgentPhase.FILE_CHECK_FAILED.value,
+        "executing": ReconAgentPhase.EXECUTING.value,
+    }
+    if phase in phase_mapping:
+        ctx["phase"] = phase_mapping[phase]
+
     return {
-        "messages": result.get("messages", messages),
+        "messages": result.get("messages", []),
         "recon_ctx": ctx,
     }
 

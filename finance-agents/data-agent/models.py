@@ -220,6 +220,7 @@ class AgentState(TypedDict, total=False):
     selected_employee_code: Optional[str]  # 选中的数字员工编码，如 "agent-recog"
     selected_rule_name: Optional[str]
     selected_rule_code: Optional[str]  # 数据整理规则编码，如 "recognition"
+    file_rule_code: Optional[str]  # 文件校验规则编码，如 "recog_file_check"
 
     # 上传的文件
     uploaded_files: list[str]

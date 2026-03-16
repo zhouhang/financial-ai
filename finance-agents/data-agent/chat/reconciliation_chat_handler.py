@@ -328,12 +328,12 @@ async def resolve_graph_input(
     if auth_token:
         input_data["auth_token"] = auth_token
         from tools.mcp_client import auth_me
-
+    
         try:
             me_result = await auth_me(auth_token)
             if me_result.get("success"):
                 input_data["current_user"] = me_result["user"]
         except Exception:
             pass
-
+    
     return input_data, False

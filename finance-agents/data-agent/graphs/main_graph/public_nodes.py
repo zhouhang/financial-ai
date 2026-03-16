@@ -192,7 +192,9 @@ async def check_file_node(state: AgentState) -> dict:
     """
     ctx = _get_proc_ctx(state)
     # 文件校验规则编码（优先从 file_rule_code 获取，用于文件校验）
-    file_rule_code: str = ctx.get("file_rule_code") or state.get("file_rule_code") or ctx.get("rule_code") or ""
+    # ⚠️ file_rule_code 和 rule_code 是不同的概念，不能互相 fallback
+    file_rule_code: str = ctx.get("file_rule_code") or state.get("file_rule_code") or ""
+
     raw_files: list = list(state.get("uploaded_files") or [])
 
     messages: list = list(state.get("messages") or [])
@@ -211,6 +213,16 @@ async def check_file_node(state: AgentState) -> dict:
         f"[public_nodes] check_file_node file_rule_code={file_rule_code!r} "
         f"files={[os.path.basename(f) for f in uploaded_files]}"
     )
+
+    # ── 0. 检查 file_rule_code 是否配置 ──────────────────────────────────────
+    if not file_rule_code:
+        reason = "未配置文件校验规则编码（file_rule_code），请联系管理员配置规则的文件校验规则。"
+        msg = f"文件校验失败：\n\n{reason}"
+        ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+        return {
+            "messages": messages + [AIMessage(content=msg)],
+            "proc_ctx": ctx,
+        }
 
     # ── 1. 基础判断：文件列表不能为空 ───────────────────────────────────────
     if not uploaded_files:
