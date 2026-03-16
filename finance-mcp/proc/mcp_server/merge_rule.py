@@ -35,42 +35,35 @@ logger = logging.getLogger(__name__)
 # 批量文件合并（基于 merge.json 配置）
 # ════════════════════════════════════════════════════════════════════════════
 
-MERGE_RULE_CODE = "verif_recog_merge"
-
-
-def load_merge_rules_from_db() -> Optional[dict]:
+def load_merge_rules_from_bus(rule_code: str) -> Optional[dict]:
     """
     从 bus_rules 表加载 merge.json 配置
-    
+
+    使用 tools.rules 中的 get_rule_from_bus 函数，复用缓存机制。
+
+    Args:
+        rule_code: 规则编码，用于从 bus_rules 表中查找
+
     Returns:
         merge.json 的完整内容，如果未找到则返回 None
     """
     try:
-        from db_config import get_db_connection
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT rule FROM bus_rules WHERE rule_code = %s LIMIT 1",
-                    (MERGE_RULE_CODE,)
-                )
-                row = cur.fetchone()
-                if row is None:
-                    logger.warning(f"[merge_rule] 未找到 rule_code='{MERGE_RULE_CODE}' 的合并规则")
-                    return None
-                
-                rule_content = row[0]
-                # 如果是字符串则解析为 JSON
-                if isinstance(rule_content, str):
-                    rule_content = json.loads(rule_content)
-                
-                logger.info(f"[merge_rule] 成功加载 merge 规则，共 {len(rule_content.get('merge_rules', []))} 条")
-                return rule_content
-        finally:
-            conn.close()
+        from tools.rules import get_rule_from_bus
+
+        rule_record = get_rule_from_bus(rule_code)
+        if rule_record is None:
+            logger.warning(f"[merge_rule] 未找到 rule_code='{rule_code}' 的合并规则")
+            return None
+
+        rule_content = rule_record.get("rule", {})
+        # 如果是字符串则解析为 JSON
+        if isinstance(rule_content, str):
+            rule_content = json.loads(rule_content)
+
+        logger.info(f"[merge_rule] 成功加载 rule_code='{rule_code}' 的 merge 规则，共 {len(rule_content.get('merge_rules', []))} 条")
+        return rule_content
     except Exception as e:
-        logger.error(f"[merge_rule] 加载 merge 规则失败: {e}")
+        logger.error(f"[merge_rule] 加载 rule_code='{rule_code}' 的 merge 规则失败: {e}")
         return None
 
 
@@ -103,17 +96,19 @@ def execute_batch_merge(
     validated_files: list[dict],
     output_dir: str,
     merge_rules_config: Optional[dict] = None,
+    rule_code: Optional[str] = None,
 ) -> dict:
     """
     批量文件合并：根据文件校验结果，将相同 table_name 的文件合并
-    
+
     Args:
         validated_files: 文件校验结果列表，每个元素包含:
             - file_path: 文件路径
             - table_name: 文件校验阶段关联的表名
         output_dir: 输出目录
         merge_rules_config: merge.json 配置，如果不传则从数据库加载
-    
+        rule_code: 规则编码，当 merge_rules_config 为 None 时用于从数据库加载
+
     Returns:
         {
             "success": True/False,
@@ -134,7 +129,14 @@ def execute_batch_merge(
     """
     # 加载 merge 规则
     if merge_rules_config is None:
-        merge_rules_config = load_merge_rules_from_db()
+        if rule_code is None:
+            return {
+                "success": False,
+                "merged_files": [],
+                "skipped": [],
+                "message": "未提供 merge_rules_config 且未指定 rule_code，无法加载 merge 规则"
+            }
+        merge_rules_config = load_merge_rules_from_bus(rule_code)
     
     if merge_rules_config is None:
         return {

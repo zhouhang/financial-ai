@@ -665,27 +665,6 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
     return await call_mcp_tool("get_rule_from_bus", args)
 
 
-async def get_proc_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
-    """根据 rule_code 获取整理规则 JSON（通过 bus_rules 服务）
-    
-    Args:
-        rule_code: 规则编码
-        auth_token: JWT token（可选）
-        
-    Returns:
-        {
-            "success": bool,
-            "rule_code": str,
-            "data": dict,  # 包含 id, rule_code, rule, memo
-            "message": str
-        }
-    """
-    args: dict[str, Any] = {"rule_code": rule_code}
-    if auth_token:
-        args["auth_token"] = auth_token
-    return await call_mcp_tool("get_rule_from_bus", args)
-
-
 async def validate_uploaded_files(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,

@@ -595,13 +595,18 @@ async def intent_router(state: AgentState) -> dict:
             }
 
         logger.info(f"[intent_router] 前端显式选择 {UserIntent.AGENT_RECOG.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
+        
+        # 保留 state 中已有的 proc_ctx（例如 file_rule_code），只更新 rule_code/rule_name
+        existing_proc_ctx = state.get("proc_ctx") or {}
+        existing_proc_ctx.update({"rule_code": rule_code, "rule_name": rule_name})
+        
         return {
             "messages": [HumanMessage(content=last_user_input)] if last_user_input else [],
             "uploaded": uploaded,
             "user_intent": UserIntent.AGENT_RECOG.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,
-            "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},
+            "proc_ctx": existing_proc_ctx,
         }
 
     if selected_employee_code == UserIntent.AGENT_RECON.value:
@@ -650,7 +655,8 @@ async def intent_router(state: AgentState) -> dict:
             "user_intent": UserIntent.AGENT_RECON.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,
-            "recon_ctx": {"rule_code": rule_code, "rule_name": rule_name},
+            # 保留 state 中已有的 recon_ctx（例如 file_rule_code），只更新 rule_code/rule_name
+            "recon_ctx": {**(state.get("recon_ctx") or {}), "rule_code": rule_code, "rule_name": rule_name},
         }
 
     # ====== 新增：workflow 上下文感知（覆盖所有 workflow 阶段）======
@@ -1006,12 +1012,16 @@ async def intent_router(state: AgentState) -> dict:
         
         logger.info(f"[intent_router] AGENT_RECOG: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}")
         
+        # 保留 state 中已有的 proc_ctx（例如 file_rule_code），只更新 rule_code/rule_name
+        existing_proc_ctx = state.get("proc_ctx") or {}
+        existing_proc_ctx.update({"rule_code": rule_code, "rule_name": rule_name})
+        
         return {
             "messages": [AIMessage(content=welcome_msg)],
             "user_intent": UserIntent.AGENT_RECOG.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,
-            "proc_ctx": {"rule_code": rule_code, "rule_name": rule_name},  # 初始化子图上下文
+            "proc_ctx": existing_proc_ctx,
         }
     else:
         # 普通对话

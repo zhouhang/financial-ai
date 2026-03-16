@@ -121,9 +121,47 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
         except Exception:
             raw_rule = {}
     rule_data: dict = raw_rule
+
+    # 支持两种规则格式：rules（普通整理规则）或 merge_rules（合并规则）
     rules_list: list[dict] = rule_data.get("rules", [])
+    merge_rules_list: list[dict] = rule_data.get("merge_rules", [])
+
+    # 如果没有 rules 但有 merge_rules，调用批量合并逻辑
+    if not rules_list and merge_rules_list:
+        logger.info(f"[proc_rule] 规则 {rule_code} 使用 merge_rules 格式，调用批量合并，规则数={len(merge_rules_list)}")
+        from proc.mcp_server.merge_rule import execute_batch_merge
+
+        merge_result = execute_batch_merge(
+            validated_files=uploaded_files,
+            output_dir=output_dir,
+            merge_rules_config=rule_data
+        )
+
+        # merge_rules 是纯合并规则，generated_files 为空，只在 merged_files 中显示
+        return {
+            "success": merge_result.get("success", False),
+            "rule_code": rule_code,
+            "generated_files": [],  # 纯合并规则不生成独立文件
+            "generated_count": 0,
+            "errors": [s["reason"] for s in merge_result.get("skipped", [])],
+            "message": merge_result.get("message", "批量合并完成"),
+            "merged_files": [
+                {
+                    "rule_id": f"merge_{m['table_name']}",
+                    "generated_file_path": None,
+                    "merged_file_path": m["merged_file_path"],
+                    "merged": True,
+                    "merge_message": m["message"],
+                    "match_field": m["table_name"],
+                    "row_count": m["total_rows"],  # 添加行数供前端显示
+                    "source_files": m.get("source_files", []),  # 源文件列表
+                }
+                for m in merge_result.get("merged_files", [])
+            ],
+        }
+
     if not rules_list:
-        return {"success": False, "error": f"规则 '{rule_code}' 中未定义任何 rules 项"}
+        return {"success": False, "error": f"规则 '{rule_code}' 中未定义任何 rules 项或 merge_rules 项"}
 
     # ── 构建 table_name → file_path 映射 ─────────────────────────────────────
     table_file_map: dict[str, str] = {}

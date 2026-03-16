@@ -373,8 +373,6 @@ def result_node(state: AgentState) -> dict:
             file_lines.append(
                 f"- **[{target_table}]({download_url})** — {row_count}行"
             )
-        
-        file_list_text = "\n".join(file_lines) if file_lines else "（无生成文件）"
 
         # 构建合并文件清单（如果有）
         merged_file_lines = []
@@ -387,24 +385,37 @@ def result_node(state: AgentState) -> dict:
                 display_name = f"{match_field}(合并)" if match_field else "合并文件"
                 # 生成下载 URL: /proc/download/{rule_code}/{filename}
                 download_url = f"{mcp_base_url}/proc/download/{rule_code}/{merged_name}"
+                # 获取源文件列表
+                source_files = mf.get("source_files", [])
+                source_files_text = ""
+                if source_files:
+                    source_names = [os.path.basename(sf) for sf in source_files]
+                    source_files_text = f"（由 {', '.join(source_names)} 合并）"
+                row_count = mf.get("row_count", 0)
+                row_text = f" — {row_count}行" if row_count else ""
                 merged_file_lines.append(
-                    f"- **[{display_name}]({download_url})**"
+                    f"- **[{display_name}]({download_url})**{row_text}{source_files_text}"
                 )
-        
+
         merged_file_text = "\n".join(merged_file_lines) if merged_file_lines else ""
-        
+
         # 所有节点完成
         all_completed_msg = _build_progress_message(
             completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node", "result_node"],
             current_node=None
         )
-        
+
+        # 构建消息：有生成文件时显示，否则只显示合并文件
         msg = (
             f"{all_completed_msg}\n\n"
             f"数据整理任务已完成。\n\n"
-            f"规则：{rule_display}\n\n"
-            f"已生成 {len(generated_files)} 个文件：\n{file_list_text}\n"
+            f"规则：{rule_display}\n"
         )
+        # 只有生成文件时才显示生成文件部分
+        if file_lines:
+            file_list_text = "\n".join(file_lines)
+            msg += f"\n已生成 {len(generated_files)} 个文件：\n{file_list_text}\n"
+        # 显示合并文件
         if merged_file_text:
             msg += f"\n**合并文件：**\n{merged_file_text}\n"
         msg += f"\n如需重新处理或使用其他规则，请告知。"

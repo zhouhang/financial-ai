@@ -199,17 +199,17 @@ def _get_digital_employees() -> List[Dict[str, Any]]:
         cur = conn.cursor()
 
         sql = """
-            SELECT id, code, name, desc_text, type, memo, file_rule_code
+            SELECT id, code, name, desc_text, type, memo, file_rule_code, COALESCE("order", 0) as "order"
             FROM bus_agent_rules
             WHERE type = '1'
-            ORDER BY id DESC
+            ORDER BY COALESCE("order", 999999), id DESC
         """
         cur.execute(sql)
         rows = cur.fetchall()
         logger.info(f"[SQL] 查询数字员工列表成功，返回 {len(rows)} 条记录")
 
         employees = [
-            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3], "type": r[4], "memo": r[5], "file_rule_code": r[6]}
+            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3], "type": r[4], "memo": r[5], "file_rule_code": r[6], "order": r[7]}
             for r in rows
         ]
         cur.close()
@@ -232,10 +232,10 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
         cur = conn.cursor()
 
         sql = """
-            SELECT id, code, name, desc_text, type, parent_code, memo, file_rule_code
+            SELECT id, code, name, desc_text, type, parent_code, memo, file_rule_code, COALESCE("order", 0) as "order"
             FROM bus_agent_rules
             WHERE parent_code = %s
-            ORDER BY id DESC
+            ORDER BY COALESCE("order", 999999), id DESC
         """
         cur.execute(sql, (employee_code,))
         rows = cur.fetchall()
@@ -243,7 +243,7 @@ def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
 
         rules = [
             {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3],
-             "type": r[4], "parent_code": r[5], "memo": r[6], "file_rule_code": r[7]}
+             "type": r[4], "parent_code": r[5], "memo": r[6], "file_rule_code": r[7], "order": r[8]}
             for r in rows
         ]
         cur.close()

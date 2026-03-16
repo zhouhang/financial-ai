@@ -74,63 +74,43 @@ def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
 async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
     """从 PG（通过 MCP 工具）加载规则。
     
-    同时获取：
-    - 文件校验规则（bus_file_rules）
-    - 整理规则（bus_proc_rules）
+    从 bus_rules 表获取规则记录，包含：
+    - 文件校验规则（file_validation_rules）
+    - 整理规则（role_desc, rules）
     
     Args:
         rule_code: 规则编码，如 "recognition"
         auth_token: JWT token
         
     Returns:
-        合并后的规则对象，包含 file_validation_rules 和 proc_rules
+        规则对象，包含 file_validation_rules 和 proc_rules
     """
-    from tools.mcp_client import get_file_validation_rule, get_proc_rule
+    from tools.mcp_client import get_file_validation_rule
 
     try:
-        # 1. 获取文件校验规则
-        file_rule_result = await get_file_validation_rule(rule_code=rule_code, auth_token=auth_token)
-        logger.info(f"[public_nodes] 获取文件校验规则结果: success={file_rule_result.get('success')}")
+        # 获取规则（get_rule_from_bus 返回完整规则记录）
+        rule_result = await get_file_validation_rule(rule_code=rule_code, auth_token=auth_token)
+        logger.info(f"[public_nodes] rule_code={rule_code}; 获取规则结果: success={rule_result.get('success')}")
         
-        # 2. 获取整理规则
-        proc_rule_result = await get_proc_rule(rule_code=rule_code, auth_token=auth_token)
-        logger.info(f"[public_nodes] 获取整理规则结果: success={proc_rule_result.get('success')}")
-        
-        # 检查是否获取成功
-        file_success = file_rule_result.get("success", False)
-        proc_success = proc_rule_result.get("success", False)
-
-        if not file_success and not proc_success:
-            logger.warning(f"[public_nodes] 未找到规则 rule_code={rule_code}（文件校验规则和整理规则均不存在）")
+        if not rule_result.get("success", False):
+            logger.warning(f"[public_nodes] 未找到规则 rule_code={rule_code}")
             return None
-
-        if not file_success:
-            logger.warning(f"[public_nodes] 未找到文件校验规则 rule_code={rule_code}")
-
-        if not proc_success:
-            logger.warning(f"[public_nodes] 未找到整理规则 rule_code={rule_code}")
         
-        # 合并规则
+        # 解析规则内容
+        rule_data = rule_result.get("data") or {}
+        # data 包含: id, rule_code, rule, memo
+        rule_content = rule_data.get("rule") or {}
+        
         combined_rule = {
             "rule_code": rule_code,
+            # 文件校验规则
+            "file_validation_rules": rule_content.get("file_validation_rules", {}),
+            "file_rule_memo": rule_data.get("memo", ""),
+            # 整理规则
+            "role_desc": rule_content.get("role_desc", ""),
+            "rules": rule_content.get("rules", []),
+            "proc_rule_memo": rule_data.get("memo", ""),
         }
-        
-        # 文件校验规则
-        if file_rule_result.get("success"):
-            file_data = file_rule_result.get("data") or {}
-            # data 包含: id, rule_code, rule, memo
-            file_rule_content = file_data.get("rule") or {}
-            combined_rule["file_validation_rules"] = file_rule_content.get("file_validation_rules", {})
-            combined_rule["file_rule_memo"] = file_data.get("memo", "")
-        
-        # 整理规则
-        if proc_rule_result.get("success"):
-            proc_data = proc_rule_result.get("data") or {}
-            # data 包含: id, rule_code, rule, memo
-            proc_rule_content = proc_data.get("rule") or {}
-            combined_rule["role_desc"] = proc_rule_content.get("role_desc", "")
-            combined_rule["rules"] = proc_rule_content.get("rules", [])
-            combined_rule["proc_rule_memo"] = proc_data.get("memo", "")
         
         logger.info(
             f"[public_nodes] 规则加载成功 rule_code={rule_code}, "

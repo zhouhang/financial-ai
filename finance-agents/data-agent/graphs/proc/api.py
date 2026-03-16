@@ -252,10 +252,10 @@ async def get_proc_rule(
         auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
     
     try:
-        # 导入 MCP 客户端函数
-        from tools.mcp_client import get_proc_rule as mcp_get_proc_rule
+        # 导入 MCP 客户端函数（get_file_validation_rule 和 get_proc_rule 功能相同，均调用 get_rule_from_bus）
+        from tools.mcp_client import get_file_validation_rule
         
-        result = await mcp_get_proc_rule(rule_code, auth_token)
+        result = await get_file_validation_rule(rule_code, auth_token)
         
         if not result.get("success"):
             logger.warning(f"获取整理规则失败: {result.get('error')}")
