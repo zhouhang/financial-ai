@@ -1,14 +1,14 @@
 """
-审计核对 MCP 服务模块
+对账 MCP 服务模块
 """
-from .audit_reconc_tool import (
-    create_audit_reconc_tools,
-    handle_audit_reconc_tool_call,
-    execute_single_audit,
+from .recon_tool import (
+    create_recon_tools,
+    handle_recon_tool_call,
+    execute_single_recon,
 )
 
 __all__ = [
-    "create_audit_reconc_tools",
-    "handle_audit_reconc_tool_call",
-    "execute_single_audit",
+    "create_recon_tools",
+    "handle_recon_tool_call",
+    "execute_single_recon",
 ]

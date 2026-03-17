@@ -204,8 +204,8 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
-    # 统一调用 audit_reconc_execute 工具（支持审计对账和普通对账）
-    from tools.mcp_client import execute_audit_reconc
+    # 统一调用 recon_execute 工具（对账）
+    from tools.mcp_client import execute_recon
 
     # 构建 validated_files 参数
     validated_files = [
@@ -215,11 +215,11 @@ async def recon_task_execution_node(state: AgentState) -> dict:
 
     try:
         logger.info(
-            f"[recon] 调用 audit_reconc_execute，"
+            f"[recon] 调用 recon_execute，"
             f"rule_code={rule_code}, "
             f"files={[f['table_name'] for f in validated_files]}"
         )
-        recon_result = await execute_audit_reconc(
+        recon_result = await execute_recon(
             validated_files=validated_files,
             rule_code=rule_code,
             rule_id="",  # 不指定则执行所有匹配的规则
@@ -238,7 +238,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         }
 
     logger.info(
-        f"[recon] audit_reconc_execute 结果: "
+        f"[recon] recon_execute 结果: "
         f"success={recon_result.get('success')}, "
         f"rule_type={recon_result.get('rule_type')}"
     )
@@ -259,14 +259,15 @@ async def recon_task_execution_node(state: AgentState) -> dict:
 
     # 判断规则类型并处理结果
     rule_type = recon_result.get("rule_type", "")
-    is_audit_reconc = rule_type == "audit_reconc"
+    is_recon = rule_type == "recon"
 
     # 提取文件信息（从对账结果中）
     file_info_list = []
     output_files = []
+    download_urls = []  # MCP 返回的下载链接
     
-    if is_audit_reconc:
-        # 审计对账结果处理
+    if is_recon:
+        # 对账结果处理
         results = recon_result.get("results", [])
         total_diff = sum(r.get("matched_with_diff", 0) for r in results)
         total_source_only = sum(r.get("source_only", 0) for r in results)
@@ -278,6 +279,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             source_file = r.get("source_file", "")
             target_file = r.get("target_file", "")
             output_file = r.get("output_file", "")
+            download_url = r.get("download_url")  # MCP 返回的下载链接
             rule_name = r.get("rule_name", "")
             if source_file and target_file:
                 file_info_list.append({
@@ -287,14 +289,17 @@ async def recon_task_execution_node(state: AgentState) -> dict:
                 })
             if output_file:
                 output_files.append(output_file)
+            if download_url:
+                download_urls.append(download_url)
 
         ctx.update({
             "phase": ReconAgentPhase.SHOWING_RESULT.value,
             "exec_status": "success",
             "recon_result": recon_result,
-            "is_audit_reconc": True,
+            "is_recon": True,
             "file_info_list": file_info_list,
             "output_files": output_files,
+            "download_urls": download_urls,
             "differences": [
                 {
                     "type": "matched_with_diff",
@@ -324,6 +329,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         source_file = result.get("source_file", "")
         target_file = result.get("target_file", "")
         output_file = result.get("output_file", "")
+        download_url = result.get("download_url")  # MCP 返回的下载链接
         if source_file and target_file:
             file_info_list.append({
                 "rule_name": result.get("rule_name", ""),
@@ -332,14 +338,17 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             })
         if output_file:
             output_files.append(output_file)
+        if download_url:
+            download_urls.append(download_url)
 
         ctx.update({
             "phase": ReconAgentPhase.SHOWING_RESULT.value,
             "exec_status": "success",
             "recon_result": recon_result,
-            "is_audit_reconc": False,
+            "is_recon": False,
             "file_info_list": file_info_list,
             "output_files": output_files,
+            "download_urls": download_urls,
             "differences": [
                 {
                     "type": "matched_with_diff",
@@ -422,22 +431,14 @@ def recon_result_node(state: AgentState) -> dict:
 
         diff_text = "\n".join(diff_lines) if diff_lines else "（无差异）"
 
-        # 构建报告文件链接（HTTP 下载链接）
+        # 构建报告文件链接（使用 MCP 返回的 download_urls）
         report_text = ""
-        if output_files:
-            # 获取 MCP 服务基础 URL
-            try:
-                from config import FINANCE_MCP_BASE_URL
-                mcp_base_url = FINANCE_MCP_BASE_URL.rstrip("/")
-            except Exception:
-                mcp_base_url = "http://localhost:3335"
-            
+        download_urls: list[str] = ctx.get("download_urls", [])
+        if download_urls:
             report_lines = []
-            for i, output_file in enumerate(output_files, 1):
-                # 提取文件名
-                file_name = output_file.split("/")[-1] if "/" in output_file else output_file
-                # 生成下载 URL: /recon/download/{filename}
-                download_url = f"{mcp_base_url}/recon/download/{file_name}"
+            for i, download_url in enumerate(download_urls, 1):
+                # 从 URL 中提取文件名
+                file_name = download_url.split("/")[-1] if "/" in download_url else download_url
                 report_lines.append(f"- [详细差异报告 {i}]({download_url})：{file_name}")
             report_text = "\n".join(report_lines) + "\n\n"
 

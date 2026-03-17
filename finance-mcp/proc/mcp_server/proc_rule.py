@@ -138,6 +138,18 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
         )
 
         # merge_rules 是纯合并规则，generated_files 为空，只在 merged_files 中显示
+        # 生成下载链接
+        def _build_download_url(file_path: str) -> Optional[str]:
+            if not file_path:
+                return None
+            file_name = Path(file_path).name
+            try:
+                import unified_mcp_server
+                base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
+            except (ImportError, AttributeError):
+                base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
+            return f"{base_url}/output/proc/{rule_code}/{file_name}"
+
         return {
             "success": merge_result.get("success", False),
             "rule_code": rule_code,
@@ -150,6 +162,7 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
                     "rule_id": f"merge_{m['table_name']}",
                     "generated_file_path": None,
                     "merged_file_path": m["merged_file_path"],
+                    "download_url": _build_download_url(m["merged_file_path"]),
                     "merged": True,
                     "merge_message": m["message"],
                     "match_field": m["table_name"],
@@ -193,6 +206,28 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
             logger.error(f"[proc_rule] {msg}", exc_info=True)
             errors.append(msg)
 
+    # ── 生成下载链接 ──────────────────────────────────────────────────────────
+    def _build_download_url(file_path: str) -> Optional[str]:
+        """构建下载 URL"""
+        if not file_path:
+            return None
+        file_name = Path(file_path).name
+        try:
+            import unified_mcp_server
+            base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
+        except (ImportError, AttributeError):
+            base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
+        return f"{base_url}/output/proc/{rule_code}/{file_name}"
+
+    # 为每个生成的文件添加 download_url
+    for f in generated_files:
+        f["download_url"] = _build_download_url(f.get("output_file"))
+        # 为合并文件也添加 download_url
+        if f.get("merge_result", {}).get("merged_file_path"):
+            f["merge_result"]["download_url"] = _build_download_url(
+                f["merge_result"]["merged_file_path"]
+            )
+
     return {
         "success": len(errors) == 0,
         "rule_code": rule_code,
@@ -207,7 +242,9 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
             {
                 "rule_id": f.get("rule_id"),
                 "generated_file_path": f.get("output_file"),
+                "download_url": f.get("download_url"),
                 "merged_file_path": f.get("merge_result", {}).get("merged_file_path"),
+                "merged_download_url": f.get("merge_result", {}).get("download_url"),
                 "merged": f.get("merge_result", {}).get("merged", False),
                 "merge_message": f.get("merge_result", {}).get("message"),
                 "match_field": f.get("merge_result", {}).get("match_field", ""),

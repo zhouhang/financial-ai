@@ -27,13 +27,6 @@ class SessionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class SessionType(str, Enum):
-    """会话类型"""
-    STANDARD = "standard"      # 标准对账
-    AUDIT = "audit"           # 审计对账
-    CUSTOM = "custom"         # 自定义
-
-
 class ProcessStatus(str, Enum):
     """差异处理状态"""
     PENDING = "pending"       # 待处理

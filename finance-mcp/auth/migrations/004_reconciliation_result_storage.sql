@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS public.reconciliation_sessions (
 COMMENT ON TABLE public.reconciliation_sessions IS '对账会话表 - 一次对账操作对应一个会话';
 COMMENT ON COLUMN public.reconciliation_sessions.task_id IS '关联的对账任务ID（兼容现有流程）';
 COMMENT ON COLUMN public.reconciliation_sessions.operator_id IS '操作人ID';
-COMMENT ON COLUMN public.reconciliation_sessions.session_type IS 'standard: 标准对账, audit: 审计对账, custom: 自定义';
+COMMENT ON COLUMN public.reconciliation_sessions.session_type IS 'standard: 对账, custom: 自定义';
 
 -- 外键约束
 ALTER TABLE public.reconciliation_sessions 

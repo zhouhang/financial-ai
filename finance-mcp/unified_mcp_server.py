@@ -2,9 +2,11 @@
 Financial Agent Unified MCP Server
 统一的财务助手 MCP 服务器 - 包含对账和数据整理功能
 """
+import os
 import sys
 import asyncio
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 from mcp import types
 
@@ -21,6 +23,9 @@ import logging
 
 # 导入安全工具
 from security_utils import validate_task_id, sanitize_path
+
+# MCP 服务公开访问地址（用于生成下载链接）
+MCP_PUBLIC_BASE_URL = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335")
 
 # 导入对账模块
 from reconciliation.mcp_server.config import DEFAULT_HOST, DEFAULT_PORT
@@ -40,8 +45,8 @@ from proc.mcp_server.proc_rule import create_proc_rule_tools, handle_proc_rule_t
 # 导入 rules 模块（规则查询 + 数字员工管理）
 from tools.rules import create_tools as create_rules_tools, handle_tool_call as handle_rules_call, get_rule_from_bus
 
-# 导入审计核对模块
-from recon.mcp_server.audit_reconc_tool import create_audit_reconc_tools, handle_audit_reconc_tool_call
+# 导入对账模块
+from recon.mcp_server.recon_tool import create_recon_tools, handle_recon_tool_call
 
 # 配置日志
 logging.basicConfig(
@@ -107,13 +112,13 @@ async def list_tools() -> list[types.Tool]:
         rules_tools = []
 
     try:
-        audit_reconc_tools = create_audit_reconc_tools()
-        logger.info(f"审计核对工具数量: {len(audit_reconc_tools)}")
+        recon_tools_2 = create_recon_tools()
+        logger.info(f"对账工具数量: {len(recon_tools_2)}")
     except Exception as e:
-        logger.error(f"加载审计核对工具失败: {str(e)}", exc_info=True)
-        audit_reconc_tools = []
+        logger.error(f"加载对账工具失败: {str(e)}", exc_info=True)
+        recon_tools_2 = []
     
-    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + file_validate_tools + sync_rule_tools + rules_tools + audit_reconc_tools
+    all_tools = auth_tools + guest_tools + recon_tools + prep_tools + file_validate_tools + sync_rule_tools + rules_tools + recon_tools_2
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -156,10 +161,10 @@ _RULES_TOOL_NAMES = {
     "list_rules_by_employee",
 }
 
-# 审计核对工具名集合
-_AUDIT_RECONC_TOOL_NAMES = {
-    "audit_reconc_execute",
-    "audit_reconc_list_rules",
+# 对账工具名集合
+_RECON_TOOL_NAMES = {
+    "recon_execute",
+    "recon_list_rules",
 }
 
 
@@ -204,9 +209,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         elif name in _RULES_TOOL_NAMES:
             result = await handle_rules_call(name, arguments)
 
-        # 8) 审计核对模块
-        elif name in _AUDIT_RECONC_TOOL_NAMES:
-            result = await handle_audit_reconc_tool_call(name, arguments)
+        # 8) 对账模块
+        elif name in _RECON_TOOL_NAMES:
+            result = await handle_recon_tool_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -458,69 +463,96 @@ async def preview_file(request):
         return JSONResponse({"error": f"预览失败: {str(e)}"}, status_code=500)
 
 
-async def download_proc_file(request):
-    """Proc 模块生成文件的下载端点。
+# ═══════════════════════════════════════════════════════════════════════════════
+# 通用文件下载
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    路径格式: /proc/download/{rule_code}/{filename}
-    对应 proc_rule 生成的输出文件目录: proc/output/{rule_code}/{filename}
+# 模块输出目录映射
+_MODULE_OUTPUT_DIRS = {
+    "proc": None,  # 延迟加载
+    "recon": None,  # 延迟加载
+    "prep": None,  # 延迟加载
+}
+
+
+def _get_module_output_dir(module: str) -> Optional[Path]:
+    """获取模块的输出目录（延迟加载）"""
+    if module not in _MODULE_OUTPUT_DIRS:
+        return None
+    
+    if _MODULE_OUTPUT_DIRS[module] is not None:
+        return _MODULE_OUTPUT_DIRS[module]
+    
+    try:
+        if module == "proc":
+            from proc.config.config import OUTPUT_DIR as PROC_OUTPUT_DIR
+            _MODULE_OUTPUT_DIRS[module] = Path(PROC_OUTPUT_DIR)
+        elif module == "recon":
+            from recon.mcp_server.recon_tool import RECON_OUTPUT_DIR
+            _MODULE_OUTPUT_DIRS[module] = RECON_OUTPUT_DIR
+        elif module == "prep":
+            from data_preparation.mcp_server.config import OUTPUT_DIR as PREP_OUTPUT_DIR
+            _MODULE_OUTPUT_DIRS[module] = Path(PREP_OUTPUT_DIR)
+        return _MODULE_OUTPUT_DIRS[module]
+    except ImportError as e:
+        logger.error(f"无法导入模块 {module} 的输出目录: {e}")
+        return None
+
+
+async def download_output_file(request):
+    """通用文件下载端点。
+
+    路径格式: /output/{module}/{path:path}
+    - module: 模块名称（proc/recon/prep）
+    - path: 文件相对路径（可包含子目录）
+
+    示例:
+    - /output/proc/{rule_code}/{filename} → proc/output/{rule_code}/{filename}
+    - /output/recon/{filename} → recon/output/{filename}
+    - /output/prep/{filename} → prep/output/{filename}
     """
-    rule_code = request.path_params.get("rule_code", "")
-    filename = request.path_params.get("filename", "")
+    module = request.path_params.get("module", "")
+    file_path = request.path_params.get("path", "")
 
-    # 基本安全校验：禁止路径遍历
-    if not rule_code or not filename or "." in rule_code or "/" in rule_code or "\\" in rule_code:
-        return JSONResponse({"error": "无效的参数"}, status_code=400)
-    # 文件名只允许 xlsx / xls / csv，禁止含路径分隔符
-    if "/" in filename or "\\" in filename:
-        return JSONResponse({"error": "无效的文件名"}, status_code=400)
+    # 参数校验
+    if not module or not file_path:
+        return JSONResponse({"error": "缺少必要参数"}, status_code=400)
 
-    from proc.config.config import OUTPUT_DIR as PROC_OUTPUT_DIR
+    # 模块白名单校验
+    if module not in _MODULE_OUTPUT_DIRS:
+        return JSONResponse({"error": f"不支持的模块: {module}"}, status_code=400)
 
-    file_path = Path(PROC_OUTPUT_DIR) / rule_code / filename
-    logger.info(f"[proc/download] 请求下载: rule_code={rule_code!r} filename={filename!r} path={file_path}")
+    # 安全校验：禁止路径遍历
+    if ".." in file_path:
+        return JSONResponse({"error": "无效的文件路径"}, status_code=400)
 
-    if not file_path.exists() or not file_path.is_file():
-        logger.warning(f"[proc/download] 文件不存在: {file_path}")
-        return JSONResponse({"error": f"文件不存在: {filename}"}, status_code=404)
+    # 获取模块输出目录
+    output_dir = _get_module_output_dir(module)
+    if output_dir is None:
+        return JSONResponse({"error": f"模块 {module} 配置错误"}, status_code=500)
 
-    # 对中文文件名使用 RFC 5987 编码，避免 Content-Disposition 头部崩溃
+    # 构建完整文件路径
+    full_path = output_dir / file_path
+    logger.info(f"[download] 请求下载: module={module} path={file_path} full_path={full_path}")
+
+    # 安全检查：确保路径在输出目录内
+    try:
+        full_path.resolve().relative_to(output_dir.resolve())
+    except ValueError:
+        logger.warning(f"[download] 路径遍历攻击尝试: {file_path}")
+        return JSONResponse({"error": "无效的文件路径"}, status_code=400)
+
+    if not full_path.exists() or not full_path.is_file():
+        logger.warning(f"[download] 文件不存在: {full_path}")
+        return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+
+    # 对中文文件名使用 RFC 5987 编码
     from urllib.parse import quote
+    filename = full_path.name
     encoded_filename = quote(filename, safe='')
+
     return FileResponse(
-        str(file_path),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
-        },
-    )
-
-
-async def download_recon_file(request):
-    """对账模块生成文件的下载端点。
-
-    路径格式: /recon/download/{filename}
-    对应 recon 生成的输出文件目录: finance-mcp/recon/output/{filename}
-    """
-    filename = request.path_params.get("filename", "")
-
-    # 基本安全校验：禁止路径遍历
-    if not filename or "/" in filename or "\\" in filename:
-        return JSONResponse({"error": "无效的文件名"}, status_code=400)
-
-    # 对账输出目录: finance-mcp/recon/output
-    from recon.mcp_server.audit_reconc_tool import RECON_OUTPUT_DIR
-    file_path = RECON_OUTPUT_DIR / filename
-    logger.info(f"[recon/download] 请求下载: filename={filename!r} path={file_path}")
-
-    if not file_path.exists() or not file_path.is_file():
-        logger.warning(f"[recon/download] 文件不存在: {file_path}")
-        return JSONResponse({"error": f"文件不存在: {filename}"}, status_code=404)
-
-    # 对中文文件名使用 RFC 5987 编码，避免 Content-Disposition 头部崩溃
-    from urllib.parse import quote
-    encoded_filename = quote(filename, safe='')
-    return FileResponse(
-        str(file_path),
+        str(full_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
@@ -665,10 +697,9 @@ routes = [
     Mount("/messages/", app=sse_transport.handle_post_message),
     Route("/health", endpoint=health_check),
     Route("/download/{task_id}", endpoint=download_file),
+    Route("/output/{module}/{path:path}", endpoint=download_output_file),
     Route("/preview/{task_id}", endpoint=preview_file),
     Route("/report/{task_id}", endpoint=get_report),
-    Route("/proc/download/{rule_code}/{filename}", endpoint=download_proc_file),
-    Route("/recon/download/{filename}", endpoint=download_recon_file),
 ]
 
 app = Starlette(routes=routes)
@@ -706,6 +737,7 @@ async def main():
   • 消息端点:        http://{host}:{port}/messages/
   • 健康检查:        http://{host}:{port}/health
   • 文件下载:        http://{host}:{port}/download/{{task_id}}
+  • 输出下载:        http://{host}:{port}/output/{{module}}/{{path}}
   • 文件预览:        http://{host}:{port}/preview/{{task_id}}
   • 详细报告:        http://{host}:{port}/report/{{task_id}}
 

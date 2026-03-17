@@ -751,23 +751,23 @@ async def execute_recon_task(
     return await call_mcp_tool("recon_task_execution", args)
 
 
-async def execute_audit_reconc(
+async def execute_recon(
     validated_files: list[dict[str, Any]],
     rule_code: str,
     rule_id: str = "",
 ) -> dict[str, Any]:
-    """执行对账任务（支持审计对账和普通对账），根据规则对源文件与目标文件进行数据比对。
+    """执行对账任务（支持对账），根据规则对源文件与目标文件进行数据比对。
     
     Args:
         validated_files: 文件校验结果列表，格式 [{"file_path": str, "table_name": str}]
         rule_code: 规则编码，用于从 bus_rules 表获取规则定义
-        rule_id: 要执行的审计核对规则 ID（可选，仅在审计对账规则中使用）
+        rule_id: 要执行的对账规则 ID（可选）
         
     Returns:
         {
             "success": bool,
             "rule_code": str,
-            "rule_type": str,  # "audit_reconc" 或 "normal_reconc"
+            "rule_type": str,  # "recon" 或 "normal_reconc"
             "total_rules": int,
             "success_count": int,
             "results": [{
@@ -793,4 +793,4 @@ async def execute_audit_reconc(
     }
     if rule_id:
         args["rule_id"] = rule_id
-    return await call_mcp_tool("audit_reconc_execute", args)
+    return await call_mcp_tool("recon_execute", args)

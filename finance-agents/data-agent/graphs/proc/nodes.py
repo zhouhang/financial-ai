@@ -357,34 +357,27 @@ def result_node(state: AgentState) -> dict:
         else:
             rule_display = rule_code
 
-        # 构建 MCP 服务基础 URL（用于生成文件下载链接）
-        from config import FINANCE_MCP_BASE_URL
-        mcp_base_url = FINANCE_MCP_BASE_URL.rstrip("/")
-        
-        # 构建生成文件清单（含可点击下载链接）
+        # 构建生成文件清单（使用 MCP 返回的 download_url）
         file_lines = []
         for gf in generated_files:
-            output_file: str = gf.get("output_file", "")
-            file_name = os.path.basename(output_file)
             target_table = gf.get("target_table", "")
             row_count = gf.get("row_count", 0)
-            # 生成下载 URL: /proc/download/{rule_code}/{filename}
-            download_url = f"{mcp_base_url}/proc/download/{rule_code}/{file_name}"
-            file_lines.append(
-                f"- **[{target_table}]({download_url})** — {row_count}行"
-            )
+            # 优先使用 MCP 返回的 download_url
+            download_url = gf.get("download_url")
+            if download_url:
+                file_lines.append(
+                    f"- **[{target_table}]({download_url})** — {row_count}行"
+                )
 
-        # 构建合并文件清单（如果有）
+        # 构建合并文件清单（使用 MCP 返回的 download_url）
         merged_file_lines = []
         for mf in merged_files:
             if mf.get("merged") and mf.get("merged_file_path"):
-                merged_path: str = mf.get("merged_file_path", "")
-                merged_name = os.path.basename(merged_path)
                 # 使用 match_field + (合并) 作为展示名称
                 match_field = mf.get("match_field", "")
                 display_name = f"{match_field}(合并)" if match_field else "合并文件"
-                # 生成下载 URL: /proc/download/{rule_code}/{filename}
-                download_url = f"{mcp_base_url}/proc/download/{rule_code}/{merged_name}"
+                # 优先使用 MCP 返回的 download_url
+                download_url = mf.get("download_url") or mf.get("merged_download_url")
                 # 获取源文件列表
                 source_files = mf.get("source_files", [])
                 source_files_text = ""
@@ -393,9 +386,10 @@ def result_node(state: AgentState) -> dict:
                     source_files_text = f"（由 {', '.join(source_names)} 合并）"
                 row_count = mf.get("row_count", 0)
                 row_text = f" — {row_count}行" if row_count else ""
-                merged_file_lines.append(
-                    f"- **[{display_name}]({download_url})**{row_text}{source_files_text}"
-                )
+                if download_url:
+                    merged_file_lines.append(
+                        f"- **[{display_name}]({download_url})**{row_text}{source_files_text}"
+                    )
 
         merged_file_text = "\n".join(merged_file_lines) if merged_file_lines else ""
 
