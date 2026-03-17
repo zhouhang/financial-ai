@@ -363,7 +363,9 @@ def execute_single_audit(
         output_dir=output_dir,
         output_config=output_config,
         rule_id=rule_id,
-        rule_name=rule_name
+        rule_name=rule_name,
+        key_columns_config=key_columns_config,
+        compare_columns_config=compare_columns_config
     )
     
     return {
@@ -693,9 +695,7 @@ def _execute_comparison(
         return result
     
     # 比较匹配记录中的数值差异
-    compare_columns = [cfg.get("column") for cfg in compare_columns_config if cfg.get("column")]
-    
-    if not compare_columns:
+    if not compare_columns_config:
         result["matched_exact"] = both
         return result
     
@@ -707,10 +707,15 @@ def _execute_comparison(
         if not col:
             continue
         
-        source_col = f"source_{col}"
-        target_col = f"target_{col}"
+        # 优先使用 source_column/target_column 配置，否则使用 column 字段
+        source_col_name = cfg.get("source_column", col)
+        target_col_name = cfg.get("target_column", col)
+        
+        source_col = f"source_{source_col_name}"
+        target_col = f"target_{target_col_name}"
         
         if source_col not in both.columns or target_col not in both.columns:
+            logger.warning(f"[audit_reconc] [{rule_id}] 比较列不存在: {source_col} 或 {target_col}")
             continue
         
         tolerance = cfg.get("tolerance", 0)
@@ -731,8 +736,10 @@ def _execute_comparison(
         
         has_diff_mask = has_diff_mask | col_has_diff
         
-        # 添加差异列
+        # 添加差异列（使用配置中的 column 作为列名）
         both[f"diff_{col}"] = source_vals - target_vals
+        
+        logger.info(f"[audit_reconc] [{rule_id}] 比较列 {col}: {source_col_name} vs {target_col_name}, 差异 {col_has_diff.sum()} 条")
     
     result["matched_with_diff"] = both[has_diff_mask]
     result["matched_exact"] = both[~has_diff_mask]
@@ -747,9 +754,14 @@ def _write_audit_result(
     output_dir: str,
     output_config: dict,
     rule_id: str,
-    rule_name: str
+    rule_name: str,
+    key_columns_config: dict = None,
+    compare_columns_config: list = None
 ) -> str:
-    """写出核对结果"""
+    """写出核对结果，并对关键列添加颜色标记"""
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.utils import get_column_letter
+    
     # 生成文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_rule_name = re.sub(r'[\\/:*?"<>|]', "_", rule_name)
@@ -757,6 +769,9 @@ def _write_audit_result(
     output_path = str(Path(output_dir) / filename)
     
     sheets_config = output_config.get("sheets", {})
+    
+    # 收集需要标记的列
+    marked_columns = _get_marked_columns(key_columns_config, compare_columns_config)
     
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         # 汇总表
@@ -780,37 +795,184 @@ def _write_audit_result(
             )
         
         # 差异记录
+        sheet_name_matched_with_diff = sheets_config.get("matched_with_diff", {}).get("name", "差异记录")
         if sheets_config.get("matched_with_diff", {}).get("enabled", True):
             df = diff_result.get("matched_with_diff", pd.DataFrame())
             if len(df) > 0:
                 df.to_excel(
                     writer,
-                    sheet_name=sheets_config.get("matched_with_diff", {}).get("name", "差异记录"),
+                    sheet_name=sheet_name_matched_with_diff,
                     index=False
                 )
         
         # 源文件独有
+        sheet_name_source_only = sheets_config.get("source_only", {}).get("name", "源文件独有")
         if sheets_config.get("source_only", {}).get("enabled", True):
             df = diff_result.get("source_only", pd.DataFrame())
             if len(df) > 0:
                 df.to_excel(
                     writer,
-                    sheet_name=sheets_config.get("source_only", {}).get("name", "源文件独有"),
+                    sheet_name=sheet_name_source_only,
                     index=False
                 )
         
         # 目标文件独有
+        sheet_name_target_only = sheets_config.get("target_only", {}).get("name", "目标文件独有")
         if sheets_config.get("target_only", {}).get("enabled", True):
             df = diff_result.get("target_only", pd.DataFrame())
             if len(df) > 0:
                 df.to_excel(
                     writer,
-                    sheet_name=sheets_config.get("target_only", {}).get("name", "目标文件独有"),
+                    sheet_name=sheet_name_target_only,
                     index=False
                 )
+        
+        # 应用颜色标记
+        workbook = writer.book
+        
+        # 定义颜色
+        mapping_fill = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")  # 黄色 - mapping列
+        compare_fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")  # 蓝色 - 比对列
+        diff_fill = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")    # 橙色 - 差异列
+        header_font = Font(bold=True)
+        
+        # 标记差异记录sheet
+        if sheet_name_matched_with_diff in workbook.sheetnames:
+            _apply_column_highlighting(
+                workbook[sheet_name_matched_with_diff],
+                marked_columns,
+                mapping_fill,
+                compare_fill,
+                diff_fill,
+                header_font
+            )
+        
+        # 标记源文件独有sheet
+        if sheet_name_source_only in workbook.sheetnames:
+            _apply_column_highlighting(
+                workbook[sheet_name_source_only],
+                marked_columns,
+                mapping_fill,
+                compare_fill,
+                diff_fill,
+                header_font
+            )
+        
+        # 标记目标文件独有sheet
+        if sheet_name_target_only in workbook.sheetnames:
+            _apply_column_highlighting(
+                workbook[sheet_name_target_only],
+                marked_columns,
+                mapping_fill,
+                compare_fill,
+                diff_fill,
+                header_font
+            )
     
     logger.info(f"[audit_reconc] [{rule_id}] 结果已输出: {output_path}")
     return output_path
+
+
+def _get_marked_columns(key_columns_config: dict, compare_columns_config: list) -> dict:
+    """
+    获取需要标记的列信息
+    
+    Returns:
+        {
+            "mapping_source": ["source_sup订单号", ...],  # 黄色 - source mapping列
+            "mapping_target": ["target_第三方订单号", ...],  # 黄色 - target mapping列
+            "compare_source": ["source_发生-", ...],  # 蓝色 - source 比对列
+            "compare_target": ["target_合作方分销收入", ...],  # 蓝色 - target 比对列
+            "diff": ["diff_发生减", ...]  # 橙色 - 差异列
+        }
+    """
+    marked = {
+        "mapping_source": [],
+        "mapping_target": [],
+        "compare_source": [],
+        "compare_target": [],
+        "diff": []
+    }
+    
+    if key_columns_config:
+        # 处理 cross_file_mapping
+        cross_mapping = key_columns_config.get("cross_file_mapping", {})
+        if cross_mapping:
+            # 单映射
+            source_col = cross_mapping.get("source_column")
+            target_col = cross_mapping.get("target_column")
+            if source_col:
+                marked["mapping_source"].append(f"source_{source_col}")
+            if target_col:
+                marked["mapping_target"].append(f"target_{target_col}")
+        
+        # 处理多映射（数组格式）
+        cross_mappings = key_columns_config.get("cross_file_mappings", [])
+        for mapping in cross_mappings:
+            source_col = mapping.get("source_column")
+            target_col = mapping.get("target_column")
+            if source_col:
+                marked["mapping_source"].append(f"source_{source_col}")
+            if target_col:
+                marked["mapping_target"].append(f"target_{target_col}")
+    
+    if compare_columns_config:
+        for cfg in compare_columns_config:
+            col = cfg.get("column")
+            source_col = cfg.get("source_column", col)
+            target_col = cfg.get("target_column", col)
+            
+            if source_col:
+                marked["compare_source"].append(f"source_{source_col}")
+            if target_col:
+                marked["compare_target"].append(f"target_{target_col}")
+            if col:
+                marked["diff"].append(f"diff_{col}")
+    
+    return marked
+
+
+def _apply_column_highlighting(
+    worksheet,
+    marked_columns: dict,
+    mapping_fill: PatternFill,
+    compare_fill: PatternFill,
+    diff_fill: PatternFill,
+    header_font: Font
+):
+    """对 worksheet 的指定列应用颜色标记"""
+    if not worksheet or worksheet.max_row == 0:
+        return
+    
+    # 获取表头行
+    header_row = 1
+    header_map = {}
+    for col_idx in range(1, worksheet.max_column + 1):
+        cell = worksheet.cell(row=header_row, column=col_idx)
+        header_map[cell.value] = col_idx
+        # 表头加粗
+        cell.font = header_font
+    
+    # 标记 mapping 列（黄色）
+    for col_name in marked_columns.get("mapping_source", []) + marked_columns.get("mapping_target", []):
+        if col_name in header_map:
+            col_idx = header_map[col_name]
+            for row_idx in range(header_row, worksheet.max_row + 1):
+                worksheet.cell(row=row_idx, column=col_idx).fill = mapping_fill
+    
+    # 标记比对列（蓝色）
+    for col_name in marked_columns.get("compare_source", []) + marked_columns.get("compare_target", []):
+        if col_name in header_map:
+            col_idx = header_map[col_name]
+            for row_idx in range(header_row, worksheet.max_row + 1):
+                worksheet.cell(row=row_idx, column=col_idx).fill = compare_fill
+    
+    # 标记差异列（橙色）
+    for col_name in marked_columns.get("diff", []):
+        if col_name in header_map:
+            col_idx = header_map[col_name]
+            for row_idx in range(header_row, worksheet.max_row + 1):
+                worksheet.cell(row=row_idx, column=col_idx).fill = diff_fill
 
 
 # ════════════════════════════════════════════════════════════════════════════
