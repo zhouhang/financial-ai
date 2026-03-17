@@ -37,7 +37,8 @@ DATABASE_URL: str = os.getenv(
 )
 
 # ── Finance MCP ───────────────────────────────────────────────────────────────
-FINANCE_MCP_BASE_URL: str = os.getenv("FINANCE_MCP_BASE_URL", "http://localhost:3335")
+# 使用 127.0.0.1 替代 localhost，避免 Sangfor 等安全软件代理导致的 502 错误
+FINANCE_MCP_BASE_URL: str = os.getenv("FINANCE_MCP_BASE_URL", "http://127.0.0.1:3335")
 FINANCE_MCP_UPLOAD_DIR: str = os.getenv(
     "FINANCE_MCP_UPLOAD_DIR",
     str(Path(__file__).resolve().parents[3] / "finance-mcp" / "uploads"),

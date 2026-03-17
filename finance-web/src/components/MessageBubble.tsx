@@ -402,7 +402,7 @@ function ContentWithTables({ content }: { content: string }) {
     return (
       <>
         {before && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
             <ReactMarkdown>{before}</ReactMarkdown>
           </div>
         )}
@@ -416,7 +416,7 @@ function ContentWithTables({ content }: { content: string }) {
           />
         ))}
         {after && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
             <ReactMarkdown>{after}</ReactMarkdown>
           </div>
         )}
@@ -429,8 +429,8 @@ function ContentWithTables({ content }: { content: string }) {
     const hasHtmlTables = htmlTableParts.some((p) => p.type === 'html');
     const markdownComponents = {
       p: ({ children }: { children?: React.ReactNode }) => <p className="my-1">{children}</p>,
-      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
       strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold">{children}</strong>,
       blockquote: ({ children }: { children?: React.ReactNode }) => (
         <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">{children}</blockquote>
@@ -452,7 +452,7 @@ function ContentWithTables({ content }: { content: string }) {
 
     if (hasHtmlTables && htmlTableParts.length > 0) {
       return (
-        <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+        <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
           {htmlTableParts.map((part, idx) =>
             part.type === 'markdown' ? (
               part.text.trim() ? (
@@ -475,7 +475,7 @@ function ContentWithTables({ content }: { content: string }) {
     }
 
     return (
-      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+      <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
         <ReactMarkdown components={markdownComponents}>{processedContent}</ReactMarkdown>
       </div>
     );
@@ -486,12 +486,12 @@ function ContentWithTables({ content }: { content: string }) {
       {regularTables.map((item: { table: ParsedTable; before: string; after: string }, idx: number) => (
         <div key={idx}>
           {item.before && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  ul: ({ children }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                   blockquote: ({ children }) => (
                     <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
@@ -512,12 +512,12 @@ function ContentWithTables({ content }: { content: string }) {
           )}
           <TableRenderer table={item.table} beforeContent={item.before} />
           {item.after && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  ul: ({ children }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                   blockquote: ({ children }) => (
                     <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">

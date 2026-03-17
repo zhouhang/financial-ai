@@ -1,11 +1,14 @@
 """
-审计核对 MCP 工具模块
+核对 MCP 工具模块
 
-根据 audit_reconc.json 规则定义，执行源文件与目标文件的数据比对与差异分析。
+根据规则定义，执行源文件与目标文件的数据比对与差异分析。
+支持两种规则类型：
+1. 对账规则：包含 rules 字段
+2. 普通对账规则：通过 recon_task_execution 处理
 
 主要功能：
-1. 加载审计核对规则（从 bus_rules 表，rule_code='audio_reconc'）
-2. 根据规则识别源文件和目标文件
+1. 加载规则（从 bus_rules 表，根据传入的 rule_code）
+2. 判断规则类型（对账 vs 普通对账）
 3. 执行数据核对：关键列匹配、数值比对、聚合比对
 4. 输出差异分析结果：差异记录、源文件独有、目标文件独有
 """
@@ -27,7 +30,10 @@ logger = logging.getLogger(__name__)
 # 常量定义
 # ════════════════════════════════════════════════════════════════════════════
 
-AUDIT_RULE_CODE = "audio_reconc"
+DEFAULT_AUDIT_RULE_CODE = "audio_reconc"
+
+# 对账报告输出目录（相对于 finance-mcp 目录）
+RECON_OUTPUT_DIR = Path(__file__).parent.parent / "output"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -35,12 +41,13 @@ AUDIT_RULE_CODE = "audio_reconc"
 # ════════════════════════════════════════════════════════════════════════════
 
 def create_audit_reconc_tools() -> list[Tool]:
-    """创建审计核对 MCP 工具列表"""
+    """创建核对 MCP 工具列表"""
     return [
         Tool(
             name="audit_reconc_execute",
             description=(
-                "执行审计核对：根据规则对源文件与目标文件进行数据比对，"
+                "执行对账：根据规则对源文件与目标文件进行数据比对，"
+                "支持对账规则（含 rules）和普通对账规则。"
                 "输出差异记录、源文件独有记录、目标文件独有记录等。"
             ),
             inputSchema={
@@ -57,24 +64,29 @@ def create_audit_reconc_tools() -> list[Tool]:
                             }
                         }
                     },
+                    "rule_code": {
+                        "type": "string",
+                        "description": "规则编码（rule_code），用于从 bus_rules 表获取规则定义"
+                    },
                     "rule_id": {
                         "type": "string",
-                        "description": "要执行的审计核对规则 ID（如 AUDIT_RECONC_001），不指定则执行所有匹配的规则"
-                    },
-                    "output_dir": {
-                        "type": "string",
-                        "description": "核对结果输出目录"
+                        "description": "要执行的核对规则 ID（如 AUDIT_RECONC_001），仅在对账规则中使用，不指定则执行所有匹配的规则"
                     }
                 },
-                "required": ["validated_files", "output_dir"]
+                "required": ["validated_files", "rule_code"]
             }
         ),
         Tool(
             name="audit_reconc_list_rules",
-            description="列出所有可用的审计核对规则",
+            description="列出所有可用的核对规则（默认从 audio_reconc 规则中获取）",
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "rule_code": {
+                        "type": "string",
+                        "description": "规则编码（可选，默认为 audio_reconc）"
+                    }
+                },
                 "required": []
             }
         )
@@ -82,7 +94,7 @@ def create_audit_reconc_tools() -> list[Tool]:
 
 
 async def handle_audit_reconc_tool_call(name: str, arguments: dict) -> dict:
-    """处理审计核对工具调用"""
+    """处理核对工具调用"""
     try:
         if name == "audit_reconc_execute":
             return await _handle_audit_reconc_execute(arguments)
@@ -91,53 +103,37 @@ async def handle_audit_reconc_tool_call(name: str, arguments: dict) -> dict:
         else:
             return {"success": False, "error": f"未知的工具: {name}"}
     except Exception as e:
-        logger.error(f"审计核对工具调用失败 [{name}]: {e}", exc_info=True)
+        logger.error(f"核对工具调用失败 [{name}]: {e}", exc_info=True)
         return {"success": False, "error": f"工具调用失败: {str(e)}"}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 规则加载
+# 规则加载（复用 tools.rules 中的公共方法）
 # ════════════════════════════════════════════════════════════════════════════
 
-def load_audit_rules_from_db() -> Optional[dict]:
+def _get_rule_from_bus(rule_code: str) -> Optional[dict]:
     """
-    从 bus_rules 表加载审计核对规则配置
+    从 bus_rules 表加载指定 rule_code 的规则配置
     
+    复用 tools.rules 中的 get_rule_from_bus 函数
+    
+    Args:
+        rule_code: 规则编码
+        
     Returns:
-        audit_reconc.json 的完整内容，未找到返回 None
+        规则字典，包含 id, rule_code, rule, memo 等字段；未找到返回 None
     """
     try:
-        from db_config import get_db_connection
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT rule FROM bus_rules WHERE rule_code = %s LIMIT 1",
-                    (AUDIT_RULE_CODE,)
-                )
-                row = cur.fetchone()
-                if row is None:
-                    logger.warning(f"[audit_reconc] 未找到 rule_code='{AUDIT_RULE_CODE}' 的审计规则")
-                    return None
-                
-                rule_content = row[0]
-                if isinstance(rule_content, str):
-                    rule_content = json.loads(rule_content)
-                
-                rules_count = len(rule_content.get("reconciliation_rules", []))
-                logger.info(f"[audit_reconc] 成功加载审计核对规则，共 {rules_count} 条")
-                return rule_content
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error(f"[audit_reconc] 加载审计规则失败: {e}")
+        from tools.rules import get_rule_from_bus
+        return get_rule_from_bus(rule_code)
+    except ImportError:
+        logger.error(f"[audit_reconc] 无法导入 tools.rules.get_rule_from_bus")
         return None
 
 
 def find_audit_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
     """根据 rule_id 查找规则"""
-    for rule in rules_config.get("reconciliation_rules", []):
+    for rule in rules_config.get("rules", []):
         if rule.get("rule_id") == rule_id:
             return rule
     return None
@@ -148,12 +144,16 @@ def find_audit_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
 # ════════════════════════════════════════════════════════════════════════════
 
 async def _handle_audit_reconc_list_rules(arguments: dict) -> dict:
-    """列出所有审计核对规则"""
-    rules_config = load_audit_rules_from_db()
-    if rules_config is None:
-        return {"success": False, "error": "未找到审计核对规则配置"}
+    """列出所有核对规则"""
+    rule_code = arguments.get("rule_code", DEFAULT_AUDIT_RULE_CODE)
+    rule_record = _get_rule_from_bus(rule_code)
+    if rule_record is None:
+        return {"success": False, "error": f"未找到规则配置: rule_code={rule_code}"}
     
-    rules = rules_config.get("reconciliation_rules", [])
+    rule_content = rule_record.get("rule", {})
+    rules_config = rule_content if isinstance(rule_content, dict) else {}
+    
+    rules = rules_config.get("rules", [])
     rule_list = []
     for rule in rules:
         rule_list.append({
@@ -167,29 +167,40 @@ async def _handle_audit_reconc_list_rules(arguments: dict) -> dict:
     
     return {
         "success": True,
+        "rule_code": rule_code,
         "count": len(rule_list),
         "rules": rule_list
     }
 
 
 async def _handle_audit_reconc_execute(arguments: dict) -> dict:
-    """执行审计核对"""
+    """执行对账（支持对账和普通对账）"""
     validated_files = arguments.get("validated_files", [])
-    output_dir = arguments.get("output_dir", "")
+    rule_code = arguments.get("rule_code", "")
     rule_id = arguments.get("rule_id")
     
     if not validated_files:
         return {"success": False, "error": "validated_files 不能为空"}
-    if not output_dir:
-        return {"success": False, "error": "output_dir 不能为空"}
+    if not rule_code:
+        return {"success": False, "error": "rule_code 不能为空"}
+    
+    # 使用常量定义的输出目录
+    output_dir = str(RECON_OUTPUT_DIR)
     
     # 确保输出目录存在
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    RECON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
-    # 加载规则
-    rules_config = load_audit_rules_from_db()
-    if rules_config is None:
-        return {"success": False, "error": "未找到审计核对规则配置"}
+    # 加载规则（复用 tools.rules 中的公共方法）
+    rule_record = _get_rule_from_bus(rule_code)
+    if rule_record is None:
+        return {"success": False, "error": f"未找到规则: rule_code={rule_code}"}
+    
+    rule_content = rule_record.get("rule", {})
+    
+    # 判断规则类型
+    is_audit_reconc = isinstance(rule_content, dict) and rule_content.get("rules") is not None
+    
+    logger.info(f"[audit_reconc] 规则类型: {'对账' if is_audit_reconc else '普通对账'}, rule_code={rule_code}")
     
     # 构建 table_name -> file_path 映射
     table_file_map: dict[str, str] = {}
@@ -201,31 +212,46 @@ async def _handle_audit_reconc_execute(arguments: dict) -> dict:
     
     logger.info(f"[audit_reconc] 文件映射: {list(table_file_map.keys())}")
     
-    # 确定要执行的规则
-    rules = rules_config.get("reconciliation_rules", [])
-    if rule_id:
-        target_rule = find_audit_rule_by_id(rules_config, rule_id)
-        if target_rule is None:
-            return {"success": False, "error": f"未找到 rule_id='{rule_id}' 的规则"}
-        rules = [target_rule]
-    
-    # 执行核对
-    results = []
-    for rule in rules:
-        if not rule.get("enabled", True):
-            continue
+    if is_audit_reconc:
+        # 对账逻辑
+        rules_config = rule_content
         
-        result = execute_single_audit(rule, table_file_map, output_dir)
-        results.append(result)
-    
-    success_count = sum(1 for r in results if r.get("success"))
-    
-    return {
-        "success": True,
-        "total_rules": len(results),
-        "success_count": success_count,
-        "results": results
-    }
+        # 确定要执行的规则
+        rules = rules_config.get("rules", [])
+        if rule_id:
+            target_rule = find_audit_rule_by_id(rules_config, rule_id)
+            if target_rule is None:
+                return {"success": False, "error": f"未找到 rule_id='{rule_id}' 的规则"}
+            rules = [target_rule]
+        
+        # 执行核对
+        results = []
+        for rule in rules:
+            if not rule.get("enabled", True):
+                continue
+            
+            result = execute_single_audit(rule, table_file_map, output_dir)
+            results.append(result)
+        
+        success_count = sum(1 for r in results if r.get("success"))
+        
+        return {
+            "success": True,
+            "rule_code": rule_code,
+            "rule_type": "audit_reconc",
+            "total_rules": len(results),
+            "success_count": success_count,
+            "results": results
+        }
+    else:
+        # 普通对账逻辑
+        return await _execute_normal_reconciliation(
+            rule_content=rule_content,
+            rule_code=rule_code,
+            table_file_map=table_file_map,
+            output_dir=output_dir,
+            validated_files=validated_files
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -238,10 +264,10 @@ def execute_single_audit(
     output_dir: str
 ) -> dict:
     """
-    执行单个审计核对规则
+    执行单个对账规则
     
     Args:
-        rule: 审计规则配置
+        rule: 规则配置
         table_file_map: table_name -> file_path 映射
         output_dir: 输出目录
     
@@ -309,7 +335,8 @@ def execute_single_audit(
     
     # 4. 获取核对配置
     recon_config = rule.get("reconciliation_config", {})
-    key_columns = recon_config.get("key_columns", {}).get("columns", [])
+    key_columns_config = recon_config.get("key_columns", {})
+    key_columns = key_columns_config.get("columns", [])
     compare_columns_config = recon_config.get("compare_columns", {}).get("columns", [])
     aggregation_config = recon_config.get("aggregation", {})
     
@@ -325,7 +352,8 @@ def execute_single_audit(
         key_columns=key_columns,
         compare_columns_config=compare_columns_config,
         diff_analysis_config=rule.get("diff_analysis", {}),
-        rule_id=rule_id
+        rule_id=rule_id,
+        key_columns_config=key_columns_config
     )
     
     # 7. 输出结果
@@ -445,13 +473,114 @@ def _apply_aggregation(
         return df
 
 
+def _apply_key_transformations(
+    df: pd.DataFrame,
+    key_column: str,
+    transformations: dict,
+    file_type: str,
+    rule_id: str
+) -> pd.DataFrame:
+    """
+    应用关键列的数据清洗转换
+    
+    支持的转换操作（按执行顺序）：
+    1. regex_extract: 使用正则表达式提取匹配内容
+    2. regex_replace: 使用正则表达式替换匹配内容
+    3. strip_prefix: 去除前缀字符串
+    4. strip_suffix: 去除后缀字符串
+    5. strip_whitespace: 去除首尾空白字符
+    6. lowercase: 转换为小写
+    
+    Args:
+        df: DataFrame
+        key_column: 关键列名
+        transformations: 转换配置
+        file_type: "source" 或 "target"
+        rule_id: 规则ID
+    
+    Returns:
+        转换后的 DataFrame
+    """
+    if key_column not in df.columns:
+        return df
+    
+    trans_config = transformations.get(file_type, {})
+    if not trans_config:
+        return df
+    
+    original_values = df[key_column].astype(str)
+    transformed_values = original_values
+    
+    # 1. 正则表达式提取 - 提取匹配指定模式的内容
+    regex_extract = trans_config.get("regex_extract")
+    if regex_extract:
+        try:
+            extracted = transformed_values.str.extract(regex_extract, expand=False)
+            # 如果结果是DataFrame（有多个捕获组），取第一个非空列
+            if isinstance(extracted, pd.DataFrame):
+                for col in extracted.columns:
+                    if extracted[col].notna().any():
+                        extracted = extracted[col]
+                        break
+            # 填充未匹配的值（保持原值）
+            transformed_values = extracted.fillna(transformed_values)
+            matched_count = extracted.notna().sum()
+            logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 正则提取 '{regex_extract}' 匹配 {matched_count} 个值")
+        except Exception as e:
+            logger.warning(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 正则提取失败: {e}")
+    
+    # 2. 正则表达式替换 - 替换匹配的内容
+    regex_replace = trans_config.get("regex_replace")
+    if regex_replace:
+        pattern = regex_replace.get("pattern")
+        replacement = regex_replace.get("replacement", "")
+        if pattern:
+            try:
+                transformed_values = transformed_values.str.replace(pattern, replacement, regex=True)
+                logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 正则替换 '{pattern}' -> '{replacement}'")
+            except Exception as e:
+                logger.warning(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 正则替换失败: {e}")
+    
+    # 3. 去除前缀
+    strip_prefix = trans_config.get("strip_prefix")
+    if strip_prefix:
+        transformed_values = transformed_values.str.lstrip(strip_prefix)
+        logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 去除前缀 '{strip_prefix}'")
+    
+    # 4. 去除后缀
+    strip_suffix = trans_config.get("strip_suffix")
+    if strip_suffix:
+        transformed_values = transformed_values.str.removesuffix(strip_suffix)
+        logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 去除后缀 '{strip_suffix}'")
+    
+    # 5. 去除空白字符
+    if trans_config.get("strip_whitespace", False):
+        transformed_values = transformed_values.str.strip()
+        logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 去除首尾空白")
+    
+    # 6. 转换为小写
+    if trans_config.get("lowercase", False):
+        transformed_values = transformed_values.str.lower()
+        logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 转换为小写")
+    
+    df[key_column] = transformed_values
+    
+    # 记录转换统计
+    changed_count = (original_values != transformed_values).sum()
+    if changed_count > 0:
+        logger.info(f"[audit_reconc] [{rule_id}] {file_type} 列 '{key_column}' 共转换了 {changed_count} 个值")
+    
+    return df
+
+
 def _execute_comparison(
     df_source: pd.DataFrame,
     df_target: pd.DataFrame,
     key_columns: list[str],
     compare_columns_config: list[dict],
     diff_analysis_config: dict,
-    rule_id: str
+    rule_id: str,
+    key_columns_config: dict = None
 ) -> dict:
     """
     执行数据比较
@@ -475,9 +604,18 @@ def _execute_comparison(
         logger.warning(f"[audit_reconc] [{rule_id}] 未配置关键列，无法执行比较")
         return result
     
-    # 检查关键列是否存在
-    source_missing = [col for col in key_columns if col not in df_source.columns]
-    target_missing = [col for col in key_columns if col not in df_target.columns]
+    # 检查关键列是否存在（考虑 cross_file_mapping）
+    cross_mapping = key_columns_config.get("cross_file_mapping", {}) if key_columns_config else {}
+    if cross_mapping:
+        # 使用 cross_file_mapping 中定义的列名进行检查
+        source_key_col = cross_mapping.get("source_column")
+        target_key_col = cross_mapping.get("target_column")
+        source_missing = [source_key_col] if source_key_col and source_key_col not in df_source.columns else []
+        target_missing = [target_key_col] if target_key_col and target_key_col not in df_target.columns else []
+    else:
+        # 使用 key_columns 列表进行检查
+        source_missing = [col for col in key_columns if col not in df_source.columns]
+        target_missing = [col for col in key_columns if col not in df_target.columns]
     
     if source_missing:
         logger.warning(f"[audit_reconc] [{rule_id}] 源文件缺少关键列: {source_missing}")
@@ -486,17 +624,51 @@ def _execute_comparison(
         logger.warning(f"[audit_reconc] [{rule_id}] 目标文件缺少关键列: {target_missing}")
         return result
     
+    # 应用数据清洗转换（在添加前缀之前）
+    if key_columns_config:
+        transformations = key_columns_config.get("transformations", {})
+        if transformations:
+            # 根据 cross_file_mapping 确定源和目标的关键列
+            cross_mapping = key_columns_config.get("cross_file_mapping", {})
+            source_key_col = cross_mapping.get("source_column", key_columns[0] if key_columns else None)
+            target_key_col = cross_mapping.get("target_column", key_columns[-1] if key_columns else None)
+            
+            if source_key_col and source_key_col in df_source.columns:
+                df_source = _apply_key_transformations(
+                    df_source.copy(), source_key_col, transformations, "source", rule_id
+                )
+            if target_key_col and target_key_col in df_target.columns:
+                df_target = _apply_key_transformations(
+                    df_target.copy(), target_key_col, transformations, "target", rule_id
+                )
+    
     # 添加前缀以区分来源
     df_source_prefixed = df_source.add_prefix("source_")
     df_target_prefixed = df_target.add_prefix("target_")
     
-    # 重命名关键列用于合并
-    source_key_cols = [f"source_{col}" for col in key_columns]
-    target_key_cols = [f"target_{col}" for col in key_columns]
+    # 确定用于合并的关键列（考虑 cross_file_mapping）
+    cross_mapping = key_columns_config.get("cross_file_mapping", {}) if key_columns_config else {}
+    if cross_mapping:
+        # 使用 cross_file_mapping 中定义的列名
+        source_key_col = cross_mapping.get("source_column", key_columns[0] if key_columns else None)
+        target_key_col = cross_mapping.get("target_column", key_columns[-1] if key_columns else None)
+        source_key_cols = [f"source_{source_key_col}"] if source_key_col else []
+        target_key_cols = [f"target_{target_key_col}"] if target_key_col else []
+    else:
+        # 使用 key_columns 列表
+        source_key_cols = [f"source_{col}" for col in key_columns]
+        target_key_cols = [f"target_{col}" for col in key_columns]
     
-    # 创建合并键
-    df_source_prefixed["_merge_key"] = df_source_prefixed[source_key_cols].astype(str).agg("||".join, axis=1)
-    df_target_prefixed["_merge_key"] = df_target_prefixed[target_key_cols].astype(str).agg("||".join, axis=1)
+    # 创建合并键（处理 NaN 值）
+    def _create_merge_key(df, cols):
+        """创建合并键，处理 NaN 值"""
+        # 将每列转换为字符串，并用空字符串填充 NaN
+        str_cols = df[cols].astype(str).fillna('')
+        # 使用 join 连接各列
+        return str_cols.agg("||".join, axis=1)
+    
+    df_source_prefixed["_merge_key"] = _create_merge_key(df_source_prefixed, source_key_cols)
+    df_target_prefixed["_merge_key"] = _create_merge_key(df_target_prefixed, target_key_cols)
     
     # 执行外连接
     merged = pd.merge(
@@ -577,7 +749,7 @@ def _write_audit_result(
     rule_id: str,
     rule_name: str
 ) -> str:
-    """写出审计核对结果"""
+    """写出核对结果"""
     # 生成文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_rule_name = re.sub(r'[\\/:*?"<>|]', "_", rule_name)

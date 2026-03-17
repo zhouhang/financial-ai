@@ -495,6 +495,39 @@ async def download_proc_file(request):
     )
 
 
+async def download_recon_file(request):
+    """对账模块生成文件的下载端点。
+
+    路径格式: /recon/download/{filename}
+    对应 recon 生成的输出文件目录: finance-mcp/recon/output/{filename}
+    """
+    filename = request.path_params.get("filename", "")
+
+    # 基本安全校验：禁止路径遍历
+    if not filename or "/" in filename or "\\" in filename:
+        return JSONResponse({"error": "无效的文件名"}, status_code=400)
+
+    # 对账输出目录: finance-mcp/recon/output
+    from recon.mcp_server.audit_reconc_tool import RECON_OUTPUT_DIR
+    file_path = RECON_OUTPUT_DIR / filename
+    logger.info(f"[recon/download] 请求下载: filename={filename!r} path={file_path}")
+
+    if not file_path.exists() or not file_path.is_file():
+        logger.warning(f"[recon/download] 文件不存在: {file_path}")
+        return JSONResponse({"error": f"文件不存在: {filename}"}, status_code=404)
+
+    # 对中文文件名使用 RFC 5987 编码，避免 Content-Disposition 头部崩溃
+    from urllib.parse import quote
+    encoded_filename = quote(filename, safe='')
+    return FileResponse(
+        str(file_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        },
+    )
+
+
 async def get_report(request):
     """获取详细报告"""
     task_id = request.path_params.get("task_id")
@@ -635,6 +668,7 @@ routes = [
     Route("/preview/{task_id}", endpoint=preview_file),
     Route("/report/{task_id}", endpoint=get_report),
     Route("/proc/download/{rule_code}/{filename}", endpoint=download_proc_file),
+    Route("/recon/download/{filename}", endpoint=download_recon_file),
 ]
 
 app = Starlette(routes=routes)

@@ -204,18 +204,25 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
-    # 调用 MCP 工具 recon_task_execution
-    from tools.mcp_client import execute_recon_task
+    # 统一调用 audit_reconc_execute 工具（支持审计对账和普通对账）
+    from tools.mcp_client import execute_audit_reconc
+
+    # 构建 validated_files 参数
+    validated_files = [
+        {"file_path": f["file_path"], "table_name": f["table_name"]}
+        for f in recon_files
+    ]
 
     try:
         logger.info(
-            f"[recon] 调用 recon_task_execution，"
-            f"files={[f['file_name'] for f in recon_files]}"
+            f"[recon] 调用 audit_reconc_execute，"
+            f"rule_code={rule_code}, "
+            f"files={[f['table_name'] for f in validated_files]}"
         )
-        recon_result = await execute_recon_task(
-            files=recon_files,
+        recon_result = await execute_audit_reconc(
+            validated_files=validated_files,
             rule_code=rule_code,
-            auth_token=state.get("auth_token") or "",
+            rule_id="",  # 不指定则执行所有匹配的规则
         )
     except Exception as e:
         error_msg = f"调用对账服务失败: {e}"
@@ -231,8 +238,9 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         }
 
     logger.info(
-        f"[recon] recon_task_execution 结果: "
-        f"success={recon_result.get('success')}"
+        f"[recon] audit_reconc_execute 结果: "
+        f"success={recon_result.get('success')}, "
+        f"rule_type={recon_result.get('rule_type')}"
     )
 
     # 处理执行结果
@@ -249,15 +257,113 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
-    # 执行成功
-    ctx.update({
-        "phase": ReconAgentPhase.SHOWING_RESULT.value,
-        "exec_status": "success",
-        "recon_result": recon_result,
-        "differences": recon_result.get("differences", []),
-        "matched_count": recon_result.get("matched_count", 0),
-        "unmatched_count": recon_result.get("unmatched_count", 0),
-    })
+    # 判断规则类型并处理结果
+    rule_type = recon_result.get("rule_type", "")
+    is_audit_reconc = rule_type == "audit_reconc"
+
+    # 提取文件信息（从对账结果中）
+    file_info_list = []
+    output_files = []
+    
+    if is_audit_reconc:
+        # 审计对账结果处理
+        results = recon_result.get("results", [])
+        total_diff = sum(r.get("matched_with_diff", 0) for r in results)
+        total_source_only = sum(r.get("source_only", 0) for r in results)
+        total_target_only = sum(r.get("target_only", 0) for r in results)
+        total_matched = sum(r.get("matched_exact", 0) for r in results)
+        
+        # 收集文件信息和输出报告路径
+        for r in results:
+            source_file = r.get("source_file", "")
+            target_file = r.get("target_file", "")
+            output_file = r.get("output_file", "")
+            rule_name = r.get("rule_name", "")
+            if source_file and target_file:
+                file_info_list.append({
+                    "rule_name": rule_name,
+                    "source_file": source_file.split("/")[-1] if "/" in source_file else source_file,
+                    "target_file": target_file.split("/")[-1] if "/" in target_file else target_file,
+                })
+            if output_file:
+                output_files.append(output_file)
+
+        ctx.update({
+            "phase": ReconAgentPhase.SHOWING_RESULT.value,
+            "exec_status": "success",
+            "recon_result": recon_result,
+            "is_audit_reconc": True,
+            "file_info_list": file_info_list,
+            "output_files": output_files,
+            "differences": [
+                {
+                    "type": "matched_with_diff",
+                    "description": f"匹配但有差异: {total_diff} 条",
+                    "count": total_diff,
+                },
+                {
+                    "type": "source_only",
+                    "description": f"源文件独有: {total_source_only} 条",
+                    "count": total_source_only,
+                },
+                {
+                    "type": "target_only",
+                    "description": f"目标文件独有: {total_target_only} 条",
+                    "count": total_target_only,
+                },
+            ],
+            "matched_count": total_matched,
+            "unmatched_count": total_diff + total_source_only + total_target_only,
+        })
+    else:
+        # 普通对账结果处理
+        # 普通对账返回单个结果（包装在 results 中或作为顶层字段）
+        result = recon_result.get("results", [{}])[0] if recon_result.get("results") else recon_result
+        
+        # 收集文件信息和输出报告路径
+        source_file = result.get("source_file", "")
+        target_file = result.get("target_file", "")
+        output_file = result.get("output_file", "")
+        if source_file and target_file:
+            file_info_list.append({
+                "rule_name": result.get("rule_name", ""),
+                "source_file": source_file.split("/")[-1] if "/" in source_file else source_file,
+                "target_file": target_file.split("/")[-1] if "/" in target_file else target_file,
+            })
+        if output_file:
+            output_files.append(output_file)
+
+        ctx.update({
+            "phase": ReconAgentPhase.SHOWING_RESULT.value,
+            "exec_status": "success",
+            "recon_result": recon_result,
+            "is_audit_reconc": False,
+            "file_info_list": file_info_list,
+            "output_files": output_files,
+            "differences": [
+                {
+                    "type": "matched_with_diff",
+                    "description": f"匹配但有差异: {result.get('matched_with_diff', 0)} 条",
+                    "count": result.get("matched_with_diff", 0),
+                },
+                {
+                    "type": "source_only",
+                    "description": f"源文件独有: {result.get('source_only', 0)} 条",
+                    "count": result.get("source_only", 0),
+                },
+                {
+                    "type": "target_only",
+                    "description": f"目标文件独有: {result.get('target_only', 0)} 条",
+                    "count": result.get("target_only", 0),
+                },
+            ],
+            "matched_count": result.get("matched_exact", 0),
+            "unmatched_count": (
+                result.get("matched_with_diff", 0) +
+                result.get("source_only", 0) +
+                result.get("target_only", 0)
+            ),
+        })
 
     return {
         "messages": messages,
@@ -282,6 +388,8 @@ def recon_result_node(state: AgentState) -> dict:
         matched_count: int = ctx.get("matched_count", 0)
         unmatched_count: int = ctx.get("unmatched_count", 0)
         rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
+        file_info_list: list[dict] = ctx.get("file_info_list", [])
+        output_files: list[str] = ctx.get("output_files", [])
 
         # 构建规则展示文本
         if rule_name:
@@ -289,26 +397,60 @@ def recon_result_node(state: AgentState) -> dict:
         else:
             rule_display = rule_code
 
-        # 构建差异摘要
+        # 构建文件对账信息
+        file_info_text = ""
+        if file_info_list:
+            file_info_lines = []
+            for i, info in enumerate(file_info_list, 1):
+                rule_name_display = info.get("rule_name", f"规则{i}")
+                source_file = info.get("source_file", "未知")
+                target_file = info.get("target_file", "未知")
+                file_info_lines.append(f"{i}. **{rule_name_display}**：`{source_file}` ↔ `{target_file}`")
+            file_info_text = "\n".join(file_info_lines)
+        else:
+            file_info_text = "（未获取文件信息）"
+
+        # 构建差异摘要（只显示中文描述，不显示技术字段名）
         diff_lines = []
         for diff in differences[:10]:  # 最多展示10条差异
-            diff_type = diff.get("type", "unknown")
             desc = diff.get("description", "")
-            diff_lines.append(f"- **{diff_type}**: {desc}")
+            if desc:
+                diff_lines.append(f"- {desc}")
 
         if len(differences) > 10:
             diff_lines.append(f"- ... 还有 {len(differences) - 10} 条差异")
 
         diff_text = "\n".join(diff_lines) if diff_lines else "（无差异）"
 
+        # 构建报告文件链接（HTTP 下载链接）
+        report_text = ""
+        if output_files:
+            # 获取 MCP 服务基础 URL
+            try:
+                from config import FINANCE_MCP_BASE_URL
+                mcp_base_url = FINANCE_MCP_BASE_URL.rstrip("/")
+            except Exception:
+                mcp_base_url = "http://localhost:3335"
+            
+            report_lines = []
+            for i, output_file in enumerate(output_files, 1):
+                # 提取文件名
+                file_name = output_file.split("/")[-1] if "/" in output_file else output_file
+                # 生成下载 URL: /recon/download/{filename}
+                download_url = f"{mcp_base_url}/recon/download/{file_name}"
+                report_lines.append(f"- [详细差异报告 {i}]({download_url})：{file_name}")
+            report_text = "\n".join(report_lines) + "\n\n"
+
         msg = (
             f"对账任务已完成。\n\n"
             f"**规则：** {rule_display}\n\n"
+            f"**对账文件：**\n{file_info_text}\n\n"
             f"**统计：**\n"
             f"- 匹配记录：{matched_count} 条\n"
             f"- 差异记录：{unmatched_count} 条\n\n"
             f"**数据差异：**\n{diff_text}\n\n"
-            f"如需查看详细差异或导出报告，请告知。"
+            f"{report_text}"
+            f"如需进一步分析或有疑问，请告知。"
         )
     else:
         exec_error: str = ctx.get("exec_error", "未知错误")
