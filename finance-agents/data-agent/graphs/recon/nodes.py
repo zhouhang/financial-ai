@@ -257,82 +257,33 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
-    # 判断规则类型并处理结果
-    rule_type = recon_result.get("rule_type", "")
-    is_recon = rule_type == "recon"
-
     # 提取文件信息（从对账结果中）
     file_info_list = []
     output_files = []
     download_urls = []  # MCP 返回的下载链接
-    
-    if is_recon:
-        # 对账结果处理
-        results = recon_result.get("results", [])
-        total_diff = sum(r.get("matched_with_diff", 0) for r in results)
-        total_source_only = sum(r.get("source_only", 0) for r in results)
-        total_target_only = sum(r.get("target_only", 0) for r in results)
-        total_matched = sum(r.get("matched_exact", 0) for r in results)
-        
-        # 收集文件信息和输出报告路径
-        for r in results:
-            source_file = r.get("source_file", "")
-            target_file = r.get("target_file", "")
-            output_file = r.get("output_file", "")
-            download_url = r.get("download_url")  # MCP 返回的下载链接
-            rule_name = r.get("rule_name", "")
-            if source_file and target_file:
-                file_info_list.append({
-                    "rule_name": rule_name,
-                    "source_file": source_file.split("/")[-1] if "/" in source_file else source_file,
-                    "target_file": target_file.split("/")[-1] if "/" in target_file else target_file,
-                })
-            if output_file:
-                output_files.append(output_file)
-            if download_url:
-                download_urls.append(download_url)
 
-        ctx.update({
-            "phase": ReconAgentPhase.SHOWING_RESULT.value,
-            "exec_status": "success",
-            "recon_result": recon_result,
-            "is_recon": True,
-            "file_info_list": file_info_list,
-            "output_files": output_files,
-            "download_urls": download_urls,
-            "differences": [
-                {
-                    "type": "matched_with_diff",
-                    "description": f"匹配但有差异: {total_diff} 条",
-                    "count": total_diff,
-                },
-                {
-                    "type": "source_only",
-                    "description": f"源文件独有: {total_source_only} 条",
-                    "count": total_source_only,
-                },
-                {
-                    "type": "target_only",
-                    "description": f"目标文件独有: {total_target_only} 条",
-                    "count": total_target_only,
-                },
-            ],
-            "matched_count": total_matched,
-            "unmatched_count": total_diff + total_source_only + total_target_only,
-        })
-    else:
-        # 普通对账结果处理
-        # 普通对账返回单个结果（包装在 results 中或作为顶层字段）
-        result = recon_result.get("results", [{}])[0] if recon_result.get("results") else recon_result
-        
-        # 收集文件信息和输出报告路径
-        source_file = result.get("source_file", "")
-        target_file = result.get("target_file", "")
-        output_file = result.get("output_file", "")
-        download_url = result.get("download_url")  # MCP 返回的下载链接
+    # 统一处理对账结果（支持单条或多条规则）
+    results = recon_result.get("results", [])
+    if not results and recon_result.get("success"):
+        # 兼容没有包装在 results 中的单个结果
+        results = [recon_result]
+
+    total_diff = sum(r.get("matched_with_diff", 0) for r in results)
+    total_source_only = sum(r.get("source_only", 0) for r in results)
+    total_target_only = sum(r.get("target_only", 0) for r in results)
+    total_matched = sum(r.get("matched_exact", 0) for r in results)
+
+    # 收集文件信息、输出报告路径和过滤统计信息
+    filter_stats = {}
+    for r in results:
+        source_file = r.get("source_file", "")
+        target_file = r.get("target_file", "")
+        output_file = r.get("output_file", "")
+        download_url = r.get("download_url")  # MCP 返回的下载链接
+        rule_name = r.get("rule_name", "")
         if source_file and target_file:
             file_info_list.append({
-                "rule_name": result.get("rule_name", ""),
+                "rule_name": rule_name,
                 "source_file": source_file.split("/")[-1] if "/" in source_file else source_file,
                 "target_file": target_file.split("/")[-1] if "/" in target_file else target_file,
             })
@@ -340,39 +291,40 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             output_files.append(output_file)
         if download_url:
             download_urls.append(download_url)
+        # 提取过滤统计信息
+        if r.get("source_filter_stats"):
+            filter_stats["source"] = r.get("source_filter_stats")
+        if r.get("target_filter_stats"):
+            filter_stats["target"] = r.get("target_filter_stats")
 
-        ctx.update({
-            "phase": ReconAgentPhase.SHOWING_RESULT.value,
-            "exec_status": "success",
-            "recon_result": recon_result,
-            "is_recon": False,
-            "file_info_list": file_info_list,
-            "output_files": output_files,
-            "download_urls": download_urls,
-            "differences": [
-                {
-                    "type": "matched_with_diff",
-                    "description": f"匹配但有差异: {result.get('matched_with_diff', 0)} 条",
-                    "count": result.get("matched_with_diff", 0),
-                },
-                {
-                    "type": "source_only",
-                    "description": f"源文件独有: {result.get('source_only', 0)} 条",
-                    "count": result.get("source_only", 0),
-                },
-                {
-                    "type": "target_only",
-                    "description": f"目标文件独有: {result.get('target_only', 0)} 条",
-                    "count": result.get("target_only", 0),
-                },
-            ],
-            "matched_count": result.get("matched_exact", 0),
-            "unmatched_count": (
-                result.get("matched_with_diff", 0) +
-                result.get("source_only", 0) +
-                result.get("target_only", 0)
-            ),
-        })
+    ctx.update({
+        "phase": ReconAgentPhase.SHOWING_RESULT.value,
+        "exec_status": "success",
+        "recon_result": recon_result,
+        "file_info_list": file_info_list,
+        "output_files": output_files,
+        "download_urls": download_urls,
+        "filter_stats": filter_stats,
+        "differences": [
+            {
+                "type": "matched_with_diff",
+                "description": f"匹配但有差异: {total_diff} 条",
+                "count": total_diff,
+            },
+            {
+                "type": "source_only",
+                "description": f"源文件独有: {total_source_only} 条",
+                "count": total_source_only,
+            },
+            {
+                "type": "target_only",
+                "description": f"目标文件独有: {total_target_only} 条",
+                "count": total_target_only,
+            },
+        ],
+        "matched_count": total_matched,
+        "unmatched_count": total_diff + total_source_only + total_target_only,
+    })
 
     return {
         "messages": messages,
@@ -393,12 +345,10 @@ def recon_result_node(state: AgentState) -> dict:
     messages: list = list(state.get("messages") or [])
 
     if exec_status == "success":
-        differences: list[dict] = ctx.get("differences", [])
-        matched_count: int = ctx.get("matched_count", 0)
-        unmatched_count: int = ctx.get("unmatched_count", 0)
         rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
         file_info_list: list[dict] = ctx.get("file_info_list", [])
-        output_files: list[str] = ctx.get("output_files", [])
+        download_urls: list[str] = ctx.get("download_urls", [])
+        recon_result: dict = ctx.get("recon_result", {})
 
         # 构建规则展示文本
         if rule_name:
@@ -406,51 +356,35 @@ def recon_result_node(state: AgentState) -> dict:
         else:
             rule_display = rule_code
 
-        # 构建文件对账信息
-        file_info_text = ""
-        if file_info_list:
-            file_info_lines = []
-            for i, info in enumerate(file_info_list, 1):
-                rule_name_display = info.get("rule_name", f"规则{i}")
-                source_file = info.get("source_file", "未知")
-                target_file = info.get("target_file", "未知")
-                file_info_lines.append(f"{i}. **{rule_name_display}**：`{source_file}` ↔ `{target_file}`")
-            file_info_text = "\n".join(file_info_lines)
-        else:
-            file_info_text = "（未获取文件信息）"
+        # 获取每个规则的详细结果
+        results = recon_result.get("results", [])
+        if not results and recon_result.get("success"):
+            results = [recon_result]
 
-        # 构建差异摘要（只显示中文描述，不显示技术字段名）
-        diff_lines = []
-        for diff in differences[:10]:  # 最多展示10条差异
-            desc = diff.get("description", "")
-            if desc:
-                diff_lines.append(f"- {desc}")
+        # 过滤掉没有匹配到文件的规则（source_file 或 target_file 为空）
+        valid_results = []
+        for result in results:
+            source_file = result.get("source_file", "")
+            target_file = result.get("target_file", "")
+            # 只有当源文件和目标文件都存在时才显示
+            if source_file and target_file:
+                valid_results.append(result)
 
-        if len(differences) > 10:
-            diff_lines.append(f"- ... 还有 {len(differences) - 10} 条差异")
+        # 构建每个规则的独立显示
+        rule_sections = []
+        for i, result in enumerate(valid_results, 1):
+            rule_section = _build_single_rule_result(result, i)
+            if rule_section:  # 只添加非空的结果
+                rule_sections.append(rule_section)
 
-        diff_text = "\n".join(diff_lines) if diff_lines else "（无差异）"
-
-        # 构建报告文件链接（使用 MCP 返回的 download_urls）
-        report_text = ""
-        download_urls: list[str] = ctx.get("download_urls", [])
-        if download_urls:
-            report_lines = []
-            for i, download_url in enumerate(download_urls, 1):
-                # 从 URL 中提取文件名
-                file_name = download_url.split("/")[-1] if "/" in download_url else download_url
-                report_lines.append(f"- [详细差异报告 {i}]({download_url})：{file_name}")
-            report_text = "\n".join(report_lines) + "\n\n"
+        # 合并所有规则的结果显示
+        all_rules_text = "\n\n".join(rule_sections)
 
         msg = (
             f"对账任务已完成。\n\n"
             f"**规则：** {rule_display}\n\n"
-            f"**对账文件：**\n{file_info_text}\n\n"
-            f"**统计：**\n"
-            f"- 匹配记录：{matched_count} 条\n"
-            f"- 差异记录：{unmatched_count} 条\n\n"
-            f"**数据差异：**\n{diff_text}\n\n"
-            f"{report_text}"
+            f"---\n\n"
+            f"{all_rules_text}\n\n"
             f"如需进一步分析或有疑问，请告知。"
         )
     else:
@@ -467,3 +401,77 @@ def recon_result_node(state: AgentState) -> dict:
         "messages": messages + [AIMessage(content=msg)],
         "recon_ctx": ctx,
     }
+
+
+def _build_single_rule_result(result: dict, index: int) -> str:
+    """构建单个规则的详细结果显示（使用 Markdown 格式）"""
+    rule_name = result.get("rule_name", f"规则{index}")
+
+    # 获取文件信息
+    source_file = result.get("source_file", "")
+    target_file = result.get("target_file", "")
+
+    # 如果缺少源文件或目标文件，则不显示此规则
+    if not source_file or not target_file:
+        return ""
+
+    source_file_name = source_file.split("/")[-1] if "/" in source_file else source_file
+    target_file_name = target_file.split("/")[-1] if "/" in target_file else target_file
+
+    # 获取过滤统计
+    source_filter_stats = result.get("source_filter_stats", {})
+    target_filter_stats = result.get("target_filter_stats", {})
+
+    # 获取统计数据
+    matched_exact = result.get("matched_exact", 0)
+    matched_with_diff = result.get("matched_with_diff", 0)
+    source_only = result.get("source_only", 0)
+    target_only = result.get("target_only", 0)
+    total_matched = matched_exact + matched_with_diff
+    total_diff = matched_with_diff + source_only + target_only
+
+    # 获取下载链接
+    download_url = result.get("download_url", "")
+
+    # 构建过滤信息（分行显示，使用列表格式）
+    filter_lines = []
+    if source_filter_stats:
+        orig = source_filter_stats.get('original_count', 0)
+        filt = source_filter_stats.get('filtered_count', 0)
+        removed = source_filter_stats.get('removed_count', 0)
+        rate = source_filter_stats.get('filter_rate', 0)
+        filter_lines.append(f"- 🔍 **源文件过滤**: {orig} → {filt} (过滤 {removed} 条, {rate}%)")
+    if target_filter_stats:
+        orig = target_filter_stats.get('original_count', 0)
+        filt = target_filter_stats.get('filtered_count', 0)
+        removed = target_filter_stats.get('removed_count', 0)
+        rate = target_filter_stats.get('filter_rate', 0)
+        filter_lines.append(f"- 🔍 **目标文件过滤**: {orig} → {filt} (过滤 {removed} 条, {rate}%)")
+    filter_text = "\n".join(filter_lines)
+
+    # 构建统计表格
+    stats_table = (
+        "| 类型 | 数量 | 说明 |\n"
+        "|------|------|------|\n"
+        f"| ✅ 完全匹配 | {matched_exact} | 数据完全一致 |\n"
+        f"| ⚠️ 匹配有差异 | {matched_with_diff} | 关键列匹配但数值不同 |\n"
+        f"| 📤 源文件独有 | {source_only} | 仅在源文件中存在 |\n"
+        f"| 📥 目标文件独有 | {target_only} | 仅在目标文件中存在 |\n"
+        f"| **合计** | **{total_matched + total_diff}** | 总记录数 |"
+    )
+
+    # 下载链接
+    download_link = f"\n📄 **[查看详细差异报告]({download_url})**\n" if download_url else ""
+
+    # 构建规则结果块（使用一级标题使规则名称更突出）
+    section = (
+        f"# **{rule_name}**\n\n"
+        f"📁 **文件**: `{source_file_name}` ↔ `{target_file_name}`\n\n"
+        f"{filter_text}\n\n"
+        f"📊 **结果统计**:\n\n"
+        f"{stats_table}\n"
+        f"{download_link}\n"
+        f"---\n"
+    )
+
+    return section

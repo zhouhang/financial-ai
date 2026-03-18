@@ -267,10 +267,29 @@ def validate_files_against_rules(
     )
 
     # ── 逐文件匹配 ────────────────────────────────────────────────────────
-    # file_match_map: file_name -> matched_table (table_id, table_name, is_ness)
-    file_match_map: Dict[str, Optional[Dict[str, Any]]] = {}
+    # file_to_tables_map: file_name -> List[matched_table_info] (记录每个文件匹配到的所有规则)
+    file_to_tables_map: Dict[str, List[Dict[str, Any]]] = {}
+    # table_to_files_map: table_id -> List[file_name] (记录每个规则匹配到的所有文件)
+    table_to_files_map: Dict[str, List[str]] = {}
     # unmatched_files: 未命中任何规则的文件名列表
     unmatched_files: List[str] = []
+
+    # 过滤出启用的规则（enabled=true 或 enabled 字段不存在时默认为启用）
+    enabled_table_schemas = [
+        ts for ts in table_schemas
+        if ts.get("enabled", True)
+    ]
+
+    if not enabled_table_schemas:
+        return {
+            "success": False,
+            "error": "校验规则中所有 table_schemas 规则均被禁用，无法进行校验"
+        }
+
+    logger.info(
+        f"[文件校验] 启用规则统计: 共 {len(table_schemas)} 个规则，"
+        f"启用 {len(enabled_table_schemas)} 个，禁用 {len(table_schemas) - len(enabled_table_schemas)} 个"
+    )
 
     for file_info in uploaded_files:
         file_name = file_info.get("file_name", "")
@@ -280,19 +299,27 @@ def validate_files_against_rules(
             logger.warning("上传文件列表中存在缺少 file_name 的条目，已跳过")
             continue
 
-        matched_table = None
-        for table_schema in table_schemas:
+        matched_tables: List[Dict[str, Any]] = []
+        for table_schema in enabled_table_schemas:
             match_result = _check_file_match_table(file_columns, table_schema, config)
             if match_result["is_match"]:
-                matched_table = {
+                table_info = {
                     "table_id": table_schema["table_id"],
                     "table_name": table_schema["table_name"],
-                    "is_ness": table_schema.get("is_ness", False)
+                    "is_ness": table_schema.get("is_ness", False),
+                    "max_file_match_count": table_schema.get("max_file_match_count", 0)
                 }
+                matched_tables.append(table_info)
+
+                # 记录到 table_to_files_map
+                table_id = table_schema["table_id"]
+                if table_id not in table_to_files_map:
+                    table_to_files_map[table_id] = []
+                table_to_files_map[table_id].append(file_name)
+
                 logger.info(
                     f"[文件校验] 文件 '{file_name}' 匹配成功: {table_schema['table_name']}"
                 )
-                break
             else:
                 logger.debug(
                     f"[文件校验] 文件 '{file_name}' 与表 '{table_schema['table_name']}' 不匹配 - "
@@ -300,27 +327,109 @@ def validate_files_against_rules(
                     f"多余: {match_result['extra_columns']}"
                 )
 
-        if matched_table:
-            file_match_map[file_name] = matched_table
+        if matched_tables:
+            file_to_tables_map[file_name] = matched_tables
         else:
-            file_match_map[file_name] = None
             unmatched_files.append(file_name)
             logger.info(f"[文件校验] 文件 '{file_name}' 未匹配任何表定义")
 
+    # ── 检查是否允许多规则匹配同一文件 ─────────────────────────────────────
+    allow_multi_rule_match = config.get("allow_multi_rule_match", True)
+    if not allow_multi_rule_match:
+        # 检测是否有文件匹配了多条规则
+        multi_match_errors: List[str] = []
+        for file_name, matched_tables in file_to_tables_map.items():
+            if len(matched_tables) > 1:
+                table_names = [t["table_name"] for t in matched_tables]
+                multi_match_errors.append(
+                    f"文件 '{file_name}' 同时匹配了多条规则: {', '.join(table_names)}"
+                )
+
+        if multi_match_errors:
+            error_msg = "文件校验失败，以下文件匹配了多条规则（当前配置不允许）:\n" + "\n".join(multi_match_errors)
+            logger.warning(f"[文件校验] {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "multi_match_violations": [
+                    {
+                        "file_name": file_name,
+                        "matched_tables": [
+                            {"table_id": t["table_id"], "table_name": t["table_name"]}
+                            for t in matched_tables
+                        ]
+                    }
+                    for file_name, matched_tables in file_to_tables_map.items()
+                    if len(matched_tables) > 1
+                ],
+                "unmatched_files": unmatched_files
+            }
+
+    # ── 检查每个规则匹配的文件数量是否超过限制 ─────────────────────────────
+    max_match_count_violations: List[Dict[str, Any]] = []
+    for table_schema in enabled_table_schemas:
+        table_id = table_schema["table_id"]
+        table_name = table_schema["table_name"]
+        max_file_match_count = table_schema.get("max_file_match_count", 0)
+
+        # max_file_match_count = 0 表示不限制
+        if max_file_match_count > 0:
+            matched_files = table_to_files_map.get(table_id, [])
+            if len(matched_files) > max_file_match_count:
+                max_match_count_violations.append({
+                    "table_id": table_id,
+                    "table_name": table_name,
+                    "max_allowed": max_file_match_count,
+                    "actual_count": len(matched_files),
+                    "matched_files": matched_files
+                })
+
+    if max_match_count_violations:
+        error_details = []
+        for violation in max_match_count_violations:
+            error_details.append(
+                f"规则 '{violation['table_name']}' (限额: {violation['max_allowed']}个) "
+                f"实际匹配了 {violation['actual_count']} 个文件: {', '.join(violation['matched_files'])}"
+            )
+        error_msg = "文件校验失败，以下规则匹配的文件数量超过限额:\n" + "\n".join(error_details)
+        logger.warning(f"[文件校验] {error_msg}")
+
+        # 构建匹配结果列表（用于返回）
+        matched_results: List[Dict[str, str]] = []
+        for file_name, matched_tables in file_to_tables_map.items():
+            if matched_tables:
+                # 取第一个匹配的规则（如果不允许多规则匹配）或主规则
+                primary_table = matched_tables[0]
+                matched_results.append({
+                    "file_name": file_name,
+                    "table_id": primary_table["table_id"],
+                    "table_name": primary_table["table_name"]
+                })
+
+        return {
+            "success": False,
+            "error": error_msg,
+            "max_match_count_violations": max_match_count_violations,
+            "unmatched_files": unmatched_files,
+            "matched_results": matched_results
+        }
+
     # ── 构建匹配结果列表 ───────────────────────────────────────────────────
     matched_results: List[Dict[str, str]] = []
-    for file_name, matched_table in file_match_map.items():
-        if matched_table:
+    for file_name, matched_tables in file_to_tables_map.items():
+        if matched_tables:
+            # 如果不允许多规则匹配，取第一个；否则也取第一个作为主匹配
+            primary_table = matched_tables[0]
             matched_results.append({
                 "file_name": file_name,
-                "table_id": matched_table["table_id"],
-                "table_name": matched_table["table_name"]
+                "table_id": primary_table["table_id"],
+                "table_name": primary_table["table_name"]
             })
 
     # ── 检查必传文件是否覆盖 ──────────────────────────────────────────────
-    # 找出所有 is_ness=true 的表
+    # 找出所有启用的、is_ness=true 的表（禁用的规则不参与必传检查）
     necessary_tables = [
-        ts for ts in table_schemas if ts.get("is_ness", False)
+        ts for ts in enabled_table_schemas if ts.get("is_ness", False)
     ]
     # 已命中的 table_id 集合
     matched_table_ids: Set[str] = {

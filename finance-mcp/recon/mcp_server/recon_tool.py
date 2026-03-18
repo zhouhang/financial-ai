@@ -24,6 +24,9 @@ from typing import Any, Optional
 import pandas as pd
 from mcp import Tool
 
+# 导入数据过滤模块
+from tools.data_filter import filter_dataframe_by_rule_config, get_filter_statistics
+
 logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -232,9 +235,18 @@ async def _handle_recon_execute(arguments: dict) -> dict:
                 continue
             
             result = execute_single_recon(rule, table_file_map, output_dir)
-            results.append(result)
+            # 只保留成功匹配到文件的规则结果
+            if result.get("success") and result.get("source_file") and result.get("target_file"):
+                results.append(result)
+            elif result.get("success"):
+                # 规则启用但未匹配到文件，跳过不加入结果
+                logger.info(f"[recon] 规则 {rule.get('rule_id')} 未匹配到文件，跳过")
+            else:
+                # 执行失败的规则，可以选择保留或跳过
+                # 这里选择跳过失败的规则
+                logger.warning(f"[recon] 规则 {rule.get('rule_id')} 执行失败: {result.get('error')}")
         
-        success_count = sum(1 for r in results if r.get("success"))
+        success_count = len(results)
         
         return {
             "success": True,
@@ -330,7 +342,41 @@ def execute_single_recon(
     
     logger.info(f"[recon] [{rule_id}] 源文件 {len(df_source)} 行，目标文件 {len(df_target)} 行")
     
-    # 3. 应用列映射
+    # 3. 应用数据过滤
+    source_filter_stats = None
+    target_filter_stats = None
+    
+    # 过滤源文件
+    df_source_original = df_source.copy()
+    logger.info(f"[recon] [{rule_id}] 源文件过滤前: {len(df_source)} 行, filter配置: {source_file_config.get('filter')}")
+    df_source = filter_dataframe_by_rule_config(df_source, source_file_config)
+    logger.info(f"[recon] [{rule_id}] 源文件过滤后: {len(df_source)} 行")
+    if len(df_source) != len(df_source_original):
+        source_filter_stats = get_filter_statistics(
+            df_source_original, 
+            df_source, 
+            source_file_config.get("table_name", "源文件")
+        )
+    else:
+        logger.info(f"[recon] [{rule_id}] 源文件无过滤或过滤前后行数相同")
+    
+    # 过滤目标文件
+    df_target_original = df_target.copy()
+    logger.info(f"[recon] [{rule_id}] 目标文件过滤前: {len(df_target)} 行, filter配置: {target_file_config.get('filter')}")
+    df_target = filter_dataframe_by_rule_config(df_target, target_file_config)
+    logger.info(f"[recon] [{rule_id}] 目标文件过滤后: {len(df_target)} 行")
+    if len(df_target) != len(df_target_original):
+        target_filter_stats = get_filter_statistics(
+            df_target_original, 
+            df_target, 
+            target_file_config.get("table_name", "目标文件")
+        )
+    else:
+        logger.info(f"[recon] [{rule_id}] 目标文件无过滤或过滤前后行数相同")
+    
+    logger.info(f"[recon] [{rule_id}] 过滤后：源文件 {len(df_source)} 行，目标文件 {len(df_target)} 行")
+    
+    # 4. 应用列映射
     df_source = _apply_column_mapping(df_source, source_file_config.get("column_mapping", {}))
     df_target = _apply_column_mapping(df_target, target_file_config.get("column_mapping", {}))
     
@@ -383,7 +429,32 @@ def execute_single_recon(
             base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
         download_url = f"{base_url}/output/recon/{file_name}"
     
-    return {
+    # 9. 构建过滤提示信息
+    filter_messages = []
+    if source_filter_stats:
+        filter_messages.append(
+            f"源文件【{source_filter_stats['file_name']}】"
+            f"原记录 {source_filter_stats['original_count']} 条，"
+            f"过滤后参与对账 {source_filter_stats['filtered_count']} 条"
+        )
+    if target_filter_stats:
+        filter_messages.append(
+            f"目标文件【{target_filter_stats['file_name']}】"
+            f"原记录 {target_filter_stats['original_count']} 条，"
+            f"过滤后参与对账 {target_filter_stats['filtered_count']} 条"
+        )
+    
+    # 构建完整消息
+    message_parts = []
+    if filter_messages:
+        message_parts.append("数据过滤：" + "；".join(filter_messages))
+    message_parts.append(
+        f"核对完成：差异 {len(diff_result.get('matched_with_diff', []))} 条，"
+        f"源独有 {len(diff_result.get('source_only', []))} 条，"
+        f"目标独有 {len(diff_result.get('target_only', []))} 条"
+    )
+    
+    result = {
         "success": True,
         "rule_id": rule_id,
         "rule_name": rule_name,
@@ -397,10 +468,26 @@ def execute_single_recon(
         "matched_exact": len(diff_result.get("matched_exact", [])),
         "output_file": output_path,
         "download_url": download_url,
-        "message": f"核对完成：差异 {len(diff_result.get('matched_with_diff', []))} 条，"
-                   f"源独有 {len(diff_result.get('source_only', []))} 条，"
-                   f"目标独有 {len(diff_result.get('target_only', []))} 条"
+        "message": "；".join(message_parts)
     }
+    
+    # 添加过滤统计详情（可选）
+    if source_filter_stats:
+        result["source_filter_stats"] = {
+            "original_count": source_filter_stats["original_count"],
+            "filtered_count": source_filter_stats["filtered_count"],
+            "removed_count": source_filter_stats["removed_count"],
+            "filter_rate": source_filter_stats["filter_rate"]
+        }
+    if target_filter_stats:
+        result["target_filter_stats"] = {
+            "original_count": target_filter_stats["original_count"],
+            "filtered_count": target_filter_stats["filtered_count"],
+            "removed_count": target_filter_stats["removed_count"],
+            "filter_rate": target_filter_stats["filter_rate"]
+        }
+    
+    return result
 
 
 def _find_file_by_identification(
