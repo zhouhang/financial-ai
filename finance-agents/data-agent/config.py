@@ -44,27 +44,6 @@ FINANCE_MCP_UPLOAD_DIR: str = os.getenv(
     str(Path(__file__).resolve().parents[3] / "finance-mcp" / "uploads"),
 )
 
-# ── 对账 Schema ───────────────────────────────────────────────────────────────
-RECONCILIATION_SCHEMA_DIR: str = os.getenv(
-    "RECONCILIATION_SCHEMA_DIR",
-    str(
-        Path(__file__).resolve().parents[3]
-        / "finance-mcp"
-        / "reconciliation"
-        / "schemas"
-    ),
-)
-RECONCILIATION_CONFIG_FILE: str = os.getenv(
-    "RECONCILIATION_CONFIG_FILE",
-    str(
-        Path(__file__).resolve().parents[3]
-        / "finance-mcp"
-        / "reconciliation"
-        / "config"
-        / "reconciliation_schemas.json"
-    ),
-)
-
 # ── 上传 ──────────────────────────────────────────────────────────────────────
 UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", FINANCE_MCP_UPLOAD_DIR)
 MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", str(100 * 1024 * 1024)))

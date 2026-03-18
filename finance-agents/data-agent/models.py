@@ -32,8 +32,8 @@ class UserIntent(str, Enum):
     CREATE_DEPARTMENT = "create_department"
     ADMIN_LOGOUT = "admin_logout"
     UNKNOWN = "unknown"
-    AGENT_RECOG = "agent-recog"              # 数据整理（核算识别）
-    AGENT_RECON = "agent-recon"              # 对账执行
+    PROC = "proc"              # 数据整理
+    RECON = "recon"            # 对账执行
 
 
 class ReconciliationPhase(str, Enum):
@@ -181,17 +181,6 @@ class PreviewResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 对账规则类型条目（存储在 reconciliation_schemas.json 中）
-# ---------------------------------------------------------------------------
-
-class ReconciliationTypeEntry(BaseModel):
-    name_cn: str
-    type_key: str
-    schema_path: str
-    callback_url: str = ""
-
-
-# ---------------------------------------------------------------------------
 # 代理状态 – 用作 LangGraph 状态
 # ---------------------------------------------------------------------------
 
@@ -203,7 +192,7 @@ class AgentState(TypedDict, total=False):
 
     # 会话
     thread_id: str
-    workflow_type: Optional[str]   # 当前工作流类型: reconciliation / data_preparation
+    workflow_type: Optional[str]   # 当前工作流类型
     workflow_run_id: Optional[str]  # 当前工作流运行ID（用于文件与缓存隔离）
 
     # ── 认证 ──────────────────────────────────────────────────
@@ -217,15 +206,15 @@ class AgentState(TypedDict, total=False):
 
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值
-    selected_employee_code: Optional[str]  # 选中的数字员工编码，如 "agent-recog"
+    selected_employee_code: Optional[str]  # 选中的任务类型，如 "proc" / "recon"
     selected_rule_name: Optional[str]
-    selected_rule_code: Optional[str]  # 数据整理规则编码，如 "recognition"
-    file_rule_code: Optional[str]  # 文件校验规则编码，如 "recog_file_check"
+    selected_rule_code: Optional[str]  # 选中的任务编码，如 "verif_recog"
+    file_rule_code: Optional[str]  # 文件校验规则编码，从 rule_detail.rule 中解析
 
     # 上传的文件
     uploaded_files: list[str]
     
-    # 工作流分区上下文（避免 reconciliation 与 data_preparation 相互污染）
+    # 历史工作流上下文字段，保留兼容
     reconciliation_ctx: Optional[dict[str, Any]]
     data_preparation_ctx: Optional[dict[str, Any]]
 
@@ -286,7 +275,6 @@ class AgentState(TypedDict, total=False):
     human_prompt: Optional[str]
 
     # ── proc 数据整理子图上下文 ─────────────────────────────────────────
-    # 与 reconciliation_ctx / data_preparation_ctx 并列，完全隔离
     proc_ctx: Optional[dict[str, Any]]
 
     # ── recon 对账执行子图上下文 ───────────────────────────────────────────

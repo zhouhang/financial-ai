@@ -283,86 +283,6 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
 
 
 # ===========================================================================
-# 高级辅助函数 - 对账执行
-# ===========================================================================
-
-async def start_reconciliation(
-    files: list[str],
-    rule_name: str = None,
-    rule_id: str = None,
-    rule_template: dict = None,
-    auth_token: str = "",
-    guest_token: str = None,
-) -> dict[str, Any]:
-    """通过 MCP 工具启动对账任务。支持从 PostgreSQL 查询规则，或直接传入 rule_template。
-    
-    Args:
-        files: 文件列表
-        rule_name: 规则名称（与 rule_id、rule_template 三选一）
-        rule_id: 规则 ID（与 rule_name、rule_template 三选一）
-        rule_template: 规则模板 JSON（新建规则流程直接传入，先对账再保存）
-        auth_token: JWT token，用于身份验证
-        guest_token: 游客token（当 auth_token 为空时使用）
-    """
-    args: dict[str, Any] = {"files": files}
-    if auth_token and auth_token.strip():
-        args["auth_token"] = auth_token
-    elif guest_token:
-        args["guest_token"] = guest_token
-    if rule_template:
-        args["rule_template"] = rule_template
-    elif rule_id:
-        args["rule_id"] = rule_id
-    elif rule_name:
-        args["rule_name"] = rule_name
-    else:
-        raise ValueError("必须提供 rule_id、rule_name 或 rule_template")
-    
-    return await call_mcp_tool("reconciliation_start", args)
-
-
-async def get_reconciliation_status(task_id: str = "", auth_token: str = "", guest_token: str = None) -> dict[str, Any]:
-    """轮询对账任务状态。
-    
-    Args:
-        task_id: 任务 ID
-        auth_token: JWT token，用于身份验证
-        guest_token: 游客token（当 auth_token 为空时使用）
-    """
-    args: dict[str, Any] = {"task_id": task_id}
-    if auth_token:
-        args["auth_token"] = auth_token
-    elif guest_token:
-        args["guest_token"] = guest_token
-    return await call_mcp_tool("reconciliation_status", args)
-
-
-async def get_reconciliation_result(task_id: str = "", auth_token: str = "", guest_token: str = None) -> dict[str, Any]:
-    """获取对账结果。
-    
-    Args:
-        task_id: 任务 ID
-        auth_token: JWT token，用于身份验证
-        guest_token: 游客token（当 auth_token 为空时使用）
-    """
-    args: dict[str, Any] = {"task_id": task_id}
-    if auth_token:
-        args["auth_token"] = auth_token
-    elif guest_token:
-        args["guest_token"] = guest_token
-    return await call_mcp_tool("reconciliation_result", args)
-
-
-async def list_reconciliation_tasks(auth_token: str) -> dict[str, Any]:
-    """列出当前用户的所有对账任务。
-    
-    Args:
-        auth_token: JWT token，用于身份验证
-    """
-    return await call_mcp_tool("reconciliation_list_tasks", {"auth_token": auth_token})
-
-
-# ===========================================================================
 # 高级辅助函数 - 认证
 # ===========================================================================
 
@@ -384,30 +304,6 @@ async def auth_register(username: str, password: str, **kwargs) -> dict[str, Any
 async def auth_me(token: str) -> dict[str, Any]:
     """获取当前用户信息"""
     return await call_mcp_tool("auth_me", {"auth_token": token})
-
-
-# ===========================================================================
-# 高级辅助函数 - 游客认证
-# ===========================================================================
-
-async def create_guest_token(session_id: str, ip_address: str = None, user_agent: str = None) -> dict[str, Any]:
-    """创建游客临时token"""
-    args = {"session_id": session_id}
-    if ip_address:
-        args["ip_address"] = ip_address
-    if user_agent:
-        args["user_agent"] = user_agent
-    return await call_mcp_tool("create_guest_token", args)
-
-
-async def verify_guest_token(guest_token: str) -> dict[str, Any]:
-    """验证游客token"""
-    return await call_mcp_tool("verify_guest_token", {"guest_token": guest_token})
-
-
-async def list_recommended_rules(guest_token: str) -> dict[str, Any]:
-    """获取系统推荐规则列表（游客专用）"""
-    return await call_mcp_tool("list_recommended_rules", {"guest_token": guest_token})
 
 
 # ===========================================================================
@@ -441,27 +337,6 @@ async def get_rule_detail(auth_token: str, rule_id: str = None,
     if result.get("success"):
         return result.get("rule")
         return None
-
-
-async def save_rule(auth_token: str, name: str, rule_template: dict,
-                    description: str = "", visibility: str = "private",
-                    tags: list[str] = None) -> dict[str, Any]:
-    """保存新规则"""
-    return await call_mcp_tool("save_reconciliation_rule", {
-        "auth_token": auth_token,
-        "name": name,
-        "description": description or name,
-        "rule_template": rule_template,
-        "visibility": visibility,
-        "tags": tags or [],
-    })
-
-
-async def update_rule(auth_token: str, rule_id: str, **kwargs) -> dict[str, Any]:
-    """更新规则"""
-    args: dict[str, Any] = {"auth_token": auth_token, "rule_id": rule_id}
-    args.update(kwargs)
-    return await call_mcp_tool("update_reconciliation_rule", args)
 
 
 async def delete_rule(auth_token: str, rule_id: str, rule_name: str = "") -> dict[str, Any]:
@@ -506,14 +381,6 @@ async def list_companies(admin_token: str) -> dict[str, Any]:
     return await call_mcp_tool("list_companies", {
         "admin_token": admin_token,
     })
-
-
-async def list_departments(admin_token: str, company_id: str = None) -> dict[str, Any]:
-    """获取部门列表"""
-    args = {"admin_token": admin_token}
-    if company_id:
-        args["company_id"] = company_id
-    return await call_mcp_tool("list_departments", args)
 
 
 async def get_admin_view(admin_token: str) -> dict[str, Any]:
@@ -564,19 +431,6 @@ async def get_conversation(auth_token: str, conversation_id: str) -> dict[str, A
     })
 
 
-async def update_conversation(auth_token: str, conversation_id: str, title: str = None, status: str = None) -> dict[str, Any]:
-    """更新会话"""
-    args = {
-        "auth_token": auth_token,
-        "conversation_id": conversation_id,
-    }
-    if title:
-        args["title"] = title
-    if status:
-        args["status"] = status
-    return await call_mcp_tool("update_conversation", args)
-
-
 async def delete_conversation(auth_token: str, conversation_id: str) -> dict[str, Any]:
     """删除会话"""
     return await call_mcp_tool("delete_conversation", {
@@ -601,11 +455,11 @@ async def save_message(auth_token: str, conversation_id: str, role: str, content
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 高级辅助函数 - Proc 模块（数字员工和规则管理）
+# 高级辅助函数 - Proc 模块（任务管理）
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def list_digital_employees(auth_token: str) -> dict[str, Any]:
-    """获取数字员工列表
+async def list_user_tasks(auth_token: str) -> dict[str, Any]:
+    """获取当前用户可用任务列表。
     
     Args:
         auth_token: JWT token（用户登录后获取，必填）
@@ -614,38 +468,17 @@ async def list_digital_employees(auth_token: str) -> dict[str, Any]:
         {
             "success": bool,
             "count": int,
-            "employees": list[dict],
+            "tasks": list[dict],
             "message": str
         }
     """
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
-    return await call_mcp_tool("list_digital_employees", {"auth_token": auth_token})
-
-
-async def list_rules_by_employee(employee_code: str, auth_token: str) -> dict[str, Any]:
-    """根据数字员工 code 获取规则列表
-    
-    Args:
-        employee_code: 数字员工的 code
-        auth_token: JWT token（用户登录后获取，必填）
-        
-    Returns:
-        {
-            "success": bool,
-            "count": int,
-            "employee_code": str,
-            "rules": list[dict],
-            "message": str
-        }
-    """
-    if not auth_token:
-        return {"success": False, "error": "未提供认证 token，请先登录"}
-    return await call_mcp_tool("list_rules_by_employee", {"auth_token": auth_token, "employee_code": employee_code})
+    return await call_mcp_tool("list_user_tasks", {"auth_token": auth_token})
 
 
 async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict[str, Any]:
-    """根据 rule_code 获取文件校验规则 JSON（通过 bus_rules 服务，rule_type=1）
+    """根据 rule_code 获取文件校验规则 JSON（通过 rule_detail 服务，rule_type=file）
     
     Args:
         rule_code: 规则编码
@@ -655,17 +488,17 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
         {
             "success": bool,
             "rule_code": str,
-            "data": dict,  # 包含 id, rule_code, rule, memo
+            "data": dict,  # 包含 id, user_id, rule_code, rule, rule_type, remark
             "message": str
         }
     """
     args: dict[str, Any] = {"rule_code": rule_code}
     if auth_token:
         args["auth_token"] = auth_token
-    return await call_mcp_tool("get_rule_from_bus", args)
+    return await call_mcp_tool("get_rule", args)
 
 
-async def validate_uploaded_files(
+async def validate_files(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
 ) -> dict[str, Any]:
@@ -686,7 +519,7 @@ async def validate_uploaded_files(
             "missing_necessary_tables": [{"table_id": str, "table_name": str}]
         }
     """
-    return await call_mcp_tool("validate_uploaded_files", {
+    return await call_mcp_tool("validate_files", {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     })
@@ -712,43 +545,10 @@ async def execute_proc_rule(
             "message": str
         }
     """
-    return await call_mcp_tool("proc_rule_execute", {
+    return await call_mcp_tool("proc_execute", {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     })
-
-
-async def execute_recon_task(
-    files: list[dict[str, Any]],
-    rule_code: str,
-    auth_token: str = "",
-) -> dict[str, Any]:
-    """执行对账任务，生成差异报告。
-    
-    Args:
-        files: 文件列表，格式 [{"file_name": str, "file_path": str, "table_id": str, "table_name": str}]
-        rule_code: 对账规则编码
-        auth_token: JWT token（可选）
-        
-    Returns:
-        {
-            "success": bool,
-            "rule_code": str,
-            "matched_count": int,
-            "unmatched_count": int,
-            "differences": [{"type": str, "description": str, ...}],
-            "report_file": str,  # 差异报告文件路径
-            "errors": [str],
-            "message": str
-        }
-    """
-    args: dict[str, Any] = {
-        "files": files,
-        "rule_code": rule_code,
-    }
-    if auth_token:
-        args["auth_token"] = auth_token
-    return await call_mcp_tool("recon_task_execution", args)
 
 
 async def execute_recon(
@@ -760,7 +560,7 @@ async def execute_recon(
     
     Args:
         validated_files: 文件校验结果列表，格式 [{"file_path": str, "table_name": str}]
-        rule_code: 规则编码，用于从 bus_rules 表获取规则定义
+        rule_code: 规则编码，用于从 rule_detail 表获取规则定义
         rule_id: 要执行的对账规则 ID（可选）
         
     Returns:

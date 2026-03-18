@@ -4,10 +4,8 @@
 根据规则定义，执行源文件与目标文件的数据比对与差异分析。
 支持两种规则类型：
 1. 对账规则：包含 rules 字段
-2. 普通对账规则：通过 recon_task_execution 处理
-
 主要功能：
-1. 加载规则（从 bus_rules 表，根据传入的 rule_code）
+1. 加载规则（从 rule_detail 表，根据传入的 rule_code）
 2. 判断规则类型（对账 vs 普通对账）
 3. 执行数据核对：关键列匹配、数值比对、聚合比对
 4. 输出差异分析结果：差异记录、源文件独有、目标文件独有
@@ -67,7 +65,7 @@ def create_recon_tools() -> list[Tool]:
                     },
                     "rule_code": {
                         "type": "string",
-                        "description": "规则编码（rule_code），用于从 bus_rules 表获取规则定义"
+                        "description": "规则编码（rule_code），用于从 rule_detail 表获取规则定义"
                     },
                     "rule_id": {
                         "type": "string",
@@ -77,20 +75,6 @@ def create_recon_tools() -> list[Tool]:
                 "required": ["validated_files", "rule_code"]
             }
         ),
-        Tool(
-            name="recon_list_rules",
-            description="列出所有可用的核对规则",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "rule_code": {
-                        "type": "string",
-                        "description": "规则编码，用于从 bus_rules 表获取规则定义"
-                    }
-                },
-                "required": ["rule_code"]
-            }
-        )
     ]
 
 
@@ -99,10 +83,7 @@ async def handle_recon_tool_call(name: str, arguments: dict) -> dict:
     try:
         if name == "recon_execute":
             return await _handle_recon_execute(arguments)
-        elif name == "recon_list_rules":
-            return await _handle_recon_list_rules(arguments)
-        else:
-            return {"success": False, "error": f"未知的工具: {name}"}
+        return {"success": False, "error": f"未知的工具: {name}"}
     except Exception as e:
         logger.error(f"核对工具调用失败 [{name}]: {e}", exc_info=True)
         return {"success": False, "error": f"工具调用失败: {str(e)}"}
@@ -112,25 +93,24 @@ async def handle_recon_tool_call(name: str, arguments: dict) -> dict:
 # 规则加载（复用 tools.rules 中的公共方法）
 # ════════════════════════════════════════════════════════════════════════════
 
-def _get_rule_from_bus(rule_code: str) -> Optional[dict]:
+def _get_rule(rule_code: str) -> Optional[dict]:
     """
-    从 bus_rules 表加载指定 rule_code 的规则配置
+    从 rule_detail 表加载指定 rule_code 的规则配置
     
-    复用 tools.rules 中的 get_rule_from_bus 函数
+    复用 tools.rules 中的 get_rule 函数
     
     Args:
         rule_code: 规则编码
         
     Returns:
-        规则字典，包含 id, rule_code, rule, memo 等字段；未找到返回 None
+        规则字典，包含 id, user_id, rule_code, rule, rule_type, remark 等字段；未找到返回 None
     """
     try:
-        from tools.rules import get_rule_from_bus
-        return get_rule_from_bus(rule_code)
+        from tools.rules import get_rule
+        return get_rule(rule_code)
     except ImportError:
-        logger.error(f"[recon] 无法导入 tools.rules.get_rule_from_bus")
+        logger.error(f"[recon] 无法导入 tools.rules.get_rule")
         return None
-
 
 def find_recon_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
     """根据 rule_id 查找规则"""
@@ -143,39 +123,6 @@ def find_recon_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
 # ════════════════════════════════════════════════════════════════════════════
 # 工具处理函数
 # ════════════════════════════════════════════════════════════════════════════
-
-async def _handle_recon_list_rules(arguments: dict) -> dict:
-    """列出所有核对规则"""
-    rule_code = arguments.get("rule_code")
-    if not rule_code:
-        return {"success": False, "error": "rule_code 不能为空"}
-    
-    rule_record = _get_rule_from_bus(rule_code)
-    if rule_record is None:
-        return {"success": False, "error": f"未找到规则配置: rule_code={rule_code}"}
-    
-    rule_content = rule_record.get("rule", {})
-    rules_config = rule_content if isinstance(rule_content, dict) else {}
-    
-    rules = rules_config.get("rules", [])
-    rule_list = []
-    for rule in rules:
-        rule_list.append({
-            "rule_id": rule.get("rule_id"),
-            "rule_name": rule.get("rule_name"),
-            "description": rule.get("description"),
-            "enabled": rule.get("enabled", True),
-            "source_table": rule.get("source_file", {}).get("identification", {}).get("match_value"),
-            "target_table": rule.get("target_file", {}).get("identification", {}).get("match_value")
-        })
-    
-    return {
-        "success": True,
-        "rule_code": rule_code,
-        "count": len(rule_list),
-        "rules": rule_list
-    }
-
 
 async def _handle_recon_execute(arguments: dict) -> dict:
     """执行对账（支持对账和普通对账）"""
@@ -195,7 +142,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     RECON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     # 加载规则（复用 tools.rules 中的公共方法）
-    rule_record = _get_rule_from_bus(rule_code)
+    rule_record = _get_rule(rule_code)
     if rule_record is None:
         return {"success": False, "error": f"未找到规则: rule_code={rule_code}"}
     

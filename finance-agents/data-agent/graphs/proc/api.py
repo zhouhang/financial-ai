@@ -1,10 +1,9 @@
-"""proc RESTful API 路由
+"""proc RESTful API 路由。
 
-提供数字员工和规则管理的 HTTP 接口：
-- GET /proc/list_digital_employees    - 获取数字员工列表
-- GET /proc/list_rules_by_employee    - 获取指定数字员工的规则列表
-- GET /proc/get_file_validation_rule  - 根据 rule_code 获取文件校验规则
-- GET /proc/get_proc_rule             - 根据 rule_code 获取整理规则
+提供任务与规则管理的 HTTP 接口：
+- GET /proc/list_user_tasks          - 获取当前用户可用任务
+- GET /proc/get_file_validation_rule - 根据 rule_code 获取文件校验规则
+- GET /proc/get_proc_rule            - 根据 rule_code 获取整理规则
 """
 from __future__ import annotations
 
@@ -24,43 +23,22 @@ router = APIRouter(prefix="/proc", tags=["proc"])
 # 数据模型
 # ══════════════════════════════════════════════════════════════════════════════
 
-class Employee(BaseModel):
-    """数字员工模型"""
+class UserTask(BaseModel):
+    """用户任务模型。"""
     id: int
-    code: str
-    name: str
-    desc_text: Optional[str] = None
-    type: str
-    memo: Optional[str] = None
+    user_id: Optional[str] = None
+    task_code: str
+    task_name: str
+    description: Optional[str] = None
+    task_type: str
     file_rule_code: Optional[str] = None
 
 
-class Rule(BaseModel):
-    """规则模型"""
-    id: int
-    code: str
-    name: str
-    desc_text: Optional[str] = None
-    type: str
-    parent_code: Optional[str] = None
-    memo: Optional[str] = None
-    file_rule_code: Optional[str] = None
-
-
-class EmployeesResponse(BaseModel):
-    """数字员工列表响应"""
+class UserTasksResponse(BaseModel):
+    """任务列表响应。"""
     success: bool
     count: int
-    employees: list[Employee]
-    message: str
-
-
-class RulesResponse(BaseModel):
-    """规则列表响应"""
-    success: bool
-    count: int
-    employee_code: str
-    rules: list[Rule]
+    tasks: list[UserTask]
     message: str
 
 
@@ -76,19 +54,12 @@ class RuleDetailResponse(BaseModel):
 # API 路由
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/list_digital_employees", response_model=EmployeesResponse)
-async def list_digital_employees(
+@router.get("/list_user_tasks", response_model=UserTasksResponse)
+async def list_user_tasks(
     authorization: Optional[str] = Header(None),
 ):
-    """获取数字员工列表
-    
-    Args:
-        authorization: JWT token（可选，通过 Header 传递）
-        
-    Returns:
-        数字员工列表
-    """
-    logger.info("API: 获取数字员工列表")
+    """获取当前用户可用任务。"""
+    logger.info("API: 获取任务列表")
     
     # 提取 token
     auth_token = ""
@@ -96,81 +67,28 @@ async def list_digital_employees(
         auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
     
     try:
-        # 导入 MCP 客户端函数
-        from tools.mcp_client import list_digital_employees as mcp_list_digital_employees
-        
-        result = await mcp_list_digital_employees(auth_token)
+        from tools.mcp_client import list_user_tasks as mcp_list_user_tasks
+
+        result = await mcp_list_user_tasks(auth_token)
         
         if not result.get("success"):
-            logger.error(f"获取数字员工列表失败: {result.get('error')}")
+            logger.error(f"获取任务列表失败: {result.get('error')}")
             raise HTTPException(
                 status_code=500,
-                detail=result.get("error", "获取数字员工列表失败")
+                detail=result.get("error", "获取任务列表失败")
             )
         
-        return EmployeesResponse(
+        return UserTasksResponse(
             success=True,
             count=result.get("count", 0),
-            employees=result.get("employees", []),
+            tasks=result.get("tasks", []),
             message=result.get("message", "")
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"获取数字员工列表异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/list_rules_by_employee", response_model=RulesResponse)
-async def list_rules_by_employee(
-    employee_code: str = Query(..., description="数字员工的 code"),
-    authorization: Optional[str] = Header(None),
-):
-    """获取指定数字员工的规则列表
-    
-    Args:
-        employee_code: 数字员工的 code（通过 query 参数传递）
-        authorization: JWT token（可选，通过 Header 传递）
-        
-    Returns:
-        规则列表
-    """
-    logger.info(f"API: 获取数字员工 {employee_code} 的规则列表")
-    
-    if not employee_code:
-        raise HTTPException(status_code=400, detail="employee_code 不能为空")
-    
-    # 提取 token
-    auth_token = ""
-    if authorization:
-        auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    
-    try:
-        # 导入 MCP 客户端函数
-        from tools.mcp_client import list_rules_by_employee as mcp_list_rules_by_employee
-        
-        result = await mcp_list_rules_by_employee(employee_code, auth_token)
-        
-        if not result.get("success"):
-            logger.error(f"获取规则列表失败: {result.get('error')}")
-            raise HTTPException(
-                status_code=500,
-                detail=result.get("error", "获取规则列表失败")
-            )
-        
-        return RulesResponse(
-            success=True,
-            count=result.get("count", 0),
-            employee_code=employee_code,
-            rules=result.get("rules", []),
-            message=result.get("message", "")
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取规则列表异常: {e}")
+        logger.error(f"获取任务列表异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -252,7 +170,7 @@ async def get_proc_rule(
         auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
     
     try:
-        # 导入 MCP 客户端函数（get_file_validation_rule 和 get_proc_rule 功能相同，均调用 get_rule_from_bus）
+        # 导入 MCP 客户端函数（get_file_validation_rule 和 get_proc_rule 功能相同，均调用 get_rule）
         from tools.mcp_client import get_file_validation_rule
         
         result = await get_file_validation_rule(rule_code, auth_token)

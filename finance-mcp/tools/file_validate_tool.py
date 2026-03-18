@@ -15,8 +15,8 @@ from typing import Dict, Any, List, Optional, Set
 
 from mcp import Tool
 
-# 导入文件校验规则查询函数（从 rules.mcp_server.tools 直接导入）
-from tools.rules import get_rule_from_bus
+# 导入文件校验规则查询函数
+from tools.rules import get_rule
 
 # 配置日志
 logger = logging.getLogger("proc.mcp_server.file_validate_tool")
@@ -30,7 +30,7 @@ def create_file_validate_tools() -> list[Tool]:
     """创建文件校验工具列表"""
     return [
         Tool(
-            name="validate_uploaded_files",
+            name="validate_files",
             description=(
                 "根据规则编码（rule_code）从数据库获取文件校验规则，校验用户上传的文件列表，判断每个文件属于哪个预定义的表。"
                 "返回文件名与表定义（table_name）的对应关系；若必传文件（is_ness=true）未找到对应上传文件，则返回错误提示。"
@@ -497,15 +497,15 @@ async def handle_file_validate_tool_call(name: str, arguments: dict) -> dict:
     Returns:
         工具执行结果
     """
-    if name == "validate_uploaded_files":
-        return await _handle_validate_uploaded_files(arguments)
+    if name == "validate_files":
+        return await _handle_validate_files(arguments)
     else:
         return {"error": f"未知的文件校验工具: {name}"}
 
 
-async def _handle_validate_uploaded_files(arguments: dict) -> dict:
+async def _handle_validate_files(arguments: dict) -> dict:
     """
-    处理 validate_uploaded_files 工具调用。
+    处理 validate_files 工具调用。
 
     Args:
         arguments: 工具参数，包含 uploaded_files 和 rule_code
@@ -531,7 +531,7 @@ async def _handle_validate_uploaded_files(arguments: dict) -> dict:
 
     # ── 根据 rule_code 从数据库获取校验规则（含缓存）────────────────────────
     try:
-        rule_record = get_rule_from_bus(rule_code)
+        rule_record = get_rule(rule_code)
     except Exception as e:
         logger.error(f"[文件校验] 获取校验规则失败，rule_code={rule_code}: {e}", exc_info=True)
         return {
@@ -545,7 +545,7 @@ async def _handle_validate_uploaded_files(arguments: dict) -> dict:
             "error": f"未找到 rule_code 为 '{rule_code}' 的文件校验规则，请确认规则编码是否正确"
         }
 
-    # rule_record["rule"] 是从 bus_rules 表获取的规则内容
+    # rule_record["rule"] 是从 rule_detail 表获取的规则内容
     rule_data = rule_record["rule"]
     if isinstance(rule_data, str):
         try:

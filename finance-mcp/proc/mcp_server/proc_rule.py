@@ -36,14 +36,14 @@ logger = logging.getLogger(__name__)
 # ════════════════════════════════════════════════════════════════════════════
 
 def create_proc_rule_tools() -> list[Tool]:
-    """创建数据同步规则工具列表"""
+    """创建数据整理规则工具列表"""
     return [
         Tool(
-            name="proc_rule_execute",
+            name="proc_execute",
             description=(
                 "根据规则编码（rule_code）从数据库获取数据整理规则，"
                 "对上传文件执行字段映射和数据转换，生成目标 Excel 文件。\n"
-                "uploaded_files 格式为文件校验工具（validate_uploaded_files）返回的 matched_results。"
+                "uploaded_files 格式为文件校验工具（validate_files）返回的 matched_results。"
             ),
             inputSchema={
                 "type": "object",
@@ -67,7 +67,7 @@ def create_proc_rule_tools() -> list[Tool]:
                     },
                     "rule_code": {
                         "type": "string",
-                        "description": "整理规则编码，用于从 bus_rules 表中获取规则 JSON",
+                        "description": "整理规则编码，用于从 rule_detail 表中获取规则 JSON",
                     },
                 },
                 "required": ["uploaded_files", "rule_code"],
@@ -81,15 +81,15 @@ def create_proc_rule_tools() -> list[Tool]:
 # ════════════════════════════════════════════════════════════════════════════
 
 async def handle_proc_rule_tool_call(name: str, arguments: dict) -> dict:
-    """处理 proc_rule_execute 工具调用"""
-    if name == "proc_rule_execute":
-        return await _handle_proc_rule_execute(arguments)
+    """处理 proc_execute 工具调用"""
+    if name == "proc_execute":
+        return await _handle_proc_execute(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
-async def _handle_proc_rule_execute(arguments: dict) -> dict:
+async def _handle_proc_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
-    from tools.rules import get_rule_from_bus
+    from tools.rules import get_rule
     from proc.config.config import OUTPUT_DIR
 
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
@@ -109,7 +109,7 @@ async def _handle_proc_rule_execute(arguments: dict) -> dict:
         return {"success": False, "error": f"创建输出目录失败: {e}"}
 
     # ── 获取整理规则 ────────────────────────────────────────────────────────
-    rule_record = get_rule_from_bus(rule_code)
+    rule_record = get_rule(rule_code)
     if rule_record is None:
         return {"success": False, "error": f"未找到 rule_code='{rule_code}' 的整理规则"}
 

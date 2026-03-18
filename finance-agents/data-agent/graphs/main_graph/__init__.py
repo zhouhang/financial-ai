@@ -23,13 +23,6 @@ from .nodes import (
     RESULT_ANALYSIS_PROMPT,
     # 节点函数
     router_node,
-    task_execution_node,
-    result_analysis_node,
-    ask_start_now_node,
-    # 内部辅助函数（暴露以便测试）
-    _do_start_task,
-    _do_poll,
-    _run_async_safe,
 )
 
 # ── routers.py ──────────────────────────────────────────────────────────────
@@ -62,13 +55,6 @@ __all__ = [
     "RESULT_ANALYSIS_PROMPT",
     # nodes - 节点函数
     "router_node",
-    "task_execution_node",
-    "result_analysis_node",
-    "ask_start_now_node",
-    # nodes - 内部辅助
-    "_do_start_task",
-    "_do_poll",
-    "_run_async_safe",
     # routers - 路由函数
     "route_after_router",
     # routers - 图构建

@@ -8,14 +8,11 @@ import {
   X,
   FileSpreadsheet,
 } from 'lucide-react';
-import type { ConnectionStatus, DigitalEmployee, EmployeeRule, Message, MessageAttachment, UploadedFile } from '../types';
+import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTask } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
-
-/** 最多上传文件数（无限制） */
-const MAX_UPLOAD_FILES = Number.MAX_SAFE_INTEGER;
 
 /** 暂存文件（本地还没上传的） */
 interface StagedFile {
@@ -53,10 +50,8 @@ interface ChatAreaProps {
   onToggleSidebar?: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
-  /** 选中的数字员工 */
-  selectedEmployee?: DigitalEmployee | null;
-  /** 选中的规则 */
-  selectedRule?: EmployeeRule | null;
+  /** 选中的任务 */
+  selectedTask?: UserTask | null;
 }
 
 export default function ChatArea({
@@ -75,8 +70,7 @@ export default function ChatArea({
   onToggleSidebar,
   streamingMessageId,
   authToken,
-  selectedEmployee,
-  selectedRule,
+  selectedTask,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -122,7 +116,7 @@ export default function ChatArea({
     }
   }, [showInput, threadId]);
 
-  // 解析消息中的 SAVE_RULE / SAVE_NEW_RULE 标记，写入 localStorage 供登录后保存使用
+  // 解析消息中的 SAVE_RULE 标记，写入 localStorage 供登录后保存使用
   useEffect(() => {
     for (const msg of messages) {
       if (msg.role === 'assistant') {
@@ -130,15 +124,6 @@ export default function ChatArea({
         if (saveRuleMatch) {
           localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
           localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
-          localStorage.removeItem('pending_thread_id');
-          localStorage.removeItem('pending_is_new_rule');
-        }
-        const saveNewRuleMatch = msg.content.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
-        if (saveNewRuleMatch) {
-          localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
-          localStorage.setItem('pending_thread_id', threadId);
-          localStorage.setItem('pending_is_new_rule', 'true');
-          localStorage.removeItem('pending_source_rule_id');
         }
       }
     }
@@ -313,12 +298,11 @@ export default function ChatArea({
             </button>
           )}
           
-          {/* 选中的数字员工和规则显示 */}
-          {selectedEmployee && selectedRule ? (
+          {selectedTask ? (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100">
-              <span className="text-xs text-blue-600 font-medium">{selectedEmployee.name}</span>
+              <span className="text-xs text-blue-600 font-medium uppercase">{selectedTask.task_type}</span>
               <span className="text-gray-400">/</span>
-              <span className="text-xs text-blue-700 font-medium">{selectedRule.name}</span>
+              <span className="text-xs text-blue-700 font-medium">{selectedTask.task_name}</span>
             </div>
           ) : null}
           

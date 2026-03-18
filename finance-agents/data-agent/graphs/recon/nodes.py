@@ -138,7 +138,7 @@ async def check_file_node_for_recon(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def recon_task_execution_node(state: AgentState) -> dict:
-    """调用 MCP 工具 recon_task_execution 执行对账任务。
+    """调用 MCP 工具 recon_execute 执行对账任务。
 
     根据规则和文件匹配结果执行对账，生成差异报告。
     """

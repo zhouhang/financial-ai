@@ -1,39 +1,31 @@
 """
-Rules MCP 工具定义和实现
+Rules MCP 工具定义和实现。
 
-合并了原 rules 和 agent_rules 两个模块的功能：
-- get_rule_from_bus    : 从 bus_rules 表获取规则（支持所有 rule_type）
-- list_digital_employees  : 获取数字员工列表（bus_agent_rules 表）
-- list_rules_by_employee  : 按数字员工获取规则列表（bus_agent_rules 表）
+- get_rule         : 从 rule_detail 表获取指定 rule_code 的规则详情
+- list_user_tasks   : 获取当前用户可用的任务列表
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp import Tool
 
-from db_config import get_db_connection
 from auth.jwt_utils import get_user_from_token
+from db_config import get_db_connection
 
 logger = logging.getLogger("tools.rules")
 
-# ── bus_rules 规则缓存 ────────────────────────────────────────────────────────
-_rule_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+_rule_cache: Dict[Tuple[str, Optional[str]], Optional[Dict[str, Any]]] = {}
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# 工具注册
-# ════════════════════════════════════════════════════════════════════════════
 
 def create_tools() -> list[Tool]:
-    """创建 Rules MCP 工具列表"""
+    """创建 Rules MCP 工具列表。"""
     return [
         Tool(
-            name="get_rule_from_bus",
-            description=(
-                "从 bus_rules 表获取指定 rule_code 的规则完整记录。"
-            ),
+            name="get_rule",
+            description="从 rule_detail 表获取指定 rule_code 的规则详情。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -43,15 +35,15 @@ def create_tools() -> list[Tool]:
                     },
                     "auth_token": {
                         "type": "string",
-                        "description": "JWT token，用于校验用户身份（可选）",
+                        "description": "JWT token，用于优先匹配当前用户的规则（可选）",
                     },
                 },
                 "required": ["rule_code"],
             },
         ),
         Tool(
-            name="list_digital_employees",
-            description="获取数字员工列表。从 bus_agent_rules 表中查询 type=1 的数字员工记录。需要登录 token。",
+            name="list_user_tasks",
+            description="获取当前用户可用的任务列表。需要登录 token。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -63,112 +55,174 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token"],
             },
         ),
-        Tool(
-            name="list_rules_by_employee",
-            description=(
-                "根据数字员工 code 获取对应的规则列表。"
-                "从 bus_agent_rules 表中查询指定 parent_code 的规则记录。需要登录 token。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {
-                        "type": "string",
-                        "description": "JWT token，用户登录后获取的身份证书",
-                    },
-                    "employee_code": {
-                        "type": "string",
-                        "description": "数字员工的 code（parent_code）",
-                    },
-                },
-                "required": ["auth_token", "employee_code"],
-            },
-        ),
     ]
 
 
 async def handle_tool_call(name: str, arguments: dict) -> dict:
-    """统一工具调用入口"""
+    """统一工具调用入口。"""
     try:
-        if name == "get_rule_from_bus":
-            return await _handle_get_rule_from_bus(arguments)
-        elif name == "list_digital_employees":
-            return await _handle_list_digital_employees(arguments)
-        elif name == "list_rules_by_employee":
-            return await _handle_list_rules_by_employee(arguments)
-        else:
-            return {"error": f"未知的工具: {name}"}
+        if name == "get_rule":
+            return await _handle_get_rule(arguments)
+        if name == "list_user_tasks":
+            return await _handle_list_user_tasks(arguments)
+        return {"error": f"未知的工具: {name}"}
     except Exception as e:
         logger.error(f"工具调用失败 [{name}]: {e}", exc_info=True)
         return {"error": f"工具调用失败: {str(e)}"}
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# bus_rules：规则查询
-# ════════════════════════════════════════════════════════════════════════════
+def _normalize_rule_payload(rule_payload: Any) -> Any:
+    """将数据库中的 JSON 规则统一为 Python 对象。"""
+    if isinstance(rule_payload, str):
+        try:
+            return json.loads(rule_payload)
+        except json.JSONDecodeError:
+            return rule_payload
+    return rule_payload
 
-def get_rule_from_bus(rule_code: str) -> Optional[Dict[str, Any]]:
-    """从 bus_rules 表获取指定 rule_code 的规则完整记录
 
-    Args:
-        rule_code: 规则编码
+def _infer_task_type(rule_payload: Any) -> str:
+    """根据规则 JSON 结构推断任务入口。"""
+    rule_obj = _normalize_rule_payload(rule_payload)
+    if not isinstance(rule_obj, dict):
+        return "proc"
+    if "role_desc" in rule_obj or "merge_rules" in rule_obj:
+        return "proc"
+    if "global_settings" in rule_obj and "rules" in rule_obj:
+        return "recon"
+    return "proc"
 
-    Returns:
-        规则字典，包含 id, rule_code, rule, memo 等字段；未找到返回 None
-    """
-    cache_key = rule_code
 
+def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, Any]]:
+    """从 rule_detail 表获取指定 rule_code 的规则完整记录。"""
+    cache_key = (rule_code, user_id)
     if cache_key in _rule_cache:
-        logger.info(f"[Cache] 命中缓存: rule_code={rule_code}")
+        logger.info(f"[Cache] 命中缓存: rule_code={rule_code}, user_id={user_id}")
         return _rule_cache[cache_key]
 
     conn = None
     try:
-        logger.info(f"[SQL] 查询 bus_rules: rule_code={rule_code}")
+        logger.info(f"[SQL] 查询 rule_detail: rule_code={rule_code}, user_id={user_id}")
         conn = get_db_connection()
         cur = conn.cursor()
 
-        sql = """
-            SELECT id, rule_code, rule, memo
-            FROM bus_rules
-            WHERE rule_code = %s
-            LIMIT 1
-        """
-        cur.execute(sql, (rule_code,))
+        if user_id:
+            sql = """
+                SELECT id, user_id, rule_code, rule, rule_type, remark
+                FROM rule_detail
+                WHERE rule_code = %s
+                  AND (user_id = %s OR user_id IS NULL)
+                ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END, id DESC
+                LIMIT 1
+            """
+            cur.execute(sql, (rule_code, user_id, user_id))
+        else:
+            sql = """
+                SELECT id, user_id, rule_code, rule, rule_type, remark
+                FROM rule_detail
+                WHERE rule_code = %s
+                  AND user_id IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+            """
+            cur.execute(sql, (rule_code,))
+
         row = cur.fetchone()
         cur.close()
 
         if row is None:
-            logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}")
+            logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}, user_id={user_id}")
             _rule_cache[cache_key] = None
             return None
 
         result = {
             "id": row[0],
-            "rule_code": row[1],
-            "rule": row[2],
-            "memo": row[3],
+            "user_id": row[1],
+            "rule_code": row[2],
+            "rule": _normalize_rule_payload(row[3]),
+            "rule_type": row[4],
+            "remark": row[5],
         }
         _rule_cache[cache_key] = result
-        logger.info(f"[SQL] 查询成功，已缓存: rule_code={rule_code}")
         return result
-
     except Exception as e:
-        logger.error(f"[SQL] 查询 bus_rules 失败: {e}", exc_info=True)
+        logger.error(f"[SQL] 查询 rule_detail 失败: {e}", exc_info=True)
         raise
     finally:
         if conn:
             conn.close()
 
 
-async def _handle_get_rule_from_bus(arguments: dict) -> dict:
+def _get_user_tasks(user_id: str) -> List[Dict[str, Any]]:
+    """从 user_tasks 表获取当前用户可用任务。"""
+    conn = None
+    try:
+        logger.info(f"[SQL] 开始查询任务列表: user_id={user_id}")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, user_id, task_code, task_name, description
+            FROM user_tasks
+            WHERE user_id = %s OR user_id IS NULL
+            ORDER BY id ASC
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+
+        tasks: List[Dict[str, Any]] = []
+        for row in rows:
+            rule_detail = get_rule(row[2], user_id=user_id)
+            if rule_detail is None:
+                logger.warning(f"[SQL] 跳过未配置 rule_detail 的任务: task_code={row[2]}")
+                continue
+
+            rule_payload = rule_detail.get("rule") or {}
+            file_rule_code = ""
+            if isinstance(rule_payload, dict):
+                file_rule_code = str(rule_payload.get("file_rule_code") or "")
+
+            tasks.append(
+                {
+                    "id": row[0],
+                    "user_id": row[1],
+                    "task_code": row[2],
+                    "task_name": row[3],
+                    "description": row[4],
+                    "task_type": _infer_task_type(rule_payload),
+                    "file_rule_code": file_rule_code,
+                }
+            )
+
+        logger.info(f"[SQL] 查询任务列表成功，返回 {len(tasks)} 条记录")
+        return tasks
+    except Exception as e:
+        logger.error(f"[SQL] 获取任务列表失败: {e}", exc_info=True)
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+async def _handle_get_rule(arguments: dict) -> dict:
     rule_code = arguments.get("rule_code", "").strip()
+    auth_token = arguments.get("auth_token", "").strip()
 
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
 
+    user_id = None
+    if auth_token:
+        user = get_user_from_token(auth_token)
+        if user:
+            user_id = str(user.get("user_id") or user.get("id") or "")
+            if not user_id:
+                user_id = None
+
     try:
-        rule = get_rule_from_bus(rule_code)
+        rule = get_rule(rule_code, user_id=user_id)
         if rule is None:
             return {
                 "success": False,
@@ -186,117 +240,27 @@ async def _handle_get_rule_from_bus(arguments: dict) -> dict:
         return {"success": False, "error": f"获取规则失败: {str(e)}"}
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# bus_agent_rules：数字员工管理
-# ════════════════════════════════════════════════════════════════════════════
-
-def _get_digital_employees() -> List[Dict[str, Any]]:
-    """从 bus_agent_rules 表中获取 type='1' 的数字员工列表"""
-    conn = None
-    try:
-        logger.info("[SQL] 开始查询数字员工列表")
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        sql = """
-            SELECT id, code, name, desc_text, type, memo, file_rule_code, COALESCE("order", 0) as "order"
-            FROM bus_agent_rules
-            WHERE type = '1'
-            ORDER BY COALESCE("order", 999999), id DESC
-        """
-        cur.execute(sql)
-        rows = cur.fetchall()
-        logger.info(f"[SQL] 查询数字员工列表成功，返回 {len(rows)} 条记录")
-
-        employees = [
-            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3], "type": r[4], "memo": r[5], "file_rule_code": r[6], "order": r[7]}
-            for r in rows
-        ]
-        cur.close()
-        return employees
-
-    except Exception as e:
-        logger.error(f"[SQL] 获取数字员工列表失败: {e}", exc_info=True)
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-
-def _get_rules_by_employee_code(employee_code: str) -> List[Dict[str, Any]]:
-    """根据数字员工 code 获取对应的规则列表（parent_code 存储的是 code 字符串）"""
-    conn = None
-    try:
-        logger.info(f"[SQL] 开始查询员工规则列表，employee_code={employee_code}")
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        sql = """
-            SELECT id, code, name, desc_text, type, parent_code, memo, file_rule_code, COALESCE("order", 0) as "order"
-            FROM bus_agent_rules
-            WHERE parent_code = %s
-            ORDER BY COALESCE("order", 999999), id DESC
-        """
-        cur.execute(sql, (employee_code,))
-        rows = cur.fetchall()
-        logger.info(f"[SQL] 查询员工规则列表成功，employee_code={employee_code}，返回 {len(rows)} 条记录")
-
-        rules = [
-            {"id": r[0], "code": r[1], "name": r[2], "desc_text": r[3],
-             "type": r[4], "parent_code": r[5], "memo": r[6], "file_rule_code": r[7], "order": r[8]}
-            for r in rows
-        ]
-        cur.close()
-        return rules
-
-    except Exception as e:
-        logger.error(f"[SQL] 获取规则列表失败，employee_code={employee_code}: {e}", exc_info=True)
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-
-async def _handle_list_digital_employees(arguments: dict) -> dict:
+async def _handle_list_user_tasks(arguments: dict) -> dict:
     auth_token = arguments.get("auth_token", "").strip()
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
-    if not get_user_from_token(auth_token):
+
+    user = get_user_from_token(auth_token)
+    if not user:
         return {"success": False, "error": "token 无效或已过期，请重新登录"}
 
-    try:
-        employees = _get_digital_employees()
-        return {
-            "success": True,
-            "count": len(employees),
-            "employees": employees,
-            "message": f"成功获取 {len(employees)} 个数字员工",
-        }
-    except Exception as e:
-        logger.error(f"获取数字员工列表失败: {e}")
-        return {"success": False, "error": f"获取数字员工列表失败: {str(e)}"}
-
-
-async def _handle_list_rules_by_employee(arguments: dict) -> dict:
-    auth_token = arguments.get("auth_token", "").strip()
-    if not auth_token:
-        return {"success": False, "error": "未提供认证 token，请先登录"}
-    if not get_user_from_token(auth_token):
-        return {"success": False, "error": "token 无效或已过期，请重新登录"}
-
-    employee_code = arguments.get("employee_code", "").strip()
-    if not employee_code:
-        return {"success": False, "error": "employee_code 不能为空"}
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
+        return {"success": False, "error": "token 中缺少用户标识"}
 
     try:
-        rules = _get_rules_by_employee_code(employee_code)
+        tasks = _get_user_tasks(user_id)
         return {
             "success": True,
-            "count": len(rules),
-            "employee_code": employee_code,
-            "rules": rules,
-            "message": f"成功获取 {len(rules)} 条规则",
+            "count": len(tasks),
+            "tasks": tasks,
+            "message": f"成功获取 {len(tasks)} 个任务",
         }
     except Exception as e:
-        logger.error(f"获取规则列表失败: {e}")
-        return {"success": False, "error": f"获取规则列表失败: {str(e)}"}
+        logger.error(f"获取任务列表失败: {e}")
+        return {"success": False, "error": f"获取任务列表失败: {str(e)}"}

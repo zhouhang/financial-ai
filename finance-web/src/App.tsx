@@ -6,11 +6,10 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
 import type {
   Conversation,
-  DigitalEmployee,
-  EmployeeRule,
   Message,
   Task,
   UploadedFile,
+  UserTask,
   WsOutgoing,
 } from './types';
 
@@ -130,9 +129,8 @@ export default function App() {
   /** 规则保存成功提示 */
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   
-  /** 选中的数字员工和规则 */
-  const [selectedEmployee, setSelectedEmployee] = useState<DigitalEmployee | null>(null);
-  const [selectedRule, setSelectedRule] = useState<EmployeeRule | null>(null);
+  /** 选中的任务 */
+  const [selectedTask, setSelectedTask] = useState<UserTask | null>(null);
 
   const isGuest = !authToken;
 
@@ -186,42 +184,15 @@ export default function App() {
     
     const pendingRuleName = localStorage.getItem('pending_rule_name');
     const pendingSourceRuleId = localStorage.getItem('pending_source_rule_id');
-    const pendingThreadId = localStorage.getItem('pending_thread_id');
-    const pendingIsNewRule = localStorage.getItem('pending_is_new_rule') === 'true';
-    
     localStorage.removeItem(STORAGE_KEY_GUEST_CONV);
     localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
     localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
     
     let ruleJustSaved = false;
-    console.log('[handleLoginSuccess] pendingRuleName=', pendingRuleName, 'pendingSourceRuleId=', pendingSourceRuleId, 'pendingIsNewRule=', pendingIsNewRule, 'newToken=', newToken ? 'exists' : 'null');
+    console.log('[handleLoginSuccess] pendingRuleName=', pendingRuleName, 'pendingSourceRuleId=', pendingSourceRuleId, 'newToken=', newToken ? 'exists' : 'null');
     if (pendingRuleName && newToken) {
       try {
-        if (pendingIsNewRule && pendingThreadId) {
-          // 新建规则：从 thread 状态恢复并保存
-          console.log('[handleLoginSuccess] 保存新建规则, threadId=', pendingThreadId);
-          const response = await fetch('/api/save-pending-rule', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${newToken}`,
-            },
-            body: JSON.stringify({
-              thread_id: pendingThreadId,
-              rule_name: pendingRuleName,
-            }),
-          });
-          const data = await response.json();
-          console.log('[handleLoginSuccess] save-pending-rule响应:', data);
-          if (data.success) {
-            ruleJustSaved = true;
-            localStorage.removeItem('pending_rule_name');
-            localStorage.removeItem('pending_thread_id');
-            localStorage.removeItem('pending_is_new_rule');
-          } else {
-            console.error('保存新建规则失败:', data.error || data.detail || '未知错误');
-          }
-        } else if (pendingSourceRuleId) {
+        if (pendingSourceRuleId) {
           // 推荐规则：复制
           console.log('[handleLoginSuccess] 复制规则, sourceRuleId=', pendingSourceRuleId);
           const response = await fetch('/api/copy-rule', {
@@ -577,19 +548,11 @@ export default function App() {
           // 尝试从 AI 消息中解析任务
           parseTasksFromMessage(newContent);
 
-          // 游客保存规则：收到 SAVE_RULE 或 SAVE_NEW_RULE 时自动弹出登录框并存储待保存信息
+          // 游客保存规则：收到 SAVE_RULE 时自动弹出登录框并存储待保存信息
           const saveRuleMatch = newContent.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
-          const saveNewRuleMatch = newContent.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
           if (saveRuleMatch) {
             localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
             localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
-            setLoginModalTitleHint('登录后可完成保存规则');
-            setIsLoginModalOpen(true);
-          } else if (saveNewRuleMatch) {
-            localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
-            // 优先使用服务端返回的 thread_id（与 LangGraph 状态一致）
-            localStorage.setItem('pending_thread_id', (data.thread_id as string) || targetConvId);
-            localStorage.setItem('pending_is_new_rule', 'true');
             setLoginModalTitleHint('登录后可完成保存规则');
             setIsLoginModalOpen(true);
           }
@@ -694,7 +657,7 @@ export default function App() {
               const current = prev.find((c) => c.id === data.thread_id);
               const rest = prev.filter((c) => c.id !== data.thread_id);
               if (current) {
-                return [{ ...current, id: data.conversation_id }, ...rest];
+                return [{ ...current, id: data.conversation_id as string }, ...rest];
               }
               // conversation_created 可能早于 handleSendMessage 的 state 更新，使用暂存的会话
               const pending = pendingSendConvRef.current;
@@ -877,9 +840,20 @@ export default function App() {
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
       const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId, selectedEmployee?.code, selectedRule?.code, selectedRule?.name, selectedRule?.file_rule_code);
+      sendMessage(
+        text,
+        activeConvId,
+        shouldResume,
+        authToken || undefined,
+        filesToSend,
+        conversationId,
+        selectedTask?.task_type,
+        selectedTask?.task_code,
+        selectedTask?.task_name,
+        selectedTask?.file_rule_code,
+      );
     },
-    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedEmployee, selectedRule]
+    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedTask]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -995,12 +969,10 @@ export default function App() {
     }
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
 
-  // ── 选择数字员工规则 ──────────────────────────────────────────
-  const handleSelectRule = useCallback((employee: DigitalEmployee, rule: EmployeeRule) => {
-    setSelectedEmployee(employee);
-    setSelectedRule(rule);
-    console.log('选中规则:', employee.name, '-', rule.name);
-    // TODO: 可以在这里触发其他操作，如发送消息给AI、开始新对话等
+  // ── 选择任务 ────────────────────────────────────────────────
+  const handleSelectTask = useCallback((task: UserTask) => {
+    setSelectedTask(task);
+    console.log('选中任务:', task.task_type, '-', task.task_name);
   }, []);
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
@@ -1041,8 +1013,8 @@ export default function App() {
         onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
-        onSelectRule={handleSelectRule}
-        selectedRuleCode={selectedRule?.code}
+        onSelectTask={handleSelectTask}
+        selectedTaskCode={selectedTask?.task_code}
         authToken={authToken}
       />
       <ChatArea
@@ -1064,8 +1036,7 @@ export default function App() {
           setIsLoginModalOpen(true);
         }}
         streamingMessageId={streamingMessageId}
-        selectedEmployee={selectedEmployee}
-        selectedRule={selectedRule}
+        selectedTask={selectedTask}
       />
       <LoginModal
         isOpen={isLoginModalOpen}

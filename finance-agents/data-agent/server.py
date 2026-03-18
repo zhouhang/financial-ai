@@ -20,14 +20,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from config import HOST, PORT, MAX_FILE_SIZE
-from chat.reconciliation_chat_handler import resolve_graph_input
 from graphs.main_graph import create_app
-from models import ReconciliationPhase, UserIntent
 from utils.db import ensure_tables
-from utils.workflow_phase_policy import (
-    can_reset_analysis_state,
-    is_workflow_phase,
-)
 from tools.mcp_client import (
     auth_login as mcp_auth_login,
     auth_register as mcp_auth_register,
@@ -49,6 +43,24 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _build_legacy_reconciliation_state_reset() -> dict[str, Any]:
+    """Clear legacy reconciliation-rule workflow state."""
+    return {
+        "file_analyses": [],
+        "suggested_mappings": {},
+        "confirmed_mappings": {},
+        "rule_config_items": [],
+        "generated_schema": None,
+        "workflow_context": {},
+        "selected_rule_id": None,
+        "using_recommended_rule": False,
+        "waiting_for_rule_name": False,
+        "editing_rule_id": None,
+        "editing_rule_name": None,
+        "editing_rule_template": None,
+    }
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
@@ -207,7 +219,7 @@ async def upload_file(
             config = {"configurable": {"thread_id": thread_id}}
             langgraph_app.update_state(config, {
                 "uploaded_files": [],
-                "file_analyses": [],
+                **_build_legacy_reconciliation_state_reset(),
             })
             logger.info(f"已同步清空 state.uploaded_files (thread={thread_id})")
         except Exception as e:
@@ -326,7 +338,7 @@ async def websocket_chat(ws: WebSocket):
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             conversation_id = data.get("conversation_id", "")  # 会话 ID
-            employee_code = data.get("employee_code", "")  # 数字员工编码（如 "agent-recog"）
+            employee_code = data.get("employee_code", "")  # 任务类型编码（如 "proc" / "recon"）
             rule_code = data.get("rule_code", "")  # 规则编码（如 "recognition"）
             rule_name = data.get("rule_name", "")  # 规则名称（如 "手工凭证整理"）
             file_rule_code = data.get("file_rule_code", "")  # 文件校验规则编码
@@ -361,39 +373,8 @@ async def websocket_chat(ws: WebSocket):
                 continue  # 认证验证完成，不继续处理消息
 
             config = {"configurable": {"thread_id": thread_id}}
-            
-            # ⚠️ 不再在收到消息时清空 _thread_files：用户可能刚上传完文件再发消息，
-            # 若此时 phase=COMPLETED 会误清空刚上传的文件，导致「未检测到文件上传」
             file_infos = _thread_files.get(thread_id, [])
             logger.info(f"🔍 [DEBUG] thread_id={thread_id}, _thread_files keys={list(_thread_files.keys())}, file_infos={len(file_infos)} files")
-            # ⚠️ 仅在用户发送新消息（非 resume）且对账已完成时清空旧文件
-            # 用户回复「不要」是 resume，表示不采纳规则、返回重新配置，应保留文件
-            try:
-                snapshot = langgraph_app.get_state(config)
-                current_phase = (snapshot.values.get("phase") or "").strip()
-                state_uploaded_files = snapshot.values.get("uploaded_files", []) if snapshot else []
-                if (
-                    not is_resume
-                    and current_phase == ReconciliationPhase.COMPLETED.value
-                    and not msg_attachments
-                ):
-                    _thread_files[thread_id] = []
-                    _thread_files_snapshot[thread_id] = []
-                    file_infos = []
-                    logger.info(f"对账已完成且为新消息，清空旧文件 (thread={thread_id})")
-                # 文件校验失败后，节点会把 state.uploaded_files 清空并回到 FILE_ANALYSIS。
-                # 若此时用户重新上传，优先信任本次消息附件，避免复用 _thread_files 的旧文件。
-                if (
-                    current_phase == ReconciliationPhase.FILE_ANALYSIS.value
-                    and not state_uploaded_files
-                    and msg_attachments
-                ):
-                    _thread_files[thread_id] = []
-                    _thread_files_snapshot[thread_id] = []
-                    file_infos = []
-                    logger.info(f"检测到 FILE_ANALYSIS 且 state 无文件，清空缓存文件以接收新上传 (thread={thread_id})")
-            except Exception as e:
-                logger.warning(f"获取 phase 失败: {e}")
             # 前端附件字段是 path；兼容 file_path/path 两种键，且优先使用本次附件覆盖缓存
             if msg_attachments:
                 attachment_files = [
@@ -423,49 +404,28 @@ async def websocket_chat(ws: WebSocket):
             files_changed = bool(msg_attachments) and (set(files) != set(previous_files))
             if files_changed and files:
                 logger.info(f"检测到文件列表变化 (thread={thread_id}): 之前={previous_files}, 现在={files}")
-                # 仅在文件上传/重传相关阶段清空分析上下文，避免 FIELD_MAPPING/RULE_CONFIG 中丢状态。
                 try:
-                    snapshot = langgraph_app.get_state(config)
-                    current_phase = (snapshot.values.get("phase") or "").strip() if snapshot else ""
-                except Exception:
-                    current_phase = ""
-
-                if can_reset_analysis_state(current_phase):
-                    try:
-                        langgraph_app.update_state(config, {
-                            "file_analyses": [],
-                            "suggested_mappings": {},
-                            "confirmed_mappings": {},
-                            "rule_config_items": [],
-                            "generated_schema": None,
-                            "phase": ReconciliationPhase.FILE_ANALYSIS.value,
-                        })
-                        logger.info(f"已清空 LangGraph 状态中的旧分析结果 (thread={thread_id}, phase={current_phase})")
-                    except Exception as e:
-                        logger.warning(f"清空 LangGraph 状态失败: {e}")
-                else:
-                    logger.info(
-                        f"检测到文件变化但当前 phase={current_phase}，跳过清空映射/分析状态，避免中断当前流程"
-                    )
+                    langgraph_app.update_state(config, {
+                        "uploaded_files": file_infos,
+                        **_build_legacy_reconciliation_state_reset(),
+                    })
+                    logger.info(f"已清空 LangGraph 状态中的旧分析结果 (thread={thread_id})")
+                except Exception as e:
+                    logger.warning(f"清空 LangGraph 状态失败: {e}")
 
                 # 更新快照
                 _thread_files_snapshot[thread_id] = files
 
             try:
-                requested_resume = is_resume
-                input_data, is_resume = await resolve_graph_input(
-                    langgraph_app=langgraph_app,
-                    config=config,
-                    user_msg=user_msg,
-                    is_resume=is_resume,
-                    auth_token=auth_token,
-                    file_infos=file_infos,
-                    has_attachments=bool(msg_attachments),
-                )
+                if is_resume:
+                    input_data = Command(resume=user_msg)
+                else:
+                    input_data = {
+                        "messages": [HumanMessage(content=user_msg)],
+                        "uploaded_files": file_infos,
+                    }
             
                 # ⚠️ 将前端传入的参数放入 input_data，确保 intent_router 能立即获取
-                # （update_state 是异步的，可能在下个节点才生效）
-                # 注意：如果 input_data 是 Command 对象（resume 场景），则无法注入参数
                 if isinstance(input_data, dict):
                     if file_rule_code:
                         input_data["file_rule_code"] = file_rule_code
@@ -478,28 +438,7 @@ async def websocket_chat(ws: WebSocket):
                     logger.info(f"[DEBUG] input_data 已注入参数: file_rule_code={file_rule_code}, rule_code={rule_code}")
                 else:
                     logger.warning(f"[DEBUG] input_data 不是 dict 类型，无法注入参数: {type(input_data)}")
-            
-                # 游客在 workflow 中输入无关内容后会退出流程（转为非 resume 且不带文件）。
-                # 这里清空 thread 级文件缓存，避免下一条"对账"复用旧文件并重放展示。
-                try:
-                    should_clear_guest_files = (
-                        not auth_token
-                        and not msg_attachments
-                        and is_workflow_phase(current_phase)
-                        and not is_resume
-                        and isinstance(input_data, dict)
-                        and not input_data.get("uploaded_files")
-                    )
-                    if should_clear_guest_files:
-                        _thread_files[thread_id] = []
-                        _thread_files_snapshot[thread_id] = []
-                        logger.info(
-                            "游客退出 workflow 后清空 thread 文件缓存 "
-                            f"(thread={thread_id}, requested_resume={requested_resume})"
-                        )
-                except Exception as e:
-                    logger.warning(f"退出 workflow 后清空 thread 文件缓存失败: {e}")
-            
+
                 # ⚙️ 同时通过 update_state 写入 state（用于后续 resume 时恢复）
                 if employee_code or rule_code or rule_name or file_rule_code:
                     try:
@@ -980,71 +919,6 @@ async def copy_rule(
         return result
     except Exception as e:
         logger.error(f"复制规则失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/save-pending-rule")
-async def save_pending_rule(
-    body: dict = Body(...),
-    authorization: Optional[str] = Header(None),
-):
-    """从 LangGraph 线程状态恢复并保存新建规则（游客创建规则后登录）"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="未提供认证令牌")
-    token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    thread_id = body.get("thread_id")
-    rule_name = body.get("rule_name")
-    if not thread_id or not rule_name:
-        raise HTTPException(status_code=400, detail="缺少 thread_id 或 rule_name")
-    try:
-        config = {"configurable": {"thread_id": thread_id}}
-        snapshot = langgraph_app.get_state(config)
-        if not snapshot or not snapshot.values:
-            raise HTTPException(status_code=404, detail="未找到对应的会话状态，规则可能已过期")
-        state = snapshot.values
-        schema = state.get("generated_schema")
-        if not schema:
-            raise HTTPException(status_code=404, detail="会话中无待保存的规则")
-        from graphs.reconciliation.helpers import (
-            _rewrite_schema_transforms_to_mapped_fields,
-            _build_field_mapping_text,
-            _build_rule_config_text,
-            _expand_file_patterns,
-            _merge_json_snippets,
-            _validate_and_deduplicate_rules,
-        )
-        schema_to_save = schema.copy()
-        schema_to_save["description"] = rule_name
-        config_items = state.get("rule_config_items", [])
-        if config_items:
-            schema_to_save = _merge_json_snippets(schema_to_save, config_items)
-            schema_to_save = _validate_and_deduplicate_rules(schema_to_save)
-        _rewrite_schema_transforms_to_mapped_fields(schema_to_save)
-        mappings = state.get("confirmed_mappings") or state.get("suggested_mappings", {})
-        schema_to_save["field_mapping_text"] = _build_field_mapping_text(mappings)
-        schema_to_save["rule_config_text"] = _build_rule_config_text(config_items)
-        for src in ("business", "finance"):
-            patterns = schema_to_save.get("data_sources", {}).get(src, {}).get("file_pattern", [])
-            expanded = []
-            for p in patterns:
-                expanded.extend(_expand_file_patterns(p))
-            if "data_sources" not in schema_to_save:
-                schema_to_save["data_sources"] = {}
-            if src not in schema_to_save["data_sources"]:
-                schema_to_save["data_sources"][src] = {}
-            schema_to_save["data_sources"][src]["file_pattern"] = list(set(expanded))
-        result = await call_mcp_tool("save_reconciliation_rule", {
-            "auth_token": token,
-            "name": rule_name,
-            "description": rule_name,
-            "rule_template": schema_to_save,
-            "visibility": "private",
-        })
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"保存待处理规则失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

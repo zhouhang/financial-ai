@@ -27,11 +27,10 @@ function formatTime(date: Date): string {
   });
 }
 
-/** 移除 SAVE_RULE / SAVE_NEW_RULE 内部标记，不展示给用户 */
+/** 移除 SAVE_RULE 内部标记，不展示给用户 */
 function stripSaveRuleTag(content: string): string {
   return content
     .replace(/\[SAVE_RULE:[^\]]+\]\s*/g, '')
-    .replace(/\[SAVE_NEW_RULE:[^\]]+\]\s*/g, '')
     .trim();
 }
 
@@ -227,6 +226,7 @@ function mergeColumnTables(tables: { filename: string; columns: string[] }[]): P
 
   return { headers, rows, isColumnTable: true };
 }
+void mergeColumnTables;
 
 function HorizontalColumnTable({
   filename,

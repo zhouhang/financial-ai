@@ -74,7 +74,7 @@ def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
 async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
     """从 PG（通过 MCP 工具）加载规则。
     
-    从 bus_rules 表获取规则记录，包含：
+    从 rule_detail 表获取规则记录，包含：
     - 文件校验规则（file_validation_rules）
     - 整理规则（role_desc, rules）
     
@@ -88,7 +88,7 @@ async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] 
     from tools.mcp_client import get_file_validation_rule
 
     try:
-        # 获取规则（get_rule_from_bus 返回完整规则记录）
+        # 获取规则（get_rule 返回完整规则记录）
         rule_result = await get_file_validation_rule(rule_code=rule_code, auth_token=auth_token)
         logger.info(f"[public_nodes] rule_code={rule_code}; 获取规则结果: success={rule_result.get('success')}")
         
@@ -98,18 +98,18 @@ async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] 
         
         # 解析规则内容
         rule_data = rule_result.get("data") or {}
-        # data 包含: id, rule_code, rule, memo
+        # data 包含: id, user_id, rule_code, rule, rule_type, remark
         rule_content = rule_data.get("rule") or {}
         
         combined_rule = {
             "rule_code": rule_code,
             # 文件校验规则
             "file_validation_rules": rule_content.get("file_validation_rules", {}),
-            "file_rule_memo": rule_data.get("memo", ""),
+            "file_rule_memo": rule_data.get("remark", ""),
             # 整理规则
             "role_desc": rule_content.get("role_desc", ""),
             "rules": rule_content.get("rules", []),
-            "proc_rule_memo": rule_data.get("memo", ""),
+            "proc_rule_memo": rule_data.get("remark", ""),
         }
         
         logger.info(
@@ -182,9 +182,9 @@ async def get_rule_node(state: AgentState) -> dict:
 async def check_file_node(state: AgentState) -> dict:
     """校验已上传文件是否满足规则要求。
 
-    通过调用 MCP 工具 validate_uploaded_files 执行校验：
+    通过调用 MCP 工具 validate_files 执行校验：
     - 读取每个文件的列名
-    - 调用 validate_uploaded_files tool 进行全量列名精确匹配
+    - 调用 validate_files tool 进行全量列名精确匹配
     - 通过：phase → EXECUTING
     - 不通过：回复错误原因，phase → FILE_CHECK_FAILED
     
@@ -270,8 +270,8 @@ async def check_file_node(state: AgentState) -> dict:
                 "proc_ctx": ctx,
             }
 
-    # ── 4. 调用 MCP tool validate_uploaded_files 执行全量列名精确匹配 ─────────
-    from tools.mcp_client import validate_uploaded_files as mcp_validate_files
+    # ── 4. 调用 MCP tool validate_files 执行全量列名精确匹配 ──────────────────
+    from tools.mcp_client import validate_files as mcp_validate_files
 
     try:
         validate_result = await mcp_validate_files(

@@ -82,24 +82,14 @@ export interface WsOutgoing {
 
 export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
 
-// ── 数字员工和规则类型 ───────────────────────────────────────────────────
+// ── 任务类型 ──────────────────────────────────────────────────────────────
 
-export interface DigitalEmployee {
+export interface UserTask {
   id: number;
-  code: string;
-  name: string;
-  desc_text?: string;
-  type: string;
-  memo?: string;
-}
-
-export interface EmployeeRule {
-  id: number;
-  code: string;
-  name: string;
-  desc_text?: string;
-  type: string;
-  parent_code?: string;
-  memo?: string;
-  file_rule_code?: string;  // 文件校验规则编码
+  user_id?: string | null;
+  task_code: string;
+  task_name: string;
+  description?: string;
+  task_type: 'proc' | 'recon' | string;
+  file_rule_code?: string;
 }

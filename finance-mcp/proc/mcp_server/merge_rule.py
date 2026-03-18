@@ -7,7 +7,7 @@
    根据 sync_rule.json 中各规则的 merge 节点配置，将新生成文件与已上传的目标文件进行合并
 
 2. 批量文件 merge（新增模式）：
-   根据 merge.json 配置（存储在 bus_rules 表，rule_code='verif_recog_merge'），
+   根据 merge.json 配置（存储在 rule_detail 表，rule_code='verif_recog_merge'），
    将文件校验阶段识别出的同类表（相同 table_name）的多个文件合并为一个文件
 
 配置说明：
@@ -37,20 +37,20 @@ logger = logging.getLogger(__name__)
 
 def load_merge_rules_from_bus(rule_code: str) -> Optional[dict]:
     """
-    从 bus_rules 表加载 merge.json 配置
+    从 rule_detail 表加载 merge.json 配置
 
-    使用 tools.rules 中的 get_rule_from_bus 函数，复用缓存机制。
+    使用 tools.rules 中的 get_rule 函数，复用缓存机制。
 
     Args:
-        rule_code: 规则编码，用于从 bus_rules 表中查找
+        rule_code: 规则编码，用于从 rule_detail 表中查找
 
     Returns:
         merge.json 的完整内容，如果未找到则返回 None
     """
     try:
-        from tools.rules import get_rule_from_bus
+        from tools.rules import get_rule
 
-        rule_record = get_rule_from_bus(rule_code)
+        rule_record = get_rule(rule_code)
         if rule_record is None:
             logger.warning(f"[merge_rule] 未找到 rule_code='{rule_code}' 的合并规则")
             return None
