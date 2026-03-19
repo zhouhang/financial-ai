@@ -206,7 +206,7 @@ class AgentState(TypedDict, total=False):
 
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值
-    selected_employee_code: Optional[str]  # 选中的任务类型，如 "proc" / "recon"
+    selected_task_code: Optional[str]  # 选中的任务类型，如 "proc" / "recon"
     selected_rule_name: Optional[str]
     selected_rule_code: Optional[str]  # 选中的任务编码，如 "verif_recog"
     file_rule_code: Optional[str]  # 文件校验规则编码，从 rule_detail.rule 中解析

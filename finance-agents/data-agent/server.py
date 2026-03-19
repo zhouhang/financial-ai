@@ -338,12 +338,12 @@ async def websocket_chat(ws: WebSocket):
             auth_token = data.get("auth_token", "")
             msg_attachments = data.get("attachments", [])  # 前端随消息发送的附件（含 path）
             conversation_id = data.get("conversation_id", "")  # 会话 ID
-            employee_code = data.get("employee_code", "")  # 任务类型编码（如 "proc" / "recon"）
+            task_code = data.get("employee_code", "")  # 任务类型编码（如 "proc" / "recon"）
             rule_code = data.get("rule_code", "")  # 规则编码（如 "recognition"）
             rule_name = data.get("rule_name", "")  # 规则名称（如 "手工凭证整理"）
             file_rule_code = data.get("file_rule_code", "")  # 文件校验规则编码
             
-            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
+            logger.info(f"处理消息: user_msg='{user_msg[:50]}...', thread_id={thread_id}, is_resume={is_resume}, has_token={bool(auth_token)}, attachments={len(msg_attachments)}, task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
 
             # ⚠️ 新增：如果消息为空但有token，这是一个认证验证请求（来自WebSocket连接时）
             if not user_msg and not is_resume and auth_token:
@@ -433,18 +433,18 @@ async def websocket_chat(ws: WebSocket):
                         input_data["selected_rule_code"] = rule_code
                     if rule_name:
                         input_data["selected_rule_name"] = rule_name
-                    if employee_code:
-                        input_data["selected_employee_code"] = employee_code
+                    if task_code:
+                        input_data["selected_task_code"] = task_code
                     logger.info(f"[DEBUG] input_data 已注入参数: file_rule_code={file_rule_code}, rule_code={rule_code}")
                 else:
                     logger.warning(f"[DEBUG] input_data 不是 dict 类型，无法注入参数: {type(input_data)}")
 
                 # ⚙️ 同时通过 update_state 写入 state（用于后续 resume 时恢复）
-                if employee_code or rule_code or rule_name or file_rule_code:
+                if task_code or rule_code or rule_name or file_rule_code:
                     try:
                         update_state = {}
-                        if employee_code:
-                            update_state["selected_employee_code"] = employee_code
+                        if task_code:
+                            update_state["selected_task_code"] = task_code
                         if rule_code:
                             update_state["selected_rule_code"] = rule_code
                         if rule_name:
@@ -452,9 +452,9 @@ async def websocket_chat(ws: WebSocket):
                         if file_rule_code:
                             update_state["file_rule_code"] = file_rule_code
                         langgraph_app.update_state(config, update_state)
-                        logger.info(f"已写入 employee_code={employee_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code} 到 state (thread={thread_id})")
+                        logger.info(f"已写入 task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code} 到 state (thread={thread_id})")
                     except Exception as e:
-                        logger.warning(f"写入 employee/rule code/name 失败: {e}")
+                        logger.warning(f"写入 task/rule code/name 失败: {e}")
 
                 logger.info(f"开始执行 LangGraph: thread_id={thread_id}")
                 

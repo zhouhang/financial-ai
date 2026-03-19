@@ -415,8 +415,8 @@ async def intent_router(state: AgentState) -> dict:
         状态更新字典，包含识别的意图和相应的状态转换
     """
     # ====== 新增：前端显式选择任务类型时，直接路由（跳过 LLM 意图识别）======
-    selected_employee_code = state.get("selected_employee_code", "")
-    if selected_employee_code == UserIntent.PROC.value:
+    selected_task_code = state.get("selected_task_code", "")
+    if selected_task_code == UserIntent.PROC.value:
         # 用户选择了"数据整理员工"，直接进入 proc 子图
         rule_code = state.get("selected_rule_code") or ""
         rule_name = state.get("selected_rule_name") or ""
@@ -457,7 +457,7 @@ async def intent_router(state: AgentState) -> dict:
             },
         }
 
-    if selected_employee_code == UserIntent.RECON.value:
+    if selected_task_code == UserIntent.RECON.value:
         # 用户选择了"对账执行员工"，直接进入 recon 子图
         rule_code = state.get("selected_rule_code") or ""
         rule_name = state.get("selected_rule_name") or ""
