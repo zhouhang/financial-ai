@@ -37,7 +37,7 @@ def create_tools() -> list[Tool]:
                         "description": "JWT token，用于优先匹配当前用户的规则（可选）",
                     },
                 },
-                "required": ["rule_code"],
+                "required": ["rule_code", "auth_token"],
             },
         ),
         Tool(
@@ -251,14 +251,16 @@ async def _handle_get_rule(arguments: dict) -> dict:
 
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    user_id = None
-    if auth_token:
-        user = get_user_from_token(auth_token)
-        if user:
-            user_id = str(user.get("user_id") or user.get("id") or "")
-            if not user_id:
-                user_id = None
+    user = get_user_from_token(auth_token)
+    if not user:
+        return {"success": False, "error": "token 无效或已过期，请重新登录"}
+
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
+        return {"success": False, "error": "token 中缺少用户标识"}
 
     try:
         rule = get_rule(rule_code, user_id=user_id)

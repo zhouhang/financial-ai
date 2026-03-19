@@ -17,10 +17,8 @@ from models import (
 )
 from tools.mcp_client import (
     list_available_rules,
-    get_rule_detail,
     auth_login,
     auth_register,
-    delete_rule,
     admin_login,
     create_company,
     create_department,
@@ -55,7 +53,11 @@ SYSTEM_PROMPT_NOT_LOGGED_IN = """\
 请根据用户的意图判断下一步操作：
 - 如果用户明确想登录，回复 JSON: {{"intent": "show_login_form"}}
 - 如果用户明确想注册，回复 JSON: {{"intent": "show_register_form"}}
-- 如果用户在**闲聊或一般对话**（如打招呼、说心情、随便聊），**正常简短回复即可**，不要主动介绍自己或列举功能
+- 如果用户在**闲聊或一般对话**（如打招呼、说心情、随便聊），回复格式：
+  1. 先简短回应用户的问候
+  2. 介绍自己：我是 Tally，专业的智能财务助手
+  3. 介绍功能：可以帮助您完成财务数据整理和对账工作
+  4. 引导登录使用：点击右上角「登录」按钮，登录后选择任务类型和数据规则即可开始处理
 - 仅当用户**明确要求**自我介绍、介绍功能（如「你是谁」「介绍一下」「你能做什么」「帮助」）时，才用完整格式介绍你是 Tally 及你的功能
 
 ⚠️ 严格禁止（违反此规则是严重错误）：
@@ -73,22 +75,22 @@ SYSTEM_PROMPT = """\
 当前登录用户：{username}
 
 你可以做以下事情：
-1. 查看可用规则列表
-2. 删除规则
-3. 执行数据整理任务
-4. 执行对账任务
-5. 回答一般使用问题
+1. 执行数据整理任务
+2. 执行对账任务
+3. 回答一般使用问题
 
 当前已有规则包括：
 {available_rules}
 
 请根据用户的意图判断下一步操作：
-- 如果用户想**查看规则列表**（如“我的规则列表”、“看看有哪些规则”、“规则列表”），回复 JSON: {{"intent": "list_rules"}}
-- 如果用户想删除规则，回复 JSON: {{"intent": "delete_rule", "rule_name": "规则名称"}}
 - 如果用户想**执行数据整理**（如"数据整理"、"核算整理"、"使用核算规则"），回复 JSON: {{"intent": "proc", "rule_code": "recognition"}}
 - 如果用户想**执行对账**（如“开始对账”、“执行对账”、“用XX规则对账”），回复 JSON: {{"intent": "recon", "rule_code": "规则编码"}}
-- 如果用户在闲聊或一般对话（如打招呼、夸赞、闲聊），**正常简短回复即可**，不要主动介绍自己或列举规则。
-- 仅当用户**明确要求**自我介绍、介绍功能、展示规则列表（如「介绍一下你自己」「你能做什么」「有哪些规则」「看看规则」）时，才用完整格式回复：
+- 如果用户在闲聊或一般对话（如打招呼、夸赞、闲聊），回复格式：
+  1. 先简短回应用户的问候
+  2. 介绍自己：我是 Tally，专业的智能财务助手
+  3. 介绍功能：可以帮助您完成财务数据整理和对账工作
+  4. 引导使用：选择任务类型（数据整理/数据对账）和数据规则即可开始处理
+- 仅当用户**明确要求**自我介绍、介绍功能（如「介绍一下你自己」「你能做什么」）时，才用完整格式回复：
   1. 用「你好，{username}！我是 Tally」开头
   2. 简要介绍你能做的事
   3. 说明当前已有规则
@@ -97,7 +99,6 @@ SYSTEM_PROMPT = """\
 
 注意：
 - 只在明确判断意图时才返回 JSON，否则正常对话
-- 删除规则时，必须从用户输入中提取准确的规则名称
 - 对账和数据整理都依赖具体规则；如果无法确认规则编码，不要编造
 - 只返回一条消息，不要分多次回复
 
@@ -297,7 +298,7 @@ async def auth_handler(state: AgentState) -> dict | None:
     last_user_msg = messages[-1].content if messages and hasattr(messages[-1], "content") else ""
 
     # 如果已登录，返回 None（由 intent_router 处理）
-    if auth_token and current_user:
+    if auth_token:
         return None
 
     # 解析表单数据
@@ -439,6 +440,20 @@ async def intent_router(state: AgentState) -> dict:
 
         logger.info(f"[intent_router] 前端显式选择 {UserIntent.PROC.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
 
+        if not uploaded:
+            rule_display = rule_name or rule_code
+            welcome_msg = (
+                "📊 **开始数据整理任务**\n\n"
+                f"已选择规则：**{rule_display}**\n\n"
+                "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
+            )
+            return {
+                "messages": [AIMessage(content=welcome_msg)],
+                "user_intent": UserIntent.UNKNOWN.value,
+                "selected_rule_code": rule_code,
+                "selected_rule_name": rule_name,
+            }
+
         # 从 state 获取 file_rule_code（必须在 AgentState schema 中声明）
         file_rule_code = state.get("file_rule_code") or ""
 
@@ -481,15 +496,21 @@ async def intent_router(state: AgentState) -> dict:
         logger.info(f"[intent_router] 前端显式选择 {UserIntent.RECON.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
 
         # 构建规则展示文本
-        rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
+        rule_display = rule_name or rule_code
 
-        # 检查是否有上传的文件
+        # 未上传文件时只做提示，不进入子图，避免重复出现文件校验失败提示。
         if not uploaded:
             welcome_msg = (
                 "📊 **开始对账执行任务**\n\n"
                 f"已选择规则：**{rule_display}**\n\n"
                 "请先上传需要对账的数据文件（Excel 或 CSV 格式）。"
             )
+            return {
+                "messages": [AIMessage(content=welcome_msg)],
+                "user_intent": UserIntent.UNKNOWN.value,
+                "selected_rule_code": rule_code,
+                "selected_rule_name": rule_name,
+            }
         else:
             welcome_msg = (
                 "📊 **开始对账执行任务**\n\n"
@@ -525,7 +546,7 @@ async def intent_router(state: AgentState) -> dict:
     logger.info(f"[DEBUG] list_available_rules 返回 {len(rules)} 条规则: {[r.get('name') for r in rules]}")
     rules_text = "\n".join([f"• {r['name']}" for r in rules]) if rules else "暂无已有规则"
 
-    username = current_user.get("username", "用户")
+    username = current_user.get("username", "用户") if isinstance(current_user, dict) else "用户"
     # 使用 replace 替代 format，避免规则名称/描述中的 {} 被误解析
     system_msg = SYSTEM_PROMPT.replace("{username}", username).replace("{available_rules}", rules_text)
 
@@ -553,101 +574,7 @@ async def intent_router(state: AgentState) -> dict:
 
     last_user_msg = (messages[-1].content if messages and hasattr(messages[-1], "content") else "") or ""
     last_user_msg_lower = last_user_msg.lower().strip()
-    list_rules_keywords = ("规则列表", "看看规则", "有哪些规则", "规则有哪些", "我的规则", "查看规则", "可用规则")
-    if any(kw in last_user_msg_lower for kw in list_rules_keywords):
-        intent = UserIntent.LIST_RULES.value
-        rule_name = ""
-        logger.info(f"router: 用户说「{last_user_msg[:30]}...」识别为 list_rules")
-
-    delete_match = re.search(r"^\s*(?:删除|删掉)\s*([^\s,，。]+?)(?:\s*规则)?\s*$", last_user_msg)
-    if delete_match:
-        extracted_name = (delete_match.group(1) or "").strip()
-        if extracted_name:
-            intent = UserIntent.DELETE_RULE.value
-            rule_name = extracted_name
-            logger.info(f"router: 删除关键词兜底生效，规则名='{rule_name}'")
-
     uploaded_files = state.get("uploaded_files", [])
-
-    if intent == UserIntent.LIST_RULES.value:
-        if rules:
-            lines = ["📋 **我的对账规则列表**\n"]
-            for r in rules:
-                lines.append(f"• **{r['name']}**")
-            msg = "\n".join(lines)
-        else:
-            msg = "📋 暂无可用规则。"
-
-        return {
-            "messages": [AIMessage(content=msg)],
-            "user_intent": UserIntent.UNKNOWN.value,
-        }
-    if intent == UserIntent.DELETE_RULE.value and rule_name:
-        # 删除规则：必须从用户消息中提取精确的规则名，避免误删（如用户说「删除西福3」时不应删除「西福」）
-        try:
-            target_name = rule_name
-            m = re.search(r"(?:删除|删掉)\s*([^\s,，。]+?)(?:\s*规则)?\s*$", last_user_msg)
-            if m:
-                extracted = m.group(1).strip()
-                if extracted.endswith("规则"):
-                    extracted = extracted[:-2].strip()
-                target_name = extracted
-
-            logger.info(f"[DEBUG] 删除规则: target_name='{target_name}', rules列表={[r.get('name') for r in rules]}")
-
-            # 先在规则列表中查找
-            rule_id = None
-            matched_rule_name = None
-            for rule in rules:
-                if rule.get("name") == target_name:
-                    rule_id = rule.get("id")
-                    matched_rule_name = rule.get("name")
-                    break
-
-            if not rule_id:
-                # ⚠️ 改进：即使列表中没找到，也尝试通过规则名查询并删除（防止缓存问题导致删除失败）
-                logger.warning(f"[DEBUG] 规则列表中未找到「{target_name}」，尝试通过API查询")
-                rule_detail = await get_rule_detail(auth_token, rule_name=target_name)
-                if rule_detail and rule_detail.get("id"):
-                    rule_id = rule_detail.get("id")
-                    matched_rule_name = rule_detail.get("name")
-                    logger.info(f"[DEBUG] API查询成功找到规则: id={rule_id}, name={matched_rule_name}")
-                else:
-                    logger.error(f"[DEBUG] API查询也未找到规则「{target_name}」")
-                    return {
-                        "messages": [AIMessage(content=f"❌ 未找到规则「{target_name}」，请检查规则名称是否正确。")],
-                        "user_intent": UserIntent.UNKNOWN.value,
-                    }
-
-            # 调用删除规则 API（传入 rule_name 用于后端校验，防止误删）
-            result = await delete_rule(auth_token, rule_id, rule_name=matched_rule_name)
-
-            if result.get("success"):
-                # 删除后二次校验，避免“看起来删了但列表仍显示”的假象
-                refreshed_rules = await list_available_rules(auth_token)
-                still_exists = any(str(r.get("id")) == str(rule_id) for r in refreshed_rules)
-                if still_exists:
-                    logger.warning(f"[DEBUG] 删除后校验仍存在: id={rule_id}, name={matched_rule_name}")
-                    return {
-                        "messages": [AIMessage(content=f"⚠️ 规则「{matched_rule_name}」删除请求已提交，但列表仍显示，请稍后刷新重试。")],
-                        "user_intent": UserIntent.UNKNOWN.value,
-                    }
-                return {
-                    "messages": [AIMessage(content=f"✅ 规则「{matched_rule_name}」已删除")],
-                    "user_intent": UserIntent.UNKNOWN.value,
-                }
-            else:
-                error_msg = result.get("error", "删除失败")
-                return {
-                    "messages": [AIMessage(content=f"❌ 删除规则失败：{error_msg}")],
-                    "user_intent": UserIntent.UNKNOWN.value,
-                }
-        except Exception as e:
-            logger.error(f"删除规则时出错: {e}")
-            return {
-                "messages": [AIMessage(content=f"❌ 删除规则时发生错误：{str(e)}")],
-                "user_intent": UserIntent.UNKNOWN.value,
-            }
     if intent == UserIntent.PROC.value:
         # 数据整理意图：进入 proc 子图
         # 优先从 state 中读取前端传递的 rule_code，其次从 LLM 解析
@@ -670,7 +597,7 @@ async def intent_router(state: AgentState) -> dict:
             }
 
         # 构建规则展示文本
-        rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
+        rule_display = rule_name or rule_code
 
         # 检查是否有上传的文件
         uploaded = state.get("uploaded_files", [])
@@ -712,7 +639,7 @@ async def intent_router(state: AgentState) -> dict:
                 "user_intent": UserIntent.UNKNOWN.value,
             }
 
-        rule_display = f"{rule_name}（{rule_code}）" if rule_name else rule_code
+        rule_display = rule_name or rule_code
         if not uploaded_files:
             welcome_msg = (
                 "📊 **开始对账执行任务**\n\n"
@@ -741,8 +668,9 @@ async def intent_router(state: AgentState) -> dict:
         }
 
     # 普通对话
+    cleaned_content = content.replace("点击右上角「登录」按钮", "选择左侧任务和规则").replace("点击右上角登录按钮", "选择左侧任务和规则")
     return {
-        "messages": [AIMessage(content=content)],
+        "messages": [AIMessage(content=cleaned_content)],
         "user_intent": UserIntent.UNKNOWN.value,
         "uploaded_files": uploaded_files,
     }

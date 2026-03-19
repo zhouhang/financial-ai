@@ -39,14 +39,48 @@ def _to_abs_path(file_path: str) -> str:
     需要拼接 UPLOAD_DIR 根目录才能在本机找到文件。
     如果已经是存在的绝对路径则直接返回。
     """
+    upload_root = Path(UPLOAD_DIR).resolve()
     p = Path(file_path)
-    if p.is_absolute() and p.exists():
-        return str(p)
-    # 去掉开头的 /uploads 或 uploads 前缀，拼接 UPLOAD_DIR
+
+    # /uploads/... 是 MCP 返回的上传引用路径，不是本机可直接访问的绝对路径。
+    if str(file_path).startswith("/uploads/"):
+        rel = file_path.lstrip("/")[len("uploads/"):]
+        resolved = (upload_root / rel).resolve()
+        resolved.relative_to(upload_root)
+        return str(resolved)
+
+    if p.is_absolute():
+        resolved = p.resolve()
+        resolved.relative_to(upload_root)
+        return str(resolved)
+
     rel = file_path.lstrip("/")
-    if rel.startswith("uploads/"):
-        rel = rel[len("uploads/"):]
-    return str(Path(UPLOAD_DIR) / rel)
+    if not rel.startswith("uploads/"):
+        raise ValueError(f"非法上传文件路径: {file_path}")
+
+    rel = rel[len("uploads/"):]
+    resolved = (upload_root / rel).resolve()
+    resolved.relative_to(upload_root)
+    return str(resolved)
+
+
+def _to_upload_ref(file_path: str) -> str:
+    """将上传文件路径标准化为 /uploads/... 引用。"""
+    upload_root = Path(UPLOAD_DIR).resolve()
+    p = Path(file_path)
+
+    if str(file_path).startswith("/uploads/"):
+        return file_path
+
+    if p.is_absolute():
+        resolved = p.resolve()
+        rel = resolved.relative_to(upload_root)
+        return f"/uploads/{rel.as_posix()}"
+
+    rel = file_path.lstrip("/")
+    if not rel.startswith("uploads/"):
+        raise ValueError(f"非法上传文件路径: {file_path}")
+    return f"/{rel}"
 
 
 def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
@@ -144,13 +178,11 @@ async def get_rule_node(state: AgentState) -> dict:
 
     logger.info(f"[public_nodes] get_rule_node rule_code={rule_code!r}")
 
-    messages: list = list(state.get("messages") or [])
-
     if not rule_code:
         msg = "未指定规则编码，请告知您要使用的规则。"
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -160,7 +192,7 @@ async def get_rule_node(state: AgentState) -> dict:
         msg = f"未找到规则编码为「{rule_code}」的规则。\n请确认规则编码是否正确，或联系管理员获取可用的规则列表。"
         ctx.update({"phase": ProcAgentPhase.RULE_NOT_FOUND.value, "error": msg})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -170,7 +202,6 @@ async def get_rule_node(state: AgentState) -> dict:
         "rule_code": rule_code,
     })
     return {
-        "messages": messages,
         "proc_ctx": ctx,
     }
 
@@ -196,8 +227,7 @@ async def check_file_node(state: AgentState) -> dict:
     file_rule_code: str = ctx.get("file_rule_code") or state.get("file_rule_code") or ""
 
     raw_files: list = list(state.get("uploaded_files") or [])
-
-    messages: list = list(state.get("messages") or [])
+    auth_token: str = state.get("auth_token") or ""
 
     # uploaded_files 可能是 str 路径或 dict（{file_path, original_filename}），统一提取绝对路径
     uploaded_files: list[str] = []
@@ -207,7 +237,16 @@ async def check_file_node(state: AgentState) -> dict:
         else:
             fp = str(item)
         if fp:
-            uploaded_files.append(_to_abs_path(fp))
+            try:
+                uploaded_files.append(_to_abs_path(fp))
+            except ValueError as e:
+                reason = f"上传文件路径非法：{e}"
+                msg = f"文件校验失败：\n\n{reason}"
+                ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+                return {
+                    "messages": list(state.get("messages") or []) + [AIMessage(content=msg)],
+                    "proc_ctx": ctx,
+                }
 
     logger.info(
         f"[public_nodes] check_file_node file_rule_code={file_rule_code!r} "
@@ -220,7 +259,7 @@ async def check_file_node(state: AgentState) -> dict:
         msg = f"文件校验失败：\n\n{reason}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -230,7 +269,7 @@ async def check_file_node(state: AgentState) -> dict:
         msg = f"文件校验失败：\n\n{reason}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -245,7 +284,7 @@ async def check_file_node(state: AgentState) -> dict:
             msg = f"文件校验失败：\n\n{reason}"
             ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
             return {
-                "messages": messages + [AIMessage(content=msg)],
+                "messages": [AIMessage(content=msg)],
                 "proc_ctx": ctx,
             }
 
@@ -266,7 +305,7 @@ async def check_file_node(state: AgentState) -> dict:
             msg = f"文件校验失败：\n\n{reason}"
             ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
             return {
-                "messages": messages + [AIMessage(content=msg)],
+                "messages": [AIMessage(content=msg)],
                 "proc_ctx": ctx,
             }
 
@@ -277,6 +316,7 @@ async def check_file_node(state: AgentState) -> dict:
         validate_result = await mcp_validate_files(
             uploaded_files=files_with_columns,
             rule_code=file_rule_code,
+            auth_token=auth_token,
         )
     except Exception as e:
         reason = f"调用文件校验服务失败：{e}"
@@ -284,7 +324,7 @@ async def check_file_node(state: AgentState) -> dict:
         msg = f"文件校验失败：\n\n{reason}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -316,7 +356,7 @@ async def check_file_node(state: AgentState) -> dict:
         )
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": error_msg})
         return {
-            "messages": messages + [AIMessage(content=msg)],
+            "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
         }
 
@@ -365,6 +405,6 @@ async def check_file_node(state: AgentState) -> dict:
         "file_match_results": matched_results,   # [{file_name, table_id, table_name}]
     })
     return {
-        "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+        "messages": [AIMessage(content=completion_msg)] if completion_msg else [],
         "proc_ctx": ctx,
     }

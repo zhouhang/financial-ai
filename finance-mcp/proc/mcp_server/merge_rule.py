@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
+from security_utils import PROC_OUTPUT_ROOT, UPLOAD_ROOT, resolve_path_under_roots
+from tools.rule_schema import load_and_validate_rule
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +50,11 @@ def load_merge_rules_from_bus(rule_code: str) -> Optional[dict]:
         merge.json 的完整内容，如果未找到则返回 None
     """
     try:
-        from tools.rules import get_rule
-
-        rule_record = get_rule(rule_code)
-        if rule_record is None:
-            logger.warning(f"[merge_rule] 未找到 rule_code='{rule_code}' 的合并规则")
+        validation_result = load_and_validate_rule(rule_code, expected_kind="merge")
+        if not validation_result.get("success"):
+            logger.warning(f"[merge_rule] merge 规则校验失败: {validation_result}")
             return None
-
-        rule_content = rule_record.get("rule", {})
-        # 如果是字符串则解析为 JSON
-        if isinstance(rule_content, str):
-            rule_content = json.loads(rule_content)
+        rule_content = validation_result.get("rule", {})
 
         logger.info(f"[merge_rule] 成功加载 rule_code='{rule_code}' 的 merge 规则，共 {len(rule_content.get('merge_rules', []))} 条")
         return rule_content
@@ -710,20 +706,20 @@ def _merge_append_rows(
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = Path(file_path)
+    path = resolve_path_under_roots(file_path, [UPLOAD_ROOT, PROC_OUTPUT_ROOT])
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
     ext = path.suffix.lower()
     if ext == ".csv":
         try:
-            return pd.read_csv(file_path, encoding="utf-8-sig")
+            return pd.read_csv(path, encoding="utf-8-sig")
         except UnicodeDecodeError:
             import chardet
-            with open(file_path, "rb") as f:
+            with open(path, "rb") as f:
                 enc = chardet.detect(f.read()).get("encoding", "gbk")
-            return pd.read_csv(file_path, encoding=enc)
+            return pd.read_csv(path, encoding=enc)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(file_path)
+        return pd.read_excel(path)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 

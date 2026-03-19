@@ -20,8 +20,6 @@ class UserIntent(str, Enum):
     USE_EXISTING_RULE = "use_existing_rule"
     CREATE_NEW_RULE = "create_new_rule"
     EDIT_RULE = "edit_rule"  # 调整/编辑已有规则
-    DELETE_RULE = "delete_rule"
-    LIST_RULES = "list_rules"  # 查看规则列表
     RESUME_WORKFLOW = "resume_workflow"  # 继续当前 workflow
     LOGIN = "login"
     REGISTER = "register"

@@ -21,9 +21,12 @@ from typing import Any, Optional
 
 import pandas as pd
 from mcp import Tool
+from auth.jwt_utils import get_user_from_token
+from security_utils import resolve_upload_file_path
 
 # 导入数据过滤模块
 from tools.data_filter import filter_dataframe_by_rule_config, get_filter_statistics
+from tools.rule_schema import load_and_validate_rule
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +73,13 @@ def create_recon_tools() -> list[Tool]:
                     "rule_id": {
                         "type": "string",
                         "description": "要执行的核对规则 ID（如 AUDIT_RECONC_001），仅在对账规则中使用，不指定则执行所有匹配的规则"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验当前用户是否有权使用该规则"
                     }
                 },
-                "required": ["validated_files", "rule_code"]
+                "required": ["validated_files", "rule_code", "auth_token"]
             }
         ),
     ]
@@ -93,7 +100,7 @@ async def handle_recon_tool_call(name: str, arguments: dict) -> dict:
 # 规则加载（复用 tools.rules 中的公共方法）
 # ════════════════════════════════════════════════════════════════════════════
 
-def _get_rule(rule_code: str) -> Optional[dict]:
+def _get_rule(rule_code: str, user_id: str) -> Optional[dict]:
     """
     从 rule_detail 表加载指定 rule_code 的规则配置
     
@@ -107,7 +114,7 @@ def _get_rule(rule_code: str) -> Optional[dict]:
     """
     try:
         from tools.rules import get_rule
-        return get_rule(rule_code)
+        return get_rule(rule_code, user_id=user_id)
     except ImportError:
         logger.error(f"[recon] 无法导入 tools.rules.get_rule")
         return None
@@ -129,11 +136,22 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     validated_files = arguments.get("validated_files", [])
     rule_code = arguments.get("rule_code", "")
     rule_id = arguments.get("rule_id")
+    auth_token = arguments.get("auth_token", "").strip()
     
     if not validated_files:
         return {"success": False, "error": "validated_files 不能为空"}
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+
+    user = get_user_from_token(auth_token)
+    if not user:
+        return {"success": False, "error": "token 无效或已过期，请重新登录"}
+
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
+        return {"success": False, "error": "token 中缺少用户标识"}
     
     # 使用常量定义的输出目录
     output_dir = str(RECON_OUTPUT_DIR)
@@ -141,12 +159,14 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     # 确保输出目录存在
     RECON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
-    # 加载规则（复用 tools.rules 中的公共方法）
-    rule_record = _get_rule(rule_code)
-    if rule_record is None:
-        return {"success": False, "error": f"未找到规则: rule_code={rule_code}"}
-    
-    rule_content = rule_record.get("rule", {})
+    # 加载规则并做结构校验
+    validation_result = load_and_validate_rule(rule_code, expected_kind="recon", user_id=user_id)
+    if not validation_result.get("success"):
+        validation_result["status"] = "invalid_request"
+        validation_result["success"] = False
+        return validation_result
+
+    rule_content = validation_result.get("rule", {})
     
     # 判断规则类型
     is_recon = isinstance(rule_content, dict) and rule_content.get("rules") is not None
@@ -179,28 +199,31 @@ async def _handle_recon_execute(arguments: dict) -> dict:
         results = []
         for rule in rules:
             if not rule.get("enabled", True):
+                results.append(
+                    {
+                        "success": False,
+                        "status": "skipped",
+                        "rule_id": rule.get("rule_id", "UNKNOWN"),
+                        "rule_name": rule.get("rule_name", "未命名规则"),
+                        "skip_reason": "disabled",
+                        "message": "规则已禁用",
+                    }
+                )
                 continue
-            
-            result = execute_single_recon(rule, table_file_map, output_dir)
-            # 只保留成功匹配到文件的规则结果
-            if result.get("success") and result.get("source_file") and result.get("target_file"):
-                results.append(result)
-            elif result.get("success"):
-                # 规则启用但未匹配到文件，跳过不加入结果
-                logger.info(f"[recon] 规则 {rule.get('rule_id')} 未匹配到文件，跳过")
-            else:
-                # 执行失败的规则，可以选择保留或跳过
-                # 这里选择跳过失败的规则
-                logger.warning(f"[recon] 规则 {rule.get('rule_id')} 执行失败: {result.get('error')}")
-        
-        success_count = len(results)
-        
+
+            results.append(execute_single_recon(rule, table_file_map, output_dir))
+
+        summary = _build_recon_summary(results)
+        status = _derive_recon_status(summary)
+
         return {
-            "success": True,
+            "success": status in {"success", "partial_success"},
+            "status": status,
             "rule_code": rule_code,
             "rule_type": "recon",
             "total_rules": len(results),
-            "success_count": success_count,
+            "success_count": summary["succeeded_rules"],
+            "summary": summary,
             "results": results
         }
     else:
@@ -259,17 +282,21 @@ def execute_single_recon(
     if source_path is None:
         return {
             "success": False,
+            "status": "skipped",
             "rule_id": rule_id,
             "rule_name": rule_name,
-            "error": "未找到源文件"
+            "skip_reason": "missing_source_file",
+            "message": "未找到源文件",
         }
     
     if target_path is None:
         return {
             "success": False,
+            "status": "skipped",
             "rule_id": rule_id,
             "rule_name": rule_name,
-            "error": "未找到目标文件"
+            "skip_reason": "missing_target_file",
+            "message": "未找到目标文件",
         }
     
     logger.info(f"[recon] [{rule_id}] 源文件: {source_path}")
@@ -282,8 +309,10 @@ def execute_single_recon(
     except Exception as e:
         return {
             "success": False,
+            "status": "failed",
             "rule_id": rule_id,
             "rule_name": rule_name,
+            "error_code": "read_file_failed",
             "error": f"读取文件失败: {e}"
         }
     
@@ -403,6 +432,7 @@ def execute_single_recon(
     
     result = {
         "success": True,
+        "status": "succeeded",
         "rule_id": rule_id,
         "rule_name": rule_name,
         "source_file": source_path,
@@ -435,6 +465,43 @@ def execute_single_recon(
         }
     
     return result
+
+
+def _build_recon_summary(results: list[dict[str, Any]]) -> dict[str, int]:
+    """统计对账执行结果。"""
+    summary = {
+        "total_rules": len(results),
+        "enabled_rules": 0,
+        "succeeded_rules": 0,
+        "skipped_rules": 0,
+        "failed_rules": 0,
+    }
+    for item in results:
+        status = item.get("status")
+        if status != "skipped" or item.get("skip_reason") != "disabled":
+            summary["enabled_rules"] += 1
+        if status == "succeeded":
+            summary["succeeded_rules"] += 1
+        elif status == "skipped":
+            summary["skipped_rules"] += 1
+        elif status == "failed":
+            summary["failed_rules"] += 1
+    return summary
+
+
+def _derive_recon_status(summary: dict[str, int]) -> str:
+    """根据统计结果推导顶层执行状态。"""
+    succeeded = summary.get("succeeded_rules", 0)
+    skipped = summary.get("skipped_rules", 0)
+    failed = summary.get("failed_rules", 0)
+
+    if succeeded > 0 and skipped == 0 and failed == 0:
+        return "success"
+    if succeeded > 0:
+        return "partial_success"
+    if failed > 0:
+        return "failed"
+    return "skipped"
 
 
 def _find_file_by_identification(
@@ -1031,20 +1098,20 @@ def _apply_column_highlighting(
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = Path(file_path)
+    path = resolve_upload_file_path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
     
     ext = path.suffix.lower()
     if ext == ".csv":
         try:
-            return pd.read_csv(file_path, encoding="utf-8-sig")
+            return pd.read_csv(path, encoding="utf-8-sig")
         except UnicodeDecodeError:
             import chardet
-            with open(file_path, "rb") as f:
+            with open(path, "rb") as f:
                 enc = chardet.detect(f.read()).get("encoding", "gbk")
-            return pd.read_csv(file_path, encoding=enc)
+            return pd.read_csv(path, encoding=enc)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(file_path)
+        return pd.read_excel(path)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")

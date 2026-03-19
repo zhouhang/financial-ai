@@ -352,6 +352,16 @@ async def websocket_chat(ws: WebSocket):
                 try:
                     me_result = await auth_me(auth_token)
                     if me_result.get("success"):
+                        try:
+                            langgraph_app.update_state(
+                                {"configurable": {"thread_id": thread_id}},
+                                {
+                                    "auth_token": auth_token,
+                                    "current_user": me_result.get("user"),
+                                },
+                            )
+                        except Exception as state_error:
+                            logger.warning(f"认证验证写入 state 失败: {state_error}")
                         logger.info(f"认证验证成功，用户: {me_result.get('user', {}).get('username', 'unknown')}")
                         await ws.send_json({
                             "type": "auth_verify",
@@ -427,6 +437,8 @@ async def websocket_chat(ws: WebSocket):
             
                 # ⚠️ 将前端传入的参数放入 input_data，确保 intent_router 能立即获取
                 if isinstance(input_data, dict):
+                    if auth_token:
+                        input_data["auth_token"] = auth_token
                     if file_rule_code:
                         input_data["file_rule_code"] = file_rule_code
                     if rule_code:
@@ -440,9 +452,11 @@ async def websocket_chat(ws: WebSocket):
                     logger.warning(f"[DEBUG] input_data 不是 dict 类型，无法注入参数: {type(input_data)}")
 
                 # ⚙️ 同时通过 update_state 写入 state（用于后续 resume 时恢复）
-                if task_code or rule_code or rule_name or file_rule_code:
+                if auth_token or task_code or rule_code or rule_name or file_rule_code:
                     try:
                         update_state = {}
+                        if auth_token:
+                            update_state["auth_token"] = auth_token
                         if task_code:
                             update_state["selected_task_code"] = task_code
                         if rule_code:
@@ -452,7 +466,7 @@ async def websocket_chat(ws: WebSocket):
                         if file_rule_code:
                             update_state["file_rule_code"] = file_rule_code
                         langgraph_app.update_state(config, update_state)
-                        logger.info(f"已写入 task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code} 到 state (thread={thread_id})")
+                        logger.info(f"已写入 auth/task/rule 信息到 state (thread={thread_id}): has_token={bool(auth_token)}, task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
                     except Exception as e:
                         logger.warning(f"写入 task/rule code/name 失败: {e}")
 
@@ -476,23 +490,13 @@ async def websocket_chat(ws: WebSocket):
                 BUFFER_SIZE = 100  # 累积 100 字符后发送一次
                 current_streaming_node = None  # 跟踪当前流式输出的节点
 
-                # resume 时，记录已有的 AI 消息内容，避免重发
-                if is_resume:
-                    try:
-                        existing_state = langgraph_app.get_state(config)
-                        baseline_message_len = len(existing_state.values.get("messages") or [])
-                        for msg in (existing_state.values.get("messages") or []):
-                            if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
-                                sent_contents.add(msg.content.strip())
-                        logger.info(f"resume: 已记录 {len(sent_contents)} 条历史 AI 消息用于去重")
-                    except Exception as e:
+                try:
+                    existing_state = langgraph_app.get_state(config)
+                    baseline_message_len = len(existing_state.values.get("messages") or [])
+                except Exception as e:
+                    if is_resume:
                         logger.warning(f"获取历史消息失败: {e}")
-                else:
-                    try:
-                        existing_state = langgraph_app.get_state(config)
-                        baseline_message_len = len(existing_state.values.get("messages") or [])
-                    except Exception:
-                        baseline_message_len = 0
+                    baseline_message_len = 0
                 
                 async for event in langgraph_app.astream_events(input_data, config=config, version="v2"):
                     event_count += 1
@@ -623,7 +627,8 @@ async def websocket_chat(ws: WebSocket):
                                     "thread_id": thread_id,
                                 })
                             
-                            for msg in output.get("messages", []):
+                            output_messages = output.get("messages", [])
+                            for msg in output_messages:
                                 if hasattr(msg, "type") and msg.type == "ai":
                                     content = (msg.content if hasattr(msg, "content") else "").strip()
                                     if content and content not in sent_contents:

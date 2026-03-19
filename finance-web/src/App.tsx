@@ -849,7 +849,7 @@ export default function App() {
         conversationId,
         selectedTask?.task_type,
         selectedTask?.task_code,
-        selectedTask?.task_name,
+        selectedTask?.name,
         selectedTask?.file_rule_code,
       );
     },

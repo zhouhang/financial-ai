@@ -14,9 +14,11 @@ import logging
 from typing import Dict, Any, List, Optional, Set
 
 from mcp import Tool
+from auth.jwt_utils import get_user_from_token
 
 # 导入文件校验规则查询函数
 from tools.rules import get_rule
+from tools.rule_schema import load_and_validate_rule
 
 # 配置日志
 logger = logging.getLogger("proc.mcp_server.file_validate_tool")
@@ -63,9 +65,13 @@ def create_file_validate_tools() -> list[Tool]:
                     "rule_code": {
                         "type": "string",
                         "description": "文件校验规则编码（rule_code），用于从数据库查询对应的校验规则配置"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验当前用户是否有权使用该规则"
                     }
                 },
-                "required": ["uploaded_files", "rule_code"]
+                "required": ["uploaded_files", "rule_code", "auth_token"]
             }
         )
     ]
@@ -516,6 +522,7 @@ async def _handle_validate_files(arguments: dict) -> dict:
     # ── 参数提取与校验 ────────────────────────────────────────────────────
     uploaded_files = arguments.get("uploaded_files")
     rule_code = arguments.get("rule_code", "").strip()
+    auth_token = arguments.get("auth_token", "").strip()
 
     if not uploaded_files:
         return {
@@ -528,47 +535,31 @@ async def _handle_validate_files(arguments: dict) -> dict:
             "success": False,
             "error": "rule_code 不能为空，请提供文件校验规则编码"
         }
-
-    # ── 根据 rule_code 从数据库获取校验规则（含缓存）────────────────────────
-    try:
-        rule_record = get_rule(rule_code)
-    except Exception as e:
-        logger.error(f"[文件校验] 获取校验规则失败，rule_code={rule_code}: {e}", exc_info=True)
+    if not auth_token:
         return {
             "success": False,
-            "error": f"获取文件校验规则失败: {str(e)}"
+            "error": "未提供认证 token，请先登录"
         }
 
-    if rule_record is None:
+    user = get_user_from_token(auth_token)
+    if not user:
         return {
             "success": False,
-            "error": f"未找到 rule_code 为 '{rule_code}' 的文件校验规则，请确认规则编码是否正确"
+            "error": "token 无效或已过期，请重新登录"
         }
 
-    # rule_record["rule"] 是从 rule_detail 表获取的规则内容
-    rule_data = rule_record["rule"]
-    if isinstance(rule_data, str):
-        try:
-            rule_data = json.loads(rule_data)
-        except json.JSONDecodeError as e:
-            return {
-                "success": False,
-                "error": f"rule_code='{rule_code}' 对应的规则内容不是有效的 JSON: {e}"
-            }
-
-    # 支持两种顶层结构：直接是 file_validation_rules 的值，或包含 file_validation_rules 的外层对象
-    if "file_validation_rules" in rule_data:
-        validation_rules = rule_data["file_validation_rules"]
-    elif "table_schemas" in rule_data:
-        validation_rules = rule_data
-    else:
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
         return {
             "success": False,
-            "error": (
-                f"rule_code='{rule_code}' 对应的规则格式不正确，"
-                "需包含 file_validation_rules 或 table_schemas 字段"
-            )
+            "error": "token 中缺少用户标识"
         }
+
+    # ── 根据 rule_code 从数据库获取校验规则（含结构校验）────────────────────
+    validation_result = load_and_validate_rule(rule_code, expected_kind="file_validation", user_id=user_id)
+    if not validation_result.get("success"):
+        return validation_result
+    validation_rules = validation_result.get("rule", {})
 
     # ── 校验 uploaded_files 格式 ──────────────────────────────────────────
     for idx, file_info in enumerate(uploaded_files):

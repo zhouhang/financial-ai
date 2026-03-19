@@ -27,6 +27,8 @@ from typing import Any, Optional
 
 import pandas as pd
 from mcp import Tool
+from security_utils import resolve_upload_file_path
+from tools.rule_schema import load_and_validate_rule
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,6 @@ async def handle_proc_rule_tool_call(name: str, arguments: dict) -> dict:
 
 async def _handle_proc_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
-    from tools.rules import get_rule
     from proc.config.config import OUTPUT_DIR
 
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
@@ -108,19 +109,11 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     except Exception as e:
         return {"success": False, "error": f"创建输出目录失败: {e}"}
 
-    # ── 获取整理规则 ────────────────────────────────────────────────────────
-    rule_record = get_rule(rule_code)
-    if rule_record is None:
-        return {"success": False, "error": f"未找到 rule_code='{rule_code}' 的整理规则"}
-
-    # rule 字段在 PostgreSQL JSON 列中，psycopg2 可能返回 str 或 dict，统一处理
-    raw_rule = rule_record.get("rule") or {}
-    if isinstance(raw_rule, str):
-        try:
-            raw_rule = json.loads(raw_rule)
-        except Exception:
-            raw_rule = {}
-    rule_data: dict = raw_rule
+    # ── 获取整理规则并做结构校验 ────────────────────────────────────────────
+    validation_result = load_and_validate_rule(rule_code, expected_kind="proc_entry")
+    if not validation_result.get("success"):
+        return validation_result
+    rule_data: dict = validation_result.get("rule", {})
 
     # 支持两种规则格式：rules（普通整理规则）或 merge_rules（合并规则）
     rules_list: list[dict] = rule_data.get("rules", [])
@@ -382,20 +375,20 @@ def _load_source_df(source_tables: Any, table_file_map: dict[str, str]) -> pd.Da
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = Path(file_path)
+    path = resolve_upload_file_path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
     ext = path.suffix.lower()
     if ext == ".csv":
         try:
-            return pd.read_csv(file_path, encoding="utf-8-sig")
+            return pd.read_csv(path, encoding="utf-8-sig")
         except UnicodeDecodeError:
             import chardet
-            with open(file_path, "rb") as f:
+            with open(path, "rb") as f:
                 enc = chardet.detect(f.read()).get("encoding", "gbk")
-            return pd.read_csv(file_path, encoding=enc)
+            return pd.read_csv(path, encoding=enc)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(file_path)
+        return pd.read_excel(path)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 

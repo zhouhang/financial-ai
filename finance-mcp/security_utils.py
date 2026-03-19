@@ -3,7 +3,13 @@
 """
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
+
+
+FINANCE_MCP_DIR = Path(__file__).resolve().parent
+UPLOAD_ROOT = FINANCE_MCP_DIR / "uploads"
+PROC_OUTPUT_ROOT = FINANCE_MCP_DIR / "proc" / "output"
+RECON_OUTPUT_ROOT = FINANCE_MCP_DIR / "recon" / "output"
 
 
 def validate_task_id(task_id: str) -> bool:
@@ -86,6 +92,34 @@ def sanitize_path(base_dir: Path, relative_path: str) -> Optional[Path]:
         return full_path
     except (ValueError, OSError):
         return None
+
+
+def resolve_path_under_roots(file_path: str, allowed_roots: Iterable[Path]) -> Path:
+    """将文件引用解析为受控绝对路径，并限制在允许目录内。"""
+    if not file_path:
+        raise ValueError("文件路径不能为空")
+
+    allowed_root_list = [root.resolve() for root in allowed_roots]
+    path_str = str(file_path).strip()
+
+    if path_str.startswith("/uploads/") or path_str.startswith("uploads/"):
+        candidate = (FINANCE_MCP_DIR / path_str.lstrip("/")).resolve()
+    else:
+        candidate = Path(path_str).expanduser().resolve()
+
+    for root in allowed_root_list:
+        try:
+            candidate.relative_to(root)
+            return candidate
+        except ValueError:
+            continue
+
+    raise ValueError(f"文件路径不在允许目录内: {file_path}")
+
+
+def resolve_upload_file_path(file_path: str) -> Path:
+    """解析上传目录中的文件路径。"""
+    return resolve_path_under_roots(file_path, [UPLOAD_ROOT])
 
 
 def validate_url(url: str) -> bool:

@@ -501,6 +501,7 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
 async def validate_files(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
+    auth_token: str = "",
 ) -> dict[str, Any]:
     """根据规则编码校验上传文件列表，判断每个文件属于哪个预定义的表。
     
@@ -519,10 +520,13 @@ async def validate_files(
             "missing_necessary_tables": [{"table_id": str, "table_name": str}]
         }
     """
-    return await call_mcp_tool("validate_files", {
+    args = {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
-    })
+    }
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("validate_files", args)
 
 
 async def execute_proc_rule(
@@ -555,6 +559,7 @@ async def execute_recon(
     validated_files: list[dict[str, Any]],
     rule_code: str,
     rule_id: str = "",
+    auth_token: str = "",
 ) -> dict[str, Any]:
     """执行对账任务（支持对账），根据规则对源文件与目标文件进行数据比对。
     
@@ -593,4 +598,6 @@ async def execute_recon(
     }
     if rule_id:
         args["rule_id"] = rule_id
+    if auth_token:
+        args["auth_token"] = auth_token
     return await call_mcp_tool("recon_execute", args)

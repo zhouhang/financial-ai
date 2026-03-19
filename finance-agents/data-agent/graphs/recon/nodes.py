@@ -29,6 +29,7 @@ from graphs.main_graph.public_nodes import (
     check_file_node,
     _get_proc_ctx,
     _to_abs_path,
+    _to_upload_ref,
 )
 
 
@@ -146,8 +147,9 @@ async def recon_task_execution_node(state: AgentState) -> dict:
     rule_code: str = ctx.get("rule_code", "")
     file_match_results: list[dict] = ctx.get("file_match_results", [])
     rule: dict = ctx.get("rule", {})
+    auth_token: str = state.get("auth_token") or ""
 
-    messages: list = list(state.get("messages") or [])
+    messages: list = []
 
     logger.info(f"[recon] recon_task_execution_node rule_code={rule_code!r}")
     logger.info(f"[recon] file_match_results={[m.get('file_name') for m in file_match_results]}")
@@ -175,8 +177,22 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         else:
             fp = str(item)
         if fp:
-            abs_fp = _to_abs_path(fp)
-            file_path_map[abs_fp.split("/")[-1]] = abs_fp
+            try:
+                upload_ref = _to_upload_ref(fp)
+                abs_fp = _to_abs_path(upload_ref)
+            except ValueError as e:
+                error_msg = f"上传文件路径非法: {e}"
+                logger.error(f"[recon] {error_msg}")
+                ctx.update({
+                    "phase": ReconAgentPhase.EXEC_FAILED.value,
+                    "exec_status": "error",
+                    "exec_error": error_msg,
+                })
+                return {
+                    "messages": messages,
+                    "recon_ctx": ctx,
+                }
+            file_path_map[abs_fp.split("/")[-1]] = upload_ref
 
     # 构建文件参数
     recon_files: list[dict] = []
@@ -223,6 +239,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             validated_files=validated_files,
             rule_code=rule_code,
             rule_id="",  # 不指定则执行所有匹配的规则
+            auth_token=auth_token,
         )
     except Exception as e:
         error_msg = f"调用对账服务失败: {e}"
@@ -243,8 +260,13 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         f"rule_type={recon_result.get('rule_type')}"
     )
 
+    execution_status = recon_result.get("status")
+
     # 处理执行结果
-    if not recon_result.get("success"):
+    if execution_status is None and not recon_result.get("success"):
+        execution_status = "failed"
+
+    if execution_status in {"failed", "invalid_request"}:
         error_msg = recon_result.get("error", "对账执行失败")
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
@@ -257,6 +279,9 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
+    if execution_status is None:
+        execution_status = "success"
+
     # 提取文件信息（从对账结果中）
     file_info_list = []
     output_files = []
@@ -268,14 +293,18 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         # 兼容没有包装在 results 中的单个结果
         results = [recon_result]
 
-    total_diff = sum(r.get("matched_with_diff", 0) for r in results)
-    total_source_only = sum(r.get("source_only", 0) for r in results)
-    total_target_only = sum(r.get("target_only", 0) for r in results)
-    total_matched = sum(r.get("matched_exact", 0) for r in results)
+    succeeded_results = [r for r in results if r.get("status", "succeeded") == "succeeded"]
+    skipped_results = [r for r in results if r.get("status") == "skipped"]
+    failed_results = [r for r in results if r.get("status") == "failed"]
+
+    total_diff = sum(r.get("matched_with_diff", 0) for r in succeeded_results)
+    total_source_only = sum(r.get("source_only", 0) for r in succeeded_results)
+    total_target_only = sum(r.get("target_only", 0) for r in succeeded_results)
+    total_matched = sum(r.get("matched_exact", 0) for r in succeeded_results)
 
     # 收集文件信息、输出报告路径和过滤统计信息
     filter_stats = {}
-    for r in results:
+    for r in succeeded_results:
         source_file = r.get("source_file", "")
         target_file = r.get("target_file", "")
         output_file = r.get("output_file", "")
@@ -299,12 +328,14 @@ async def recon_task_execution_node(state: AgentState) -> dict:
 
     ctx.update({
         "phase": ReconAgentPhase.SHOWING_RESULT.value,
-        "exec_status": "success",
+        "exec_status": execution_status,
         "recon_result": recon_result,
         "file_info_list": file_info_list,
         "output_files": output_files,
         "download_urls": download_urls,
         "filter_stats": filter_stats,
+        "skipped_results": skipped_results,
+        "failed_results": failed_results,
         "differences": [
             {
                 "type": "matched_with_diff",
@@ -342,17 +373,20 @@ def recon_result_node(state: AgentState) -> dict:
     rule_code: str = ctx.get("rule_code", "（未知规则）")
     exec_status: str = ctx.get("exec_status", "error")
 
-    messages: list = list(state.get("messages") or [])
+    messages: list = []
 
-    if exec_status == "success":
+    if exec_status in {"success", "partial_success", "skipped"}:
         rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
         file_info_list: list[dict] = ctx.get("file_info_list", [])
         download_urls: list[str] = ctx.get("download_urls", [])
         recon_result: dict = ctx.get("recon_result", {})
+        skipped_results: list[dict] = ctx.get("skipped_results", [])
+        failed_results: list[dict] = ctx.get("failed_results", [])
+        summary: dict = recon_result.get("summary", {})
 
         # 构建规则展示文本
         if rule_name:
-            rule_display = f"{rule_name}（{rule_code}）"
+            rule_display = rule_name
         else:
             rule_display = rule_code
 
@@ -360,15 +394,7 @@ def recon_result_node(state: AgentState) -> dict:
         results = recon_result.get("results", [])
         if not results and recon_result.get("success"):
             results = [recon_result]
-
-        # 过滤掉没有匹配到文件的规则（source_file 或 target_file 为空）
-        valid_results = []
-        for result in results:
-            source_file = result.get("source_file", "")
-            target_file = result.get("target_file", "")
-            # 只有当源文件和目标文件都存在时才显示
-            if source_file and target_file:
-                valid_results.append(result)
+        valid_results = [result for result in results if result.get("status", "succeeded") == "succeeded"]
 
         # 构建每个规则的独立显示
         rule_sections = []
@@ -379,12 +405,27 @@ def recon_result_node(state: AgentState) -> dict:
 
         # 合并所有规则的结果显示
         all_rules_text = "\n\n".join(rule_sections)
+        extra_sections: list[str] = []
+        if exec_status == "partial_success":
+            extra_sections.append(
+                f"本次执行为部分成功：成功 {summary.get('succeeded_rules', len(valid_results))} 条，"
+                f"跳过 {summary.get('skipped_rules', len(skipped_results))} 条，"
+                f"失败 {summary.get('failed_rules', len(failed_results))} 条。"
+            )
+        elif exec_status == "skipped":
+            extra_sections.append("本次未生成对账结果，所有规则都被跳过。")
+        if skipped_results:
+            extra_sections.append(_build_rule_status_list("跳过规则", skipped_results, reason_key="skip_reason"))
+        if failed_results:
+            extra_sections.append(_build_rule_status_list("失败规则", failed_results, reason_key="error"))
+        extra_text = "\n\n".join(section for section in extra_sections if section)
 
         msg = (
             f"对账任务已完成。\n\n"
             f"**规则：** {rule_display}\n\n"
             f"---\n\n"
-            f"{all_rules_text}\n\n"
+            f"{all_rules_text}"
+            f"{f'{chr(10) * 2}{extra_text}' if extra_text else ''}\n\n"
             f"如需进一步分析或有疑问，请告知。"
         )
     else:
@@ -398,7 +439,7 @@ def recon_result_node(state: AgentState) -> dict:
 
     ctx.update({"phase": ReconAgentPhase.COMPLETED.value})
     return {
-        "messages": messages + [AIMessage(content=msg)],
+        "messages": [AIMessage(content=msg)],
         "recon_ctx": ctx,
     }
 
@@ -475,3 +516,16 @@ def _build_single_rule_result(result: dict, index: int) -> str:
     )
 
     return section
+
+
+def _build_rule_status_list(title: str, results: list[dict], reason_key: str) -> str:
+    """构建跳过/失败规则列表。"""
+    if not results:
+        return ""
+
+    lines = [f"## {title}"]
+    for item in results:
+        rule_name = item.get("rule_name") or item.get("rule_id") or "未命名规则"
+        reason = item.get(reason_key) or item.get("message") or "未提供原因"
+        lines.append(f"- **{rule_name}**: {reason}")
+    return "\n".join(lines)

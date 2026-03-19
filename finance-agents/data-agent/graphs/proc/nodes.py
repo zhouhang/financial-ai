@@ -32,6 +32,7 @@ from graphs.main_graph.public_nodes import (
     check_file_node,
     _get_proc_ctx,
     _to_abs_path,
+    _to_upload_ref,
     SUPPORTED_EXTENSIONS,
 )
 
@@ -117,7 +118,7 @@ def welcome_node(state: AgentState) -> dict:
 
     # 构建规则展示文本：有 name 就显示「名称（编码）」，没有则仅显示编码
     if rule_name:
-        rule_display = f"**{rule_name}**（{rule_code}）"
+        rule_display = f"**{rule_name}**"
     else:
         rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
     flow_overview = _build_flow_overview()
@@ -166,9 +167,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         completed_nodes=["get_rule_node", "check_file_node"],
         current_node="proc_task_execute_node"
     )
-    messages: list = list(state.get("messages") or [])
-    if progress_msg:
-        messages.append(AIMessage(content=progress_msg))
+    messages: list = [AIMessage(content=progress_msg)] if progress_msg else []
 
     logger.info(f"[proc] proc_task_execute_node rule_code={rule_code!r}")
     logger.info(f"[proc] file_match_results={[m.get('file_name') for m in file_match_results]}")
@@ -202,9 +201,23 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         else:
             fp = str(item)
         if fp:
-            abs_fp = _to_abs_path(fp)
+            try:
+                upload_ref = _to_upload_ref(fp)
+                abs_fp = _to_abs_path(upload_ref)
+            except ValueError as e:
+                error_msg = f"上传文件路径非法: {e}"
+                logger.error(f"[proc] {error_msg}")
+                ctx.update({
+                    "phase": ProcAgentPhase.SHOWING_RESULT.value,
+                    "exec_status": "error",
+                    "exec_error": error_msg,
+                })
+                return {
+                    "messages": messages,
+                    "proc_ctx": ctx,
+                }
             # key = 存储路径文件名（与 file_match_results[i].file_name 来源相同）
-            file_path_map[os.path.basename(abs_fp)] = abs_fp
+            file_path_map[os.path.basename(abs_fp)] = upload_ref
     logger.info(f"[proc] file_path_map keys={list(file_path_map.keys())}")
 
     # 构建 uploaded_files 参数（proc_execute 需要的格式）
@@ -287,7 +300,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         })
 
         return {
-            "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+            "messages": [AIMessage(content=completion_msg)] if completion_msg else [],
             "proc_ctx": ctx,
         }
 
@@ -323,7 +336,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
     })
 
     return {
-        "messages": messages + [AIMessage(content=completion_msg)] if completion_msg else messages,
+        "messages": [AIMessage(content=completion_msg)] if completion_msg else [],
         "proc_ctx": ctx,
     }
 
@@ -342,9 +355,7 @@ def result_node(state: AgentState) -> dict:
         completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node"],
         current_node="result_node"
     )
-    messages: list = list(state.get("messages") or [])
-    if progress_msg:
-        messages.append(AIMessage(content=progress_msg))
+    messages: list = [AIMessage(content=progress_msg)] if progress_msg else []
 
     if exec_status == "success":
         generated_files: list[dict] = ctx.get("generated_files", [])
@@ -353,7 +364,7 @@ def result_node(state: AgentState) -> dict:
         
         # 构建规则展示文本
         if rule_name:
-            rule_display = f"{rule_name}（{rule_code}）"
+            rule_display = rule_name
         else:
             rule_display = rule_code
 
@@ -416,7 +427,7 @@ def result_node(state: AgentState) -> dict:
     else:
         exec_error: str = ctx.get("exec_error", "未知错误")
         rule_name_else: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
-        rule_display_else = f"{rule_name_else}（{rule_code}）" if rule_name_else else rule_code
+        rule_display_else = rule_name_else or rule_code
         msg = (
             f"数据整理任务执行失败。\n\n"
             f"**规则：** {rule_display_else}\n"
