@@ -2,11 +2,10 @@
 Rules MCP 工具定义和实现。
 
 - get_rule         : 从 rule_detail 表获取指定 rule_code 的规则详情
-- list_user_tasks   : 获取当前用户可用的任务列表
+- list_user_tasks  : 获取当前用户可用的任务列表及其下属规则
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,19 +70,9 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
         return {"error": f"工具调用失败: {str(e)}"}
 
 
-def _normalize_rule_payload(rule_payload: Any) -> Any:
-    """将数据库中的 JSON 规则统一为 Python 对象。"""
-    if isinstance(rule_payload, str):
-        try:
-            return json.loads(rule_payload)
-        except json.JSONDecodeError:
-            return rule_payload
-    return rule_payload
-
-
 def _infer_task_type(rule_payload: Any) -> str:
     """根据规则 JSON 结构推断任务入口。"""
-    rule_obj = _normalize_rule_payload(rule_payload)
+    rule_obj = rule_payload
     if not isinstance(rule_obj, dict):
         return "proc"
     if "role_desc" in rule_obj or "merge_rules" in rule_obj:
@@ -91,6 +80,15 @@ def _infer_task_type(rule_payload: Any) -> str:
     if "global_settings" in rule_obj and "rules" in rule_obj:
         return "recon"
     return "proc"
+
+
+def _normalize_task_type(rule_type: Any, rule_payload: Any) -> str:
+    """优先使用表中 rule_type，缺失时再回退到规则内容推断。"""
+    if isinstance(rule_type, str):
+        normalized = rule_type.strip().lower()
+        if normalized in {"proc", "recon"}:
+            return normalized
+    return _infer_task_type(rule_payload)
 
 
 def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, Any]]:
@@ -108,7 +106,7 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
 
         if user_id:
             sql = """
-                SELECT id, user_id, rule_code, rule, rule_type, remark
+                SELECT id, user_id, task_id, rule_code, name, rule, rule_type, remark
                 FROM rule_detail
                 WHERE rule_code = %s
                   AND (user_id = %s OR user_id IS NULL)
@@ -118,7 +116,7 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
             cur.execute(sql, (rule_code, user_id, user_id))
         else:
             sql = """
-                SELECT id, user_id, rule_code, rule, rule_type, remark
+                SELECT id, user_id, task_id, rule_code, name, rule, rule_type, remark
                 FROM rule_detail
                 WHERE rule_code = %s
                   AND user_id IS NULL
@@ -138,10 +136,12 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
         result = {
             "id": row[0],
             "user_id": row[1],
-            "rule_code": row[2],
-            "rule": _normalize_rule_payload(row[3]),
-            "rule_type": row[4],
-            "remark": row[5],
+            "task_id": row[2],
+            "rule_code": row[3],
+            "name": row[4],
+            "rule": row[5],
+            "rule_type": row[6],
+            "remark": row[7],
         }
         _rule_cache[cache_key] = result
         return result
@@ -162,36 +162,75 @@ def _get_user_tasks(user_id: str) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, user_id, task_code, task_name, description
-            FROM user_tasks
-            WHERE user_id = %s OR user_id IS NULL
-            ORDER BY id ASC
+            SELECT
+                ut.id,
+                ut.user_id,
+                ut.task_code,
+                ut.task_name,
+                ut.description,
+                rd.id,
+                rd.user_id,
+                rd.task_id,
+                rd.rule_code,
+                rd.name,
+                rd.rule,
+                rd.rule_type,
+                rd.remark
+            FROM user_tasks AS ut
+            LEFT JOIN rule_detail AS rd
+              ON rd.task_id = ut.id
+             AND rd.rule_type IN ('proc', 'recon')
+             AND (rd.user_id = %s OR rd.user_id IS NULL)
+            WHERE ut.user_id = %s
+            ORDER BY ut.id ASC, rd.id ASC
             """,
-            (user_id,),
+            (user_id, user_id),
         )
         rows = cur.fetchall()
         cur.close()
 
+        task_map: Dict[int, Dict[str, Any]] = {}
         tasks: List[Dict[str, Any]] = []
+
         for row in rows:
-            rule_detail = get_rule(row[2], user_id=user_id)
-            if rule_detail is None:
-                logger.warning(f"[SQL] 跳过未配置 rule_detail 的任务: task_code={row[2]}")
-                continue
-
-            rule_payload = rule_detail.get("rule") or {}
-            file_rule_code = ""
-            if isinstance(rule_payload, dict):
-                file_rule_code = str(rule_payload.get("file_rule_code") or "")
-
-            tasks.append(
-                {
+            task_id = row[0]
+            task = task_map.get(task_id)
+            if task is None:
+                task = {
                     "id": row[0],
                     "user_id": row[1],
                     "task_code": row[2],
                     "task_name": row[3],
                     "description": row[4],
-                    "task_type": _infer_task_type(rule_payload),
+                    "task_type": "proc",
+                    "rules": [],
+                }
+                task_map[task_id] = task
+                tasks.append(task)
+
+            rule_id = row[5]
+            if rule_id is None:
+                continue
+
+            rule_payload = row[10] or {}
+            task_type = _normalize_task_type(row[11], rule_payload)
+            task["task_type"] = task_type
+            file_rule_code = ""
+            if isinstance(rule_payload, dict):
+                file_rule_code = str(rule_payload.get("file_rule_code") or "")
+
+            task["rules"].append(
+                {
+                    "id": row[5],
+                    "user_id": row[6],
+                    "task_id": row[7],
+                    "rule_code": row[8],
+                    "name": row[9],
+                    "rule_type": row[11],
+                    "remark": row[12],
+                    "task_code": row[2],
+                    "task_name": row[3],
+                    "task_type": task_type,
                     "file_rule_code": file_rule_code,
                 }
             )

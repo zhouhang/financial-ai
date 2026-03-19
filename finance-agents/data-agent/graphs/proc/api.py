@@ -11,7 +11,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,21 @@ router = APIRouter(prefix="/proc", tags=["proc"])
 # 数据模型
 # ══════════════════════════════════════════════════════════════════════════════
 
+class UserTaskRule(BaseModel):
+    """任务下的规则模型。"""
+    id: int
+    user_id: Optional[str] = None
+    task_id: Optional[int] = None
+    rule_code: str
+    name: str
+    rule_type: str
+    remark: Optional[str] = None
+    task_code: str
+    task_name: str
+    task_type: str
+    file_rule_code: Optional[str] = None
+
+
 class UserTask(BaseModel):
     """用户任务模型。"""
     id: int
@@ -31,7 +46,7 @@ class UserTask(BaseModel):
     task_name: str
     description: Optional[str] = None
     task_type: str
-    file_rule_code: Optional[str] = None
+    rules: list[UserTaskRule] = Field(default_factory=list)
 
 
 class UserTasksResponse(BaseModel):

@@ -8,7 +8,7 @@ import {
   X,
   FileSpreadsheet,
 } from 'lucide-react';
-import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTask } from '../types';
+import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTaskRule } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
@@ -51,7 +51,7 @@ interface ChatAreaProps {
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
   /** 选中的任务 */
-  selectedTask?: UserTask | null;
+  selectedTask?: UserTaskRule | null;
 }
 
 export default function ChatArea({
@@ -300,9 +300,9 @@ export default function ChatArea({
           
           {selectedTask ? (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100">
-              <span className="text-xs text-blue-600 font-medium uppercase">{selectedTask.task_type}</span>
-              <span className="text-gray-400">/</span>
               <span className="text-xs text-blue-700 font-medium">{selectedTask.task_name}</span>
+              <span className="text-gray-400">/</span>
+              <span className="text-xs text-blue-700 font-medium">{selectedTask.name}</span>
             </div>
           ) : null}
           

@@ -9,7 +9,7 @@ import type {
   Message,
   Task,
   UploadedFile,
-  UserTask,
+  UserTaskRule,
   WsOutgoing,
 } from './types';
 
@@ -130,7 +130,7 @@ export default function App() {
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   
   /** 选中的任务 */
-  const [selectedTask, setSelectedTask] = useState<UserTask | null>(null);
+  const [selectedTask, setSelectedTask] = useState<UserTaskRule | null>(null);
 
   const isGuest = !authToken;
 
@@ -970,9 +970,9 @@ export default function App() {
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
 
   // ── 选择任务 ────────────────────────────────────────────────
-  const handleSelectTask = useCallback((task: UserTask) => {
+  const handleSelectTask = useCallback((task: UserTaskRule) => {
     setSelectedTask(task);
-    console.log('选中任务:', task.task_type, '-', task.task_name);
+    console.log('选中规则:', task.task_type, '-', task.task_name, '-', task.name);
   }, []);
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
@@ -1013,8 +1013,8 @@ export default function App() {
         onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
-        onSelectTask={handleSelectTask}
-        selectedTaskCode={selectedTask?.task_code}
+        onSelectRule={handleSelectTask}
+        selectedRuleCode={selectedTask?.rule_code}
         authToken={authToken}
       />
       <ChatArea

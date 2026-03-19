@@ -3,12 +3,12 @@ import {
   BarChart3,
   LogOut,
   MessageSquare,
-  ReceiptText,
+  ChevronRight,
   Trash2,
   User,
   Zap,
 } from 'lucide-react';
-import type { ConnectionStatus, Conversation, UserTask } from '../types';
+import type { ConnectionStatus, Conversation, UserTask, UserTaskRule } from '../types';
 
 /** 历史对话时间格式化：今天→时间，昨天→昨天，2-7天→过去7天，8-30天→过去30天，1月-1年→月份，1年+→年份 */
 function formatConversationTime(date: Date | string): string {
@@ -46,8 +46,8 @@ interface SidebarProps {
   currentUser?: Record<string, unknown> | null;
   onLogout?: () => void;
   collapsed?: boolean;
-  onSelectTask?: (task: UserTask) => void;
-  selectedTaskCode?: string | null;
+  onSelectRule?: (rule: UserTaskRule) => void;
+  selectedRuleCode?: string | null;
   authToken?: string | null;
 }
 
@@ -61,12 +61,13 @@ export default function Sidebar({
   currentUser,
   onLogout,
   collapsed = false,
-  onSelectTask,
-  selectedTaskCode,
+  onSelectRule,
+  selectedRuleCode,
   authToken,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<UserTask[]>([]);
+  const [expandedTaskCodes, setExpandedTaskCodes] = useState<string[]>([]);
 
   useEffect(() => {
     if (!authToken) return;
@@ -79,6 +80,10 @@ export default function Sidebar({
         const data = await response.json();
         if (data.success && data.tasks) {
           setTasks(data.tasks);
+          setExpandedTaskCodes((prev) => {
+            if (prev.length > 0) return prev;
+            return data.tasks.map((task: UserTask) => task.task_code);
+          });
         }
       } catch (error) {
         console.error('加载任务列表失败:', error);
@@ -88,8 +93,16 @@ export default function Sidebar({
     fetchTasks();
   }, [authToken]);
 
-  const handleTaskClick = (task: UserTask) => {
-    onSelectTask?.(task);
+  const handleRuleClick = (rule: UserTaskRule) => {
+    onSelectRule?.(rule);
+  };
+
+  const handleToggleTask = (taskCode: string) => {
+    setExpandedTaskCodes((prev) =>
+      prev.includes(taskCode)
+        ? prev.filter((code) => code !== taskCode)
+        : [...prev, taskCode]
+    );
   };
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
@@ -137,17 +150,41 @@ export default function Sidebar({
             {tasks.map((task) => (
               <div
                 key={task.task_code}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all ${
-                  selectedTaskCode === task.task_code
-                    ? 'bg-blue-50 text-blue-600'
-                    : 'text-gray-600 hover:bg-gray-50'
-                }`}
-                onClick={() => handleTaskClick(task)}
+                className="rounded-xl"
                 title={task.description || task.task_name}
               >
-                <ReceiptText className="w-4 h-4 shrink-0" />
-                <span className="flex-1 truncate text-sm font-medium">{task.task_name}</span>
-                <span className="text-[10px] uppercase tracking-wide text-gray-400">{task.task_type}</span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleTask(task.task_code)}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 text-white font-medium text-sm hover:shadow-lg hover:shadow-blue-500/20 transition-all"
+                  title={task.description || task.task_name}
+                >
+                  <ChevronRight
+                    className={`w-4 h-4 shrink-0 transition-transform ${
+                      expandedTaskCodes.includes(task.task_code) ? 'rotate-90' : ''
+                    }`}
+                  />
+                  <span className="flex-1 truncate text-left">{task.task_name}</span>
+                </button>
+                {expandedTaskCodes.includes(task.task_code) && task.rules && task.rules.length > 0 && (
+                  <div className="mt-1.5 space-y-1">
+                    {task.rules.map((rule) => (
+                      <button
+                        key={rule.rule_code}
+                        type="button"
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-all ${
+                          selectedRuleCode === rule.rule_code
+                            ? 'border border-blue-100 bg-blue-50 text-blue-600'
+                            : 'border border-blue-100 bg-blue-50 text-gray-700 hover:bg-blue-100'
+                        }`}
+                        onClick={() => handleRuleClick(rule)}
+                        title={rule.name}
+                      >
+                        <span className="flex-1 truncate text-sm font-medium">{rule.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -84,6 +84,20 @@ export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
 
 // ── 任务类型 ──────────────────────────────────────────────────────────────
 
+export interface UserTaskRule {
+  id: number;
+  user_id?: string | null;
+  task_id?: number | null;
+  rule_code: string;
+  name: string;
+  rule_type: string;
+  remark?: string;
+  task_code: string;
+  task_name: string;
+  task_type: 'proc' | 'recon' | string;
+  file_rule_code?: string;
+}
+
 export interface UserTask {
   id: number;
   user_id?: string | null;
@@ -91,5 +105,5 @@ export interface UserTask {
   task_name: string;
   description?: string;
   task_type: 'proc' | 'recon' | string;
-  file_rule_code?: string;
+  rules: UserTaskRule[];
 }
