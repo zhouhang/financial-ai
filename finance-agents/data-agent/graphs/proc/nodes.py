@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 from graphs.main_graph.public_nodes import (
     get_rule_node,
     check_file_node,
+    _build_upload_name_maps,
     _get_proc_ctx,
     _to_abs_path,
     _to_upload_ref,
@@ -191,33 +192,8 @@ async def proc_task_execute_node(state: AgentState) -> dict:
     # 需要补充 file_path（从 uploaded_files 或 state 中获取）
     uploaded_files_raw: list = list(state.get("uploaded_files") or [])
 
-    # 构建 file_name -> file_path 映射
-    # ⚠️ key 必须用存储路径的 basename（与 check_file_node 中 os.path.basename(abs_path) 保持一致）
-    # uploaded_files 格式: {"file_path": "/uploads/...", "original_filename": "xxx.xlsx"}
-    file_path_map: dict[str, str] = {}
-    for item in uploaded_files_raw:
-        if isinstance(item, dict):
-            fp = item.get("file_path") or item.get("path") or ""
-        else:
-            fp = str(item)
-        if fp:
-            try:
-                upload_ref = _to_upload_ref(fp)
-                abs_fp = _to_abs_path(upload_ref)
-            except ValueError as e:
-                error_msg = f"上传文件路径非法: {e}"
-                logger.error(f"[proc] {error_msg}")
-                ctx.update({
-                    "phase": ProcAgentPhase.SHOWING_RESULT.value,
-                    "exec_status": "error",
-                    "exec_error": error_msg,
-                })
-                return {
-                    "messages": messages,
-                    "proc_ctx": ctx,
-                }
-            # key = 存储路径文件名（与 file_match_results[i].file_name 来源相同）
-            file_path_map[os.path.basename(abs_fp)] = upload_ref
+    # 构建 file_name -> file_path 映射，兼容原始文件名与存储文件名
+    file_path_map, _ = _build_upload_name_maps(uploaded_files_raw)
     logger.info(f"[proc] file_path_map keys={list(file_path_map.keys())}")
 
     # 构建 uploaded_files 参数（proc_execute 需要的格式）
@@ -259,6 +235,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         sync_result = await execute_proc_rule(
             uploaded_files=sync_uploaded_files,
             rule_code=rule_code,
+            auth_token=state.get("auth_token", ""),
         )
     except Exception as e:
         error_msg = f"调用数据整理服务失败: {e}"

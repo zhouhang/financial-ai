@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # ── 公共节点导入 ────────────────────────────────────────────────────────────
 from graphs.main_graph.public_nodes import (
+    _build_upload_name_maps,
     get_rule_node,
     check_file_node,
     _get_proc_ctx,
@@ -170,29 +171,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
 
     # 准备对账参数
     uploaded_files_raw: list = list(state.get("uploaded_files") or [])
-    file_path_map: dict[str, str] = {}
-    for item in uploaded_files_raw:
-        if isinstance(item, dict):
-            fp = item.get("file_path") or item.get("path") or ""
-        else:
-            fp = str(item)
-        if fp:
-            try:
-                upload_ref = _to_upload_ref(fp)
-                abs_fp = _to_abs_path(upload_ref)
-            except ValueError as e:
-                error_msg = f"上传文件路径非法: {e}"
-                logger.error(f"[recon] {error_msg}")
-                ctx.update({
-                    "phase": ReconAgentPhase.EXEC_FAILED.value,
-                    "exec_status": "error",
-                    "exec_error": error_msg,
-                })
-                return {
-                    "messages": messages,
-                    "recon_ctx": ctx,
-                }
-            file_path_map[abs_fp.split("/")[-1]] = upload_ref
+    file_path_map, ref_to_display_name = _build_upload_name_maps(uploaded_files_raw)
 
     # 构建文件参数
     recon_files: list[dict] = []
@@ -311,10 +290,12 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         download_url = r.get("download_url")  # MCP 返回的下载链接
         rule_name = r.get("rule_name", "")
         if source_file and target_file:
+            source_display = ref_to_display_name.get(source_file, source_file.split("/")[-1] if "/" in source_file else source_file)
+            target_display = ref_to_display_name.get(target_file, target_file.split("/")[-1] if "/" in target_file else target_file)
             file_info_list.append({
                 "rule_name": rule_name,
-                "source_file": source_file.split("/")[-1] if "/" in source_file else source_file,
-                "target_file": target_file.split("/")[-1] if "/" in target_file else target_file,
+                "source_file": source_display,
+                "target_file": target_display,
             })
         if output_file:
             output_files.append(output_file)
@@ -397,9 +378,18 @@ def recon_result_node(state: AgentState) -> dict:
         valid_results = [result for result in results if result.get("status", "succeeded") == "succeeded"]
 
         # 构建每个规则的独立显示
+        _, ref_to_display_name = _build_upload_name_maps(list(state.get("uploaded_files") or []))
+        diff_label = _build_diff_description(ctx)
+        show_rule_title = len(valid_results) > 1
         rule_sections = []
         for i, result in enumerate(valid_results, 1):
-            rule_section = _build_single_rule_result(result, i)
+            rule_section = _build_single_rule_result(
+                result,
+                i,
+                ref_to_display_name=ref_to_display_name,
+                diff_label=diff_label,
+                show_rule_title=show_rule_title,
+            )
             if rule_section:  # 只添加非空的结果
                 rule_sections.append(rule_section)
 
@@ -444,7 +434,14 @@ def recon_result_node(state: AgentState) -> dict:
     }
 
 
-def _build_single_rule_result(result: dict, index: int) -> str:
+def _build_single_rule_result(
+    result: dict,
+    index: int,
+    *,
+    ref_to_display_name: dict[str, str],
+    diff_label: str,
+    show_rule_title: bool,
+) -> str:
     """构建单个规则的详细结果显示（使用 Markdown 格式）"""
     rule_name = result.get("rule_name", f"规则{index}")
 
@@ -456,8 +453,8 @@ def _build_single_rule_result(result: dict, index: int) -> str:
     if not source_file or not target_file:
         return ""
 
-    source_file_name = source_file.split("/")[-1] if "/" in source_file else source_file
-    target_file_name = target_file.split("/")[-1] if "/" in target_file else target_file
+    source_file_name = ref_to_display_name.get(source_file, source_file.split("/")[-1] if "/" in source_file else source_file)
+    target_file_name = ref_to_display_name.get(target_file, target_file.split("/")[-1] if "/" in target_file else target_file)
 
     # 获取过滤统计
     source_filter_stats = result.get("source_filter_stats", {})
@@ -495,9 +492,9 @@ def _build_single_rule_result(result: dict, index: int) -> str:
         "| 类型 | 数量 | 说明 |\n"
         "|------|------|------|\n"
         f"| ✅ 完全匹配 | {matched_exact} | 数据完全一致 |\n"
-        f"| ⚠️ 匹配有差异 | {matched_with_diff} | 关键列匹配但数值不同 |\n"
-        f"| 📤 源文件独有 | {source_only} | 仅在源文件中存在 |\n"
-        f"| 📥 目标文件独有 | {target_only} | 仅在目标文件中存在 |\n"
+        f"| ⚠️ 匹配有差异 | {matched_with_diff} | {diff_label} |\n"
+        f"| 📤 {source_file_name}独有 | {source_only} | 仅在{source_file_name}中存在 |\n"
+        f"| 📥 {target_file_name}独有 | {target_only} | 仅在{target_file_name}中存在 |\n"
         f"| **合计** | **{total_matched + total_diff}** | 总记录数 |"
     )
 
@@ -505,8 +502,9 @@ def _build_single_rule_result(result: dict, index: int) -> str:
     download_link = f"\n📄 **[查看详细差异报告]({download_url})**\n" if download_url else ""
 
     # 构建规则结果块（使用一级标题使规则名称更突出）
+    title = f"# **{rule_name}**\n\n" if show_rule_title else ""
     section = (
-        f"# **{rule_name}**\n\n"
+        f"{title}"
         f"📁 **文件**: `{source_file_name}` ↔ `{target_file_name}`\n\n"
         f"{filter_text}\n\n"
         f"📊 **结果统计**:\n\n"
@@ -516,6 +514,44 @@ def _build_single_rule_result(result: dict, index: int) -> str:
     )
 
     return section
+
+
+def _build_diff_description(ctx: dict[str, Any]) -> str:
+    """根据规则配置生成差异说明。"""
+    rule = ctx.get("rule") or {}
+    rules = rule.get("rules") or []
+    first_rule = rules[0] if rules else {}
+    recon_config = first_rule.get("recon") or first_rule.get("reconciliation_config") or {}
+
+    key_config = recon_config.get("key_columns") or {}
+    mappings = key_config.get("mappings") or []
+    if not mappings:
+        source_field = (key_config.get("source_field") or "").strip()
+        target_field = (key_config.get("target_field") or "").strip()
+        if source_field and target_field:
+            mappings = [{"source_field": source_field, "target_field": target_field}]
+
+    key_labels: list[str] = []
+    for mapping in mappings:
+        key_source = (mapping.get("source_field") or "").strip()
+        key_target = (mapping.get("target_field") or "").strip()
+        if key_source and key_target and key_source != key_target:
+            key_labels.append(f"{key_source}/{key_target}")
+        elif key_source or key_target:
+            key_labels.append(key_source or key_target)
+    key_label = " + ".join(key_labels) if key_labels else "关键列"
+
+    compare_columns = (recon_config.get("compare_columns") or {}).get("columns") or []
+    compare_item = compare_columns[0] if compare_columns else {}
+    compare_label = (
+        (compare_item.get("name") or "").strip()
+        or (compare_item.get("alias") or "").strip()
+        or (compare_item.get("source_column") or "").strip()
+        or (compare_item.get("target_column") or "").strip()
+        or (compare_item.get("column") or "").strip()
+        or "数值"
+    )
+    return f"{key_label}匹配但{compare_label}不同"
 
 
 def _build_rule_status_list(title: str, results: list[dict], reason_key: str) -> str:

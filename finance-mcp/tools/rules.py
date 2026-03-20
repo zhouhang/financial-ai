@@ -7,6 +7,7 @@ Rules MCP 工具定义和实现。
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp import Tool
@@ -16,7 +17,8 @@ from db_config import get_db_connection
 
 logger = logging.getLogger("tools.rules")
 
-_rule_cache: Dict[Tuple[str, Optional[str]], Optional[Dict[str, Any]]] = {}
+RULE_CACHE_TTL_SECONDS = 5
+_rule_cache: Dict[Tuple[str, Optional[str]], Tuple[float, Optional[Dict[str, Any]]]] = {}
 
 
 def create_tools() -> list[Tool]:
@@ -77,7 +79,16 @@ def _infer_task_type(rule_payload: Any) -> str:
         return "proc"
     if "role_desc" in rule_obj or "merge_rules" in rule_obj:
         return "proc"
-    if "global_settings" in rule_obj and "rules" in rule_obj:
+    rules = rule_obj.get("rules")
+    if isinstance(rules, list) and rules:
+        first_rule = rules[0] or {}
+        if isinstance(first_rule, dict) and (
+            "recon" in first_rule
+            or ("source_file" in first_rule and "target_file" in first_rule)
+            or ("rule_id" in rule_obj and "rule_name" in rule_obj)
+        ):
+            return "recon"
+    if "rule_id" in rule_obj and "rule_name" in rule_obj and "file_rule_code" in rule_obj:
         return "recon"
     return "proc"
 
@@ -94,9 +105,14 @@ def _normalize_task_type(rule_type: Any, rule_payload: Any) -> str:
 def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, Any]]:
     """从 rule_detail 表获取指定 rule_code 的规则完整记录。"""
     cache_key = (rule_code, user_id)
-    if cache_key in _rule_cache:
-        logger.info(f"[Cache] 命中缓存: rule_code={rule_code}, user_id={user_id}")
-        return _rule_cache[cache_key]
+    cached = _rule_cache.get(cache_key)
+    now = time.time()
+    if cached is not None:
+        cached_at, cached_value = cached
+        if now - cached_at < RULE_CACHE_TTL_SECONDS:
+            logger.info(f"[Cache] 命中缓存: rule_code={rule_code}, user_id={user_id}")
+            return cached_value
+        _rule_cache.pop(cache_key, None)
 
     conn = None
     try:
@@ -130,7 +146,7 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
 
         if row is None:
             logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}, user_id={user_id}")
-            _rule_cache[cache_key] = None
+            _rule_cache[cache_key] = (now, None)
             return None
 
         result = {
@@ -143,7 +159,7 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
             "rule_type": row[6],
             "remark": row[7],
         }
-        _rule_cache[cache_key] = result
+        _rule_cache[cache_key] = (now, result)
         return result
     except Exception as e:
         logger.error(f"[SQL] 查询 rule_detail 失败: {e}", exc_info=True)

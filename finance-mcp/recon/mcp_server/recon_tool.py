@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
-from security_utils import resolve_upload_file_path
+from security_utils import resolve_upload_file_path, write_output_metadata
 
 # 导入数据过滤模块
 from tools.data_filter import filter_dataframe_by_rule_config, get_filter_statistics
@@ -121,6 +123,9 @@ def _get_rule(rule_code: str, user_id: str) -> Optional[dict]:
 
 def find_recon_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
     """根据 rule_id 查找规则"""
+    if rules_config.get("rule_id") == rule_id:
+        rules = rules_config.get("rules", [])
+        return rules[0] if rules else None
     for rule in rules_config.get("rules", []):
         if rule.get("rule_id") == rule_id:
             return rule
@@ -203,15 +208,25 @@ async def _handle_recon_execute(arguments: dict) -> dict:
                     {
                         "success": False,
                         "status": "skipped",
-                        "rule_id": rule.get("rule_id", "UNKNOWN"),
-                        "rule_name": rule.get("rule_name", "未命名规则"),
+                        "rule_id": rules_config.get("rule_id", "UNKNOWN"),
+                        "rule_name": rules_config.get("rule_name", "未命名规则"),
                         "skip_reason": "disabled",
                         "message": "规则已禁用",
                     }
                 )
                 continue
 
-            results.append(execute_single_recon(rule, table_file_map, output_dir))
+            results.append(
+                execute_single_recon(
+                    rule,
+                    table_file_map,
+                    output_dir,
+                    auth_token,
+                    user_id,
+                    rule_code,
+                    rules_config,
+                )
+            )
 
         summary = _build_recon_summary(results)
         status = _derive_recon_status(summary)
@@ -244,7 +259,11 @@ async def _handle_recon_execute(arguments: dict) -> dict:
 def execute_single_recon(
     rule: dict,
     table_file_map: dict[str, str],
-    output_dir: str
+    output_dir: str,
+    auth_token: str,
+    user_id: str,
+    rule_code: str,
+    rule_meta: dict[str, Any] | None = None,
 ) -> dict:
     """
     执行单个对账规则
@@ -257,8 +276,9 @@ def execute_single_recon(
     Returns:
         核对结果
     """
-    rule_id = rule.get("rule_id", "UNKNOWN")
-    rule_name = rule.get("rule_name", "未命名规则")
+    meta = rule_meta or {}
+    rule_id = meta.get("rule_id") or rule.get("rule_id", "UNKNOWN")
+    rule_name = meta.get("rule_name") or rule.get("rule_name", "未命名规则")
     
     logger.info(f"[recon] [{rule_id}] 开始执行: {rule_name}")
     
@@ -357,9 +377,9 @@ def execute_single_recon(
     df_target = _apply_column_mapping(df_target, target_file_config.get("column_mapping", {}))
     
     # 4. 获取核对配置
-    recon_config = rule.get("reconciliation_config", {})
+    recon_config = rule.get("recon") or rule.get("reconciliation_config", {})
     key_columns_config = recon_config.get("key_columns", {})
-    key_columns = key_columns_config.get("columns", [])
+    key_mappings = _get_key_mappings(key_columns_config)
     compare_columns_config = recon_config.get("compare_columns", {}).get("columns", [])
     aggregation_config = recon_config.get("aggregation", {})
     
@@ -372,9 +392,8 @@ def execute_single_recon(
     diff_result = _execute_comparison(
         df_source=df_source,
         df_target=df_target,
-        key_columns=key_columns,
+        key_mappings=key_mappings,
         compare_columns_config=compare_columns_config,
-        diff_analysis_config=rule.get("diff_analysis", {}),
         rule_id=rule_id,
         key_columns_config=key_columns_config
     )
@@ -394,8 +413,6 @@ def execute_single_recon(
     # 8. 生成下载链接
     download_url = None
     if output_path:
-        import os
-        from pathlib import Path
         file_name = Path(output_path).name
         # MCP_PUBLIC_BASE_URL 在 unified_mcp_server.py 中定义
         try:
@@ -403,7 +420,16 @@ def execute_single_recon(
             base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
         except (ImportError, AttributeError):
             base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-        download_url = f"{base_url}/output/recon/{file_name}"
+        write_output_metadata(
+            output_path,
+            {
+                "owner_user_id": user_id,
+                "module": "recon",
+                "rule_code": rule_code,
+                "rule_id": rule_id,
+            },
+        )
+        download_url = f"{base_url}/output/recon/{file_name}?auth_token={quote(auth_token, safe='')}"
     
     # 9. 构建过滤提示信息
     filter_messages = []
@@ -553,6 +579,82 @@ def _apply_column_mapping(df: pd.DataFrame, column_mapping: dict) -> pd.DataFram
     return df
 
 
+def _get_key_mappings(key_columns_config: dict | None) -> list[dict[str, str]]:
+    """解析关键列映射，兼容单字段与多字段配置。"""
+    config = key_columns_config or {}
+    mappings = config.get("mappings") or []
+    normalized: list[dict[str, str]] = []
+
+    for item in mappings:
+        source_field = str(item.get("source_field") or "").strip()
+        target_field = str(item.get("target_field") or "").strip()
+        if source_field and target_field:
+            normalized.append({"source_field": source_field, "target_field": target_field})
+
+    if normalized:
+        return normalized
+
+    source_field = str(config.get("source_field") or "").strip()
+    target_field = str(config.get("target_field") or "").strip()
+    if source_field and target_field:
+        return [{"source_field": source_field, "target_field": target_field}]
+    return []
+
+
+def _resolve_group_by_columns(aggregation_config: dict, file_type: str) -> list[str]:
+    """解析聚合 group_by 配置，主形态为数组，兼容旧对象结构。"""
+    group_by = aggregation_config.get("group_by", [])
+    if isinstance(group_by, dict):
+        group_by = [group_by]
+    if isinstance(group_by, list):
+        fields: list[str] = []
+        for item in group_by:
+            if isinstance(item, str):
+                fields.append(str(item).strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            field = item.get(f"{file_type}_field") or item.get(file_type)
+            if isinstance(field, list):
+                fields.extend(str(sub).strip() for sub in field if str(sub).strip())
+            elif field:
+                fields.append(str(field).strip())
+        return fields
+    return []
+
+
+def _build_aggregation_specs(aggregation_config: dict, df: pd.DataFrame, file_type: str) -> dict[str, tuple[str, str]]:
+    """构建 pandas NamedAgg 配置。"""
+    specs: dict[str, tuple[str, str]] = {}
+    aggregations = aggregation_config.get("aggregations", []) or aggregation_config.get("aggre_fields", []) or []
+    if isinstance(aggregations, dict):
+        aggregations = [aggregations]
+    for agg in aggregations:
+        input_col = (
+            agg.get(f"{file_type}_field")
+            or agg.get("source_field" if file_type == "source" else "target_field")
+            or agg.get(f"{file_type}_column")
+            or agg.get("source_column" if file_type == "source" else "target_column")
+            or agg.get("column")
+        )
+        output_col = agg.get("alias") or input_col
+        func = agg.get("function", "sum")
+        if input_col and output_col and input_col in df.columns:
+            specs[output_col] = (input_col, func)
+    return specs
+
+
+def _get_compare_name(compare_cfg: dict[str, Any]) -> str:
+    """获取比较项展示名，兼容旧 column 字段。"""
+    return (
+        str(compare_cfg.get("name") or "").strip()
+        or str(compare_cfg.get("column") or "").strip()
+        or str(compare_cfg.get("source_column") or "").strip()
+        or str(compare_cfg.get("target_column") or "").strip()
+        or "数值"
+    )
+
+
 def _apply_aggregation(
     df: pd.DataFrame,
     aggregation_config: dict,
@@ -560,8 +662,10 @@ def _apply_aggregation(
     file_type: str
 ) -> pd.DataFrame:
     """应用分组聚合"""
-    group_by = aggregation_config.get("group_by", [])
-    aggregations = aggregation_config.get("aggregations", [])
+    group_by = _resolve_group_by_columns(aggregation_config, file_type)
+    aggregations = aggregation_config.get("aggregations", []) or aggregation_config.get("aggre_fields", [])
+    if isinstance(aggregations, dict):
+        aggregations = [aggregations]
     
     if not group_by or not aggregations:
         return df
@@ -572,19 +676,18 @@ def _apply_aggregation(
         logger.warning(f"[recon] [{rule_id}] {file_type} 缺少分组列: {missing_cols}")
         return df
     
-    # 构建聚合字典
-    agg_dict = {}
-    for agg in aggregations:
-        col = agg.get("column")
-        func = agg.get("function", "sum")
-        if col in df.columns:
-            agg_dict[col] = func
-    
-    if not agg_dict:
+    agg_specs = _build_aggregation_specs(aggregation_config, df, file_type)
+
+    if not agg_specs:
         return df
     
     try:
-        grouped = df.groupby(group_by, as_index=False).agg(agg_dict)
+        grouped = df.groupby(group_by, as_index=False).agg(
+            **{
+                output_col: pd.NamedAgg(column=input_col, aggfunc=func)
+                for output_col, (input_col, func) in agg_specs.items()
+            }
+        )
         logger.info(f"[recon] [{rule_id}] {file_type} 聚合后 {len(grouped)} 行")
         return grouped
     except Exception as e:
@@ -595,7 +698,7 @@ def _apply_aggregation(
 def _apply_key_transformations(
     df: pd.DataFrame,
     key_column: str,
-    transformations: dict,
+    transformations: list[dict[str, Any]],
     file_type: str,
     rule_id: str
 ) -> pd.DataFrame:
@@ -622,69 +725,60 @@ def _apply_key_transformations(
     """
     if key_column not in df.columns:
         return df
-    
-    trans_config = transformations.get(file_type, {})
-    if not trans_config:
-        return df
-    
+
     original_values = df[key_column].astype(str)
     transformed_values = original_values
-    
-    # 1. 正则表达式提取 - 提取匹配指定模式的内容
-    regex_extract = trans_config.get("regex_extract")
-    if regex_extract:
-        try:
-            extracted = transformed_values.str.extract(regex_extract, expand=False)
-            # 如果结果是DataFrame（有多个捕获组），取第一个非空列
-            if isinstance(extracted, pd.DataFrame):
-                for col in extracted.columns:
-                    if extracted[col].notna().any():
-                        extracted = extracted[col]
-                        break
-            # 填充未匹配的值（保持原值）
-            transformed_values = extracted.fillna(transformed_values)
-            matched_count = extracted.notna().sum()
-            logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则提取 '{regex_extract}' 匹配 {matched_count} 个值")
-        except Exception as e:
-            logger.warning(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则提取失败: {e}")
-    
-    # 2. 正则表达式替换 - 替换匹配的内容
-    regex_replace = trans_config.get("regex_replace")
-    if regex_replace:
-        pattern = regex_replace.get("pattern")
-        replacement = regex_replace.get("replacement", "")
-        if pattern:
+
+    # 允许对同一字段按顺序应用多条转换规则
+    for trans_config in [t for t in transformations if t]:
+        op_type = trans_config.get("type")
+        # 1. 正则表达式提取
+        regex_extract = trans_config.get("pattern") if op_type == "regex_extract" else None
+        if regex_extract:
             try:
-                transformed_values = transformed_values.str.replace(pattern, replacement, regex=True)
-                logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则替换 '{pattern}' -> '{replacement}'")
+                extracted = transformed_values.str.extract(regex_extract, expand=False)
+                if isinstance(extracted, pd.DataFrame):
+                    for col in extracted.columns:
+                        if extracted[col].notna().any():
+                            extracted = extracted[col]
+                            break
+                transformed_values = extracted.fillna(transformed_values)
+                matched_count = extracted.notna().sum()
+                logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则提取 '{regex_extract}' 匹配 {matched_count} 个值")
             except Exception as e:
-                logger.warning(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则替换失败: {e}")
-    
-    # 3. 去除前缀
-    strip_prefix = trans_config.get("strip_prefix")
-    if strip_prefix:
-        transformed_values = transformed_values.str.lstrip(strip_prefix)
-        logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除前缀 '{strip_prefix}'")
-    
-    # 4. 去除后缀
-    strip_suffix = trans_config.get("strip_suffix")
-    if strip_suffix:
-        transformed_values = transformed_values.str.removesuffix(strip_suffix)
-        logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除后缀 '{strip_suffix}'")
-    
-    # 5. 去除空白字符
-    if trans_config.get("strip_whitespace", False):
-        transformed_values = transformed_values.str.strip()
-        logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除首尾空白")
-    
-    # 6. 转换为小写
-    if trans_config.get("lowercase", False):
-        transformed_values = transformed_values.str.lower()
-        logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 转换为小写")
-    
+                logger.warning(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则提取失败: {e}")
+
+        # 2. 正则表达式替换
+        if op_type == "regex_replace":
+            pattern = trans_config.get("pattern")
+            replacement = trans_config.get("replacement", "")
+            if pattern:
+                try:
+                    transformed_values = transformed_values.str.replace(pattern, replacement, regex=True)
+                    logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则替换 '{pattern}' -> '{replacement}'")
+                except Exception as e:
+                    logger.warning(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 正则替换失败: {e}")
+
+        strip_prefix = trans_config.get("value") if op_type == "strip_prefix" else None
+        if strip_prefix:
+            transformed_values = transformed_values.str.lstrip(strip_prefix)
+            logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除前缀 '{strip_prefix}'")
+
+        strip_suffix = trans_config.get("value") if op_type == "strip_suffix" else None
+        if strip_suffix:
+            transformed_values = transformed_values.str.removesuffix(strip_suffix)
+            logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除后缀 '{strip_suffix}'")
+
+        if op_type == "strip_whitespace":
+            transformed_values = transformed_values.str.strip()
+            logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 去除首尾空白")
+
+        if op_type == "lowercase":
+            transformed_values = transformed_values.str.lower()
+            logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 转换为小写")
+
     df[key_column] = transformed_values
-    
-    # 记录转换统计
+
     changed_count = (original_values != transformed_values).sum()
     if changed_count > 0:
         logger.info(f"[recon] [{rule_id}] {file_type} 列 '{key_column}' 共转换了 {changed_count} 个值")
@@ -692,12 +786,29 @@ def _apply_key_transformations(
     return df
 
 
+def _get_transformation_chain(
+    key_columns_config: dict | None,
+    file_type: str,
+    key_column: str,
+) -> list[dict[str, Any]]:
+    """按字段解析转换链，仅支持 source/target -> field -> operations 结构。"""
+    transformations = (key_columns_config or {}).get("transformations", {})
+    if not isinstance(transformations, dict):
+        return []
+    side_config = transformations.get(file_type, {})
+    if not isinstance(side_config, dict):
+        return []
+    operations = side_config.get(key_column, [])
+    if not isinstance(operations, list):
+        return []
+    return [dict(item) for item in operations if isinstance(item, dict)]
+
+
 def _execute_comparison(
     df_source: pd.DataFrame,
     df_target: pd.DataFrame,
-    key_columns: list[str],
+    key_mappings: list[dict[str, str]],
     compare_columns_config: list[dict],
-    diff_analysis_config: dict,
     rule_id: str,
     key_columns_config: dict = None
 ) -> dict:
@@ -719,22 +830,14 @@ def _execute_comparison(
         "matched_exact": pd.DataFrame()
     }
     
-    if not key_columns:
+    if not key_mappings:
         logger.warning(f"[recon] [{rule_id}] 未配置关键列，无法执行比较")
         return result
-    
-    # 检查关键列是否存在（考虑 cross_file_mapping）
-    cross_mapping = key_columns_config.get("cross_file_mapping", {}) if key_columns_config else {}
-    if cross_mapping:
-        # 使用 cross_file_mapping 中定义的列名进行检查
-        source_key_col = cross_mapping.get("source_column")
-        target_key_col = cross_mapping.get("target_column")
-        source_missing = [source_key_col] if source_key_col and source_key_col not in df_source.columns else []
-        target_missing = [target_key_col] if target_key_col and target_key_col not in df_target.columns else []
-    else:
-        # 使用 key_columns 列表进行检查
-        source_missing = [col for col in key_columns if col not in df_source.columns]
-        target_missing = [col for col in key_columns if col not in df_target.columns]
+
+    source_key_cols_raw = [item["source_field"] for item in key_mappings]
+    target_key_cols_raw = [item["target_field"] for item in key_mappings]
+    source_missing = [col for col in source_key_cols_raw if col not in df_source.columns]
+    target_missing = [col for col in target_key_cols_raw if col not in df_target.columns]
     
     if source_missing:
         logger.warning(f"[recon] [{rule_id}] 源文件缺少关键列: {source_missing}")
@@ -745,38 +848,28 @@ def _execute_comparison(
     
     # 应用数据清洗转换（在添加前缀之前）
     if key_columns_config:
-        transformations = key_columns_config.get("transformations", {})
-        if transformations:
-            # 根据 cross_file_mapping 确定源和目标的关键列
-            cross_mapping = key_columns_config.get("cross_file_mapping", {})
-            source_key_col = cross_mapping.get("source_column", key_columns[0] if key_columns else None)
-            target_key_col = cross_mapping.get("target_column", key_columns[-1] if key_columns else None)
-            
-            if source_key_col and source_key_col in df_source.columns:
-                df_source = _apply_key_transformations(
-                    df_source.copy(), source_key_col, transformations, "source", rule_id
-                )
-            if target_key_col and target_key_col in df_target.columns:
-                df_target = _apply_key_transformations(
-                    df_target.copy(), target_key_col, transformations, "target", rule_id
-                )
+        if key_columns_config.get("transformations"):
+            df_source = df_source.copy()
+            df_target = df_target.copy()
+            for source_key_col in source_key_cols_raw:
+                trans_chain = _get_transformation_chain(key_columns_config, "source", source_key_col)
+                if source_key_col in df_source.columns and trans_chain:
+                    df_source = _apply_key_transformations(
+                        df_source, source_key_col, trans_chain, "source", rule_id
+                    )
+            for target_key_col in target_key_cols_raw:
+                trans_chain = _get_transformation_chain(key_columns_config, "target", target_key_col)
+                if target_key_col in df_target.columns and trans_chain:
+                    df_target = _apply_key_transformations(
+                        df_target, target_key_col, trans_chain, "target", rule_id
+                    )
     
     # 添加前缀以区分来源
     df_source_prefixed = df_source.add_prefix("source_")
     df_target_prefixed = df_target.add_prefix("target_")
     
-    # 确定用于合并的关键列（考虑 cross_file_mapping）
-    cross_mapping = key_columns_config.get("cross_file_mapping", {}) if key_columns_config else {}
-    if cross_mapping:
-        # 使用 cross_file_mapping 中定义的列名
-        source_key_col = cross_mapping.get("source_column", key_columns[0] if key_columns else None)
-        target_key_col = cross_mapping.get("target_column", key_columns[-1] if key_columns else None)
-        source_key_cols = [f"source_{source_key_col}"] if source_key_col else []
-        target_key_cols = [f"target_{target_key_col}"] if target_key_col else []
-    else:
-        # 使用 key_columns 列表
-        source_key_cols = [f"source_{col}" for col in key_columns]
-        target_key_cols = [f"target_{col}" for col in key_columns]
+    source_key_cols = [f"source_{col}" for col in source_key_cols_raw]
+    target_key_cols = [f"target_{col}" for col in target_key_cols_raw]
     
     # 创建合并键（处理 NaN 值）
     def _create_merge_key(df, cols):
@@ -820,13 +913,15 @@ def _execute_comparison(
     has_diff_mask = pd.Series([False] * len(both), index=both.index)
     
     for cfg in compare_columns_config:
-        col = cfg.get("column")
-        if not col:
+        compare_name = _get_compare_name(cfg)
+        if not compare_name:
             continue
         
-        # 优先使用 source_column/target_column 配置，否则使用 column 字段
-        source_col_name = cfg.get("source_column", col)
-        target_col_name = cfg.get("target_column", col)
+        source_col_name = cfg.get("source_column")
+        target_col_name = cfg.get("target_column")
+        if not source_col_name or not target_col_name:
+            logger.warning(f"[recon] [{rule_id}] 比较项缺少 source_column 或 target_column: {compare_name}")
+            continue
         
         source_col = f"source_{source_col_name}"
         target_col = f"target_{target_col_name}"
@@ -836,7 +931,6 @@ def _execute_comparison(
             continue
         
         tolerance = cfg.get("tolerance", 0)
-        tolerance_type = cfg.get("tolerance_type", "absolute")
         
         # 转换为数值
         source_vals = pd.to_numeric(both[source_col], errors="coerce").fillna(0)
@@ -844,19 +938,13 @@ def _execute_comparison(
         
         diff = (source_vals - target_vals).abs()
         
-        if tolerance_type == "absolute":
-            col_has_diff = diff > tolerance
-        elif tolerance_type == "relative":
-            col_has_diff = (diff / target_vals.abs().replace(0, 1)) > tolerance
-        else:
-            col_has_diff = diff > 0
+        col_has_diff = diff > tolerance
         
         has_diff_mask = has_diff_mask | col_has_diff
         
-        # 添加差异列（使用配置中的 column 作为列名）
-        both[f"diff_{col}"] = source_vals - target_vals
+        both[f"diff_{compare_name}"] = source_vals - target_vals
         
-        logger.info(f"[recon] [{rule_id}] 比较列 {col}: {source_col_name} vs {target_col_name}, 差异 {col_has_diff.sum()} 条")
+        logger.info(f"[recon] [{rule_id}] 比较列 {compare_name}: {source_col_name} vs {target_col_name}, 差异 {col_has_diff.sum()} 条")
     
     result["matched_with_diff"] = both[has_diff_mask]
     result["matched_exact"] = both[~has_diff_mask]
@@ -1012,22 +1100,9 @@ def _get_marked_columns(key_columns_config: dict, compare_columns_config: list) 
     }
     
     if key_columns_config:
-        # 处理 cross_file_mapping
-        cross_mapping = key_columns_config.get("cross_file_mapping", {})
-        if cross_mapping:
-            # 单映射
-            source_col = cross_mapping.get("source_column")
-            target_col = cross_mapping.get("target_column")
-            if source_col:
-                marked["mapping_source"].append(f"source_{source_col}")
-            if target_col:
-                marked["mapping_target"].append(f"target_{target_col}")
-        
-        # 处理多映射（数组格式）
-        cross_mappings = key_columns_config.get("cross_file_mappings", [])
-        for mapping in cross_mappings:
-            source_col = mapping.get("source_column")
-            target_col = mapping.get("target_column")
+        for mapping in _get_key_mappings(key_columns_config):
+            source_col = mapping.get("source_field")
+            target_col = mapping.get("target_field")
             if source_col:
                 marked["mapping_source"].append(f"source_{source_col}")
             if target_col:
@@ -1035,16 +1110,16 @@ def _get_marked_columns(key_columns_config: dict, compare_columns_config: list) 
     
     if compare_columns_config:
         for cfg in compare_columns_config:
-            col = cfg.get("column")
-            source_col = cfg.get("source_column", col)
-            target_col = cfg.get("target_column", col)
+            compare_name = _get_compare_name(cfg)
+            source_col = cfg.get("source_column")
+            target_col = cfg.get("target_column")
             
             if source_col:
                 marked["compare_source"].append(f"source_{source_col}")
             if target_col:
                 marked["compare_target"].append(f"target_{target_col}")
-            if col:
-                marked["diff"].append(f"diff_{col}")
+            if compare_name:
+                marked["diff"].append(f"diff_{compare_name}")
     
     return marked
 

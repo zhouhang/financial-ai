@@ -342,7 +342,13 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
 
   const isExceptionTable = table.headers.includes('异常订单号') && table.headers.includes('异常原因');
   const isColumnRequirementsTable = beforeContent?.includes('列名要求') || beforeContent?.includes('列名未能与');
-  const hideToolbar = isExceptionTable || isColumnRequirementsTable;
+  const isReconSummaryTable =
+    table.headers.length === 3 &&
+    table.headers[0] === '类型' &&
+    table.headers[1] === '数量' &&
+    table.headers[2] === '说明' &&
+    !!beforeContent?.includes('结果统计');
+  const hideToolbar = isExceptionTable || isColumnRequirementsTable || isReconSummaryTable;
 
   return (
     <div className="my-2">

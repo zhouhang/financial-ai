@@ -188,59 +188,71 @@ class ReconFileConfigModel(StrictModel):
     column_mapping: ColumnMappingModel | None = None
 
 
-class CrossFileMappingModel(StrictModel):
-    source_column: str
-    target_column: str
-
-
 class CompareColumnModel(StrictModel):
-    column: str
+    name: str | None = None
+    column: str | None = None
     source_column: str | None = None
     target_column: str | None = None
     tolerance: float | int = 0
-    tolerance_type: Literal["absolute", "relative"] = "absolute"
+
+
+class AggregationGroupByModel(StrictModel):
+    source_field: str
+    target_field: str
 
 
 class AggregationItemModel(StrictModel):
-    column: str
+    alias: str | None = None
+    source_field: str | None = None
+    target_field: str | None = None
+    column: str | None = None
+    source_column: str | None = None
+    target_column: str | None = None
     function: Literal["sum", "count", "mean", "min", "max", "first", "last"] = "sum"
 
 
 class AggregationConfigModel(StrictModel):
     enabled: bool = False
-    group_by: list[str] = Field(default_factory=list)
+    group_by: list[AggregationGroupByModel] = Field(default_factory=list)
     aggregations: list[AggregationItemModel] = Field(default_factory=list)
 
 
+class KeyFieldMappingModel(StrictModel):
+    source_field: str
+    target_field: str
+
+
 class KeyColumnsConfigModel(StrictModel):
-    columns: list[str] = Field(default_factory=list)
-    cross_file_mapping: CrossFileMappingModel | None = None
-    cross_file_mappings: list[CrossFileMappingModel] = Field(default_factory=list)
-    transformations: dict[str, Any] = Field(default_factory=dict)
+    source_field: str | None = None
+    target_field: str | None = None
+    mappings: list[KeyFieldMappingModel] = Field(default_factory=list)
+    transformations: dict[str, dict[str, list[dict[str, Any]]]] = Field(default_factory=dict)
 
 
 class CompareColumnsConfigModel(StrictModel):
     columns: list[CompareColumnModel] = Field(default_factory=list)
 
 
-class ReconciliationConfigModel(StrictModel):
+class ReconConfigModel(StrictModel):
     key_columns: KeyColumnsConfigModel
     compare_columns: CompareColumnsConfigModel = Field(default_factory=CompareColumnsConfigModel)
     aggregation: AggregationConfigModel = Field(default_factory=AggregationConfigModel)
 
 
 class ReconRuleModel(StrictModel):
-    rule_id: str
-    rule_name: str
     enabled: bool = True
     source_file: ReconFileConfigModel
     target_file: ReconFileConfigModel
-    reconciliation_config: ReconciliationConfigModel
+    recon: ReconConfigModel
     output: dict[str, Any] = Field(default_factory=dict)
-    diff_analysis: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReconRuleSetModel(StrictModel):
+    rule_id: str
+    rule_name: str
+    description: str | None = None
+    file_rule_code: str | None = None
+    schema_version: str | None = None
     rules: list[ReconRuleModel]
 
 
@@ -339,83 +351,165 @@ def _semantic_errors_for_merge(rule: dict[str, Any]) -> list[dict[str, str]]:
 
 def _semantic_errors_for_recon(rule: dict[str, Any]) -> list[dict[str, str]]:
     errors = []
-    rule_ids = [item["rule_id"] for item in rule.get("rules", [])]
-    if len(rule_ids) != len(set(rule_ids)):
-        errors.append({"path": "rules", "message": "rule_id 必须唯一", "type": "duplicate"})
+    if not rule.get("rule_id"):
+        errors.append({"path": "rule_id", "message": "缺少顶层 rule_id", "type": "missing"})
+    if not rule.get("rule_name"):
+        errors.append({"path": "rule_name", "message": "缺少顶层 rule_name", "type": "missing"})
     for idx, item in enumerate(rule.get("rules", [])):
-        recon_config = item.get("reconciliation_config", {})
-        key_columns = recon_config.get("key_columns", {}).get("columns", [])
-        if not key_columns and not recon_config.get("key_columns", {}).get("cross_file_mapping"):
+        recon_config = item.get("recon") or item.get("reconciliation_config", {})
+        key_config = recon_config.get("key_columns", {})
+        mappings = key_config.get("mappings") or []
+        if not mappings:
+            source_field = key_config.get("source_field")
+            target_field = key_config.get("target_field")
+            if source_field and target_field:
+                mappings = [{"source_field": source_field, "target_field": target_field}]
+        if not mappings:
             errors.append(
                 {
-                    "path": f"rules.{idx}.reconciliation_config.key_columns",
-                    "message": "至少需要配置 key_columns.columns 或 cross_file_mapping",
+                    "path": f"rules.{idx}.recon.key_columns",
+                    "message": "需要配置 key_columns.mappings，或同时配置 source_field 和 target_field",
                     "type": "missing",
                 }
             )
+        else:
+            pair_set: set[tuple[str, str]] = set()
+            for mapping_idx, mapping in enumerate(mappings):
+                source_field = mapping.get("source_field")
+                target_field = mapping.get("target_field")
+                if not source_field or not target_field:
+                    errors.append(
+                        {
+                            "path": f"rules.{idx}.recon.key_columns.mappings.{mapping_idx}",
+                            "message": "每个 key mapping 都需要 source_field 和 target_field",
+                            "type": "missing",
+                        }
+                    )
+                    continue
+                pair = (source_field, target_field)
+                if pair in pair_set:
+                    errors.append(
+                        {
+                            "path": f"rules.{idx}.recon.key_columns.mappings.{mapping_idx}",
+                            "message": "key mapping 不能重复",
+                            "type": "duplicate",
+                        }
+                    )
+                pair_set.add(pair)
         for compare_idx, compare_item in enumerate(recon_config.get("compare_columns", {}).get("columns", [])):
-            if not compare_item.get("column"):
+            if not compare_item.get("name"):
                 errors.append(
                     {
-                        "path": f"rules.{idx}.reconciliation_config.compare_columns.columns.{compare_idx}",
-                        "message": "compare_columns 缺少 column",
+                        "path": f"rules.{idx}.recon.compare_columns.columns.{compare_idx}",
+                        "message": "compare_columns 缺少 name",
                         "type": "missing",
                     }
                 )
-        for agg_idx, aggregation in enumerate(recon_config.get("aggregation", {}).get("aggregations", [])):
+            if not compare_item.get("source_column") or not compare_item.get("target_column"):
+                errors.append(
+                    {
+                        "path": f"rules.{idx}.recon.compare_columns.columns.{compare_idx}",
+                        "message": "compare_columns 需要同时配置 source_column 和 target_column",
+                        "type": "missing",
+                    }
+                )
+        group_by = recon_config.get("aggregation", {}).get("group_by", [])
+        if isinstance(group_by, dict):
+            group_by = [group_by]
+        for group_idx, group_item in enumerate(group_by):
+            if not group_item.get("source_field") or not group_item.get("target_field"):
+                errors.append(
+                    {
+                        "path": f"rules.{idx}.recon.aggregation.group_by.{group_idx}",
+                        "message": "group_by 每项都需要 source_field 和 target_field",
+                        "type": "missing",
+                    }
+                )
+        aggregations = recon_config.get("aggregation", {}).get("aggregations", [])
+        if isinstance(aggregations, dict):
+            aggregations = [aggregations]
+        for agg_idx, aggregation in enumerate(aggregations):
             if aggregation.get("function") not in VALID_AGG_FUNCTIONS:
                 errors.append(
                     {
-                        "path": f"rules.{idx}.reconciliation_config.aggregation.aggregations.{agg_idx}.function",
+                        "path": f"rules.{idx}.recon.aggregation.aggregations.{agg_idx}.function",
                         "message": "聚合函数不在白名单内",
                         "type": "constraint",
+                    }
+                )
+            if not aggregation.get("source_field") or not aggregation.get("target_field"):
+                errors.append(
+                    {
+                        "path": f"rules.{idx}.recon.aggregation.aggregations.{agg_idx}",
+                        "message": "aggregations 每项都需要 source_field 和 target_field",
+                        "type": "missing",
                     }
                 )
         transformations = recon_config.get("key_columns", {}).get("transformations", {})
         for file_side in ("source", "target"):
             side_config = transformations.get(file_side, {})
-            pattern = side_config.get("regex_extract")
-            if pattern:
-                if len(pattern) > 256:
+            if not isinstance(side_config, dict):
+                errors.append(
+                    {
+                        "path": f"rules.{idx}.recon.key_columns.transformations.{file_side}",
+                        "message": "transformations 的 source/target 必须是对象，键为字段名，值为操作数组",
+                        "type": "type",
+                    }
+                )
+                continue
+            for field_name, operations in side_config.items():
+                if not isinstance(operations, list):
                     errors.append(
                         {
-                            "path": f"rules.{idx}.reconciliation_config.key_columns.transformations.{file_side}.regex_extract",
-                            "message": "正则表达式过长",
-                            "type": "constraint",
+                            "path": f"rules.{idx}.recon.key_columns.transformations.{file_side}.{field_name}",
+                            "message": "字段转换配置必须是数组",
+                            "type": "type",
                         }
                     )
-                else:
-                    try:
-                        re.compile(pattern)
-                    except re.error as exc:
+                    continue
+                for op_idx, op in enumerate(operations):
+                    if not isinstance(op, dict):
                         errors.append(
                             {
-                                "path": f"rules.{idx}.reconciliation_config.key_columns.transformations.{file_side}.regex_extract",
-                                "message": f"正则表达式无效: {exc}",
-                                "type": "regex",
+                                "path": f"rules.{idx}.recon.key_columns.transformations.{file_side}.{field_name}.{op_idx}",
+                                "message": "转换操作必须是对象",
+                                "type": "type",
                             }
                         )
-            replace_pattern = side_config.get("regex_replace", {}).get("pattern")
-            if replace_pattern:
-                if len(replace_pattern) > 256:
-                    errors.append(
-                        {
-                            "path": f"rules.{idx}.reconciliation_config.key_columns.transformations.{file_side}.regex_replace.pattern",
-                            "message": "正则表达式过长",
-                            "type": "constraint",
-                        }
-                    )
-                else:
-                    try:
-                        re.compile(replace_pattern)
-                    except re.error as exc:
+                        continue
+                    op_type = op.get("type")
+                    path_prefix = f"rules.{idx}.recon.key_columns.transformations.{file_side}.{field_name}.{op_idx}"
+                    if op_type not in {"regex_extract", "regex_replace", "strip_prefix", "strip_suffix", "strip_whitespace", "lowercase"}:
                         errors.append(
                             {
-                                "path": f"rules.{idx}.reconciliation_config.key_columns.transformations.{file_side}.regex_replace.pattern",
-                                "message": f"正则表达式无效: {exc}",
-                                "type": "regex",
+                                "path": f"{path_prefix}.type",
+                                "message": "不支持的转换类型",
+                                "type": "constraint",
                             }
                         )
+                    pattern = op.get("pattern") if op_type in {"regex_extract", "regex_replace"} else None
+                    if op_type == "regex_extract":
+                        pattern = op.get("pattern") or op.get("regex_extract")
+                    if pattern:
+                        if len(pattern) > 256:
+                            errors.append(
+                                {
+                                    "path": f"{path_prefix}.pattern",
+                                    "message": "正则表达式过长",
+                                    "type": "constraint",
+                                }
+                            )
+                        else:
+                            try:
+                                re.compile(pattern)
+                            except re.error as exc:
+                                errors.append(
+                                    {
+                                        "path": f"{path_prefix}.pattern",
+                                        "message": f"正则表达式无效: {exc}",
+                                        "type": "regex",
+                                    }
+                                )
     return errors
 
 
@@ -460,6 +554,56 @@ def validate_rule_record(rule_record: dict[str, Any], expected_kind: str) -> dic
             )
     elif expected_kind == "recon":
         normalized_payload = rule_payload
+        rules = normalized_payload.get("rules", [])
+        first_rule = rules[0] if rules else {}
+        normalized_payload["rule_id"] = normalized_payload.get("rule_id") or first_rule.get("rule_id")
+        normalized_payload["rule_name"] = normalized_payload.get("rule_name") or first_rule.get("rule_name")
+        normalized_payload["description"] = normalized_payload.get("description") or first_rule.get("description")
+        for item in normalized_payload.get("rules", []):
+            if "recon" not in item and "reconciliation_config" in item:
+                item["recon"] = item.pop("reconciliation_config")
+            item.pop("rule_id", None)
+            item.pop("rule_name", None)
+            item.pop("description", None)
+            item.pop("diff_analysis", None)
+            recon = item.get("recon") or {}
+            compare_columns = (recon.get("compare_columns") or {}).get("columns") or []
+            for compare_item in compare_columns:
+                if "name" not in compare_item and "column" in compare_item:
+                    compare_item["name"] = compare_item.get("column")
+            key_config = recon.get("key_columns") or {}
+            cross_mapping = key_config.pop("cross_file_mapping", None) or {}
+            columns = key_config.pop("columns", None) or []
+            mappings = key_config.get("mappings") or []
+            if not mappings:
+                source_field = key_config.get("source_field") or cross_mapping.get("source_column") or (columns[0] if columns else None)
+                target_field = key_config.get("target_field") or cross_mapping.get("target_column") or (columns[-1] if columns else None)
+                if source_field and target_field:
+                    mappings = [{"source_field": source_field, "target_field": target_field}]
+            key_config["mappings"] = mappings
+            if mappings:
+                key_config["source_field"] = key_config.get("source_field") or mappings[0].get("source_field")
+                key_config["target_field"] = key_config.get("target_field") or mappings[0].get("target_field")
+            key_config.pop("cross_file_mappings", None)
+            recon["key_columns"] = key_config
+
+            aggregation = recon.get("aggregation") or {}
+            group_by = aggregation.get("group_by")
+            if isinstance(group_by, dict):
+                aggregation["group_by"] = [group_by]
+            elif isinstance(group_by, list) and group_by and isinstance(group_by[0], str):
+                aggregation["group_by"] = [
+                    {
+                        "source_field": group_by[0] if len(group_by) > 0 else None,
+                        "target_field": group_by[-1] if len(group_by) > 1 else (group_by[0] if group_by else None),
+                    }
+                ]
+            if "aggregations" not in aggregation and "aggre_fields" in aggregation:
+                aggregation["aggregations"] = aggregation.pop("aggre_fields")
+            aggregations = aggregation.get("aggregations")
+            if isinstance(aggregations, dict):
+                aggregation["aggregations"] = [aggregations]
+            recon["aggregation"] = aggregation
         model = ReconRuleSetModel
         semantic_check = _semantic_errors_for_recon
     else:

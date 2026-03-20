@@ -18,6 +18,8 @@ from starlette.routing import Route, Mount
 from starlette.responses import Response, JSONResponse, FileResponse
 import uvicorn
 import logging
+from auth.jwt_utils import get_user_from_token
+from security_utils import read_output_metadata
 
 # 导入上传模块
 from tools.file_upload_tool import (
@@ -250,10 +252,21 @@ async def download_output_file(request):
     """
     module = request.path_params.get("module", "")
     file_path = request.path_params.get("path", "")
+    auth_token = (request.query_params.get("auth_token") or "").strip()
+    if not auth_token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            auth_token = auth_header[7:].strip()
 
     # 参数校验
     if not module or not file_path:
         return JSONResponse({"error": "缺少必要参数"}, status_code=400)
+    if not auth_token:
+        return JSONResponse({"error": "缺少认证 token"}, status_code=401)
+
+    user = get_user_from_token(auth_token)
+    if not user:
+        return JSONResponse({"error": "token 无效或已过期"}, status_code=401)
 
     # 模块白名单校验
     if module not in _MODULE_OUTPUT_DIRS:
@@ -282,6 +295,23 @@ async def download_output_file(request):
     if not full_path.exists() or not full_path.is_file():
         logger.warning(f"[download] 文件不存在: {full_path}")
         return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+
+    metadata = read_output_metadata(full_path)
+    if not metadata:
+        logger.warning(f"[download] 缺少输出元数据，拒绝下载: {full_path}")
+        return JSONResponse({"error": "文件缺少鉴权元数据，禁止下载"}, status_code=403)
+
+    owner_user_id = str(metadata.get("owner_user_id") or "")
+    current_user_id = str(user.get("user_id") or user.get("id") or "")
+    current_role = str(user.get("role") or "")
+    if metadata.get("module") != module:
+        logger.warning(f"[download] 模块元数据不匹配: path={full_path} meta={metadata}")
+        return JSONResponse({"error": "文件元数据非法"}, status_code=403)
+    if current_role != "admin" and (not owner_user_id or owner_user_id != current_user_id):
+        logger.warning(
+            f"[download] 越权下载被拒绝: user_id={current_user_id} owner_user_id={owner_user_id} path={full_path}"
+        )
+        return JSONResponse({"error": "无权下载该文件"}, status_code=403)
 
     # 对中文文件名使用 RFC 5987 编码
     from urllib.parse import quote

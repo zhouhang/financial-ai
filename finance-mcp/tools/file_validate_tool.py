@@ -280,21 +280,16 @@ def validate_files_against_rules(
     # unmatched_files: 未命中任何规则的文件名列表
     unmatched_files: List[str] = []
 
-    # 过滤出启用的规则（enabled=true 或 enabled 字段不存在时默认为启用）
-    enabled_table_schemas = [
-        ts for ts in table_schemas
-        if ts.get("enabled", True)
-    ]
+    active_table_schemas = list(table_schemas)
 
-    if not enabled_table_schemas:
+    if not active_table_schemas:
         return {
             "success": False,
-            "error": "校验规则中所有 table_schemas 规则均被禁用，无法进行校验"
+            "error": "校验规则中 table_schemas 为空，无法进行校验"
         }
 
     logger.info(
-        f"[文件校验] 启用规则统计: 共 {len(table_schemas)} 个规则，"
-        f"启用 {len(enabled_table_schemas)} 个，禁用 {len(table_schemas) - len(enabled_table_schemas)} 个"
+        f"[文件校验] 规则统计: 共 {len(active_table_schemas)} 个 table_schemas 参与匹配"
     )
 
     for file_info in uploaded_files:
@@ -306,7 +301,7 @@ def validate_files_against_rules(
             continue
 
         matched_tables: List[Dict[str, Any]] = []
-        for table_schema in enabled_table_schemas:
+        for table_schema in active_table_schemas:
             match_result = _check_file_match_table(file_columns, table_schema, config)
             if match_result["is_match"]:
                 table_info = {
@@ -373,7 +368,7 @@ def validate_files_against_rules(
 
     # ── 检查每个规则匹配的文件数量是否超过限制 ─────────────────────────────
     max_match_count_violations: List[Dict[str, Any]] = []
-    for table_schema in enabled_table_schemas:
+    for table_schema in active_table_schemas:
         table_id = table_schema["table_id"]
         table_name = table_schema["table_name"]
         max_file_match_count = table_schema.get("max_file_match_count", 0)
@@ -435,7 +430,7 @@ def validate_files_against_rules(
     # ── 检查必传文件是否覆盖 ──────────────────────────────────────────────
     # 找出所有启用的、is_ness=true 的表（禁用的规则不参与必传检查）
     necessary_tables = [
-        ts for ts in enabled_table_schemas if ts.get("is_ness", False)
+        ts for ts in active_table_schemas if ts.get("is_ness", False)
     ]
     # 已命中的 table_id 集合
     matched_table_ids: Set[str] = {

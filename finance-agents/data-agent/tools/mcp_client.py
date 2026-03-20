@@ -532,6 +532,7 @@ async def validate_files(
 async def execute_proc_rule(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
+    auth_token: str = "",
 ) -> dict[str, Any]:
     """根据规则编码执行数据整理规则，生成目标 Excel 文件。
     
@@ -549,10 +550,13 @@ async def execute_proc_rule(
             "message": str
         }
     """
-    return await call_mcp_tool("proc_execute", {
+    args: dict[str, Any] = {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
-    })
+    }
+    if auth_token:
+        args["auth_token"] = auth_token
+    return await call_mcp_tool("proc_execute", args)
 
 
 async def execute_recon(

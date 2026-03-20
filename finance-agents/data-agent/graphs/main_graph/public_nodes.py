@@ -83,6 +83,44 @@ def _to_upload_ref(file_path: str) -> str:
     return f"/{rel}"
 
 
+def _build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """构建上传文件名映射。
+
+    Returns:
+        display_name_to_ref: 用户原始文件名/存储文件名 -> /uploads/... 引用
+        ref_to_display_name: /uploads.../绝对路径/存储文件名 -> 用户原始文件名
+    """
+    display_name_to_ref: dict[str, str] = {}
+    ref_to_display_name: dict[str, str] = {}
+
+    for item in raw_files:
+        original_filename = ""
+        if isinstance(item, dict):
+            fp = item.get("file_path") or item.get("path") or ""
+            original_filename = (item.get("original_filename") or item.get("name") or "").strip()
+        else:
+            fp = str(item)
+        if not fp:
+            continue
+        try:
+            upload_ref = _to_upload_ref(fp)
+            abs_path = _to_abs_path(upload_ref)
+        except ValueError:
+            continue
+
+        stored_name = os.path.basename(abs_path)
+        display_name = original_filename or stored_name
+
+        display_name_to_ref[display_name] = upload_ref
+        display_name_to_ref[stored_name] = upload_ref
+
+        ref_to_display_name[upload_ref] = display_name
+        ref_to_display_name[abs_path] = display_name
+        ref_to_display_name[stored_name] = display_name
+
+    return display_name_to_ref, ref_to_display_name
+
+
 def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
     """读取文件的第一行列名，支持 Excel / CSV。"""
     ext = os.path.splitext(file_path)[-1].lower()
@@ -229,28 +267,36 @@ async def check_file_node(state: AgentState) -> dict:
     raw_files: list = list(state.get("uploaded_files") or [])
     auth_token: str = state.get("auth_token") or ""
 
-    # uploaded_files 可能是 str 路径或 dict（{file_path, original_filename}），统一提取绝对路径
-    uploaded_files: list[str] = []
+    # uploaded_files 可能是 str 路径或 dict（{file_path, original_filename}）
+    uploaded_file_entries: list[dict[str, str]] = []
     for item in raw_files:
         if isinstance(item, dict):
             fp = item.get("file_path") or item.get("path") or ""
+            display_name = (item.get("original_filename") or item.get("name") or "").strip()
         else:
             fp = str(item)
+            display_name = ""
         if fp:
             try:
-                uploaded_files.append(_to_abs_path(fp))
+                abs_path = _to_abs_path(fp)
+                uploaded_file_entries.append({
+                    "abs_path": abs_path,
+                    "display_name": display_name or os.path.basename(abs_path),
+                })
             except ValueError as e:
                 reason = f"上传文件路径非法：{e}"
                 msg = f"文件校验失败：\n\n{reason}"
                 ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
                 return {
-                    "messages": list(state.get("messages") or []) + [AIMessage(content=msg)],
+                    "messages": [AIMessage(content=msg)],
                     "proc_ctx": ctx,
                 }
 
+    uploaded_files = [entry["abs_path"] for entry in uploaded_file_entries]
+
     logger.info(
         f"[public_nodes] check_file_node file_rule_code={file_rule_code!r} "
-        f"files={[os.path.basename(f) for f in uploaded_files]}"
+        f"files={[entry['display_name'] for entry in uploaded_file_entries]}"
     )
 
     # ── 0. 检查 file_rule_code 是否配置 ──────────────────────────────────────
@@ -274,11 +320,13 @@ async def check_file_node(state: AgentState) -> dict:
         }
 
     # ── 2. 文件类型校验 ──────────────────────────────────────────────────
-    for fp in uploaded_files:
+    for entry in uploaded_file_entries:
+        fp = entry["abs_path"]
+        display_name = entry["display_name"]
         ext = os.path.splitext(fp)[-1].lower()
         if ext not in SUPPORTED_EXTENSIONS:
             reason = (
-                f"文件「{os.path.basename(fp)}」格式不支持（{ext}），"
+                f"文件「{display_name}」格式不支持（{ext}），"
                 f"请上传 {', '.join(sorted(SUPPORTED_EXTENSIONS))} 格式的文件。"
             )
             msg = f"文件校验失败：\n\n{reason}"
@@ -290,18 +338,20 @@ async def check_file_node(state: AgentState) -> dict:
 
     # ── 3. 读取各文件列名，构建 tool 参数 ────────────────────────────────
     files_with_columns: list[dict] = []
-    for fp in uploaded_files:
+    for entry in uploaded_file_entries:
+        fp = entry["abs_path"]
+        display_name = entry["display_name"]
         try:
             columns = _read_header(fp, ignore_whitespace=True)
             files_with_columns.append({
-                "file_name": os.path.basename(fp),
+                "file_name": display_name,
                 "columns": columns,
             })
             logger.info(
-                f"[public_nodes] 读取列名成功: {os.path.basename(fp)}, 共 {len(columns)} 列"
+                f"[public_nodes] 读取列名成功: {display_name}, 共 {len(columns)} 列"
             )
         except Exception as e:
-            reason = f"读取文件「{os.path.basename(fp)}」表头失败：{e}"
+            reason = f"读取文件「{display_name}」表头失败：{e}"
             msg = f"文件校验失败：\n\n{reason}"
             ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
             return {

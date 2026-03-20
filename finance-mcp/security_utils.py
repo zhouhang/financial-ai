@@ -1,9 +1,11 @@
 """
 安全工具模块 - 提供输入验证和安全功能
 """
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 
 FINANCE_MCP_DIR = Path(__file__).resolve().parent
@@ -120,6 +122,37 @@ def resolve_path_under_roots(file_path: str, allowed_roots: Iterable[Path]) -> P
 def resolve_upload_file_path(file_path: str) -> Path:
     """解析上传目录中的文件路径。"""
     return resolve_path_under_roots(file_path, [UPLOAD_ROOT])
+
+
+def get_output_metadata_path(file_path: str | Path) -> Path:
+    """获取输出文件 sidecar 元数据路径。"""
+    target = Path(file_path)
+    return target.with_name(f"{target.name}.meta.json")
+
+
+def write_output_metadata(file_path: str | Path, metadata: dict[str, Any]) -> Path:
+    """为输出文件写入 sidecar 元数据。"""
+    target = Path(file_path)
+    meta_path = get_output_metadata_path(target)
+    payload = dict(metadata)
+    payload.setdefault("file_name", target.name)
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    meta_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return meta_path
+
+
+def read_output_metadata(file_path: str | Path) -> Optional[dict[str, Any]]:
+    """读取输出文件 sidecar 元数据。"""
+    meta_path = get_output_metadata_path(file_path)
+    if not meta_path.exists() or not meta_path.is_file():
+        return None
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def validate_url(url: str) -> bool:

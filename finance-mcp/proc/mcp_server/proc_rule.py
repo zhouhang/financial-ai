@@ -24,10 +24,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import pandas as pd
 from mcp import Tool
-from security_utils import resolve_upload_file_path
+from auth.jwt_utils import get_user_from_token
+from security_utils import write_output_metadata, resolve_upload_file_path
 from tools.rule_schema import load_and_validate_rule
 
 logger = logging.getLogger(__name__)
@@ -71,8 +73,12 @@ def create_proc_rule_tools() -> list[Tool]:
                         "type": "string",
                         "description": "整理规则编码，用于从 rule_detail 表中获取规则 JSON",
                     },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用于校验当前用户和生成下载鉴权链接",
+                    },
                 },
-                "required": ["uploaded_files", "rule_code"],
+                "required": ["uploaded_files", "rule_code", "auth_token"],
             },
         )
     ]
@@ -95,12 +101,23 @@ async def _handle_proc_execute(arguments: dict) -> dict:
 
     uploaded_files: list[dict] = arguments.get("uploaded_files") or []
     rule_code: str = (arguments.get("rule_code") or "").strip()
+    auth_token: str = (arguments.get("auth_token") or "").strip()
 
     # ── 参数校验 ──────────────────────────────────────────────────────────────
     if not uploaded_files:
         return {"success": False, "error": "uploaded_files 不能为空"}
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+
+    user = get_user_from_token(auth_token)
+    if not user:
+        return {"success": False, "error": "token 无效或已过期，请重新登录"}
+
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
+        return {"success": False, "error": "token 中缺少用户标识"}
 
     # ── 确定输出目录（按 rule_code 分子目录）────────────────────────────────
     output_dir = str(Path(OUTPUT_DIR) / rule_code)
@@ -110,7 +127,11 @@ async def _handle_proc_execute(arguments: dict) -> dict:
         return {"success": False, "error": f"创建输出目录失败: {e}"}
 
     # ── 获取整理规则并做结构校验 ────────────────────────────────────────────
-    validation_result = load_and_validate_rule(rule_code, expected_kind="proc_entry")
+    validation_result = load_and_validate_rule(
+        rule_code,
+        expected_kind="proc_entry",
+        user_id=user_id,
+    )
     if not validation_result.get("success"):
         return validation_result
     rule_data: dict = validation_result.get("rule", {})
@@ -141,7 +162,19 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                 base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
             except (ImportError, AttributeError):
                 base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-            return f"{base_url}/output/proc/{rule_code}/{file_name}"
+            return f"{base_url}/output/proc/{rule_code}/{file_name}?auth_token={quote(auth_token, safe='')}"
+
+        for merged in merge_result.get("merged_files", []):
+            merged_file_path = merged.get("merged_file_path")
+            if merged_file_path:
+                write_output_metadata(
+                    merged_file_path,
+                    {
+                        "owner_user_id": user_id,
+                        "module": "proc",
+                        "rule_code": rule_code,
+                    },
+                )
 
         return {
             "success": merge_result.get("success", False),
@@ -210,13 +243,31 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
         except (ImportError, AttributeError):
             base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-        return f"{base_url}/output/proc/{rule_code}/{file_name}"
+        return f"{base_url}/output/proc/{rule_code}/{file_name}?auth_token={quote(auth_token, safe='')}"
 
     # 为每个生成的文件添加 download_url
     for f in generated_files:
+        output_file = f.get("output_file")
+        if output_file:
+            write_output_metadata(
+                output_file,
+                {
+                    "owner_user_id": user_id,
+                    "module": "proc",
+                    "rule_code": rule_code,
+                },
+            )
         f["download_url"] = _build_download_url(f.get("output_file"))
         # 为合并文件也添加 download_url
         if f.get("merge_result", {}).get("merged_file_path"):
+            write_output_metadata(
+                f["merge_result"]["merged_file_path"],
+                {
+                    "owner_user_id": user_id,
+                    "module": "proc",
+                    "rule_code": rule_code,
+                },
+            )
             f["merge_result"]["download_url"] = _build_download_url(
                 f["merge_result"]["merged_file_path"]
             )
