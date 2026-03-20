@@ -32,6 +32,11 @@ from graphs.main_graph.public_nodes import (
     _to_abs_path,
     _to_upload_ref,
 )
+from .execution_service import (
+    build_execution_request,
+    resolve_recon_inputs,
+    run_recon_execution,
+)
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
@@ -146,87 +151,58 @@ async def recon_task_execution_node(state: AgentState) -> dict:
     """
     ctx = _get_recon_ctx(state)
     rule_code: str = ctx.get("rule_code", "")
-    file_match_results: list[dict] = ctx.get("file_match_results", [])
+    rule_id: str = ctx.get("rule_id", "")
     rule: dict = ctx.get("rule", {})
     auth_token: str = state.get("auth_token") or ""
 
     messages: list = []
 
     logger.info(f"[recon] recon_task_execution_node rule_code={rule_code!r}")
-    logger.info(f"[recon] file_match_results={[m.get('file_name') for m in file_match_results]}")
 
-    # 检查文件校验结果
-    if not file_match_results:
-        error_msg = "未找到文件校验结果，请先完成文件校验步骤"
-        logger.error(f"[recon] {error_msg}")
+    recon_inputs, ref_to_display_name, input_error = resolve_recon_inputs(state=state, ctx=ctx)
+    if input_error:
+        logger.error(f"[recon] {input_error}")
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
             "exec_status": "error",
-            "exec_error": error_msg,
+            "exec_error": input_error,
         })
         return {
             "messages": messages,
             "recon_ctx": ctx,
         }
 
-    # 准备对账参数
-    uploaded_files_raw: list = list(state.get("uploaded_files") or [])
-    file_path_map, ref_to_display_name = _build_upload_name_maps(uploaded_files_raw)
-
-    # 构建文件参数
-    recon_files: list[dict] = []
-    for match in file_match_results:
-        file_name = match.get("file_name", "")
-        file_path = file_path_map.get(file_name, "")
-        if file_path:
-            recon_files.append({
-                "file_name": file_name,
-                "file_path": file_path,
-                "table_id": match.get("table_id", ""),
-                "table_name": match.get("table_name", ""),
-            })
-
-    if not recon_files:
-        error_msg = "无法构建文件路径映射，请检查上传文件状态"
-        logger.error(f"[recon] {error_msg}")
+    execution_request, request_error = build_execution_request(
+        rule_code=rule_code,
+        rule_id=rule_id,
+        auth_token=auth_token,
+        recon_inputs=recon_inputs,
+        run_context=ctx.get("run_context") if isinstance(ctx.get("run_context"), dict) else {},
+    )
+    if request_error:
+        logger.error(f"[recon] {request_error}")
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
             "exec_status": "error",
-            "exec_error": error_msg,
+            "exec_error": request_error,
         })
         return {
             "messages": messages,
             "recon_ctx": ctx,
         }
 
-    # 统一调用 recon_execute 工具（对账）
-    from tools.mcp_client import execute_recon
-
-    # 构建 validated_files 参数
-    validated_files = [
-        {"file_path": f["file_path"], "table_name": f["table_name"]}
-        for f in recon_files
-    ]
-
-    try:
-        logger.info(
-            f"[recon] 调用 recon_execute，"
-            f"rule_code={rule_code}, "
-            f"files={[f['table_name'] for f in validated_files]}"
-        )
-        recon_result = await execute_recon(
-            validated_files=validated_files,
-            rule_code=rule_code,
-            rule_id="",  # 不指定则执行所有匹配的规则
-            auth_token=auth_token,
-        )
-    except Exception as e:
-        error_msg = f"调用对账服务失败: {e}"
-        logger.error(f"[recon] {error_msg}", exc_info=True)
+    logger.info(
+        f"[recon] 调用 recon_execute, rule_code={rule_code}, "
+        f"inputs={[item.get('table_name') for item in execution_request.get('validated_inputs', [])]}"
+    )
+    recon_result, exec_error = await run_recon_execution(execution_request)
+    if exec_error:
+        logger.error(f"[recon] {exec_error}")
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
             "exec_status": "error",
-            "exec_error": error_msg,
+            "exec_error": exec_error,
+            "execution_request": execution_request,
         })
         return {
             "messages": messages,
@@ -251,6 +227,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "phase": ReconAgentPhase.EXEC_FAILED.value,
             "exec_status": "error",
             "exec_error": error_msg,
+            "execution_request": execution_request,
             "recon_result": recon_result,
         })
         return {
@@ -310,6 +287,9 @@ async def recon_task_execution_node(state: AgentState) -> dict:
     ctx.update({
         "phase": ReconAgentPhase.SHOWING_RESULT.value,
         "exec_status": execution_status,
+        "recon_inputs": recon_inputs,
+        "execution_request": execution_request,
+        "execution_result": recon_result,
         "recon_result": recon_result,
         "file_info_list": file_info_list,
         "output_files": output_files,
@@ -431,6 +411,7 @@ def recon_result_node(state: AgentState) -> dict:
     return {
         "messages": [AIMessage(content=msg)],
         "recon_ctx": ctx,
+        "uploaded_files": [],
     }
 
 

@@ -37,6 +37,7 @@ from tools.mcp_client import (
 
 # 导入 proc 路由
 from graphs.proc.api import router as proc_router
+from graphs.recon.api import router as recon_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +69,7 @@ app = FastAPI(title="Financial Data Agent", version="0.1.0")
 
 # 注册 proc 路由
 app.include_router(proc_router)
+app.include_router(recon_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -659,18 +661,32 @@ async def websocket_chat(ws: WebSocket):
                 # 检查是否处于中断状态
                 is_interrupted, payload, last_ai = _get_interrupt_info(config)
 
-                # 游客流程退出后，线程文件缓存必须与 state 同步清空，避免后续“对账”复用旧文件。
-                if not auth_token and not msg_attachments and not is_interrupted:
-                    try:
-                        final_snapshot = langgraph_app.get_state(config)
-                        final_phase = (final_snapshot.values.get("phase") or "").strip() if final_snapshot else ""
-                        final_uploaded = final_snapshot.values.get("uploaded_files", []) if final_snapshot else []
+                # 对账任务完成后，清空线程文件缓存，避免下一轮消息复用旧文件再次执行。
+                try:
+                    final_snapshot = langgraph_app.get_state(config)
+                    final_values = final_snapshot.values if final_snapshot else {}
+                    final_uploaded = final_values.get("uploaded_files", []) if final_values else []
+                    recon_ctx = final_values.get("recon_ctx") or {}
+                    recon_phase = str(recon_ctx.get("phase") or "").strip()
+                    selected_task_code = str(final_values.get("selected_task_code") or "").strip()
+                    if (
+                        not is_interrupted
+                        and not final_uploaded
+                        and _thread_files.get(thread_id)
+                        and selected_task_code == "recon"
+                        and recon_phase == "completed"
+                    ):
+                        _thread_files[thread_id] = []
+                        _thread_files_snapshot[thread_id] = []
+                        logger.info(f"对账任务完成后已清空 thread 文件缓存 (thread={thread_id})")
+                    elif not auth_token and not msg_attachments and not is_interrupted:
+                        final_phase = str(final_values.get("phase") or "").strip()
                         if not final_phase and not final_uploaded and _thread_files.get(thread_id):
                             _thread_files[thread_id] = []
                             _thread_files_snapshot[thread_id] = []
                             logger.info(f"游客非中断回合结束，已清空 thread 文件缓存 (thread={thread_id})")
-                    except Exception as e:
-                        logger.warning(f"回合同步清空游客 thread 文件缓存失败: {e}")
+                except Exception as e:
+                    logger.warning(f"回合同步清空 thread 文件缓存失败: {e}")
 
                 if is_interrupted:
                     await ws.send_json({

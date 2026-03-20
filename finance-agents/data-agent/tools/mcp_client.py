@@ -560,7 +560,9 @@ async def execute_proc_rule(
 
 
 async def execute_recon(
-    validated_files: list[dict[str, Any]],
+    *,
+    validated_inputs: list[dict[str, Any]] | None = None,
+    validated_files: list[dict[str, Any]] | None = None,
     rule_code: str,
     rule_id: str = "",
     auth_token: str = "",
@@ -568,7 +570,8 @@ async def execute_recon(
     """执行对账任务（支持对账），根据规则对源文件与目标文件进行数据比对。
     
     Args:
-        validated_files: 文件校验结果列表，格式 [{"file_path": str, "table_name": str}]
+        validated_inputs: 统一输入列表，格式 [{"table_name": str, "input_type": "file|dataset", ...}]
+        validated_files: 兼容旧格式的文件输入，格式 [{"file_path": str, "table_name": str}]
         rule_code: 规则编码，用于从 rule_detail 表获取规则定义
         rule_id: 要执行的对账规则 ID（可选）
         
@@ -597,9 +600,12 @@ async def execute_recon(
         }
     """
     args: dict[str, Any] = {
-        "validated_files": validated_files,
         "rule_code": rule_code,
     }
+    if validated_inputs is not None:
+        args["validated_inputs"] = validated_inputs
+    if validated_files is not None:
+        args["validated_files"] = validated_files
     if rule_id:
         args["rule_id"] = rule_id
     if auth_token:

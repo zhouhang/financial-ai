@@ -53,18 +53,16 @@ class FileCountConfig(StrictModel):
 class ValidationConfig(StrictModel):
     ignore_whitespace: bool = True
     case_sensitive: bool = False
-    allow_multi_rule_match: bool = True
     file_count: FileCountConfig = Field(default_factory=FileCountConfig)
 
 
 class TableSchema(StrictModel):
     table_id: str
     table_name: str
-    all_columns: list[str] = Field(default_factory=list)
+    required_columns: list[str] = Field(default_factory=list)
     column_aliases: dict[str, list[str]] = Field(default_factory=dict)
-    is_ness: bool = False
-    max_file_match_count: int = 0
-    enabled: bool = True
+    is_required: bool = False
+    max_match_count: int = 0
 
 
 class FileValidationRuleModel(StrictModel):
@@ -295,9 +293,9 @@ def _semantic_errors_for_file_validation(rule: dict[str, Any]) -> list[dict[str,
     if len(table_ids) != len(set(table_ids)):
         errors.append({"path": "table_schemas", "message": "table_id 必须唯一", "type": "duplicate"})
     for idx, item in enumerate(rule.get("table_schemas", [])):
-        if not item.get("all_columns"):
+        if not item.get("required_columns"):
             errors.append(
-                {"path": f"table_schemas.{idx}.all_columns", "message": "all_columns 不能为空", "type": "missing"}
+                {"path": f"table_schemas.{idx}.required_columns", "message": "required_columns 不能为空", "type": "missing"}
             )
     return errors
 

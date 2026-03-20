@@ -143,6 +143,49 @@ def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
         raise ValueError(f"不支持的文件类型：{ext}")
 
 
+def _build_file_rule_requirements_text(rule_name: str, file_rule: dict[str, Any] | None) -> str:
+    """构建文件校验失败时的规则要求说明。"""
+    file_validation_rules = (file_rule or {}).get("file_validation_rules") or {}
+    table_schemas = file_validation_rules.get("table_schemas") or []
+    if not table_schemas:
+        return (
+            f"上传的文件不符合「{rule_name}」规则。\n"
+            "请重新上传符合要求的文件。"
+        )
+
+    lines = [
+        f"上传的文件不符合「{rule_name}」规则。",
+        "规则要求上传以下文件，并且文件表头需包含对应列名：",
+        "",
+    ]
+    for schema in table_schemas:
+        table_name = str(schema.get("table_name") or "未命名表")
+        required_columns = schema.get("required_columns") or []
+        cols_text = "、".join(str(col) for col in required_columns) if required_columns else "未配置"
+        lines.append(f"- {table_name}：{cols_text}")
+    return "\n".join(lines)
+
+
+def _get_table_schema_map(file_rule: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """按 table_name 构建 schema 映射。"""
+    file_validation_rules = (file_rule or {}).get("file_validation_rules") or {}
+    table_schemas = file_validation_rules.get("table_schemas") or []
+    return {
+        str(schema.get("table_name") or ""): schema
+        for schema in table_schemas
+        if schema.get("table_name")
+    }
+
+
+def _format_required_columns(schema: dict[str, Any] | None) -> str:
+    required_columns = (schema or {}).get("required_columns") or []
+    return "、".join(str(col) for col in required_columns) if required_columns else "未配置"
+
+
+def _format_file_list(items: list[str]) -> str:
+    return "、".join(str(item) for item in items if str(item).strip())
+
+
 async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
     """从 PG（通过 MCP 工具）加载规则。
     
@@ -263,6 +306,13 @@ async def check_file_node(state: AgentState) -> dict:
     # 文件校验规则编码（优先从 file_rule_code 获取，用于文件校验）
     # ⚠️ file_rule_code 和 rule_code 是不同的概念，不能互相 fallback
     file_rule_code: str = ctx.get("file_rule_code") or state.get("file_rule_code") or ""
+    rule_display_name: str = (
+        ctx.get("rule_name")
+        or state.get("selected_rule_name")
+        or ctx.get("rule_code")
+        or state.get("selected_rule_code")
+        or "当前规则"
+    )
 
     raw_files: list = list(state.get("uploaded_files") or [])
     auth_token: str = state.get("auth_token") or ""
@@ -298,6 +348,8 @@ async def check_file_node(state: AgentState) -> dict:
         f"[public_nodes] check_file_node file_rule_code={file_rule_code!r} "
         f"files={[entry['display_name'] for entry in uploaded_file_entries]}"
     )
+
+    file_rule = await _load_rule_from_pg(rule_code=file_rule_code, auth_token=auth_token) if file_rule_code else None
 
     # ── 0. 检查 file_rule_code 是否配置 ──────────────────────────────────────
     if not file_rule_code:
@@ -387,23 +439,111 @@ async def check_file_node(state: AgentState) -> dict:
     # ── 5. 处理校验结果 ──────────────────────────────────────────────────────
     if not validate_result.get("success"):
         error_msg = validate_result.get("error", "文件校验未通过")
-
-        # 展示未匹配信息和缺少的必传表
+        matched_results = validate_result.get("matched_results", [])
         missing_tables = validate_result.get("missing_necessary_tables", [])
         unmatched_files = validate_result.get("unmatched_files", [])
+        max_match_count_violations = validate_result.get("max_match_count_violations", [])
+        schema_map = _get_table_schema_map(file_rule)
+        expected_schema_count = len(schema_map)
+        uploaded_count = len(files_with_columns)
+        is_file_count_mismatch = expected_schema_count > 0 and uploaded_count != expected_schema_count
 
-        detail_lines = []
-        if missing_tables:
-            missing_names = ", ".join(t["table_name"] for t in missing_tables)
-            detail_lines.append(f"缺少必传文件类型：{missing_names}")
-        if unmatched_files:
-            detail_lines.append(f"未能识别的文件：{', '.join(unmatched_files)}")
+        matched_lines: list[str] = []
+        if matched_results:
+            for item in matched_results:
+                file_name = item.get("file_name", "")
+                table_name = item.get("table_name", "")
+                if file_name and table_name:
+                    matched_lines.append(f"- {file_name} -> {table_name}")
+        elif max_match_count_violations:
+            seen_pairs: set[tuple[str, str]] = set()
+            for violation in max_match_count_violations:
+                table_name = violation.get("table_name", "")
+                for file_name in violation.get("matched_files", []) or []:
+                    pair = (str(file_name), str(table_name))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    matched_lines.append(f"- {file_name} -> {table_name}")
 
-        detail_text = "\n".join(f"- {line}" for line in detail_lines) if detail_lines else ""
-        msg = (
-            f"文件校验失败：\n\n{error_msg}"
-            + (f"\n\n**详情：**\n{detail_text}" if detail_text else "")
+        unmatched_lines = [f"- {file_name}" for file_name in unmatched_files]
+        upload_summary = (
+            f"本次共上传 {uploaded_count} 个文件；当前规则需要 {expected_schema_count} 类文件。"
         )
+
+        if is_file_count_mismatch:
+            requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
+            msg = (
+                "文件校验失败：\n\n"
+                f"当前上传了 {uploaded_count} 个文件，但「{rule_display_name}」规则要求上传 {expected_schema_count} 个文件。\n\n"
+                f"{requirement_text}\n\n"
+                "请按规则要求上传正确数量的文件后重试。"
+            )
+        elif max_match_count_violations:
+            requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
+            violation_lines = []
+            for violation in max_match_count_violations:
+                table_name = str(violation.get("table_name") or "未命名表")
+                max_allowed = violation.get("max_allowed", 0)
+                matched_files = _format_file_list(violation.get("matched_files", []) or [])
+                required_columns_text = _format_required_columns(schema_map.get(table_name))
+                violation_lines.append(
+                    f"- 「{table_name}」只允许上传 {max_allowed} 个文件，当前匹配到了 {len(violation.get('matched_files', []) or [])} 个：{matched_files}\n"
+                    f"  需要的列名：{required_columns_text}"
+                )
+
+            sections = [
+                "文件校验失败：",
+                "",
+                upload_summary,
+                "",
+                requirement_text,
+            ]
+            if matched_lines:
+                sections.extend(["", "已识别的文件：", "\n".join(matched_lines)])
+            if unmatched_lines:
+                sections.extend(["", "未识别的文件：", "\n".join(unmatched_lines)])
+            sections.extend([
+                "",
+                "发现以下问题：",
+                "\n".join(violation_lines),
+                "",
+                "请保留每类文件各 1 个，并检查文件格式后重新上传。",
+            ])
+            msg = (
+                "\n".join(sections)
+            )
+        elif unmatched_files or missing_tables:
+            requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
+            detail_lines = []
+            if missing_tables:
+                missing_names = "、".join(t["table_name"] for t in missing_tables)
+                detail_lines.append(f"- 缺少必传文件：{missing_names}")
+            if unmatched_files:
+                detail_lines.append("- 存在未能识别的文件，请检查文件格式和表头是否符合规则要求。")
+            sections = [
+                "文件校验失败：",
+                "",
+                upload_summary,
+                "",
+                requirement_text,
+            ]
+            if matched_lines:
+                sections.extend(["", "已识别的文件：", "\n".join(matched_lines)])
+            if unmatched_lines:
+                sections.extend(["", "未识别的文件：", "\n".join(unmatched_lines)])
+            sections.extend([
+                "",
+                "发现以下问题：",
+                "\n".join(detail_lines),
+                "",
+                "请检查文件格式后重新上传文件。",
+            ])
+            msg = (
+                "\n".join(sections)
+            )
+        else:
+            msg = f"文件校验失败：\n\n{error_msg}"
         ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": error_msg})
         return {
             "messages": [AIMessage(content=msg)],

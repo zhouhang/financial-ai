@@ -18,7 +18,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 import pandas as pd
@@ -57,9 +57,25 @@ def create_recon_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "validated_inputs": {
+                        "type": "array",
+                        "description": (
+                            "统一的输入列表，每个元素通过 input_type 指定来源。"
+                            "input_type=file 时需提供 file_path；input_type=dataset 时需提供 dataset_ref。"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "table_name": {"type": "string"},
+                                "input_type": {"type": "string", "enum": ["file", "dataset"]},
+                                "file_path": {"type": "string"},
+                                "dataset_ref": {"type": "object"},
+                            }
+                        },
+                    },
                     "validated_files": {
                         "type": "array",
-                        "description": "文件校验结果列表，每个元素包含 file_path 和 table_name",
+                        "description": "兼容旧参数：文件校验结果列表，每个元素包含 file_path 和 table_name",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -81,7 +97,7 @@ def create_recon_tools() -> list[Tool]:
                         "description": "JWT token，用于校验当前用户是否有权使用该规则"
                     }
                 },
-                "required": ["validated_files", "rule_code", "auth_token"]
+                "required": ["rule_code", "auth_token"]
             }
         ),
     ]
@@ -132,19 +148,150 @@ def find_recon_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
     return None
 
 
+def _normalize_validated_inputs(
+    *,
+    validated_inputs: list[dict[str, Any]] | None,
+    validated_files: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """统一 recon 输入，兼容 validated_inputs / validated_files。"""
+    normalized: list[dict[str, Any]] = []
+
+    for item in validated_inputs or []:
+        if not isinstance(item, dict):
+            continue
+        table_name = str(item.get("table_name") or "").strip()
+        input_type = str(item.get("input_type") or "").strip().lower()
+        if not table_name or input_type not in {"file", "dataset"}:
+            continue
+        if input_type == "file":
+            file_path = str(item.get("file_path") or "").strip()
+            if not file_path:
+                continue
+            normalized.append({
+                "table_name": table_name,
+                "input_type": "file",
+                "file_path": file_path,
+            })
+            continue
+        dataset_ref = item.get("dataset_ref")
+        if not isinstance(dataset_ref, dict):
+            dataset_ref = {}
+        normalized.append({
+            "table_name": table_name,
+            "input_type": "dataset",
+            "dataset_ref": dataset_ref,
+        })
+
+    if not normalized:
+        for item in validated_files or []:
+            if not isinstance(item, dict):
+                continue
+            table_name = str(item.get("table_name") or "").strip()
+            file_path = str(item.get("file_path") or "").strip()
+            if not table_name or not file_path:
+                continue
+            normalized.append({
+                "table_name": table_name,
+                "input_type": "file",
+                "file_path": file_path,
+            })
+
+    if not normalized:
+        return [], "validated_inputs / validated_files 不能为空"
+    return normalized, None
+
+
+def _find_input_by_identification(
+    identification: dict[str, Any],
+    table_input_map: dict[str, dict[str, Any]],
+    rule_id: str,
+    file_type: str,
+) -> Optional[dict[str, Any]]:
+    """根据表名识别输入对象。"""
+    match_by = identification.get("match_by", "table_name")
+    match_value = identification.get("match_value", "")
+    match_strategy = identification.get("match_strategy", "exact")
+
+    if not match_value:
+        logger.warning(f"[recon] [{rule_id}] {file_type} 输入 match_value 未配置")
+        return None
+
+    if match_by == "table_name":
+        if match_strategy == "exact":
+            return table_input_map.get(match_value)
+        if match_strategy == "contains":
+            for table_name, input_item in table_input_map.items():
+                if match_value in table_name:
+                    return input_item
+        if match_strategy == "startswith":
+            for table_name, input_item in table_input_map.items():
+                if table_name.startswith(match_value):
+                    return input_item
+
+    logger.warning(f"[recon] [{rule_id}] 未找到匹配的 {file_type} 输入: {match_value}")
+    return None
+
+
+def _dataset_display_name(dataset_ref: dict[str, Any], table_name: str) -> str:
+    source_key = str(dataset_ref.get("source_key") or "").strip()
+    if source_key:
+        return source_key
+    return table_name
+
+
+def _read_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
+    """读取 dataset 输入。
+
+    当前仅支持测试/占位数据：
+    - dataset_ref.rows: list[dict]
+    - dataset_ref.data: list[dict]
+    真实 db/api 抓取逻辑后续再接入。
+    """
+    rows = dataset_ref.get("rows")
+    if isinstance(rows, list):
+        return pd.DataFrame(rows)
+    rows = dataset_ref.get("data")
+    if isinstance(rows, list):
+        return pd.DataFrame(rows)
+    source_type = str(dataset_ref.get("source_type") or "").strip() or "dataset"
+    source_key = str(dataset_ref.get("source_key") or "").strip() or table_name
+    raise NotImplementedError(
+        f"dataset 输入暂未接入真实 {source_type} 数据源读取，请为 source_key={source_key} 提供 rows/data 占位数据。"
+    )
+
+
+def _resolve_input_to_df(input_item: dict[str, Any], rule_id: str, table_name: str) -> tuple[pd.DataFrame, str]:
+    """将 file / dataset 输入统一解析为 DataFrame。"""
+    input_type = str(input_item.get("input_type") or "").strip().lower()
+    if input_type == "file":
+        file_path = str(input_item.get("file_path") or "").strip()
+        return _read_file_as_df(file_path), file_path
+    if input_type == "dataset":
+        dataset_ref = input_item.get("dataset_ref")
+        if not isinstance(dataset_ref, dict):
+            dataset_ref = {}
+        return _read_dataset_as_df(dataset_ref, table_name), _dataset_display_name(dataset_ref, table_name)
+    raise ValueError(f"[{rule_id}] 不支持的输入类型: {input_type}")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 工具处理函数
 # ════════════════════════════════════════════════════════════════════════════
 
 async def _handle_recon_execute(arguments: dict) -> dict:
     """执行对账（支持对账和普通对账）"""
+    validated_inputs_raw = arguments.get("validated_inputs", [])
     validated_files = arguments.get("validated_files", [])
     rule_code = arguments.get("rule_code", "")
     rule_id = arguments.get("rule_id")
     auth_token = arguments.get("auth_token", "").strip()
-    
-    if not validated_files:
-        return {"success": False, "error": "validated_files 不能为空"}
+
+    validated_inputs, input_error = _normalize_validated_inputs(
+        validated_inputs=validated_inputs_raw,
+        validated_files=validated_files,
+    )
+    if input_error:
+        return {"success": False, "error": input_error}
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
     if not auth_token:
@@ -178,15 +325,19 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     
     logger.info(f"[recon] 规则类型: {'对账' if is_recon else '普通对账'}, rule_code={rule_code}")
     
-    # 构建 table_name -> file_path 映射
-    table_file_map: dict[str, str] = {}
-    for item in validated_files:
-        table_name = item.get("table_name", "")
-        file_path = item.get("file_path", "")
-        if table_name and file_path:
-            table_file_map[table_name] = file_path
-    
-    logger.info(f"[recon] 文件映射: {list(table_file_map.keys())}")
+    # 构建 table_name -> input 映射
+    table_input_map: dict[str, dict[str, Any]] = {}
+    for item in validated_inputs:
+        table_name = item["table_name"]
+        if table_name in table_input_map:
+            logger.warning(f"[recon] table_name={table_name} 重复输入，后者覆盖前者")
+        table_input_map[table_name] = item
+
+    input_labels = [
+        f"{name}({table_input_map[name].get('input_type')})"
+        for name in table_input_map.keys()
+    ]
+    logger.info(f"[recon] 输入映射: {input_labels}")
     
     if is_recon:
         # 对账逻辑
@@ -219,7 +370,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
             results.append(
                 execute_single_recon(
                     rule,
-                    table_file_map,
+                    table_input_map,
                     output_dir,
                     auth_token,
                     user_id,
@@ -242,13 +393,26 @@ async def _handle_recon_execute(arguments: dict) -> dict:
             "results": results
         }
     else:
+        # 普通对账暂未支持 dataset 输入，保持旧行为并返回明确错误
+        has_dataset_input = any(item.get("input_type") == "dataset" for item in validated_inputs)
+        if has_dataset_input:
+            return {
+                "success": False,
+                "status": "invalid_request",
+                "error": "普通对账暂不支持 dataset 输入，请先使用 file 输入。",
+            }
+        legacy_validated_files = [
+            {"table_name": item["table_name"], "file_path": item.get("file_path", "")}
+            for item in validated_inputs
+            if item.get("input_type") == "file" and item.get("file_path")
+        ]
         # 普通对账逻辑
         return await _execute_normal_reconciliation(
             rule_content=rule_content,
             rule_code=rule_code,
-            table_file_map=table_file_map,
+            table_file_map={item["table_name"]: item.get("file_path", "") for item in legacy_validated_files},
             output_dir=output_dir,
-            validated_files=validated_files
+            validated_files=legacy_validated_files
         )
 
 
@@ -258,7 +422,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
 
 def execute_single_recon(
     rule: dict,
-    table_file_map: dict[str, str],
+    table_input_map: dict[str, dict[str, Any]],
     output_dir: str,
     auth_token: str,
     user_id: str,
@@ -270,7 +434,7 @@ def execute_single_recon(
     
     Args:
         rule: 规则配置
-        table_file_map: table_name -> file_path 映射
+        table_input_map: table_name -> input 映射
         output_dir: 输出目录
     
     Returns:
@@ -286,20 +450,20 @@ def execute_single_recon(
     source_file_config = rule.get("source_file", {})
     target_file_config = rule.get("target_file", {})
     
-    source_path = _find_file_by_identification(
+    source_input = _find_input_by_identification(
         source_file_config.get("identification", {}),
-        table_file_map,
+        table_input_map,
         rule_id,
         "source"
     )
-    target_path = _find_file_by_identification(
+    target_input = _find_input_by_identification(
         target_file_config.get("identification", {}),
-        table_file_map,
+        table_input_map,
         rule_id,
         "target"
     )
     
-    if source_path is None:
+    if source_input is None:
         return {
             "success": False,
             "status": "skipped",
@@ -309,7 +473,7 @@ def execute_single_recon(
             "message": "未找到源文件",
         }
     
-    if target_path is None:
+    if target_input is None:
         return {
             "success": False,
             "status": "skipped",
@@ -319,13 +483,21 @@ def execute_single_recon(
             "message": "未找到目标文件",
         }
     
-    logger.info(f"[recon] [{rule_id}] 源文件: {source_path}")
-    logger.info(f"[recon] [{rule_id}] 目标文件: {target_path}")
+    logger.info(f"[recon] [{rule_id}] 源输入: {source_input}")
+    logger.info(f"[recon] [{rule_id}] 目标输入: {target_input}")
     
-    # 2. 读取文件
+    # 2. 读取输入
     try:
-        df_source = _read_file_as_df(source_path)
-        df_target = _read_file_as_df(target_path)
+        df_source, source_path = _resolve_input_to_df(
+            source_input,
+            rule_id,
+            str(source_file_config.get("table_name") or "源文件"),
+        )
+        df_target, target_path = _resolve_input_to_df(
+            target_input,
+            rule_id,
+            str(target_file_config.get("table_name") or "目标文件"),
+        )
     except Exception as e:
         return {
             "success": False,
@@ -406,6 +578,7 @@ def execute_single_recon(
         output_config=output_config,
         rule_id=rule_id,
         rule_name=rule_name,
+        rule=rule,
         key_columns_config=key_columns_config,
         compare_columns_config=compare_columns_config
     )
@@ -653,6 +826,62 @@ def _get_compare_name(compare_cfg: dict[str, Any]) -> str:
         or str(compare_cfg.get("target_column") or "").strip()
         or "数值"
     )
+
+
+def _get_diff_display_name(compare_cfg: dict[str, Any]) -> str:
+    """获取差异列的业务展示名。"""
+    compare_name = _get_compare_name(compare_cfg)
+    if compare_name.endswith("差异"):
+        return compare_name
+    return f"{compare_name}差异"
+
+
+def _format_export_dataframe(
+    df: pd.DataFrame,
+    sheet_type: str,
+    rule: dict[str, Any],
+    compare_columns_config: list[dict[str, Any]] | None = None,
+) -> pd.DataFrame:
+    """按 sheet 类型格式化导出列名。"""
+    if df is None or df.empty:
+        return df
+
+    formatted = df.copy()
+    source_name = ((rule.get("source_file") or {}).get("table_name") or "源").strip()
+    target_name = ((rule.get("target_file") or {}).get("table_name") or "目标").strip()
+    rename_map: dict[str, str] = {}
+
+    if sheet_type == "source_only":
+        formatted = formatted[[col for col in formatted.columns if not col.startswith("target_")]]
+    elif sheet_type == "target_only":
+        formatted = formatted[[col for col in formatted.columns if not col.startswith("source_")]]
+
+    compare_name_map = {
+        f"diff_{_get_compare_name(cfg)}": _get_diff_display_name(cfg)
+        for cfg in (compare_columns_config or [])
+    }
+
+    for col in formatted.columns:
+        if col in compare_name_map:
+            rename_map[col] = compare_name_map[col]
+            continue
+        if sheet_type == "matched_with_diff":
+            if col.startswith("source_"):
+                rename_map[col] = f"{source_name}.{col[len('source_'):]}"
+                continue
+            if col.startswith("target_"):
+                rename_map[col] = f"{target_name}.{col[len('target_'):]}"
+                continue
+        elif sheet_type == "source_only" and col.startswith("source_"):
+            rename_map[col] = col[len("source_"):]
+            continue
+        elif sheet_type == "target_only" and col.startswith("target_"):
+            rename_map[col] = col[len("target_"):]
+            continue
+
+    if rename_map:
+        formatted = formatted.rename(columns=rename_map)
+    return formatted
 
 
 def _apply_aggregation(
@@ -960,6 +1189,7 @@ def _write_recon_result(
     output_config: dict,
     rule_id: str,
     rule_name: str,
+    rule: dict | None = None,
     key_columns_config: dict = None,
     compare_columns_config: list = None
 ) -> str:
@@ -976,6 +1206,7 @@ def _write_recon_result(
     sheets_config = output_config.get("sheets", {})
     
     # 收集需要标记的列
+    _get_marked_columns._rule_context = rule or {}
     marked_columns = _get_marked_columns(key_columns_config, compare_columns_config)
     
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -1004,6 +1235,12 @@ def _write_recon_result(
         if sheets_config.get("matched_with_diff", {}).get("enabled", True):
             df = diff_result.get("matched_with_diff", pd.DataFrame())
             if len(df) > 0:
+                df = _format_export_dataframe(
+                    df,
+                    "matched_with_diff",
+                    rule or {},
+                    compare_columns_config or [],
+                )
                 df.to_excel(
                     writer,
                     sheet_name=sheet_name_matched_with_diff,
@@ -1015,6 +1252,12 @@ def _write_recon_result(
         if sheets_config.get("source_only", {}).get("enabled", True):
             df = diff_result.get("source_only", pd.DataFrame())
             if len(df) > 0:
+                df = _format_export_dataframe(
+                    df,
+                    "source_only",
+                    rule or {},
+                    compare_columns_config or [],
+                )
                 df.to_excel(
                     writer,
                     sheet_name=sheet_name_source_only,
@@ -1026,6 +1269,12 @@ def _write_recon_result(
         if sheets_config.get("target_only", {}).get("enabled", True):
             df = diff_result.get("target_only", pd.DataFrame())
             if len(df) > 0:
+                df = _format_export_dataframe(
+                    df,
+                    "target_only",
+                    rule or {},
+                    compare_columns_config or [],
+                )
                 df.to_excel(
                     writer,
                     sheet_name=sheet_name_target_only,
@@ -1099,14 +1348,20 @@ def _get_marked_columns(key_columns_config: dict, compare_columns_config: list) 
         "diff": []
     }
     
+    source_label = "源"
+    target_label = "目标"
+    if rule_context := getattr(_get_marked_columns, "_rule_context", None):
+        source_label = ((rule_context.get("source_file") or {}).get("table_name") or source_label).strip()
+        target_label = ((rule_context.get("target_file") or {}).get("table_name") or target_label).strip()
+
     if key_columns_config:
         for mapping in _get_key_mappings(key_columns_config):
             source_col = mapping.get("source_field")
             target_col = mapping.get("target_field")
             if source_col:
-                marked["mapping_source"].append(f"source_{source_col}")
+                marked["mapping_source"].extend([f"source_{source_col}", f"{source_label}.{source_col}", source_col])
             if target_col:
-                marked["mapping_target"].append(f"target_{target_col}")
+                marked["mapping_target"].extend([f"target_{target_col}", f"{target_label}.{target_col}", target_col])
     
     if compare_columns_config:
         for cfg in compare_columns_config:
@@ -1115,11 +1370,11 @@ def _get_marked_columns(key_columns_config: dict, compare_columns_config: list) 
             target_col = cfg.get("target_column")
             
             if source_col:
-                marked["compare_source"].append(f"source_{source_col}")
+                marked["compare_source"].extend([f"source_{source_col}", f"{source_label}.{source_col}", source_col])
             if target_col:
-                marked["compare_target"].append(f"target_{target_col}")
+                marked["compare_target"].extend([f"target_{target_col}", f"{target_label}.{target_col}", target_col])
             if compare_name:
-                marked["diff"].append(f"diff_{compare_name}")
+                marked["diff"].extend([f"diff_{compare_name}", _get_diff_display_name(cfg)])
     
     return marked
 
