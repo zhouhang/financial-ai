@@ -221,46 +221,8 @@ class AgentState(TypedDict, total=False):
     analysis_cache: Optional[dict[str, Any]]
     pending_interrupt: Optional[dict[str, Any]]
 
-    # 文件分析（第2层 – 步骤1）
-    file_analyses: list[dict[str, Any]]
-
-    # 字段映射（第2层 – 步骤2，HITL）
-    suggested_mappings: dict[str, Any]
-    confirmed_mappings: Optional[dict[str, Any]]
-    mapping_adjustment_feedback: Optional[str]  # 用户调整意见的反馈
-
-    # 规则配置（第2层 – 步骤3，HITL）
-    rule_config_questions: list[dict[str, Any]]
-    rule_config_answers: Optional[dict[str, Any]]
-    rule_config_adjustment_feedback: Optional[str]  # 用户调整规则配置的反馈
-    rule_config_items: Optional[list[dict[str, Any]]]  # 增量式配置项列表
-
-    # 生成的模式（第2层 – 步骤4）
-    generated_schema: Optional[dict[str, Any]]
-
-    # 预览（第2层 – 步骤4，HITL）
-    preview_result: Optional[dict[str, Any]]
-
-    # 规则推荐（第2层 – 步骤2.5）
-    recommended_rules: Optional[list[dict[str, Any]]]  # 推荐的规则列表
-    selected_rule_id: Optional[str]  # 用户选择的推荐规则 ID
-    using_recommended_rule: Optional[bool]  # 是否使用推荐规则
-    waiting_for_rule_name: Optional[bool]  # 等待用户输入规则名称
-
-    # 保存的规则名称（第2层 – 步骤5）
-    saved_rule_name: Optional[str]
-
     # 当前阶段跟踪
     phase: str  # ReconciliationPhase 值
-
-    # 工作流上下文保存（用于中断和恢复）
-    workflow_context: Optional[dict[str, Any]]
-    # 结构：{"paused_phase": str, "paused_at": str, "saved_progress": dict}
-
-    # 编辑规则流程（edit_rule 意图）
-    editing_rule_id: Optional[str]
-    editing_rule_name: Optional[str]
-    editing_rule_template: Optional[dict[str, Any]]
 
     # 任务执行（第3层）
     task_id: Optional[str]

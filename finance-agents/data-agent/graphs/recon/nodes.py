@@ -33,7 +33,9 @@ from graphs.main_graph.public_nodes import (
     _to_upload_ref,
 )
 from .execution_service import (
+    build_recon_observation,
     build_execution_request,
+    build_recon_ctx_update_from_execution,
     resolve_recon_inputs,
     run_recon_execution,
 )
@@ -153,6 +155,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
     rule_code: str = ctx.get("rule_code", "")
     rule_id: str = ctx.get("rule_id", "")
     rule: dict = ctx.get("rule", {})
+    rule_name: str = str(ctx.get("rule_name") or state.get("selected_rule_name") or rule_code)
     auth_token: str = state.get("auth_token") or ""
 
     messages: list = []
@@ -215,107 +218,50 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         f"rule_type={recon_result.get('rule_type')}"
     )
 
-    execution_status = recon_result.get("status")
+    run_context = ctx.get("run_context") if isinstance(ctx.get("run_context"), dict) else {}
+    run_context = {
+        **run_context,
+        "trigger_type": str(run_context.get("trigger_type") or "chat"),
+        "entry_mode": str(run_context.get("entry_mode") or "file"),
+    }
+    recon_observation = build_recon_observation(
+        rule_code=rule_code,
+        rule_name=rule_name,
+        rule=rule if isinstance(rule, dict) else {},
+        trigger_type=str(run_context.get("trigger_type") or "chat"),
+        entry_mode=str(run_context.get("entry_mode") or "file"),
+        recon_inputs=recon_inputs,
+        recon_result=recon_result if isinstance(recon_result, dict) else {},
+        run_context=run_context,
+        run_id=str(ctx.get("run_id") or ""),
+        ref_to_display_name=ref_to_display_name,
+    )
 
-    # 处理执行结果
-    if execution_status is None and not recon_result.get("success"):
-        execution_status = "failed"
-
-    if execution_status in {"failed", "invalid_request"}:
-        error_msg = recon_result.get("error", "对账执行失败")
+    execution_ctx = build_recon_ctx_update_from_execution(
+        recon_result=recon_result if isinstance(recon_result, dict) else {},
+        recon_inputs=recon_inputs,
+        execution_request=execution_request,
+        ref_to_display_name=ref_to_display_name,
+        recon_observation=recon_observation,
+    )
+    if not execution_ctx.get("ok"):
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
-            "exec_status": "error",
-            "exec_error": error_msg,
-            "execution_request": execution_request,
-            "recon_result": recon_result,
+            "exec_status": execution_ctx.get("execution_status", "error"),
+            "exec_error": execution_ctx.get("exec_error", "对账执行失败"),
+            **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
         })
         return {
             "messages": messages,
             "recon_ctx": ctx,
         }
 
-    if execution_status is None:
-        execution_status = "success"
-
-    # 提取文件信息（从对账结果中）
-    file_info_list = []
-    output_files = []
-    download_urls = []  # MCP 返回的下载链接
-
-    # 统一处理对账结果（支持单条或多条规则）
-    results = recon_result.get("results", [])
-    if not results and recon_result.get("success"):
-        # 兼容没有包装在 results 中的单个结果
-        results = [recon_result]
-
-    succeeded_results = [r for r in results if r.get("status", "succeeded") == "succeeded"]
-    skipped_results = [r for r in results if r.get("status") == "skipped"]
-    failed_results = [r for r in results if r.get("status") == "failed"]
-
-    total_diff = sum(r.get("matched_with_diff", 0) for r in succeeded_results)
-    total_source_only = sum(r.get("source_only", 0) for r in succeeded_results)
-    total_target_only = sum(r.get("target_only", 0) for r in succeeded_results)
-    total_matched = sum(r.get("matched_exact", 0) for r in succeeded_results)
-
-    # 收集文件信息、输出报告路径和过滤统计信息
-    filter_stats = {}
-    for r in succeeded_results:
-        source_file = r.get("source_file", "")
-        target_file = r.get("target_file", "")
-        output_file = r.get("output_file", "")
-        download_url = r.get("download_url")  # MCP 返回的下载链接
-        rule_name = r.get("rule_name", "")
-        if source_file and target_file:
-            source_display = ref_to_display_name.get(source_file, source_file.split("/")[-1] if "/" in source_file else source_file)
-            target_display = ref_to_display_name.get(target_file, target_file.split("/")[-1] if "/" in target_file else target_file)
-            file_info_list.append({
-                "rule_name": rule_name,
-                "source_file": source_display,
-                "target_file": target_display,
-            })
-        if output_file:
-            output_files.append(output_file)
-        if download_url:
-            download_urls.append(download_url)
-        # 提取过滤统计信息
-        if r.get("source_filter_stats"):
-            filter_stats["source"] = r.get("source_filter_stats")
-        if r.get("target_filter_stats"):
-            filter_stats["target"] = r.get("target_filter_stats")
-
     ctx.update({
         "phase": ReconAgentPhase.SHOWING_RESULT.value,
-        "exec_status": execution_status,
-        "recon_inputs": recon_inputs,
-        "execution_request": execution_request,
-        "execution_result": recon_result,
-        "recon_result": recon_result,
-        "file_info_list": file_info_list,
-        "output_files": output_files,
-        "download_urls": download_urls,
-        "filter_stats": filter_stats,
-        "skipped_results": skipped_results,
-        "failed_results": failed_results,
-        "differences": [
-            {
-                "type": "matched_with_diff",
-                "description": f"匹配但有差异: {total_diff} 条",
-                "count": total_diff,
-            },
-            {
-                "type": "source_only",
-                "description": f"源文件独有: {total_source_only} 条",
-                "count": total_source_only,
-            },
-            {
-                "type": "target_only",
-                "description": f"目标文件独有: {total_target_only} 条",
-                "count": total_target_only,
-            },
-        ],
-        "matched_count": total_matched,
-        "unmatched_count": total_diff + total_source_only + total_target_only,
+        "exec_status": execution_ctx.get("execution_status", "success"),
+        "exec_error": "",
+        "run_context": run_context,
+        **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
     })
 
     return {

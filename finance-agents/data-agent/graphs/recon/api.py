@@ -11,7 +11,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from graphs.recon.execution_service import build_execution_request, normalize_recon_inputs, run_recon_execution
+from graphs.recon.execution_service import (
+    build_execution_request,
+    build_recon_ctx_update_from_execution,
+    build_recon_observation,
+    normalize_recon_inputs,
+    run_recon_execution,
+)
 from tools.mcp_client import get_file_validation_rule
 
 logger = logging.getLogger(__name__)
@@ -57,16 +63,18 @@ async def run_internal_recon(
     if not recon_inputs:
         raise HTTPException(status_code=400, detail="recon_inputs 不能为空")
 
+    merged_run_context = {
+        **body.run_context,
+        "trigger_type": body.trigger_type,
+        "entry_mode": body.entry_mode,
+    }
+
     execution_request, request_error = build_execution_request(
         rule_code=body.rule_code,
         rule_id=body.rule_id,
         auth_token=auth_token,
         recon_inputs=recon_inputs,
-        run_context={
-            **body.run_context,
-            "trigger_type": body.trigger_type,
-            "entry_mode": body.entry_mode,
-        },
+        run_context=merged_run_context,
     )
     if request_error:
         raise HTTPException(status_code=400, detail=request_error)
@@ -75,7 +83,29 @@ async def run_internal_recon(
     if exec_error:
         raise HTTPException(status_code=500, detail=exec_error)
 
-    success = bool(recon_result.get("success"))
+    recon_observation = build_recon_observation(
+        rule_code=body.rule_code,
+        rule_name=rule_name,
+        rule=rule_data if isinstance(rule_data, dict) else {},
+        trigger_type=body.trigger_type,
+        entry_mode=body.entry_mode,
+        recon_inputs=recon_inputs,
+        recon_result=recon_result if isinstance(recon_result, dict) else {},
+        run_context=merged_run_context,
+        run_id=str(merged_run_context.get("run_id") or ""),
+        ref_to_display_name={},
+    )
+    execution_ctx = build_recon_ctx_update_from_execution(
+        recon_result=recon_result if isinstance(recon_result, dict) else {},
+        recon_inputs=recon_inputs,
+        execution_request=execution_request,
+        ref_to_display_name={},
+        recon_observation=recon_observation,
+    )
+    success = bool(recon_result.get("success")) and bool(execution_ctx.get("ok"))
+    exec_status = str(execution_ctx.get("execution_status") or ("success" if success else "error"))
+    exec_error = str(execution_ctx.get("exec_error") or "")
+
     return {
         "success": success,
         "trigger_type": body.trigger_type,
@@ -88,13 +118,12 @@ async def run_internal_recon(
             "rule_code": body.rule_code,
             "rule_name": rule_name,
             "rule": rule_data,
-            "run_context": body.run_context,
-            "recon_inputs": recon_inputs,
-            "execution_request": execution_request,
-            "execution_result": recon_result,
+            "run_context": merged_run_context,
+            **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
             "phase": "completed" if success else "exec_failed",
-            "exec_status": recon_result.get("status", "success" if success else "error"),
-            "exec_error": recon_result.get("error", ""),
+            "exec_status": exec_status,
+            "exec_error": exec_error,
         },
         "execution_result": recon_result,
+        "recon_observation": recon_observation,
     }

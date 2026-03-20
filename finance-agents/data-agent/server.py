@@ -47,21 +47,8 @@ logger = logging.getLogger(__name__)
 
 
 def _build_legacy_reconciliation_state_reset() -> dict[str, Any]:
-    """Clear legacy reconciliation-rule workflow state."""
-    return {
-        "file_analyses": [],
-        "suggested_mappings": {},
-        "confirmed_mappings": {},
-        "rule_config_items": [],
-        "generated_schema": None,
-        "workflow_context": {},
-        "selected_rule_id": None,
-        "using_recommended_rule": False,
-        "waiting_for_rule_name": False,
-        "editing_rule_id": None,
-        "editing_rule_name": None,
-        "editing_rule_template": None,
-    }
+    """Legacy reconciliation state has been removed."""
+    return {}
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
