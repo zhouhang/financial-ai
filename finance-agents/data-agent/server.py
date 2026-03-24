@@ -209,7 +209,6 @@ async def upload_file(
     thread_id: str = Form("default"),
     is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
     auth_token: str = Form(""),  # 登录用户的 auth_token
-    guest_token: str = Form(""),  # 游客的 guest_token
 ):
     """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
 
@@ -217,8 +216,7 @@ async def upload_file(
         file: 上传的文件
         thread_id: 会话 ID
         is_first_file: 是否是本批上传的第一个文件 ("1"=True, "0"=False)
-        auth_token: 登录用户的认证 token（与 guest_token 二选一）
-        guest_token: 游客的临时 token（与 auth_token 二选一）
+        auth_token: 登录用户的认证 token
     """
     import base64
     import os
@@ -280,20 +278,19 @@ async def upload_file(
             logger.warning(f"清空 state.uploaded_files 失败: {e}")
 
     # ⚠️ 如果前端没有传递 token，从 LangGraph state 中获取
-    if not auth_token and not guest_token:
+    if not auth_token:
         try:
             config = {"configurable": {"thread_id": thread_id}}
             snapshot = langgraph_app.get_state(config)
             state_auth_token = snapshot.values.get("auth_token", "")
-            state_guest_token = snapshot.values.get("guest_token", "")
             if state_auth_token:
                 auth_token = state_auth_token
                 logger.info(f"从 state 获取 auth_token (thread={thread_id})")
-            elif state_guest_token:
-                guest_token = state_guest_token
-                logger.info(f"从 state 获取 guest_token (thread={thread_id})")
         except Exception as e:
             logger.warning(f"无法从 state 获取 token: {e}")
+
+    if not auth_token:
+        raise HTTPException(401, "缺少 auth_token，请先登录")
 
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
@@ -305,11 +302,7 @@ async def upload_file(
                 }
             ]
         }
-        # 传递 token 给 MCP 工具（auth_token 或 guest_token）
-        if auth_token:
-            mcp_args["auth_token"] = auth_token
-        elif guest_token:
-            mcp_args["guest_token"] = guest_token
+        mcp_args["auth_token"] = auth_token
 
         result = await call_mcp_tool("file_upload", mcp_args)
 

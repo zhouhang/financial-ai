@@ -195,11 +195,10 @@ class AgentState(TypedDict, total=False):
     # ── 认证 ──────────────────────────────────────────────────
     auth_token: Optional[str]         # JWT token
     current_user: Optional[dict]      # 当前登录用户信息
-    guest_token: Optional[str]        # 游客临时token
     
     # ── 管理员 ────────────────────────────────────────────────
     admin_token: Optional[str]        # 管理员 token
-    admin_data: Optional[dict]        # 管理员数据（公司部门员工规则）
+    admin_data: Optional[dict]        # 管理员数据（公司部门员工）
 
     # 意图检测（第1层）
     user_intent: str  # UserIntent 值

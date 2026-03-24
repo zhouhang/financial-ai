@@ -198,13 +198,11 @@ def generate_admin_view(data: dict = None, admin_token: str = "") -> str:
         depts_html = ""
         for dept in company.get("departments", []):
             employees = ", ".join([e["username"] for e in dept.get("employees", [])]) or "无"
-            rules = ", ".join([r["name"] for r in dept.get("rules", [])]) or "无"
             depts_html += f"""
             <li>
               <strong>{dept["name"]}</strong>
               <ul>
                 <li>员工: {employees}</li>
-                <li>规则: {rules}</li>
               </ul>
             </li>"""
         
