@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import LoginModal from './components/LoginModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
+import { applyTheme, resolveInitialTheme, type ThemeMode } from './theme';
 import type {
   Conversation,
   Message,
   Task,
   UploadedFile,
+  UserTaskRule,
   WsOutgoing,
 } from './types';
 
@@ -68,6 +70,30 @@ function parseGuestConv(json: string): Conversation | null {
   }
 }
 
+function isBlockingBackdrop(element: HTMLElement): boolean {
+  const style = window.getComputedStyle(element);
+  if (style.position !== 'fixed' || style.pointerEvents === 'none') {
+    return false;
+  }
+
+  const rect = element.getBoundingClientRect();
+  const coversViewport =
+    rect.top <= 1 &&
+    rect.left <= 1 &&
+    rect.width >= window.innerWidth - 1 &&
+    rect.height >= window.innerHeight - 1;
+
+  if (!coversViewport) {
+    return false;
+  }
+
+  const zIndex = Number(style.zIndex);
+  const background = style.backgroundColor.replace(/\s+/g, '');
+  const isDarkBackdrop = /^rgba?\(0,0,0(?:,[0-9.]+)?\)$/.test(background);
+
+  return Number.isFinite(zIndex) && zIndex >= 40 && isDarkBackdrop;
+}
+
 // 从 localStorage 读取初始会话状态（区分游客/登录）
 function getInitialConversationState(): {
   activeId: string;
@@ -125,10 +151,55 @@ export default function App() {
   /** 登录框标题提示，如「登录后使用完整功能」；为空时显示默认「登录」/「注册」 */
   const [loginModalTitleHint, setLoginModalTitleHint] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  /** 规则保存成功提示 */
-  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  
+  /** 选中的任务 */
+  const [selectedTask, setSelectedTask] = useState<UserTaskRule | null>(null);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(resolveInitialTheme);
 
   const isGuest = !authToken;
+
+  useEffect(() => {
+    if (!authToken) return;
+    setIsLoginModalOpen(false);
+    setLoginModalTitleHint(null);
+  }, [authToken]);
+
+  useLayoutEffect(() => {
+    applyTheme(themeMode, { disableTransitions: true });
+  }, [themeMode]);
+
+  useLayoutEffect(() => {
+    if (!authToken && !currentUser) {
+      return;
+    }
+
+    const clearStaleBackdrop = () => {
+      document.body.style.overflow = 'unset';
+
+      document.querySelectorAll<HTMLElement>('[data-login-modal-backdrop="true"]').forEach((element) => {
+        element.style.display = 'none';
+        element.style.pointerEvents = 'none';
+      });
+
+      document.querySelectorAll<HTMLElement>('body *').forEach((element) => {
+        if (!isBlockingBackdrop(element)) {
+          return;
+        }
+
+        element.style.display = 'none';
+        element.style.pointerEvents = 'none';
+      });
+    };
+
+    clearStaleBackdrop();
+    const rafId = window.requestAnimationFrame(clearStaleBackdrop);
+    const timerId = window.setTimeout(clearStaleBackdrop, 120);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(timerId);
+    };
+  }, [authToken, currentUser, themeMode]);
 
   // 保存当前会话状态到 localStorage（游客用 guest 存储，已登录用 active/id）
   useEffect(() => {
@@ -177,80 +248,14 @@ export default function App() {
       setAuthToken(newToken);
     }
     setCurrentUser({ username: user.username, id: user.userId });
-    
-    const pendingRuleName = localStorage.getItem('pending_rule_name');
-    const pendingSourceRuleId = localStorage.getItem('pending_source_rule_id');
-    const pendingThreadId = localStorage.getItem('pending_thread_id');
-    const pendingIsNewRule = localStorage.getItem('pending_is_new_rule') === 'true';
-    
+
+    localStorage.removeItem('pending_rule_name');
+    localStorage.removeItem('pending_source_rule_id');
+    localStorage.removeItem('pending_rule_id');
     localStorage.removeItem(STORAGE_KEY_GUEST_CONV);
     localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
     localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
-    
-    let ruleJustSaved = false;
-    console.log('[handleLoginSuccess] pendingRuleName=', pendingRuleName, 'pendingSourceRuleId=', pendingSourceRuleId, 'pendingIsNewRule=', pendingIsNewRule, 'newToken=', newToken ? 'exists' : 'null');
-    if (pendingRuleName && newToken) {
-      try {
-        if (pendingIsNewRule && pendingThreadId) {
-          // 新建规则：从 thread 状态恢复并保存
-          console.log('[handleLoginSuccess] 保存新建规则, threadId=', pendingThreadId);
-          const response = await fetch('/api/save-pending-rule', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${newToken}`,
-            },
-            body: JSON.stringify({
-              thread_id: pendingThreadId,
-              rule_name: pendingRuleName,
-            }),
-          });
-          const data = await response.json();
-          console.log('[handleLoginSuccess] save-pending-rule响应:', data);
-          if (data.success) {
-            ruleJustSaved = true;
-            localStorage.removeItem('pending_rule_name');
-            localStorage.removeItem('pending_thread_id');
-            localStorage.removeItem('pending_is_new_rule');
-          } else {
-            console.error('保存新建规则失败:', data.error || data.detail || '未知错误');
-          }
-        } else if (pendingSourceRuleId) {
-          // 推荐规则：复制
-          console.log('[handleLoginSuccess] 复制规则, sourceRuleId=', pendingSourceRuleId);
-          const response = await fetch('/api/copy-rule', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${newToken}`,
-            },
-            body: JSON.stringify({
-              source_rule_id: pendingSourceRuleId,
-              new_rule_name: pendingRuleName,
-            }),
-          });
-          const data = await response.json();
-          console.log('[handleLoginSuccess] copy-rule响应:', data);
-          if (data.success) {
-            ruleJustSaved = true;
-            localStorage.removeItem('pending_rule_name');
-            localStorage.removeItem('pending_source_rule_id');
-          } else {
-            console.error('复制规则失败:', data.error || data.detail || '未知错误');
-          }
-        }
-        console.log('[handleLoginSuccess] ruleJustSaved=', ruleJustSaved);
-        if (ruleJustSaved) {
-          localStorage.removeItem('pending_rule_id');
-          // 显示成功提示
-          setSaveSuccessMessage(`✅ 规则「${pendingRuleName}」已成功保存到您的个人规则列表！`);
-        }
-      } catch (e) {
-        console.error('保存规则失败:', e);
-        // 失败时不清除 pending_*，便于用户重试
-      }
-    }
-    
+
     setIsLoginModalOpen(false);
     // 清除游客对话缓存，不保存为登录后会话
     clearConversationsCache();
@@ -414,6 +419,7 @@ export default function App() {
   
   // ── 流式输出状态 ──────────────────────────────────────────
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const nodeStatusMessageIdsRef = useRef<Map<string, string>>(new Map());
 
   // ── 响应目标会话追踪 ───────────────────────────────────────
   const pendingConvIdRef = useRef<string | null>(null);
@@ -451,6 +457,140 @@ export default function App() {
     [activeConvId]
   );
 
+  const makeNodeStatusKey = useCallback((conversationId: string, nodeName: string) => {
+    return `${conversationId}::${nodeName}`;
+  }, []);
+
+  const upsertRunningNodeMessage = useCallback((
+    conversationId: string,
+    nodeName: string,
+    label: string,
+    detail?: string,
+  ) => {
+    const key = makeNodeStatusKey(conversationId, nodeName);
+    const existingId = nodeStatusMessageIdsRef.current.get(key);
+    const messageId = existingId || generateId();
+
+    nodeStatusMessageIdsRef.current.set(key, messageId);
+
+    setConversations((prev) =>
+      prev.map((conversation) => {
+        if (conversation.id !== conversationId) return conversation;
+
+        const existingIndex = conversation.messages.findIndex((message) => message.id === messageId);
+        const nextMessage: Message = {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date(),
+          nodeName,
+          nodeStatus: 'running',
+          nodeLabel: label,
+          nodeDetail: detail,
+        };
+
+        if (existingIndex >= 0) {
+          const updated = [...conversation.messages];
+          updated[existingIndex] = {
+            ...updated[existingIndex],
+            ...nextMessage,
+          };
+          return { ...conversation, messages: updated, updatedAt: new Date() };
+        }
+
+        return {
+          ...conversation,
+          messages: [...conversation.messages, nextMessage],
+          updatedAt: new Date(),
+        };
+      }),
+    );
+  }, [makeNodeStatusKey]);
+
+  const completeNodeMessage = useCallback((
+    conversationId: string,
+    nodeName: string,
+    content: string,
+    label?: string,
+  ) => {
+    const key = makeNodeStatusKey(conversationId, nodeName);
+    const existingId = nodeStatusMessageIdsRef.current.get(key);
+    if (existingId) {
+      nodeStatusMessageIdsRef.current.delete(key);
+    }
+
+    const resolvedId = existingId || generateId();
+
+    setConversations((prev) =>
+      prev.map((conversation) => {
+        if (conversation.id !== conversationId) return conversation;
+
+        const existingIndex = conversation.messages.findIndex((message) => message.id === resolvedId);
+        const nextMessage: Message = {
+          id: resolvedId,
+          role: 'assistant',
+          content,
+          timestamp: new Date(),
+          nodeName,
+          nodeStatus: 'completed',
+          nodeLabel: label,
+        };
+
+        if (existingIndex >= 0) {
+          const updated = [...conversation.messages];
+          updated[existingIndex] = {
+            ...updated[existingIndex],
+            ...nextMessage,
+          };
+          return { ...conversation, messages: updated, updatedAt: new Date() };
+        }
+
+        return {
+          ...conversation,
+          messages: [...conversation.messages, nextMessage],
+          updatedAt: new Date(),
+        };
+      }),
+    );
+  }, [makeNodeStatusKey]);
+
+  const clearRunningNodeMessages = useCallback((conversationId: string) => {
+    setConversations((prev) =>
+      prev.map((conversation) => {
+        if (conversation.id !== conversationId) return conversation;
+        return {
+          ...conversation,
+          messages: conversation.messages.map((message) =>
+            message.nodeStatus === 'running'
+              ? { ...message, nodeStatus: 'completed', content: message.content || `已结束：${message.nodeLabel || '当前步骤'}` }
+              : message,
+          ),
+          updatedAt: new Date(),
+        };
+      }),
+    );
+
+    Array.from(nodeStatusMessageIdsRef.current.keys())
+      .filter((key) => key.startsWith(`${conversationId}::`))
+      .forEach((key) => nodeStatusMessageIdsRef.current.delete(key));
+  }, []);
+
+  const remapNodeStatusConversationId = useCallback((fromConversationId: string, toConversationId: string) => {
+    if (!fromConversationId || !toConversationId || fromConversationId === toConversationId) {
+      return;
+    }
+
+    const remapped = new Map<string, string>();
+    nodeStatusMessageIdsRef.current.forEach((messageId, key) => {
+      if (key.startsWith(`${fromConversationId}::`)) {
+        remapped.set(key.replace(`${fromConversationId}::`, `${toConversationId}::`), messageId);
+        return;
+      }
+      remapped.set(key, messageId);
+    });
+    nodeStatusMessageIdsRef.current = remapped;
+  }, []);
+
   // ── WebSocket 连接时的认证验证 ─────────────────────────
   const handleWsConnected = useCallback(
     (sendMessage: (msg: string, threadId: string, resume?: boolean, token?: string) => boolean) => {
@@ -468,6 +608,26 @@ export default function App() {
     (data: WsOutgoing) => {
       const targetConvId = pendingConvIdRef.current || activeConvId;
       switch (data.type) {
+        case 'node_status':
+          setIsLoading(false);
+          setStreamingMessageId(null);
+          if (data.node && data.status === 'running') {
+            upsertRunningNodeMessage(
+              targetConvId,
+              data.node,
+              data.label || data.content || '处理中',
+              data.detail,
+            );
+          } else if (data.node && data.status === 'completed') {
+            completeNodeMessage(
+              targetConvId,
+              data.node,
+              data.content || '当前节点已完成',
+              data.label,
+            );
+          }
+          break;
+
         case 'stream':
           // 流式输出：逐步更新消息内容
           setIsLoading(false);
@@ -514,7 +674,7 @@ export default function App() {
           );
           break;
         
-        case 'message':
+        case 'message': {
           setIsLoading(false);
           const currentStreamingId = streamingMessageId;
           setStreamingMessageId(null); // 完整消息，清除流式状态
@@ -570,26 +730,10 @@ export default function App() {
 
           // 尝试从 AI 消息中解析任务
           parseTasksFromMessage(newContent);
-
-          // 游客保存规则：收到 SAVE_RULE 或 SAVE_NEW_RULE 时自动弹出登录框并存储待保存信息
-          const saveRuleMatch = newContent.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
-          const saveNewRuleMatch = newContent.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
-          if (saveRuleMatch) {
-            localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
-            localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
-            setLoginModalTitleHint('登录后可完成保存规则');
-            setIsLoginModalOpen(true);
-          } else if (saveNewRuleMatch) {
-            localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
-            // 优先使用服务端返回的 thread_id（与 LangGraph 状态一致）
-            localStorage.setItem('pending_thread_id', (data.thread_id as string) || targetConvId);
-            localStorage.setItem('pending_is_new_rule', 'true');
-            setLoginModalTitleHint('登录后可完成保存规则');
-            setIsLoginModalOpen(true);
-          }
           break;
+        }
 
-        case 'interrupt':
+        case 'interrupt': {
           setIsLoading(false);
           const payload = data.payload || {};
           const question = (payload.question as string) || '';
@@ -629,11 +773,13 @@ export default function App() {
           setWaitingForFileUpload(true);
           pendingConvIdRef.current = null;
           break;
+        }
 
         case 'done':
           setIsLoading(false);
           setWaitingForFileUpload(false);
           setStreamingMessageId(null); // 清除流式状态
+          clearRunningNodeMessages(targetConvId);
           pendingConvIdRef.current = null;
           pendingSendConvRef.current = null; // 响应完成，清除无对话发送的暂存
           break;
@@ -666,12 +812,21 @@ export default function App() {
             }
             console.log('Auth token verified successfully');
           } else {
-            // token 已过期或无效，清除本地凭证
-            console.log('Auth token verification failed, clearing stored credentials');
-            setAuthToken(null);
-            setCurrentUser(null);
-            localStorage.removeItem('tally_auth_token');
-            localStorage.removeItem('tally_current_user');
+            const reason =
+              data.payload && typeof data.payload.reason === 'string'
+                ? data.payload.reason
+                : 'unknown';
+
+            if (reason === 'invalid_token') {
+              // token 已过期或无效，清除本地凭证
+              console.log('Auth token invalid, clearing stored credentials');
+              setAuthToken(null);
+              setCurrentUser(null);
+              localStorage.removeItem('tally_auth_token');
+              localStorage.removeItem('tally_current_user');
+            } else {
+              console.warn('Auth verification skipped due to transient backend issue:', data.payload);
+            }
           }
           break;
 
@@ -680,6 +835,7 @@ export default function App() {
           if (data.conversation_id && data.thread_id) {
             console.log('[conversation_created] 本地ID:', data.thread_id, '→ 服务器ID:', data.conversation_id);
             convIdMapRef.current.set(data.thread_id, data.conversation_id);
+            remapNodeStatusConversationId(data.thread_id, data.conversation_id);
             // 如果是登录会话，更新服务器ID
             if (loginConvIdRef.current.localId === data.thread_id) {
               loginConvIdRef.current.serverId = data.conversation_id;
@@ -688,7 +844,7 @@ export default function App() {
               const current = prev.find((c) => c.id === data.thread_id);
               const rest = prev.filter((c) => c.id !== data.thread_id);
               if (current) {
-                return [{ ...current, id: data.conversation_id }, ...rest];
+                return [{ ...current, id: data.conversation_id as string }, ...rest];
               }
               // conversation_created 可能早于 handleSendMessage 的 state 更新，使用暂存的会话
               const pending = pendingSendConvRef.current;
@@ -709,6 +865,7 @@ export default function App() {
 
         case 'error':
           setIsLoading(false);
+          clearRunningNodeMessages(targetConvId);
           setConversations((prev) =>
             prev.map((c) =>
               c.id === targetConvId
@@ -734,7 +891,17 @@ export default function App() {
           break;
       }
     },
-    [appendMessage, streamingMessageId, activeConvId, pendingConvIdRef, loadConversations]
+    [
+      activeConvId,
+      appendMessage,
+      clearRunningNodeMessages,
+      completeNodeMessage,
+      loadConversations,
+      pendingConvIdRef,
+      remapNodeStatusConversationId,
+      streamingMessageId,
+      upsertRunningNodeMessage,
+    ]
   );
 
   const { status, sendMessage } = useWebSocket({
@@ -871,9 +1038,20 @@ export default function App() {
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
       const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
-      sendMessage(text, activeConvId, shouldResume, authToken || undefined, filesToSend, conversationId);
+      sendMessage(
+        text,
+        activeConvId,
+        shouldResume,
+        authToken || undefined,
+        filesToSend,
+        conversationId,
+        selectedTask?.task_type,
+        selectedTask?.rule_code,
+        selectedTask?.name,
+        selectedTask?.file_rule_code,
+      );
     },
-    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId]
+    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedTask]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -989,6 +1167,12 @@ export default function App() {
     }
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
 
+  // ── 选择任务 ────────────────────────────────────────────────
+  const handleSelectTask = useCallback((task: UserTaskRule) => {
+    setSelectedTask(task);
+    console.log('选中规则:', task.task_type, '-', task.task_name, '-', task.name);
+  }, []);
+
   // ── 合并本地和服务器会话 ────────────────────────────────────
   // 服务器会话优先，本地会话补充（未同步的新会话）
   // 如果刚登录，排除登录会话
@@ -1016,7 +1200,7 @@ export default function App() {
   const displayConversations = mergedConversations();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary">
+    <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary text-text-primary">
       <Sidebar
         collapsed={sidebarCollapsed}
         conversations={displayConversations}
@@ -1027,6 +1211,9 @@ export default function App() {
         onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
+        onSelectRule={handleSelectTask}
+        selectedRuleCode={selectedTask?.rule_code}
+        authToken={authToken}
       />
       <ChatArea
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
@@ -1046,28 +1233,21 @@ export default function App() {
           setLoginModalTitleHint(null);
           setIsLoginModalOpen(true);
         }}
+        themeMode={themeMode}
+        onToggleTheme={() => setThemeMode((prev) => (prev === 'light' ? 'dark' : 'light'))}
         streamingMessageId={streamingMessageId}
+        selectedTask={selectedTask}
       />
-      <LoginModal
-        isOpen={isLoginModalOpen}
-        onClose={() => {
-          setIsLoginModalOpen(false);
-          setLoginModalTitleHint(null);
-        }}
-        onLoginSuccess={handleLoginSuccess}
-        titleHint={loginModalTitleHint}
-      />
-      {/* 规则保存成功提示 */}
-      {saveSuccessMessage && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg shadow-lg z-50 flex items-center gap-3">
-          <span>{saveSuccessMessage}</span>
-          <button 
-            onClick={() => setSaveSuccessMessage(null)} 
-            className="text-green-500 hover:text-green-700 font-bold"
-          >
-            ✕
-          </button>
-        </div>
+      {!authToken && isLoginModalOpen && (
+        <LoginModal
+          isOpen={isLoginModalOpen}
+          onClose={() => {
+            setIsLoginModalOpen(false);
+            setLoginModalTitleHint(null);
+          }}
+          onLoginSuccess={handleLoginSuccess}
+          titleHint={loginModalTitleHint}
+        />
       )}
     </div>
   );

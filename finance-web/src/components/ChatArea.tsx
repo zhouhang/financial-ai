@@ -7,15 +7,14 @@ import {
   Loader2,
   X,
   FileSpreadsheet,
+  Moon,
+  SunMedium,
 } from 'lucide-react';
-import type { ConnectionStatus, Message, MessageAttachment, UploadedFile } from '../types';
+import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTaskRule } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
-
-/** 最多上传文件数 */
-const MAX_UPLOAD_FILES = 2;
 
 /** 暂存文件（本地还没上传的） */
 interface StagedFile {
@@ -51,8 +50,12 @@ interface ChatAreaProps {
   /** 认证 token */
   authToken?: string | null;
   onToggleSidebar?: () => void;
+  themeMode: 'light' | 'dark';
+  onToggleTheme: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
+  /** 选中的任务 */
+  selectedTask?: UserTaskRule | null;
 }
 
 export default function ChatArea({
@@ -69,6 +72,8 @@ export default function ChatArea({
   onLogin,
   sidebarCollapsed = false,
   onToggleSidebar,
+  themeMode,
+  onToggleTheme,
   streamingMessageId,
   authToken,
 }: ChatAreaProps) {
@@ -115,28 +120,6 @@ export default function ChatArea({
       inputRef.current.focus();
     }
   }, [showInput, threadId]);
-
-  // 解析消息中的 SAVE_RULE / SAVE_NEW_RULE 标记，写入 localStorage 供登录后保存使用
-  useEffect(() => {
-    for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        const saveRuleMatch = msg.content.match(/\[SAVE_RULE:([^:]+):([^\]]+)\]/);
-        if (saveRuleMatch) {
-          localStorage.setItem('pending_rule_name', saveRuleMatch[1]);
-          localStorage.setItem('pending_source_rule_id', saveRuleMatch[2]);
-          localStorage.removeItem('pending_thread_id');
-          localStorage.removeItem('pending_is_new_rule');
-        }
-        const saveNewRuleMatch = msg.content.match(/\[SAVE_NEW_RULE:([^\]]+)\]/);
-        if (saveNewRuleMatch) {
-          localStorage.setItem('pending_rule_name', saveNewRuleMatch[1]);
-          localStorage.setItem('pending_thread_id', threadId);
-          localStorage.setItem('pending_is_new_rule', 'true');
-          localStorage.removeItem('pending_source_rule_id');
-        }
-      }
-    }
-  }, [messages, threadId]);
 
   // 暴露聚焦函数给父组件
   useEffect(() => {
@@ -260,14 +243,7 @@ export default function ChatArea({
       alert(`仅支持 Excel 和 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv），以下文件已忽略：\n${rejected.join('\n')}`);
     }
     if (newStaged.length > 0) {
-      setStagedFiles((prev) => {
-        const canAdd = Math.max(0, MAX_UPLOAD_FILES - prev.length);
-        const toAdd = newStaged.slice(0, canAdd);
-        if (newStaged.length > canAdd) {
-          alert('最多只能上传 2 个文件');
-        }
-        return [...prev, ...toAdd];
-      });
+      setStagedFiles((prev) => [...prev, ...newStaged]);
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
@@ -298,12 +274,12 @@ export default function ChatArea({
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-surface-secondary relative">
       {/* ── Header ── */}
-      <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0">
+      <header className="h-14 bg-surface border-b border-border flex items-center justify-between px-6 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           {onToggleSidebar && (
             <button
               onClick={onToggleSidebar}
-              className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors shrink-0"
+              className="p-1.5 rounded-lg text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors shrink-0"
               title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
             >
               {sidebarCollapsed ? (
@@ -313,6 +289,7 @@ export default function ChatArea({
               )}
             </button>
           )}
+          
           <div
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
               connectionStatus === 'connected'
@@ -322,11 +299,23 @@ export default function ChatArea({
                 : 'bg-red-500'
             }`}
           />
-          <span className="text-sm font-medium text-gray-800 truncate">
+          <span className="text-sm font-medium text-text-primary truncate">
             {conversationTitle || 'Tally 智能财务助手'}
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleTheme}
+            className="h-9 w-9 rounded-lg border border-border bg-surface-elevated text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors flex items-center justify-center"
+            title={themeMode === 'light' ? '切换到深色模式' : '切换到浅色模式'}
+          >
+            {themeMode === 'light' ? (
+              <Moon className="w-4 h-4" />
+            ) : (
+              <SunMedium className="w-4 h-4" />
+            )}
+          </button>
           {!currentUser && onLogin ? (
             <button
               onClick={onLogin}
@@ -361,7 +350,7 @@ export default function ChatArea({
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
               <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-4" />
-              <p className="text-sm text-gray-500">正在加载会话...</p>
+              <p className="text-sm text-text-secondary">正在加载会话...</p>
             </div>
           </div>
         )}
@@ -370,26 +359,26 @@ export default function ChatArea({
         {!isLoadingConversation && messages.length === 0 && !isLoading && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
-              <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <div className="w-16 h-16 rounded-full bg-surface-tertiary flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </div>
               {currentUser ? (
                 <>
-                  <h3 className="text-base font-medium text-gray-800 mb-2">
+                  <h3 className="text-base font-medium text-text-primary mb-2">
                     开启新对话，开始交流
                   </h3>
-                  <p className="text-sm text-gray-500">
+                  <p className="text-sm text-text-secondary">
                     上传数据文件或直接描述您的分析需求
                   </p>
                 </>
               ) : (
                 <>
-                  <h3 className="text-base font-medium text-gray-800 mb-2">
+                  <h3 className="text-base font-medium text-text-primary mb-2">
                     您好！我是 Tally 智能对账助手
                   </h3>
-                  <p className="text-sm text-gray-500">
+                  <p className="text-sm text-text-secondary">
                     我可以帮助您进行数据对比对账，上传两个文件即可开始
                   </p>
                 </>
@@ -419,7 +408,7 @@ export default function ChatArea({
         <div className="px-6 pb-3 pointer-events-none">
           <div className="max-w-4xl mx-auto pointer-events-none">
             {/* Floating container with shadow */}
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-200 pointer-events-auto overflow-hidden">
+            <div className="bg-surface-elevated rounded-2xl shadow-lg border border-border pointer-events-auto overflow-hidden">
               {/* 暂存文件预览条 */}
               {stagedFiles.length > 0 && (
                 <div className="px-3 pt-3 flex flex-wrap gap-2">
@@ -429,12 +418,12 @@ export default function ChatArea({
                       className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 text-sm group animate-fade-in-up"
                     >
                       <FileSpreadsheet className="w-4 h-4 text-blue-500 shrink-0" />
-                      <span className="text-gray-800 font-medium truncate max-w-40">
+                      <span className="text-text-primary font-medium truncate max-w-40">
                         {sf.name}
                       </span>
                       <button
                         onClick={() => removeStagedFile(i)}
-                        className="w-5 h-5 rounded-full bg-gray-200 hover:bg-red-100 flex items-center justify-center text-gray-500 hover:text-red-500 transition-colors shrink-0 cursor-pointer"
+                        className="w-5 h-5 rounded-full bg-surface-tertiary hover:bg-red-100 flex items-center justify-center text-text-secondary hover:text-red-500 transition-colors shrink-0 cursor-pointer"
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -456,11 +445,11 @@ export default function ChatArea({
                 <button
                   type="button"
                   onClick={handleUploadClick}
-                  disabled={isUploading || stagedFiles.length >= MAX_UPLOAD_FILES}
+                  disabled={isUploading}
                   className="w-9 h-9 rounded-lg flex items-center justify-center
-                    text-gray-500 hover:text-blue-500 hover:bg-blue-50
+                    text-text-secondary hover:text-blue-500 hover:bg-blue-50
                     transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
-                  title={stagedFiles.length >= MAX_UPLOAD_FILES ? '最多上传 2 个文件' : '添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
+                  title={'添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
                 >
                   {isUploading ? (
                     <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />
@@ -479,7 +468,7 @@ export default function ChatArea({
                     placeholder="描述您的分析需求 (Shift+Enter 换行)..."
                     rows={1}
                     className="w-full px-3 py-2 text-sm rounded-lg
-                      bg-transparent resize-none
+                      bg-transparent text-text-primary resize-none
                       focus:outline-none
                       placeholder:text-gray-400"
                     style={{ height: '36px', maxHeight: '120px' }}
@@ -507,7 +496,7 @@ export default function ChatArea({
             
             {/* Bottom hint text */}
             <div className="mt-2">
-              <p className="text-center text-[11px] text-gray-400">
+              <p className="text-center text-[11px] text-text-muted">
                 AI 分析结果仅供参考，请结合实际数据进行判断
               </p>
             </div>

@@ -41,7 +41,7 @@ export default function InterruptDialog({
             onChange={(e) => setResponse(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
             placeholder="输入您的回复..."
-            className="flex-1 px-3 py-2 text-sm rounded-lg border border-border bg-white
+            className="flex-1 px-3 py-2 text-sm rounded-lg border border-border bg-surface-elevated text-text-primary
               focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
           />
           <button

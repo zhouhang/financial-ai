@@ -1,0 +1,44 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	router(router)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> router;
+	router -.-> __end__;
+	router -.-> proc_subgraph\3aget_rule_node;
+	router -.-> recon_subgraph\3aget_rule_node;
+	proc_subgraph\3a__end__ --> __end__;
+	recon_subgraph\3a__end__ --> __end__;
+	subgraph proc_subgraph
+	proc_subgraph\3aget_rule_node(get_rule_node)
+	proc_subgraph\3acheck_file_node(check_file_node)
+	proc_subgraph\3aproc_task_execute_node(proc_task_execute_node)
+	proc_subgraph\3aresult_node(result_node)
+	proc_subgraph\3a__end__(<p>__end__</p>)
+	proc_subgraph\3acheck_file_node -.-> proc_subgraph\3a__end__;
+	proc_subgraph\3acheck_file_node -.-> proc_subgraph\3aproc_task_execute_node;
+	proc_subgraph\3aget_rule_node -.-> proc_subgraph\3a__end__;
+	proc_subgraph\3aget_rule_node -.-> proc_subgraph\3acheck_file_node;
+	proc_subgraph\3aproc_task_execute_node --> proc_subgraph\3aresult_node;
+	proc_subgraph\3aresult_node --> proc_subgraph\3a__end__;
+	end
+	subgraph recon_subgraph
+	recon_subgraph\3aget_rule_node(get_rule_node)
+	recon_subgraph\3acheck_file_node(check_file_node)
+	recon_subgraph\3arecon_task_execution_node(recon_task_execution_node)
+	recon_subgraph\3arecon_result_node(recon_result_node)
+	recon_subgraph\3a__end__(<p>__end__</p>)
+	recon_subgraph\3acheck_file_node -.-> recon_subgraph\3a__end__;
+	recon_subgraph\3acheck_file_node -.-> recon_subgraph\3arecon_task_execution_node;
+	recon_subgraph\3aget_rule_node -.-> recon_subgraph\3a__end__;
+	recon_subgraph\3aget_rule_node -.-> recon_subgraph\3acheck_file_node;
+	recon_subgraph\3arecon_task_execution_node --> recon_subgraph\3arecon_result_node;
+	recon_subgraph\3arecon_result_node --> recon_subgraph\3a__end__;
+	end
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

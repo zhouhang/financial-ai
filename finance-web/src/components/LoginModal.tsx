@@ -4,7 +4,7 @@ import { X, AlertCircle, ChevronDown } from 'lucide-react';
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onLoginSuccess: (user: { username: string; userId: string }) => void;
+  onLoginSuccess: (user: { username: string; userId: string }) => void | Promise<void>;
   /** 标题提示，如「登录后使用完整功能」；有值时显示为标题，否则显示默认「登录」/「注册」 */
   titleHint?: string | null;
 }
@@ -134,18 +134,20 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess, titleHint 
       const data = await resp.json().catch(() => ({}));
 
       if (resp.ok && data.success && data.token) {
+        const userInfo = {
+          username: data.user?.username || username,
+          userId: data.user?.id || data.user_id
+        };
         localStorage.setItem('tally_auth_token', data.token);
         localStorage.setItem('tally_current_user', JSON.stringify({
-          username: data.user?.username || username,
-          userId: data.user?.id || data.user_id
+          username: userInfo.username,
+          userId: userInfo.userId,
         }));
-        onLoginSuccess({
-          username: data.user?.username || username,
-          userId: data.user?.id || data.user_id
-        });
         setUsername('');
         setPassword('');
+        document.body.style.overflow = 'unset';
         onClose();
+        void onLoginSuccess(userInfo);
       } else {
         const errMsg = typeof data.detail === 'string' ? data.detail : data.error || data.detail || '用户名或密码错误';
         setError(errMsg);
@@ -192,20 +194,22 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess, titleHint 
       const data = await resp.json().catch(() => ({}));
 
       if (resp.ok && data.success && data.token) {
+        const userInfo = {
+          username: data.user?.username || username,
+          userId: data.user?.id || data.user_id
+        };
         localStorage.setItem('tally_auth_token', data.token);
         localStorage.setItem('tally_current_user', JSON.stringify({
-          username: data.user?.username || username,
-          userId: data.user?.id || data.user_id
+          username: userInfo.username,
+          userId: userInfo.userId,
         }));
-        onLoginSuccess({
-          username: data.user?.username || username,
-          userId: data.user?.id || data.user_id
-        });
         setUsername('');
         setPassword('');
         setEmail('');
         setPhone('');
+        document.body.style.overflow = 'unset';
         onClose();
+        void onLoginSuccess(userInfo);
       } else {
         const errMsg = typeof data.detail === 'string' ? data.detail : data.error || data.detail || '注册失败';
         setError(errMsg);
@@ -245,6 +249,7 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess, titleHint 
 
   return (
     <div
+      data-login-modal-backdrop="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       onClick={handleBackdropClick}
     >

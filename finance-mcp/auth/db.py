@@ -13,6 +13,15 @@ from psycopg2 import OperationalError, InterfaceError
 logger = logging.getLogger(__name__)
 
 
+def _serialize_datetimes(d: dict) -> dict:
+    """将字典中所有 datetime 对象转为 ISO 格式字符串（原地修改并返回）"""
+    from datetime import datetime, date
+    for k, v in d.items():
+        if isinstance(v, (datetime, date)):
+            d[k] = v.isoformat()
+    return d
+
+
 def _get_db_config() -> dict:
     """获取数据库连接配置 - 引用统一的 db_config"""
     from db_config import db_config
@@ -157,8 +166,8 @@ def update_last_login(user_id: str):
 # ── 公司/部门查询 ────────────────────────────────────────────────────
 
 def list_companies() -> list[dict]:
-    """列出所有公司"""
-    sql = "SELECT id, name, code FROM company WHERE status = 'active' ORDER BY name"
+    """获取公司列表。"""
+    sql = "SELECT id, name, created_at FROM company ORDER BY created_at DESC"
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -170,265 +179,34 @@ def list_companies() -> list[dict]:
         return []
 
 
-def list_departments(company_id: str) -> list[dict]:
-    """列出公司下的所有部门"""
-    sql = """
-    SELECT id, name, code, parent_id
-    FROM departments
-    WHERE company_id = %s
-    ORDER BY name
-    """
+def list_departments(company_id: str | None = None) -> list[dict]:
+    """获取部门列表，可按公司筛选。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (company_id,))
+                if company_id:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, name, created_at
+                        FROM departments
+                        WHERE company_id = %s
+                        ORDER BY created_at DESC
+                        """,
+                        (company_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, name, created_at
+                        FROM departments
+                        ORDER BY created_at DESC
+                        """
+                    )
                 return [dict(r) for r in cur.fetchall()]
     except Exception as e:
         logger.error(f"查询部门列表失败 (company_id={company_id}): {e}")
         return []
-
-
-# ── 规则 CRUD ─────────────────────────────────────────────────────────
-
-def list_rules_for_user(user_id: str, company_id: str = None,
-                        department_id: str = None,
-                        status: str = "active") -> list[dict]:
-    """查询用户可见的规则列表。
-
-    可见性规则：
-    - private: 仅创建者可见
-    - department: 同部门可见
-    - company: 同公司可见
-    - admin: 可以看到所有规则
-    """
-    sql = """
-    SELECT r.id, r.name, r.description, r.visibility, r.version,
-           r.use_count, r.last_used_at, r.tags, r.status,
-           r.created_at, r.updated_at,
-           u.username AS created_by_name,
-           r.created_by
-    FROM reconciliation_rules r
-    JOIN users u ON r.created_by = u.id
-    WHERE r.status = %s
-      AND (
-        r.created_by = %s                              -- 自己创建的
-        OR r.visibility = 'company' AND r.company_id = %s  -- 公司可见
-        OR r.visibility = 'department' AND r.department_id = %s  -- 部门可见
-        OR %s = ANY(r.shared_with_users)               -- 被分享的
-      )
-    ORDER BY r.updated_at DESC
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (status, user_id, company_id, department_id, user_id))
-                rows = cur.fetchall()
-                return [_serialize_rule_row(r) for r in rows]
-    except Exception as e:
-        logger.error(f"查询规则列表失败 (user_id={user_id}): {e}")
-        return []
-
-
-def list_all_active_rules(status: str = "active") -> list[dict]:
-    """查询所有活跃规则（游客模式使用）
-    
-    Args:
-        status: 规则状态
-        
-    Returns:
-        list: 规则列表
-    """
-    sql = """
-    SELECT r.id, r.name, r.description, r.visibility, r.version,
-           r.use_count, r.last_used_at, r.tags, r.status,
-           r.created_at, r.updated_at,
-           u.username AS created_by_name,
-           r.created_by
-    FROM reconciliation_rules r
-    JOIN users u ON r.created_by = u.id
-    WHERE r.status = %s
-    ORDER BY r.use_count DESC
-    LIMIT 50
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (status,))
-                rows = cur.fetchall()
-                return [_serialize_rule_row(r) for r in rows]
-    except Exception as e:
-        logger.error(f"查询所有活跃规则失败: {e}")
-        return []
-
-
-def get_rule_by_id(rule_id: str, active_only: bool = True) -> Optional[dict]:
-    """根据 ID 获取规则详情（含 rule_template）"""
-    sql = """
-    SELECT r.*, u.username AS created_by_name
-    FROM reconciliation_rules r
-    JOIN users u ON r.created_by = u.id
-    WHERE r.id = %s
-    """
-    if active_only:
-        sql += " AND r.status = 'active'"
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (rule_id,))
-                row = cur.fetchone()
-                if row:
-                    return _serialize_rule_row(row, include_template=True)
-                return None
-    except Exception as e:
-        logger.error(f"查询规则详情失败 (rule_id={rule_id}): {e}")
-        return None
-
-
-def get_rule_by_name(name: str, created_by: str = None, active_only: bool = True) -> Optional[dict]:
-    """根据名称获取规则详情"""
-    sql = """
-    SELECT r.*, u.username AS created_by_name
-    FROM reconciliation_rules r
-    JOIN users u ON r.created_by = u.id
-    WHERE r.name = %s
-    """
-    params = [name]
-    if active_only:
-        sql += " AND r.status = 'active'"
-    if created_by:
-        sql += " AND r.created_by = %s"
-        params.append(created_by)
-    sql += " ORDER BY r.updated_at DESC LIMIT 1"
-
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params)
-                row = cur.fetchone()
-                if row:
-                    return _serialize_rule_row(row, include_template=True)
-                return None
-    except Exception as e:
-        logger.error(f"查询规则详情失败 (name={name}): {e}")
-        return None
-
-
-def create_rule(name: str, description: str, created_by: str,
-                company_id: str, department_id: str,
-                rule_template: dict, visibility: str = "private",
-                tags: list[str] = None) -> dict:
-    """创建新规则，自动计算并存储 field_mapping_hash"""
-    import json
-    
-    hash_value = compute_field_mapping_hash(rule_template)
-    
-    sql = """
-    INSERT INTO reconciliation_rules
-        (name, description, created_by, company_id, department_id,
-         rule_template, visibility, tags, version, status, field_mapping_hash)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '1.0', 'active', %s)
-    RETURNING id, name, description, visibility, version, status, created_at
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (
-                    name, description, created_by, company_id, department_id,
-                    json.dumps(rule_template, ensure_ascii=False),
-                    visibility, tags or [], hash_value,
-                ))
-                row = cur.fetchone()
-                conn.commit()
-                return _serialize_rule_row(row)
-    except Exception as e:
-        logger.error(f"创建规则失败 (name={name}): {e}")
-        raise
-
-
-def update_rule(rule_id: str, **kwargs) -> Optional[dict]:
-    """更新规则。支持更新的字段：name, description, rule_template, visibility, tags, status"""
-    import json
-
-    allowed_fields = {"name", "description", "rule_template", "visibility", "tags", "status"}
-    update_parts = []
-    params = []
-
-    for field, value in kwargs.items():
-        if field in allowed_fields and value is not None:
-            if field == "rule_template":
-                update_parts.append(f"{field} = %s")
-                params.append(json.dumps(value, ensure_ascii=False))
-            elif field == "tags":
-                update_parts.append(f"{field} = %s")
-                params.append(value)
-            else:
-                update_parts.append(f"{field} = %s")
-                params.append(value)
-
-    if not update_parts:
-        return None
-
-    params.append(rule_id)
-    sql = f"""
-    UPDATE reconciliation_rules
-    SET {', '.join(update_parts)}, updated_at = CURRENT_TIMESTAMP
-    WHERE id = %s
-    RETURNING id, name, description, visibility, version, status, updated_at
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params)
-                row = cur.fetchone()
-                conn.commit()
-                if row:
-                    return _serialize_rule_row(row)
-                return None
-    except Exception as e:
-        logger.error(f"更新规则失败 (rule_id={rule_id}): {e}")
-        return None
-
-
-def delete_rule(rule_id: str) -> bool:
-    """物理删除规则（从数据库中完全删除）"""
-    sql = """
-    DELETE FROM reconciliation_rules
-    WHERE id = %s
-    RETURNING id
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (rule_id,))
-                result = cur.fetchone()
-                conn.commit()
-                return result is not None
-    except Exception as e:
-        logger.error(f"删除规则失败 (rule_id={rule_id}): {e}")
-        return False
-
-
-def can_user_modify_rule(user_id: str, role: str, rule: dict) -> bool:
-    """检查用户是否有权限修改规则"""
-    # admin 可以修改任何规则
-    if role == "admin":
-        return True
-    # 创建者可以修改自己的规则
-    if str(rule.get("created_by")) == user_id:
-        return True
-    # manager 可以修改同部门/同公司的规则
-    if role == "manager":
-        return True
-    return False
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 规则推荐功能 - 字段映射哈希
@@ -613,58 +391,6 @@ def batch_get_rules_by_ids(rule_ids: list[str]) -> list[dict]:
         logger.error(f"批量获取规则失败: {e}")
         return []
 
-
-def copy_rule(source_rule_id: str, new_name: str, user_id: str) -> dict:
-    """复制规则为新规则"""
-    import json
-    
-    sql = """
-    SELECT * FROM reconciliation_rules WHERE id = %s
-    """
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (source_rule_id,))
-                row = cur.fetchone()
-                
-                if not row:
-                    raise ValueError(f"源规则不存在: {source_rule_id}")
-                
-                template = row["rule_template"]
-                if isinstance(template, str):
-                    template = json.loads(template)
-                
-                new_hash = compute_field_mapping_hash(template)
-                
-                insert_sql = """
-                INSERT INTO reconciliation_rules
-                    (name, description, created_by, company_id, department_id,
-                     rule_template, visibility, tags, version, status, field_mapping_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, name, description, created_at
-                """
-                cur.execute(insert_sql, (
-                    new_name,
-                    row["description"],
-                    user_id,
-                    row["company_id"],
-                    row["department_id"],
-                    json.dumps(template, ensure_ascii=False),
-                    "private",
-                    row["tags"] or [],
-                    row["version"],
-                    "active",
-                    new_hash,
-                ))
-                new_row = cur.fetchone()
-                conn.commit()
-                return _serialize_rule_row(new_row)
-    except Exception as e:
-        logger.error(f"复制规则失败: {e}")
-        raise
-
-
 # ── 辅助函数 ──────────────────────────────────────────────────────────
 
 def _serialize_rule_row(row: dict, include_template: bool = False) -> dict:
@@ -743,41 +469,6 @@ def create_department(company_id: str, name: str) -> dict | None:
     except Exception as e:
         logger.error(f"创建部门失败: {e}")
         return None
-
-
-def list_companies() -> list[dict]:
-    """获取公司列表"""
-    conn = get_conn()
-    try:
-        with conn as c:
-            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT id, name, created_at FROM company ORDER BY created_at DESC")
-                rows = cur.fetchall()
-                return [dict(r) for r in rows]
-    except Exception as e:
-        logger.error(f"获取公司列表失败: {e}")
-        return []
-
-
-def list_departments(company_id: str | None = None) -> list[dict]:
-    """获取部门列表，可按公司筛选"""
-    conn = get_conn()
-    try:
-        with conn as c:
-            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if company_id:
-                    cur.execute(
-                        "SELECT id, company_id, name, created_at FROM departments WHERE company_id = %s ORDER BY created_at DESC",
-                        (company_id,)
-                    )
-                else:
-                    cur.execute("SELECT id, company_id, name, created_at FROM departments ORDER BY created_at DESC")
-                rows = cur.fetchall()
-                return [dict(r) for r in rows]
-    except Exception as e:
-        logger.error(f"获取部门列表失败: {e}")
-        return []
-
 
 def get_admin_view() -> dict:
     """获取管理员视图 - 公司部门员工规则层级"""
@@ -872,6 +563,7 @@ def create_conversation(user_id: str, title: str = None) -> dict | None:
                 result = dict(row)
                 result["id"] = str(result["id"])
                 result["user_id"] = str(result["user_id"])
+                _serialize_datetimes(result)
                 return result
     except Exception as e:
         logger.error(f"创建会话失败: {e}")
@@ -895,6 +587,7 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
                     result = dict(row)
                     result["id"] = str(result["id"])
                     result["user_id"] = str(result["user_id"])
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -922,6 +615,7 @@ def list_conversations(user_id: str, limit: int = 50, offset: int = 0) -> list[d
                     item = dict(row)
                     item["id"] = str(item["id"])
                     item["user_id"] = str(item["user_id"])
+                    _serialize_datetimes(item)
                     result.append(item)
                 return result
     except Exception as e:
@@ -962,6 +656,7 @@ def update_conversation(conversation_id: str, user_id: str, title: str = None, s
                     result = dict(row)
                     result["id"] = str(result["id"])
                     result["user_id"] = str(result["user_id"])
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -1034,6 +729,7 @@ def save_message(conversation_id: str, role: str, content: str, metadata: dict =
                     # 确保总是返回 attachments 字段（即使是空数组）
                     if "attachments" not in result:
                         result["attachments"] = []
+                    _serialize_datetimes(result)
                     return result
                 return None
     except Exception as e:
@@ -1132,6 +828,7 @@ def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> lis
                         # 确保 attachments 总是一个列表
                         if "attachments" not in item or item.get("attachments") is None:
                             item["attachments"] = []
+                        _serialize_datetimes(item)
                         result.append(item)
                 return result
     except Exception as e:

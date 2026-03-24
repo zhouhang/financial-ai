@@ -1,0 +1,148 @@
+{
+    "rules": [
+      {
+        "output": {
+          "format": "xlsx",
+          "sheets": {
+            "summary": {
+              "name": "核对汇总",
+              "enabled": true,
+              "description": "输出核对结果汇总信息，包括总记录数、匹配数、差异数等"
+            },
+            "source_only": {
+              "name": "合单独有",
+              "enabled": true,
+              "description": "仅在合单文件中存在的记录"
+            },
+            "target_only": {
+              "name": "官网独有",
+              "enabled": true,
+              "description": "仅在官网文件中存在的记录"
+            },
+            "matched_with_diff": {
+              "name": "差异记录",
+              "enabled": true,
+              "description": "关键列匹配但数值有差异的记录详情"
+            }
+          },
+          "file_name_template": "喜马26_{rule_name}_核对结果_{timestamp}"
+        },
+        "enabled": true,
+        "rule_id": "XM_26_RECONC_001",
+        "rule_name": "喜马-26合单与官网数据核对",
+        "description": "将合单文件与官网文件进行核对，通过sup订单号与第三方订单号关联，比对金额数据差异",
+        "source_file": {
+          "table_name": "喜马合单表",
+          "description": "源文件定义（合单文件）",
+          "identification": {
+            "match_by": "table_name",
+            "match_value": "喜马合单表",
+            "match_strategy": "exact"
+          }
+        },
+        "target_file": {
+          "table_name": "喜马官网表",
+          "description": "目标文件定义（官网文件）",
+          "identification": {
+            "match_by": "table_name",
+            "match_value": "喜马官网表",
+            "match_strategy": "exact"
+          }
+        },
+        "diff_analysis": {
+          "description": "差异分析配置",
+          "diff_columns": {
+            "columns": [
+              {
+                "name": "diff_合作方分销收入",
+                "formula": "source.发生减 - target.合作方分销收入",
+                "description": "合作方分销收入差异 = 合单发生- - 官网合作方分销收入"
+              },
+              {
+                "name": "diff_应结算平台金额",
+                "formula": "source.发生加 - target.应结算平台金额",
+                "description": "应结算平台金额差异 = 合单发生+ - 官网应结算平台金额"
+              },
+              {
+                "name": "diff_商品金额",
+                "formula": "source.发生加 - target.商品金额",
+                "description": "商品金额差异"
+              },
+              {
+                "name": "diff_实付金额",
+                "formula": "source.发生加 - target.实付金额",
+                "description": "实付金额差异"
+              },
+              {
+                "name": "diff_percent_合作方分销收入",
+                "formula": "(source.发生减 - target.合作方分销收入) / target.合作方分销收入 * 100",
+                "description": "合作方分销收入差异百分比"
+              }
+            ]
+          },
+          "output_types": [
+            {
+              "type": "matched_with_diff",
+              "enabled": true,
+              "output_columns": ["source.*", "target.*", "diff.*"]
+            },
+            {
+              "type": "source_only",
+              "enabled": true,
+              "output_columns": ["source.*"]
+            },
+            {
+              "type": "target_only",
+              "enabled": true,
+              "output_columns": ["target.*"]
+            },
+            {
+              "type": "matched_exact",
+              "enabled": false,
+              "output_columns": ["source.*"]
+            }
+          ]
+        },
+        "reconciliation_config": {
+          "aggregation": {
+            "enabled": false,
+            "group_by": ["订单号", "sup订单号"],
+            "aggregations": [
+              {"alias": "发生加_汇总", "column": "发生+", "function": "sum"},
+              {"alias": "发生减_汇总", "column": "发生-", "function": "sum"}
+            ]
+          },
+          "key_columns": {
+            "columns": ["sup订单号", "第三方订单号"],
+            "match_type": "exact",
+            "case_sensitive": false,
+            "transformations": {
+              "source": {"strip_prefix": "'"},
+              "target": {"regex_replace": {"pattern": "_\\d+$", "replacement": ""}}
+            },
+            "cross_file_mapping": {
+              "source_column": "sup订单号",
+              "target_column": "第三方订单号"
+            }
+          },
+          "compare_columns": {
+            "columns": [
+              {
+                "column": "发生减",
+                "tolerance": 0.01,
+                "compare_type": "numeric",
+                "source_table": "喜马合单表",
+                "target_table": "喜马官网表",
+                "source_column": "发生-",
+                "target_column": "应结算平台金额",
+                "tolerance_type": "absolute"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "description": "喜马-26文件对账规则定义，用于合单文件与官网文件的数据比对与差异分析",
+    "file_rule_code": "audio_recon_file_check",
+    "schema_version": "1.0"
+  }

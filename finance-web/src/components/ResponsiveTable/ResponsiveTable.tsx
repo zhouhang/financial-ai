@@ -80,13 +80,13 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
   };
 
   return (
-    <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+    <div className="border border-border rounded-lg overflow-hidden bg-surface-elevated">
       {/* Toolbar */}
       {showToolbar && (
-      <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
+      <div className="flex items-center justify-between px-3 py-2 bg-surface-tertiary border-b border-border">
         {showViewMode ? (
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">视图:</span>
+            <span className="text-xs text-text-secondary">视图:</span>
             {(['compact', 'standard', 'expanded'] as ViewMode[]).map((mode) => (
               <button
                 key={mode}
@@ -94,7 +94,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
                 className={`px-2 py-1 text-xs rounded transition-colors ${
                   viewMode === mode
                     ? 'bg-blue-500 text-white'
-                    : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                    : 'bg-surface-elevated text-text-secondary hover:bg-surface-tertiary border border-border'
                 }`}
               >
                 {mode === 'compact' ? '紧凑' : mode === 'standard' ? '标准' : '展开'}
@@ -107,26 +107,26 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
         <div className="relative">
           <button
             onClick={() => setShowColumnMenu(!showColumnMenu)}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded border border-gray-200"
+            className="flex items-center gap-1 px-2 py-1 text-xs text-text-secondary hover:bg-surface-tertiary rounded border border-border"
           >
             <Columns3 className="w-3 h-3" />
             列
           </button>
           {showColumnMenu && (
-            <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 min-w-40">
+            <div className="absolute right-0 top-full mt-1 bg-surface-elevated border border-border rounded-lg shadow-lg z-10 min-w-40">
               {columns.map((col) => (
                 <label
                   key={col.key}
-                  className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer"
+                  className="flex items-center gap-2 px-3 py-2 hover:bg-surface-tertiary cursor-pointer"
                 >
                   <input
                     type="checkbox"
                     checked={columnVisibility[col.key] !== false}
                     onChange={() => onColumnVisibilityChange(col.key)}
                     disabled={isEssentialColumn(col.key)}
-                    className="rounded border-gray-300"
+                    className="rounded border-border"
                   />
-                  <span className="text-xs text-gray-700">{col.label}</span>
+                  <span className="text-xs text-text-primary">{col.label}</span>
                 </label>
               ))}
             </div>
@@ -139,11 +139,11 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
       <div ref={containerRef} className="overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
-            <tr className="bg-gray-50">
+            <tr className="bg-surface-tertiary">
               {visibleColumns.map((col, index) => (
                 <th
                   key={col.key}
-                  className={`relative ${style.padding} text-left text-xs font-medium text-gray-600 border-b border-gray-200 select-none`}
+                  className={`relative ${style.padding} text-left text-xs font-medium text-text-secondary border-b border-border select-none`}
                   style={{
                     width: columnWidths[col.key] || col.width,
                     minWidth: col.minWidth,
@@ -151,12 +151,12 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
                     top: 0,
                     zIndex: index === 0 ? 2 : 1,
                     left: index === 0 ? 0 : undefined,
-                    backgroundColor: '#f9fafb',
+                    backgroundColor: 'var(--color-surface-tertiary)',
                   }}
                 >
                   <div className="flex items-center gap-1">
                     <span>{col.label}</span>
-                    {index === 0 && <GripVertical className="w-3 h-3 text-gray-400 cursor-grab" />}
+                    {index === 0 && <GripVertical className="w-3 h-3 text-text-muted cursor-grab" />}
                   </div>
                   <div
                     className={`absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 ${
@@ -172,19 +172,19 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
             {data.map((row, rowIndex) => (
               <tr
                 key={rowIndex}
-                className={`${style.rowHeight} hover:bg-gray-50 transition-colors border-b border-gray-100`}
+                className={`${style.rowHeight} hover:bg-surface-tertiary transition-colors border-b border-border-subtle`}
               >
                 {visibleColumns.map((col, colIndex) => (
                   <td
                     key={col.key}
-                    className={`${style.padding} ${style.fontSize} text-gray-700 border-r border-gray-100 last:border-r-0`}
+                    className={`${style.padding} ${style.fontSize} text-text-primary border-r border-border-subtle last:border-r-0`}
                     style={{
                       width: columnWidths[col.key] || col.width,
                       minWidth: col.minWidth,
                       position: 'sticky',
                       left: colIndex === 0 ? 0 : undefined,
                       zIndex: colIndex === 0 ? 1 : 0,
-                      backgroundColor: colIndex === 0 ? 'white' : 'inherit',
+                      backgroundColor: colIndex === 0 ? 'var(--color-surface-elevated)' : 'inherit',
                     }}
                   >
                     {col.key === 'filename' ? (
@@ -205,7 +205,7 @@ export default function ResponsiveTable<T extends Record<string, unknown>>({
               <tr>
                 <td
                   colSpan={visibleColumns.length}
-                  className={`${style.padding} text-center text-gray-400`}
+                  className={`${style.padding} text-center text-text-muted`}
                 >
                   暂无数据
                 </td>

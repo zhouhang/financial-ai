@@ -3,7 +3,7 @@
 
 set -e  # 遇到错误立即退出
 
-PROJECT_ROOT="/Users/kevin/workspace/financial-ai"
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$PROJECT_ROOT/logs"
 
 # 创建日志目录
@@ -44,7 +44,7 @@ cd finance-agents/data-agent
 set -a
 [ -f .env ] && source .env
 set +a
-nohup python -m app.server > "$LOG_DIR/data-agent.log" 2>&1 &
+nohup python -m server > "$LOG_DIR/data-agent.log" 2>&1 &
 DATA_AGENT_PID=$!
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
 

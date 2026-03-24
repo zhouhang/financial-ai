@@ -1,0 +1,1344 @@
+from __future__ import annotations
+
+import ast
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Optional
+
+import pandas as pd
+
+from security_utils import resolve_upload_file_path
+
+logger = logging.getLogger(__name__)
+
+VALID_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
+VALID_FIELD_WRITE_MODES = {"overwrite", "increment"}
+
+
+@dataclass
+class TableSchemaState:
+    name: str
+    primary_key: list[str] = field(default_factory=list)
+    column_order: list[str] = field(default_factory=list)
+    defaults: dict[str, Any] = field(default_factory=dict)
+
+
+def execute_steps_rule(
+    rule_code: str,
+    rule_data: dict[str, Any],
+    validated_files: list[dict[str, Any]],
+    output_dir: str,
+) -> list[dict[str, Any]]:
+    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir)
+    return runtime.execute()
+
+
+class StepsProcRuntime:
+    def __init__(
+        self,
+        rule_code: str,
+        rule_data: dict[str, Any],
+        validated_files: list[dict[str, Any]],
+        output_dir: str,
+    ) -> None:
+        self.rule_code = rule_code
+        self.rule_data = rule_data
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.validated_files = validated_files
+        self.table_file_map = {
+            str(item.get("table_name") or "").strip(): str(
+                item.get("file_path") or item.get("file_name") or ""
+            ).strip()
+            for item in validated_files
+            if str(item.get("table_name") or "").strip()
+        }
+        self.tables: dict[str, pd.DataFrame] = {}
+        self.schemas: dict[str, TableSchemaState] = {}
+        self.materialized_targets: list[str] = []
+
+    def execute(self) -> list[dict[str, Any]]:
+        steps = list(self.rule_data.get("steps", []) or [])
+        known_step_ids = {
+            str(step.get("step_id") or "").strip()
+            for step in steps
+            if str(step.get("step_id") or "").strip()
+        }
+        executed_step_ids: set[str] = set()
+        pending_steps = list(steps)
+
+        while pending_steps:
+            progressed = False
+            next_pending: list[dict[str, Any]] = []
+            for step in pending_steps:
+                step_id = str(step.get("step_id") or "").strip()
+                dependencies = [
+                    str(item).strip()
+                    for item in (step.get("depends_on") or [])
+                    if str(item).strip()
+                ]
+                missing_dependencies = [item for item in dependencies if item not in known_step_ids]
+                if missing_dependencies:
+                    raise ValueError(
+                        f"step '{step_id or '<anonymous>'}' 依赖未定义: {', '.join(missing_dependencies)}"
+                    )
+                if not all(item in executed_step_ids for item in dependencies):
+                    next_pending.append(step)
+                    continue
+
+                self._execute_step(step)
+                if step_id:
+                    executed_step_ids.add(step_id)
+                progressed = True
+
+            if not progressed:
+                unresolved = [
+                    str(step.get("step_id") or "<anonymous>")
+                    for step in next_pending
+                ]
+                raise ValueError(f"steps 依赖无法解析，可能存在循环依赖: {', '.join(unresolved)}")
+            pending_steps = next_pending
+        return self._export_tables()
+
+    def _execute_step(self, step: dict[str, Any]) -> None:
+        action = str(step.get("action") or "").strip()
+        target_table = str(step.get("target_table") or "").strip()
+        if action == "create_schema":
+            self._create_schema(step)
+        elif action == "write_dataset":
+            self._write_dataset(step)
+        else:
+            raise ValueError(f"不支持的 step action: {action}")
+        if target_table and target_table not in self.materialized_targets:
+            self.materialized_targets.append(target_table)
+
+    def _create_schema(self, step: dict[str, Any]) -> None:
+        target_table = str(step.get("target_table") or "").strip()
+        schema_def = step.get("schema") or {}
+        columns = list(schema_def.get("columns") or [])
+        dynamic_columns = schema_def.get("dynamic_columns") or {}
+
+        if dynamic_columns:
+            months = self._resolve_month_range(dynamic_columns)
+            for month in months:
+                month_context = {
+                    "month": month,
+                    "prev_month": _previous_month(month),
+                    "is_first_month": month == months[0],
+                }
+                for pattern in dynamic_columns.get("columns_pattern", []):
+                    columns.append(
+                        {
+                            **pattern,
+                            "name": self._render_template_definition(
+                                pattern.get("name", ""),
+                                pattern.get("variables") or {},
+                                month_context,
+                            ),
+                        }
+                    )
+
+        column_order: list[str] = []
+        defaults: dict[str, Any] = {}
+        for column in columns:
+            name = str(column.get("name") or "").strip()
+            if not name or name in column_order:
+                continue
+            column_order.append(name)
+            defaults[name] = column.get("default")
+
+        self.schemas[target_table] = TableSchemaState(
+            name=target_table,
+            primary_key=list(schema_def.get("primary_key") or []),
+            column_order=column_order,
+            defaults=defaults,
+        )
+        self.tables[target_table] = pd.DataFrame(columns=column_order)
+
+    def _write_dataset(self, step: dict[str, Any]) -> None:
+        target_table = str(step.get("target_table") or "").strip()
+        row_write_mode = str(step.get("row_write_mode") or "").strip() or "upsert"
+        if row_write_mode not in VALID_ROW_WRITE_MODES:
+            raise ValueError(f"不支持的 row_write_mode: {row_write_mode}")
+        alias_frames, alias_tables = self._load_alias_frames(step)
+        self._apply_reference_filter(step, alias_frames)
+        self._apply_filter(step, alias_frames, alias_tables, target_table)
+        self._apply_aggregates(step, alias_frames, alias_tables)
+
+        self._ensure_table_loaded(target_table)
+        target_df = self.tables[target_table]
+
+        if step.get("dynamic_mappings"):
+            updated_df = self._apply_dynamic_mappings(
+                step,
+                target_df,
+                alias_frames,
+                alias_tables,
+                target_table,
+                row_write_mode,
+            )
+        else:
+            updated_df = self._apply_standard_mappings(
+                step,
+                target_df,
+                alias_frames,
+                alias_tables,
+                target_table,
+                row_write_mode,
+            )
+
+        self.tables[target_table] = self._align_columns(target_table, updated_df)
+
+    def _load_alias_frames(
+        self, step: dict[str, Any]
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+        alias_frames: dict[str, pd.DataFrame] = {}
+        alias_tables: dict[str, str] = {}
+        for source in step.get("sources", []) or []:
+            table_name = str(source.get("table") or "").strip()
+            alias = str(source.get("alias") or table_name).strip()
+            df = self._ensure_table_loaded(table_name).copy()
+            alias_frames[alias] = df
+            alias_tables[alias] = table_name
+        return alias_frames, alias_tables
+
+    def _apply_reference_filter(
+        self,
+        step: dict[str, Any],
+        alias_frames: dict[str, pd.DataFrame],
+    ) -> None:
+        filter_def = step.get("reference_filter") or {}
+        if not filter_def:
+            return
+
+        source_alias = str(filter_def.get("source_alias") or "").strip()
+        reference_table = str(filter_def.get("reference_table") or "").strip()
+        keys = list(filter_def.get("keys") or [])
+
+        if source_alias not in alias_frames:
+            raise ValueError(f"reference_filter source_alias 不存在: {source_alias}")
+        if not reference_table:
+            raise ValueError("reference_filter 缺少 reference_table")
+        if not keys:
+            raise ValueError("reference_filter.keys 不能为空")
+        for idx, item in enumerate(keys):
+            if not item.get("source_field") or not item.get("reference_field"):
+                raise ValueError(f"reference_filter.keys[{idx}] 缺少 source_field/reference_field")
+
+        source_df = alias_frames[source_alias]
+        reference_df = self._ensure_table_loaded(reference_table)
+        reference_key_set = {
+            tuple(_normalize_key(row.get(item["reference_field"])) for item in keys)
+            for _, row in reference_df.iterrows()
+        }
+
+        mask = []
+        for _, row in source_df.iterrows():
+            source_key = tuple(_normalize_key(row.get(item["source_field"])) for item in keys)
+            mask.append(source_key in reference_key_set)
+        alias_frames[source_alias] = source_df[mask].reset_index(drop=True)
+
+    def _apply_filter(
+        self,
+        step: dict[str, Any],
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+    ) -> None:
+        filter_def = step.get("filter") or {}
+        if not filter_def:
+            return
+        source_defs = list(step.get("sources") or [])
+        if not source_defs:
+            return
+        primary_alias = str(source_defs[0].get("alias") or source_defs[0].get("table") or "").strip()
+        if primary_alias not in alias_frames:
+            raise ValueError(f"filter source alias 不存在: {primary_alias}")
+
+        filter_type = str(filter_def.get("type") or "").strip()
+        if filter_type != "formula":
+            raise ValueError(f"不支持的 filter.type: {filter_type}")
+
+        bindings = filter_def.get("bindings") or {}
+        expr = str(filter_def.get("expr") or "").strip()
+        source_df = alias_frames[primary_alias]
+        mask = []
+        for _, row in source_df.iterrows():
+            row_contexts = {primary_alias: row.to_dict()}
+            env = {
+                name: _normalize_formula_value(
+                    self._evaluate_value_spec(
+                        value,
+                        row_contexts,
+                        alias_tables,
+                        target_table,
+                        {},
+                        {},
+                    )
+                )
+                for name, value in bindings.items()
+            }
+            mask.append(bool(_evaluate_formula_expression(expr, env)))
+        alias_frames[primary_alias] = source_df[mask].reset_index(drop=True)
+
+    def _apply_aggregates(
+        self,
+        step: dict[str, Any],
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+    ) -> None:
+        for aggregate in step.get("aggregate", []) or []:
+            source_alias = str(aggregate.get("source_alias") or "").strip()
+            output_alias = str(aggregate.get("output_alias") or "").strip()
+            group_fields = list(aggregate.get("group_fields") or [])
+            aggregations = list(aggregate.get("aggregations") or [])
+
+            if source_alias not in alias_frames:
+                raise ValueError(f"aggregate source_alias 不存在: {source_alias}")
+            if not output_alias:
+                raise ValueError("aggregate 缺少 output_alias")
+
+            source_df = alias_frames[source_alias]
+            grouped = source_df.groupby(group_fields, dropna=False, sort=False)
+            agg_frames = []
+            for item in aggregations:
+                field = item.get("field")
+                operator = str(item.get("operator") or item.get("function") or "").strip()
+                alias = item.get("alias")
+                if operator == "sum":
+                    series = grouped[field].sum(min_count=1)
+                elif operator == "min":
+                    series = grouped[field].agg(_series_min)
+                else:
+                    raise ValueError(f"不支持的 aggregate operator: {operator}")
+                agg_frames.append(series.rename(alias))
+            result_df = pd.concat(agg_frames, axis=1).reset_index()
+            alias_frames[output_alias] = result_df
+            alias_tables[output_alias] = alias_tables.get(source_alias, source_alias)
+
+    def _apply_standard_mappings(
+        self,
+        step: dict[str, Any],
+        target_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        row_write_mode: str,
+    ) -> pd.DataFrame:
+        match_sources = list((step.get("match") or {}).get("sources") or [])
+        mappings = list(step.get("mappings") or [])
+
+        if match_sources:
+            for source_spec in match_sources:
+                alias = str(source_spec.get("alias") or "").strip()
+                source_df = alias_frames.get(alias)
+                if source_df is None:
+                    raise ValueError(f"match source alias 不存在: {alias}")
+                relevant_mappings = self._select_relevant_mappings(mappings, alias, len(match_sources))
+                for _, source_row in source_df.iterrows():
+                    key_map = {
+                        item["target_field"]: source_row.get(item["field"])
+                        for item in source_spec.get("keys", []) or []
+                    }
+                    row_index = self._locate_or_create_target_row(
+                        target_table,
+                        target_df,
+                        key_map,
+                        row_write_mode,
+                    )
+                    if row_index is None:
+                        continue
+                    target_row = target_df.loc[row_index].to_dict()
+                    row_contexts = {alias: source_row.to_dict()}
+                    target_row = self._apply_mapping_group(
+                        relevant_mappings,
+                        target_df,
+                        row_index,
+                        row_contexts,
+                        alias_tables,
+                        target_row,
+                        target_table,
+                        {},
+                    )
+            return target_df
+
+        base_aliases = self._infer_base_aliases(step, alias_frames)
+        if len(base_aliases) != 1:
+            raise ValueError("无 match 的 write_dataset 仅支持单一基础 alias")
+        base_alias = base_aliases[0]
+        for _, source_row in alias_frames[base_alias].iterrows():
+            row_contexts = {base_alias: source_row.to_dict()}
+            row_values = self._evaluate_mappings_to_dict(
+                mappings,
+                row_contexts,
+                alias_tables,
+                target_table,
+                {},
+                current_target_row={},
+            )
+            key_map = self._resolve_row_key_map(target_table, row_values)
+            row_index = self._locate_or_create_target_row(
+                target_table,
+                target_df,
+                key_map,
+                row_write_mode,
+            )
+            if row_index is None:
+                continue
+            target_row = target_df.loc[row_index].to_dict()
+            self._apply_row_values(
+                mappings,
+                row_values,
+                target_df,
+                row_index,
+                target_row,
+                target_table,
+            )
+        return target_df
+
+    def _apply_dynamic_mappings(
+        self,
+        step: dict[str, Any],
+        target_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        row_write_mode: str,
+    ) -> pd.DataFrame:
+        dynamic_def = step.get("dynamic_mappings") or {}
+        mappings = list(dynamic_def.get("mappings") or [])
+        match_sources = list((step.get("match") or {}).get("sources") or [])
+        months = self._resolve_month_range(dynamic_def)
+
+        if not match_sources:
+            raise ValueError("dynamic_mappings 需要同时配置 match.sources")
+
+        for idx, month in enumerate(months):
+            contexts = {
+                "month": month,
+                "prev_month": _previous_month(month),
+                "is_first_month": idx == 0,
+            }
+            for source_spec in match_sources:
+                alias = str(source_spec.get("alias") or "").strip()
+                source_df = alias_frames.get(alias)
+                if source_df is None:
+                    raise ValueError(f"dynamic match source alias 不存在: {alias}")
+                for _, source_row in source_df.iterrows():
+                    key_map = {
+                        item["target_field"]: source_row.get(item["field"])
+                        for item in source_spec.get("keys", []) or []
+                    }
+                    row_index = self._locate_or_create_target_row(
+                        target_table,
+                        target_df,
+                        key_map,
+                        row_write_mode,
+                    )
+                    if row_index is None:
+                        continue
+                    target_row = target_df.loc[row_index].to_dict()
+                    row_contexts = {alias: source_row.to_dict()}
+                    if alias_tables.get(alias) == target_table:
+                        row_contexts[alias] = dict(target_row)
+                    target_row = self._apply_mapping_group(
+                        mappings,
+                        target_df,
+                        row_index,
+                        row_contexts,
+                        alias_tables,
+                        target_row,
+                        target_table,
+                        contexts,
+                    )
+            target_df = self._align_columns(target_table, target_df)
+        return target_df
+
+    def _evaluate_mappings_to_dict(
+        self,
+        mappings: list[dict[str, Any]],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        contexts: dict[str, Any],
+        current_target_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for mapping in mappings:
+            target_field = self._resolve_target_field(mapping, row_contexts, alias_tables, contexts)
+            if not target_field:
+                continue
+            values[target_field] = self._evaluate_mapping_value(
+                mapping,
+                row_contexts,
+                alias_tables,
+                target_table,
+                contexts,
+                current_target_row,
+            )
+        return values
+
+    def _apply_mapping_group(
+        self,
+        mappings: list[dict[str, Any]],
+        target_df: pd.DataFrame,
+        row_index: int,
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        current_target_row: dict[str, Any],
+        target_table: str,
+        contexts: dict[str, Any],
+    ) -> dict[str, Any]:
+        for mapping in mappings:
+            target_field = self._resolve_target_field(mapping, row_contexts, alias_tables, contexts)
+            if not target_field:
+                continue
+            value = self._evaluate_mapping_value(
+                mapping,
+                row_contexts,
+                alias_tables,
+                target_table,
+                contexts,
+                current_target_row,
+            )
+            self._ensure_column_exists(target_table, target_df, target_field)
+            current_value = current_target_row.get(target_field)
+            field_write_mode = str(mapping.get("field_write_mode") or "overwrite")
+            new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
+            target_df.at[row_index, target_field] = new_value
+            current_target_row[target_field] = new_value
+            for alias, origin_table in alias_tables.items():
+                if origin_table == target_table and alias in row_contexts:
+                    row_contexts[alias][target_field] = new_value
+        return current_target_row
+
+    def _apply_row_values(
+        self,
+        mappings: list[dict[str, Any]],
+        row_values: dict[str, Any],
+        target_df: pd.DataFrame,
+        row_index: int,
+        current_target_row: dict[str, Any],
+        target_table: str,
+    ) -> None:
+        for mapping in mappings:
+            target_field = mapping.get("target_field")
+            if not target_field:
+                continue
+            value = row_values.get(target_field)
+            current_value = current_target_row.get(target_field)
+            field_write_mode = str(mapping.get("field_write_mode") or "overwrite")
+            new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
+            self._ensure_column_exists(target_table, target_df, target_field)
+            target_df.at[row_index, target_field] = new_value
+            current_target_row[target_field] = new_value
+
+    def _evaluate_mapping_value(
+        self,
+        mapping: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        contexts: dict[str, Any],
+        current_target_row: dict[str, Any],
+    ) -> Any:
+        value_node = mapping.get("value") or {}
+        node_type = value_node.get("type")
+
+        if node_type == "source":
+            return self._evaluate_source_node(
+                value_node,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+            )
+        if node_type == "template_source":
+            return self._evaluate_template_source_node(
+                value_node,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+        if node_type == "context":
+            return contexts.get(value_node.get("name"))
+        if node_type == "function":
+            return self._evaluate_function_node(value_node, row_contexts, alias_tables, target_table, current_target_row, contexts)
+        if node_type == "formula":
+            bindings = mapping.get("bindings") or value_node.get("bindings") or {}
+            env = {
+                name: _normalize_formula_value(
+                    self._evaluate_value_spec(
+                        spec,
+                        row_contexts,
+                        alias_tables,
+                        target_table,
+                        current_target_row,
+                        contexts,
+                    )
+                )
+                for name, spec in bindings.items()
+            }
+            return _evaluate_formula_expression(value_node.get("expr", ""), env)
+        raise ValueError(f"不支持的 value.type: {node_type}")
+
+    def _evaluate_value_spec(
+        self,
+        spec: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> Any:
+        spec_type = spec.get("type")
+        if spec_type == "source":
+            return self._evaluate_source_node(spec, row_contexts, alias_tables, target_table, current_target_row)
+        if spec_type == "template_source":
+            return self._evaluate_template_source_node(
+                spec,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+        if spec_type == "context":
+            return contexts.get(spec.get("name"))
+        if spec_type == "function":
+            return self._evaluate_function_node(spec, row_contexts, alias_tables, target_table, current_target_row, contexts)
+        if spec_type == "formula":
+            env = {
+                name: _normalize_formula_value(
+                    self._evaluate_value_spec(
+                        value,
+                        row_contexts,
+                        alias_tables,
+                        target_table,
+                        current_target_row,
+                        contexts,
+                    )
+                )
+                for name, value in (spec.get("bindings") or {}).items()
+            }
+            return _evaluate_formula_expression(spec.get("expr", ""), env)
+        return spec
+
+    def _evaluate_source_node(
+        self,
+        node: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+    ) -> Any:
+        source = node.get("source") or {}
+        alias = str(source.get("alias") or "").strip()
+        field = str(source.get("field") or "").strip()
+        default = node.get("default")
+        if alias_tables.get(alias) == target_table and field in current_target_row:
+            value = current_target_row.get(field)
+        else:
+            value = (row_contexts.get(alias) or {}).get(field)
+        return default if _is_nullish(value) and "default" in node else value
+
+    def _evaluate_template_source_node(
+        self,
+        node: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> Any:
+        source = node.get("source") or {}
+        alias = str(source.get("alias") or "").strip()
+        field_name = self._render_template_definition(
+            node.get("template", ""),
+            node.get("variables") or {},
+            contexts,
+            row_contexts=row_contexts,
+            alias_tables=alias_tables,
+            target_table=target_table,
+            current_target_row=current_target_row,
+        )
+        default = node.get("default")
+        if alias_tables.get(alias) == target_table and field_name in current_target_row:
+            value = current_target_row.get(field_name)
+        else:
+            value = (row_contexts.get(alias) or {}).get(field_name)
+        return default if _is_nullish(value) and "default" in node else value
+
+    def _evaluate_function_node(
+        self,
+        node: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> Any:
+        function_name = str(node.get("function") or "").strip()
+        args = node.get("args") or {}
+
+        if function_name == "current_date":
+            return _current_date()
+        if function_name == "month_of":
+            value = self._evaluate_value_spec(
+                args.get("date") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            return _as_month(value)
+        if function_name == "earliest_date":
+            source_table = str(args.get("source") or "").strip()
+            date_field = str(args.get("date_field") or "").strip()
+            output_format = str(args.get("output_format") or "").strip()
+            offset = int(args.get("offset") or 0)
+            df = self._ensure_table_loaded(source_table)
+            if date_field not in df.columns:
+                raise ValueError(f"earliest_date 字段不存在: {source_table}.{date_field}")
+            series = pd.to_datetime(df[date_field], errors="coerce").dropna()
+            if series.empty:
+                raise ValueError(f"earliest_date 无可用日期: {source_table}.{date_field}")
+            earliest = series.min()
+            if output_format == "month":
+                return _offset_month(int(earliest.month), offset)
+            if offset:
+                earliest = earliest + pd.DateOffset(months=offset)
+            return earliest.date()
+        raise ValueError(f"不支持的 function: {function_name}")
+
+    def _resolve_target_field(
+        self,
+        mapping: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        contexts: dict[str, Any],
+    ) -> str:
+        target_field = mapping.get("target_field")
+        if target_field:
+            return str(target_field)
+        template = mapping.get("target_field_template") or {}
+        return self._render_template_definition(
+            template.get("template", ""),
+            template.get("variables") or {},
+            contexts,
+            row_contexts=row_contexts,
+            alias_tables=alias_tables,
+            current_target_row={},
+        )
+
+    def _render_template_definition(
+        self,
+        template: str,
+        variables: dict[str, Any],
+        contexts: dict[str, Any],
+        row_contexts: Optional[dict[str, dict[str, Any]]] = None,
+        alias_tables: Optional[dict[str, str]] = None,
+        target_table: str = "",
+        current_target_row: Optional[dict[str, Any]] = None,
+    ) -> str:
+        rendered = str(template)
+        for name, spec in variables.items():
+            value = self._evaluate_value_spec(
+                spec,
+                row_contexts or {},
+                alias_tables or {},
+                target_table,
+                current_target_row or {},
+                contexts,
+            )
+            rendered = rendered.replace(f"{{{name}}}", "" if value is None else str(value))
+        return rendered
+
+    def _infer_base_aliases(
+        self,
+        step: dict[str, Any],
+        alias_frames: dict[str, pd.DataFrame],
+    ) -> list[str]:
+        referenced_aliases = []
+        for mapping in step.get("mappings", []) or []:
+            referenced_aliases.extend(sorted(_collect_aliases(mapping)))
+        if referenced_aliases:
+            return list(dict.fromkeys(alias for alias in referenced_aliases if alias in alias_frames))
+        return list(alias_frames.keys())
+
+    def _select_relevant_mappings(
+        self,
+        mappings: list[dict[str, Any]],
+        alias: str,
+        match_source_count: int,
+    ) -> list[dict[str, Any]]:
+        selected = []
+        for mapping in mappings:
+            aliases = _collect_aliases(mapping)
+            if alias in aliases:
+                selected.append(mapping)
+            elif not aliases and match_source_count == 1:
+                selected.append(mapping)
+        return selected
+
+    def _resolve_row_key_map(
+        self,
+        target_table: str,
+        row_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        primary_key = self.schemas.get(target_table, TableSchemaState(target_table)).primary_key
+        if not primary_key:
+            return {}
+        return {field: row_values.get(field) for field in primary_key}
+
+    def _locate_or_create_target_row(
+        self,
+        target_table: str,
+        target_df: pd.DataFrame,
+        key_map: dict[str, Any],
+        row_write_mode: str,
+    ) -> Optional[int]:
+        row_index = self._find_row_index(target_df, key_map)
+        if row_index is not None:
+            return row_index
+        if row_write_mode not in {"upsert", "insert_if_missing"}:
+            return None
+        new_row = self._build_default_row(target_table)
+        for field, value in key_map.items():
+            new_row[field] = value
+            self._ensure_column_exists(target_table, target_df, field)
+        target_df.loc[len(target_df)] = new_row
+        return int(len(target_df) - 1)
+
+    def _find_row_index(
+        self,
+        df: pd.DataFrame,
+        key_map: dict[str, Any],
+    ) -> Optional[int]:
+        if df.empty:
+            return None
+        if not key_map:
+            return None
+        mask = pd.Series([True] * len(df), index=df.index)
+        for field, value in key_map.items():
+            if field not in df.columns:
+                return None
+            mask = mask & (df[field].apply(_normalize_key) == _normalize_key(value))
+        matches = df.index[mask]
+        return int(matches[0]) if len(matches) else None
+
+    def _build_default_row(self, table_name: str) -> dict[str, Any]:
+        schema = self.schemas.get(table_name)
+        if not schema:
+            df = self.tables.get(table_name)
+            if df is None:
+                return {}
+            return {column: None for column in df.columns}
+        return {column: schema.defaults.get(column) for column in schema.column_order}
+
+    def _ensure_column_exists(
+        self,
+        table_name: str,
+        df: pd.DataFrame,
+        column_name: str,
+    ) -> None:
+        if column_name not in df.columns:
+            df[column_name] = None
+        else:
+            df[column_name] = df[column_name].astype("object")
+        schema = self.schemas.get(table_name)
+        if schema and column_name not in schema.column_order:
+            schema.column_order.append(column_name)
+            schema.defaults.setdefault(column_name, None)
+
+    def _align_columns(self, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
+        schema = self.schemas.get(table_name)
+        if not schema:
+            return df
+        ordered = [column for column in schema.column_order if column in df.columns]
+        extras = [column for column in df.columns if column not in ordered]
+        return df[ordered + extras]
+
+    def _ensure_table_loaded(self, table_name: str) -> pd.DataFrame:
+        if table_name in self.tables:
+            return self.tables[table_name]
+        file_path = self.table_file_map.get(table_name)
+        if not file_path:
+            raise ValueError(f"表 '{table_name}' 未在上传文件或中间结果中找到")
+        df = _read_file_as_df(file_path)
+        self.tables[table_name] = df
+        if table_name not in self.schemas:
+            self.schemas[table_name] = TableSchemaState(
+                name=table_name,
+                primary_key=[],
+                column_order=list(df.columns),
+                defaults={column: None for column in df.columns},
+            )
+        return df
+
+    def _resolve_month_range(self, definition: dict[str, Any]) -> list[int]:
+        start_value = self._evaluate_boundary_definition(definition.get("start") or {})
+        end_value = self._evaluate_boundary_definition(definition.get("end") or {})
+        start_month = _as_month(start_value)
+        end_month = _as_month(end_value)
+        months = [start_month]
+        for _ in range(23):
+            if months[-1] == end_month:
+                return months
+            months.append(_next_month(months[-1]))
+        raise ValueError(f"月份范围无效: start={start_month}, end={end_month}")
+
+    def _evaluate_boundary_definition(self, definition: dict[str, Any]) -> Any:
+        function_name = str(definition.get("function") or "").strip()
+        if not function_name:
+            return definition
+        return self._evaluate_function_node(
+            {"type": "function", "function": function_name, "args": definition.get("args") or {}},
+            {},
+            {},
+            "",
+            {},
+            {},
+        )
+
+    def _apply_field_write_mode(
+        self,
+        field_write_mode: str,
+        current_value: Any,
+        new_value: Any,
+    ) -> Any:
+        if field_write_mode not in VALID_FIELD_WRITE_MODES:
+            raise ValueError(f"不支持的 field_write_mode: {field_write_mode}")
+        if field_write_mode == "increment":
+            return (_coerce_number(current_value) or 0) + (_coerce_number(new_value) or 0)
+        return new_value
+
+    def _export_tables(self) -> list[dict[str, Any]]:
+        exports: list[dict[str, Any]] = []
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        for table_name in self.materialized_targets:
+            df = self.tables.get(table_name)
+            if df is None:
+                continue
+            output_name = f"{_safe_table_name(table_name)}_{timestamp}.xlsx"
+            output_path = self.output_dir / output_name
+            _write_excel(df, output_path)
+            exports.append(
+                {
+                    "rule_id": table_name,
+                    "target_table": table_name,
+                    "output_file": str(output_path),
+                    "row_count": int(len(df)),
+                }
+            )
+        return exports
+
+
+def _read_file_as_df(file_path: str) -> pd.DataFrame:
+    path = resolve_upload_file_path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            import chardet
+
+            with open(path, "rb") as file:
+                encoding = chardet.detect(file.read()).get("encoding", "gbk")
+            return pd.read_csv(path, encoding=encoding)
+    if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+        return pd.read_excel(path)
+    raise ValueError(f"不支持的文件格式: {suffix}")
+
+
+def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sheet1")
+
+
+def _normalize_key(value: Any) -> Any:
+    if _is_nullish(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def _is_nullish(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except TypeError:
+        return False
+
+
+def _series_min(series: pd.Series) -> Any:
+    cleaned = series.dropna()
+    if cleaned.empty:
+        return None
+    return cleaned.min()
+
+
+def _coerce_number(value: Any) -> Optional[float]:
+    if _is_nullish(value):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            item_value = value.item()
+            if isinstance(item_value, (int, float)):
+                return float(item_value)
+        except Exception:
+            pass
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_formula_value(value: Any) -> Any:
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+        try:
+            return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return value
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    return value
+
+
+def _safe_table_name(table_name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]', "_", table_name)
+
+
+def _current_date() -> date:
+    return date.today()
+
+
+def _as_month(value: Any) -> int:
+    if isinstance(value, int):
+        month = value
+    elif isinstance(value, pd.Timestamp):
+        month = int(value.month)
+    elif isinstance(value, datetime):
+        month = int(value.month)
+    elif isinstance(value, date):
+        month = int(value.month)
+    else:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            raise ValueError(f"无法解析月份值: {value}")
+        month = int(ts.month)
+    if month < 1 or month > 12:
+        raise ValueError(f"月份超出范围: {month}")
+    return month
+
+
+def _offset_month(month: int, offset: int) -> int:
+    return ((month - 1 + offset) % 12) + 1
+
+
+def _previous_month(month: int) -> int:
+    return 12 if month == 1 else month - 1
+
+
+def _next_month(month: int) -> int:
+    return 1 if month == 12 else month + 1
+
+
+def _collect_aliases(node: Any) -> set[str]:
+    aliases: set[str] = set()
+    if isinstance(node, dict):
+        node_type = node.get("type")
+        if node_type in {"source", "template_source"}:
+            source = node.get("source") or {}
+            alias = source.get("alias")
+            if alias:
+                aliases.add(str(alias))
+        for value in node.values():
+            aliases |= _collect_aliases(value)
+    elif isinstance(node, list):
+        for item in node:
+            aliases |= _collect_aliases(item)
+    return aliases
+
+
+_ALLOWED_AST_NODES = (
+    ast.Expression,
+    ast.BoolOp,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.IfExp,
+    ast.Compare,
+    ast.Call,
+    ast.Name,
+    ast.Load,
+    ast.Subscript,
+    ast.Constant,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.USub,
+    ast.UAdd,
+    ast.Gt,
+    ast.GtE,
+    ast.Lt,
+    ast.LtE,
+    ast.Eq,
+    ast.NotEq,
+)
+
+
+def _evaluate_formula_expression(expr: str, env: dict[str, Any]) -> Any:
+    translated = _translate_formula(expr)
+    tree = ast.parse(translated, mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_AST_NODES):
+            raise ValueError(f"公式包含不支持的语法: {type(node).__name__}")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in {"coalesce", "is_null"}:
+                raise ValueError("公式包含不支持的函数")
+        if isinstance(node, ast.Name) and node.id not in {"__vars__", "coalesce", "is_null"}:
+            raise ValueError(f"公式包含不支持的标识符: {node.id}")
+    return _evaluate_formula_ast(tree.body, env)
+
+
+def _translate_formula(expr: str) -> str:
+    expr = _convert_ternary(expr.strip())
+    return re.sub(r"\{([^{}]+)\}", lambda match: f"__vars__[{match.group(1)!r}]", expr)
+
+
+def _convert_ternary(expr: str) -> str:
+    expr = expr.strip()
+    if not expr:
+        return expr
+    if _is_wrapped_by_outer_parentheses(expr):
+        return f"({_convert_ternary(expr[1:-1])})"
+
+    rebuilt: list[str] = []
+    idx = 0
+    while idx < len(expr):
+        char = expr[idx]
+        if char != "(":
+            rebuilt.append(char)
+            idx += 1
+            continue
+        end = _find_matching_parenthesis(expr, idx)
+        inner = expr[idx + 1 : end]
+        rebuilt.append(f"({_convert_ternary(inner)})")
+        idx = end + 1
+
+    return _convert_top_level_ternary("".join(rebuilt))
+
+
+def _convert_top_level_ternary(expr: str) -> str:
+    qmark = _find_top_level_qmark(expr)
+    if qmark == -1:
+        return expr
+    colon = _find_matching_colon(expr, qmark)
+    if colon == -1:
+        raise ValueError(f"三元表达式缺少冒号: {expr}")
+    condition = expr[:qmark].strip()
+    when_true = expr[qmark + 1 : colon].strip()
+    when_false = expr[colon + 1 :].strip()
+    return (
+        f"({_convert_ternary(when_true)} if {_convert_ternary(condition)} "
+        f"else {_convert_ternary(when_false)})"
+    )
+
+
+def _find_top_level_qmark(expr: str) -> int:
+    depth = 0
+    for idx, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "?" and depth == 0:
+            return idx
+    return -1
+
+
+def _find_matching_colon(expr: str, qmark: int) -> int:
+    depth = 0
+    nested = 0
+    for idx in range(qmark + 1, len(expr)):
+        char = expr[idx]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and char == "?":
+            nested += 1
+        elif depth == 0 and char == ":":
+            if nested == 0:
+                return idx
+            nested -= 1
+    return -1
+
+
+def _find_matching_parenthesis(expr: str, start: int) -> int:
+    depth = 0
+    for idx in range(start, len(expr)):
+        char = expr[idx]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+    raise ValueError(f"括号未闭合: {expr}")
+
+
+def _is_wrapped_by_outer_parentheses(expr: str) -> bool:
+    if len(expr) < 2 or expr[0] != "(" or expr[-1] != ")":
+        return False
+    try:
+        return _find_matching_parenthesis(expr, 0) == len(expr) - 1
+    except ValueError:
+        return False
+
+
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if not _is_null(value):
+            return value
+    return None
+
+
+def _is_null(value: Any) -> bool:
+    return _is_nullish(value)
+
+
+def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.Name):
+        if node.id == "__vars__":
+            return env
+        if node.id == "coalesce":
+            return _coalesce
+        if node.id == "is_null":
+            return _is_null
+        raise ValueError(f"不支持的公式标识符: {node.id}")
+
+    if isinstance(node, ast.Subscript):
+        container = _evaluate_formula_ast(node.value, env)
+        slice_node = node.slice
+        if isinstance(slice_node, ast.Index):  # pragma: no cover
+            slice_node = slice_node.value
+        key = _evaluate_formula_ast(slice_node, env)
+        return container.get(key) if isinstance(container, dict) else container[key]
+
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            for value_node in node.values:
+                if not bool(_evaluate_formula_ast(value_node, env)):
+                    return False
+            return True
+        if isinstance(node.op, ast.Or):
+            for value_node in node.values:
+                if bool(_evaluate_formula_ast(value_node, env)):
+                    return True
+            return False
+        raise ValueError(f"不支持的逻辑运算: {type(node.op).__name__}")
+
+    if isinstance(node, ast.BinOp):
+        left = _evaluate_formula_ast(node.left, env)
+        right = _evaluate_formula_ast(node.right, env)
+        if _is_nullish(left) or _is_nullish(right):
+            return None
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Div):
+            return left / right
+        raise ValueError(f"不支持的算术运算: {type(node.op).__name__}")
+
+    if isinstance(node, ast.UnaryOp):
+        operand = _evaluate_formula_ast(node.operand, env)
+        if isinstance(node.op, ast.Not):
+            return not bool(operand)
+        if _is_nullish(operand):
+            return None
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        raise ValueError(f"不支持的单目运算: {type(node.op).__name__}")
+
+    if isinstance(node, ast.IfExp):
+        condition = _evaluate_formula_ast(node.test, env)
+        branch = node.body if bool(condition) else node.orelse
+        return _evaluate_formula_ast(branch, env)
+
+    if isinstance(node, ast.Compare):
+        left = _evaluate_formula_ast(node.left, env)
+        for operator, comparator_node in zip(node.ops, node.comparators):
+            right = _evaluate_formula_ast(comparator_node, env)
+            if _is_nullish(left) or _is_nullish(right):
+                return False
+            if not _apply_compare_operator(operator, left, right):
+                return False
+            left = right
+        return True
+
+    if isinstance(node, ast.Call):
+        func = _evaluate_formula_ast(node.func, env)
+        args = [_evaluate_formula_ast(arg, env) for arg in node.args]
+        if func is _coalesce:
+            return _coalesce(*args)
+        if func is _is_null:
+            if len(args) != 1:
+                raise ValueError("is_null 需要 1 个参数")
+            return _is_null(args[0])
+        raise ValueError("公式包含不支持的函数调用")
+
+    raise ValueError(f"公式包含不支持的节点: {type(node).__name__}")
+
+
+def _apply_compare_operator(operator: ast.cmpop, left: Any, right: Any) -> bool:
+    if isinstance(operator, ast.Gt):
+        return left > right
+    if isinstance(operator, ast.GtE):
+        return left >= right
+    if isinstance(operator, ast.Lt):
+        return left < right
+    if isinstance(operator, ast.LtE):
+        return left <= right
+    if isinstance(operator, ast.Eq):
+        return left == right
+    if isinstance(operator, ast.NotEq):
+        return left != right
+    raise ValueError(f"不支持的比较运算: {type(operator).__name__}")

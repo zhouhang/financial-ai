@@ -27,11 +27,10 @@ function formatTime(date: Date): string {
   });
 }
 
-/** 移除 SAVE_RULE / SAVE_NEW_RULE 内部标记，不展示给用户 */
+/** 移除 SAVE_RULE 内部标记，不展示给用户 */
 function stripSaveRuleTag(content: string): string {
   return content
     .replace(/\[SAVE_RULE:[^\]]+\]\s*/g, '')
-    .replace(/\[SAVE_NEW_RULE:[^\]]+\]\s*/g, '')
     .trim();
 }
 
@@ -227,6 +226,7 @@ function mergeColumnTables(tables: { filename: string; columns: string[] }[]): P
 
   return { headers, rows, isColumnTable: true };
 }
+void mergeColumnTables;
 
 function HorizontalColumnTable({
   filename,
@@ -342,7 +342,13 @@ function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeCon
 
   const isExceptionTable = table.headers.includes('异常订单号') && table.headers.includes('异常原因');
   const isColumnRequirementsTable = beforeContent?.includes('列名要求') || beforeContent?.includes('列名未能与');
-  const hideToolbar = isExceptionTable || isColumnRequirementsTable;
+  const isReconSummaryTable =
+    table.headers.length === 3 &&
+    table.headers[0] === '类型' &&
+    table.headers[1] === '数量' &&
+    table.headers[2] === '说明' &&
+    !!beforeContent?.includes('结果统计');
+  const hideToolbar = isExceptionTable || isColumnRequirementsTable || isReconSummaryTable;
 
   return (
     <div className="my-2">
@@ -402,7 +408,7 @@ function ContentWithTables({ content }: { content: string }) {
     return (
       <>
         {before && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
             <ReactMarkdown>{before}</ReactMarkdown>
           </div>
         )}
@@ -416,7 +422,7 @@ function ContentWithTables({ content }: { content: string }) {
           />
         ))}
         {after && (
-          <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
             <ReactMarkdown>{after}</ReactMarkdown>
           </div>
         )}
@@ -429,8 +435,8 @@ function ContentWithTables({ content }: { content: string }) {
     const hasHtmlTables = htmlTableParts.some((p) => p.type === 'html');
     const markdownComponents = {
       p: ({ children }: { children?: React.ReactNode }) => <p className="my-1">{children}</p>,
-      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+      ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+      ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
       strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold">{children}</strong>,
       blockquote: ({ children }: { children?: React.ReactNode }) => (
         <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">{children}</blockquote>
@@ -438,11 +444,21 @@ function ContentWithTables({ content }: { content: string }) {
       code: ({ children }: { children?: React.ReactNode }) => (
         <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
       ),
+      a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-600 hover:text-blue-800 underline cursor-pointer"
+        >
+          {children}
+        </a>
+      ),
     };
 
     if (hasHtmlTables && htmlTableParts.length > 0) {
       return (
-        <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+        <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
           {htmlTableParts.map((part, idx) =>
             part.type === 'markdown' ? (
               part.text.trim() ? (
@@ -465,7 +481,7 @@ function ContentWithTables({ content }: { content: string }) {
     }
 
     return (
-      <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+      <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
         <ReactMarkdown components={markdownComponents}>{processedContent}</ReactMarkdown>
       </div>
     );
@@ -476,21 +492,24 @@ function ContentWithTables({ content }: { content: string }) {
       {regularTables.map((item: { table: ParsedTable; before: string; after: string }, idx: number) => (
         <div key={idx}>
           {item.before && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  ul: ({ children }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
+                  blockquote: ({ children }) => (
                     <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
                       {children}
                     </blockquote>
                   ),
-                    code: ({ children }) => (
-                      <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
-                    ),
+                  code: ({ children }) => (
+                    <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                  ),
+                  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline cursor-pointer">{children}</a>
+                  ),
                 }}
               >
                 {item.before}
@@ -499,20 +518,23 @@ blockquote: ({ children }) => (
           )}
           <TableRenderer table={item.table} beforeContent={item.before} />
           {item.after && (
-            <div className="[&_ul]:list-disc [&_ul]:list-inside [&_ol]:list-decimal [&_ol]:list-inside [&_*]:my-0.5">
+            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside my-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal list-inside my-1">{children}</ol>,
+                  ul: ({ children }) => <ul className="list-disc pl-5 my-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal pl-5 my-1">{children}</ol>,
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-blockquote: ({ children }) => (
-                <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
-                  {children}
-                </blockquote>
-              ),
+                  blockquote: ({ children }) => (
+                    <blockquote className="pl-4 my-1 text-text-secondary [&+blockquote]:mt-0">
+                      {children}
+                    </blockquote>
+                  ),
                   code: ({ children }) => (
                     <code className="px-1 py-0.5 rounded bg-gray-100 text-sm">{children}</code>
+                  ),
+                  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline cursor-pointer">{children}</a>
                   ),
                 }}
               >
@@ -550,6 +572,30 @@ function MarkdownMessageContent({ content, isStreaming }: { content: string; isS
   );
 }
 
+function NodeProgressMessage({ message }: { message: Message }) {
+  const title = message.nodeLabel ? `AI 正在${message.nodeLabel}` : 'AI 正在处理中';
+  const detail = message.nodeDetail || '请稍候，正在处理您的请求';
+
+  return (
+    <div className="flex gap-3 animate-fade-in-up">
+      <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center shrink-0 mt-0.5">
+        <Bot className="w-4.5 h-4.5 text-blue-600" />
+      </div>
+      <div className="bg-white rounded-2xl rounded-tl-md px-5 py-4 shadow-sm border border-border/50 max-w-2xl">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-text-secondary">{title}</span>
+          <div className="flex gap-1 ml-1">
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+          </div>
+        </div>
+        <p className="text-xs text-text-muted mt-1">{detail}</p>
+      </div>
+    </div>
+  );
+}
+
 /** AI 消息 */
 function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
@@ -557,6 +603,7 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
   // 表格消息也走 Markdown 渲染管线（ContentWithTables）以支持表格外文本的 Markdown
   const isHtmlContent = isHtmlForm;
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
+  const isNodeProgressMessage = message.nodeStatus === 'running';
 
   useEffect(() => {
     if (!isHtmlForm || !formRef.current || !onFormSubmit) return;
@@ -601,6 +648,10 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
     formElement.addEventListener('submit', handleSubmit);
     return () => formElement.removeEventListener('submit', handleSubmit);
   }, [isHtmlForm, onFormSubmit, message.content]);
+
+  if (isNodeProgressMessage) {
+    return <NodeProgressMessage message={message} />;
+  }
 
   return (
     <div className="flex gap-3 animate-fade-in-up">
@@ -694,7 +745,7 @@ export function LoadingIndicator() {
       </div>
       <div className="bg-white rounded-2xl rounded-tl-md px-5 py-4 shadow-sm border border-border/50">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-text-secondary">AI 正在分析...</span>
+          <span className="text-sm text-text-secondary">AI 正在处理中</span>
           <div className="flex gap-1 ml-1">
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />

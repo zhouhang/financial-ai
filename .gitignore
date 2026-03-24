@@ -273,21 +273,23 @@ check_*.json
 # macOS
 .DS_Store
 
+<<<<<<< HEAD
 # LangGraph CLI 本地开发缓存（langgraph dev 生成的运行时数据）
 .langgraph_api/
 
 # 以 . 开头的目录和文件（保留项目所需配置）
+=======
+# 以 . 开头的目录（任意层级）及其内容
+**/.*/
+
+# 以 . 开头的目录和文件（仅保留必要配置）
+>>>>>>> recon
 .*
 !.git/
 !.gitignore
 !.gitattributes
 !.env.example
 !.cursorrules
-!.claude/
-!.cursor/
-!.opencode/
-!.qoder/
-!.qwen/
 
 finance-ai/finance-mcp/uploads
 finance-ai/finance-mcp/data_preparation/output
@@ -295,6 +297,16 @@ finance-ai/finance-mcp/data_preparation/report
 finance-ai/finance-mcp/reconciliation/output
 finance-ai/finance-mcp/reconciliation/report
 finance-ui/.vite/
+<<<<<<< HEAD
 
 # LangGraph runtime (local state)
 finance-agents/data-agent/.langgraph_api/
+=======
+/finance-agents/proc-agent
+/docs
+/temp
+/finance-mcp/proc/output
+/finance-mcp/proc/output
+/proc-agent/*
+/proc-agent
+>>>>>>> recon

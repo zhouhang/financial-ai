@@ -23,6 +23,14 @@ export interface Message {
   actionDetail?: string;
   /** 系统消息是否完成 */
   actionDone?: boolean;
+  /** 节点级进度消息对应的节点名 */
+  nodeName?: string;
+  /** 节点级进度消息当前状态 */
+  nodeStatus?: 'running' | 'completed';
+  /** 节点级进度消息展示标签 */
+  nodeLabel?: string;
+  /** 节点级进度消息辅助说明 */
+  nodeDetail?: string;
 }
 
 // ── 会话类型 ──────────────────────────────────────────────────────────────
@@ -64,11 +72,14 @@ export interface WsIncoming {
 }
 
 export interface WsOutgoing {
-  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify' | 'conversation_created';
+  type: 'message' | 'stream' | 'interrupt' | 'done' | 'error' | 'auth' | 'auth_verify' | 'conversation_created' | 'node_status';
   content?: string;
   payload?: Record<string, unknown>;
   thread_id?: string;
   node?: string;
+  status?: 'running' | 'completed';
+  label?: string;
+  detail?: string;
   /** auth 和 auth_verify 类型专用 */
   token?: string;
   user?: Record<string, unknown>;
@@ -81,3 +92,29 @@ export interface WsOutgoing {
 // ── 连接状态 ─────────────────────────────────────────────────────────────
 
 export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
+
+// ── 任务类型 ──────────────────────────────────────────────────────────────
+
+export interface UserTaskRule {
+  id: number;
+  user_id?: string | null;
+  task_id?: number | null;
+  rule_code: string;
+  name: string;
+  rule_type: string;
+  remark?: string;
+  task_code: string;
+  task_name: string;
+  task_type: 'proc' | 'recon' | string;
+  file_rule_code?: string;
+}
+
+export interface UserTask {
+  id: number;
+  user_id?: string | null;
+  task_code: string;
+  task_name: string;
+  description?: string;
+  task_type: 'proc' | 'recon' | string;
+  rules: UserTaskRule[];
+}
