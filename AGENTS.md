@@ -17,17 +17,17 @@ This is a Financial AI system with:
 
 ```bash
 # Activate virtual environment
-cd /Users/kevin/workspace/financial-ai/finance-agents/data-agent
+cd /Users/kevin/workspace/financial-ai
 source .venv/bin/activate
-
-# Run a single test file
-pytest test_auth_improved.py -v
-
-# Run a single test function
-pytest test_auth_improved.py::test_login_success -v
 
 # Run all tests
 pytest
+
+# Run a single test file
+pytest path/to/test_file.py -v
+
+# Run a single test function
+pytest path/to/test_file.py::test_name -v
 
 # Lint (if ruff is installed)
 ruff check .
@@ -69,8 +69,8 @@ cd /Users/kevin/workspace/financial-ai
 
 Service ports:
 - finance-web: http://localhost:5173
-- finance-mcp API: http://localhost:8000
-- finance-mcp MCP: http://localhost:3335
+- data-agent: http://localhost:8100
+- finance-mcp: http://localhost:3335
 - Dify: http://localhost
 
 ## Code Style Guidelines
@@ -218,7 +218,7 @@ export interface Message {
 
 2. **Database Config**: Connection strings stored in environment variables or `.env` files. Check:
    - `finance-agents/data-agent/.env`
-   - `finance-mcp/api/config.py`
+   - `finance-mcp/db_config.py`
 
 3. **Logging**: Use Python's `logging` module, not print statements
    ```python
@@ -237,10 +237,10 @@ export interface Message {
 | Component | Path |
 |-----------|------|
 | MCP Server | `finance-mcp/unified_mcp_server.py` |
-| API Server | `finance-mcp/api_server.py` |
-| Data Agent | `finance-agents/data-agent/app/server.py` |
+| Data Agent | `finance-agents/data-agent/server.py` |
 | Frontend | `finance-web/src/` |
-| Config | `finance-agents/data-agent/app/config.py` |
+| Data Agent Config | `finance-agents/data-agent/config.py` |
+| MCP DB Config | `finance-mcp/db_config.py` |
 
 ## Database
 
@@ -251,19 +251,20 @@ export interface Message {
 
 ### Running a specific test
 ```bash
-cd /Users/kevin/workspace/financial-ai/finance-agents/data-agent
+cd /Users/kevin/workspace/financial-ai
 source .venv/bin/activate
-pytest test_auth_improved.py::test_login_success -v
+pytest path/to/test_file.py::test_name -v
 ```
 
 ### Checking service logs
 ```bash
-tail -f /tmp/finance-mcp-api.log
-tail -f /tmp/finance-mcp-mcp.log
-tail -f /tmp/finance-ui.log
+tail -f logs/finance-mcp.log
+tail -f logs/data-agent.log
+tail -f logs/finance-web.log
 ```
 
 ### Health check
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8100/health
+curl http://localhost:3335/health
 ```

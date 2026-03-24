@@ -3,11 +3,11 @@
 包含数据整理工作流的节点、路由和子图构建函数。
 
 流程：
-  welcome_node → get_rule_node  →  规则存在？
+  get_rule_node → 规则存在？
     ├─ 否 → 返回：规则不存在 → END
     └─ 是 → check_file_node → 校验通过？
-                ├─ 否 → 返回：文件校验失败 → END
-                └─ 是 → proc_task_execute_node → result_node → END
+              ├─ 否 → 返回：文件校验失败 → END
+              └─ 是 → proc_task_execute_node → result_node → END
 
 文件结构：
   proc/
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 # ── 节点函数 ──────────────────────────────────────────────────────────────────
 from graphs.proc.nodes import (
-    welcome_node,
+    build_proc_start_message,
     proc_task_execute_node,
     result_node,
 )
@@ -41,7 +41,7 @@ from graphs.proc.routers import (
 
 __all__ = [
     # 节点函数
-    "welcome_node",
+    "build_proc_start_message",
     "get_rule_node",
     "check_file_node",
     "proc_task_execute_node",

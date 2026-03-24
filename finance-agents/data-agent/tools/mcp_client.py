@@ -307,44 +307,36 @@ async def auth_me(token: str) -> dict[str, Any]:
 
 
 # ===========================================================================
-# 高级辅助函数 - 规则管理（全部通过 MCP 工具，需要 auth_token）
+# 高级辅助函数 - 规则选择
 # ===========================================================================
 
 async def list_available_rules(auth_token: str) -> list[dict[str, str]]:
-    """查询当前用户可见的对账规则列表。
+    """从任务列表中提取当前用户可用规则。
 
     Returns:
-        [{"id": "...", "name": "...", "description": "...", ...}, ...]
+        [{"rule_code": "...", "name": "...", "task_name": "..."}, ...]
     """
-    result = await call_mcp_tool("list_reconciliation_rules", {
-        "auth_token": auth_token,
-    })
-    if result.get("success"):
-        return result.get("rules", [])
-    logger.error(f"查询规则列表失败: {result.get('error')}")
-    return []
+    result = await list_user_tasks(auth_token)
+    if not result.get("success"):
+        logger.error(f"查询任务列表失败: {result.get('error')}")
+        return []
 
-
-async def get_rule_detail(auth_token: str, rule_id: str = None,
-                          rule_name: str = None) -> dict[str, Any] | None:
-    """获取规则详情（含 rule_template）"""
-    args: dict[str, Any] = {"auth_token": auth_token}
-    if rule_id:
-        args["rule_id"] = rule_id
-    if rule_name:
-        args["rule_name"] = rule_name
-    result = await call_mcp_tool("get_reconciliation_rule", args)
-    if result.get("success"):
-        return result.get("rule")
-        return None
-
-
-async def delete_rule(auth_token: str, rule_id: str, rule_name: str = "") -> dict[str, Any]:
-    """删除规则。传入 rule_name 用于后端校验，防止误删其他规则。"""
-    args: dict[str, Any] = {"auth_token": auth_token, "rule_id": rule_id}
-    if rule_name:
-        args["rule_name"] = rule_name
-    return await call_mcp_tool("delete_reconciliation_rule", args)
+    flattened_rules: list[dict[str, str]] = []
+    seen_rule_codes: set[str] = set()
+    for task in result.get("tasks", []):
+        task_name = str(task.get("task_name") or "").strip()
+        for rule in task.get("rules", []):
+            rule_code = str(rule.get("rule_code") or "").strip()
+            rule_name = str(rule.get("name") or rule_code or task_name).strip()
+            if not rule_name or rule_code in seen_rule_codes:
+                continue
+            seen_rule_codes.add(rule_code)
+            flattened_rules.append({
+                "rule_code": rule_code,
+                "name": rule_name,
+                "task_name": task_name,
+            })
+    return flattened_rules
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -376,11 +368,16 @@ async def create_department(admin_token: str, company_id: str, name: str) -> dic
     })
 
 
-async def list_companies(admin_token: str) -> dict[str, Any]:
-    """获取公司列表"""
-    return await call_mcp_tool("list_companies", {
-        "admin_token": admin_token,
-    })
+async def list_company(admin_token: str = "") -> dict[str, Any]:
+    """获取公司列表。
+
+    - 未传 admin_token: 注册/公开流程
+    - 传入 admin_token: 管理员流程
+    """
+    args: dict[str, Any] = {}
+    if admin_token:
+        args["admin_token"] = admin_token
+    return await call_mcp_tool("list_company", args)
 
 
 async def get_admin_view(admin_token: str) -> dict[str, Any]:
@@ -390,14 +387,9 @@ async def get_admin_view(admin_token: str) -> dict[str, Any]:
     })
 
 
-async def list_companies_public() -> dict[str, Any]:
-    """获取公司列表（公开，用于注册）"""
-    return await call_mcp_tool("list_companies_public", {})
-
-
-async def list_departments_public(company_id: str) -> dict[str, Any]:
-    """获取指定公司的部门列表（公开，用于注册）"""
-    return await call_mcp_tool("list_departments_public", {
+async def list_departments(company_id: str) -> dict[str, Any]:
+    """获取指定公司的部门列表。"""
+    return await call_mcp_tool("list_departments", {
         "company_id": company_id,
     })
 
@@ -517,7 +509,7 @@ async def validate_files(
             "message": str,
             # 失败时还包含:
             "error": str,
-            "missing_necessary_tables": [{"table_id": str, "table_name": str}]
+            "missing_tables": [{"table_id": str, "table_name": str}]
         }
     """
     args = {

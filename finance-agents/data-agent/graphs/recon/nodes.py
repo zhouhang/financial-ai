@@ -48,6 +48,79 @@ def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
 
+def _to_int(value: Any) -> int:
+    """安全转换为 int，异常时返回 0。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_recon_execution_summary(
+    *,
+    execution_status: str,
+    ctx_update: dict[str, Any],
+) -> str:
+    """构建 recon_task_execution_node 的完成摘要消息。"""
+    matched_count = _to_int(ctx_update.get("matched_count"))
+    unmatched_count = _to_int(ctx_update.get("unmatched_count"))
+    total_count = matched_count + unmatched_count
+
+    differences = list(ctx_update.get("differences") or [])
+    diff_lines: list[str] = []
+    for item in differences:
+        if not isinstance(item, dict):
+            continue
+        count = _to_int(item.get("count"))
+        description = str(item.get("description") or "").strip()
+        if count > 0 and description:
+            diff_lines.append(f"- {description}")
+
+    recon_result = ctx_update.get("recon_result") if isinstance(ctx_update.get("recon_result"), dict) else {}
+    results = list(recon_result.get("results") or [])
+    if not results and recon_result.get("success"):
+        results = [recon_result]
+    succeeded_rules = sum(1 for r in results if isinstance(r, dict) and r.get("status", "succeeded") == "succeeded")
+    skipped_rules = len(list(ctx_update.get("skipped_results") or []))
+    failed_rules = len(list(ctx_update.get("failed_results") or []))
+
+    if execution_status == "skipped":
+        return (
+            "对账执行已完成，本次未生成有效结果。\n\n"
+            "正在整理规则跳过原因并生成详细说明。"
+        )
+
+    lines = [
+        f"对账执行已完成：共处理 {total_count} 条，匹配 {matched_count} 条，异常 {unmatched_count} 条。"
+    ]
+
+    if execution_status == "partial_success":
+        lines.append(
+            f"规则执行情况：成功 {succeeded_rules} 条，跳过 {skipped_rules} 条，失败 {failed_rules} 条。"
+        )
+
+    if diff_lines:
+        lines.append("")
+        lines.append("异常分布：")
+        lines.extend(diff_lines)
+
+    lines.append("")
+    lines.append("正在生成详细结果，请稍候。")
+    return "\n".join(lines)
+
+
+def _build_recon_execution_error_summary(rule_display: str, error_msg: str) -> str:
+    """构建 recon 执行节点失败摘要（用于替换执行中占位）。"""
+    detail = (error_msg or "未知错误").strip()
+    if len(detail) > 240:
+        detail = detail[:240] + "..."
+    return (
+        "对账执行失败，正在整理错误详情。\n\n"
+        f"- 规则：{rule_display}\n"
+        f"- 错误摘要：{detail}"
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 节点 1：get_rule_node — 从 PG 读取规则（公共节点）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -171,7 +244,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "exec_error": input_error,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, input_error))],
             "recon_ctx": ctx,
         }
 
@@ -190,7 +263,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "exec_error": request_error,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, request_error))],
             "recon_ctx": ctx,
         }
 
@@ -208,7 +281,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "execution_request": execution_request,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, exec_error))],
             "recon_ctx": ctx,
         }
 
@@ -244,24 +317,35 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         ref_to_display_name=ref_to_display_name,
         recon_observation=recon_observation,
     )
+    ctx_update = execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}
+    execution_status = str(execution_ctx.get("execution_status", "success"))
+
     if not execution_ctx.get("ok"):
+        exec_error_msg = str(execution_ctx.get("exec_error", "对账执行失败"))
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
-            "exec_status": execution_ctx.get("execution_status", "error"),
-            "exec_error": execution_ctx.get("exec_error", "对账执行失败"),
-            **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
+            "exec_status": execution_status,
+            "exec_error": exec_error_msg,
+            **ctx_update,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, exec_error_msg))],
             "recon_ctx": ctx,
         }
 
+    summary_msg = _build_recon_execution_summary(
+        execution_status=execution_status,
+        ctx_update=ctx_update,
+    )
+    if summary_msg:
+        messages.append(AIMessage(content=summary_msg))
+
     ctx.update({
         "phase": ReconAgentPhase.SHOWING_RESULT.value,
-        "exec_status": execution_ctx.get("execution_status", "success"),
+        "exec_status": execution_status,
         "exec_error": "",
         "run_context": run_context,
-        **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
+        **ctx_update,
     })
 
     return {
@@ -284,8 +368,6 @@ def recon_result_node(state: AgentState) -> dict:
 
     if exec_status in {"success", "partial_success", "skipped"}:
         rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
-        file_info_list: list[dict] = ctx.get("file_info_list", [])
-        download_urls: list[str] = ctx.get("download_urls", [])
         recon_result: dict = ctx.get("recon_result", {})
         skipped_results: list[dict] = ctx.get("skipped_results", [])
         failed_results: list[dict] = ctx.get("failed_results", [])
@@ -337,7 +419,7 @@ def recon_result_node(state: AgentState) -> dict:
         extra_text = "\n\n".join(section for section in extra_sections if section)
 
         msg = (
-            f"对账任务已完成。\n\n"
+            f"以下是详细对账结果。\n\n"
             f"**规则：** {rule_display}\n\n"
             f"---\n\n"
             f"{all_rules_text}"

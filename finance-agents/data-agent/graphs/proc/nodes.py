@@ -2,11 +2,10 @@
 
 包含数据整理工作流的核心节点：
 
-  1. welcome_node            —— 展示欢迎信息，引导用户上传文件
-  2. get_rule_node           —— 从 PG 读取规则（公共节点）
-  3. check_file_node         —— 校验上传文件（公共节点）
-  4. proc_task_execute_node  —— 按 JSON 规则确定性执行数据整理
-  5. result_node             —— 展示处理结果或返回错误信息
+  1. get_rule_node           —— 从 PG 读取规则（公共节点）
+  2. check_file_node         —— 校验上传文件（公共节点）
+  3. proc_task_execute_node  —— 按 JSON 规则确定性执行数据整理
+  4. result_node             —— 展示处理结果或返回错误信息
 
 节点间通过 AgentState 的 proc_ctx 子字典传递中间状态，
 不污染主图其他字段。
@@ -14,7 +13,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
@@ -28,13 +26,8 @@ logger = logging.getLogger(__name__)
 
 # ── 公共节点导入 ────────────────────────────────────────────────────────────
 from graphs.main_graph.public_nodes import (
-    get_rule_node,
-    check_file_node,
     _build_upload_name_maps,
     _get_proc_ctx,
-    _to_abs_path,
-    _to_upload_ref,
-    SUPPORTED_EXTENSIONS,
 )
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
@@ -42,10 +35,7 @@ from graphs.main_graph.public_nodes import (
 # _to_abs_path, _read_header, SUPPORTED_EXTENSIONS 已移至 graphs.main_graph.public_nodes
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 节点 0：welcome_node — 展示欢迎信息，引导用户上传文件
-# ══════════════════════════════════════════════════════════════════════════════
-
-# 节点流程定义（用于 welcome_node 展示和进度提示）
+# 节点流程定义（用于开始提示和进度提示）
 _PROC_NODE_FLOW = [
     {"name": "读取规则", "desc": "从数据库加载数据整理规则定义", "node": "get_rule_node"},
     {"name": "文件校验", "desc": "校验上传文件格式、列名是否符合规则要求", "node": "check_file_node"},
@@ -62,79 +52,58 @@ def _build_flow_overview() -> str:
     return "\n".join(lines)
 
 
-def _build_progress_message(completed_nodes: list[str], current_node: str | None = None) -> str:
-    """构建进度提示消息。
-
-    每个任务项单独一行展示：
-    - 已完成：✅ 任务名称
-    - 执行中：⏳ 正在进行 任务名称 的工作...
-    - 即将执行：📍 接下来将执行 任务名称
-
-    Args:
-        completed_nodes: 已完成的节点名称列表
-        current_node: 当前正在执行的节点名称（可选）
-
-    Returns:
-        格式化的进度提示文本
-    """
-    lines = []
-
-    # 已完成的节点 - 每个单独一行
-    for node_name in completed_nodes:
-        for step in _PROC_NODE_FLOW:
-            if step["node"] == node_name:
-                lines.append(f"✅ {step['name']}")
-                break
-
-    # 当前正在执行的节点
-    if current_node:
-        for step in _PROC_NODE_FLOW:
-            if step["node"] == current_node:
-                lines.append(f"⏳ 正在进行 **{step['name']}** 的工作...")
-                break
-
-    # 下一个即将执行的节点
-    if current_node:
-        found_current = False
-        for step in _PROC_NODE_FLOW:
-            if found_current:
-                lines.append(f"📍 接下来将执行 **{step['name']}**")
-                break
-            if step["node"] == current_node:
-                found_current = True
-
-    # 使用双换行符确保前端正确分行显示
-    return "\n\n".join(lines) if lines else ""
-
-
-def welcome_node(state: AgentState) -> dict:
-    """展示数据整理任务开始的欢迎信息。
-
-    显示已选择的规则名称、处理流程概览，并引导用户上传待整理的数据文件。
-    完成后 phase 不改变，直接流转到 get_rule_node。
-    """
-    ctx = _get_proc_ctx(state)
-    rule_code: str = ctx.get("rule_code") or state.get("selected_rule_code") or ""
-    rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
-
-    # 构建规则展示文本：有 name 就显示「名称（编码）」，没有则仅显示编码
-    if rule_name:
-        rule_display = f"**{rule_name}**"
-    else:
-        rule_display = f"**{rule_code}**" if rule_code else "（未指定）"
+def build_proc_start_message(rule_display: str, uploaded_count: int = 0) -> str:
+    """构建数据整理任务开始提示。"""
     flow_overview = _build_flow_overview()
-
-    msg = (
+    display = rule_display or "（未指定）"
+    header = (
         f"📊 **开始数据整理任务**\n\n"
-        f"已选择规则：{rule_display}\n\n"
-        f"{flow_overview}\n\n"
-        f"请上传需要整理的数据文件，系统将自动按上述流程处理。"
+        f"已选择规则：**{display}**\n"
     )
 
-    logger.info(f"[proc] welcome_node rule_code={rule_code!r}, rule_name={rule_name!r}")
-    return {
-        "messages": [AIMessage(content=msg)],
-    }
+    if uploaded_count > 0:
+        return (
+            f"{header}"
+            f"已上传文件：{uploaded_count} 个\n\n"
+            f"{flow_overview}\n\n"
+            "正在校验文件并加载规则..."
+        )
+
+    return (
+        f"{header}\n"
+        f"{flow_overview}\n\n"
+        "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
+    )
+
+
+def _build_execute_success_summary(
+    rule_display: str,
+    generated_count: int,
+    merged_count: int,
+) -> str:
+    """构建执行节点完成摘要（用于替换执行中占位）。"""
+    lines = [
+        "执行整理已完成。",
+        "",
+        f"- 规则：{rule_display}",
+        f"- 生成目标文件：{generated_count} 个",
+        f"- 合并文件：{merged_count} 个",
+        "",
+        "正在整理最终结果，请稍候。",
+    ]
+    return "\n".join(lines)
+
+
+def _build_execute_error_summary(rule_display: str, error_msg: str) -> str:
+    """构建执行节点失败摘要（用于替换执行中占位）。"""
+    detail = (error_msg or "未知错误").strip()
+    if len(detail) > 240:
+        detail = detail[:240] + "..."
+    return (
+        "执行整理失败，正在整理错误详情。\n\n"
+        f"- 规则：{rule_display}\n"
+        f"- 错误摘要：{detail}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,14 +130,9 @@ async def proc_task_execute_node(state: AgentState) -> dict:
     """
     ctx = _get_proc_ctx(state)
     rule_code: str = ctx.get("rule_code", "")
+    rule_name: str = ctx.get("rule_name") or state.get("selected_rule_name") or ""
+    rule_display = rule_name or rule_code or "（未知规则）"
     file_match_results: list[dict] = ctx.get("file_match_results", [])
-
-    # 开始执行提示
-    progress_msg = _build_progress_message(
-        completed_nodes=["get_rule_node", "check_file_node"],
-        current_node="proc_task_execute_node"
-    )
-    messages: list = [AIMessage(content=progress_msg)] if progress_msg else []
 
     logger.info(f"[proc] proc_task_execute_node rule_code={rule_code!r}")
     logger.info(f"[proc] file_match_results={[m.get('file_name') for m in file_match_results]}")
@@ -183,7 +147,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "exec_error": error_msg,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_execute_error_summary(rule_display, error_msg))],
             "proc_ctx": ctx,
         }
 
@@ -220,7 +184,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "exec_error": error_msg,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_execute_error_summary(rule_display, error_msg))],
             "proc_ctx": ctx,
         }
 
@@ -246,7 +210,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "exec_error": error_msg,
         })
         return {
-            "messages": messages,
+            "messages": [AIMessage(content=_build_execute_error_summary(rule_display, error_msg))],
             "proc_ctx": ctx,
         }
 
@@ -263,12 +227,6 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         if errors:
             error_msg += f"\n\n详细错误:\n" + "\n".join(f"- {e}" for e in errors)
 
-        # 完成提示（本节点失败，进入结果展示）
-        completion_msg = _build_progress_message(
-            completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node"],
-            current_node="result_node"
-        )
-
         ctx.update({
             "phase": ProcAgentPhase.SHOWING_RESULT.value,
             "exec_status": "error",
@@ -277,7 +235,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
         })
 
         return {
-            "messages": [AIMessage(content=completion_msg)] if completion_msg else [],
+            "messages": [AIMessage(content=_build_execute_error_summary(rule_display, error_msg))],
             "proc_ctx": ctx,
         }
 
@@ -296,12 +254,6 @@ async def proc_task_execute_node(state: AgentState) -> dict:
             "mapping_count": gf.get("row_count", 0),
         })
 
-    # 完成提示：本节点已完成，开始下一个节点
-    completion_msg = _build_progress_message(
-        completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node"],
-        current_node="result_node"
-    )
-
     ctx.update({
         "phase": ProcAgentPhase.SHOWING_RESULT.value,
         "exec_status": "success",
@@ -313,7 +265,15 @@ async def proc_task_execute_node(state: AgentState) -> dict:
     })
 
     return {
-        "messages": [AIMessage(content=completion_msg)] if completion_msg else [],
+        "messages": [
+            AIMessage(
+                content=_build_execute_success_summary(
+                    rule_display=rule_display,
+                    generated_count=len(generated_files),
+                    merged_count=len([m for m in merged_files if m.get("merged")]),
+                )
+            )
+        ],
         "proc_ctx": ctx,
     }
 
@@ -326,13 +286,6 @@ def result_node(state: AgentState) -> dict:
     ctx = _get_proc_ctx(state)
     rule_code: str = ctx.get("rule_code", "（未知规则）")
     exec_status: str = ctx.get("exec_status", "error")
-
-    # 开始执行提示
-    progress_msg = _build_progress_message(
-        completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node"],
-        current_node="result_node"
-    )
-    messages: list = [AIMessage(content=progress_msg)] if progress_msg else []
 
     if exec_status == "success":
         generated_files: list[dict] = ctx.get("generated_files", [])
@@ -381,22 +334,15 @@ def result_node(state: AgentState) -> dict:
 
         merged_file_text = "\n".join(merged_file_lines) if merged_file_lines else ""
 
-        # 所有节点完成
-        all_completed_msg = _build_progress_message(
-            completed_nodes=["get_rule_node", "check_file_node", "proc_task_execute_node", "result_node"],
-            current_node=None
-        )
-
         # 构建消息：有生成文件时显示，否则只显示合并文件
         msg = (
-            f"{all_completed_msg}\n\n"
-            f"数据整理任务已完成。\n\n"
+            f"数据整理任务已完成，结果文件如下。\n\n"
             f"规则：{rule_display}\n"
         )
         # 只有生成文件时才显示生成文件部分
         if file_lines:
             file_list_text = "\n".join(file_lines)
-            msg += f"\n已生成 {len(generated_files)} 个文件：\n{file_list_text}\n"
+            msg += f"\n**结果文件：**\n{file_list_text}\n"
         # 显示合并文件
         if merged_file_text:
             msg += f"\n**合并文件：**\n{merged_file_text}\n"
@@ -414,6 +360,6 @@ def result_node(state: AgentState) -> dict:
 
     ctx.update({"phase": ProcAgentPhase.COMPLETED.value})
     return {
-        "messages": messages + [AIMessage(content=msg)],
+        "messages": [AIMessage(content=msg)],
         "proc_ctx": ctx,
     }

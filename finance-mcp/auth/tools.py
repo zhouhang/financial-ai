@@ -1,4 +1,4 @@
-"""认证和规则管理的 MCP 工具定义与处理"""
+"""认证、组织管理和会话管理的 MCP 工具定义与处理"""
 
 import logging
 from typing import Dict, Any
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def create_auth_tools() -> list[mcp_types.Tool]:
-    """创建认证和规则管理相关的工具"""
+    """创建认证、组织管理和会话管理相关的工具"""
     Tool = mcp_types.Tool
     return [
         # ── 认证 ──────────────────────────────────────────────
@@ -61,63 +61,6 @@ def create_auth_tools() -> list[mcp_types.Tool]:
             },
         ),
 
-        # ── 规则管理（需要认证） ───────────────────────────────
-        Tool(
-            name="list_reconciliation_rules",
-            description="查询当前用户可见的对账规则列表（基于权限过滤）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string", "description": "JWT token"},
-                    "status": {
-                        "type": "string",
-                        "description": "规则状态过滤：active/archived",
-                        "default": "active",
-                    },
-                },
-                "required": ["auth_token"],
-            },
-        ),
-        Tool(
-            name="get_reconciliation_rule",
-            description="获取单条对账规则的详情（含 rule_template）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string", "description": "JWT token"},
-                    "rule_id": {"type": "string", "description": "规则 ID"},
-                    "rule_name": {"type": "string", "description": "规则名称（与 rule_id 二选一）"},
-                },
-                "required": ["auth_token"],
-            },
-        ),
-        Tool(
-            name="delete_reconciliation_rule",
-            description="删除对账规则（软删除，需要权限）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string", "description": "JWT token"},
-                    "rule_id": {"type": "string", "description": "规则 ID"},
-                    "rule_name": {"type": "string", "description": "规则名称（可选，用于校验防止误删）"},
-                },
-                "required": ["auth_token", "rule_id"],
-            },
-        ),
-        Tool(
-            name="copy_reconciliation_rule",
-            description="复制对账规则为个人规则",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string", "description": "JWT token"},
-                    "source_rule_id": {"type": "string", "description": "源规则 ID"},
-                    "new_rule_name": {"type": "string", "description": "新规则名称"},
-                },
-                "required": ["auth_token", "source_rule_id", "new_rule_name"],
-            },
-        ),
-
         # ── 管理员功能 ───────────────────────────────────────────────
         Tool(
             name="admin_login",
@@ -157,14 +100,14 @@ def create_auth_tools() -> list[mcp_types.Tool]:
             },
         ),
         Tool(
-            name="list_companies",
-            description="获取公司列表（管理员）",
+            name="list_company",
+            description="获取公司列表（注册与管理员流程共用；admin_token 可选）",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "admin_token": {"type": "string", "description": "管理员 token"},
                 },
-                "required": ["admin_token"],
+                "required": [],
             },
         ),
         Tool(
@@ -179,19 +122,9 @@ def create_auth_tools() -> list[mcp_types.Tool]:
             },
         ),
         
-        # ── 公开 API（无需认证）───────────────────────────────────────
         Tool(
-            name="list_companies_public",
-            description="获取公司列表（公开，用于注册）",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        ),
-        Tool(
-            name="list_departments_public",
-            description="获取指定公司的部门列表（公开，用于注册）",
+            name="list_departments",
+            description="获取指定公司的部门列表（注册与管理员流程共用）",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -274,22 +207,17 @@ def create_auth_tools() -> list[mcp_types.Tool]:
 # ============================================================================
 
 async def handle_auth_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """处理认证和规则管理工具调用"""
+    """处理认证、组织管理和会话管理工具调用"""
     handlers = {
         "auth_register": _handle_register,
         "auth_login": _handle_login,
         "auth_me": _handle_me,
-        "list_reconciliation_rules": _handle_list_rules,
-        "get_reconciliation_rule": _handle_get_rule,
-        "delete_reconciliation_rule": _handle_delete_rule,
-        "copy_reconciliation_rule": _handle_copy_rule,
         "admin_login": _handle_admin_login,
         "create_company": _handle_create_company,
         "create_department": _handle_create_department,
-        "list_companies": _handle_list_companies,
+        "list_company": _handle_list_company,
         "get_admin_view": _handle_admin_view,
-        "list_companies_public": _handle_list_companies_public,
-        "list_departments_public": _handle_list_departments_public,
+        "list_departments": _handle_list_departments,
         # 会话管理
         "create_conversation": _handle_create_conversation,
         "list_conversations": _handle_list_conversations,
@@ -451,179 +379,6 @@ async def _handle_me(args: dict) -> dict:
         },
     }
 
-
-# ── 规则管理工具处理 ──────────────────────────────────────────────────
-
-async def _handle_list_rules(args: dict) -> dict:
-    """列出用户可见的规则"""
-    # 支持 auth_token 或 guest_token
-    auth_token = args.get("auth_token", "")
-    guest_token = args.get("guest_token", "")
-    
-    if auth_token:
-        valid, user_info, err = _require_auth(args)
-        if not valid:
-            return {"success": False, "error": err}
-    elif guest_token:
-        # 验证游客token
-        token_info = auth_db.verify_guest_token(guest_token)
-        if not token_info or not token_info.get("valid"):
-            return {"success": False, "error": "无效的游客token或token已过期"}
-        # 游客模式：返回所有活跃规则
-        status = args.get("status", "active")
-        rules = auth_db.list_all_active_rules(status=status)
-        return {"success": True, "rules": rules, "count": len(rules)}
-    else:
-        return {"success": False, "error": "请提供 auth_token 或 guest_token"}
-
-    status = args.get("status", "active")
-    
-    # 非管理员只能查询 active 状态
-    user_role = user_info.get("role", "")
-    if status != "active" and user_role != "admin":
-        return {"success": False, "error": "无权查询已删除的规则"}
-    
-    rules = auth_db.list_rules_for_user(
-        user_id=user_info["user_id"],
-        company_id=user_info.get("company_id"),
-        department_id=user_info.get("department_id"),
-        status=status,
-    )
-    return {"success": True, "rules": rules, "count": len(rules)}
-
-
-async def _handle_get_rule(args: dict) -> dict:
-    """获取规则详情"""
-    valid, user_info, err = _require_auth(args)
-    if not valid:
-        return {"success": False, "error": err}
-
-    rule_id = args.get("rule_id")
-    rule_name = args.get("rule_name")
-
-    rule = None
-    if rule_id:
-        rule = auth_db.get_rule_by_id(rule_id)
-    elif rule_name:
-        rule = auth_db.get_rule_by_name(rule_name, created_by=user_info["user_id"])
-        if not rule:
-            # 如果自己没有，也查找可见的
-            rule = auth_db.get_rule_by_name(rule_name)
-
-    if not rule:
-        return {"success": False, "error": "规则不存在"}
-    
-    # 验证用户是否有权限查看该规则
-    user_id = user_info.get("user_id")
-    user_role = user_info.get("role")
-    rule_created_by = rule.get("created_by")
-    rule_visibility = rule.get("visibility", "private")
-    rule_department_id = rule.get("department_id")
-    user_department_id = user_info.get("department_id")
-    
-    has_access = False
-    if str(rule_created_by) == user_id:  # 创建者可以查看
-        has_access = True
-    elif rule_visibility == "company" and str(rule.get("company_id")) == str(user_info.get("company_id")):  # 公司可见
-        has_access = True
-    elif rule_visibility == "department" and str(rule_department_id) == str(user_department_id):  # 部门可见
-        has_access = True
-    elif user_role == "admin":  # admin 可以查看所有
-        has_access = True
-    
-    if not has_access:
-        return {"success": False, "error": "无权查看该规则"}
-
-    return {"success": True, "rule": rule}
-
-
-async def _handle_delete_rule(args: dict) -> dict:
-    """删除规则
-    
-    流程:
-    - 普通用户：软删除 (UPDATE status='archived')
-    - 管理员：硬删除 (DELETE FROM)
-    
-    注意: PostgreSQL 是规则的主数据源。
-    """
-    valid, user_info, err = _require_auth(args)
-    if not valid:
-        return {"success": False, "error": err}
-
-    rule_id = args.get("rule_id")
-    if not rule_id:
-        return {"success": False, "error": "缺少 rule_id"}
-
-    # 检查规则是否存在
-    rule = auth_db.get_rule_by_id(rule_id)
-    if not rule:
-        return {"success": False, "error": "规则不存在"}
-
-    # 校验：若调用方传入 rule_name，必须与数据库中的规则名完全一致，防止误删
-    expected_name = args.get("rule_name", "").strip()
-    rule_name = rule.get("name", "")
-    if expected_name and expected_name != rule_name:
-        logger.warning(f"删除校验失败: 期望规则名「{expected_name}」与实际「{rule_name}」不一致，拒绝删除")
-        return {"success": False, "error": f"规则名称不匹配，拒绝删除（期望「{expected_name}」，实际「{rule_name}」）"}
-
-    # 检查权限
-    if not auth_db.can_user_modify_rule(user_info["user_id"], user_info["role"], rule):
-        return {"success": False, "error": "无权删除此规则"}
-    
-    user_role = user_info.get("role", "")
-    
-    if user_role == "admin":
-        success = auth_db.delete_rule(rule_id)
-        if not success:
-            return {"success": False, "error": "删除数据库记录失败"}
-        logger.info(f"管理员删除规则（硬删除）: {rule_name} (id={rule_id})")
-        return {
-            "success": True,
-            "message": f"规则「{rule_name}」已彻底删除（管理员硬删除）",
-        }
-    updated = auth_db.update_rule(rule_id, status="archived")
-    if not updated:
-        return {"success": False, "error": "软删除失败"}
-
-    logger.info(f"普通用户删除规则（软删除）: {rule_name} (id={rule_id}), status -> archived")
-
-    return {
-        "success": True,
-        "message": f"规则「{rule_name}」已删除（状态已归档）",
-    }
-
-
-async def _handle_copy_rule(args: dict) -> dict:
-    """复制对账规则为个人规则"""
-    valid, user_info, err = _require_auth(args)
-    if not valid:
-        return {"success": False, "error": err}
-
-    source_rule_id = args.get("source_rule_id")
-    new_rule_name = args.get("new_rule_name")
-
-    if not source_rule_id:
-        return {"success": False, "error": "缺少 source_rule_id"}
-    if not new_rule_name:
-        return {"success": False, "error": "缺少 new_rule_name"}
-
-    user_id = user_info["user_id"]
-
-    try:
-        new_rule = auth_db.copy_rule(source_rule_id, new_rule_name, user_id)
-        logger.info(f"用户 {user_id} 复制规则 {source_rule_id} 为 {new_rule_name}")
-        return {
-            "success": True,
-            "message": f"规则已复制为 '{new_rule_name}'",
-            "rule": new_rule,
-        }
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"复制规则失败: {e}")
-        return {"success": False, "error": str(e)}
-
-
 import hashlib
 
 ADMIN_TOKENS = {}  # 简单的内存存储：admin_token -> admin_info
@@ -708,13 +463,17 @@ async def _handle_create_department(args: dict) -> dict:
     return {"success": True, "department": department}
 
 
-async def _handle_list_companies(args: dict) -> dict:
-    """获取公司列表"""
-    admin_token = args.get("admin_token", "")
-    
-    if not admin_token or admin_token not in ADMIN_TOKENS:
+async def _handle_list_company(args: dict) -> dict:
+    """获取公司列表。
+
+    admin_token 可选：
+    - 传入时校验管理员身份，供后台管理流程复用
+    - 不传时允许公开读取，供注册流程复用
+    """
+    admin_token = (args.get("admin_token") or "").strip()
+    if admin_token and admin_token not in ADMIN_TOKENS:
         return {"success": False, "error": "无效的管理员 token，请先登录"}
-    
+
     companies = auth_db.list_companies()
     return {"success": True, "companies": companies}
 
@@ -730,18 +489,12 @@ async def _handle_admin_view(args: dict) -> dict:
     return {"success": True, "data": data}
 
 
-async def _handle_list_companies_public(args: dict) -> dict:
-    """获取公司列表（公开，用于注册）"""
-    companies = auth_db.list_companies()
-    return {"success": True, "companies": companies}
-
-
-async def _handle_list_departments_public(args: dict) -> dict:
-    """获取指定公司的部门列表（公开，用于注册）"""
-    company_id = args.get("company_id", "").strip()
+async def _handle_list_departments(args: dict) -> dict:
+    """获取指定公司的部门列表。"""
+    company_id = (args.get("company_id") or "").strip()
     if not company_id:
         return {"success": False, "error": "公司 ID 不能为空"}
-    
+
     departments = auth_db.list_departments(company_id)
     return {"success": True, "departments": departments}
 

@@ -282,7 +282,16 @@ async def get_rule_node(state: AgentState) -> dict:
         "rule": rule,
         "rule_code": rule_code,
     })
+
+    rule_name = (
+        ctx.get("rule_name")
+        or state.get("selected_rule_name")
+        or rule.get("name")
+        or rule_code
+    )
+    completion_msg = f"已读取规则「{rule_name}」，开始准备文件校验。"
     return {
+        "messages": [AIMessage(content=completion_msg)],
         "proc_ctx": ctx,
     }
 
@@ -440,9 +449,8 @@ async def check_file_node(state: AgentState) -> dict:
     if not validate_result.get("success"):
         error_msg = validate_result.get("error", "文件校验未通过")
         matched_results = validate_result.get("matched_results", [])
-        missing_tables = validate_result.get("missing_necessary_tables", [])
+        missing_tables = validate_result.get("missing_tables", [])
         unmatched_files = validate_result.get("unmatched_files", [])
-        max_match_count_violations = validate_result.get("max_match_count_violations", [])
         schema_map = _get_table_schema_map(file_rule)
         expected_schema_count = len(schema_map)
         uploaded_count = len(files_with_columns)
@@ -454,16 +462,6 @@ async def check_file_node(state: AgentState) -> dict:
                 file_name = item.get("file_name", "")
                 table_name = item.get("table_name", "")
                 if file_name and table_name:
-                    matched_lines.append(f"- {file_name} -> {table_name}")
-        elif max_match_count_violations:
-            seen_pairs: set[tuple[str, str]] = set()
-            for violation in max_match_count_violations:
-                table_name = violation.get("table_name", "")
-                for file_name in violation.get("matched_files", []) or []:
-                    pair = (str(file_name), str(table_name))
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
                     matched_lines.append(f"- {file_name} -> {table_name}")
 
         unmatched_lines = [f"- {file_name}" for file_name in unmatched_files]
@@ -479,46 +477,12 @@ async def check_file_node(state: AgentState) -> dict:
                 f"{requirement_text}\n\n"
                 "请按规则要求上传正确数量的文件后重试。"
             )
-        elif max_match_count_violations:
-            requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
-            violation_lines = []
-            for violation in max_match_count_violations:
-                table_name = str(violation.get("table_name") or "未命名表")
-                max_allowed = violation.get("max_allowed", 0)
-                matched_files = _format_file_list(violation.get("matched_files", []) or [])
-                required_columns_text = _format_required_columns(schema_map.get(table_name))
-                violation_lines.append(
-                    f"- 「{table_name}」只允许上传 {max_allowed} 个文件，当前匹配到了 {len(violation.get('matched_files', []) or [])} 个：{matched_files}\n"
-                    f"  需要的列名：{required_columns_text}"
-                )
-
-            sections = [
-                "文件校验失败：",
-                "",
-                upload_summary,
-                "",
-                requirement_text,
-            ]
-            if matched_lines:
-                sections.extend(["", "已识别的文件：", "\n".join(matched_lines)])
-            if unmatched_lines:
-                sections.extend(["", "未识别的文件：", "\n".join(unmatched_lines)])
-            sections.extend([
-                "",
-                "发现以下问题：",
-                "\n".join(violation_lines),
-                "",
-                "请保留每类文件各 1 个，并检查文件格式后重新上传。",
-            ])
-            msg = (
-                "\n".join(sections)
-            )
         elif unmatched_files or missing_tables:
             requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
             detail_lines = []
             if missing_tables:
                 missing_names = "、".join(t["table_name"] for t in missing_tables)
-                detail_lines.append(f"- 缺少必传文件：{missing_names}")
+                detail_lines.append(f"- 缺少规则要求的文件：{missing_names}")
             if unmatched_files:
                 detail_lines.append("- 存在未能识别的文件，请检查文件格式和表头是否符合规则要求。")
             sections = [

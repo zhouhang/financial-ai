@@ -26,6 +26,14 @@ DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+# Zhipu AI — 检索相关 API
+ZHIPU_API_KEY: str = os.getenv("ZHIPU_API_KEY", "")
+ZHIPU_BASE_URL: str = os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+ZHIPU_EMBEDDING_MODEL: str = os.getenv("ZHIPU_EMBEDDING_MODEL", "embedding-3")
+ZHIPU_RERANK_MODEL: str = os.getenv("ZHIPU_RERANK_MODEL", "rerank")
+ZHIPU_EMBEDDING_DIMENSIONS: int = int(os.getenv("ZHIPU_EMBEDDING_DIMENSIONS", "1024"))
+ZHIPU_TIMEOUT_SECONDS: float = float(os.getenv("ZHIPU_TIMEOUT_SECONDS", "30"))
+
 # ── 服务器 ────────────────────────────────────────────────────────────────────
 HOST: str = os.getenv("HOST", "0.0.0.0")
 PORT: int = int(os.getenv("PORT", "8100"))

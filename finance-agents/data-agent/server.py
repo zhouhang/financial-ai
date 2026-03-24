@@ -25,8 +25,8 @@ from utils.db import ensure_tables
 from tools.mcp_client import (
     auth_login as mcp_auth_login,
     auth_register as mcp_auth_register,
-    list_companies_public as mcp_list_companies_public,
-    list_departments_public as mcp_list_departments_public,
+    list_company as mcp_list_company,
+    list_departments as mcp_list_departments,
     create_conversation as mcp_create_conversation,
     save_message as mcp_save_message,
     list_conversations as mcp_list_conversations,
@@ -44,6 +44,71 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+TRACKED_NODE_NAMES = {
+    "get_rule_node",
+    "check_file_node",
+    "proc_task_execute_node",
+    "result_node",
+    "recon_task_execution_node",
+    "recon_result_node",
+}
+
+NO_STREAM_NODES = {
+    "file_analysis",
+    "field_mapping",
+    "rule_config",
+    "validation_preview",
+    "edit_field_mapping",
+    "edit_rule_config",
+    "result_analysis",
+}
+
+
+def _should_track_node_status(node_name: str) -> bool:
+    return node_name in TRACKED_NODE_NAMES
+
+
+def _resolve_task_kind(config: dict[str, Any], explicit_task_code: str) -> str:
+    if explicit_task_code in {"proc", "recon"}:
+        return explicit_task_code
+
+    try:
+        snapshot = langgraph_app.get_state(config)
+    except Exception:
+        return ""
+
+    selected_task_code = snapshot.values.get("selected_task_code", "")
+    return selected_task_code if selected_task_code in {"proc", "recon"} else ""
+
+
+def _build_running_node_label(node_name: str, task_kind: str) -> str:
+    labels = {
+        ("proc", "get_rule_node"): "读取整理规则",
+        ("proc", "check_file_node"): "校验整理文件",
+        ("proc", "proc_task_execute_node"): "执行数据整理",
+        ("proc", "result_node"): "生成整理结果",
+        ("recon", "get_rule_node"): "读取对账规则",
+        ("recon", "check_file_node"): "校验对账文件",
+        ("recon", "recon_task_execution_node"): "执行数据对账",
+        ("recon", "recon_result_node"): "生成对账结果",
+    }
+    return labels.get((task_kind, node_name), node_name)
+
+
+def _build_running_node_detail(node_name: str, task_kind: str) -> str:
+    details = {
+        ("proc", "get_rule_node"): "请稍候，正在读取并整理当前规则配置。",
+        ("proc", "check_file_node"): "请稍候，正在检查文件格式、数量和表头。",
+        ("proc", "proc_task_execute_node"): "请稍候，正在按规则执行整理任务。",
+        ("proc", "result_node"): "请稍候，正在汇总整理结果。",
+        ("recon", "get_rule_node"): "请稍候，正在读取并整理当前对账规则。",
+        ("recon", "check_file_node"): "请稍候，正在检查对账文件格式与匹配关系。",
+        ("recon", "recon_task_execution_node"): "请稍候，正在执行对账计算与差异分析。",
+        ("recon", "recon_result_node"): "请稍候，正在生成对账结果报告。",
+    }
+    return details.get((task_kind, node_name), "请稍候，正在处理您的请求。")
 
 
 def _build_legacy_reconciliation_state_reset() -> dict[str, Any]:
@@ -358,16 +423,25 @@ async def websocket_chat(ws: WebSocket):
                             "user": me_result.get("user"),
                         })
                     else:
-                        logger.warning(f"认证验证失败: {me_result.get('error', 'unknown')}")
+                        err = str(me_result.get("error", "unknown"))
+                        logger.warning(f"认证验证失败: {err}")
                         await ws.send_json({
                             "type": "auth_verify",
                             "success": False,
+                            "payload": {
+                                "reason": "invalid_token",
+                                "message": err,
+                            },
                         })
                 except Exception as e:
                     logger.error(f"认证验证异常: {str(e)}")
                     await ws.send_json({
                         "type": "auth_verify",
                         "success": False,
+                        "payload": {
+                            "reason": "service_unavailable",
+                            "message": str(e),
+                        },
                     })
                 continue  # 认证验证完成，不继续处理消息
 
@@ -470,6 +544,7 @@ async def websocket_chat(ws: WebSocket):
                 streamed_content = ""
                 router_buffer = ""
                 router_mode = "detect"  # "detect" | "stream" | "json"
+                active_task_kind = _resolve_task_kind(config, task_code)
                 event_count = 0
                 sent_contents: set[str] = set()
                 baseline_message_len = 0
@@ -493,6 +568,20 @@ async def websocket_chat(ws: WebSocket):
                     data_obj = event.get("data", {})
                     metadata = event.get("metadata", {})
                     node_name = metadata.get("langgraph_node", "")
+
+                    if kind == "on_chain_start" and node_name:
+                        if node_name.endswith("_subgraph") or node_name == "router":
+                            continue
+                        if _should_track_node_status(node_name):
+                            await ws.send_json({
+                                "type": "node_status",
+                                "status": "running",
+                                "node": node_name,
+                                "label": _build_running_node_label(node_name, active_task_kind),
+                                "detail": _build_running_node_detail(node_name, active_task_kind),
+                                "thread_id": thread_id,
+                            })
+                        continue
                     
                     # ① LLM 流式 token
                     if kind == "on_chat_model_stream" and node_name:
@@ -530,18 +619,14 @@ async def websocket_chat(ws: WebSocket):
                             else:
                                 # 其他节点：过滤掉内部 LLM 输出（字段映射/规则配置的解析，不应显示 raw JSON）
                                 # 只有 result_analysis 等面向用户的节点才流式输出
-                                _no_stream_nodes = [
-                                    "file_analysis", "field_mapping", "rule_config", "validation_preview",
-                                    "edit_field_mapping", "edit_rule_config",
-                                    "result_analysis",  # 对账结果表格一次性展示，避免逐行渲染生硬
-                                ]
-                                if node_name not in _no_stream_nodes:
+                                if node_name not in NO_STREAM_NODES:
                                     streamed_content += token
                                     message_buffer += token
                                     current_streaming_node = node_name
                                     # ⚠️ 修复：缓冲累积而不是每个 token 都发送
                                     if len(message_buffer) >= BUFFER_SIZE:
                                         await ws.send_json({"type": "stream", "content": message_buffer, "thread_id": thread_id})
+                                        emitted_assistant_output = True
                                         message_buffer = ""
                     
                     # ② router LLM 结束
@@ -581,7 +666,7 @@ async def websocket_chat(ws: WebSocket):
                             message_buffer = ""
                             current_streaming_node = None
                         # ⚠️ 只收集面向用户的消息，不收集内部处理的 JSON
-                        if node_name not in _no_stream_nodes:
+                        if node_name not in NO_STREAM_NODES:
                             output = data_obj.get("output")
                             if output and hasattr(output, "content") and output.content:
                                 sent_contents.add(output.content.strip())
@@ -617,14 +702,36 @@ async def websocket_chat(ws: WebSocket):
                                 })
                             
                             output_messages = output.get("messages", [])
+                            handled_node_completion = False
                             for msg in output_messages:
                                 if hasattr(msg, "type") and msg.type == "ai":
                                     content = (msg.content if hasattr(msg, "content") else "").strip()
                                     if content and content not in sent_contents:
                                         sent_contents.add(content)
                                         logger.info(f"实时发送 [{node_name}] 手动消息，长度={len(content)}")
-                                        await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
+                                        if _should_track_node_status(node_name) and not handled_node_completion:
+                                            await ws.send_json({
+                                                "type": "node_status",
+                                                "status": "completed",
+                                                "node": node_name,
+                                                "label": _build_running_node_label(node_name, active_task_kind),
+                                                "content": content,
+                                                "thread_id": thread_id,
+                                            })
+                                            handled_node_completion = True
+                                        else:
+                                            await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                                         emitted_assistant_output = True
+                            if _should_track_node_status(node_name) and not handled_node_completion:
+                                await ws.send_json({
+                                    "type": "node_status",
+                                    "status": "completed",
+                                    "node": node_name,
+                                    "label": _build_running_node_label(node_name, active_task_kind),
+                                    "content": f"{_build_running_node_label(node_name, active_task_kind)}已完成。",
+                                    "thread_id": thread_id,
+                                })
+                                emitted_assistant_output = True
                 
                 logger.info(f"astream_events 结束，共 {event_count} 个事件，流式发送 {len(streamed_content)} 字符")
 
@@ -850,9 +957,9 @@ async def auth_login(username: str = Form(...), password: str = Form(...)):
 
 @app.get("/companies")
 async def get_companies():
-    """获取公司列表（公开，用于注册）"""
+    """获取公司列表。"""
     try:
-        result = await mcp_list_companies_public()
+        result = await mcp_list_company()
         return result.get("companies", []) if result.get("success") else []
     except Exception as e:
         logger.error(f"获取公司列表失败: {e}")
@@ -861,11 +968,11 @@ async def get_companies():
 
 @app.get("/departments")
 async def get_departments(company_id: str):
-    """获取部门列表（公开，用于注册）"""
+    """获取部门列表。"""
     if not company_id:
         return []
     try:
-        result = await mcp_list_departments_public(company_id)
+        result = await mcp_list_departments(company_id)
         return result.get("departments", []) if result.get("success") else []
     except Exception as e:
         logger.error(f"获取部门列表失败: {e}")
@@ -900,35 +1007,6 @@ async def auth_register(
     except Exception as e:
         logger.error(f"注册失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/copy-rule")
-async def copy_rule(
-    body: dict = Body(...),
-    authorization: Optional[str] = Header(None),
-):
-    """复制对账规则为个人规则（登录后保存游客创建的推荐规则）"""
-    logger.info(f"[copy-rule] 收到请求, authorization={authorization[:20] if authorization else None}..., body={body}")
-    if not authorization:
-        raise HTTPException(status_code=401, detail="未提供认证令牌")
-    token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    logger.info(f"[copy-rule] token长度={len(token)}, token前20={token[:20] if token else None}")
-    source_rule_id = body.get("source_rule_id")
-    new_rule_name = body.get("new_rule_name")
-    if not source_rule_id or not new_rule_name:
-        raise HTTPException(status_code=400, detail="缺少 source_rule_id 或 new_rule_name")
-    try:
-        result = await call_mcp_tool("copy_reconciliation_rule", {
-            "auth_token": token,
-            "source_rule_id": source_rule_id,
-            "new_rule_name": new_rule_name,
-        })
-        logger.info(f"[copy-rule] MCP返回: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"复制规则失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 会话管理 REST API

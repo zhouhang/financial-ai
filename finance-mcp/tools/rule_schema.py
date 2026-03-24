@@ -38,6 +38,10 @@ VALID_PROC_RULE_TYPES = {
     "lookup",
 }
 VALID_AGG_FUNCTIONS = {"sum", "count", "mean", "min", "max", "first", "last"}
+VALID_PROC_STEP_ACTIONS = {"create_schema", "write_dataset"}
+VALID_PROC_STEP_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
+VALID_PROC_STEP_FIELD_WRITE_MODES = {"overwrite", "increment"}
+VALID_PROC_STEP_VALUE_TYPES = {"source", "formula", "template_source", "function", "context"}
 
 
 class StrictModel(BaseModel):
@@ -59,10 +63,9 @@ class ValidationConfig(StrictModel):
 class TableSchema(StrictModel):
     table_id: str
     table_name: str
+    file_type: list[str] = Field(default_factory=list)
     required_columns: list[str] = Field(default_factory=list)
     column_aliases: dict[str, list[str]] = Field(default_factory=dict)
-    is_required: bool = False
-    max_match_count: int = 0
 
 
 class FileValidationRuleModel(StrictModel):
@@ -134,6 +137,12 @@ class ProcRuleModel(StrictModel):
 
 class ProcRuleSetModel(StrictModel):
     rules: list[ProcRuleModel]
+
+
+class ProcStepsRuleSetModel(StrictModel):
+    role_desc: str | None = None
+    file_rule_code: str | None = None
+    steps: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MergeRuleModel(StrictModel):
@@ -340,6 +349,144 @@ def _semantic_errors_for_proc(rule: dict[str, Any]) -> list[dict[str, str]]:
     return errors
 
 
+def _semantic_errors_for_proc_steps(rule: dict[str, Any]) -> list[dict[str, str]]:
+    errors = []
+    steps = rule.get("steps", [])
+    if not steps:
+        return [{"path": "steps", "message": "steps 不能为空", "type": "missing"}]
+
+    step_ids = [item.get("step_id") for item in steps if item.get("step_id")]
+    if len(step_ids) != len(set(step_ids)):
+        errors.append({"path": "steps", "message": "step_id 必须唯一", "type": "duplicate"})
+
+    for idx, step in enumerate(steps):
+        if not step.get("action"):
+            errors.append(
+                {"path": f"steps.{idx}.action", "message": "缺少 action", "type": "missing"}
+            )
+        elif step.get("action") not in VALID_PROC_STEP_ACTIONS:
+            errors.append(
+                {
+                    "path": f"steps.{idx}.action",
+                    "message": f"不支持的 action: {step.get('action')}",
+                    "type": "invalid",
+                }
+            )
+        if not step.get("target_table"):
+            errors.append(
+                {
+                    "path": f"steps.{idx}.target_table",
+                    "message": "缺少 target_table",
+                    "type": "missing",
+                }
+            )
+        row_write_mode = step.get("row_write_mode")
+        if row_write_mode and row_write_mode not in VALID_PROC_STEP_ROW_WRITE_MODES:
+            errors.append(
+                {
+                    "path": f"steps.{idx}.row_write_mode",
+                    "message": f"不支持的 row_write_mode: {row_write_mode}",
+                    "type": "invalid",
+                }
+            )
+
+        reference_filter = step.get("reference_filter") or {}
+        if reference_filter:
+            if not reference_filter.get("source_alias"):
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.reference_filter.source_alias",
+                        "message": "reference_filter 缺少 source_alias",
+                        "type": "missing",
+                    }
+                )
+            if not reference_filter.get("reference_table"):
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.reference_filter.reference_table",
+                        "message": "reference_filter 缺少 reference_table",
+                        "type": "missing",
+                    }
+                )
+            keys = reference_filter.get("keys") or []
+            if not keys:
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.reference_filter.keys",
+                        "message": "reference_filter.keys 不能为空",
+                        "type": "missing",
+                    }
+                )
+            for key_idx, key in enumerate(keys):
+                if not key.get("source_field") or not key.get("reference_field"):
+                    errors.append(
+                        {
+                            "path": f"steps.{idx}.reference_filter.keys.{key_idx}",
+                            "message": "reference_filter.keys 每项都需要 source_field/reference_field",
+                            "type": "missing",
+                        }
+                    )
+
+        for agg_idx, aggregate in enumerate(step.get("aggregate", []) or []):
+            if not aggregate.get("source_alias"):
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.aggregate.{agg_idx}.source_alias",
+                        "message": "aggregate 缺少 source_alias",
+                        "type": "missing",
+                    }
+                )
+            if not aggregate.get("output_alias"):
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.aggregate.{agg_idx}.output_alias",
+                        "message": "aggregate 缺少 output_alias",
+                        "type": "missing",
+                    }
+                )
+
+        dynamic_mappings = step.get("dynamic_mappings") or {}
+        if dynamic_mappings and not ((step.get("match") or {}).get("sources") or []):
+            errors.append(
+                {
+                    "path": f"steps.{idx}.dynamic_mappings",
+                    "message": "dynamic_mappings 需要同时配置 match.sources",
+                    "type": "missing",
+                }
+            )
+
+        for mapping_idx, mapping in enumerate(step.get("mappings", []) or []):
+            if not mapping.get("target_field") and not mapping.get("target_field_template"):
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.mappings.{mapping_idx}",
+                        "message": "mapping 需要配置 target_field 或 target_field_template",
+                        "type": "missing",
+                    }
+                )
+            value = mapping.get("value") or {}
+            if value:
+                value_type = value.get("type")
+                if value_type not in VALID_PROC_STEP_VALUE_TYPES:
+                    errors.append(
+                        {
+                            "path": f"steps.{idx}.mappings.{mapping_idx}.value.type",
+                            "message": f"不支持的 value.type: {value_type}",
+                            "type": "invalid",
+                        }
+                    )
+            field_write_mode = mapping.get("field_write_mode")
+            if field_write_mode and field_write_mode not in VALID_PROC_STEP_FIELD_WRITE_MODES:
+                errors.append(
+                    {
+                        "path": f"steps.{idx}.mappings.{mapping_idx}.field_write_mode",
+                        "message": f"不支持的 field_write_mode: {field_write_mode}",
+                        "type": "invalid",
+                    }
+                )
+    return errors
+
+
 def _semantic_errors_for_merge(rule: dict[str, Any]) -> list[dict[str, str]]:
     table_names = [item.get("table_name") for item in rule.get("merge_rules", []) if item.get("enabled", True)]
     if len(table_names) != len(set(table_names)):
@@ -530,13 +677,21 @@ def validate_rule_record(rule_record: dict[str, Any], expected_kind: str) -> dic
         normalized_payload = rule_payload
         model = ProcRuleSetModel
         semantic_check = _semantic_errors_for_proc
+    elif expected_kind == "proc_steps":
+        normalized_payload = rule_payload
+        model = ProcStepsRuleSetModel
+        semantic_check = _semantic_errors_for_proc_steps
     elif expected_kind == "merge":
         normalized_payload = rule_payload
         model = ProcMergeRuleSetModel
         semantic_check = _semantic_errors_for_merge
     elif expected_kind == "proc_entry":
         normalized_payload = rule_payload
-        if normalized_payload.get("rules"):
+        if normalized_payload.get("steps"):
+            model = ProcStepsRuleSetModel
+            semantic_check = _semantic_errors_for_proc_steps
+            expected_kind = "proc_steps"
+        elif normalized_payload.get("rules"):
             model = ProcRuleSetModel
             semantic_check = _semantic_errors_for_proc
             expected_kind = "proc"
@@ -548,7 +703,13 @@ def validate_rule_record(rule_record: dict[str, Any], expected_kind: str) -> dic
             return _validation_failure(
                 rule_code,
                 expected_kind,
-                [{"path": "$", "message": "规则中未定义 rules 或 merge_rules", "type": "missing"}],
+                [
+                    {
+                        "path": "$",
+                        "message": "规则中未定义 steps、rules 或 merge_rules",
+                        "type": "missing",
+                    }
+                ],
             )
     elif expected_kind == "recon":
         normalized_payload = rule_payload

@@ -22,10 +22,9 @@ from tools.mcp_client import (
     admin_login,
     create_company,
     create_department,
-    list_companies,
+    list_company,
     get_admin_view,
-    list_companies_public,
-    list_departments_public,
+    list_departments,
 )
 from .forms import (
     generate_login_form,
@@ -35,6 +34,7 @@ from .forms import (
     generate_create_department_form,
     generate_admin_view,
 )
+from graphs.proc.nodes import build_proc_start_message
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +240,7 @@ async def admin_handler(state: AgentState) -> dict | None:
 
         # 创建部门指令
         if "创建部门" in last_user_msg:
-            companies_result = await list_companies(admin_token)
+            companies_result = await list_company(admin_token)
             return {
                 "messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies")))],
                 "user_intent": UserIntent.CREATE_DEPARTMENT.value,
@@ -258,7 +258,7 @@ async def admin_handler(state: AgentState) -> dict | None:
                     }
                 else:
                     error = result.get('error', '创建部门失败')
-                    companies_result = await list_companies(admin_token)
+                    companies_result = await list_company(admin_token)
                     return {"messages": [AIMessage(content=generate_create_department_form(companies_result.get("companies"), error))]}
 
         # 退出管理员
@@ -330,8 +330,8 @@ async def auth_handler(state: AgentState) -> dict | None:
             company_id = form_data.get("company_id", "").strip()
             if company_id:
                 # 获取公司列表和该公司的部门列表
-                companies_result = await list_companies_public()
-                departments_result = await list_departments_public(company_id)
+                companies_result = await list_company()
+                departments_result = await list_departments(company_id)
                 return {
                     "messages": [AIMessage(content=generate_register_form(
                         companies=companies_result.get("companies", []),
@@ -363,8 +363,8 @@ async def auth_handler(state: AgentState) -> dict | None:
                 else:
                     # 注册失败，重新显示注册表单（错误信息嵌入表单）
                     error = result.get('error', '注册失败，请检查输入信息')
-                    companies_result = await list_companies_public()
-                    departments_result = await list_departments_public(company_id) if company_id else {"departments": []}
+                    companies_result = await list_company()
+                    departments_result = await list_departments(company_id) if company_id else {"departments": []}
                     return {"messages": [AIMessage(content=generate_register_form(
                         error=error,
                         companies=companies_result.get("companies", []),
@@ -440,15 +440,12 @@ async def intent_router(state: AgentState) -> dict:
 
         logger.info(f"[intent_router] 前端显式选择 {UserIntent.PROC.value}，直接路由: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}, user_msg='{last_user_input[:50]}'")
 
+        rule_display = rule_name or rule_code
+        start_msg = build_proc_start_message(rule_display, len(uploaded))
+
         if not uploaded:
-            rule_display = rule_name or rule_code
-            welcome_msg = (
-                "📊 **开始数据整理任务**\n\n"
-                f"已选择规则：**{rule_display}**\n\n"
-                "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
-            )
             return {
-                "messages": [AIMessage(content=welcome_msg)],
+                "messages": [AIMessage(content=start_msg)],
                 "user_intent": UserIntent.UNKNOWN.value,
                 "selected_rule_code": rule_code,
                 "selected_rule_name": rule_name,
@@ -458,7 +455,7 @@ async def intent_router(state: AgentState) -> dict:
         file_rule_code = state.get("file_rule_code") or ""
 
         return {
-            "messages": [HumanMessage(content=last_user_input)] if last_user_input else [],
+            "messages": [AIMessage(content=start_msg)],
             "uploaded": uploaded,
             "user_intent": UserIntent.PROC.value,
             "selected_rule_code": rule_code,
@@ -598,22 +595,8 @@ async def intent_router(state: AgentState) -> dict:
 
         # 构建规则展示文本
         rule_display = rule_name or rule_code
-
-        # 检查是否有上传的文件
         uploaded = state.get("uploaded_files", [])
-        if not uploaded:
-            welcome_msg = (
-                "📊 **开始数据整理任务**\n\n"
-                f"已选择规则：**{rule_display}**\n\n"
-                "请先上传需要整理的数据文件（Excel 或 CSV 格式）。"
-            )
-        else:
-            welcome_msg = (
-                "📊 **开始数据整理任务**\n\n"
-                f"已选择规则：**{rule_display}**\n"
-                f"已上传文件：{len(uploaded)} 个\n\n"
-                "正在校验文件并加载规则..."
-            )
+        start_msg = build_proc_start_message(rule_display, len(uploaded))
         
         logger.info(f"[intent_router] PROC: rule_code={rule_code}, rule_name={rule_name}, files={len(uploaded)}")
         
@@ -622,7 +605,7 @@ async def intent_router(state: AgentState) -> dict:
         existing_proc_ctx.update({"rule_code": rule_code, "rule_name": rule_name})
         
         return {
-            "messages": [AIMessage(content=welcome_msg)],
+            "messages": [AIMessage(content=start_msg)],
             "user_intent": UserIntent.PROC.value,
             "selected_rule_code": rule_code,
             "selected_rule_name": rule_name,

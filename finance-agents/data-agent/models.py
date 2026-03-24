@@ -41,7 +41,6 @@ class ReconciliationPhase(str, Enum):
     RULE_RECOMMENDATION = "rule_recommendation"
     RULE_CONFIG = "rule_config"
     VALIDATION_PREVIEW = "validation_preview"
-    SAVE_RULE = "save_rule"
     RESULT_EVALUATION = "result_evaluation"  # 对账结果评估
     # 编辑规则流程
     EDIT_FIELD_MAPPING = "edit_field_mapping"

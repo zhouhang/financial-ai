@@ -572,6 +572,30 @@ function MarkdownMessageContent({ content, isStreaming }: { content: string; isS
   );
 }
 
+function NodeProgressMessage({ message }: { message: Message }) {
+  const title = message.nodeLabel ? `AI 正在${message.nodeLabel}` : 'AI 正在处理中';
+  const detail = message.nodeDetail || '请稍候，正在处理您的请求';
+
+  return (
+    <div className="flex gap-3 animate-fade-in-up">
+      <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center shrink-0 mt-0.5">
+        <Bot className="w-4.5 h-4.5 text-blue-600" />
+      </div>
+      <div className="bg-white rounded-2xl rounded-tl-md px-5 py-4 shadow-sm border border-border/50 max-w-2xl">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-text-secondary">{title}</span>
+          <div className="flex gap-1 ml-1">
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+            <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
+          </div>
+        </div>
+        <p className="text-xs text-text-muted mt-1">{detail}</p>
+      </div>
+    </div>
+  );
+}
+
 /** AI 消息 */
 function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { message: Message; onFormSubmit?: (formData: Record<string, unknown>) => void; isStreaming?: boolean }) {
   const formRef = useRef<HTMLDivElement>(null);
@@ -579,6 +603,7 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
   // 表格消息也走 Markdown 渲染管线（ContentWithTables）以支持表格外文本的 Markdown
   const isHtmlContent = isHtmlForm;
   const isSavingMessage = /^正在保存\.*$/.test(message.content.trim());
+  const isNodeProgressMessage = message.nodeStatus === 'running';
 
   useEffect(() => {
     if (!isHtmlForm || !formRef.current || !onFormSubmit) return;
@@ -623,6 +648,10 @@ function AssistantMessage({ message, onFormSubmit, isStreaming = false }: { mess
     formElement.addEventListener('submit', handleSubmit);
     return () => formElement.removeEventListener('submit', handleSubmit);
   }, [isHtmlForm, onFormSubmit, message.content]);
+
+  if (isNodeProgressMessage) {
+    return <NodeProgressMessage message={message} />;
+  }
 
   return (
     <div className="flex gap-3 animate-fade-in-up">
@@ -716,7 +745,7 @@ export function LoadingIndicator() {
       </div>
       <div className="bg-white rounded-2xl rounded-tl-md px-5 py-4 shadow-sm border border-border/50">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-text-secondary">AI 正在分析...</span>
+          <span className="text-sm text-text-secondary">AI 正在处理中</span>
           <div className="flex gap-1 ml-1">
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />
             <span className="loading-dot w-1.5 h-1.5 bg-blue-500 rounded-full inline-block" />

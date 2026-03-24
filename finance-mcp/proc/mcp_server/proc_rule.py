@@ -136,6 +136,63 @@ async def _handle_proc_execute(arguments: dict) -> dict:
         return validation_result
     rule_data: dict = validation_result.get("rule", {})
 
+    if rule_data.get("steps"):
+        from proc.mcp_server.steps_runtime import execute_steps_rule
+
+        try:
+            generated_files = execute_steps_rule(
+                rule_code=rule_code,
+                rule_data=rule_data,
+                validated_files=uploaded_files,
+                output_dir=output_dir,
+            )
+        except Exception as e:
+            logger.error(f"[proc_rule] steps 规则执行失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "rule_code": rule_code,
+                "generated_files": [],
+                "generated_count": 0,
+                "errors": [str(e)],
+                "message": f"steps 规则执行失败: {e}",
+                "merged_files": [],
+            }
+
+        def _build_download_url(file_path: str) -> Optional[str]:
+            if not file_path:
+                return None
+            file_name = Path(file_path).name
+            try:
+                import unified_mcp_server
+
+                base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
+            except (ImportError, AttributeError):
+                base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
+            return f"{base_url}/output/proc/{rule_code}/{file_name}?auth_token={quote(auth_token, safe='')}"
+
+        for item in generated_files:
+            output_file = item.get("output_file")
+            if output_file:
+                write_output_metadata(
+                    output_file,
+                    {
+                        "owner_user_id": user_id,
+                        "module": "proc",
+                        "rule_code": rule_code,
+                    },
+                )
+            item["download_url"] = _build_download_url(output_file)
+
+        return {
+            "success": True,
+            "rule_code": rule_code,
+            "generated_files": generated_files,
+            "generated_count": len(generated_files),
+            "errors": [],
+            "message": f"成功生成 {len(generated_files)} 个文件",
+            "merged_files": [],
+        }
+
     # 支持两种规则格式：rules（普通整理规则）或 merge_rules（合并规则）
     rules_list: list[dict] = rule_data.get("rules", [])
     merge_rules_list: list[dict] = rule_data.get("merge_rules", [])

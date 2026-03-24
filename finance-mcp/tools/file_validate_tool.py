@@ -37,7 +37,7 @@ def create_file_validate_tools() -> list[Tool]:
             name="validate_files",
             description=(
                 "根据规则编码（rule_code）从数据库获取文件校验规则，校验用户上传的文件列表，判断每个文件属于哪个预定义的表。"
-                "返回文件名与表定义（table_name）的对应关系；若必传文件（is_required=true）未找到对应上传文件，则返回错误提示。"
+                "返回文件名与表定义（table_name）的对应关系；所有 table_schemas 都必须被唯一命中一次，否则返回错误提示。"
             ),
             inputSchema={
                 "type": "object",
@@ -329,8 +329,6 @@ def validate_files_against_rules(
     # ── 逐文件匹配 ────────────────────────────────────────────────────────
     # file_to_tables_map: file_name -> List[matched_table_info] (记录每个文件匹配到的所有规则)
     file_to_tables_map: Dict[str, List[Dict[str, Any]]] = {}
-    # table_to_files_map: table_id -> List[file_name] (记录每个规则匹配到的所有文件)
-    table_to_files_map: Dict[str, List[str]] = {}
     # unmatched_files: 未命中任何规则的文件名列表
     unmatched_files: List[str] = []
 
@@ -361,16 +359,8 @@ def validate_files_against_rules(
                 table_info = {
                     "table_id": table_schema["table_id"],
                     "table_name": table_schema["table_name"],
-                    "is_required": table_schema.get("is_required", False),
-                    "max_match_count": table_schema.get("max_match_count", 0)
                 }
                 matched_tables.append(table_info)
-
-                # 记录到 table_to_files_map
-                table_id = table_schema["table_id"]
-                if table_id not in table_to_files_map:
-                    table_to_files_map[table_id] = []
-                table_to_files_map[table_id].append(file_name)
 
                 logger.info(
                     f"[文件校验] 文件 '{file_name}' 匹配成功: {table_schema['table_name']}"
@@ -388,42 +378,6 @@ def validate_files_against_rules(
         else:
             unmatched_files.append(file_name)
             logger.info(f"[文件校验] 文件 '{file_name}' 未匹配任何表定义")
-
-    # ── 检查每个规则匹配的文件数量是否超过限制 ─────────────────────────────
-    max_match_count_violations: List[Dict[str, Any]] = []
-    for table_schema in active_table_schemas:
-        table_id = table_schema["table_id"]
-        table_name = table_schema["table_name"]
-        max_match_count = table_schema.get("max_match_count", 0)
-
-        # max_match_count = 0 表示不限制
-        if max_match_count > 0:
-            matched_files = table_to_files_map.get(table_id, [])
-            if len(matched_files) > max_match_count:
-                max_match_count_violations.append({
-                    "table_id": table_id,
-                    "table_name": table_name,
-                    "max_allowed": max_match_count,
-                    "actual_count": len(matched_files),
-                    "matched_files": matched_files
-                })
-
-    if max_match_count_violations:
-        error_details = []
-        for violation in max_match_count_violations:
-            error_details.append(
-                f"规则 '{violation['table_name']}' (限额: {violation['max_allowed']}个) "
-                f"实际匹配了 {violation['actual_count']} 个文件: {', '.join(violation['matched_files'])}"
-            )
-        error_msg = "文件校验失败，以下规则匹配的文件数量超过限额:\n" + "\n".join(error_details)
-        logger.warning(f"[文件校验] {error_msg}")
-
-        return {
-            "success": False,
-            "error": error_msg,
-            "max_match_count_violations": max_match_count_violations,
-            "unmatched_files": unmatched_files
-        }
 
     matched_results, assignment_error = _find_unique_assignment(file_to_tables_map)
     if assignment_error:
@@ -454,34 +408,29 @@ def validate_files_against_rules(
             "matched_results": matched_results,
         }
 
-    # ── 检查必传文件是否覆盖 ──────────────────────────────────────────────
-    necessary_tables = [
-        ts for ts in active_table_schemas if ts.get("is_required", False)
-    ]
-    # 已命中的 table_id 集合
+    # ── 检查规则中定义的所有表是否都被覆盖 ──────────────────────────────
     matched_table_ids: Set[str] = {
         item["table_id"] for item in matched_results
     }
-    # 未被上传文件覆盖的必传表
-    missing_necessary_tables = [
-        ts for ts in necessary_tables
+    missing_tables = [
+        ts for ts in active_table_schemas
         if ts["table_id"] not in matched_table_ids
     ]
 
-    if missing_necessary_tables:
-        missing_names = [ts["table_name"] for ts in missing_necessary_tables]
+    if missing_tables:
+        missing_names = [ts["table_name"] for ts in missing_tables]
         logger.warning(
-            f"[文件校验] 必传文件未上传: {missing_names}"
+            f"[文件校验] 缺少规则要求的文件: {missing_names}"
         )
         return {
             "success": False,
             "error": (
-                f"必传文件未上传，以下文件类型为必填：{', '.join(missing_names)}。"
+                f"缺少规则要求的文件类型：{', '.join(missing_names)}。"
                 f"请上传对应格式的文件后重试。"
             ),
-            "missing_necessary_tables": [
+            "missing_tables": [
                 {"table_id": ts["table_id"], "table_name": ts["table_name"]}
-                for ts in missing_necessary_tables
+                for ts in missing_tables
             ],
             "unmatched_files": unmatched_files,
             "matched_results": matched_results

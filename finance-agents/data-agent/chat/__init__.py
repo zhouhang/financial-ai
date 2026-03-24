@@ -1,2 +1,0 @@
-"""Chat entry handlers."""
-

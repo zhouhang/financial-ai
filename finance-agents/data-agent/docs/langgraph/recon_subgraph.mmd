@@ -1,0 +1,22 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	get_rule_node(get_rule_node)
+	check_file_node(check_file_node)
+	recon_task_execution_node(recon_task_execution_node)
+	recon_result_node(recon_result_node)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> get_rule_node;
+	check_file_node -.-> __end__;
+	check_file_node -.-> recon_task_execution_node;
+	get_rule_node -.-> __end__;
+	get_rule_node -.-> check_file_node;
+	recon_task_execution_node --> recon_result_node;
+	recon_result_node --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

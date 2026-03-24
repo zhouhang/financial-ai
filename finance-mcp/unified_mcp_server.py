@@ -104,16 +104,13 @@ async def list_tools() -> list[types.Tool]:
     return all_tools
 
 
-# 认证和规则管理工具名集合
+# 认证/管理员/会话工具名集合
 _AUTH_TOOL_NAMES = {
     "auth_register", "auth_login", "auth_me",
-    "list_reconciliation_rules", "get_reconciliation_rule",
-    "delete_reconciliation_rule",
-    "copy_reconciliation_rule",
     # 管理员功能
     "admin_login", "create_company", "create_department",
-    "list_companies", "get_admin_view",
-    "list_companies_public", "list_departments_public",
+    "list_company", "get_admin_view",
+    "list_departments",
     # 会话管理
     "create_conversation", "list_conversations", "get_conversation",
     "delete_conversation", "save_message",
@@ -404,9 +401,9 @@ async def main():
 
 📖 使用说明:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  在 Dify 中配置:
-    MCP 服务器地址: http://localhost:{port}/sse
-    或使用 Docker:   http://host.docker.internal:{port}/sse
+  外部 MCP 客户端可连接:
+    SSE 地址:         http://localhost:{port}/sse
+    Docker 地址:      http://host.docker.internal:{port}/sse
 
 服务器正在运行...
 """)
