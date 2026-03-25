@@ -914,7 +914,6 @@ def build_recon_ctx_update_from_execution(
 
     base_ctx_update: dict[str, Any] = {
         "recon_inputs": recon_inputs,
-        "execution_request": execution_request,
         "execution_result": recon_result,
         "recon_result": recon_result,
         "recon_observation": recon_observation or {},

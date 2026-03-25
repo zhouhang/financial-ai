@@ -25,6 +25,11 @@ import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import resolve_upload_file_path, write_output_metadata
+from .dataset_loader import (
+    DatasetLoadError,
+    dataset_display_name,
+    load_dataset_as_df,
+)
 
 # 导入数据过滤模块
 from tools.data_filter import filter_dataframe_by_rule_config, get_filter_statistics
@@ -61,7 +66,8 @@ def create_recon_tools() -> list[Tool]:
                         "type": "array",
                         "description": (
                             "统一的输入列表，每个元素通过 input_type 指定来源。"
-                            "input_type=file 时需提供 file_path；input_type=dataset 时需提供 dataset_ref。"
+                            "input_type=file 时需提供 file_path；"
+                            "input_type=dataset 时需提供 dataset_ref.source_type/source_key/query。"
                         ),
                         "items": {
                             "type": "object",
@@ -69,7 +75,14 @@ def create_recon_tools() -> list[Tool]:
                                 "table_name": {"type": "string"},
                                 "input_type": {"type": "string", "enum": ["file", "dataset"]},
                                 "file_path": {"type": "string"},
-                                "dataset_ref": {"type": "object"},
+                                "dataset_ref": {
+                                    "type": "object",
+                                    "description": (
+                                        "dataset 输入协议："
+                                        "{source_type:'db|api', source_key:'...', query:{...}}。"
+                                        "rows/data 协议已废弃。"
+                                    ),
+                                },
                             }
                         },
                     },
@@ -175,7 +188,28 @@ def _normalize_validated_inputs(
             continue
         dataset_ref = item.get("dataset_ref")
         if not isinstance(dataset_ref, dict):
-            dataset_ref = {}
+            return [], f"table_name={table_name} 的 dataset_ref 必须是对象"
+        query = dataset_ref.get("query")
+        if "query" not in dataset_ref or not isinstance(query, dict):
+            if isinstance(dataset_ref.get("rows"), list) or isinstance(dataset_ref.get("data"), list):
+                return [], (
+                    f"table_name={table_name} 的 dataset_ref.rows/data 已废弃，请改为"
+                    " dataset_ref={{source_type, source_key, query}}"
+                )
+            return [], (
+                f"table_name={table_name} 的 dataset_ref.query 缺失，"
+                "请传入 dataset_ref={{source_type, source_key, query}}"
+            )
+        if "sql" in query:
+            return [], (
+                f"table_name={table_name} 不允许 query.sql。"
+                "请使用 source_key + query 条件模式。"
+            )
+        if "url" in query:
+            return [], (
+                f"table_name={table_name} 不允许 query.url。"
+                "请由 source_key 在 MCP registry/handler 中决定 API 地址。"
+            )
         normalized.append({
             "table_name": table_name,
             "input_type": "dataset",
@@ -232,34 +266,6 @@ def _find_input_by_identification(
     return None
 
 
-def _dataset_display_name(dataset_ref: dict[str, Any], table_name: str) -> str:
-    source_key = str(dataset_ref.get("source_key") or "").strip()
-    if source_key:
-        return source_key
-    return table_name
-
-
-def _read_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
-    """读取 dataset 输入。
-
-    当前仅支持测试/占位数据：
-    - dataset_ref.rows: list[dict]
-    - dataset_ref.data: list[dict]
-    真实 db/api 抓取逻辑后续再接入。
-    """
-    rows = dataset_ref.get("rows")
-    if isinstance(rows, list):
-        return pd.DataFrame(rows)
-    rows = dataset_ref.get("data")
-    if isinstance(rows, list):
-        return pd.DataFrame(rows)
-    source_type = str(dataset_ref.get("source_type") or "").strip() or "dataset"
-    source_key = str(dataset_ref.get("source_key") or "").strip() or table_name
-    raise NotImplementedError(
-        f"dataset 输入暂未接入真实 {source_type} 数据源读取，请为 source_key={source_key} 提供 rows/data 占位数据。"
-    )
-
-
 def _resolve_input_to_df(input_item: dict[str, Any], rule_id: str, table_name: str) -> tuple[pd.DataFrame, str]:
     """将 file / dataset 输入统一解析为 DataFrame。"""
     input_type = str(input_item.get("input_type") or "").strip().lower()
@@ -269,9 +275,42 @@ def _resolve_input_to_df(input_item: dict[str, Any], rule_id: str, table_name: s
     if input_type == "dataset":
         dataset_ref = input_item.get("dataset_ref")
         if not isinstance(dataset_ref, dict):
-            dataset_ref = {}
-        return _read_dataset_as_df(dataset_ref, table_name), _dataset_display_name(dataset_ref, table_name)
+            raise ValueError(f"[{rule_id}] dataset_ref 必须是对象")
+        return load_dataset_as_df(dataset_ref, table_name), dataset_display_name(dataset_ref, table_name)
     raise ValueError(f"[{rule_id}] 不支持的输入类型: {input_type}")
+
+
+def _summarize_input_for_log(input_item: dict[str, Any]) -> dict[str, Any]:
+    """Build redacted input summary for logs (no query/details leakage)."""
+    if not isinstance(input_item, dict):
+        return {"input_type": "unknown"}
+    input_type = str(input_item.get("input_type") or "").strip().lower()
+    table_name = str(input_item.get("table_name") or "").strip()
+    if input_type == "file":
+        file_path = str(input_item.get("file_path") or "").strip()
+        return {
+            "input_type": "file",
+            "table_name": table_name,
+            "file_name": os.path.basename(file_path) if file_path else "",
+        }
+    if input_type == "dataset":
+        dataset_ref = input_item.get("dataset_ref")
+        if not isinstance(dataset_ref, dict):
+            dataset_ref = {}
+        source_type = str(dataset_ref.get("source_type") or "").strip().lower()
+        source_key = str(dataset_ref.get("source_key") or "").strip()
+        has_query = isinstance(dataset_ref.get("query"), dict)
+        return {
+            "input_type": "dataset",
+            "table_name": table_name,
+            "source_type": source_type,
+            "has_source_key": bool(source_key),
+            "has_query": has_query,
+        }
+    return {
+        "input_type": input_type or "unknown",
+        "table_name": table_name,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -483,8 +522,8 @@ def execute_single_recon(
             "message": "未找到目标文件",
         }
     
-    logger.info(f"[recon] [{rule_id}] 源输入: {source_input}")
-    logger.info(f"[recon] [{rule_id}] 目标输入: {target_input}")
+    logger.info(f"[recon] [{rule_id}] 源输入摘要: {_summarize_input_for_log(source_input)}")
+    logger.info(f"[recon] [{rule_id}] 目标输入摘要: {_summarize_input_for_log(target_input)}")
     
     # 2. 读取输入
     try:
@@ -498,6 +537,16 @@ def execute_single_recon(
             rule_id,
             str(target_file_config.get("table_name") or "目标文件"),
         )
+    except DatasetLoadError as e:
+        logger.warning(f"[recon] [{rule_id}] dataset query 失败: {e}")
+        return {
+            "success": False,
+            "status": "failed",
+            "rule_id": rule_id,
+            "rule_name": rule_name,
+            "error_code": "dataset_query_failed",
+            "error": "数据集读取失败，请检查 dataset_ref.source_type/source_key/query 是否符合协议，且数据源已正确配置。",
+        }
     except Exception as e:
         return {
             "success": False,

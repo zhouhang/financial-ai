@@ -5,6 +5,7 @@ description = "Financial data reconciliation and preparation agent powered by La
 requires-python = ">=3.12"
 dependencies = [
     "langgraph>=0.4.1",
+    "langgraph-checkpoint-postgres>=3.0.5",
     "langchain-openai>=0.3.0",
     "langchain-core>=0.3.0",
     "pydantic>=2.0.0",

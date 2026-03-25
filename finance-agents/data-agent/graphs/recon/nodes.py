@@ -33,12 +33,9 @@ from graphs.main_graph.public_nodes import (
     _to_upload_ref,
 )
 from .execution_service import (
-    build_recon_observation,
-    build_execution_request,
-    build_recon_ctx_update_from_execution,
     resolve_recon_inputs,
-    run_recon_execution,
 )
+from .pipeline_service import execute_headless_recon_pipeline
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
@@ -248,80 +245,38 @@ async def recon_task_execution_node(state: AgentState) -> dict:
             "recon_ctx": ctx,
         }
 
-    execution_request, request_error = build_execution_request(
-        rule_code=rule_code,
-        rule_id=rule_id,
-        auth_token=auth_token,
-        recon_inputs=recon_inputs,
-        run_context=ctx.get("run_context") if isinstance(ctx.get("run_context"), dict) else {},
-    )
-    if request_error:
-        logger.error(f"[recon] {request_error}")
-        ctx.update({
-            "phase": ReconAgentPhase.EXEC_FAILED.value,
-            "exec_status": "error",
-            "exec_error": request_error,
-        })
-        return {
-            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, request_error))],
-            "recon_ctx": ctx,
-        }
-
-    logger.info(
-        f"[recon] 调用 recon_execute, rule_code={rule_code}, "
-        f"inputs={[item.get('table_name') for item in execution_request.get('validated_inputs', [])]}"
-    )
-    recon_result, exec_error = await run_recon_execution(execution_request)
-    if exec_error:
-        logger.error(f"[recon] {exec_error}")
-        ctx.update({
-            "phase": ReconAgentPhase.EXEC_FAILED.value,
-            "exec_status": "error",
-            "exec_error": exec_error,
-            "execution_request": execution_request,
-        })
-        return {
-            "messages": [AIMessage(content=_build_recon_execution_error_summary(rule_name, exec_error))],
-            "recon_ctx": ctx,
-        }
-
-    logger.info(
-        f"[recon] recon_execute 结果: "
-        f"success={recon_result.get('success')}, "
-        f"rule_type={recon_result.get('rule_type')}"
-    )
-
     run_context = ctx.get("run_context") if isinstance(ctx.get("run_context"), dict) else {}
     run_context = {
         **run_context,
         "trigger_type": str(run_context.get("trigger_type") or "chat"),
         "entry_mode": str(run_context.get("entry_mode") or "file"),
     }
-    recon_observation = build_recon_observation(
+
+    pipeline_result = await execute_headless_recon_pipeline(
         rule_code=rule_code,
+        rule_id=rule_id,
         rule_name=rule_name,
         rule=rule if isinstance(rule, dict) else {},
-        trigger_type=str(run_context.get("trigger_type") or "chat"),
-        entry_mode=str(run_context.get("entry_mode") or "file"),
+        auth_token=auth_token,
         recon_inputs=recon_inputs,
-        recon_result=recon_result if isinstance(recon_result, dict) else {},
         run_context=run_context,
         run_id=str(ctx.get("run_id") or ""),
+        trigger_type=str(run_context.get("trigger_type") or "chat"),
+        entry_mode=str(run_context.get("entry_mode") or "file"),
         ref_to_display_name=ref_to_display_name,
     )
+    ctx_update = pipeline_result.get("ctx_update") if isinstance(pipeline_result.get("ctx_update"), dict) else {}
+    execution_status = str(pipeline_result.get("execution_status", "success"))
+    execution_result = pipeline_result.get("execution_result") if isinstance(pipeline_result.get("execution_result"), dict) else {}
+    if execution_result:
+        logger.info(
+            f"[recon] recon_execute 结果: "
+            f"success={execution_result.get('success')}, "
+            f"rule_type={execution_result.get('rule_type')}"
+        )
 
-    execution_ctx = build_recon_ctx_update_from_execution(
-        recon_result=recon_result if isinstance(recon_result, dict) else {},
-        recon_inputs=recon_inputs,
-        execution_request=execution_request,
-        ref_to_display_name=ref_to_display_name,
-        recon_observation=recon_observation,
-    )
-    ctx_update = execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}
-    execution_status = str(execution_ctx.get("execution_status", "success"))
-
-    if not execution_ctx.get("ok"):
-        exec_error_msg = str(execution_ctx.get("exec_error", "对账执行失败"))
+    if not pipeline_result.get("ok"):
+        exec_error_msg = str(pipeline_result.get("exec_error", "对账执行失败"))
         ctx.update({
             "phase": ReconAgentPhase.EXEC_FAILED.value,
             "exec_status": execution_status,
@@ -344,7 +299,7 @@ async def recon_task_execution_node(state: AgentState) -> dict:
         "phase": ReconAgentPhase.SHOWING_RESULT.value,
         "exec_status": execution_status,
         "exec_error": "",
-        "run_context": run_context,
+        "run_context": pipeline_result.get("run_context") if isinstance(pipeline_result.get("run_context"), dict) else run_context,
         **ctx_update,
     })
 
