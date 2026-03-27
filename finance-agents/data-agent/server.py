@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 # 必须在 langchain/langgraph 导入之前加载 .env，否则 LangSmith 会缓存未设置的环境变量，追踪失效
+from contextlib import AsyncExitStack
 from pathlib import Path
+import re
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+ROOT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+LOCAL_ENV_PATH = Path(__file__).resolve().parent / ".env"
+
+load_dotenv(ROOT_ENV_PATH)
+load_dotenv(LOCAL_ENV_PATH, override=True)
 
 import json
 import logging
@@ -17,9 +24,18 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
+from psycopg import connect, sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from config import HOST, PORT, MAX_FILE_SIZE
+from config import (
+    HOST,
+    PORT,
+    MAX_FILE_SIZE,
+    LANGGRAPH_CHECKPOINT_DATABASE_URL,
+    LANGGRAPH_CHECKPOINT_SCHEMA,
+)
 from graphs.main_graph import create_app
 from utils.db import ensure_tables
 from tools.mcp_client import (
@@ -44,6 +60,8 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 TRACKED_NODE_NAMES = {
@@ -70,12 +88,46 @@ def _should_track_node_status(node_name: str) -> bool:
     return node_name in TRACKED_NODE_NAMES
 
 
-def _resolve_task_kind(config: dict[str, Any], explicit_task_code: str) -> str:
+def _get_langgraph_app():
+    if langgraph_app is None:
+        raise RuntimeError("LangGraph app 尚未初始化")
+    return langgraph_app
+
+
+def _get_checkpoint_conn_string() -> str:
+    """构造带 search_path 的 checkpoint 连接串。"""
+    if not LANGGRAPH_CHECKPOINT_SCHEMA:
+        return LANGGRAPH_CHECKPOINT_DATABASE_URL
+
+    return make_conninfo(
+        LANGGRAPH_CHECKPOINT_DATABASE_URL,
+        options=f"-csearch_path={LANGGRAPH_CHECKPOINT_SCHEMA}",
+    )
+
+
+def _ensure_checkpoint_schema() -> None:
+    """确保 LangGraph checkpoint 使用独立 schema。"""
+    if not LANGGRAPH_CHECKPOINT_SCHEMA:
+        return
+
+    if not _SCHEMA_NAME_PATTERN.fullmatch(LANGGRAPH_CHECKPOINT_SCHEMA):
+        raise ValueError(f"非法的 LANGGRAPH_CHECKPOINT_SCHEMA: {LANGGRAPH_CHECKPOINT_SCHEMA}")
+
+    with connect(LANGGRAPH_CHECKPOINT_DATABASE_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(LANGGRAPH_CHECKPOINT_SCHEMA)
+                )
+            )
+
+
+async def _resolve_task_kind(config: dict[str, Any], explicit_task_code: str) -> str:
     if explicit_task_code in {"proc", "recon"}:
         return explicit_task_code
 
     try:
-        snapshot = langgraph_app.get_state(config)
+        snapshot = await _get_langgraph_app().aget_state(config)
     except Exception:
         return ""
 
@@ -115,6 +167,14 @@ def _build_legacy_reconciliation_state_reset() -> dict[str, Any]:
     """Legacy reconciliation state has been removed."""
     return {}
 
+
+def _format_exception_message(exc: Exception) -> str:
+    """为前端返回稳定的错误文案，避免空字符串异常。"""
+    detail = str(exc).strip()
+    if detail:
+        return detail
+    return f"{exc.__class__.__name__}: 未提供详细错误信息"
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Financial Data Agent", version="0.1.0")
@@ -132,12 +192,52 @@ app.add_middleware(
 
 # ── LangGraph 实例 ────────────────────────────────────────────────────────────
 
-langgraph_app = create_app()
+langgraph_app = None
+_checkpoint_stack: AsyncExitStack | None = None
 
 # 用于跟踪每个 thread 上传的文件
 _thread_files: dict[str, list[dict]] = {}  # 保存文件信息，包含 file_path 和 original_filename
 # ⚠️ 修复：跟踪每个 thread 的上一次文件列表（用于检测文件变化）
 _thread_files_snapshot: dict[str, list[str]] = {}  # 保存上一次的文件路径列表快照
+
+
+async def _init_langgraph_app() -> None:
+    """初始化 LangGraph 及 Postgres checkpointer。"""
+    global langgraph_app, _checkpoint_stack
+
+    if langgraph_app is not None:
+        return
+
+    stack = AsyncExitStack()
+    try:
+        _ensure_checkpoint_schema()
+        checkpoint_conn_string = _get_checkpoint_conn_string()
+        checkpointer = await stack.enter_async_context(
+            AsyncPostgresSaver.from_conn_string(checkpoint_conn_string)
+        )
+        await checkpointer.setup()
+        langgraph_app = create_app(checkpointer)
+        _checkpoint_stack = stack
+        checkpoint_info = conninfo_to_dict(LANGGRAPH_CHECKPOINT_DATABASE_URL)
+        logger.info(
+            "LangGraph Postgres checkpointer 已初始化: db=%s schema=%s",
+            checkpoint_info.get("dbname", ""),
+            LANGGRAPH_CHECKPOINT_SCHEMA or "public",
+        )
+    except Exception as e:
+        await stack.aclose()
+        logger.error(f"初始化 LangGraph Postgres checkpointer 失败: {e}")
+        raise
+
+
+async def _close_langgraph_app() -> None:
+    """关闭 LangGraph 相关资源。"""
+    global langgraph_app, _checkpoint_stack
+
+    if _checkpoint_stack is not None:
+        await _checkpoint_stack.aclose()
+        _checkpoint_stack = None
+    langgraph_app = None
 
 
 # ── 启动时初始化 ──────────────────────────────────────────────────────────────
@@ -157,10 +257,16 @@ async def on_startup():
             "未设置" if not tracing else "已设置",
             "未设置" if not api_key else "已设置",
         )
+    await _init_langgraph_app()
     try:
         ensure_tables()
     except Exception as e:
         logger.warning(f"数据库初始化失败（可稍后重试）: {e}")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await _close_langgraph_app()
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -173,14 +279,14 @@ def _extract_last_ai_message(messages) -> str | None:
     return None
 
 
-def _get_interrupt_info(config: dict) -> tuple[bool, Any, str | None]:
+async def _get_interrupt_info(config: dict) -> tuple[bool, Any, str | None]:
     """检查图是否处于中断状态。
 
     Returns:
         (is_interrupted, interrupt_payload, last_ai_content)
     """
     try:
-        snapshot = langgraph_app.get_state(config)
+        snapshot = await _get_langgraph_app().aget_state(config)
     except Exception:
         return False, None, None
 
@@ -209,7 +315,6 @@ async def upload_file(
     thread_id: str = Form("default"),
     is_first_file: str = Form("0"),  # 改为 str，通过表单传递 "0" 或 "1"
     auth_token: str = Form(""),  # 登录用户的 auth_token
-    guest_token: str = Form(""),  # 游客的 guest_token
 ):
     """上传文件 - 调用 finance-mcp 的 file_upload MCP 工具。
 
@@ -217,8 +322,7 @@ async def upload_file(
         file: 上传的文件
         thread_id: 会话 ID
         is_first_file: 是否是本批上传的第一个文件 ("1"=True, "0"=False)
-        auth_token: 登录用户的认证 token（与 guest_token 二选一）
-        guest_token: 游客的临时 token（与 auth_token 二选一）
+        auth_token: 登录用户的认证 token
     """
     import base64
     import os
@@ -271,29 +375,31 @@ async def upload_file(
         # 同时清空 LangGraph state 中的 uploaded_files，确保状态同步
         try:
             config = {"configurable": {"thread_id": thread_id}}
-            langgraph_app.update_state(config, {
-                "uploaded_files": [],
-                **_build_legacy_reconciliation_state_reset(),
-            })
+            await _get_langgraph_app().aupdate_state(
+                config,
+                {
+                    "uploaded_files": [],
+                    **_build_legacy_reconciliation_state_reset(),
+                },
+            )
             logger.info(f"已同步清空 state.uploaded_files (thread={thread_id})")
         except Exception as e:
             logger.warning(f"清空 state.uploaded_files 失败: {e}")
 
     # ⚠️ 如果前端没有传递 token，从 LangGraph state 中获取
-    if not auth_token and not guest_token:
+    if not auth_token:
         try:
             config = {"configurable": {"thread_id": thread_id}}
-            snapshot = langgraph_app.get_state(config)
+            snapshot = await _get_langgraph_app().aget_state(config)
             state_auth_token = snapshot.values.get("auth_token", "")
-            state_guest_token = snapshot.values.get("guest_token", "")
             if state_auth_token:
                 auth_token = state_auth_token
                 logger.info(f"从 state 获取 auth_token (thread={thread_id})")
-            elif state_guest_token:
-                guest_token = state_guest_token
-                logger.info(f"从 state 获取 guest_token (thread={thread_id})")
         except Exception as e:
             logger.warning(f"无法从 state 获取 token: {e}")
+
+    if not auth_token:
+        raise HTTPException(401, "缺少 auth_token，请先登录")
 
     # 调用 finance-mcp 的 file_upload MCP 工具
     try:
@@ -305,11 +411,7 @@ async def upload_file(
                 }
             ]
         }
-        # 传递 token 给 MCP 工具（auth_token 或 guest_token）
-        if auth_token:
-            mcp_args["auth_token"] = auth_token
-        elif guest_token:
-            mcp_args["guest_token"] = guest_token
+        mcp_args["auth_token"] = auth_token
 
         result = await call_mcp_tool("file_upload", mcp_args)
 
@@ -353,7 +455,7 @@ async def upload_file(
         raise  # 重新抛出 HTTPException
     except Exception as e:
         logger.error(f"调用 MCP 工具上传文件失败: {e}", exc_info=True)
-        raise HTTPException(500, f"文件上传失败: {str(e)}")
+        raise HTTPException(500, f"文件上传失败: {_format_exception_message(e)}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -407,7 +509,7 @@ async def websocket_chat(ws: WebSocket):
                     me_result = await auth_me(auth_token)
                     if me_result.get("success"):
                         try:
-                            langgraph_app.update_state(
+                            await _get_langgraph_app().aupdate_state(
                                 {"configurable": {"thread_id": thread_id}},
                                 {
                                     "auth_token": auth_token,
@@ -440,7 +542,7 @@ async def websocket_chat(ws: WebSocket):
                         "success": False,
                         "payload": {
                             "reason": "service_unavailable",
-                            "message": str(e),
+                            "message": _format_exception_message(e),
                         },
                     })
                 continue  # 认证验证完成，不继续处理消息
@@ -478,10 +580,13 @@ async def websocket_chat(ws: WebSocket):
             if files_changed and files:
                 logger.info(f"检测到文件列表变化 (thread={thread_id}): 之前={previous_files}, 现在={files}")
                 try:
-                    langgraph_app.update_state(config, {
-                        "uploaded_files": file_infos,
-                        **_build_legacy_reconciliation_state_reset(),
-                    })
+                    await _get_langgraph_app().aupdate_state(
+                        config,
+                        {
+                            "uploaded_files": file_infos,
+                            **_build_legacy_reconciliation_state_reset(),
+                        },
+                    )
                     logger.info(f"已清空 LangGraph 状态中的旧分析结果 (thread={thread_id})")
                 except Exception as e:
                     logger.warning(f"清空 LangGraph 状态失败: {e}")
@@ -528,7 +633,7 @@ async def websocket_chat(ws: WebSocket):
                             update_state["selected_rule_name"] = rule_name
                         if file_rule_code:
                             update_state["file_rule_code"] = file_rule_code
-                        langgraph_app.update_state(config, update_state)
+                        await _get_langgraph_app().aupdate_state(config, update_state)
                         logger.info(f"已写入 auth/task/rule 信息到 state (thread={thread_id}): has_token={bool(auth_token)}, task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
                     except Exception as e:
                         logger.warning(f"写入 task/rule code/name 失败: {e}")
@@ -544,7 +649,7 @@ async def websocket_chat(ws: WebSocket):
                 streamed_content = ""
                 router_buffer = ""
                 router_mode = "detect"  # "detect" | "stream" | "json"
-                active_task_kind = _resolve_task_kind(config, task_code)
+                active_task_kind = await _resolve_task_kind(config, task_code)
                 event_count = 0
                 sent_contents: set[str] = set()
                 baseline_message_len = 0
@@ -555,14 +660,14 @@ async def websocket_chat(ws: WebSocket):
                 current_streaming_node = None  # 跟踪当前流式输出的节点
 
                 try:
-                    existing_state = langgraph_app.get_state(config)
+                    existing_state = await _get_langgraph_app().aget_state(config)
                     baseline_message_len = len(existing_state.values.get("messages") or [])
                 except Exception as e:
                     if is_resume:
                         logger.warning(f"获取历史消息失败: {e}")
                     baseline_message_len = 0
                 
-                async for event in langgraph_app.astream_events(input_data, config=config, version="v2"):
+                async for event in _get_langgraph_app().astream_events(input_data, config=config, version="v2"):
                     event_count += 1
                     kind = event.get("event")
                     data_obj = event.get("data", {})
@@ -738,7 +843,7 @@ async def websocket_chat(ws: WebSocket):
                 # Fallback: 仅在本轮完全没有输出时，按基线补发新增 AI 消息（避免重复回放历史）
                 if not emitted_assistant_output:
                     try:
-                        final_state = langgraph_app.get_state(config)
+                        final_state = await _get_langgraph_app().aget_state(config)
                         messages = final_state.values.get("messages") or []
                         new_msgs = messages[baseline_message_len:] if baseline_message_len >= 0 else messages
                         for msg in new_msgs:
@@ -753,11 +858,11 @@ async def websocket_chat(ws: WebSocket):
                         logger.warning(f"fallback 检查遗漏消息失败: {e}")
 
                 # 检查是否处于中断状态
-                is_interrupted, payload, last_ai = _get_interrupt_info(config)
+                is_interrupted, payload, last_ai = await _get_interrupt_info(config)
 
                 # 对账任务完成后，清空线程文件缓存，避免下一轮消息复用旧文件再次执行。
                 try:
-                    final_snapshot = langgraph_app.get_state(config)
+                    final_snapshot = await _get_langgraph_app().aget_state(config)
                     final_values = final_snapshot.values if final_snapshot else {}
                     final_uploaded = final_values.get("uploaded_files", []) if final_values else []
                     recon_ctx = final_values.get("recon_ctx") or {}
@@ -845,7 +950,7 @@ async def websocket_chat(ws: WebSocket):
                 print(f"[ERROR] 图执行异常: {e}\n{tb}", flush=True)
                 await ws.send_json({
                     "type": "error",
-                    "content": f"处理失败: {str(e)}",
+                    "content": f"处理失败: {_format_exception_message(e)}",
                     "thread_id": thread_id,
                 })
 
@@ -888,7 +993,11 @@ async def stream_chat(
                     "uploaded_files": uploaded_files_for_state,
                 }
 
-            for event in langgraph_app.stream(invoke_input, config=config, stream_mode="updates"):
+            async for event in _get_langgraph_app().astream(
+                invoke_input,
+                config=config,
+                stream_mode="updates",
+            ):
                 for node_name, node_output in event.items():
                     if node_name == "__interrupt__":
                         continue
@@ -902,7 +1011,7 @@ async def stream_chat(
                             yield f"data: {payload}\n\n"
 
             # 检查是否中断
-            is_interrupted, payload, _ = _get_interrupt_info(config)
+            is_interrupted, payload, _ = await _get_interrupt_info(config)
             if is_interrupted:
                 interrupt_data = json.dumps(
                     {"type": "interrupt", "payload": payload or {}, "thread_id": tid},
@@ -915,7 +1024,7 @@ async def stream_chat(
         except Exception as e:
             logger.error(f"Stream 异常: {e}", exc_info=True)
             error_payload = json.dumps(
-                {"type": "error", "content": str(e)},
+                {"type": "error", "content": _format_exception_message(e)},
                 ensure_ascii=False,
             )
             yield f"data: {error_payload}\n\n"

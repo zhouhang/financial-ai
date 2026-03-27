@@ -20,523 +20,369 @@ SET row_security = off;
 -- Data for Name: admins; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.admins VALUES (1, 'admin', '92925488b28ab12584ac8fcaa8a27a0f497b2c62940c8f4fbc8ef19ebc87c43e', '2026-02-19 10:27:27.267257');
+INSERT INTO public.admins (id, username, password, created_at) VALUES (1, 'admin', '92925488b28ab12584ac8fcaa8a27a0f497b2c62940c8f4fbc8ef19ebc87c43e', '2026-02-19 10:27:27.267257');
 
 
 --
 -- Data for Name: company; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.company VALUES ('00000000-0000-0000-0000-000000000001', '示例公司', 'DEMO_COMPANY', 1000, 100, '["reconciliation", "data_prep"]', '2026-02-10 16:11:16.32517+08', '2026-02-10 16:11:16.32517+08', 'active');
-INSERT INTO public.company VALUES ('ef39a863-6ab7-4f99-bb78-236170d38117', '武汉岚晨网络科技有限公司', 'COMP_83035BAF', 100, 10, '["reconciliation", "data_prep"]', '2026-02-19 16:30:56.871353+08', '2026-02-25 10:18:15.898601+08', 'active');
+INSERT INTO public.company (id, name, code, max_users, max_departments, enabled_features, created_at, updated_at, status) VALUES ('00000000-0000-0000-0000-000000000001', '示例公司', 'DEMO_COMPANY', 1000, 100, '["reconciliation", "data_prep"]', '2026-02-10 16:11:16.32517+08', '2026-02-10 16:11:16.32517+08', 'active');
+INSERT INTO public.company (id, name, code, max_users, max_departments, enabled_features, created_at, updated_at, status) VALUES ('ef39a863-6ab7-4f99-bb78-236170d38117', '武汉岚晨网络科技有限公司', 'COMP_83035BAF', 100, 10, '["reconciliation", "data_prep"]', '2026-02-19 16:30:56.871353+08', '2026-02-25 10:18:15.898601+08', 'active');
+INSERT INTO public.company (id, name, code, max_users, max_departments, enabled_features, created_at, updated_at, status) VALUES ('c2a4b2b8-2afd-41ae-91ab-23df1ac97fc1', '测试部', 'COMP_3BE8A888', 100, 10, '["reconciliation", "data_prep"]', '2026-03-04 15:32:19.755906+08', '2026-03-04 15:32:19.755906+08', 'active');
 
 
 --
 -- Data for Name: departments; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.departments VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', NULL, '财务部', 'FINANCE', '财务对账部门', '{}', '2026-02-10 16:11:16.327623+08', '2026-02-10 16:11:16.327623+08');
-INSERT INTO public.departments VALUES ('063eae86-62ee-43f9-ac81-7776c25ecb7c', 'ef39a863-6ab7-4f99-bb78-236170d38117', NULL, '资产部', 'DEPT_3EF4E97B', NULL, '{}', '2026-02-19 16:31:29.88011+08', '2026-02-25 10:18:30.09625+08');
-INSERT INTO public.departments VALUES ('4a0127f2-98ae-4769-a9c1-5de3334af801', 'ef39a863-6ab7-4f99-bb78-236170d38117', NULL, '核算部', 'DEPT_7CD78C2B', NULL, '{}', '2026-02-19 16:40:06.467791+08', '2026-02-25 10:18:30.09625+08');
+INSERT INTO public.departments (id, company_id, parent_id, name, code, description, settings, created_at, updated_at) VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', NULL, '财务部', 'FINANCE', '财务对账部门', '{}', '2026-02-10 16:11:16.327623+08', '2026-02-10 16:11:16.327623+08');
+INSERT INTO public.departments (id, company_id, parent_id, name, code, description, settings, created_at, updated_at) VALUES ('063eae86-62ee-43f9-ac81-7776c25ecb7c', 'ef39a863-6ab7-4f99-bb78-236170d38117', NULL, '资产部', 'DEPT_3EF4E97B', NULL, '{}', '2026-02-19 16:31:29.88011+08', '2026-02-25 10:18:30.09625+08');
+INSERT INTO public.departments (id, company_id, parent_id, name, code, description, settings, created_at, updated_at) VALUES ('4a0127f2-98ae-4769-a9c1-5de3334af801', 'ef39a863-6ab7-4f99-bb78-236170d38117', NULL, '核算部', 'DEPT_7CD78C2B', NULL, '{}', '2026-02-19 16:40:06.467791+08', '2026-02-25 10:18:30.09625+08');
+INSERT INTO public.departments (id, company_id, parent_id, name, code, description, settings, created_at, updated_at) VALUES ('3f3cd4fd-eca3-4783-8273-cd94c284d4c7', 'c2a4b2b8-2afd-41ae-91ab-23df1ac97fc1', NULL, '测试一组', 'DEPT_E48C5851', NULL, '{}', '2026-03-04 15:32:38.377629+08', '2026-03-04 15:32:38.377629+08');
 
 
 --
 -- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.users VALUES ('00000000-0000-0000-0000-000000000001', 'system', '', 'system@tally.local', NULL, NULL, NULL, 'admin', '2026-02-12 16:20:15.777487+08', '2026-02-12 16:20:15.777487+08', NULL, 'active');
-INSERT INTO public.users VALUES ('3b593fbd-d0cd-48b8-99f1-fd9274f4059d', 'testuser', '$2b$12$eMoYGYTk1cBXupBiYXk5he8PG56Fyb8t2TpFCVovKcQrnWJdg0VKG', NULL, NULL, '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'member', '2026-02-12 17:08:15.240684+08', '2026-02-12 17:08:15.240684+08', NULL, 'active');
-INSERT INTO public.users VALUES ('8416371f-95f9-4454-b516-a20d434ca79c', 'testuser_828796', '$2b$12$aortAUQny0vsJFcFfFkJ4edAzrphidZX1pRDsb6y3D.CD1AeD9B.q', NULL, NULL, NULL, NULL, 'member', '2026-02-13 11:20:30.039084+08', '2026-02-13 11:24:06.561373+08', '2026-02-13 11:24:06.561373+08', 'active');
-INSERT INTO public.users VALUES ('85a817b0-9fdb-4281-89e1-220ee539373c', 'testuser_1770953046_7807', '$2b$12$avN29IEdT0T1c.16NOFkGOC2XJpew5ziRJQxVBja7jjMUdlVWDZda', 'testuser_1770953046_7807@test.com', '13800000000', NULL, NULL, 'member', '2026-02-13 11:24:06.954359+08', '2026-02-13 11:24:06.954359+08', NULL, 'active');
-INSERT INTO public.users VALUES ('dbcc40a1-1a3f-4da9-a726-76e3b1e29e0b', 'user_1770953127_9395', '$2b$12$MF1isplyh9RcLJAt4L8tzOw/Vgjpyk1dJkZyekDhej.Ssafd9CVH.', 'user_1770953127_9395@example.com', '13800000000', NULL, NULL, 'member', '2026-02-13 11:25:28.940015+08', '2026-02-13 11:25:31.71581+08', '2026-02-13 11:25:31.71581+08', 'active');
-INSERT INTO public.users VALUES ('00000000-0000-0000-0000-000000000003', 'admin', '$2a$06$8jR7WzRe5E3upJmmCtIPyOfArPX1k8140YBJ/rZIe6nr6k4hG3Tna', 'admin@example.com', NULL, '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'admin', '2026-02-10 16:11:16.330406+08', '2026-02-25 09:27:37.873784+08', '2026-02-25 09:27:37.873784+08', 'active');
-INSERT INTO public.users VALUES ('869405c8-4cdf-4137-ab53-c9fd98796293', 'financer', '$2b$12$KaYrIUU/AA0YT6BfLEaJVOgCi0.OpG/A8f5JQyjb.YpgLfD4PPPDO', 'financer@lanchen.com', '15020302832', '4a0127f2-98ae-4769-a9c1-5de3334af801', 'ef39a863-6ab7-4f99-bb78-236170d38117', 'member', '2026-02-19 16:43:43.320509+08', '2026-02-19 16:43:43.320509+08', NULL, 'active');
-
-
---
--- Data for Name: audit_logs; Type: TABLE DATA; Schema: public; Owner: -
---
-
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('00000000-0000-0000-0000-000000000001', 'system', '', 'system@finflux.local', NULL, NULL, NULL, 'admin', '2026-02-12 16:20:15.777487+08', '2026-02-12 16:20:15.777487+08', NULL, 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('3b593fbd-d0cd-48b8-99f1-fd9274f4059d', 'testuser', '$2b$12$eMoYGYTk1cBXupBiYXk5he8PG56Fyb8t2TpFCVovKcQrnWJdg0VKG', NULL, NULL, '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'member', '2026-02-12 17:08:15.240684+08', '2026-02-12 17:08:15.240684+08', NULL, 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('8416371f-95f9-4454-b516-a20d434ca79c', 'testuser_828796', '$2b$12$aortAUQny0vsJFcFfFkJ4edAzrphidZX1pRDsb6y3D.CD1AeD9B.q', NULL, NULL, NULL, NULL, 'member', '2026-02-13 11:20:30.039084+08', '2026-02-13 11:24:06.561373+08', '2026-02-13 11:24:06.561373+08', 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('85a817b0-9fdb-4281-89e1-220ee539373c', 'testuser_1770953046_7807', '$2b$12$avN29IEdT0T1c.16NOFkGOC2XJpew5ziRJQxVBja7jjMUdlVWDZda', 'testuser_1770953046_7807@test.com', '13800000000', NULL, NULL, 'member', '2026-02-13 11:24:06.954359+08', '2026-02-13 11:24:06.954359+08', NULL, 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('dbcc40a1-1a3f-4da9-a726-76e3b1e29e0b', 'user_1770953127_9395', '$2b$12$MF1isplyh9RcLJAt4L8tzOw/Vgjpyk1dJkZyekDhej.Ssafd9CVH.', 'user_1770953127_9395@example.com', '13800000000', NULL, NULL, 'member', '2026-02-13 11:25:28.940015+08', '2026-02-13 11:25:31.71581+08', '2026-02-13 11:25:31.71581+08', 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('869405c8-4cdf-4137-ab53-c9fd98796293', 'financer', '$2b$12$KaYrIUU/AA0YT6BfLEaJVOgCi0.OpG/A8f5JQyjb.YpgLfD4PPPDO', 'financer@lanchen.com', '15020302832', '4a0127f2-98ae-4769-a9c1-5de3334af801', 'ef39a863-6ab7-4f99-bb78-236170d38117', 'member', '2026-02-19 16:43:43.320509+08', '2026-02-19 16:43:43.320509+08', NULL, 'active');
+INSERT INTO public.users (id, username, password_hash, email, phone, department_id, company_id, role, created_at, updated_at, last_login, status) VALUES ('00000000-0000-0000-0000-000000000003', 'admin', '$2a$06$8jR7WzRe5E3upJmmCtIPyOfArPX1k8140YBJ/rZIe6nr6k4hG3Tna', 'admin@example.com', NULL, '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'admin', '2026-02-10 16:11:16.330406+08', '2026-03-24 14:09:05.431407+08', '2026-03-24 14:09:05.431407+08', 'active');
 
 
 --
 -- Data for Name: conversations; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.conversations VALUES ('9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', '00000000-0000-0000-0000-000000000003', '你好', '2026-02-25 09:38:49.018524', '2026-02-25 10:28:12.798989', 'active');
+INSERT INTO public.conversations (id, user_id, title, created_at, updated_at, status) VALUES ('d9d4079d-ce32-43d6-b3ee-41e6e3a8a548', '00000000-0000-0000-0000-000000000003', '我的规则列表', '2026-03-22 15:37:09.271053', '2026-03-24 14:05:26.769606', 'active');
 
 
 --
 -- Data for Name: messages; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.messages VALUES ('740b3a46-15e9-4131-b867-6e6a7f016404', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '你好', '{}', '[]', '2026-02-25 09:38:49.045634');
-INSERT INTO public.messages VALUES ('2242a22c-fc90-4e56-a8ef-7925df4431de', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '你好，admin！
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('3da80c1b-0f97-458f-a4e3-fc2a7e9aae5c', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📋 **我的对账规则列表**
 
-我是专业的财务对账助手，可以帮助你完成以下工作：
-1. **执行对账**：使用已有的对账规则快速对账
-2. **创建规则**：引导你创建新的对账规则
-3. **编辑规则**：调整已有规则的字段映射、配置等
-4. **删除规则**：删除不需要的对账规则
-5. **查看规则列表**：列出所有已创建的对账规则
-6. **理解对账结果**：帮助你分析和解释对账结果
+• **南京飞翰123**
+• **腾讯异业123**
+• **西福123**
+• **喜马**
+• **西福商管欧飞**
+• **腾讯异业**', '{}', '[]', '2026-03-22 15:37:09.327404');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('fed408c3-2693-4306-941c-830c40629335', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '🚀 对账任务已启动
 
-当前已有的对账规则包括：
-- 喜马（喜马）
-- 腾讯异业（腾讯异业）
-- 西福（西福）
-
-请问你需要什么帮助？', '{}', '[]', '2026-02-25 09:38:49.070981');
-INSERT INTO public.messages VALUES ('2187f401-6918-456f-9b2c-4961e0b060af', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '你好', '{}', '[]', '2026-02-25 09:39:13.424614');
-INSERT INTO public.messages VALUES ('616f2c98-1589-42b5-a9a6-ada87a31c269', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '你好，admin！
-
-我是专业的财务对账助手，可以帮助你完成以下工作：
-1. **执行对账**：使用已有的对账规则快速对账
-2. **创建规则**：引导你创建新的对账规则
-3. **编辑规则**：调整已有规则的字段映射、配置等
-4. **删除规则**：删除不需要的对账规则
-5. **查看规则列表**：列出所有已创建的对账规则
-6. **理解对账结果**：帮助你分析和解释对账结果
-
-当前已有的对账规则包括：
-- 喜马（喜马）
-- 腾讯异业（腾讯异业）
-- 西福（西福）
-
-请问你需要什么帮助？', '{}', '[]', '2026-02-25 09:39:13.448352');
-INSERT INTO public.messages VALUES ('372fc992-cfd5-44ed-a5a9-e8bf9d835af0', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 09:39:29.01492');
-INSERT INTO public.messages VALUES ('805bc68f-e902-49c6-a3cf-f1d0eddb8441', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 09:39:29.03876');
-INSERT INTO public.messages VALUES ('4aebf402-00a8-48b8-84b4-6691a1508e4f', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_093934.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_093935.csv", "size": 0}]', '2026-02-25 09:39:42.584161');
-INSERT INTO public.messages VALUES ('db8887fe-364d-4438-a836-7ceb37baf18e', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 09:39:42.608422');
-INSERT INTO public.messages VALUES ('5756a0a1-533a-4ebd-a854-0b8b47cd8765', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_093934.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_093935.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 09:39:42.630879');
-INSERT INTO public.messages VALUES ('1164eec8-c429-46db-815c-d489599e5b80', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '你好，admin！
-
-我是专业的财务对账助手，可以帮助你完成以下工作：
-1. **执行对账**：使用已有的对账规则快速对账
-2. **创建规则**：引导你创建新的对账规则
-3. **编辑规则**：调整已有规则的字段映射、配置等
-4. **删除规则**：删除不需要的对账规则
-5. **查看规则列表**：列出所有已创建的对账规则
-6. **理解对账结果**：帮助你分析和解释对账结果
-
-当前已有的对账规则包括：
-- 喜马（喜马）
-- 腾讯异业（腾讯异业）
-- 西福（西福）
-
-请问你需要什么帮助？', '{}', '[]', '2026-02-25 09:39:42.656367');
-INSERT INTO public.messages VALUES ('8c5fe3cc-1ab9-401e-b213-0b4ddb4271b9', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_093934.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_093935.csv", "size": 0}]', '2026-02-25 09:39:59.682195');
-INSERT INTO public.messages VALUES ('708ee1cd-20ae-4650-9a10-c9d2fad0d79a', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_093934.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_093935.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 09:39:59.709019');
-INSERT INTO public.messages VALUES ('be54c8ad-1a39-467c-9aae-e8251c94444e', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '✅ 已选择规则「西福」
-
-📋 **字段映射**
-业务: date→订单时间, amount→销售额, status→状态, order_id→[''sp订单号'']
-财务: date→完成时间, amount→发生-, status→None, order_id→[''sup订单号'']
-
-⚙️ **规则配置**
-默认规则
-
-此规则进行对请确认是否采用账？
-（回复"确认"采用，或回复"不要"返回）', '{}', '[]', '2026-02-25 09:39:59.730505');
-INSERT INTO public.messages VALUES ('79f33d67-68e5-436f-8295-c61328ba896f', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🚀 对账任务已启动
-
-规则：西福
-文件：2 个
-任务ID：task_5a3fe27f69b1
+- 规则：腾讯异业
+- 2025-12-01~2025-12-01对账流水.csv
+- ads_finance_d_inc_channel_details_20260105133821735_0.csv
 
 ⏳ 正在执行对账，预计需要 10-60 秒
 
-进度：开始加载数据', '{}', '[]', '2026-02-25 09:39:59.749947');
-INSERT INTO public.messages VALUES ('df52d241-acd1-4618-8f80-7226c761a52f', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+进度：开始加载数据', '{}', '[]', '2026-03-22 15:38:31.552448');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('72c473fb-a853-44a4-bdca-ed76eeaae340', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始数据整理任务**
 
-我会引导你完成以下4个步骤：
+已选择规则：**逾期统计数据整理**
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
+请先上传需要整理的数据文件（Excel 或 CSV 格式）。', '{}', '[]', '2026-03-24 11:24:31.331693');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('eca4d4ae-cad2-4a20-a23a-3e8c08b5a247', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始数据整理任务**
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 09:39:59.772061');
-INSERT INTO public.messages VALUES ('0919eab9-b169-4a0f-b5c1-eda872242654', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '你好，admin！
+已选择规则：**逾期统计数据整理**
 
-我是专业的财务对账助手，可以帮助你完成以下工作：
-1. **执行对账**：使用已有的对账规则快速对账
-2. **创建规则**：引导你创建新的对账规则
-3. **编辑规则**：调整已有规则的字段映射、配置等
-4. **删除规则**：删除不需要的对账规则
-5. **查看规则列表**：列出所有已创建的对账规则
-6. **理解对账结果**：帮助你分析和解释对账结果
+📋 **处理流程**（共4个步骤）：
 
-当前已有的对账规则包括：
-- 喜马（喜马）
-- 腾讯异业（腾讯异业）
-- 西福（西福）
+1. **读取规则** — 从数据库加载数据整理规则定义
+2. **文件校验** — 校验上传文件格式、列名是否符合规则要求
+3. **执行整理** — 按照规则执行数据转换和整理
+4. **结果展示** — 展示处理结果和生成的执行计划
 
-请问你需要什么帮助？', '{}', '[]', '2026-02-25 09:39:59.791218');
-INSERT INTO public.messages VALUES ('213f5179-ac6f-45a8-9d31-8a37a28d3a0b', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 09:46:03.142381');
-INSERT INTO public.messages VALUES ('124e97d3-101d-4ee7-80da-c67cfbb15ffb', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+请上传需要整理的数据文件，系统将自动按上述流程处理。', '{}', '[]', '2026-03-24 11:32:14.795231');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('6d63ac9a-01e8-4e5e-94a9-c99929ab6873', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '你好，admin！我是 Tally，专业的智能财务助手。
 
-我会引导你完成以下4个步骤：
+我可以帮助您完成财务数据整理和对账工作。选择任务类型（数据整理/数据对账）和数据规则即可开始处理。', '{}', '[]', '2026-03-24 12:23:52.801214');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('685a6831-3e09-48e3-bb5e-bc0ea41b456e', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '已读取规则「逾期统计数据整理」，开始准备文件校验。', '{}', '[]', '2026-03-24 12:24:05.093753');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('1e9ca583-d54b-4afd-b650-9c45f3ff8e03', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '数据整理任务已完成，结果文件如下。
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
+规则：逾期统计数据整理
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 09:46:03.172784');
-INSERT INTO public.messages VALUES ('def29d24-999a-4640-81f2-e91bcfcd5fbe', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_094607.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_094607.csv", "size": 0}]', '2026-02-25 09:46:15.174064');
-INSERT INTO public.messages VALUES ('933c1500-467f-4aaa-b9f5-0a5fa2f37f46', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
+**结果文件：**
+- **[金蝶期末余额-检核](http://localhost:3335/output/proc/overdue_statistics/金蝶期末余额-检核_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 2行
+- **[统计使用-7月余额](http://localhost:3335/output/proc/overdue_statistics/统计使用-7月余额_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 2行
+- **[统计使用-借方](http://localhost:3335/output/proc/overdue_statistics/统计使用-借方_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 4行
+- **[统计使用-贷方](http://localhost:3335/output/proc/overdue_statistics/统计使用-贷方_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 4行
+- **[统计合并](http://localhost:3335/output/proc/overdue_statistics/统计合并_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 2行
+- **[逾期统计](http://localhost:3335/output/proc/overdue_statistics/逾期统计_20260324_140424_082.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)** — 2行
 
-📄 **1767597466118_094607.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
+如需重新处理或使用其他规则，请告知。', '{}', '[]', '2026-03-24 14:04:24.645933');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('5d00c843-3c9c-4ac5-ab75-50a6ac47c66b', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始对账执行任务**
 
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_094607.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
+已选择规则：**喜马-26合单与官网数据核对**
+已上传文件：2 个
 
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 09:46:15.197293');
-INSERT INTO public.messages VALUES ('b9b0487a-fdbd-42b6-8335-d6cb9bf4e558', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+正在校验文件并加载规则...', '{}', '[]', '2026-03-24 14:05:09.502719');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('b8ec8a3a-5e69-454a-9599-65c5c8d73e31', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '以下是详细对账结果。
 
-我会引导你完成以下4个步骤：
+**规则：** 喜马-26合单与官网数据核对
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
+---
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 09:46:15.216379');
-INSERT INTO public.messages VALUES ('ea8f53fa-5c38-4771-bd19-542b7667fa8e', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 10:03:43.339952');
-INSERT INTO public.messages VALUES ('806f66d6-8d70-456c-b5c6-d6af7e557156', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+📁 **文件**: `合单.xlsx` ↔ `官网.xlsx`
 
-我会引导你完成以下4个步骤：
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:03:43.365895');
-INSERT INTO public.messages VALUES ('c786b566-5394-43b4-959c-52c24d845809', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_100518.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv", "size": 0}]', '2026-02-25 10:05:26.938382');
-INSERT INTO public.messages VALUES ('49b248fd-ab63-4a70-a305-135fbb9551a8', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+📊 **结果统计**:
 
-我会引导你完成以下4个步骤：
+| 类型 | 数量 | 说明 |
+|------|------|------|
+| ✅ 完全匹配 | 6484 | 数据完全一致 |
+| ⚠️ 匹配有差异 | 0 | sup订单号/第三方订单号匹配但发生减不同 |
+| 📤 合单.xlsx独有 | 0 | 仅在合单.xlsx中存在 |
+| 📥 官网.xlsx独有 | 10 | 仅在官网.xlsx中存在 |
+| **合计** | **6494** | 总记录数 |
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
+📄 **[查看详细差异报告](http://localhost:3335/output/recon/喜马-26合单与官网数据核对_核对结果_20260324_140525.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMzIyNDgsImV4cCI6MTc3NDQxODY0OCwianRpIjoiZGVjMWE5MDQtY2E4Zi00ZjUwLTgxOTAtZDEzYzEyZDBjZjM1In0.sdzDXPJcbgbbmTLL4QFfCRbQ8NVvpsXqR9LScfrIm4Q)**
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:05:26.963558');
-INSERT INTO public.messages VALUES ('3344361a-a7b9-4e7b-8370-3aafb3d66cbd', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
+---
 
-📄 **1767597466118_100518.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
 
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
+如需进一步分析或有疑问，请告知。', '{}', '[]', '2026-03-24 14:05:26.599544');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('9d89cbdd-7ccc-454f-9ed9-7e030eee3ff9', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '使用腾讯异业', '{}', '[]', '2026-03-22 15:37:21.797786');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('2f9c25df-52dd-42e2-8926-0dc21dd8c636', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '好的，将使用规则「腾讯异业」进行对账。
 
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:05:26.987999');
-INSERT INTO public.messages VALUES ('2086c3e6-0acc-4619-b9cb-3e72e9eb0a86', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_100518.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv", "size": 0}]', '2026-02-25 10:05:32.607948');
-INSERT INTO public.messages VALUES ('b03d30e1-386d-4c48-8971-36a7eb80408c', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+✨ 请上传对账文件（文件1和文件2各一个）', '{}', '[]', '2026-03-22 15:38:31.583213');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('423f05e1-871d-4ff7-84a2-87042f568a45', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 5 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/24/贷方-收款单明细_112559.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/调整明细_112559.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/借方-计提单明细_112559.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/金蝶期末余额-检核_112559.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/科目期初_112559.xlsx", "size": 0}]', '2026-03-24 11:25:59.851142');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('8b666647-47be-402c-b09e-95aa2f9a517f', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '✅ 读取规则
 
-我会引导你完成以下4个步骤：
+✅ 文件校验
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
+✅ 执行整理
 
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:05:32.629365');
-INSERT INTO public.messages VALUES ('ecf78d23-96a3-478e-99d0-3cb9a0ff085d', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
+✅ 结果展示
 
-📄 **1767597466118_100518.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
+数据整理任务已完成。
 
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
+规则：逾期统计数据整理
 
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:05:32.652233');
-INSERT INTO public.messages VALUES ('cc151164-0de0-461a-8028-7d5215b2cf53', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_100518.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv", "size": 0}]', '2026-02-25 10:05:56.172812');
-INSERT INTO public.messages VALUES ('906c7e83-3b83-4caf-821b-fa7a9977f9a7', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
+已生成 6 个文件：
+- **[金蝶期末余额-检核](http://localhost:3335/output/proc/overdue_statistics/金蝶期末余额-检核_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[统计使用-7月余额](http://localhost:3335/output/proc/overdue_statistics/统计使用-7月余额_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[统计使用-借方](http://localhost:3335/output/proc/overdue_statistics/统计使用-借方_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 4行
+- **[统计使用-贷方](http://localhost:3335/output/proc/overdue_statistics/统计使用-贷方_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 4行
+- **[统计合并](http://localhost:3335/output/proc/overdue_statistics/统计合并_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[逾期统计](http://localhost:3335/output/proc/overdue_statistics/逾期统计_20260324_113214_519.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
 
-我会引导你完成以下4个步骤：
+如需重新处理或使用其他规则，请告知。', '{}', '[]', '2026-03-24 11:32:14.87669');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('324a90dc-b179-41a5-b2ba-ab03851723a3', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 5 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/24/贷方-收款单明细_122402.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/调整明细_122402.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/借方-计提单明细_122402.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/金蝶期末余额-检核_122403.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/科目期初_122403.xlsx", "size": 0}]', '2026-03-24 12:24:04.592368');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('b34a8fad-3e1d-4d9b-8ba9-5299cec08af7', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '文件校验通过。
 
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:05:56.19646');
-INSERT INTO public.messages VALUES ('164e232c-c7e3-43c5-9a20-7fb4723a26f9', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_100518.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_100519.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:05:56.219302');
-INSERT INTO public.messages VALUES ('3ad59929-4b6b-42ab-8023-0a0376ac0524', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 10:12:34.838035');
-INSERT INTO public.messages VALUES ('a5b04af3-57d4-4afb-9334-803c024ef1c2', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:12:34.871313');
-INSERT INTO public.messages VALUES ('410e2f98-f531-4816-9f69-8d9bb319226b', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_101241.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_101241.csv", "size": 0}]', '2026-02-25 10:12:50.833265');
-INSERT INTO public.messages VALUES ('516db3bf-a92c-4d25-805f-5bfe0f1a23fe', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_101241.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_101241.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:12:50.858379');
-INSERT INTO public.messages VALUES ('8afc8ba4-8768-4692-b58e-ab16c92ddea0', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:12:50.878791');
-INSERT INTO public.messages VALUES ('180922de-6f17-4c1e-9b38-84a2c1693559', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_101241.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_101241.csv", "size": 0}]', '2026-02-25 10:12:54.969791');
-INSERT INTO public.messages VALUES ('e411f8d5-8dfc-4964-9218-b9a41e60bb3f', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_101241.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_101241.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:12:54.990765');
-INSERT INTO public.messages VALUES ('4d841c9e-7ad1-4346-9dd8-6dc27814180d', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:12:55.010652');
-INSERT INTO public.messages VALUES ('a2c794cf-d652-4c13-80b3-20cb9451555d', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 10:20:58.868289');
-INSERT INTO public.messages VALUES ('3a199181-fa38-4b64-88a5-adc2c4fb44f7', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:20:58.900773');
-INSERT INTO public.messages VALUES ('351b4610-7184-40b4-b494-f749eb65b00a', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_102102.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_102103.csv", "size": 0}]', '2026-02-25 10:21:10.325565');
-INSERT INTO public.messages VALUES ('d78dd8d6-91b6-443d-bd1b-b9f4a56909ff', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:21:10.351694');
-INSERT INTO public.messages VALUES ('470407eb-64c6-47c9-be76-74e346fa1279', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_102102.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_102103.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:21:10.379293');
-INSERT INTO public.messages VALUES ('cc83d43b-f444-476a-871b-d9538c41808a', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_102102.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_102103.csv", "size": 0}]', '2026-02-25 10:21:14.350199');
-INSERT INTO public.messages VALUES ('682e0ada-713f-405b-a71e-340b11244d1b', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:21:14.431133');
-INSERT INTO public.messages VALUES ('e88b689c-2d2c-498f-8a21-26f07b799d45', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_102102.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_102103.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:21:14.459578');
-INSERT INTO public.messages VALUES ('e98ba5d9-b0b3-4a45-9daf-e77a2063e1eb', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '创建规则', '{}', '[]', '2026-02-25 10:27:53.723051');
-INSERT INTO public.messages VALUES ('7279e88a-f4c2-4da5-a9fb-8f717cb5ece6', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:27:53.748835');
-INSERT INTO public.messages VALUES ('289e3eb9-e8c0-4a96-9f2b-89922d66aebd', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_102759.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_102800.csv", "size": 0}]', '2026-02-25 10:28:07.267918');
-INSERT INTO public.messages VALUES ('ef08bfc7-c2e7-486d-885e-333ac90ab335', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_102759.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_102800.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:28:07.294902');
-INSERT INTO public.messages VALUES ('a35d1020-5e15-45b5-94e6-6b2077cbf413', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:28:07.320369');
-INSERT INTO public.messages VALUES ('f13a12e6-6a63-4b28-b8c7-7b5763f80e68', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'user', '1', '{}', '[{"name": null, "path": "/uploads/2026/2/25/1767597466118_102759.csv", "size": 0}, {"name": null, "path": "/uploads/2026/2/25/ads_finance_d_inc_channel_details_20260105152012277_0_102800.csv", "size": 0}]', '2026-02-25 10:28:12.707681');
-INSERT INTO public.messages VALUES ('a19d266b-61ea-43b8-92fc-7b7913803b9b', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '📊 **第1步：文件分析完成**
-
-📄 **1767597466118_102759.csv**
-   • 列数: 17  行数: 985
-   • 列名: 订单编号, sp订单号, 商品编号, 商品名称, 充值账号, 面值, 购买数量, 销售额, 成本, 利润...
-
-📄 **ads_finance_d_inc_channel_details_20260105152012277_0_102800.csv**
-   • 列数: 20  行数: 976
-   • 列名: 完成时间, 提交时间, 订单来源, 订单号, sup订单号, 合单订单号, 订单类型, 结算类型, 渠道所属公司, 渠道供应商...
-
-正在为你生成字段映射建议...', '{}', '[]', '2026-02-25 10:28:12.731498');
-INSERT INTO public.messages VALUES ('9c56f690-7065-4008-a76e-2c3c9a0e3ba0', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🎯 开始创建新的对账规则
-
-我会引导你完成以下4个步骤：
-
-1️⃣ 上传并分析文件 - 分析文件结构和列名
-2️⃣ 确认字段映射 - 将列名映射到标准字段（订单号、金额等）
-3️⃣ 配置规则参数 - 设置容差、订单号特征等
-4️⃣ 预览并保存 - 查看规则效果并保存
-
-请先上传需要对账的文件（业务数据和财务数据各一个 Excel/CSV 文件）。', '{}', '[]', '2026-02-25 10:28:12.755623');
-INSERT INTO public.messages VALUES ('9ae55841-1d53-42ae-a6fe-146164d6bc7a', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '✅ 已选择规则「西福」
-
-📋 **字段映射**
-业务: date→订单时间, amount→销售额, status→状态, order_id→[''sp订单号'']
-财务: date→完成时间, amount→发生-, status→None, order_id→[''sup订单号'']
-
-⚙️ **规则配置**
-默认规则
-
-请确认是否采用此规则进行对账？
-（回复"确认"采用，或回复"不要"返回）', '{}', '[]', '2026-02-25 10:28:12.777322');
-INSERT INTO public.messages VALUES ('6e392e26-4b09-4fdf-b074-91b1562f640e', '9fdd4ab4-e561-43b8-99b1-e8fcc97172a9', 'assistant', '🚀 对账任务已启动
-
-规则：西福
-文件：2 个
-任务ID：task_a910e4a60ded
-
-⏳ 正在执行对账，预计需要 10-60 秒
-
-进度：开始加载数据', '{}', '[]', '2026-02-25 10:28:12.798989');
+**文件识别结果：**
+✅ **已匹配：**
+- **贷方-收款单明细.xlsx** → 贷方-收款单明细
+- **调整明细.xlsx** → 调整明细
+- **借方-计提单明细.xlsx** → 借方-计提单明细
+- **金蝶期末余额-检核.xlsx** → 金蝶期末余额-检核
+- **科目期初.xlsx** → 科目期初', '{}', '[]', '2026-03-24 12:24:05.165614');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('f97470fc-9ba7-46b2-afcd-51c4262e025b', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '文件校验通过。
+
+**文件识别结果：**
+✅ **已匹配：**
+- **贷方-收款单明细.xlsx** → 贷方-收款单明细
+- **调整明细.xlsx** → 调整明细
+- **借方-计提单明细.xlsx** → 借方-计提单明细
+- **金蝶期末余额-检核.xlsx** → 金蝶期末余额-检核
+- **科目期初.xlsx** → 科目期初', '{}', '[]', '2026-03-24 14:04:24.740443');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('b527cb94-1bb4-45d3-a133-8a61d2875807', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '已读取规则「喜马-26合单与官网数据核对」，开始准备文件校验。', '{}', '[]', '2026-03-24 14:05:09.593807');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('15d1e4b9-abc7-4f93-90ed-6e5d3cfab36b', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '已读取规则「喜马-26合单与官网数据核对」，开始准备文件校验。', '{}', '[]', '2026-03-24 14:05:26.687287');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('bd7e51c4-5098-46e5-992f-c3b5dc157e1c', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '好的，将使用规则「腾讯异业」进行对账。
+
+✨ 请上传对账文件（文件1和文件2各一个）', '{}', '[]', '2026-03-22 15:37:21.828628');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('a8109057-0a37-478d-b1f8-4407003eb849', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '你好', '{}', '[]', '2026-03-23 17:51:52.058052');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('a6ca2aa2-00f8-4983-ac6a-27612e8aca57', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '未找到规则编码为「verif_recog」的规则。
+请确认规则编码是否正确，或联系管理员获取可用的规则列表。', '{}', '[]', '2026-03-24 11:25:59.951748');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('c2c19a98-51b9-4fd3-ae6a-a4cfd0fd009c', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '✅ 读取规则
+
+✅ 文件校验
+
+✅ 执行整理
+
+⏳ 正在进行 **结果展示** 的工作...', '{}', '[]', '2026-03-24 11:32:15.000615');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('f9d9c8e0-85f7-463d-af63-e12d7d064e74', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始数据整理任务**
+
+已选择规则：**逾期统计数据整理**
+已上传文件：5 个
+
+📋 **处理流程**（共4个步骤）：
+
+1. **读取规则** — 从数据库加载数据整理规则定义
+2. **文件校验** — 校验上传文件格式、列名是否符合规则要求
+3. **执行整理** — 按照规则执行数据转换和整理
+4. **结果展示** — 展示处理结果和生成的执行计划
+
+正在校验文件并加载规则...', '{}', '[]', '2026-03-24 12:24:04.712174');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('0948ee2f-776f-4c45-8509-1c9771508ec7', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 5 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/24/贷方-收款单明细_140422.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/调整明细_140422.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/借方-计提单明细_140422.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/金蝶期末余额-检核_140422.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/科目期初_140422.xlsx", "size": 0}]', '2026-03-24 14:04:24.250779');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('c79d4698-e496-45e2-a553-db13b23f0ee5', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始数据整理任务**
+
+已选择规则：**逾期统计数据整理**
+已上传文件：5 个
+
+📋 **处理流程**（共4个步骤）：
+
+1. **读取规则** — 从数据库加载数据整理规则定义
+2. **文件校验** — 校验上传文件格式、列名是否符合规则要求
+3. **执行整理** — 按照规则执行数据转换和整理
+4. **结果展示** — 展示处理结果和生成的执行计划
+
+正在校验文件并加载规则...', '{}', '[]', '2026-03-24 14:04:24.812789');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('b871d469-2abf-4f6e-87b0-fc5fd29ac6a1', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 2 个文件，请处理。', '{}', '[]', '2026-03-24 14:05:26.30917');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('70ac83e2-3bb4-45e9-8b8f-3fd99a597069', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '文件校验通过。
+
+**文件识别结果：**
+✅ **已匹配：**
+- **官网.xlsx** → 喜马官网表
+- **合单.xlsx** → 喜马合单表', '{}', '[]', '2026-03-24 14:05:26.769606');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('857c2eaa-1ed0-4e3c-b100-4ff33ad9f290', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/22/2025-12-01~2025-12-01对账流水_153733.csv", "size": 0}, {"name": null, "path": "/uploads/2026/3/22/ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv", "size": 0}]', '2026-03-22 15:38:31.486792');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('06b6e353-5048-4fab-9a60-a3b12e83f941', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '你好！我是 Tally，专业的智能财务助手。我可以帮助您完成财务数据整理和对账工作。选择任务类型（数据整理/数据对账）和数据规则即可开始处理。', '{}', '[]', '2026-03-23 17:51:52.155075');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('fe64ff8c-f980-4e00-b895-a9cc184aeb83', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始数据整理任务**
+
+已选择规则：**逾期统计数据整理**
+
+📋 **处理流程**（共4个步骤）：
+
+1. **读取规则** — 从数据库加载数据整理规则定义
+2. **文件校验** — 校验上传文件格式、列名是否符合规则要求
+3. **执行整理** — 按照规则执行数据转换和整理
+4. **结果展示** — 展示处理结果和生成的执行计划
+
+请上传需要整理的数据文件，系统将自动按上述流程处理。', '{}', '[]', '2026-03-24 11:26:00.029893');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('53b3d30e-ed36-4bd1-bd88-ec7d1a85984d', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '文件校验通过。
+
+**文件识别结果：**
+✅ **已匹配：**
+- **贷方-收款单明细.xlsx** → 贷方-收款单明细
+- **调整明细.xlsx** → 调整明细
+- **借方-计提单明细.xlsx** → 借方-计提单明细
+- **金蝶期末余额-检核.xlsx** → 金蝶期末余额-检核
+- **科目期初.xlsx** → 科目期初', '{}', '[]', '2026-03-24 11:32:15.255494');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('ae74c2cc-7f2d-4377-bf39-1a4f56467bfe', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '数据整理任务已完成，结果文件如下。
+
+规则：逾期统计数据整理
+
+**结果文件：**
+- **[金蝶期末余额-检核](http://localhost:3335/output/proc/overdue_statistics/金蝶期末余额-检核_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[统计使用-7月余额](http://localhost:3335/output/proc/overdue_statistics/统计使用-7月余额_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[统计使用-借方](http://localhost:3335/output/proc/overdue_statistics/统计使用-借方_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 4行
+- **[统计使用-贷方](http://localhost:3335/output/proc/overdue_statistics/统计使用-贷方_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 4行
+- **[统计合并](http://localhost:3335/output/proc/overdue_statistics/统计合并_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+- **[逾期统计](http://localhost:3335/output/proc/overdue_statistics/逾期统计_20260324_122404_420.xlsx?auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ1c2VybmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImRlcGFydG1lbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIiLCJpYXQiOjE3NzQzMjMxMjMsImV4cCI6MTc3NDQwOTUyMywianRpIjoiOGJmZDhkMzMtYWU4NS00NTgwLTg4ODItNmQzMTNhZDIyMzc3In0.5PC2tCKSIO0nC4Hw9z6KTAFZZCtgDhCc7yypJlm9Xfs)** — 2行
+
+如需重新处理或使用其他规则，请告知。', '{}', '[]', '2026-03-24 12:24:04.828848');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('5132fbf0-d556-4866-9330-86e17657bb47', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '已读取规则「逾期统计数据整理」，开始准备文件校验。', '{}', '[]', '2026-03-24 14:04:24.354863');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('b56dc64d-9fcc-471c-a62e-b65d9dc4702e', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 2 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/24/1767597466118_140508.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/ads_finance_d_inc_channel_details_20260105152012277_0_140508.xlsx", "size": 0}]', '2026-03-24 14:05:09.292621');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('4d70c3ca-e31f-4917-98dc-467879006b1c', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '📊 **开始对账执行任务**
+
+已选择规则：**喜马-26合单与官网数据核对**
+已上传文件：2 个
+
+正在校验文件并加载规则...', '{}', '[]', '2026-03-24 14:05:26.402025');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('9deff274-d81d-4936-8ef2-cdf8a0b35e35', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '我的规则列表', '{}', '[]', '2026-03-22 15:37:09.303455');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('2121f012-d4af-45da-847e-d5f58dccbdf9', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '✅ 对账完成
+
+**对账概览**
+- **2025-12-01~2025-12-01对账流水_153733.csv:** 2316条
+- **ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv:** 2289条
+- **匹配成功:** 2289条
+- **异常记录:** 27条
+- **匹配率:** 98.8%
+
+**异常明细 (27条)**
+
+| 异常订单号 | 异常原因 |
+|-----------|----------|
+| L25120110170809713900 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120111175452914200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120110321469314100 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120103334534714200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120110161182614100 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120111443209714200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120113570522214200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120113314579414000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120100244338814200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120111412116113900 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120114565738713900 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120115025545713900 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120111455281814000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120112364330914000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120100512124614000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120112094453614000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120110060875614200 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120108194593814000 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120112572006214100 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+| L25120109310768114100 | 2025-12-01~2025-12-01对账流水_153733.csv存在，ads_finance_d_inc_channel_details_20260105133821735_0_153733.csv无此订单记录 |
+（共27条，仅列前20条）', '{}', '[]', '2026-03-22 15:38:31.518143');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('12119ebf-40b4-4289-9cc2-5d97f143a2a3', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '你好', '{}', '[]', '2026-03-24 11:24:31.251016');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('428ef151-63f1-4f47-bea8-ac361c82a503', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '已上传 5 个文件，请处理。', '{}', '[{"name": null, "path": "/uploads/2026/3/24/贷方-收款单明细_113212.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/调整明细_113212.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/借方-计提单明细_113212.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/金蝶期末余额-检核_113213.xlsx", "size": 0}, {"name": null, "path": "/uploads/2026/3/24/科目期初_113213.xlsx", "size": 0}]', '2026-03-24 11:32:14.687188');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('4448b755-1cdb-45de-8f4a-8d55a41c682a', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'user', '你好', '{}', '[]', '2026-03-24 12:23:52.689767');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('13102ccf-4947-45b5-82f7-87e1c2635243', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '执行整理已完成。
+
+- 规则：逾期统计数据整理
+- 生成目标文件：6 个
+- 合并文件：0 个
+
+正在整理最终结果，请稍候。', '{}', '[]', '2026-03-24 12:24:05.00133');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('174dd5ff-2fa0-40e9-b71c-422188d58cc2', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '执行整理已完成。
+
+- 规则：逾期统计数据整理
+- 生成目标文件：6 个
+- 合并文件：0 个
+
+正在整理最终结果，请稍候。', '{}', '[]', '2026-03-24 14:04:24.458857');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('f99ccb94-420c-4ffa-886f-1c419d0d2fb6', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '文件校验失败：
+
+本次共上传 2 个文件；当前规则需要 2 类文件。
+
+上传的文件不符合「喜马-26合单与官网数据核对」规则。
+规则要求上传以下文件，并且文件表头需包含对应列名：
+
+- 喜马合单表：完成时间、订单来源、订单号、订单类型、结算类型、渠道所属公司、渠道供应商、渠道名称、发生+、发生-
+- 喜马官网表：喜马订单号、支付时间、分成比例、合作方分销收入、应结算平台金额、结算状态、商品金额、实付金额
+
+已识别的文件：
+- ads_finance_d_inc_channel_details_20260105152012277_0.xlsx -> 喜马合单表
+
+未识别的文件：
+- 1767597466118.xlsx
+
+发现以下问题：
+- 存在未能识别的文件，请检查文件格式和表头是否符合规则要求。
+
+请检查文件格式后重新上传文件。', '{}', '[]', '2026-03-24 14:05:09.397343');
+INSERT INTO public.messages (id, conversation_id, role, content, metadata, attachments, created_at) VALUES ('3ae40b9c-73e1-4a31-b451-d5e0ba343c5d', 'd9d4079d-ce32-43d6-b3ee-41e6e3a8a548', 'assistant', '对账执行已完成：共处理 6494 条，匹配 6484 条，异常 10 条。
+
+异常分布：
+- 目标文件独有: 10 条
+
+正在生成详细结果，请稍候。', '{}', '[]', '2026-03-24 14:05:26.483221');
 
 
 --
--- Data for Name: reconciliation_rules; Type: TABLE DATA; Schema: public; Owner: -
+-- Data for Name: user_tasks; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.reconciliation_rules VALUES ('3a6650f8-3c0c-49b5-a124-1ff6c87c8b46', '测试认证规则', '更新后的描述', '3b593fbd-d0cd-48b8-99f1-fd9274f4059d', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'company', '{}', '{"version": "1.0", "description": "测试认证规则", "data_sources": {"finance": {}, "business": {}}}', '1.0', 0, NULL, '{测试,认证}', 'archived', NULL, NULL, '2026-02-12 17:08:15.339339+08', '2026-02-12 17:08:15.526847+08', DEFAULT, NULL);
-INSERT INTO public.reconciliation_rules VALUES ('15221300-8179-493b-ac9d-80a94a9d3624', '西福', '西福', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "西福", "data_sources": {"finance": {"field_roles": {"date": "完成时间", "amount": "发生-", "status": null, "order_id": ["sup订单号"]}, "file_pattern": ["ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx", "ads_finance_d_inc_channel_details_20260105152012277_0_*.csv", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm"]}, "business": {"field_roles": {"date": "订单时间", "amount": "销售额", "status": "状态", "order_id": ["sp订单号"]}, "file_pattern": ["1767597466118_*.csv", "1767597466118_*.xlsb", "1767597466118_*.xls", "1767597466118_*.xlsx", "1767597466118_*.xlsm"]}}, "key_field_role": "order_id", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}, {"name": "order_status_mismatch", "issue_type": "order_status_mismatch", "condition_expr": "biz_exists and str(biz.get(''status'', '''')).lower() != ''success'' and str(biz.get(''status'', '''')).lower() != ''成功'' and str(biz.get(''status'', '''')).lower() != ''交易成功''", "detail_template": "订单状态不一致：状态为 {biz[status]}，不是允许的成功状态"}], "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"row_filters": [{"condition": "str(row.get(''order_id'', '''')).startswith(''104'')", "description": "只保留104开头的订单号"}], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "按订单号合并"}, {"group_by": "order_id", "agg_fields": {"amount": "sum"}, "description": "按订单号合并，金额累加"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "transform": "str(row.get(''order_id'', '''')).strip(\"''\")[:21]", "description": "订单号去掉开头单引号，并截取前21位"}], "global_transforms": [{"subset": ["order_id", "amount"], "operation": "drop_na", "description": "删除关键字段为空的记录"}]}, "business": {"row_filters": [{"condition": "str(row.get(''order_id'', '''')).startswith(''104'')", "description": "只保留104开头的订单号"}], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "按订单号合并"}, {"group_by": "order_id", "agg_fields": {"amount": "sum"}, "description": "按订单号合并，金额累加"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "transform": "str(row.get(''order_id'', '''')).strip(\"''\")[:21]", "description": "订单号去掉开头单引号，并截取前21位"}], "global_transforms": [{"subset": ["order_id"], "operation": "drop_na", "description": "删除订单号为空的记录"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-14 15:32:11.585011+08', '2026-02-14 15:32:11.585011+08', DEFAULT, NULL);
-INSERT INTO public.reconciliation_rules VALUES ('1fdf802d-6a6a-445c-a1c4-7e939983fe26', '腾讯异业', '腾讯异业', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "腾讯异业", "data_sources": {"finance": {"field_roles": {"date": ["完成时间"], "amount": ["发生-"], "order_id": ["sup订单号"]}, "file_pattern": ["ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsb", "ads_finance_d_inc_channel_details_20260105133821735_0_*.csv", "ads_finance_d_inc_channel_details_20260105133821735_0_*.xls", "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsx", "ads_finance_d_inc_channel_details_20260105133821735_0_*.xlsm"]}, "business": {"field_roles": {"date": ["ftran_time"], "amount": "product_price", "status": ["result", "provide_result"], "order_id": ["roc_oid"]}, "file_pattern": ["2025-12-01~2025-12-01对账流水_*.xlsb", "2025-12-01~2025-12-01对账流水_*.xlsm", "2025-12-01~2025-12-01对账流水_*.xlsx", "2025-12-01~2025-12-01对账流水_*.csv", "2025-12-01~2025-12-01对账流水_*.xls"]}}, "key_field_role": "order_id", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}, {"name": "order_status_mismatch", "issue_type": "order_status_mismatch", "condition_expr": "biz_exists and str(biz.get(''status'', '''')).lower() != ''success'' and str(biz.get(''status'', '''')).lower() != ''成功'' and str(biz.get(''status'', '''')).lower() != ''交易成功''", "detail_template": "订单状态不一致：状态为 {biz[status]}，不是允许的成功状态"}], "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"group_by": [{"field": "order_id", "aggregations": [{"field": "amount", "operation": "sum", "output_field": "amount"}]}], "row_filters": [], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "按订单号合并"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "transform": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21]", "description": "订单号去掉开头单引号，并截取前21位"}, {"field": "order_id", "transform": "str(row.get(''order_id'', ''''))", "description": "订单号转换为字符串"}], "global_transforms": [{"subset": ["order_id", "amount"], "operation": "drop_na", "description": "删除关键字段为空的记录"}]}, "business": {"group_by": [{"field": "order_id", "aggregations": [{"field": "amount", "operation": "sum", "output_field": "amount"}]}], "row_filters": [], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "按订单号合并"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "transform": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21]", "description": "订单号去掉开头单引号，并截取前21位"}, {"field": "order_id", "transform": "str(row.get(''order_id'', ''''))", "description": "订单号转换为字符串"}, {"field": "amount", "transform": "float(row.get(''amount'', 0)) / 100", "description": "product_price 除以100转换为元"}], "global_transforms": [{"subset": ["order_id"], "operation": "drop_na", "description": "删除订单号为空的记录"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-14 22:37:54.072215+08', '2026-02-14 22:37:54.072215+08', DEFAULT, NULL);
-INSERT INTO public.reconciliation_rules VALUES ('1eb20a3b-44c7-49fb-9239-62082b3f3d9a', '喜马', '喜马', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "喜马", "data_sources": {"finance": {"field_roles": {"date": "完成时间", "amount": ["发生-"], "order_id": "sup订单号"}, "file_pattern": ["合单_*.xlsx", "合单_*.csv", "合单_*.xls", "合单_*.xlsb", "合单_*.xlsm"]}, "business": {"field_roles": {"date": "支付时间", "amount": ["应结算平台金额"], "order_id": ["第三方订单号"]}, "file_pattern": ["官网_*.xlsb", "官网_*.xlsm", "官网_*.xlsx", "官网_*.csv", "官网_*.xls"]}}, "key_field_role": "order_id", "rule_config_text": "金额容差 0.1 元\n业务文件：金额保留2位小数\n业务文件：订单号去除首尾空格\n业务文件：订单号去掉开头单引号，并截取前21位\n业务文件：相同的订单号按金额累加合并\n财务文件：金额取绝对值\n财务文件：金额保留2位小数\n财务文件：订单号去除首尾空格\n财务文件：订单号去掉开头单引号，并截取前21位\n财务文件：相同的订单号按金额累加合并", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}], "field_mapping_text": "业务: 日期->支付时间, 金额->应结算平台金额, 订单号->第三方订单号\n财务: 日期->完成时间, 金额->发生-, 订单号->sup订单号", "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}, "business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-15 20:57:47.56214+08', '2026-02-15 20:57:47.56214+08', DEFAULT, NULL);
-INSERT INTO public.reconciliation_rules VALUES ('715b4720-f674-42bd-9347-4513b81b02ff', '对账吧', '对账吧', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "对账吧", "data_sources": {"finance": {"field_roles": {"date": "完成时间", "amount": ["发生-"], "order_id": "sup订单号"}, "file_pattern": ["合单_*.xlsm", "合单_*.csv", "合单_*.xls", "合单_*.xlsx", "合单_*.xlsb"]}, "business": {"field_roles": {"date": "支付时间", "amount": ["应结算平台金额"], "order_id": ["第三方订单号"]}, "file_pattern": ["官网_*.xlsb", "官网_*.xlsm", "官网_*.csv", "官网_*.xlsx", "官网_*.xls"]}}, "key_field_role": "order_id", "rule_config_text": "", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}], "field_mapping_text": "业务: 日期->支付时间, 金额->应结算平台金额, 订单号->第三方订单号\n财务: 日期->完成时间, 金额->发生-, 订单号->sup订单号", "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}, "business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-24 16:35:56.862839+08', '2026-02-24 16:35:56.862839+08', DEFAULT, '98f51d95bba9c295c0a459ad548ab61b');
-INSERT INTO public.reconciliation_rules VALUES ('6c5c6b4c-6993-4c09-a979-7e19f402e609', '确认', '确认', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "确认", "data_sources": {"finance": {"field_roles": {"date": "完成时间", "amount": ["发生-"], "order_id": "sup订单号"}, "file_pattern": ["合单_*.xlsm", "合单_*.xlsx", "合单_*.xls", "合单_*.xlsb", "合单_*.csv"]}, "business": {"field_roles": {"date": "支付时间", "amount": ["应结算平台金额"], "order_id": ["第三方订单号"]}, "file_pattern": ["官网_*.xlsm", "官网_*.xlsx", "官网_*.xls", "官网_*.csv", "官网_*.xlsb"]}}, "key_field_role": "order_id", "rule_config_text": "", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}], "field_mapping_text": "业务: 日期->支付时间, 金额->应结算平台金额, 订单号->第三方订单号\n财务: 日期->完成时间, 金额->发生-, 订单号->sup订单号", "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}, "business": {"aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "订单号去掉开头单引号，并截取前21位"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-24 16:59:55.579337+08', '2026-02-24 16:59:55.579337+08', DEFAULT, '98f51d95bba9c295c0a459ad548ab61b');
-INSERT INTO public.reconciliation_rules VALUES ('05e8f9ce-06f6-41dd-92b1-81b9f379c301', '西福商管', '西福商管', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'private', '{}', '{"version": "1.0", "tolerance": {"date_format": "%Y-%m-%d", "amount_diff_max": 0.1}, "description": "西福商管", "data_sources": {"finance": {"field_roles": {"date": "完成时间", "amount": "发生-", "order_id": ["sup订单号"]}, "file_pattern": ["ads_finance_d_inc_channel_details_20260105152012277_0_*.csv", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xls", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsm", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsx", "ads_finance_d_inc_channel_details_20260105152012277_0_*.xlsb"]}, "business": {"field_roles": {"date": "订单时间", "amount": "销售额", "order_id": ["sp订单号"]}, "file_pattern": ["1767597466118_*.xls", "1767597466118_*.xlsb", "1767597466118_*.xlsx", "1767597466118_*.csv", "1767597466118_*.xlsm"]}}, "key_field_role": "order_id", "rule_config_text": "去掉sup订单号单引号，并截取前21位\n相同的订单号按金额累加合并", "custom_validations": [{"name": "missing_in_business", "issue_type": "missing_in_business", "condition_expr": "fin_exists and not biz_exists", "detail_template": "{fin_file}存在，{biz_file}无此订单记录"}, {"name": "missing_in_finance", "issue_type": "missing_in_finance", "condition_expr": "biz_exists and not fin_exists", "detail_template": "{biz_file}存在，{fin_file}无此订单记录"}, {"name": "amount_mismatch", "issue_type": "amount_mismatch", "condition_expr": "biz_exists and fin_exists and biz.get(''amount'') is not None and fin.get(''amount'') is not None and abs(float(biz.get(''amount'', 0)) - float(fin.get(''amount'', 0))) > amount_diff_max", "detail_template": "{biz_file}金额 {biz[amount]} vs {fin_file}金额 {fin[amount]}，差额 {amount_diff_formatted} 超出容差 {amount_diff_max}"}], "field_mapping_text": "业务: 订单号->sp订单号, 金额->销售额, 日期->订单时间\n财务: 订单号->sup订单号, 金额->发生-, 日期->完成时间", "data_cleaning_rules": {"global": {"global_transforms": [{"keep": "first", "subset": ["order_id"], "operation": "drop_duplicates", "description": "全局去重"}]}, "finance": {"row_filters": [], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "operation": "abs", "description": "金额取绝对值"}, {"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}, {"field": "order_id", "operation": "expr", "expression": "str(row.get(''order_id'', '''')).lstrip(\"''\")[:21] if pd.notna(row.get(''order_id'', '''')) else row.get(''order_id'', '''')", "description": "sup订单号去掉前面的单引号，并截取前21位"}], "global_transforms": [{"subset": ["order_id", "amount"], "operation": "drop_na", "description": "删除关键字段为空的记录"}]}, "business": {"row_filters": [], "aggregations": [{"group_by": "order_id", "agg_fields": {"date": "first", "amount": "sum"}, "description": "相同的订单号按金额累加合并"}], "field_transforms": [{"field": "amount", "decimals": 2, "operation": "round", "description": "金额保留2位小数"}, {"field": "order_id", "operation": "strip", "description": "订单号去除首尾空格"}], "global_transforms": [{"subset": ["order_id"], "operation": "drop_na", "description": "删除订单号为空的记录"}]}}}', '1.0', 0, NULL, '{}', 'active', NULL, NULL, '2026-02-24 10:43:25.954193+08', '2026-02-24 14:02:48.375566+08', DEFAULT, '7fe0d171d468f2fd9c8c04eb3e84a033');
+INSERT INTO public.user_tasks (id, user_id, task_code, task_name, description) VALUES (3, '00000000-0000-0000-0000-000000000003', 'verif_recog', '数据整理', NULL);
+INSERT INTO public.user_tasks (id, user_id, task_code, task_name, description) VALUES (5, '00000000-0000-0000-0000-000000000003', 'audio_recon', '数据对账', NULL);
 
 
 --
--- Data for Name: reconciliation_tasks; Type: TABLE DATA; Schema: public; Owner: -
+-- Data for Name: rule_detail; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-
-
---
--- Data for Name: rule_usage_logs; Type: TABLE DATA; Schema: public; Owner: -
---
-
-
-
---
--- Data for Name: rule_versions; Type: TABLE DATA; Schema: public; Owner: -
---
-
+INSERT INTO public.rule_detail (id, rule_code, rule, remark, rule_type, user_id, name, task_id) VALUES (6, 'audio_recon_file_check', '{"file_validation_rules": {"version": "1.0", "description": "音频业务对账文件校验规则，包含喜马-26、腾讯异业、南京飞翰等目录的文件校验", "table_schemas": [{"table_id": "XIMA_HE_DAN", "file_type": ["xls", "xlsx", "csv"], "table_name": "喜马合单表", "table_type": "source", "description": "喜马合单数据表，包含订单汇总和渠道结算信息", "is_required": true, "column_aliases": {"发生+": ["发生加", "收入", "income"], "发生-": ["发生减", "支出", "expense"], "订单号": ["订单编号", "order_no"], "完成时间": ["完成日期", "finish_time"], "渠道名称": ["channel_name"], "结算类型": ["settlement_type"], "订单来源": ["来源", "order_source"], "订单类型": ["order_type"], "渠道供应商": ["供应商", "channel_supplier"], "渠道所属公司": ["所属公司", "channel_company"]}, "max_match_count": 1, "required_columns": ["完成时间", "订单来源", "订单号", "订单类型", "结算类型", "渠道所属公司", "渠道供应商", "渠道名称", "发生+", "发生-"]}, {"table_id": "XIMA_GUAN_WANG", "file_type": ["xls", "xlsx", "csv"], "table_name": "喜马官网表", "table_type": "target", "description": "喜马官网订单明细表，包含订单详情和商品信息", "is_required": true, "column_aliases": {"分成比例": ["分成", "share_ratio"], "商品金额": ["product_amount", "商品总价"], "实付金额": ["actual_amount", "实际支付金额"], "支付时间": ["pay_time", "付款时间"], "结算状态": ["settlement_status"], "喜马订单号": ["订单号", "xima_order_no", "order_no"], "合作方分销收入": ["分销收入", "partner_income"], "应结算平台金额": ["结算金额", "settlement_amount"]}, "max_match_count": 1, "required_columns": ["喜马订单号", "支付时间", "分成比例", "合作方分销收入", "应结算平台金额", "结算状态", "商品金额", "实付金额"]}], "validation_config": {"file_count": {"max": 10, "min": 2, "allow_multiple": true}, "case_sensitive": false, "ignore_whitespace": true}}}', '审计对账-文件上传合法性校验规则', 'file', NULL, '审计对账-文件上传合法性校验规则', 5);
+INSERT INTO public.rule_detail (id, rule_code, rule, remark, rule_type, user_id, name, task_id) VALUES (7, 'overdue_file_check', '{"file_validation_rules": {"table_schemas": [{"table_id": "OVERDUE_DEBIT_ACCRUAL_DETAIL", "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"], "table_name": "借方-计提单明细", "column_aliases": {"计提项": ["计提项目"], "公司名称": ["公司"], "单号整理": ["单号"], "客商名称": ["核算项目", "对方核算项目", "客商"], "对应科目": ["科目名称"], "逾期时间": ["逾期时"], "对应科目编码": ["科目编码", "科目代码"]}, "required_columns": ["对应科目编码", "对应科目", "日期", "公司名称", "中心", "计提项", "周期", "客商名称", "含税金额", "不含税金额", "税额", "单号整理", "期数", "逾期时间"]}, {"table_id": "OVERDUE_CREDIT_RECEIPT_DETAIL", "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"], "table_name": "贷方-收款单明细", "column_aliases": {"公司名称": ["公司"], "客商名称": ["核算项目", "对方核算项目", "客商"], "对应科目": ["科目名称"], "对应科目编码": ["科目编码", "科目代码"]}, "required_columns": ["对应科目编码", "对应科目", "日期", "公司名称", "客商名称", "金额", "单号", "费用项目", "商户", "填单人", "中心", "周期"]}, {"table_id": "OVERDUE_OPENING_BALANCE", "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"], "table_name": "科目期初", "column_aliases": {"公司": ["公司名称"], "归属中心": ["中心"], "核算项目": ["客商名称"], "科目代码": ["科目编码"], "逾期时间": ["逾期时"], "预计回款时间": ["预计回款日期", "预计回款"]}, "required_columns": ["日期", "科目代码", "科目名称", "公司", "核算项目", "周期", "归属中心", "期末余额", "预计回款时间", "逾期时间"]}, {"table_id": "OVERDUE_ADJUSTMENT_DETAIL", "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"], "table_name": "调整明细", "column_aliases": {"借方": ["借方金额"], "贷方": ["贷方金额"], "业务日期": ["日期"], "对方核算项目": ["核算项目", "客商名称", "客商"]}, "required_columns": ["科目编码", "科目名称", "公司", "对方核算项目", "业务日期", "摘要", "借方", "贷方", "中心", "周期"]}, {"table_id": "OVERDUE_KINGDEE_END_BALANCE_CHECK", "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"], "table_name": "金蝶期末余额-检核", "column_aliases": {"公司": ["公司名称"], "核算项目": ["核算项目1", "客商名称"], "科目编码": ["科目代码"]}, "required_columns": ["科目编码", "科目名称", "公司", "核算项目", "期初", "借方合计", "贷方合计", "借方调整", "贷方调整", "计算余额"]}], "validation_config": {"file_count": {"max": 5, "min": 5}}}}', '逾期统计文件校验规则', 'file', NULL, '逾期统计-文件上传合法性校验规则', 3);
+INSERT INTO public.rule_detail (id, rule_code, rule, remark, rule_type, user_id, name, task_id) VALUES (8, 'overdue_statistics', '{"steps": [{"match": {"sources": [{"keys": [{"field": "科目名称", "target_field": "科目名称"}, {"field": "公司", "target_field": "公司"}, {"field": "核算项目", "target_field": "核算项目"}], "alias": "opening_balance_agg"}, {"keys": [{"field": "科目名称", "target_field": "科目名称"}, {"field": "公司名称", "target_field": "公司"}, {"field": "客商名称", "target_field": "核算项目"}], "alias": "debit_accrual_agg"}, {"keys": [{"field": "科目名称", "target_field": "科目名称"}, {"field": "公司名称", "target_field": "公司"}, {"field": "客商名称", "target_field": "核算项目"}], "alias": "credit_receipt_agg"}, {"keys": [{"field": "科目名称", "target_field": "科目名称"}, {"field": "公司", "target_field": "公司"}, {"field": "对方核算项目", "target_field": "核算项目"}], "alias": "adjustment_agg"}]}, "action": "write_dataset", "sources": [{"alias": "opening_balance_source", "table": "科目期初"}, {"alias": "debit_accrual_source", "table": "借方-计提单明细"}, {"alias": "credit_receipt_source", "table": "贷方-收款单明细"}, {"alias": "adjustment_source", "table": "调整明细"}], "step_id": "step1_update_check_table", "mappings": [{"value": {"type": "source", "source": {"alias": "opening_balance_agg", "field": "agg_期初"}}, "target_field": "期初", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_agg", "field": "agg_借方合计"}}, "target_field": "借方合计", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_agg", "field": "agg_贷方合计"}}, "target_field": "贷方合计", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_agg", "field": "agg_贷方调整"}}, "target_field": "贷方调整", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_agg", "field": "agg_借方调整"}}, "target_field": "借方调整", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_期初", "field": "期末余额", "operator": "sum"}], "group_fields": ["科目名称", "公司", "核算项目"], "output_alias": "opening_balance_agg", "source_alias": "opening_balance_source"}, {"aggregations": [{"alias": "agg_借方合计", "field": "含税金额", "operator": "sum"}], "group_fields": ["科目名称", "公司名称", "客商名称"], "output_alias": "debit_accrual_agg", "source_alias": "debit_accrual_source"}, {"aggregations": [{"alias": "agg_贷方合计", "field": "金额", "operator": "sum"}], "group_fields": ["科目名称", "公司名称", "客商名称"], "output_alias": "credit_receipt_agg", "source_alias": "credit_receipt_source"}, {"aggregations": [{"alias": "agg_贷方调整", "field": "贷方", "operator": "sum"}, {"alias": "agg_借方调整", "field": "借方", "operator": "sum"}], "group_fields": ["科目名称", "公司", "对方核算项目"], "output_alias": "adjustment_agg", "source_alias": "adjustment_source"}], "description": "根据四张源表汇总更新金蝶期末余额-检核", "target_table": "金蝶期末余额-检核", "row_write_mode": "update_only"}, {"action": "create_schema", "schema": {"columns": [{"name": "日期", "nullable": false, "data_type": "date"}, {"name": "科目代码", "nullable": false, "data_type": "string"}, {"name": "科目名称", "nullable": false, "data_type": "string"}, {"name": "公司名称", "nullable": false, "data_type": "string"}, {"name": "核算项目", "nullable": false, "data_type": "string"}, {"name": "周期", "nullable": false, "data_type": "string"}, {"name": "归属中心", "nullable": false, "data_type": "string"}, {"name": "期末余额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "预计回款时间", "nullable": true, "data_type": "date"}, {"name": "逾期时间", "nullable": true, "data_type": "date"}], "primary_key": ["日期", "科目代码", "科目名称", "公司名称", "核算项目", "周期", "归属中心"]}, "step_id": "step2a_create_july_balance_usage", "description": "创建统计使用-7月余额表", "target_table": "统计使用-7月余额"}, {"action": "write_dataset", "sources": [{"alias": "opening_balance_source", "table": "科目期初"}], "step_id": "step2b_write_july_balance_usage", "mappings": [{"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "日期"}}, "target_field": "日期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "科目代码"}}, "target_field": "科目代码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "科目名称"}}, "target_field": "科目名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "公司"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "核算项目"}}, "target_field": "核算项目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "归属中心"}}, "target_field": "归属中心", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "期末余额"}}, "target_field": "期末余额", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "预计回款时间"}}, "target_field": "预计回款时间", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "opening_balance_source", "field": "逾期时间"}}, "target_field": "逾期时间", "field_write_mode": "overwrite"}], "depends_on": ["step2a_create_july_balance_usage", "step1_update_check_table"], "description": "按检核表匹配科目期初，生成统计使用-7月余额", "target_table": "统计使用-7月余额", "row_write_mode": "upsert", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司", "reference_field": "公司"}, {"source_field": "核算项目", "reference_field": "核算项目"}], "source_alias": "opening_balance_source", "reference_table": "金蝶期末余额-检核"}}, {"action": "create_schema", "schema": {"columns": [{"name": "对应科目编码", "nullable": false, "data_type": "string"}, {"name": "对应科目", "nullable": false, "data_type": "string"}, {"name": "日期", "nullable": false, "data_type": "date"}, {"name": "公司名称", "nullable": false, "data_type": "string"}, {"name": "中心", "nullable": false, "data_type": "string"}, {"name": "计提项目", "nullable": true, "data_type": "string"}, {"name": "周期", "nullable": false, "data_type": "string"}, {"name": "客商名称", "nullable": false, "data_type": "string"}, {"name": "含税金额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "不含税金额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "税额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "单号", "nullable": false, "data_type": "string"}, {"name": "期数", "nullable": true, "data_type": "string"}, {"name": "逾期时间", "nullable": true, "data_type": "date"}], "primary_key": ["单号", "对应科目编码", "公司名称", "客商名称", "周期", "中心"]}, "step_id": "step2c_create_debit_usage", "description": "创建统计使用-借方表", "target_table": "统计使用-借方"}, {"action": "write_dataset", "sources": [{"alias": "debit_accrual_source", "table": "借方-计提单明细"}], "step_id": "step2d_write_debit_usage", "mappings": [{"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "科目名称"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "日期"}}, "target_field": "日期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "计提项目"}}, "target_field": "计提项目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "客商名称"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "含税金额"}}, "target_field": "含税金额", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "不含税金额"}}, "target_field": "不含税金额", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "税额"}}, "target_field": "税额", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "单号"}}, "target_field": "单号", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "期数"}}, "target_field": "期数", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_accrual_source", "field": "逾期时间"}}, "target_field": "逾期时间", "field_write_mode": "overwrite"}], "depends_on": ["step2c_create_debit_usage", "step1_update_check_table"], "description": "按检核表匹配借方-计提单明细，生成统计使用-借方", "target_table": "统计使用-借方", "row_write_mode": "upsert", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司名称", "reference_field": "公司"}, {"source_field": "客商名称", "reference_field": "核算项目"}], "source_alias": "debit_accrual_source", "reference_table": "金蝶期末余额-检核"}}, {"action": "create_schema", "schema": {"columns": [{"name": "对应科目编码", "nullable": false, "data_type": "string"}, {"name": "对应科目", "nullable": false, "data_type": "string"}, {"name": "日期", "nullable": false, "data_type": "date"}, {"name": "公司名称", "nullable": false, "data_type": "string"}, {"name": "客商名称", "nullable": false, "data_type": "string"}, {"name": "金额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "单号", "nullable": false, "data_type": "string"}, {"name": "费用项目", "nullable": true, "data_type": "string"}, {"name": "商户", "nullable": true, "data_type": "string"}, {"name": "填单人", "nullable": true, "data_type": "string"}, {"name": "中心", "nullable": false, "data_type": "string"}, {"name": "周期", "nullable": false, "data_type": "string"}], "primary_key": ["单号", "对应科目编码", "公司名称", "客商名称", "周期", "中心"]}, "step_id": "step2e_create_credit_usage", "description": "创建统计使用-贷方表", "target_table": "统计使用-贷方"}, {"action": "write_dataset", "sources": [{"alias": "credit_receipt_source", "table": "贷方-收款单明细"}], "step_id": "step2f_write_credit_usage", "mappings": [{"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "科目名称"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "日期"}}, "target_field": "日期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "客商名称"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "金额"}}, "target_field": "金额", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "单号"}}, "target_field": "单号", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "费用项目"}}, "target_field": "费用项目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "商户"}}, "target_field": "商户", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "填单人"}}, "target_field": "填单人", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_receipt_source", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}], "depends_on": ["step2e_create_credit_usage", "step1_update_check_table"], "description": "按检核表匹配贷方-收款单明细，生成统计使用-贷方", "target_table": "统计使用-贷方", "row_write_mode": "upsert", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司名称", "reference_field": "公司"}, {"source_field": "客商名称", "reference_field": "核算项目"}], "source_alias": "credit_receipt_source", "reference_table": "金蝶期末余额-检核"}}, {"action": "create_schema", "schema": {"columns": [{"name": "对应科目编码", "nullable": false, "data_type": "string"}, {"name": "对应科目", "nullable": false, "data_type": "string"}, {"name": "公司名称", "nullable": false, "data_type": "string"}, {"name": "客商名称", "nullable": false, "data_type": "string"}, {"name": "周期", "nullable": false, "data_type": "string"}, {"name": "中心", "nullable": false, "data_type": "string"}, {"name": "累计借方", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "累计贷方", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "累计调整-借", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "累计调整-贷", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "7月余额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "逾期时间", "nullable": true, "data_type": "date"}, {"name": "计算余额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}], "primary_key": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "dynamic_columns": {"end": {"args": {"date": {"args": {}, "type": "function", "function": "current_date"}}, "function": "month_of"}, "start": {"args": {"offset": 1, "source": "统计使用-7月余额", "date_field": "日期", "output_format": "month"}, "function": "earliest_date"}, "dimension": "month", "columns_pattern": [{"name": "{month}月借", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}, {"name": "{month}月贷", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}, {"name": "{month}月调整-借", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}, {"name": "{month}月调整-贷", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}, {"name": "{month}月逾期时间", "nullable": true, "data_type": "date", "variables": {"month": {"name": "month", "type": "context"}}}, {"name": "{month}月计算余额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}]}}, "step_id": "step3_1_create_statistics_merge", "depends_on": ["step2b_write_july_balance_usage", "step2d_write_debit_usage", "step2f_write_credit_usage"], "description": "创建统计合并表结构，包含动态月列", "target_table": "统计合并"}, {"match": {"sources": [{"keys": [{"field": "科目代码", "target_field": "对应科目编码"}, {"field": "科目名称", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "核算项目", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "归属中心", "target_field": "中心"}], "alias": "july_balance_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "july_balance_usage", "table": "统计使用-7月余额"}], "step_id": "step3_2_seed_merge_from_july_balance", "mappings": [{"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "科目代码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "科目名称"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "核算项目"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "归属中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_seed", "field": "期末余额", "operator": "sum"}], "group_fields": ["科目代码", "科目名称", "公司名称", "核算项目", "周期", "归属中心"], "output_alias": "july_balance_usage_agg", "source_alias": "july_balance_usage"}], "depends_on": ["step3_1_create_statistics_merge"], "description": "用统计使用-7月余额初始化统计合并业务键", "target_table": "统计合并", "row_write_mode": "upsert"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "debit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "debit_usage", "table": "统计使用-借方"}], "step_id": "step3_3_seed_merge_from_debit", "mappings": [{"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "对应科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "对应科目"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "客商名称"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_seed", "field": "含税金额", "operator": "sum"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "output_alias": "debit_usage_agg", "source_alias": "debit_usage"}], "depends_on": ["step3_2_seed_merge_from_july_balance"], "description": "用统计使用-借方补齐统计合并业务键", "target_table": "统计合并", "row_write_mode": "upsert"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "credit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "credit_usage", "table": "统计使用-贷方"}], "step_id": "step3_4_seed_merge_from_credit", "mappings": [{"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "对应科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "对应科目"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "客商名称"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_seed", "field": "金额", "operator": "sum"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "output_alias": "credit_usage_agg", "source_alias": "credit_usage"}], "depends_on": ["step3_3_seed_merge_from_debit"], "description": "用统计使用-贷方补齐统计合并业务键", "target_table": "统计合并", "row_write_mode": "upsert"}, {"match": {"sources": [{"keys": [{"field": "科目编码", "target_field": "对应科目编码"}, {"field": "科目名称", "target_field": "对应科目"}, {"field": "公司", "target_field": "公司名称"}, {"field": "对方核算项目", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "adjustment_source_agg"}]}, "action": "write_dataset", "sources": [{"alias": "adjustment_source", "table": "调整明细"}], "step_id": "step3_5_seed_merge_from_adjustment", "mappings": [{"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "科目名称"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "公司"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "对方核算项目"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_seed", "field": "借方", "operator": "sum"}], "group_fields": ["科目编码", "科目名称", "公司", "对方核算项目", "周期", "中心"], "output_alias": "adjustment_source_agg", "source_alias": "adjustment_source"}], "depends_on": ["step3_4_seed_merge_from_credit"], "description": "用调整明细补齐统计合并业务键", "target_table": "统计合并", "row_write_mode": "upsert", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司", "reference_field": "公司"}, {"source_field": "对方核算项目", "reference_field": "核算项目"}], "source_alias": "adjustment_source", "reference_table": "金蝶期末余额-检核"}}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "debit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "debit_usage", "table": "统计使用-借方"}], "step_id": "step3_6_fill_cumulative_debit", "mappings": [{"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "agg_累计借方"}}, "target_field": "累计借方", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_累计借方", "field": "含税金额", "operator": "sum"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "output_alias": "debit_usage_agg", "source_alias": "debit_usage"}], "depends_on": ["step3_5_seed_merge_from_adjustment"], "description": "按业务键聚合统计使用-借方，回填累计借方", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "credit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "credit_usage", "table": "统计使用-贷方"}], "step_id": "step3_7_fill_cumulative_credit", "mappings": [{"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "agg_累计贷方"}}, "target_field": "累计贷方", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_累计贷方", "field": "金额", "operator": "sum"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "output_alias": "credit_usage_agg", "source_alias": "credit_usage"}], "depends_on": ["step3_6_fill_cumulative_debit"], "description": "按业务键聚合统计使用-贷方，回填累计贷方", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "科目编码", "target_field": "对应科目编码"}, {"field": "科目名称", "target_field": "对应科目"}, {"field": "公司", "target_field": "公司名称"}, {"field": "对方核算项目", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "adjustment_source_agg"}]}, "action": "write_dataset", "sources": [{"alias": "adjustment_source", "table": "调整明细"}], "step_id": "step3_8_fill_cumulative_adjustment", "mappings": [{"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "agg_累计调整借"}}, "target_field": "累计调整-借", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "agg_累计调整贷"}}, "target_field": "累计调整-贷", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_累计调整借", "field": "借方", "operator": "sum"}, {"alias": "agg_累计调整贷", "field": "贷方", "operator": "sum"}], "group_fields": ["科目编码", "科目名称", "公司", "对方核算项目", "周期", "中心"], "output_alias": "adjustment_source_agg", "source_alias": "adjustment_source"}], "depends_on": ["step3_7_fill_cumulative_credit"], "description": "按业务键聚合调整明细，回填累计调整借贷", "target_table": "统计合并", "row_write_mode": "update_only", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司", "reference_field": "公司"}, {"source_field": "对方核算项目", "reference_field": "核算项目"}], "source_alias": "adjustment_source", "reference_table": "金蝶期末余额-检核"}}, {"match": {"sources": [{"keys": [{"field": "科目代码", "target_field": "对应科目编码"}, {"field": "科目名称", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "核算项目", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "归属中心", "target_field": "中心"}], "alias": "july_balance_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "july_balance_usage", "table": "统计使用-7月余额"}], "step_id": "step3_9_fill_july_balance", "mappings": [{"value": {"type": "source", "source": {"alias": "july_balance_usage_agg", "field": "agg_7月余额"}}, "target_field": "7月余额", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_7月余额", "field": "期末余额", "operator": "sum"}], "group_fields": ["科目代码", "科目名称", "公司名称", "核算项目", "周期", "归属中心"], "output_alias": "july_balance_usage_agg", "source_alias": "july_balance_usage"}], "depends_on": ["step3_8_fill_cumulative_adjustment"], "description": "按业务键聚合统计使用-7月余额，回填7月余额", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "debit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "debit_usage", "table": "统计使用-借方"}], "step_id": "step3_10_fill_overdue_time", "mappings": [{"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "agg_逾期时间"}}, "target_field": "逾期时间", "field_write_mode": "overwrite"}], "aggregate": [{"aggregations": [{"alias": "agg_逾期时间", "field": "逾期时间", "operator": "min"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "output_alias": "debit_usage_agg", "source_alias": "debit_usage"}], "depends_on": ["step3_9_fill_july_balance"], "description": "按业务键聚合统计使用-借方，回填逾期时间", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "debit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "debit_usage", "table": "统计使用-借方"}], "step_id": "step3_11_fill_dynamic_debit_columns", "mappings": [{"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "agg_月借"}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月借", "variables": {"month": {"args": {"date": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "日期"}}}, "type": "function", "function": "month_of"}}}}, {"value": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "agg_月逾期时间"}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月逾期时间", "variables": {"month": {"args": {"date": {"type": "source", "source": {"alias": "debit_usage_agg", "field": "日期"}}}, "type": "function", "function": "month_of"}}}}], "aggregate": [{"aggregations": [{"alias": "agg_月借", "field": "含税金额", "operator": "sum"}, {"alias": "agg_月逾期时间", "field": "逾期时间", "operator": "min"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心", "日期"], "output_alias": "debit_usage_agg", "source_alias": "debit_usage"}], "depends_on": ["step3_10_fill_overdue_time"], "description": "按月聚合统计使用-借方，回填月借与月逾期时间", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "credit_usage_agg"}]}, "action": "write_dataset", "sources": [{"alias": "credit_usage", "table": "统计使用-贷方"}], "step_id": "step3_12_fill_dynamic_credit_columns", "mappings": [{"value": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "agg_月贷"}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月贷", "variables": {"month": {"args": {"date": {"type": "source", "source": {"alias": "credit_usage_agg", "field": "日期"}}}, "type": "function", "function": "month_of"}}}}], "aggregate": [{"aggregations": [{"alias": "agg_月贷", "field": "金额", "operator": "sum"}], "group_fields": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心", "日期"], "output_alias": "credit_usage_agg", "source_alias": "credit_usage"}], "depends_on": ["step3_11_fill_dynamic_debit_columns"], "description": "按月聚合统计使用-贷方，回填月贷", "target_table": "统计合并", "row_write_mode": "update_only"}, {"match": {"sources": [{"keys": [{"field": "科目编码", "target_field": "对应科目编码"}, {"field": "科目名称", "target_field": "对应科目"}, {"field": "公司", "target_field": "公司名称"}, {"field": "对方核算项目", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "adjustment_source_agg"}]}, "action": "write_dataset", "sources": [{"alias": "adjustment_source", "table": "调整明细"}], "step_id": "step3_13_fill_dynamic_adjustment_columns", "mappings": [{"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "agg_月调整借"}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月调整-借", "variables": {"month": {"args": {"date": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "业务日期"}}}, "type": "function", "function": "month_of"}}}}, {"value": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "agg_月调整贷"}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月调整-贷", "variables": {"month": {"args": {"date": {"type": "source", "source": {"alias": "adjustment_source_agg", "field": "业务日期"}}}, "type": "function", "function": "month_of"}}}}], "aggregate": [{"aggregations": [{"alias": "agg_月调整借", "field": "借方", "operator": "sum"}, {"alias": "agg_月调整贷", "field": "贷方", "operator": "sum"}], "group_fields": ["科目编码", "科目名称", "公司", "对方核算项目", "周期", "中心", "业务日期"], "output_alias": "adjustment_source_agg", "source_alias": "adjustment_source"}], "depends_on": ["step3_12_fill_dynamic_credit_columns"], "description": "按月聚合调整明细，回填月调整借贷", "target_table": "统计合并", "row_write_mode": "update_only", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司", "reference_field": "公司"}, {"source_field": "对方核算项目", "reference_field": "核算项目"}], "source_alias": "adjustment_source", "reference_table": "金蝶期末余额-检核"}}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "merged_statistics"}]}, "action": "write_dataset", "sources": [{"alias": "merged_statistics", "table": "统计合并"}], "step_id": "step3_14_calculate_dynamic_balance", "depends_on": ["step3_13_fill_dynamic_adjustment_columns"], "description": "按月计算统计合并各月计算余额", "target_table": "统计合并", "row_write_mode": "update_only", "dynamic_mappings": {"end": {"args": {"date": {"args": {}, "type": "function", "function": "current_date"}}, "function": "month_of"}, "start": {"args": {"offset": 1, "source": "统计使用-7月余额", "date_field": "日期", "output_format": "month"}, "function": "earliest_date"}, "mappings": [{"value": {"expr": "({is_first_month} ? {july_balance} : {previous_month_balance}) + {current_debit} - {current_credit} + {current_adjust_debit} - {current_adjust_credit}", "type": "formula"}, "bindings": {"july_balance": {"type": "source", "source": {"alias": "merged_statistics", "field": "7月余额"}}, "current_debit": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月借", "variables": {"month": {"name": "month", "type": "context"}}}, "current_credit": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月贷", "variables": {"month": {"name": "month", "type": "context"}}}, "is_first_month": {"name": "is_first_month", "type": "context"}, "current_adjust_debit": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月调整-借", "variables": {"month": {"name": "month", "type": "context"}}}, "current_adjust_credit": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月调整-贷", "variables": {"month": {"name": "month", "type": "context"}}}, "previous_month_balance": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{prev_month}月计算余额", "variables": {"prev_month": {"name": "prev_month", "type": "context"}}}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月计算余额", "variables": {"month": {"name": "month", "type": "context"}}}}], "dimension": "month"}}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "merged_statistics"}]}, "action": "write_dataset", "sources": [{"alias": "merged_statistics", "table": "统计合并"}], "step_id": "step3_15_finalize_current_balance", "mappings": [{"value": {"expr": "coalesce({current_month_balance}, {july_balance})", "type": "formula"}, "bindings": {"july_balance": {"type": "source", "source": {"alias": "merged_statistics", "field": "7月余额"}}, "current_month_balance": {"type": "template_source", "source": {"alias": "merged_statistics"}, "template": "{current_month}月计算余额", "variables": {"current_month": {"args": {"date": {"args": {}, "type": "function", "function": "current_date"}}, "type": "function", "function": "month_of"}}}}, "target_field": "计算余额", "field_write_mode": "overwrite"}], "depends_on": ["step3_14_calculate_dynamic_balance"], "description": "用当前月份动态余额回填统计合并计算余额", "target_table": "统计合并", "row_write_mode": "update_only"}, {"action": "create_schema", "schema": {"columns": [{"name": "对应科目编码", "nullable": false, "data_type": "string"}, {"name": "对应科目", "nullable": false, "data_type": "string"}, {"name": "公司名称", "nullable": false, "data_type": "string"}, {"name": "客商名称", "nullable": false, "data_type": "string"}, {"name": "周期", "nullable": false, "data_type": "string"}, {"name": "中心", "nullable": false, "data_type": "string"}, {"name": "计算余额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "逾期金额", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "逾期合计", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}, {"name": "7月逾期", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18}], "primary_key": ["对应科目编码", "对应科目", "公司名称", "客商名称", "周期", "中心"], "dynamic_columns": {"end": {"args": {"date": {"args": {}, "type": "function", "function": "current_date"}}, "function": "month_of"}, "start": {"args": {"offset": 1, "source": "统计使用-7月余额", "date_field": "日期", "output_format": "month"}, "function": "earliest_date"}, "dimension": "month", "columns_pattern": [{"name": "{month}月逾期", "scale": 2, "default": 0, "data_type": "decimal", "precision": 18, "variables": {"month": {"name": "month", "type": "context"}}}]}}, "step_id": "step4_1_create_overdue_statistics", "depends_on": ["step3_15_finalize_current_balance"], "description": "创建逾期统计表结构", "target_table": "逾期统计"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "merged_statistics"}]}, "action": "write_dataset", "filter": {"expr": "{current_balance} > 0 and {overdue_time} < {today}", "type": "formula", "bindings": {"today": {"args": {}, "type": "function", "function": "current_date"}, "overdue_time": {"type": "source", "source": {"alias": "merged_statistics", "field": "逾期时间"}}, "current_balance": {"type": "source", "source": {"alias": "merged_statistics", "field": "计算余额"}}}}, "sources": [{"alias": "merged_statistics", "table": "统计合并"}], "step_id": "step4_2_sync_overdue_base", "mappings": [{"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "对应科目编码"}}, "target_field": "对应科目编码", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "对应科目"}}, "target_field": "对应科目", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "公司名称"}}, "target_field": "公司名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "客商名称"}}, "target_field": "客商名称", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "周期"}}, "target_field": "周期", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "中心"}}, "target_field": "中心", "field_write_mode": "overwrite"}, {"value": {"type": "source", "source": {"alias": "merged_statistics", "field": "计算余额"}}, "target_field": "计算余额", "field_write_mode": "overwrite"}, {"value": {"expr": "{july_balance} <= 0 ? 0 : (is_null({overdue_time}) ? 0 : ({overdue_time} < {today} ? {july_balance} : 0))", "type": "formula"}, "bindings": {"today": {"args": {}, "type": "function", "function": "current_date"}, "july_balance": {"type": "source", "source": {"alias": "merged_statistics", "field": "7月余额"}}, "overdue_time": {"type": "source", "source": {"alias": "merged_statistics", "field": "逾期时间"}}}, "target_field": "7月逾期", "field_write_mode": "overwrite"}, {"value": {"expr": "{july_balance} <= 0 ? 0 : (is_null({overdue_time}) ? 0 : ({overdue_time} < {today} ? {july_balance} : 0))", "type": "formula"}, "bindings": {"today": {"args": {}, "type": "function", "function": "current_date"}, "july_balance": {"type": "source", "source": {"alias": "merged_statistics", "field": "7月余额"}}, "overdue_time": {"type": "source", "source": {"alias": "merged_statistics", "field": "逾期时间"}}}, "target_field": "逾期合计", "field_write_mode": "overwrite"}], "depends_on": ["step4_1_create_overdue_statistics"], "description": "筛选统计合并中已逾期且余额大于0的数据，写入逾期统计基础字段", "target_table": "逾期统计", "row_write_mode": "upsert"}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "merged_statistics"}]}, "action": "write_dataset", "sources": [{"alias": "merged_statistics", "table": "统计合并"}], "step_id": "step4_3_fill_dynamic_monthly_overdue", "depends_on": ["step4_2_sync_overdue_base"], "description": "按月判断是否逾期，回填月逾期并累加逾期合计", "target_table": "逾期统计", "row_write_mode": "update_only", "dynamic_mappings": {"end": {"args": {"date": {"args": {}, "type": "function", "function": "current_date"}}, "function": "month_of"}, "start": {"args": {"offset": 1, "source": "统计使用-7月余额", "date_field": "日期", "output_format": "month"}, "function": "earliest_date"}, "mappings": [{"value": {"expr": "({month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today}) ? 0 : {month_balance}", "type": "formula"}, "bindings": {"today": {"args": {}, "type": "function", "function": "current_date"}, "month_balance": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月计算余额", "variables": {"month": {"name": "month", "type": "context"}}}, "month_overdue_time": {"type": "template_source", "source": {"alias": "merged_statistics"}, "template": "{month}月逾期时间", "variables": {"month": {"name": "month", "type": "context"}}}}, "field_write_mode": "overwrite", "target_field_template": {"template": "{month}月逾期", "variables": {"month": {"name": "month", "type": "context"}}}}, {"value": {"expr": "({month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today}) ? 0 : {month_balance}", "type": "formula"}, "bindings": {"today": {"args": {}, "type": "function", "function": "current_date"}, "month_balance": {"type": "template_source", "source": {"alias": "merged_statistics"}, "default": 0, "template": "{month}月计算余额", "variables": {"month": {"name": "month", "type": "context"}}}, "month_overdue_time": {"type": "template_source", "source": {"alias": "merged_statistics"}, "template": "{month}月逾期时间", "variables": {"month": {"name": "month", "type": "context"}}}}, "target_field": "逾期合计", "field_write_mode": "increment"}], "dimension": "month"}}, {"match": {"sources": [{"keys": [{"field": "对应科目编码", "target_field": "对应科目编码"}, {"field": "对应科目", "target_field": "对应科目"}, {"field": "公司名称", "target_field": "公司名称"}, {"field": "客商名称", "target_field": "客商名称"}, {"field": "周期", "target_field": "周期"}, {"field": "中心", "target_field": "中心"}], "alias": "overdue_statistics"}]}, "action": "write_dataset", "sources": [{"alias": "overdue_statistics", "table": "逾期统计"}], "step_id": "step4_4_finalize_overdue_amount", "mappings": [{"value": {"expr": "{balance} - {overdue_total} <= 0 ? {balance} : {overdue_total}", "type": "formula"}, "bindings": {"balance": {"type": "source", "source": {"alias": "overdue_statistics", "field": "计算余额"}}, "overdue_total": {"type": "source", "source": {"alias": "overdue_statistics", "field": "逾期合计"}}}, "target_field": "逾期金额", "field_write_mode": "overwrite"}], "depends_on": ["step4_3_fill_dynamic_monthly_overdue"], "description": "按计算余额与逾期合计关系回填最终逾期金额", "target_table": "逾期统计", "row_write_mode": "update_only"}], "version": "4.5", "metadata": {"tags": ["财务核算", "数据整理", "逾期统计", "聚合分析"], "author": "codex", "created_at": "2026-03-23T10:30:00+08:00"}, "role_desc": "逾期统计数据整理规则", "global_config": {"date_format": "YYYY-MM-DD", "error_handling": "stop", "null_value_handling": "keep", "default_round_precision": 2}, "file_rule_code": "overdue_file_check", "dsl_constraints": {"actions": ["create_schema", "write_dataset"], "filter_rules": {"examples": [{"filter": {"expr": "{amount} > 0 and {status} != ''作废''", "type": "formula", "bindings": {"amount": {"type": "source", "source": {"alias": "debit_detail_source", "field": "含税金额"}}, "status": {"type": "source", "source": {"alias": "debit_detail_source", "field": "单据状态"}}}}, "description": "仅保留金额大于0且单据状态不为作废的源数据"}], "applies_to": "source_rows", "expression_type": "formula", "supported_scopes": ["step"]}, "formula_rules": {"functions": ["if", "coalesce", "is_null"], "operators": {"logical": ["and", "or", "not"], "arithmetic": ["+", "-", "*", "/"], "comparison": [">", ">=", "<", "<=", "==", "!="], "conditional": ["?:"]}, "null_rules": {"logical": "treat_null_as_false", "arithmetic": "propagate_null", "comparison": "return_false_when_any_operand_is_null"}, "bindings_field": "bindings", "expression_field": "expr", "placeholder_pattern": "{binding_name}"}, "row_write_modes": ["insert_if_missing", "update_only", "upsert"], "merge_strategies": ["union_distinct"], "value_node_types": ["source", "formula", "template_source", "function", "context"], "builtin_functions": ["earliest_date", "current_date", "month_of"], "column_data_types": ["string", "date", "decimal"], "field_write_modes": ["overwrite", "increment"], "loop_context_vars": ["month", "prev_month", "is_first_month"], "aggregate_operators": ["sum", "min"], "reference_filter_rules": {"examples": [{"description": "仅保留能在参考表中按业务键匹配到的源数据", "reference_filter": {"keys": [{"source_field": "科目名称", "reference_field": "科目名称"}, {"source_field": "公司", "reference_field": "公司"}, {"source_field": "核算项目", "reference_field": "核算项目"}], "source_alias": "opening_balance_source", "reference_table": "金蝶期末余额-检核"}}], "semantics": "keep_row_when_exists_in_reference", "keys_field": "keys", "supported_scopes": ["step"]}}}', '逾期统计数据整理规则', 'proc', NULL, '逾期统计数据整理', 3);
+INSERT INTO public.rule_detail (id, rule_code, rule, remark, rule_type, user_id, name, task_id) VALUES (4, 'audio_recon', '{"rules": [{"recon": {"aggregation": {"enabled": true, "group_by": [{"source_field": "sup订单号", "target_field": "第三方订单号"}], "description": "分组聚合配置，启用后先按 source/target 对应字段分组聚合，再进行比对", "aggregations": [{"alias": "应结算平台金额汇总", "function": "sum", "source_field": "发生-", "target_field": "应结算平台金额"}]}, "description": "核对配置", "key_columns": {"mappings": [{"source_field": "sup订单号", "target_field": "第三方订单号"}], "match_type": "exact", "description": "用于关联源文件与目标文件的关键列映射（相当于 JOIN 条件），支持多字段映射", "transformations": {"source": {"sup订单号": [{"type": "strip_prefix", "value": "''"}, {"type": "regex_replace", "pattern": "^(.{1,21}).*$", "replacement": "\\1"}]}, "target": {"第三方订单号": [{"type": "regex_replace", "pattern": "_\\\\d+$", "replacement": ""}, {"type": "regex_replace", "pattern": "^(.{1,21}).*$", "replacement": "\\1"}]}}}, "compare_columns": {"columns": [{"name": "发生减", "tolerance": 0.01, "description": "合单发生- 与 官网应结算平台金额比对，允许 0.01 的绝对误差", "compare_type": "numeric", "source_column": "发生-", "target_column": "应结算平台金额"}], "description": "需要比对的数值列"}}, "output": {"format": "xlsx", "sheets": {"summary": {"name": "核对汇总", "enabled": true, "description": "输出核对结果汇总信息，包括总记录数、匹配数、差异数等"}, "source_only": {"name": "合单独有", "enabled": true, "description": "仅在合单文件中存在的记录"}, "target_only": {"name": "官网独有", "enabled": true, "description": "仅在官网文件中存在的记录"}, "matched_with_diff": {"name": "差异记录", "enabled": true, "description": "关键列匹配但数值有差异的记录详情"}}, "file_name_template": "喜马26_{rule_name}_核对结果_{timestamp}"}, "enabled": true, "source_file": {"table_name": "喜马合单表", "description": "源文件定义（合单文件）", "identification": {"match_by": "table_name", "description": "通过文件校验阶段识别的表名匹配源文件", "match_value": "喜马合单表", "match_strategy": "exact"}}, "target_file": {"table_name": "喜马官网表", "description": "目标文件定义（官网文件）", "identification": {"match_by": "table_name", "description": "通过文件校验阶段识别的表名匹配目标文件", "match_value": "喜马官网表", "match_strategy": "exact"}}}], "rule_id": "XM_26_RECONC_001", "rule_name": "喜马-26合单与官网数据核对", "description": "将合单文件与官网文件进行核对，通过 sup 订单号与第三方订单号关联，比对应结算金额差异", "file_rule_code": "audio_recon_file_check", "schema_version": "1.6"}', '审计对账规则，用于源文件与目标文件的数据比对与差异分析', 'recon', NULL, '喜马-26合单与官网数据核对', 5);
 
 
 --

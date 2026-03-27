@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -26,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _RESULT_WAIT_TIMEOUT = 60.0  # 等待 SSE 结果超时秒数
+
+
+def _get_result_wait_timeout(tool_name: str) -> float:
+    """按工具类型返回结果等待超时。
+
+    proc/recon 属于长任务，60 秒对真实文件偏紧，容易误判为失败。
+    """
+    if tool_name == "proc_execute":
+        return 180.0
+    if tool_name == "recon_execute":
+        return 300.0
+    return _RESULT_WAIT_TIMEOUT
 
 # ===========================================================================
 # MCP SSE 会话管理
@@ -40,6 +53,7 @@ class _McpSession:
         self._req_counter = 0
         self._sse_task: asyncio.Task | None = None
         self._client: httpx.AsyncClient | None = None
+        self._connect_lock = asyncio.Lock()
 
     def _next_id(self) -> int:
         self._req_counter += 1
@@ -47,29 +61,51 @@ class _McpSession:
 
     async def connect(self) -> bool:
         """建立 SSE 长连接，获取 session_id，完成 MCP 游标握手，并启动后台监听任务。"""
-        if self._sse_task and not self._sse_task.done():
-            return self.session_id is not None
+        async with self._connect_lock:
+            if self._sse_task and not self._sse_task.done():
+                return self.session_id is not None
 
-        try:
-            logger.info("建立 MCP SSE 长连接...")
-            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
-            session_ready = asyncio.get_event_loop().create_future()
-            self._sse_task = asyncio.create_task(
-                self._sse_listener(session_ready)
-            )
-            # 等待 session_id 就绪（最多 15 秒）
-            await asyncio.wait_for(session_ready, timeout=15.0)
-            if not self.session_id:
+            try:
+                logger.info("建立 MCP SSE 长连接...")
+                self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+                session_ready = asyncio.get_running_loop().create_future()
+                self._sse_task = asyncio.create_task(
+                    self._sse_listener(session_ready)
+                )
+                # 等待 session_id 就绪（最多 15 秒）
+                await asyncio.wait_for(session_ready, timeout=15.0)
+                if not self.session_id:
+                    await self._close_failed_connection()
+                    return False
+                # 完成 MCP 协议握手
+                await self._handshake()
+                return True
+            except asyncio.TimeoutError:
+                logger.error("等待 SSE session_id 超时")
+                await self._close_failed_connection()
                 return False
-            # 完成 MCP 协议握手
-            await self._handshake()
-            return True
-        except asyncio.TimeoutError:
-            logger.error("等待 SSE session_id 超时")
-            return False
-        except Exception as e:
-            logger.error(f"SSE 连接失败: {e}", exc_info=True)
-            return False
+            except Exception as e:
+                logger.error(f"SSE 连接失败: {e}", exc_info=True)
+                await self._close_failed_connection()
+                return False
+
+    async def _close_failed_connection(self) -> None:
+        """清理失败或半初始化的 SSE 连接。"""
+        sse_task = self._sse_task
+        client = self._client
+
+        self.session_id = None
+        self._sse_task = None
+        self._client = None
+
+        if sse_task is not None and not sse_task.done():
+            sse_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sse_task
+
+        if client is not None:
+            with suppress(Exception):
+                await client.aclose()
 
     async def _handshake(self):
         """完成 MCP 协议握手：发送 initialize 并等待响应，再发 notifications/initialized。"""
@@ -181,8 +217,14 @@ class _McpSession:
                     fut.set_exception(RuntimeError("SSE 连接已断开"))
             self._pending.clear()
             self.session_id = None
+            self._sse_task = None
+            client = self._client
+            self._client = None
             if not session_ready.done():
                 session_ready.set_result(None)
+            if client is not None:
+                with suppress(Exception):
+                    await client.aclose()
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """发送工具调用请求并等待 SSE 响应。"""
@@ -192,6 +234,7 @@ class _McpSession:
             if not ok:
                 return {"success": False, "error": "无法建立 MCP SSE 连接"}
 
+        result_wait_timeout = _get_result_wait_timeout(tool_name)
         req_id = self._next_id()
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -229,11 +272,18 @@ class _McpSession:
 
             # 等待 SSE 推送结果
             try:
-                jsonrpc_resp = await asyncio.wait_for(fut, timeout=_RESULT_WAIT_TIMEOUT)
+                jsonrpc_resp = await asyncio.wait_for(fut, timeout=result_wait_timeout)
             except asyncio.TimeoutError:
                 self._pending.pop(req_id, None)
-                logger.error(f"等待 MCP 响应超时: tool={tool_name}")
-                return {"success": False, "error": "等待 MCP 响应超时"}
+                logger.error(
+                    "等待 MCP 响应超时: tool=%s timeout=%ss",
+                    tool_name,
+                    result_wait_timeout,
+                )
+                return {
+                    "success": False,
+                    "error": f"等待 MCP 响应超时（{int(result_wait_timeout)}秒）",
+                }
 
             # 提取结果
             if "error" in jsonrpc_resp:
@@ -562,7 +612,10 @@ async def execute_recon(
     """执行对账任务（支持对账），根据规则对源文件与目标文件进行数据比对。
     
     Args:
-        validated_inputs: 统一输入列表，格式 [{"table_name": str, "input_type": "file|dataset", ...}]
+        validated_inputs: 统一输入列表。
+            - file: {"table_name": str, "input_type": "file", "file_path": str}
+            - dataset: {"table_name": str, "input_type": "dataset",
+                        "dataset_ref": {"source_type": "db|api", "source_key": str, "query": dict}}
         validated_files: 兼容旧格式的文件输入，格式 [{"file_path": str, "table_name": str}]
         rule_code: 规则编码，用于从 rule_detail 表获取规则定义
         rule_id: 要执行的对账规则 ID（可选）

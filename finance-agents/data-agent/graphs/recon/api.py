@@ -18,6 +18,7 @@ from graphs.recon.execution_service import (
     normalize_recon_inputs,
     run_recon_execution,
 )
+from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from tools.mcp_client import get_file_validation_rule
 
 logger = logging.getLogger(__name__)
@@ -69,42 +70,44 @@ async def run_internal_recon(
         "entry_mode": body.entry_mode,
     }
 
-    execution_request, request_error = build_execution_request(
+    # Use unified headless pipeline to keep API/cron path aligned with chat execution semantics.
+    pipeline_result = await execute_headless_recon_pipeline(
         rule_code=body.rule_code,
         rule_id=body.rule_id,
+        rule_name=rule_name,
+        rule=rule_data if isinstance(rule_data, dict) else {},
         auth_token=auth_token,
         recon_inputs=recon_inputs,
         run_context=merged_run_context,
-    )
-    if request_error:
-        raise HTTPException(status_code=400, detail=request_error)
-
-    recon_result, exec_error = await run_recon_execution(execution_request)
-    if exec_error:
-        raise HTTPException(status_code=500, detail=exec_error)
-
-    recon_observation = build_recon_observation(
-        rule_code=body.rule_code,
-        rule_name=rule_name,
-        rule=rule_data if isinstance(rule_data, dict) else {},
+        run_id=str(merged_run_context.get("run_id") or ""),
         trigger_type=body.trigger_type,
         entry_mode=body.entry_mode,
-        recon_inputs=recon_inputs,
-        recon_result=recon_result if isinstance(recon_result, dict) else {},
-        run_context=merged_run_context,
-        run_id=str(merged_run_context.get("run_id") or ""),
         ref_to_display_name={},
+        # Keep injection points patchable for existing tests/in-process callers.
+        build_execution_request_fn=build_execution_request,
+        run_recon_execution_fn=run_recon_execution,
+        build_recon_observation_fn=build_recon_observation,
+        build_recon_ctx_update_fn=build_recon_ctx_update_from_execution,
     )
-    execution_ctx = build_recon_ctx_update_from_execution(
-        recon_result=recon_result if isinstance(recon_result, dict) else {},
-        recon_inputs=recon_inputs,
-        execution_request=execution_request,
-        ref_to_display_name={},
-        recon_observation=recon_observation,
-    )
-    success = bool(recon_result.get("success")) and bool(execution_ctx.get("ok"))
-    exec_status = str(execution_ctx.get("execution_status") or ("success" if success else "error"))
-    exec_error = str(execution_ctx.get("exec_error") or "")
+    exec_status = str(pipeline_result.get("execution_status") or "error").strip() or "error"
+    exec_error = str(pipeline_result.get("exec_error") or "").strip()
+    failure_stage = str(pipeline_result.get("failure_stage") or "").strip()
+    if not bool(pipeline_result.get("ok")):
+        if failure_stage == "request_build_failed":
+            raise HTTPException(status_code=400, detail=exec_error or "对账执行请求构建失败")
+        if failure_stage == "execution_call_failed":
+            raise HTTPException(status_code=502, detail=exec_error or "调用对账执行服务失败")
+        if failure_stage == "execution_result_failed":
+            raise HTTPException(status_code=422, detail=exec_error or "对账执行失败")
+        raise HTTPException(status_code=500, detail=exec_error or "对账执行失败")
+
+    execution_result = pipeline_result.get("execution_result") if isinstance(pipeline_result.get("execution_result"), dict) else {}
+    recon_observation = pipeline_result.get("recon_observation") if isinstance(pipeline_result.get("recon_observation"), dict) else {}
+    ctx_update = pipeline_result.get("ctx_update") if isinstance(pipeline_result.get("ctx_update"), dict) else {}
+    normalized_run_context = pipeline_result.get("run_context") if isinstance(pipeline_result.get("run_context"), dict) else merged_run_context
+
+    non_error_statuses = {"success", "partial_success", "skipped"}
+    success = exec_status in non_error_statuses
 
     return {
         "success": success,
@@ -118,12 +121,12 @@ async def run_internal_recon(
             "rule_code": body.rule_code,
             "rule_name": rule_name,
             "rule": rule_data,
-            "run_context": merged_run_context,
-            **(execution_ctx.get("ctx_update") if isinstance(execution_ctx.get("ctx_update"), dict) else {}),
-            "phase": "completed" if success else "exec_failed",
+            "run_context": normalized_run_context,
+            **ctx_update,
+            "phase": "completed" if exec_status in non_error_statuses else "exec_failed",
             "exec_status": exec_status,
             "exec_error": exec_error,
         },
-        "execution_result": recon_result,
+        "execution_result": execution_result,
         "recon_observation": recon_observation,
     }

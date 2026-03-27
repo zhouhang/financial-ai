@@ -1,8 +1,8 @@
 {
   "role_desc": "逾期统计数据整理规则",
-  "version": "4.5",
+  "version": "5.0",
   "metadata": {
-    "created_at": "2026-03-23T10:30:00+08:00",
+    "created_at": "2026-03-25T19:10:00+08:00",
     "author": "codex",
     "tags": [
       "财务核算",
@@ -17,6 +17,7 @@
     "null_value_handling": "keep",
     "error_handling": "stop"
   },
+  "file_rule_code": "overdue_file_check",
   "dsl_constraints": {
     "actions": [
       "create_schema",
@@ -25,7 +26,9 @@
     "builtin_functions": [
       "earliest_date",
       "current_date",
-      "month_of"
+      "month_of",
+      "add_months",
+      "fraction_numerator"
     ],
     "aggregate_operators": [
       "sum",
@@ -50,109 +53,9 @@
       "formula",
       "template_source",
       "function",
-      "context"
+      "context",
+      "lookup"
     ],
-    "filter_rules": {
-      "expression_type": "formula",
-      "supported_scopes": [
-        "step"
-      ],
-      "applies_to": "source_rows",
-      "examples": [
-        {
-          "description": "仅保留金额大于0且单据状态不为作废的源数据",
-          "filter": {
-            "type": "formula",
-            "expr": "{amount} > 0 and {status} != '作废'",
-            "bindings": {
-              "amount": {
-                "type": "source",
-                "source": {
-                  "alias": "debit_detail_source",
-                  "field": "含税金额"
-                }
-              },
-              "status": {
-                "type": "source",
-                "source": {
-                  "alias": "debit_detail_source",
-                  "field": "单据状态"
-                }
-              }
-            }
-          }
-        }
-      ]
-    },
-    "reference_filter_rules": {
-      "supported_scopes": [
-        "step"
-      ],
-      "semantics": "keep_row_when_exists_in_reference",
-      "keys_field": "keys",
-      "examples": [
-        {
-          "description": "仅保留能在参考表中按业务键匹配到的源数据",
-          "reference_filter": {
-            "source_alias": "opening_balance_source",
-            "reference_table": "金蝶期末余额-检核",
-            "keys": [
-              {
-                "source_field": "科目名称",
-                "reference_field": "科目名称"
-              },
-              {
-                "source_field": "公司",
-                "reference_field": "公司"
-              },
-              {
-                "source_field": "核算项目",
-                "reference_field": "核算项目"
-              }
-            ]
-          }
-        }
-      ]
-    },
-    "formula_rules": {
-      "expression_field": "expr",
-      "bindings_field": "bindings",
-      "placeholder_pattern": "{binding_name}",
-      "operators": {
-        "arithmetic": [
-          "+",
-          "-",
-          "*",
-          "/"
-        ],
-        "comparison": [
-          ">",
-          ">=",
-          "<",
-          "<=",
-          "==",
-          "!="
-        ],
-        "logical": [
-          "and",
-          "or",
-          "not"
-        ],
-        "conditional": [
-          "?:"
-        ]
-      },
-      "functions": [
-        "if",
-        "coalesce",
-        "is_null"
-      ],
-      "null_rules": {
-        "arithmetic": "propagate_null",
-        "comparison": "return_false_when_any_operand_is_null",
-        "logical": "treat_null_as_false"
-      }
-    },
     "merge_strategies": [
       "union_distinct"
     ],
@@ -164,11 +67,10 @@
   },
   "steps": [
     {
-      "step_id": "step1_update_check_table",
-      "description": "根据四张源表汇总更新金蝶期末余额-检核",
+      "step_id": "step1_update_check_table_amounts",
+      "description": "根据四张源表汇总更新金蝶期末余额-检核的期初与借贷调整字段",
       "action": "write_dataset",
       "target_table": "金蝶期末余额-检核",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "科目期初",
@@ -176,15 +78,86 @@
         },
         {
           "table": "借方-计提单明细",
-          "alias": "debit_accrual_source"
+          "alias": "debit_detail_source"
         },
         {
           "table": "贷方-收款单明细",
-          "alias": "credit_receipt_source"
+          "alias": "credit_detail_source"
         },
         {
           "table": "调整明细",
           "alias": "adjustment_source"
+        }
+      ],
+      "aggregate": [
+        {
+          "source_alias": "opening_balance_source",
+          "output_alias": "opening_balance_agg",
+          "group_fields": [
+            "科目名称",
+            "公司",
+            "核算项目"
+          ],
+          "aggregations": [
+            {
+              "field": "期末余额",
+              "operator": "sum",
+              "alias": "agg_期初"
+            }
+          ]
+        },
+        {
+          "source_alias": "debit_detail_source",
+          "output_alias": "debit_detail_agg",
+          "group_fields": [
+            "对应科目",
+            "公司名称",
+            "客商名称"
+          ],
+          "aggregations": [
+            {
+              "field": "含税金额",
+              "operator": "sum",
+              "alias": "agg_借方合计"
+            }
+          ]
+        },
+        {
+          "source_alias": "credit_detail_source",
+          "output_alias": "credit_detail_agg",
+          "group_fields": [
+            "对应科目",
+            "公司名称",
+            "客商名称"
+          ],
+          "aggregations": [
+            {
+              "field": "金额",
+              "operator": "sum",
+              "alias": "agg_贷方合计"
+            }
+          ]
+        },
+        {
+          "source_alias": "adjustment_source",
+          "output_alias": "adjustment_agg",
+          "group_fields": [
+            "科目名称",
+            "公司",
+            "对方核算项目"
+          ],
+          "aggregations": [
+            {
+              "field": "借方",
+              "operator": "sum",
+              "alias": "agg_借方调整"
+            },
+            {
+              "field": "贷方",
+              "operator": "sum",
+              "alias": "agg_贷方调整"
+            }
+          ]
         }
       ],
       "match": {
@@ -202,15 +175,15 @@
               },
               {
                 "field": "核算项目",
-                "target_field": "核算项目"
+                "target_field": "核算项目1"
               }
             ]
           },
           {
-            "alias": "debit_accrual_agg",
+            "alias": "debit_detail_agg",
             "keys": [
               {
-                "field": "科目名称",
+                "field": "对应科目",
                 "target_field": "科目名称"
               },
               {
@@ -219,15 +192,15 @@
               },
               {
                 "field": "客商名称",
-                "target_field": "核算项目"
+                "target_field": "核算项目1"
               }
             ]
           },
           {
-            "alias": "credit_receipt_agg",
+            "alias": "credit_detail_agg",
             "keys": [
               {
-                "field": "科目名称",
+                "field": "对应科目",
                 "target_field": "科目名称"
               },
               {
@@ -236,7 +209,7 @@
               },
               {
                 "field": "客商名称",
-                "target_field": "核算项目"
+                "target_field": "核算项目1"
               }
             ]
           },
@@ -253,7 +226,7 @@
               },
               {
                 "field": "对方核算项目",
-                "target_field": "核算项目"
+                "target_field": "核算项目1"
               }
             ]
           }
@@ -276,7 +249,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_agg",
+              "alias": "debit_detail_agg",
               "field": "agg_借方合计"
             }
           },
@@ -287,19 +260,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_agg",
+              "alias": "credit_detail_agg",
               "field": "agg_贷方合计"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "贷方调整",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "adjustment_agg",
-              "field": "agg_贷方调整"
             }
           },
           "field_write_mode": "overwrite"
@@ -314,95 +276,116 @@
             }
           },
           "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "贷方调整",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "adjustment_agg",
+              "field": "agg_贷方调整"
+            }
+          },
+          "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "opening_balance_source",
-          "output_alias": "opening_balance_agg",
-          "group_fields": [
-            "科目名称",
-            "公司",
-            "核算项目"
-          ],
-          "aggregations": [
-            {
-              "field": "期末余额",
-              "operator": "sum",
-              "alias": "agg_期初"
-            }
-          ]
-        },
-        {
-          "source_alias": "debit_accrual_source",
-          "output_alias": "debit_accrual_agg",
-          "group_fields": [
-            "科目名称",
-            "公司名称",
-            "客商名称"
-          ],
-          "aggregations": [
-            {
-              "field": "含税金额",
-              "operator": "sum",
-              "alias": "agg_借方合计"
-            }
-          ]
-        },
-        {
-          "source_alias": "credit_receipt_source",
-          "output_alias": "credit_receipt_agg",
-          "group_fields": [
-            "科目名称",
-            "公司名称",
-            "客商名称"
-          ],
-          "aggregations": [
-            {
-              "field": "金额",
-              "operator": "sum",
-              "alias": "agg_贷方合计"
-            }
-          ]
-        },
-        {
-          "source_alias": "adjustment_source",
-          "output_alias": "adjustment_agg",
-          "group_fields": [
-            "科目名称",
-            "公司",
-            "对方核算项目"
-          ],
-          "aggregations": [
-            {
-              "field": "贷方",
-              "operator": "sum",
-              "alias": "agg_贷方调整"
-            },
-            {
-              "field": "借方",
-              "operator": "sum",
-              "alias": "agg_借方调整"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step2a_create_july_balance_usage",
+      "step_id": "step1_finalize_check_table_balance",
+      "description": "根据更新后的期初与借贷调整重新计算金蝶期末余额-检核的计算余额",
+      "depends_on": [
+        "step1_update_check_table_amounts"
+      ],
+      "action": "write_dataset",
+      "target_table": "金蝶期末余额-检核",
+      "sources": [
+        {
+          "table": "金蝶期末余额-检核",
+          "alias": "check_table_source"
+        }
+      ],
+      "match": {
+        "sources": [
+          {
+            "alias": "check_table_source",
+            "keys": [
+              {
+                "field": "科目代码",
+                "target_field": "科目代码"
+              },
+              {
+                "field": "科目名称",
+                "target_field": "科目名称"
+              },
+              {
+                "field": "公司",
+                "target_field": "公司"
+              },
+              {
+                "field": "核算项目1",
+                "target_field": "核算项目1"
+              }
+            ]
+          }
+        ]
+      },
+      "mappings": [
+        {
+          "target_field": "计算余额",
+          "value": {
+            "type": "formula",
+            "expr": "coalesce({opening}, 0) + coalesce({debit_total}, 0) - coalesce({credit_total}, 0) + coalesce({adjust_debit}, 0) - coalesce({adjust_credit}, 0)"
+          },
+          "field_write_mode": "overwrite",
+          "bindings": {
+            "opening": {
+              "type": "source",
+              "source": {
+                "alias": "check_table_source",
+                "field": "期初"
+              }
+            },
+            "debit_total": {
+              "type": "source",
+              "source": {
+                "alias": "check_table_source",
+                "field": "借方合计"
+              }
+            },
+            "credit_total": {
+              "type": "source",
+              "source": {
+                "alias": "check_table_source",
+                "field": "贷方合计"
+              }
+            },
+            "adjust_debit": {
+              "type": "source",
+              "source": {
+                "alias": "check_table_source",
+                "field": "借方调整"
+              }
+            },
+            "adjust_credit": {
+              "type": "source",
+              "source": {
+                "alias": "check_table_source",
+                "field": "贷方调整"
+              }
+            }
+          }
+        }
+      ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step2_create_july_balance_usage",
       "description": "创建统计使用-7月余额表",
       "action": "create_schema",
       "target_table": "统计使用-7月余额",
       "schema": {
-        "primary_key": [
-          "日期",
-          "科目代码",
-          "科目名称",
-          "公司名称",
-          "核算项目",
-          "周期",
-          "归属中心"
-        ],
+        "primary_key": [],
         "columns": [
           {
             "name": "日期",
@@ -410,12 +393,12 @@
             "nullable": false
           },
           {
-            "name": "科目代码",
+            "name": "对应科目编码",
             "data_type": "string",
             "nullable": false
           },
           {
-            "name": "科目名称",
+            "name": "对应科目",
             "data_type": "string",
             "nullable": false
           },
@@ -425,7 +408,7 @@
             "nullable": false
           },
           {
-            "name": "核算项目",
+            "name": "客商名称",
             "data_type": "string",
             "nullable": false
           },
@@ -435,7 +418,7 @@
             "nullable": false
           },
           {
-            "name": "归属中心",
+            "name": "中心",
             "data_type": "string",
             "nullable": false
           },
@@ -460,15 +443,14 @@
       }
     },
     {
-      "step_id": "step2b_write_july_balance_usage",
-      "description": "按检核表匹配科目期初，生成统计使用-7月余额",
+      "step_id": "step2_write_july_balance_usage",
+      "description": "按金蝶期末余额-检核匹配科目期初，生成统计使用-7月余额",
       "depends_on": [
-        "step2a_create_july_balance_usage",
-        "step1_update_check_table"
+        "step1_finalize_check_table_balance",
+        "step2_create_july_balance_usage"
       ],
       "action": "write_dataset",
       "target_table": "统计使用-7月余额",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "科目期初",
@@ -489,7 +471,7 @@
           },
           {
             "source_field": "核算项目",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
@@ -506,7 +488,7 @@
           "field_write_mode": "overwrite"
         },
         {
-          "target_field": "科目代码",
+          "target_field": "对应科目编码",
           "value": {
             "type": "source",
             "source": {
@@ -517,7 +499,7 @@
           "field_write_mode": "overwrite"
         },
         {
-          "target_field": "科目名称",
+          "target_field": "对应科目",
           "value": {
             "type": "source",
             "source": {
@@ -539,7 +521,7 @@
           "field_write_mode": "overwrite"
         },
         {
-          "target_field": "核算项目",
+          "target_field": "客商名称",
           "value": {
             "type": "source",
             "source": {
@@ -561,7 +543,7 @@
           "field_write_mode": "overwrite"
         },
         {
-          "target_field": "归属中心",
+          "target_field": "中心",
           "value": {
             "type": "source",
             "source": {
@@ -604,22 +586,194 @@
           },
           "field_write_mode": "overwrite"
         }
-      ]
+      ],
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step2c_create_debit_usage",
+      "step_id": "step2_map_credit_center",
+      "description": "根据中心匹配表将统计使用-贷方的中心替换为中心2",
+      "depends_on": [
+        "step2_write_credit_usage"
+      ],
+      "action": "write_dataset",
+      "target_table": "统计使用-贷方",
+      "sources": [
+        {
+          "table": "统计使用-贷方",
+          "alias": "credit_usage"
+        },
+        {
+          "table": "中心匹配",
+          "alias": "center_mapping"
+        }
+      ],
+      "match": {
+        "sources": [
+          {
+            "alias": "credit_usage",
+            "keys": [
+              {
+                "field": "单号",
+                "target_field": "单号"
+              },
+              {
+                "field": "对应科目编码",
+                "target_field": "对应科目编码"
+              },
+              {
+                "field": "公司名称",
+                "target_field": "公司名称"
+              },
+              {
+                "field": "客商名称",
+                "target_field": "客商名称"
+              },
+              {
+                "field": "周期",
+                "target_field": "周期"
+              },
+              {
+                "field": "中心",
+                "target_field": "中心"
+              }
+            ]
+          }
+        ]
+      },
+      "mappings": [
+        {
+          "target_field": "中心",
+          "value": {
+            "type": "formula",
+            "expr": "coalesce({mapped_center}, {original_center})"
+          },
+          "bindings": {
+            "mapped_center": {
+              "type": "lookup",
+              "source_alias": "center_mapping",
+              "value_field": "中心2",
+              "keys": [
+                {
+                  "lookup_field": "中心1",
+                  "input": {
+                    "type": "source",
+                    "source": {
+                      "alias": "credit_usage",
+                      "field": "中心"
+                    }
+                  }
+                }
+              ]
+            },
+            "original_center": {
+              "type": "source",
+              "source": {
+                "alias": "credit_usage",
+                "field": "中心"
+              }
+            }
+          },
+          "field_write_mode": "overwrite"
+        }
+      ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step2_map_debit_center",
+      "description": "根据中心匹配表将统计使用-借方的中心替换为中心2",
+      "depends_on": [
+        "step2_write_debit_usage"
+      ],
+      "action": "write_dataset",
+      "target_table": "统计使用-借方",
+      "sources": [
+        {
+          "table": "统计使用-借方",
+          "alias": "debit_usage"
+        },
+        {
+          "table": "中心匹配",
+          "alias": "center_mapping"
+        }
+      ],
+      "match": {
+        "sources": [
+          {
+            "alias": "debit_usage",
+            "keys": [
+              {
+                "field": "单号",
+                "target_field": "单号"
+              },
+              {
+                "field": "对应科目编码",
+                "target_field": "对应科目编码"
+              },
+              {
+                "field": "公司名称",
+                "target_field": "公司名称"
+              },
+              {
+                "field": "客商名称",
+                "target_field": "客商名称"
+              },
+              {
+                "field": "周期",
+                "target_field": "周期"
+              },
+              {
+                "field": "中心",
+                "target_field": "中心"
+              }
+            ]
+          }
+        ]
+      },
+      "mappings": [
+        {
+          "target_field": "中心",
+          "value": {
+            "type": "formula",
+            "expr": "coalesce({mapped_center}, {original_center})"
+          },
+          "bindings": {
+            "mapped_center": {
+              "type": "lookup",
+              "source_alias": "center_mapping",
+              "value_field": "中心2",
+              "keys": [
+                {
+                  "lookup_field": "中心1",
+                  "input": {
+                    "type": "source",
+                    "source": {
+                      "alias": "debit_usage",
+                      "field": "中心"
+                    }
+                  }
+                }
+              ]
+            },
+            "original_center": {
+              "type": "source",
+              "source": {
+                "alias": "debit_usage",
+                "field": "中心"
+              }
+            }
+          },
+          "field_write_mode": "overwrite"
+        }
+      ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step2_create_debit_usage",
       "description": "创建统计使用-借方表",
       "action": "create_schema",
       "target_table": "统计使用-借方",
       "schema": {
-        "primary_key": [
-          "单号",
-          "对应科目编码",
-          "公司名称",
-          "客商名称",
-          "周期",
-          "中心"
-        ],
+        "primary_key": [],
         "columns": [
           {
             "name": "对应科目编码",
@@ -662,6 +816,11 @@
             "nullable": false
           },
           {
+            "name": "大类",
+            "data_type": "string",
+            "nullable": true
+          },
+          {
             "name": "含税金额",
             "data_type": "decimal",
             "precision": 18,
@@ -701,27 +860,26 @@
       }
     },
     {
-      "step_id": "step2d_write_debit_usage",
-      "description": "按检核表匹配借方-计提单明细，生成统计使用-借方",
+      "step_id": "step2_write_debit_usage",
+      "description": "按金蝶期末余额-检核匹配借方明细，生成统计使用-借方，并按周期与期数分子计算逾期时间",
       "depends_on": [
-        "step2c_create_debit_usage",
-        "step1_update_check_table"
+        "step1_finalize_check_table_balance",
+        "step2_create_debit_usage"
       ],
       "action": "write_dataset",
       "target_table": "统计使用-借方",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "借方-计提单明细",
-          "alias": "debit_accrual_source"
+          "alias": "debit_detail_source"
         }
       ],
       "reference_filter": {
-        "source_alias": "debit_accrual_source",
+        "source_alias": "debit_detail_source",
         "reference_table": "金蝶期末余额-检核",
         "keys": [
           {
-            "source_field": "科目名称",
+            "source_field": "对应科目",
             "reference_field": "科目名称"
           },
           {
@@ -730,7 +888,7 @@
           },
           {
             "source_field": "客商名称",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
@@ -740,8 +898,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
-              "field": "科目编码"
+              "alias": "debit_detail_source",
+              "field": "对应科目编码"
             }
           },
           "field_write_mode": "overwrite"
@@ -751,8 +909,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
-              "field": "科目名称"
+              "alias": "debit_detail_source",
+              "field": "对应科目"
             }
           },
           "field_write_mode": "overwrite"
@@ -762,7 +920,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "日期"
             }
           },
@@ -773,7 +931,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "公司名称"
             }
           },
@@ -784,7 +942,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "中心"
             }
           },
@@ -795,7 +953,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "计提项目"
             }
           },
@@ -806,7 +964,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "周期"
             }
           },
@@ -817,8 +975,19 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "客商名称"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "大类",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "debit_detail_source",
+              "field": "大类"
             }
           },
           "field_write_mode": "overwrite"
@@ -828,7 +997,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "含税金额"
             }
           },
@@ -839,7 +1008,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "不含税金额"
             }
           },
@@ -850,7 +1019,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
+              "alias": "debit_detail_source",
               "field": "税额"
             }
           },
@@ -861,8 +1030,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_accrual_source",
-              "field": "单号"
+              "alias": "debit_detail_source",
+              "field": "单号整理"
             }
           },
           "field_write_mode": "overwrite"
@@ -870,10 +1039,23 @@
         {
           "target_field": "期数",
           "value": {
-            "type": "source",
-            "source": {
-              "alias": "debit_accrual_source",
-              "field": "期数"
+            "type": "formula",
+            "expr": "{period_text} == '月返' ? '1/1' : {source_installment}"
+          },
+          "bindings": {
+            "period_text": {
+              "type": "source",
+              "source": {
+                "alias": "debit_detail_source",
+                "field": "周期"
+              }
+            },
+            "source_installment": {
+              "type": "source",
+              "source": {
+                "alias": "debit_detail_source",
+                "field": "期数"
+              }
             }
           },
           "field_write_mode": "overwrite"
@@ -881,30 +1063,56 @@
         {
           "target_field": "逾期时间",
           "value": {
-            "type": "source",
-            "source": {
-              "alias": "debit_accrual_source",
-              "field": "逾期时间"
+            "type": "function",
+            "function": "add_months",
+            "args": {
+              "date": {
+                "type": "source",
+                "source": {
+                  "alias": "debit_detail_source",
+                  "field": "日期"
+                }
+              },
+              "months": {
+                "type": "formula",
+                "expr": "{period_text} == '月返' ? 4 : ({period_text} == '季返' ? 6 - {period_numerator} : ({period_text} == '年返' ? 15 - {period_numerator} : 0))",
+                "bindings": {
+                  "period_text": {
+                    "type": "source",
+                    "source": {
+                      "alias": "debit_detail_source",
+                      "field": "周期"
+                    }
+                  },
+                  "period_numerator": {
+                    "type": "function",
+                    "function": "fraction_numerator",
+                    "args": {
+                      "value": {
+                        "type": "source",
+                        "source": {
+                          "alias": "debit_detail_source",
+                          "field": "期数"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
           },
           "field_write_mode": "overwrite"
         }
-      ]
+      ],
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step2e_create_credit_usage",
+      "step_id": "step2_create_credit_usage",
       "description": "创建统计使用-贷方表",
       "action": "create_schema",
       "target_table": "统计使用-贷方",
       "schema": {
-        "primary_key": [
-          "单号",
-          "对应科目编码",
-          "公司名称",
-          "客商名称",
-          "周期",
-          "中心"
-        ],
+        "primary_key": [],
         "columns": [
           {
             "name": "对应科目编码",
@@ -928,6 +1136,16 @@
           },
           {
             "name": "客商名称",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "中心",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "周期",
             "data_type": "string",
             "nullable": false
           },
@@ -957,42 +1175,31 @@
             "name": "填单人",
             "data_type": "string",
             "nullable": true
-          },
-          {
-            "name": "中心",
-            "data_type": "string",
-            "nullable": false
-          },
-          {
-            "name": "周期",
-            "data_type": "string",
-            "nullable": false
           }
         ]
       }
     },
     {
-      "step_id": "step2f_write_credit_usage",
-      "description": "按检核表匹配贷方-收款单明细，生成统计使用-贷方",
+      "step_id": "step2_write_credit_usage",
+      "description": "按金蝶期末余额-检核匹配贷方明细，直接使用源文件中的中心和周期，生成统计使用-贷方",
       "depends_on": [
-        "step2e_create_credit_usage",
-        "step1_update_check_table"
+        "step1_finalize_check_table_balance",
+        "step2_create_credit_usage"
       ],
       "action": "write_dataset",
       "target_table": "统计使用-贷方",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "贷方-收款单明细",
-          "alias": "credit_receipt_source"
+          "alias": "credit_detail_source"
         }
       ],
       "reference_filter": {
-        "source_alias": "credit_receipt_source",
+        "source_alias": "credit_detail_source",
         "reference_table": "金蝶期末余额-检核",
         "keys": [
           {
-            "source_field": "科目名称",
+            "source_field": "对应科目",
             "reference_field": "科目名称"
           },
           {
@@ -1001,7 +1208,7 @@
           },
           {
             "source_field": "客商名称",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
@@ -1011,8 +1218,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
-              "field": "科目编码"
+              "alias": "credit_detail_source",
+              "field": "对应科目编码"
             }
           },
           "field_write_mode": "overwrite"
@@ -1022,8 +1229,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
-              "field": "科目名称"
+              "alias": "credit_detail_source",
+              "field": "对应科目"
             }
           },
           "field_write_mode": "overwrite"
@@ -1033,7 +1240,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
+              "alias": "credit_detail_source",
               "field": "日期"
             }
           },
@@ -1044,7 +1251,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
+              "alias": "credit_detail_source",
               "field": "公司名称"
             }
           },
@@ -1055,63 +1262,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
+              "alias": "credit_detail_source",
               "field": "客商名称"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "金额",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "credit_receipt_source",
-              "field": "金额"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "单号",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "credit_receipt_source",
-              "field": "单号"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "费用项目",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "credit_receipt_source",
-              "field": "费用项目"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "商户",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "credit_receipt_source",
-              "field": "商户"
-            }
-          },
-          "field_write_mode": "overwrite"
-        },
-        {
-          "target_field": "填单人",
-          "value": {
-            "type": "source",
-            "source": {
-              "alias": "credit_receipt_source",
-              "field": "填单人"
             }
           },
           "field_write_mode": "overwrite"
@@ -1121,7 +1273,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
+              "alias": "credit_detail_source",
               "field": "中心"
             }
           },
@@ -1132,21 +1284,75 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_receipt_source",
+              "alias": "credit_detail_source",
               "field": "周期"
             }
           },
           "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "金额",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "credit_detail_source",
+              "field": "金额"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "单号",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "credit_detail_source",
+              "field": "单号"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "费用项目",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "credit_detail_source",
+              "field": "费用项目"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "商户",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "credit_detail_source",
+              "field": "商户"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "填单人",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "credit_detail_source",
+              "field": "填单人"
+            }
+          },
+          "field_write_mode": "overwrite"
         }
-      ]
+      ],
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step3_1_create_statistics_merge",
-      "description": "创建统计合并表结构，包含动态月列",
+      "step_id": "step3_create_merged_statistics",
+      "description": "创建统计合并表结构，并按月份生成动态列",
       "depends_on": [
-        "step2b_write_july_balance_usage",
-        "step2d_write_debit_usage",
-        "step2f_write_credit_usage"
+        "step2_write_credit_usage"
       ],
       "action": "create_schema",
       "target_table": "统计合并",
@@ -1241,6 +1447,7 @@
         "dynamic_columns": {
           "dimension": "month",
           "start": {
+            "type": "function",
             "function": "earliest_date",
             "args": {
               "source": "统计使用-7月余额",
@@ -1250,6 +1457,7 @@
             }
           },
           "end": {
+            "type": "function",
             "function": "month_of",
             "args": {
               "date": {
@@ -1337,18 +1545,75 @@
               "default": 0
             }
           ]
+        },
+        "export_layout": {
+          "fixed_columns": [
+            "对应科目编码",
+            "对应科目",
+            "公司名称",
+            "客商名称",
+            "周期",
+            "中心",
+            "累计贷方",
+            "累计借方",
+            "累计调整-借",
+            "累计调整-贷",
+            "7月余额",
+            "逾期时间",
+            "计算余额"
+          ],
+          "dynamic_groups": [
+            {
+              "dimension": "month",
+              "start": {
+                "type": "function",
+                "function": "earliest_date",
+                "args": {
+                  "source": "统计使用-7月余额",
+                  "date_field": "日期",
+                  "offset": 1
+                }
+              },
+              "end": {
+                "type": "function",
+                "function": "current_date",
+                "args": {}
+              },
+              "columns": [
+                {
+                  "source_template": "{month}月借",
+                  "header_template": "{month_end_date}"
+                },
+                {
+                  "source_template": "{month}月调整-借",
+                  "header": "调整-借"
+                },
+                {
+                  "source_template": "{month}月调整-贷",
+                  "header": "调整-贷"
+                },
+                {
+                  "source_template": "{month}月逾期时间",
+                  "header": "逾期时间"
+                },
+                {
+                  "source_template": "{month}月计算余额",
+                  "header": "计算余额"
+                }
+              ]
+            }
+          ]
         }
       }
     },
     {
-      "step_id": "step3_2_seed_merge_from_july_balance",
+      "step_id": "step3_seed_merged_keys_from_july_balance",
       "description": "用统计使用-7月余额初始化统计合并业务键",
       "depends_on": [
-        "step3_1_create_statistics_merge"
+        "step3_create_merged_statistics"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "统计使用-7月余额",
@@ -1358,14 +1623,14 @@
       "match": {
         "sources": [
           {
-            "alias": "july_balance_usage_agg",
+            "alias": "july_balance_usage",
             "keys": [
               {
-                "field": "科目代码",
+                "field": "对应科目编码",
                 "target_field": "对应科目编码"
               },
               {
-                "field": "科目名称",
+                "field": "对应科目",
                 "target_field": "对应科目"
               },
               {
@@ -1373,7 +1638,7 @@
                 "target_field": "公司名称"
               },
               {
-                "field": "核算项目",
+                "field": "客商名称",
                 "target_field": "客商名称"
               },
               {
@@ -1381,7 +1646,7 @@
                 "target_field": "周期"
               },
               {
-                "field": "归属中心",
+                "field": "中心",
                 "target_field": "中心"
               }
             ]
@@ -1394,8 +1659,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
-              "field": "科目代码"
+              "alias": "july_balance_usage",
+              "field": "对应科目编码"
             }
           },
           "field_write_mode": "overwrite"
@@ -1405,8 +1670,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
-              "field": "科目名称"
+              "alias": "july_balance_usage",
+              "field": "对应科目"
             }
           },
           "field_write_mode": "overwrite"
@@ -1416,7 +1681,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
+              "alias": "july_balance_usage",
               "field": "公司名称"
             }
           },
@@ -1427,8 +1692,8 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
-              "field": "核算项目"
+              "alias": "july_balance_usage",
+              "field": "客商名称"
             }
           },
           "field_write_mode": "overwrite"
@@ -1438,7 +1703,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
+              "alias": "july_balance_usage",
               "field": "周期"
             }
           },
@@ -1449,44 +1714,24 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
-              "field": "归属中心"
+              "alias": "july_balance_usage",
+              "field": "中心"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "july_balance_usage",
-          "output_alias": "july_balance_usage_agg",
-          "group_fields": [
-            "科目代码",
-            "科目名称",
-            "公司名称",
-            "核算项目",
-            "周期",
-            "归属中心"
-          ],
-          "aggregations": [
-            {
-              "field": "期末余额",
-              "operator": "sum",
-              "alias": "agg_seed"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step3_3_seed_merge_from_debit",
-      "description": "用统计使用-借方补齐统计合并业务键",
+      "step_id": "step3_seed_merged_keys_from_debit_usage",
+      "description": "用统计使用-借方补充统计合并业务键",
       "depends_on": [
-        "step3_2_seed_merge_from_july_balance"
+        "step3_seed_merged_keys_from_july_balance",
+        "step2_map_debit_center"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "统计使用-借方",
@@ -1496,7 +1741,7 @@
       "match": {
         "sources": [
           {
-            "alias": "debit_usage_agg",
+            "alias": "debit_usage",
             "keys": [
               {
                 "field": "对应科目编码",
@@ -1532,7 +1777,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "对应科目编码"
             }
           },
@@ -1543,7 +1788,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "对应科目"
             }
           },
@@ -1554,7 +1799,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "公司名称"
             }
           },
@@ -1565,7 +1810,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "客商名称"
             }
           },
@@ -1576,7 +1821,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "周期"
             }
           },
@@ -1587,44 +1832,24 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_usage",
               "field": "中心"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "debit_usage",
-          "output_alias": "debit_usage_agg",
-          "group_fields": [
-            "对应科目编码",
-            "对应科目",
-            "公司名称",
-            "客商名称",
-            "周期",
-            "中心"
-          ],
-          "aggregations": [
-            {
-              "field": "含税金额",
-              "operator": "sum",
-              "alias": "agg_seed"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step3_4_seed_merge_from_credit",
-      "description": "用统计使用-贷方补齐统计合并业务键",
+      "step_id": "step3_seed_merged_keys_from_credit_usage",
+      "description": "用统计使用-贷方补充统计合并业务键",
       "depends_on": [
-        "step3_3_seed_merge_from_debit"
+        "step3_seed_merged_keys_from_debit_usage",
+        "step2_map_credit_center"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "统计使用-贷方",
@@ -1634,7 +1859,7 @@
       "match": {
         "sources": [
           {
-            "alias": "credit_usage_agg",
+            "alias": "credit_usage",
             "keys": [
               {
                 "field": "对应科目编码",
@@ -1670,7 +1895,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "对应科目编码"
             }
           },
@@ -1681,7 +1906,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "对应科目"
             }
           },
@@ -1692,7 +1917,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "公司名称"
             }
           },
@@ -1703,7 +1928,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "客商名称"
             }
           },
@@ -1714,7 +1939,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "周期"
             }
           },
@@ -1725,44 +1950,23 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_usage",
               "field": "中心"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "credit_usage",
-          "output_alias": "credit_usage_agg",
-          "group_fields": [
-            "对应科目编码",
-            "对应科目",
-            "公司名称",
-            "客商名称",
-            "周期",
-            "中心"
-          ],
-          "aggregations": [
-            {
-              "field": "金额",
-              "operator": "sum",
-              "alias": "agg_seed"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step3_5_seed_merge_from_adjustment",
-      "description": "用调整明细补齐统计合并业务键",
+      "step_id": "step3_seed_merged_keys_from_adjustment",
+      "description": "用调整明细补充统计合并业务键",
       "depends_on": [
-        "step3_4_seed_merge_from_credit"
+        "step3_seed_merged_keys_from_credit_usage"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "调整明细",
@@ -1783,14 +1987,14 @@
           },
           {
             "source_field": "对方核算项目",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
       "match": {
         "sources": [
           {
-            "alias": "adjustment_source_agg",
+            "alias": "adjustment_source",
             "keys": [
               {
                 "field": "科目编码",
@@ -1826,7 +2030,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "科目编码"
             }
           },
@@ -1837,7 +2041,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "科目名称"
             }
           },
@@ -1848,7 +2052,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "公司"
             }
           },
@@ -1859,7 +2063,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "对方核算项目"
             }
           },
@@ -1870,7 +2074,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "周期"
             }
           },
@@ -1881,48 +2085,48 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_source",
               "field": "中心"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
+      "row_write_mode": "upsert"
+    },
+    {
+      "step_id": "step3_fill_cumulative_debit",
+      "description": "聚合统计使用-借方，回填累计借方",
+      "depends_on": [
+        "step3_seed_merged_keys_from_adjustment"
+      ],
+      "action": "write_dataset",
+      "target_table": "统计合并",
+      "sources": [
+        {
+          "table": "统计使用-借方",
+          "alias": "debit_usage"
+        }
+      ],
       "aggregate": [
         {
-          "source_alias": "adjustment_source",
-          "output_alias": "adjustment_source_agg",
+          "source_alias": "debit_usage",
+          "output_alias": "debit_usage_agg",
           "group_fields": [
-            "科目编码",
-            "科目名称",
-            "公司",
-            "对方核算项目",
+            "对应科目编码",
+            "对应科目",
+            "公司名称",
+            "客商名称",
             "周期",
             "中心"
           ],
           "aggregations": [
             {
-              "field": "借方",
+              "field": "含税金额",
               "operator": "sum",
-              "alias": "agg_seed"
+              "alias": "agg_累计借方"
             }
           ]
-        }
-      ]
-    },
-    {
-      "step_id": "step3_6_fill_cumulative_debit",
-      "description": "按业务键聚合统计使用-借方，回填累计借方",
-      "depends_on": [
-        "step3_5_seed_merge_from_adjustment"
-      ],
-      "action": "write_dataset",
-      "target_table": "统计合并",
-      "row_write_mode": "update_only",
-      "sources": [
-        {
-          "table": "统计使用-借方",
-          "alias": "debit_usage"
         }
       ],
       "match": {
@@ -1971,10 +2175,26 @@
           "field_write_mode": "overwrite"
         }
       ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step3_fill_cumulative_credit",
+      "description": "聚合统计使用-贷方，回填累计贷方",
+      "depends_on": [
+        "step3_fill_cumulative_debit"
+      ],
+      "action": "write_dataset",
+      "target_table": "统计合并",
+      "sources": [
+        {
+          "table": "统计使用-贷方",
+          "alias": "credit_usage"
+        }
+      ],
       "aggregate": [
         {
-          "source_alias": "debit_usage",
-          "output_alias": "debit_usage_agg",
+          "source_alias": "credit_usage",
+          "output_alias": "credit_usage_agg",
           "group_fields": [
             "对应科目编码",
             "对应科目",
@@ -1985,27 +2205,11 @@
           ],
           "aggregations": [
             {
-              "field": "含税金额",
+              "field": "金额",
               "operator": "sum",
-              "alias": "agg_累计借方"
+              "alias": "agg_累计贷方"
             }
           ]
-        }
-      ]
-    },
-    {
-      "step_id": "step3_7_fill_cumulative_credit",
-      "description": "按业务键聚合统计使用-贷方，回填累计贷方",
-      "depends_on": [
-        "step3_6_fill_cumulative_debit"
-      ],
-      "action": "write_dataset",
-      "target_table": "统计合并",
-      "row_write_mode": "update_only",
-      "sources": [
-        {
-          "table": "统计使用-贷方",
-          "alias": "credit_usage"
         }
       ],
       "match": {
@@ -2054,37 +2258,16 @@
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "credit_usage",
-          "output_alias": "credit_usage_agg",
-          "group_fields": [
-            "对应科目编码",
-            "对应科目",
-            "公司名称",
-            "客商名称",
-            "周期",
-            "中心"
-          ],
-          "aggregations": [
-            {
-              "field": "金额",
-              "operator": "sum",
-              "alias": "agg_累计贷方"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_8_fill_cumulative_adjustment",
-      "description": "按业务键聚合调整明细，回填累计调整借贷",
+      "step_id": "step3_fill_cumulative_adjustment",
+      "description": "聚合调整明细，回填累计调整借贷",
       "depends_on": [
-        "step3_7_fill_cumulative_credit"
+        "step3_fill_cumulative_credit"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "调整明细",
@@ -2105,14 +2288,40 @@
           },
           {
             "source_field": "对方核算项目",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
+      "aggregate": [
+          {
+            "source_alias": "adjustment_source",
+            "output_alias": "adjustment_agg",
+            "group_fields": [
+              "科目编码",
+              "科目名称",
+              "公司",
+              "对方核算项目",
+              "周期",
+              "中心"
+            ],
+          "aggregations": [
+            {
+              "field": "借方",
+              "operator": "sum",
+              "alias": "agg_累计调整借"
+            },
+            {
+              "field": "贷方",
+              "operator": "sum",
+              "alias": "agg_累计调整贷"
+            }
+          ]
+        }
+      ],
       "match": {
         "sources": [
           {
-            "alias": "adjustment_source_agg",
+            "alias": "adjustment_agg",
             "keys": [
               {
                 "field": "科目编码",
@@ -2148,7 +2357,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_agg",
               "field": "agg_累计调整借"
             }
           },
@@ -2159,66 +2368,61 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_agg",
               "field": "agg_累计调整贷"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "adjustment_source",
-          "output_alias": "adjustment_source_agg",
-          "group_fields": [
-            "科目编码",
-            "科目名称",
-            "公司",
-            "对方核算项目",
-            "周期",
-            "中心"
-          ],
-          "aggregations": [
-            {
-              "field": "借方",
-              "operator": "sum",
-              "alias": "agg_累计调整借"
-            },
-            {
-              "field": "贷方",
-              "operator": "sum",
-              "alias": "agg_累计调整贷"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_9_fill_july_balance",
-      "description": "按业务键聚合统计使用-7月余额，回填7月余额",
+      "step_id": "step3_fill_july_balance",
+      "description": "聚合统计使用-7月余额，回填7月余额",
       "depends_on": [
-        "step3_8_fill_cumulative_adjustment"
+        "step3_fill_cumulative_adjustment"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "统计使用-7月余额",
           "alias": "july_balance_usage"
         }
       ],
+      "aggregate": [
+        {
+          "source_alias": "july_balance_usage",
+          "output_alias": "july_balance_agg",
+          "group_fields": [
+            "对应科目编码",
+            "对应科目",
+            "公司名称",
+            "客商名称",
+            "周期",
+            "中心"
+          ],
+          "aggregations": [
+            {
+              "field": "期末余额",
+              "operator": "sum",
+              "alias": "agg_7月余额"
+            }
+          ]
+        }
+      ],
       "match": {
         "sources": [
           {
-            "alias": "july_balance_usage_agg",
+            "alias": "july_balance_agg",
             "keys": [
               {
-                "field": "科目代码",
+                "field": "对应科目编码",
                 "target_field": "对应科目编码"
               },
               {
-                "field": "科目名称",
+                "field": "对应科目",
                 "target_field": "对应科目"
               },
               {
@@ -2226,7 +2430,7 @@
                 "target_field": "公司名称"
               },
               {
-                "field": "核算项目",
+                "field": "客商名称",
                 "target_field": "客商名称"
               },
               {
@@ -2234,7 +2438,7 @@
                 "target_field": "周期"
               },
               {
-                "field": "归属中心",
+                "field": "中心",
                 "target_field": "中心"
               }
             ]
@@ -2247,54 +2451,54 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "july_balance_usage_agg",
+              "alias": "july_balance_agg",
               "field": "agg_7月余额"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "july_balance_usage",
-          "output_alias": "july_balance_usage_agg",
-          "group_fields": [
-            "科目代码",
-            "科目名称",
-            "公司名称",
-            "核算项目",
-            "周期",
-            "归属中心"
-          ],
-          "aggregations": [
-            {
-              "field": "期末余额",
-              "operator": "sum",
-              "alias": "agg_7月余额"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_10_fill_overdue_time",
-      "description": "按业务键聚合统计使用-借方，回填逾期时间",
+      "step_id": "step3_fill_overdue_time",
+      "description": "聚合统计使用-7月余额，回填7月逾期时间",
       "depends_on": [
-        "step3_9_fill_july_balance"
+        "step3_fill_july_balance"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
-          "table": "统计使用-借方",
-          "alias": "debit_usage"
+          "table": "统计使用-7月余额",
+          "alias": "july_balance_usage"
+        }
+      ],
+      "aggregate": [
+        {
+          "source_alias": "july_balance_usage",
+          "output_alias": "july_overdue_agg",
+          "group_fields": [
+            "对应科目编码",
+            "对应科目",
+            "公司名称",
+            "客商名称",
+            "周期",
+            "中心"
+          ],
+          "aggregations": [
+            {
+              "field": "预计回款时间",
+              "operator": "min",
+              "alias": "agg_7月逾期时间"
+            }
+          ]
         }
       ],
       "match": {
         "sources": [
           {
-            "alias": "debit_usage_agg",
+            "alias": "july_overdue_agg",
             "keys": [
               {
                 "field": "对应科目编码",
@@ -2330,54 +2534,60 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
-              "field": "agg_逾期时间"
+              "alias": "july_overdue_agg",
+              "field": "agg_7月逾期时间"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "debit_usage",
-          "output_alias": "debit_usage_agg",
-          "group_fields": [
-            "对应科目编码",
-            "对应科目",
-            "公司名称",
-            "客商名称",
-            "周期",
-            "中心"
-          ],
-          "aggregations": [
-            {
-              "field": "逾期时间",
-              "operator": "min",
-              "alias": "agg_逾期时间"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_11_fill_dynamic_debit_columns",
-      "description": "按月聚合统计使用-借方，回填月借与月逾期时间",
+      "step_id": "step3_fill_dynamic_debit_columns",
+      "description": "按月聚合统计使用-借方，回填月借和月逾期时间",
       "depends_on": [
-        "step3_10_fill_overdue_time"
+        "step3_fill_overdue_time"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "统计使用-借方",
           "alias": "debit_usage"
         }
       ],
+      "aggregate": [
+        {
+          "source_alias": "debit_usage",
+          "output_alias": "debit_monthly_agg",
+          "group_fields": [
+            "对应科目编码",
+            "对应科目",
+            "公司名称",
+            "客商名称",
+            "周期",
+            "中心",
+            "日期"
+          ],
+          "aggregations": [
+            {
+              "field": "含税金额",
+              "operator": "sum",
+              "alias": "agg_月借"
+            },
+            {
+              "field": "逾期时间",
+              "operator": "min",
+              "alias": "agg_月逾期时间"
+            }
+          ]
+        }
+      ],
       "match": {
         "sources": [
           {
-            "alias": "debit_usage_agg",
+            "alias": "debit_monthly_agg",
             "keys": [
               {
                 "field": "对应科目编码",
@@ -2419,7 +2629,7 @@
                   "date": {
                     "type": "source",
                     "source": {
-                      "alias": "debit_usage_agg",
+                      "alias": "debit_monthly_agg",
                       "field": "日期"
                     }
                   }
@@ -2430,7 +2640,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_monthly_agg",
               "field": "agg_月借"
             }
           },
@@ -2447,7 +2657,7 @@
                   "date": {
                     "type": "source",
                     "source": {
-                      "alias": "debit_usage_agg",
+                      "alias": "debit_monthly_agg",
                       "field": "日期"
                     }
                   }
@@ -2458,17 +2668,33 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "debit_usage_agg",
+              "alias": "debit_monthly_agg",
               "field": "agg_月逾期时间"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step3_fill_dynamic_credit_columns",
+      "description": "按月聚合统计使用-贷方，回填月贷",
+      "depends_on": [
+        "step3_fill_dynamic_debit_columns"
+      ],
+      "action": "write_dataset",
+      "target_table": "统计合并",
+      "sources": [
+        {
+          "table": "统计使用-贷方",
+          "alias": "credit_usage"
+        }
+      ],
       "aggregate": [
         {
-          "source_alias": "debit_usage",
-          "output_alias": "debit_usage_agg",
+          "source_alias": "credit_usage",
+          "output_alias": "credit_monthly_agg",
           "group_fields": [
             "对应科目编码",
             "对应科目",
@@ -2480,38 +2706,17 @@
           ],
           "aggregations": [
             {
-              "field": "含税金额",
+              "field": "金额",
               "operator": "sum",
-              "alias": "agg_月借"
-            },
-            {
-              "field": "逾期时间",
-              "operator": "min",
-              "alias": "agg_月逾期时间"
+              "alias": "agg_月贷"
             }
           ]
-        }
-      ]
-    },
-    {
-      "step_id": "step3_12_fill_dynamic_credit_columns",
-      "description": "按月聚合统计使用-贷方，回填月贷",
-      "depends_on": [
-        "step3_11_fill_dynamic_debit_columns"
-      ],
-      "action": "write_dataset",
-      "target_table": "统计合并",
-      "row_write_mode": "update_only",
-      "sources": [
-        {
-          "table": "统计使用-贷方",
-          "alias": "credit_usage"
         }
       ],
       "match": {
         "sources": [
           {
-            "alias": "credit_usage_agg",
+            "alias": "credit_monthly_agg",
             "keys": [
               {
                 "field": "对应科目编码",
@@ -2553,7 +2758,7 @@
                   "date": {
                     "type": "source",
                     "source": {
-                      "alias": "credit_usage_agg",
+                      "alias": "credit_monthly_agg",
                       "field": "日期"
                     }
                   }
@@ -2564,45 +2769,23 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "credit_usage_agg",
+              "alias": "credit_monthly_agg",
               "field": "agg_月贷"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "credit_usage",
-          "output_alias": "credit_usage_agg",
-          "group_fields": [
-            "对应科目编码",
-            "对应科目",
-            "公司名称",
-            "客商名称",
-            "周期",
-            "中心",
-            "日期"
-          ],
-          "aggregations": [
-            {
-              "field": "金额",
-              "operator": "sum",
-              "alias": "agg_月贷"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_13_fill_dynamic_adjustment_columns",
+      "step_id": "step3_fill_dynamic_adjustment_columns",
       "description": "按月聚合调整明细，回填月调整借贷",
       "depends_on": [
-        "step3_12_fill_dynamic_credit_columns"
+        "step3_fill_dynamic_credit_columns"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "调整明细",
@@ -2623,14 +2806,41 @@
           },
           {
             "source_field": "对方核算项目",
-            "reference_field": "核算项目"
+            "reference_field": "核算项目1"
           }
         ]
       },
+      "aggregate": [
+        {
+          "source_alias": "adjustment_source",
+          "output_alias": "adjustment_monthly_agg",
+            "group_fields": [
+              "科目编码",
+              "科目名称",
+              "公司",
+              "对方核算项目",
+              "周期",
+              "中心",
+              "业务日期"
+            ],
+          "aggregations": [
+            {
+              "field": "借方",
+              "operator": "sum",
+              "alias": "agg_月调整借"
+            },
+            {
+              "field": "贷方",
+              "operator": "sum",
+              "alias": "agg_月调整贷"
+            }
+          ]
+        }
+      ],
       "match": {
         "sources": [
           {
-            "alias": "adjustment_source_agg",
+            "alias": "adjustment_monthly_agg",
             "keys": [
               {
                 "field": "科目编码",
@@ -2672,7 +2882,7 @@
                   "date": {
                     "type": "source",
                     "source": {
-                      "alias": "adjustment_source_agg",
+                      "alias": "adjustment_monthly_agg",
                       "field": "业务日期"
                     }
                   }
@@ -2683,7 +2893,7 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_monthly_agg",
               "field": "agg_月调整借"
             }
           },
@@ -2700,7 +2910,7 @@
                   "date": {
                     "type": "source",
                     "source": {
-                      "alias": "adjustment_source_agg",
+                      "alias": "adjustment_monthly_agg",
                       "field": "业务日期"
                     }
                   }
@@ -2711,50 +2921,23 @@
           "value": {
             "type": "source",
             "source": {
-              "alias": "adjustment_source_agg",
+              "alias": "adjustment_monthly_agg",
               "field": "agg_月调整贷"
             }
           },
           "field_write_mode": "overwrite"
         }
       ],
-      "aggregate": [
-        {
-          "source_alias": "adjustment_source",
-          "output_alias": "adjustment_source_agg",
-          "group_fields": [
-            "科目编码",
-            "科目名称",
-            "公司",
-            "对方核算项目",
-            "周期",
-            "中心",
-            "业务日期"
-          ],
-          "aggregations": [
-            {
-              "field": "借方",
-              "operator": "sum",
-              "alias": "agg_月调整借"
-            },
-            {
-              "field": "贷方",
-              "operator": "sum",
-              "alias": "agg_月调整贷"
-            }
-          ]
-        }
-      ]
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step3_14_calculate_dynamic_balance",
-      "description": "按月计算统计合并各月计算余额",
+      "step_id": "step3_calculate_dynamic_balance",
+      "description": "按月计算统计合并的月度计算余额",
       "depends_on": [
-        "step3_13_fill_dynamic_adjustment_columns"
+        "step3_fill_dynamic_adjustment_columns"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "统计合并",
@@ -2794,9 +2977,11 @@
           }
         ]
       },
+      "row_write_mode": "update_only",
       "dynamic_mappings": {
         "dimension": "month",
         "start": {
+          "type": "function",
           "function": "earliest_date",
           "args": {
             "source": "统计使用-7月余额",
@@ -2806,6 +2991,7 @@
           }
         },
         "end": {
+          "type": "function",
           "function": "month_of",
           "args": {
             "date": {
@@ -2828,8 +3014,9 @@
             },
             "value": {
               "type": "formula",
-              "expr": "({is_first_month} ? {july_balance} : {previous_month_balance}) + {current_debit} - {current_credit} + {current_adjust_debit} - {current_adjust_credit}"
+              "expr": "{is_first_month} ? ({july_balance} - {cumulative_credit}) : ({previous_month_balance} + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit})"
             },
+            "field_write_mode": "overwrite",
             "bindings": {
               "is_first_month": {
                 "type": "context",
@@ -2842,8 +3029,18 @@
                   "field": "7月余额"
                 }
               },
+              "cumulative_credit": {
+                "type": "source",
+                "source": {
+                  "alias": "merged_statistics",
+                  "field": "累计贷方"
+                }
+              },
               "previous_month_balance": {
                 "type": "template_source",
+                "source": {
+                  "alias": "merged_statistics"
+                },
                 "template": "{prev_month}月计算余额",
                 "variables": {
                   "prev_month": {
@@ -2851,13 +3048,13 @@
                     "name": "prev_month"
                   }
                 },
+                "default": 0
+              },
+              "current_month_debit": {
+                "type": "template_source",
                 "source": {
                   "alias": "merged_statistics"
                 },
-                "default": 0
-              },
-              "current_debit": {
-                "type": "template_source",
                 "template": "{month}月借",
                 "variables": {
                   "month": {
@@ -2865,27 +3062,13 @@
                     "name": "month"
                   }
                 },
+                "default": 0
+              },
+              "current_month_adjust_debit": {
+                "type": "template_source",
                 "source": {
                   "alias": "merged_statistics"
                 },
-                "default": 0
-              },
-              "current_credit": {
-                "type": "template_source",
-                "template": "{month}月贷",
-                "variables": {
-                  "month": {
-                    "type": "context",
-                    "name": "month"
-                  }
-                },
-                "source": {
-                  "alias": "merged_statistics"
-                },
-                "default": 0
-              },
-              "current_adjust_debit": {
-                "type": "template_source",
                 "template": "{month}月调整-借",
                 "variables": {
                   "month": {
@@ -2893,13 +3076,13 @@
                     "name": "month"
                   }
                 },
+                "default": 0
+              },
+              "current_month_adjust_credit": {
+                "type": "template_source",
                 "source": {
                   "alias": "merged_statistics"
                 },
-                "default": 0
-              },
-              "current_adjust_credit": {
-                "type": "template_source",
                 "template": "{month}月调整-贷",
                 "variables": {
                   "month": {
@@ -2907,26 +3090,21 @@
                     "name": "month"
                   }
                 },
-                "source": {
-                  "alias": "merged_statistics"
-                },
                 "default": 0
               }
-            },
-            "field_write_mode": "overwrite"
+            }
           }
         ]
       }
     },
     {
-      "step_id": "step3_15_finalize_current_balance",
-      "description": "用当前月份动态余额回填统计合并计算余额",
+      "step_id": "step3_finalize_current_balance",
+      "description": "回填7月计算余额",
       "depends_on": [
-        "step3_14_calculate_dynamic_balance"
+        "step3_calculate_dynamic_balance"
       ],
       "action": "write_dataset",
       "target_table": "统计合并",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "统计合并",
@@ -2971,46 +3149,34 @@
           "target_field": "计算余额",
           "value": {
             "type": "formula",
-            "expr": "coalesce({current_month_balance}, {july_balance})"
+            "expr": "{july_balance} - {cumulative_credit}"
           },
+          "field_write_mode": "overwrite",
           "bindings": {
-            "current_month_balance": {
-              "type": "template_source",
-              "template": "{current_month}月计算余额",
-              "variables": {
-                "current_month": {
-                  "type": "function",
-                  "function": "month_of",
-                  "args": {
-                    "date": {
-                      "type": "function",
-                      "function": "current_date",
-                      "args": {}
-                    }
-                  }
-                }
-              },
-              "source": {
-                "alias": "merged_statistics"
-              }
-            },
             "july_balance": {
               "type": "source",
               "source": {
                 "alias": "merged_statistics",
                 "field": "7月余额"
               }
+            },
+            "cumulative_credit": {
+              "type": "source",
+              "source": {
+                "alias": "merged_statistics",
+                "field": "累计贷方"
+              }
             }
-          },
-          "field_write_mode": "overwrite"
+          }
         }
-      ]
+      ],
+      "row_write_mode": "update_only"
     },
     {
-      "step_id": "step4_1_create_overdue_statistics",
+      "step_id": "step4_create_overdue_statistics",
       "description": "创建逾期统计表结构",
       "depends_on": [
-        "step3_15_finalize_current_balance"
+        "step3_finalize_current_balance"
       ],
       "action": "create_schema",
       "target_table": "逾期统计",
@@ -3062,14 +3228,14 @@
             "default": 0
           },
           {
-            "name": "逾期金额",
+            "name": "逾期合计",
             "data_type": "decimal",
             "precision": 18,
             "scale": 2,
             "default": 0
           },
           {
-            "name": "逾期合计",
+            "name": "逾期金额",
             "data_type": "decimal",
             "precision": 18,
             "scale": 2,
@@ -3086,6 +3252,7 @@
         "dynamic_columns": {
           "dimension": "month",
           "start": {
+            "type": "function",
             "function": "earliest_date",
             "args": {
               "source": "统计使用-7月余额",
@@ -3095,6 +3262,7 @@
             }
           },
           "end": {
+            "type": "function",
             "function": "month_of",
             "args": {
               "date": {
@@ -3123,14 +3291,13 @@
       }
     },
     {
-      "step_id": "step4_2_sync_overdue_base",
-      "description": "筛选统计合并中已逾期且余额大于0的数据，写入逾期统计基础字段",
+      "step_id": "step4_sync_overdue_base",
+      "description": "筛选统计合并中已逾期且计算余额大于0的数据，写入逾期统计基础字段",
       "depends_on": [
-        "step4_1_create_overdue_statistics"
+        "step4_create_overdue_statistics"
       ],
       "action": "write_dataset",
       "target_table": "逾期统计",
-      "row_write_mode": "upsert",
       "sources": [
         {
           "table": "统计合并",
@@ -3277,8 +3444,9 @@
           "target_field": "7月逾期",
           "value": {
             "type": "formula",
-            "expr": "{july_balance} <= 0 ? 0 : (is_null({overdue_time}) ? 0 : ({overdue_time} < {today} ? {july_balance} : 0))"
+            "expr": "{july_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_balance}"
           },
+          "field_write_mode": "overwrite",
           "bindings": {
             "july_balance": {
               "type": "source",
@@ -3299,15 +3467,15 @@
               "function": "current_date",
               "args": {}
             }
-          },
-          "field_write_mode": "overwrite"
+          }
         },
         {
           "target_field": "逾期合计",
           "value": {
             "type": "formula",
-            "expr": "{july_balance} <= 0 ? 0 : (is_null({overdue_time}) ? 0 : ({overdue_time} < {today} ? {july_balance} : 0))"
+            "expr": "{july_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_balance}"
           },
+          "field_write_mode": "overwrite",
           "bindings": {
             "july_balance": {
               "type": "source",
@@ -3328,20 +3496,19 @@
               "function": "current_date",
               "args": {}
             }
-          },
-          "field_write_mode": "overwrite"
+          }
         }
-      ]
+      ],
+      "row_write_mode": "upsert"
     },
     {
-      "step_id": "step4_3_fill_dynamic_monthly_overdue",
-      "description": "按月判断是否逾期，回填月逾期并累加逾期合计",
+      "step_id": "step4_fill_dynamic_monthly_overdue",
+      "description": "逐月判断逾期金额，回填月逾期并累加逾期合计",
       "depends_on": [
-        "step4_2_sync_overdue_base"
+        "step4_sync_overdue_base"
       ],
       "action": "write_dataset",
       "target_table": "逾期统计",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "统计合并",
@@ -3381,9 +3548,11 @@
           }
         ]
       },
+      "row_write_mode": "update_only",
       "dynamic_mappings": {
         "dimension": "month",
         "start": {
+          "type": "function",
           "function": "earliest_date",
           "args": {
             "source": "统计使用-7月余额",
@@ -3393,6 +3562,7 @@
           }
         },
         "end": {
+          "type": "function",
           "function": "month_of",
           "args": {
             "date": {
@@ -3415,11 +3585,15 @@
             },
             "value": {
               "type": "formula",
-              "expr": "({month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today}) ? 0 : {month_balance}"
+              "expr": "{month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today} ? 0 : {month_balance}"
             },
+            "field_write_mode": "overwrite",
             "bindings": {
               "month_balance": {
                 "type": "template_source",
+                "source": {
+                  "alias": "merged_statistics"
+                },
                 "template": "{month}月计算余额",
                 "variables": {
                   "month": {
@@ -3427,22 +3601,19 @@
                     "name": "month"
                   }
                 },
-                "source": {
-                  "alias": "merged_statistics"
-                },
                 "default": 0
               },
               "month_overdue_time": {
                 "type": "template_source",
+                "source": {
+                  "alias": "merged_statistics"
+                },
                 "template": "{month}月逾期时间",
                 "variables": {
                   "month": {
                     "type": "context",
                     "name": "month"
                   }
-                },
-                "source": {
-                  "alias": "merged_statistics"
                 }
               },
               "today": {
@@ -3450,18 +3621,21 @@
                 "function": "current_date",
                 "args": {}
               }
-            },
-            "field_write_mode": "overwrite"
+            }
           },
           {
             "target_field": "逾期合计",
             "value": {
               "type": "formula",
-              "expr": "({month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today}) ? 0 : {month_balance}"
+              "expr": "{month_balance} <= 0 or is_null({month_overdue_time}) or {month_overdue_time} >= {today} ? 0 : {month_balance}"
             },
+            "field_write_mode": "increment",
             "bindings": {
               "month_balance": {
                 "type": "template_source",
+                "source": {
+                  "alias": "merged_statistics"
+                },
                 "template": "{month}月计算余额",
                 "variables": {
                   "month": {
@@ -3469,22 +3643,19 @@
                     "name": "month"
                   }
                 },
-                "source": {
-                  "alias": "merged_statistics"
-                },
                 "default": 0
               },
               "month_overdue_time": {
                 "type": "template_source",
+                "source": {
+                  "alias": "merged_statistics"
+                },
                 "template": "{month}月逾期时间",
                 "variables": {
                   "month": {
                     "type": "context",
                     "name": "month"
                   }
-                },
-                "source": {
-                  "alias": "merged_statistics"
                 }
               },
               "today": {
@@ -3492,21 +3663,19 @@
                 "function": "current_date",
                 "args": {}
               }
-            },
-            "field_write_mode": "increment"
+            }
           }
         ]
       }
     },
     {
-      "step_id": "step4_4_finalize_overdue_amount",
-      "description": "按计算余额与逾期合计关系回填最终逾期金额",
+      "step_id": "step4_finalize_overdue_amount",
+      "description": "根据计算余额与逾期合计关系回填最终逾期金额",
       "depends_on": [
-        "step4_3_fill_dynamic_monthly_overdue"
+        "step4_fill_dynamic_monthly_overdue"
       ],
       "action": "write_dataset",
       "target_table": "逾期统计",
-      "row_write_mode": "update_only",
       "sources": [
         {
           "table": "逾期统计",
@@ -3553,6 +3722,7 @@
             "type": "formula",
             "expr": "{balance} - {overdue_total} <= 0 ? {balance} : {overdue_total}"
           },
+          "field_write_mode": "overwrite",
           "bindings": {
             "balance": {
               "type": "source",
@@ -3568,10 +3738,10 @@
                 "field": "逾期合计"
               }
             }
-          },
-          "field_write_mode": "overwrite"
+          }
         }
-      ]
+      ],
+      "row_write_mode": "update_only"
     }
   ]
 }

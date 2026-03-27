@@ -42,6 +42,7 @@ source .venv/bin/activate
 cd finance-agents/data-agent
 # 在 Python 启动前导出 LangSmith 环境变量（必须在进程启动时已存在，否则 LangSmith 追踪不生效）
 set -a
+[ -f "$PROJECT_ROOT/.env" ] && source "$PROJECT_ROOT/.env"
 [ -f .env ] && source .env
 set +a
 nohup python -m server > "$LOG_DIR/data-agent.log" 2>&1 &

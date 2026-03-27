@@ -3,12 +3,11 @@
 包含主图的条件路由函数和图构建函数：
 - route_after_router: router 之后的条件路由
 - build_main_graph: 构建主 Agent 图
-- create_app: 创建带有 MemorySaver 的可运行图实例
+- create_app: 创建带有外部 checkpointer 的可运行图实例
 """
 
 from __future__ import annotations
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from models import (
@@ -70,8 +69,7 @@ def build_main_graph() -> StateGraph:
     return graph
 
 
-def create_app():
-    """创建带有 MemorySaver 的可运行图实例。"""
-    memory = MemorySaver()
+def create_app(checkpointer):
+    """创建带有外部 checkpointer 的可运行图实例。"""
     graph = build_main_graph()
-    return graph.compile(checkpointer=memory)
+    return graph.compile(checkpointer=checkpointer)

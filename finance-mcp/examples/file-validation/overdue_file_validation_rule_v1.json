@@ -1,29 +1,57 @@
 {
   "file_validation_rules": {
     "validation_config": {
+      "ignore_whitespace": true,
+      "case_sensitive": false,
       "file_count": {
-        "min": 5,
-        "max": 5
+        "min": 6,
+        "max": 6
       }
     },
     "table_schemas": [
       {
-        "table_id": "OVERDUE_DEBIT_ACCRUAL_DETAIL",
-        "table_name": "借方-计提单明细",
-        "file_type": [
-          "xls",
-          "xlsx",
-          "xlsm",
-          "xlsb",
-          "csv"
+        "table_id": "OVERDUE_CENTER_MAPPING",
+        "table_name": "中心匹配",
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
+        "required_columns": ["中心1", "中心2"],
+        "column_aliases": {
+          "中心1": ["安全法务中心"]
+        }
+      },
+      {
+        "table_id": "OVERDUE_OPENING_BALANCE",
+        "table_name": "科目期初",
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
+        "required_columns": [
+          "日期",
+          "科目代码",
+          "科目名称",
+          "公司",
+          "核算项目",
+          "周期",
+          "归属中心",
+          "期末余额",
+          "预计回款时间"
         ],
+        "column_aliases": {
+          "科目代码": ["科目编码"],
+          "公司": ["公司名称"],
+          "核算项目": ["客商名称", "客商"],
+          "归属中心": ["中心"],
+          "预计回款时间": ["预计回款日期", "预计回款"]
+        }
+      },
+      {
+        "table_id": "OVERDUE_DEBIT_DETAIL",
+        "table_name": "借方-计提单明细",
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
         "required_columns": [
           "对应科目编码",
           "对应科目",
           "日期",
           "公司名称",
           "中心",
-          "计提项",
+          "计提项目",
           "周期",
           "客商名称",
           "含税金额",
@@ -34,190 +62,81 @@
           "逾期时间"
         ],
         "column_aliases": {
-          "对应科目编码": [
-            "科目编码",
-            "科目代码"
-          ],
-          "对应科目": [
-            "科目名称"
-          ],
-          "公司名称": [
-            "公司"
-          ],
-          "计提项": [
-            "计提项目"
-          ],
-          "客商名称": [
-            "核算项目",
-            "对方核算项目",
-            "客商"
-          ],
-          "单号整理": [
-            "单号"
-          ],
-          "逾期时间": [
-            "逾期时"
-          ]
+          "对应科目编码": ["科目编码", "科目代码"],
+          "对应科目": ["科目名称"],
+          "公司名称": ["公司"],
+          "客商名称": ["核算项目", "客商"],
+          "单号整理": ["单号"],
+          "计提项目": ["计提项"]
         }
       },
       {
-        "table_id": "OVERDUE_CREDIT_RECEIPT_DETAIL",
+        "table_id": "OVERDUE_CREDIT_DETAIL",
         "table_name": "贷方-收款单明细",
-        "file_type": [
-          "xls",
-          "xlsx",
-          "xlsm",
-          "xlsb",
-          "csv"
-        ],
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
         "required_columns": [
           "对应科目编码",
           "对应科目",
           "日期",
           "公司名称",
           "客商名称",
+          "中心",
+          "周期",
           "金额",
           "单号",
           "费用项目",
           "商户",
-          "填单人",
-          "中心",
-          "周期"
+          "填单人"
         ],
         "column_aliases": {
-          "对应科目编码": [
-            "科目编码",
-            "科目代码"
-          ],
-          "对应科目": [
-            "科目名称"
-          ],
-          "公司名称": [
-            "公司"
-          ],
-          "客商名称": [
-            "核算项目",
-            "对方核算项目",
-            "客商"
-          ]
+          "对应科目编码": ["科目编码", "科目代码"],
+          "对应科目": ["科目名称"],
+          "公司名称": ["公司"],
+          "客商名称": ["核算项目", "客商"]
         }
       },
       {
-        "table_id": "OVERDUE_OPENING_BALANCE",
-        "table_name": "科目期初",
-        "file_type": [
-          "xls",
-          "xlsx",
-          "xlsm",
-          "xlsb",
-          "csv"
-        ],
+        "table_id": "OVERDUE_KINGDEE_CHECK",
+        "table_name": "金蝶期末余额-检核",
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
         "required_columns": [
-          "日期",
           "科目代码",
           "科目名称",
           "公司",
-          "核算项目",
-          "周期",
-          "归属中心",
-          "期末余额",
-          "预计回款时间",
-          "逾期时间"
+          "核算项目1",
+          "计算余额",
+          "期初",
+          "借方合计",
+          "贷方合计",
+          "借方调整",
+          "贷方调整"
         ],
         "column_aliases": {
-          "科目代码": [
-            "科目编码"
-          ],
-          "公司": [
-            "公司名称"
-          ],
-          "核算项目": [
-            "客商名称"
-          ],
-          "归属中心": [
-            "中心"
-          ],
-          "预计回款时间": [
-            "预计回款日期",
-            "预计回款"
-          ],
-          "逾期时间": [
-            "逾期时"
-          ]
+          "科目代码": ["科目编码"],
+          "核算项目1": ["客商名称", "核算项目"],
+          "公司": ["公司名称"]
         }
       },
       {
         "table_id": "OVERDUE_ADJUSTMENT_DETAIL",
         "table_name": "调整明细",
-        "file_type": [
-          "xls",
-          "xlsx",
-          "xlsm",
-          "xlsb",
-          "csv"
-        ],
+        "file_type": ["xls", "xlsx", "xlsm", "xlsb", "csv"],
         "required_columns": [
           "科目编码",
           "科目名称",
           "公司",
           "对方核算项目",
           "业务日期",
-          "摘要",
           "借方",
           "贷方",
           "中心",
           "周期"
         ],
         "column_aliases": {
-          "对方核算项目": [
-            "核算项目",
-            "客商名称",
-            "客商"
-          ],
-          "业务日期": [
-            "日期"
-          ],
-          "借方": [
-            "借方金额"
-          ],
-          "贷方": [
-            "贷方金额"
-          ]
-        }
-      },
-      {
-        "table_id": "OVERDUE_KINGDEE_END_BALANCE_CHECK",
-        "table_name": "金蝶期末余额-检核",
-        "file_type": [
-          "xls",
-          "xlsx",
-          "xlsm",
-          "xlsb",
-          "csv"
-        ],
-        "required_columns": [
-          "科目编码",
-          "科目名称",
-          "公司",
-          "核算项目",
-          "期初",
-          "借方合计",
-          "贷方合计",
-          "借方调整",
-          "贷方调整",
-          "计算余额"
-        ],
-        "column_aliases": {
-          "科目编码": [
-            "科目代码"
-          ],
-          "公司": [
-            "公司名称"
-          ],
-          "核算项目": [
-            "核算项目1",
-            "客商名称"
-          ]
+          "对方核算项目": ["客商名称", "核算项目", "客商"],
+          "业务日期": ["日期"],
+          "借方": ["借方金额"],
+          "贷方": ["贷方金额"]
         }
       }
     ]

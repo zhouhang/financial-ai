@@ -112,7 +112,7 @@ def create_auth_tools() -> list[mcp_types.Tool]:
         ),
         Tool(
             name="get_admin_view",
-            description="获取管理员视图 - 公司部门员工规则层级结构",
+            description="获取管理员视图 - 公司部门员工层级结构",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -479,7 +479,7 @@ async def _handle_list_company(args: dict) -> dict:
 
 
 async def _handle_admin_view(args: dict) -> dict:
-    """获取管理员视图 - 公司部门员工规则层级"""
+    """获取管理员视图 - 公司部门员工层级"""
     admin_token = args.get("admin_token", "")
     
     if not admin_token or admin_token not in ADMIN_TOKENS:

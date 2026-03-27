@@ -136,6 +136,11 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
 .envrc
 .venv
 env/
@@ -309,4 +314,7 @@ finance-agents/data-agent/.langgraph_api/
 /finance-mcp/proc/output
 /proc-agent/*
 /proc-agent
+<<<<<<< HEAD
+>>>>>>> recon
+=======
 >>>>>>> recon

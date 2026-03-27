@@ -2,9 +2,15 @@
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+ROOT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+LOCAL_ENV_PATH = Path(__file__).resolve().parent / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+load_dotenv(ROOT_ENV_PATH)
+load_dotenv(LOCAL_ENV_PATH, override=True)
 
 
 # ── LLM 配置 ─────────────────────────────────────────────────────────────────
@@ -39,17 +45,27 @@ HOST: str = os.getenv("HOST", "0.0.0.0")
 PORT: int = int(os.getenv("PORT", "8100"))
 
 # ── 数据库 ────────────────────────────────────────────────────────────────────
+DEFAULT_POSTGRESQL_URL = "postgresql://tally_user:123456@localhost:5432/tally"
+
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    "postgresql://tally_user:123456@localhost:5432/tally",
+    DEFAULT_POSTGRESQL_URL,
 )
+LANGGRAPH_CHECKPOINT_DATABASE_URL: str = os.getenv(
+    "LANGGRAPH_CHECKPOINT_DATABASE_URL",
+    DEFAULT_POSTGRESQL_URL,
+)
+LANGGRAPH_CHECKPOINT_SCHEMA: str = os.getenv(
+    "LANGGRAPH_CHECKPOINT_SCHEMA",
+    "langgraph_checkpoint",
+).strip()
 
 # ── Finance MCP ───────────────────────────────────────────────────────────────
 # 使用 127.0.0.1 替代 localhost，避免 Sangfor 等安全软件代理导致的 502 错误
 FINANCE_MCP_BASE_URL: str = os.getenv("FINANCE_MCP_BASE_URL", "http://127.0.0.1:3335")
 FINANCE_MCP_UPLOAD_DIR: str = os.getenv(
     "FINANCE_MCP_UPLOAD_DIR",
-    str(Path(__file__).resolve().parents[3] / "finance-mcp" / "uploads"),
+    str(PROJECT_ROOT / "finance-mcp" / "uploads"),
 )
 
 # ── 上传 ──────────────────────────────────────────────────────────────────────
