@@ -3,8 +3,10 @@ from __future__ import annotations
 import ast
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,6 +26,7 @@ class TableSchemaState:
     primary_key: list[str] = field(default_factory=list)
     column_order: list[str] = field(default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
+    export_layout: dict[str, Any] = field(default_factory=dict)
 
 
 def execute_steps_rule(
@@ -59,9 +62,18 @@ class StepsProcRuntime:
         self.tables: dict[str, pd.DataFrame] = {}
         self.schemas: dict[str, TableSchemaState] = {}
         self.materialized_targets: list[str] = []
+        self._active_alias_frames: dict[str, pd.DataFrame] = {}
+        self._lookup_cache: dict[tuple[str, tuple[str, ...]], dict[tuple[Any, ...], dict[str, Any]]] = {}
+        self._row_index_cache: dict[str, dict[tuple[Any, ...], int]] = {}
 
     def execute(self) -> list[dict[str, Any]]:
         steps = list(self.rule_data.get("steps", []) or [])
+        logger.info(
+            "[steps_runtime] 开始执行 steps 规则: rule_code=%s, step_count=%s, input_tables=%s",
+            self.rule_code,
+            len(steps),
+            sorted(self.table_file_map.keys()),
+        )
         known_step_ids = {
             str(step.get("step_id") or "").strip()
             for step in steps
@@ -101,11 +113,26 @@ class StepsProcRuntime:
                 ]
                 raise ValueError(f"steps 依赖无法解析，可能存在循环依赖: {', '.join(unresolved)}")
             pending_steps = next_pending
-        return self._export_tables()
+        exports = self._export_tables()
+        logger.info(
+            "[steps_runtime] steps 规则执行完成: rule_code=%s, exported=%s",
+            self.rule_code,
+            [(item.get("target_table"), item.get("row_count")) for item in exports],
+        )
+        return exports
 
     def _execute_step(self, step: dict[str, Any]) -> None:
         action = str(step.get("action") or "").strip()
         target_table = str(step.get("target_table") or "").strip()
+        step_id = str(step.get("step_id") or "<anonymous>").strip() or "<anonymous>"
+        start_time = time.perf_counter()
+        logger.info(
+            "[steps_runtime] step start: rule_code=%s step_id=%s action=%s target=%s",
+            self.rule_code,
+            step_id,
+            action,
+            target_table,
+        )
         if action == "create_schema":
             self._create_schema(step)
         elif action == "write_dataset":
@@ -114,6 +141,15 @@ class StepsProcRuntime:
             raise ValueError(f"不支持的 step action: {action}")
         if target_table and target_table not in self.materialized_targets:
             self.materialized_targets.append(target_table)
+        target_df = self.tables.get(target_table)
+        logger.info(
+            "[steps_runtime] step done: rule_code=%s step_id=%s elapsed=%.3fs rows=%s cols=%s",
+            self.rule_code,
+            step_id,
+            time.perf_counter() - start_time,
+            len(target_df) if target_df is not None else "NA",
+            len(target_df.columns) if target_df is not None else "NA",
+        )
 
     def _create_schema(self, step: dict[str, Any]) -> None:
         target_table = str(step.get("target_table") or "").strip()
@@ -155,6 +191,7 @@ class StepsProcRuntime:
             primary_key=list(schema_def.get("primary_key") or []),
             column_order=column_order,
             defaults=defaults,
+            export_layout=dict(schema_def.get("export_layout") or {}),
         )
         self.tables[target_table] = pd.DataFrame(columns=column_order)
 
@@ -164,33 +201,39 @@ class StepsProcRuntime:
         if row_write_mode not in VALID_ROW_WRITE_MODES:
             raise ValueError(f"不支持的 row_write_mode: {row_write_mode}")
         alias_frames, alias_tables = self._load_alias_frames(step)
+        self._active_alias_frames = alias_frames
+        self._lookup_cache = {}
         self._apply_reference_filter(step, alias_frames)
         self._apply_filter(step, alias_frames, alias_tables, target_table)
         self._apply_aggregates(step, alias_frames, alias_tables)
 
-        self._ensure_table_loaded(target_table)
-        target_df = self.tables[target_table]
+        try:
+            self._ensure_table_loaded(target_table)
+            target_df = self.tables[target_table]
 
-        if step.get("dynamic_mappings"):
-            updated_df = self._apply_dynamic_mappings(
-                step,
-                target_df,
-                alias_frames,
-                alias_tables,
-                target_table,
-                row_write_mode,
-            )
-        else:
-            updated_df = self._apply_standard_mappings(
-                step,
-                target_df,
-                alias_frames,
-                alias_tables,
-                target_table,
-                row_write_mode,
-            )
+            if step.get("dynamic_mappings"):
+                updated_df = self._apply_dynamic_mappings(
+                    step,
+                    target_df,
+                    alias_frames,
+                    alias_tables,
+                    target_table,
+                    row_write_mode,
+                )
+            else:
+                updated_df = self._apply_standard_mappings(
+                    step,
+                    target_df,
+                    alias_frames,
+                    alias_tables,
+                    target_table,
+                    row_write_mode,
+                )
 
-        self.tables[target_table] = self._align_columns(target_table, updated_df)
+            self.tables[target_table] = self._align_columns(target_table, updated_df)
+        finally:
+            self._active_alias_frames = {}
+            self._lookup_cache = {}
 
     def _load_alias_frames(
         self, step: dict[str, Any]
@@ -510,6 +553,11 @@ class StepsProcRuntime:
             new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
             target_df.at[row_index, target_field] = new_value
             current_target_row[target_field] = new_value
+            if (
+                target_field in self.schemas.get(target_table, TableSchemaState(target_table)).primary_key
+                and new_value != current_value
+            ):
+                self._invalidate_row_index_cache(target_table)
             for alias, origin_table in alias_tables.items():
                 if origin_table == target_table and alias in row_contexts:
                     row_contexts[alias][target_field] = new_value
@@ -535,6 +583,11 @@ class StepsProcRuntime:
             self._ensure_column_exists(target_table, target_df, target_field)
             target_df.at[row_index, target_field] = new_value
             current_target_row[target_field] = new_value
+            if (
+                target_field in self.schemas.get(target_table, TableSchemaState(target_table)).primary_key
+                and new_value != current_value
+            ):
+                self._invalidate_row_index_cache(target_table)
 
     def _evaluate_mapping_value(
         self,
@@ -569,6 +622,15 @@ class StepsProcRuntime:
             return contexts.get(value_node.get("name"))
         if node_type == "function":
             return self._evaluate_function_node(value_node, row_contexts, alias_tables, target_table, current_target_row, contexts)
+        if node_type == "lookup":
+            return self._evaluate_lookup_node(
+                value_node,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
         if node_type == "formula":
             bindings = mapping.get("bindings") or value_node.get("bindings") or {}
             env = {
@@ -612,6 +674,15 @@ class StepsProcRuntime:
             return contexts.get(spec.get("name"))
         if spec_type == "function":
             return self._evaluate_function_node(spec, row_contexts, alias_tables, target_table, current_target_row, contexts)
+        if spec_type == "lookup":
+            return self._evaluate_lookup_node(
+                spec,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
         if spec_type == "formula":
             env = {
                 name: _normalize_formula_value(
@@ -688,6 +759,24 @@ class StepsProcRuntime:
 
         if function_name == "current_date":
             return _current_date()
+        if function_name == "add_months":
+            date_value = self._evaluate_value_spec(
+                args.get("date") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            months_value = self._evaluate_value_spec(
+                args.get("months") or args.get("offset") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            return _add_months(date_value, months_value)
         if function_name == "month_of":
             value = self._evaluate_value_spec(
                 args.get("date") or {},
@@ -698,6 +787,16 @@ class StepsProcRuntime:
                 contexts,
             )
             return _as_month(value)
+        if function_name == "fraction_numerator":
+            value = self._evaluate_value_spec(
+                args.get("value") or args.get("text") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            return _extract_fraction_numerator(value)
         if function_name == "earliest_date":
             source_table = str(args.get("source") or "").strip()
             date_field = str(args.get("date_field") or "").strip()
@@ -716,6 +815,78 @@ class StepsProcRuntime:
                 earliest = earliest + pd.DateOffset(months=offset)
             return earliest.date()
         raise ValueError(f"不支持的 function: {function_name}")
+
+    def _evaluate_lookup_node(
+        self,
+        node: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> Any:
+        source_alias = str(node.get("source_alias") or "").strip()
+        keys = list(node.get("keys") or [])
+        value_field = str(node.get("value_field") or "").strip()
+        default = node.get("default")
+
+        if not source_alias:
+            raise ValueError("lookup 缺少 source_alias")
+        if source_alias not in self._active_alias_frames:
+            raise ValueError(f"lookup source_alias 不存在: {source_alias}")
+        if not value_field:
+            raise ValueError("lookup 缺少 value_field")
+        if not keys:
+            raise ValueError("lookup.keys 不能为空")
+
+        lookup_fields: list[str] = []
+        lookup_key: list[Any] = []
+        for idx, item in enumerate(keys):
+            lookup_field = str(item.get("lookup_field") or "").strip()
+            input_spec = item.get("input")
+            if not lookup_field:
+                raise ValueError(f"lookup.keys[{idx}] 缺少 lookup_field")
+            if not isinstance(input_spec, dict) or not input_spec:
+                raise ValueError(f"lookup.keys[{idx}] 缺少 input")
+            lookup_fields.append(lookup_field)
+            lookup_key.append(
+                _normalize_key(
+                    self._evaluate_value_spec(
+                        input_spec,
+                        row_contexts,
+                        alias_tables,
+                        target_table,
+                        current_target_row,
+                        contexts,
+                    )
+                )
+            )
+
+        index = self._get_lookup_index(source_alias, tuple(lookup_fields))
+        matched_row = index.get(tuple(lookup_key))
+        if matched_row is None:
+            return default if "default" in node else None
+        value = matched_row.get(value_field)
+        return default if _is_nullish(value) and "default" in node else value
+
+    def _get_lookup_index(
+        self,
+        source_alias: str,
+        lookup_fields: tuple[str, ...],
+    ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        cache_key = (source_alias, lookup_fields)
+        cached = self._lookup_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        lookup_df = self._active_alias_frames[source_alias]
+        index: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for _, row in lookup_df.iterrows():
+            row_dict = row.to_dict()
+            key = tuple(_normalize_key(row_dict.get(field)) for field in lookup_fields)
+            index.setdefault(key, row_dict)
+        self._lookup_cache[cache_key] = index
+        return index
 
     def _resolve_target_field(
         self,
@@ -804,7 +975,7 @@ class StepsProcRuntime:
         key_map: dict[str, Any],
         row_write_mode: str,
     ) -> Optional[int]:
-        row_index = self._find_row_index(target_df, key_map)
+        row_index = self._find_row_index(target_table, target_df, key_map)
         if row_index is not None:
             return row_index
         if row_write_mode not in {"upsert", "insert_if_missing"}:
@@ -814,10 +985,13 @@ class StepsProcRuntime:
             new_row[field] = value
             self._ensure_column_exists(target_table, target_df, field)
         target_df.loc[len(target_df)] = new_row
-        return int(len(target_df) - 1)
+        row_index = int(len(target_df) - 1)
+        self._update_row_index_cache(target_table, key_map, row_index)
+        return row_index
 
     def _find_row_index(
         self,
+        target_table: str,
         df: pd.DataFrame,
         key_map: dict[str, Any],
     ) -> Optional[int]:
@@ -825,13 +999,73 @@ class StepsProcRuntime:
             return None
         if not key_map:
             return None
+        cache_key = self._normalize_row_key(target_table, key_map)
+        if cache_key is not None:
+            cached = self._get_row_index_cache(target_table, df).get(cache_key)
+            if cached is not None:
+                return cached
         mask = pd.Series([True] * len(df), index=df.index)
         for field, value in key_map.items():
             if field not in df.columns:
                 return None
             mask = mask & (df[field].apply(_normalize_key) == _normalize_key(value))
         matches = df.index[mask]
-        return int(matches[0]) if len(matches) else None
+        if not len(matches):
+            return None
+        row_index = int(matches[0])
+        self._update_row_index_cache(target_table, key_map, row_index)
+        return row_index
+
+    def _normalize_row_key(
+        self,
+        target_table: str,
+        key_map: dict[str, Any],
+    ) -> Optional[tuple[Any, ...]]:
+        schema = self.schemas.get(target_table)
+        primary_key = list(schema.primary_key) if schema else []
+        if not primary_key:
+            return None
+        if any(field not in key_map for field in primary_key):
+            return None
+        return tuple(_normalize_key(key_map.get(field)) for field in primary_key)
+
+    def _get_row_index_cache(
+        self,
+        target_table: str,
+        df: pd.DataFrame,
+    ) -> dict[tuple[Any, ...], int]:
+        cached = self._row_index_cache.get(target_table)
+        if cached is not None:
+            return cached
+
+        schema = self.schemas.get(target_table)
+        primary_key = list(schema.primary_key) if schema else []
+        if not primary_key or any(field not in df.columns for field in primary_key):
+            cached = {}
+            self._row_index_cache[target_table] = cached
+            return cached
+
+        cached = {}
+        for row_index, row in df.iterrows():
+            key = tuple(_normalize_key(row.get(field)) for field in primary_key)
+            cached.setdefault(key, int(row_index))
+        self._row_index_cache[target_table] = cached
+        return cached
+
+    def _update_row_index_cache(
+        self,
+        target_table: str,
+        key_map: dict[str, Any],
+        row_index: int,
+    ) -> None:
+        key = self._normalize_row_key(target_table, key_map)
+        if key is None:
+            return
+        cached = self._row_index_cache.setdefault(target_table, {})
+        cached[key] = row_index
+
+    def _invalidate_row_index_cache(self, target_table: str) -> None:
+        self._row_index_cache.pop(target_table, None)
 
     def _build_default_row(self, table_name: str) -> dict[str, Any]:
         schema = self.schemas.get(table_name)
@@ -880,6 +1114,7 @@ class StepsProcRuntime:
                 column_order=list(df.columns),
                 defaults={column: None for column in df.columns},
             )
+        self._invalidate_row_index_cache(table_name)
         return df
 
     def _resolve_month_range(self, definition: dict[str, Any]) -> list[int]:
@@ -928,7 +1163,8 @@ class StepsProcRuntime:
                 continue
             output_name = f"{_safe_table_name(table_name)}_{timestamp}.xlsx"
             output_path = self.output_dir / output_name
-            _write_excel(df, output_path)
+            export_df = self._build_export_dataframe(table_name, df)
+            _write_excel(export_df, output_path)
             exports.append(
                 {
                     "rule_id": table_name,
@@ -938,6 +1174,98 @@ class StepsProcRuntime:
                 }
             )
         return exports
+
+    def _build_export_dataframe(self, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
+        schema = self.schemas.get(table_name)
+        export_layout = dict(schema.export_layout or {}) if schema else {}
+        if not export_layout:
+            return df
+
+        export_columns: list[pd.Series] = []
+        export_headers: list[Any] = []
+
+        for column_spec in export_layout.get("fixed_columns") or []:
+            source_field, header = self._resolve_export_column(column_spec, {})
+            export_columns.append(self._get_export_series(df, source_field))
+            export_headers.append(header)
+
+        for group in export_layout.get("dynamic_groups") or []:
+            for context in self._resolve_export_month_contexts(group):
+                for column_spec in group.get("columns") or []:
+                    source_field, header = self._resolve_export_column(column_spec, context)
+                    export_columns.append(self._get_export_series(df, source_field))
+                    export_headers.append(header)
+
+        if not export_columns:
+            return df
+
+        export_df = pd.concat(export_columns, axis=1)
+        export_df.columns = export_headers
+        return export_df
+
+    def _resolve_export_column(
+        self,
+        column_spec: Any,
+        context: dict[str, Any],
+    ) -> tuple[str, Any]:
+        if isinstance(column_spec, str):
+            return column_spec, column_spec
+
+        if not isinstance(column_spec, dict):
+            raise ValueError(f"导出列配置无效: {column_spec}")
+
+        source_field = str(column_spec.get("source_field") or "").strip()
+        if not source_field:
+            source_template = str(column_spec.get("source_template") or "").strip()
+            if not source_template:
+                raise ValueError("导出列缺少 source_field/source_template")
+            source_field = _render_context_template(source_template, context, coerce_to_string=True)
+
+        if "header" in column_spec:
+            header = column_spec.get("header")
+        else:
+            header_template = column_spec.get("header_template")
+            if header_template is None:
+                header = source_field
+            else:
+                header = _render_context_template(str(header_template), context, coerce_to_string=False)
+
+        return source_field, header
+
+    def _get_export_series(self, df: pd.DataFrame, column_name: str) -> pd.Series:
+        if column_name in df.columns:
+            return df[column_name].reset_index(drop=True)
+        return pd.Series([None] * len(df))
+
+    def _resolve_export_month_contexts(self, definition: dict[str, Any]) -> list[dict[str, Any]]:
+        dimension = str(definition.get("dimension") or "month").strip()
+        if dimension != "month":
+            raise ValueError(f"不支持的导出动态维度: {dimension}")
+
+        start_value = self._evaluate_boundary_definition(definition.get("start") or {})
+        end_value = self._evaluate_boundary_definition(definition.get("end") or {})
+        start_date = _coerce_date_value(start_value)
+        end_date = _coerce_date_value(end_value)
+
+        current = _month_end(start_date)
+        end_month = _month_end(end_date)
+        contexts: list[dict[str, Any]] = []
+        for _ in range(24):
+            if current > end_month:
+                return contexts
+            contexts.append(
+                {
+                    "month": current.month,
+                    "prev_month": _previous_month(current.month),
+                    "month_end": current.isoformat(),
+                    "month_end_date": current,
+                }
+            )
+            next_month = _add_months(current, 1)
+            if next_month is None:
+                break
+            current = _month_end(next_month)
+        raise ValueError(f"导出月份范围无效: start={start_date}, end={end_date}")
 
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
@@ -1030,12 +1358,91 @@ def _normalize_formula_value(value: Any) -> Any:
     return value
 
 
+def _coerce_date_value(value: Any) -> date:
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        raise ValueError(f"无法解析日期值: {value}")
+    return ts.date()
+
+
+def _month_end(value: Any) -> date:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        raise ValueError(f"无法解析月份结束日期: {value}")
+    return (ts + pd.offsets.MonthEnd(0)).date()
+
+
+def _render_context_template(
+    template: str,
+    context: dict[str, Any],
+    *,
+    coerce_to_string: bool,
+) -> Any:
+    placeholder_only = re.fullmatch(r"\{([^{}]+)\}", template.strip())
+    if placeholder_only:
+        value = context.get(placeholder_only.group(1))
+        return "" if value is None and coerce_to_string else value
+
+    rendered = str(template)
+    for name, value in context.items():
+        rendered = rendered.replace(f"{{{name}}}", "" if value is None else str(value))
+    return rendered
+
+
 def _safe_table_name(table_name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", table_name)
 
 
 def _current_date() -> date:
     return date.today()
+
+
+def _coerce_month_offset(value: Any) -> int:
+    if _is_nullish(value):
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        match = re.search(r"[-+]?\d+", text)
+        if match:
+            return int(match.group())
+    raise ValueError(f"无法解析月份偏移量: {value}")
+
+
+def _add_months(value: Any, months: Any) -> Optional[date]:
+    if _is_nullish(value):
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        raise ValueError(f"无法解析日期值: {value}")
+    return (ts + pd.DateOffset(months=_coerce_month_offset(months))).date()
+
+
+def _extract_fraction_numerator(value: Any) -> int:
+    if _is_nullish(value):
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    if "/" in text:
+        numerator, _, _ = text.partition("/")
+        return _coerce_month_offset(numerator)
+    return _coerce_month_offset(text)
 
 
 def _as_month(value: Any) -> int:
@@ -1116,7 +1523,8 @@ _ALLOWED_AST_NODES = (
 )
 
 
-def _evaluate_formula_expression(expr: str, env: dict[str, Any]) -> Any:
+@lru_cache(maxsize=256)
+def _compile_formula_expression(expr: str) -> ast.Expression:
     translated = _translate_formula(expr)
     tree = ast.parse(translated, mode="eval")
     for node in ast.walk(tree):
@@ -1127,6 +1535,11 @@ def _evaluate_formula_expression(expr: str, env: dict[str, Any]) -> Any:
                 raise ValueError("公式包含不支持的函数")
         if isinstance(node, ast.Name) and node.id not in {"__vars__", "coalesce", "is_null"}:
             raise ValueError(f"公式包含不支持的标识符: {node.id}")
+    return tree
+
+
+def _evaluate_formula_expression(expr: str, env: dict[str, Any]) -> Any:
+    tree = _compile_formula_expression(expr)
     return _evaluate_formula_ast(tree.body, env)
 
 

@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _RESULT_WAIT_TIMEOUT = 60.0  # 等待 SSE 结果超时秒数
 
+
+def _get_result_wait_timeout(tool_name: str) -> float:
+    """按工具类型返回结果等待超时。
+
+    proc/recon 属于长任务，60 秒对真实文件偏紧，容易误判为失败。
+    """
+    if tool_name == "proc_execute":
+        return 180.0
+    if tool_name == "recon_execute":
+        return 300.0
+    return _RESULT_WAIT_TIMEOUT
+
 # ===========================================================================
 # MCP SSE 会话管理
 # ===========================================================================
@@ -222,6 +234,7 @@ class _McpSession:
             if not ok:
                 return {"success": False, "error": "无法建立 MCP SSE 连接"}
 
+        result_wait_timeout = _get_result_wait_timeout(tool_name)
         req_id = self._next_id()
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -259,11 +272,18 @@ class _McpSession:
 
             # 等待 SSE 推送结果
             try:
-                jsonrpc_resp = await asyncio.wait_for(fut, timeout=_RESULT_WAIT_TIMEOUT)
+                jsonrpc_resp = await asyncio.wait_for(fut, timeout=result_wait_timeout)
             except asyncio.TimeoutError:
                 self._pending.pop(req_id, None)
-                logger.error(f"等待 MCP 响应超时: tool={tool_name}")
-                return {"success": False, "error": "等待 MCP 响应超时"}
+                logger.error(
+                    "等待 MCP 响应超时: tool=%s timeout=%ss",
+                    tool_name,
+                    result_wait_timeout,
+                )
+                return {
+                    "success": False,
+                    "error": f"等待 MCP 响应超时（{int(result_wait_timeout)}秒）",
+                }
 
             # 提取结果
             if "error" in jsonrpc_resp:

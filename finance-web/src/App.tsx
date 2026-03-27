@@ -4,7 +4,6 @@ import ChatArea from './components/ChatArea';
 import LoginModal from './components/LoginModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
-import { applyTheme, resolveInitialTheme, type ThemeMode } from './theme';
 import type {
   Conversation,
   Message,
@@ -154,7 +153,6 @@ export default function App() {
   
   /** 选中的任务 */
   const [selectedTask, setSelectedTask] = useState<UserTaskRule | null>(null);
-  const [themeMode, setThemeMode] = useState<ThemeMode>(resolveInitialTheme);
 
   const isGuest = !authToken;
 
@@ -163,10 +161,6 @@ export default function App() {
     setIsLoginModalOpen(false);
     setLoginModalTitleHint(null);
   }, [authToken]);
-
-  useLayoutEffect(() => {
-    applyTheme(themeMode, { disableTransitions: true });
-  }, [themeMode]);
 
   useLayoutEffect(() => {
     if (!authToken && !currentUser) {
@@ -199,7 +193,7 @@ export default function App() {
       window.cancelAnimationFrame(rafId);
       window.clearTimeout(timerId);
     };
-  }, [authToken, currentUser, themeMode]);
+  }, [authToken, currentUser]);
 
   // 保存当前会话状态到 localStorage（游客用 guest 存储，已登录用 active/id）
   useEffect(() => {
@@ -1233,8 +1227,6 @@ export default function App() {
           setLoginModalTitleHint(null);
           setIsLoginModalOpen(true);
         }}
-        themeMode={themeMode}
-        onToggleTheme={() => setThemeMode((prev) => (prev === 'light' ? 'dark' : 'light'))}
         streamingMessageId={streamingMessageId}
         selectedTask={selectedTask}
       />

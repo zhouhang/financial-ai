@@ -41,7 +41,7 @@ VALID_AGG_FUNCTIONS = {"sum", "count", "mean", "min", "max", "first", "last"}
 VALID_PROC_STEP_ACTIONS = {"create_schema", "write_dataset"}
 VALID_PROC_STEP_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
 VALID_PROC_STEP_FIELD_WRITE_MODES = {"overwrite", "increment"}
-VALID_PROC_STEP_VALUE_TYPES = {"source", "formula", "template_source", "function", "context"}
+VALID_PROC_STEP_VALUE_TYPES = {"source", "formula", "template_source", "function", "context", "lookup"}
 
 
 class StrictModel(BaseModel):
@@ -475,6 +475,41 @@ def _semantic_errors_for_proc_steps(rule: dict[str, Any]) -> list[dict[str, str]
                             "type": "invalid",
                         }
                     )
+                if value_type == "lookup":
+                    if not value.get("source_alias"):
+                        errors.append(
+                            {
+                                "path": f"steps.{idx}.mappings.{mapping_idx}.value.source_alias",
+                                "message": "lookup 缺少 source_alias",
+                                "type": "missing",
+                            }
+                        )
+                    if not value.get("value_field"):
+                        errors.append(
+                            {
+                                "path": f"steps.{idx}.mappings.{mapping_idx}.value.value_field",
+                                "message": "lookup 缺少 value_field",
+                                "type": "missing",
+                            }
+                        )
+                    keys = value.get("keys") or []
+                    if not keys:
+                        errors.append(
+                            {
+                                "path": f"steps.{idx}.mappings.{mapping_idx}.value.keys",
+                                "message": "lookup.keys 不能为空",
+                                "type": "missing",
+                            }
+                        )
+                    for key_idx, key in enumerate(keys):
+                        if not key.get("lookup_field") or not key.get("input"):
+                            errors.append(
+                                {
+                                    "path": f"steps.{idx}.mappings.{mapping_idx}.value.keys.{key_idx}",
+                                    "message": "lookup.keys 每项都需要 lookup_field 和 input",
+                                    "type": "missing",
+                                }
+                            )
             field_write_mode = mapping.get("field_write_mode")
             if field_write_mode and field_write_mode not in VALID_PROC_STEP_FIELD_WRITE_MODES:
                 errors.append(

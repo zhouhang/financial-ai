@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -10,6 +10,7 @@ import {
   Moon,
   SunMedium,
 } from 'lucide-react';
+import { getThemeMode, subscribeTheme, toggleTheme } from '../theme';
 import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTaskRule } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
 
@@ -29,6 +30,29 @@ function _formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 void _formatFileSize; // Reserved for future use
+
+const ThemeToggleButton = memo(function ThemeToggleButton() {
+  const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
+
+  const handleToggleTheme = useCallback(() => {
+    toggleTheme();
+  }, []);
+
+  return (
+    <button
+      type="button"
+      onClick={handleToggleTheme}
+      className="h-9 w-9 rounded-lg border border-border bg-surface-elevated text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors flex items-center justify-center"
+      title={themeMode === 'light' ? '切换到深色模式' : '切换到浅色模式'}
+    >
+      {themeMode === 'light' ? (
+        <Moon className="w-4 h-4" />
+      ) : (
+        <SunMedium className="w-4 h-4" />
+      )}
+    </button>
+  );
+});
 
 interface ChatAreaProps {
   messages: Message[];
@@ -50,8 +74,6 @@ interface ChatAreaProps {
   /** 认证 token */
   authToken?: string | null;
   onToggleSidebar?: () => void;
-  themeMode: 'light' | 'dark';
-  onToggleTheme: () => void;
   /** 正在流式输出的消息 ID */
   streamingMessageId?: string | null;
   /** 选中的任务 */
@@ -72,8 +94,6 @@ export default function ChatArea({
   onLogin,
   sidebarCollapsed = false,
   onToggleSidebar,
-  themeMode,
-  onToggleTheme,
   streamingMessageId,
   authToken,
 }: ChatAreaProps) {
@@ -304,18 +324,7 @@ export default function ChatArea({
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onToggleTheme}
-            className="h-9 w-9 rounded-lg border border-border bg-surface-elevated text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors flex items-center justify-center"
-            title={themeMode === 'light' ? '切换到深色模式' : '切换到浅色模式'}
-          >
-            {themeMode === 'light' ? (
-              <Moon className="w-4 h-4" />
-            ) : (
-              <SunMedium className="w-4 h-4" />
-            )}
-          </button>
+          <ThemeToggleButton />
           {!currentUser && onLogin ? (
             <button
               onClick={onLogin}
