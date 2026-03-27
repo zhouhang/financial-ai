@@ -40,7 +40,6 @@ done
 - `rule_detail`
 - `user_tasks`
 - `users`
-- `v_users_full`
 
 `002_seed_data.sql` 当前包含上述表在导出时刻的真实数据快照，包括：
 - 管理员、公司、部门、用户

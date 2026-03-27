@@ -3014,7 +3014,7 @@
             },
             "value": {
               "type": "formula",
-              "expr": "{is_first_month} ? ({july_balance} - {cumulative_credit}) : ({previous_month_balance} + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit})"
+              "expr": "{is_first_month} ? (({july_balance} - {cumulative_credit}) + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit}) : ({previous_month_balance} + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit})"
             },
             "field_write_mode": "overwrite",
             "bindings": {
