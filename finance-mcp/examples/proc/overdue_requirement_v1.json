@@ -3014,7 +3014,7 @@
             },
             "value": {
               "type": "formula",
-              "expr": "{is_first_month} ? ({july_balance} - {cumulative_credit}) : ({previous_month_balance} + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit})"
+              "expr": "{is_first_month} ? (({july_balance} - {cumulative_credit}) + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit}) : ({previous_month_balance} + {current_month_debit} + {current_month_adjust_debit} - {current_month_adjust_credit})"
             },
             "field_write_mode": "overwrite",
             "bindings": {
@@ -3309,11 +3309,25 @@
         "expr": "{current_balance} > 0 and {overdue_time} < {today}",
         "bindings": {
           "current_balance": {
-            "type": "source",
+            "type": "template_source",
             "source": {
-              "alias": "merged_statistics",
-              "field": "计算余额"
-            }
+              "alias": "merged_statistics"
+            },
+            "template": "{month}月计算余额",
+            "variables": {
+              "month": {
+                "type": "function",
+                "function": "month_of",
+                "args": {
+                  "date": {
+                    "type": "function",
+                    "function": "current_date",
+                    "args": {}
+                  }
+                }
+              }
+            },
+            "default": 0
           },
           "overdue_time": {
             "type": "source",
@@ -3432,11 +3446,25 @@
         {
           "target_field": "计算余额",
           "value": {
-            "type": "source",
+            "type": "template_source",
             "source": {
-              "alias": "merged_statistics",
-              "field": "计算余额"
-            }
+              "alias": "merged_statistics"
+            },
+            "template": "{month}月计算余额",
+            "variables": {
+              "month": {
+                "type": "function",
+                "function": "month_of",
+                "args": {
+                  "date": {
+                    "type": "function",
+                    "function": "current_date",
+                    "args": {}
+                  }
+                }
+              }
+            },
+            "default": 0
           },
           "field_write_mode": "overwrite"
         },

@@ -17,11 +17,13 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
+--
 -- Extensions required by current schema
 --
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 
 -- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: -
+--
 --
 
 CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
@@ -260,28 +262,6 @@ COMMENT ON TABLE public.users IS '用户表';
 --
 
 COMMENT ON COLUMN public.users.role IS 'admin: 管理员, manager: 部门经理, member: 普通成员';
-
-
---
--- Name: v_users_full; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_users_full AS
- SELECT u.id,
-    u.username,
-    u.email,
-    u.phone,
-    u.role,
-    u.status,
-    u.created_at,
-    u.last_login,
-    d.name AS department_name,
-    d.code AS department_code,
-    c.name AS company_name,
-    c.code AS company_code
-   FROM ((public.users u
-     LEFT JOIN public.departments d ON ((u.department_id = d.id)))
-     LEFT JOIN public.company c ON ((u.company_id = c.id)));
 
 
 --
@@ -645,3 +625,4 @@ ALTER TABLE ONLY public.users
 --
 -- PostgreSQL database dump complete
 --
+
