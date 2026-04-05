@@ -3174,13 +3174,14 @@
     },
     {
       "step_id": "step4_create_overdue_statistics",
-      "description": "创建逾期统计表结构",
+      "description": "创建逾期统计中间表结构",
       "depends_on": [
         "step3_finalize_current_balance"
       ],
       "action": "create_schema",
-      "target_table": "逾期统计",
+      "target_table": "逾期统计-中间",
       "schema": {
+        "export_enabled": false,
         "primary_key": [
           "对应科目编码",
           "对应科目",
@@ -3292,57 +3293,18 @@
     },
     {
       "step_id": "step4_sync_overdue_base",
-      "description": "筛选统计合并中已逾期且计算余额大于0的数据，写入逾期统计基础字段",
+      "description": "将统计合并全量写入逾期统计中间表基础字段",
       "depends_on": [
         "step4_create_overdue_statistics"
       ],
       "action": "write_dataset",
-      "target_table": "逾期统计",
+      "target_table": "逾期统计-中间",
       "sources": [
         {
           "table": "统计合并",
           "alias": "merged_statistics"
         }
       ],
-      "filter": {
-        "type": "formula",
-        "expr": "{current_balance} > 0 and {overdue_time} < {today}",
-        "bindings": {
-          "current_balance": {
-            "type": "template_source",
-            "source": {
-              "alias": "merged_statistics"
-            },
-            "template": "{month}月计算余额",
-            "variables": {
-              "month": {
-                "type": "function",
-                "function": "month_of",
-                "args": {
-                  "date": {
-                    "type": "function",
-                    "function": "current_date",
-                    "args": {}
-                  }
-                }
-              }
-            },
-            "default": 0
-          },
-          "overdue_time": {
-            "type": "source",
-            "source": {
-              "alias": "merged_statistics",
-              "field": "逾期时间"
-            }
-          },
-          "today": {
-            "type": "function",
-            "function": "current_date",
-            "args": {}
-          }
-        }
-      },
       "match": {
         "sources": [
           {
@@ -3472,15 +3434,15 @@
           "target_field": "7月逾期",
           "value": {
             "type": "formula",
-            "expr": "{july_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_balance}"
+            "expr": "{july_calc_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_calc_balance}"
           },
           "field_write_mode": "overwrite",
           "bindings": {
-            "july_balance": {
+            "july_calc_balance": {
               "type": "source",
               "source": {
                 "alias": "merged_statistics",
-                "field": "7月余额"
+                "field": "计算余额"
               }
             },
             "overdue_time": {
@@ -3501,15 +3463,15 @@
           "target_field": "逾期合计",
           "value": {
             "type": "formula",
-            "expr": "{july_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_balance}"
+            "expr": "{july_calc_balance} <= 0 or is_null({overdue_time}) or {overdue_time} >= {today} ? 0 : {july_calc_balance}"
           },
           "field_write_mode": "overwrite",
           "bindings": {
-            "july_balance": {
+            "july_calc_balance": {
               "type": "source",
               "source": {
                 "alias": "merged_statistics",
-                "field": "7月余额"
+                "field": "计算余额"
               }
             },
             "overdue_time": {
@@ -3536,7 +3498,7 @@
         "step4_sync_overdue_base"
       ],
       "action": "write_dataset",
-      "target_table": "逾期统计",
+      "target_table": "逾期统计-中间",
       "sources": [
         {
           "table": "统计合并",
@@ -3703,10 +3665,10 @@
         "step4_fill_dynamic_monthly_overdue"
       ],
       "action": "write_dataset",
-      "target_table": "逾期统计",
+      "target_table": "逾期统计-中间",
       "sources": [
         {
-          "table": "逾期统计",
+          "table": "逾期统计-中间",
           "alias": "overdue_statistics"
         }
       ],
@@ -3748,7 +3710,7 @@
           "target_field": "逾期金额",
           "value": {
             "type": "formula",
-            "expr": "{balance} - {overdue_total} <= 0 ? {balance} : {overdue_total}"
+            "expr": "coalesce({balance}, 0) <= coalesce({overdue_total}, 0) ? (coalesce({balance}, 0) > 0 ? coalesce({balance}, 0) : 0) : coalesce({overdue_total}, 0)"
           },
           "field_write_mode": "overwrite",
           "bindings": {
@@ -3769,6 +3731,412 @@
           }
         }
       ],
+      "row_write_mode": "update_only"
+    },
+    {
+      "step_id": "step4_create_overdue_statistics_output",
+      "description": "创建正式逾期统计表结构",
+      "depends_on": [
+        "step4_finalize_overdue_amount"
+      ],
+      "action": "create_schema",
+      "target_table": "逾期统计",
+      "schema": {
+        "primary_key": [
+          "对应科目编码",
+          "对应科目",
+          "公司名称",
+          "客商名称",
+          "周期",
+          "中心"
+        ],
+        "columns": [
+          {
+            "name": "对应科目编码",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "对应科目",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "公司名称",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "客商名称",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "周期",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "中心",
+            "data_type": "string",
+            "nullable": false
+          },
+          {
+            "name": "计算余额",
+            "data_type": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "default": 0
+          },
+          {
+            "name": "逾期合计",
+            "data_type": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "default": 0
+          },
+          {
+            "name": "逾期金额",
+            "data_type": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "default": 0
+          },
+          {
+            "name": "7月逾期",
+            "data_type": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "default": 0
+          }
+        ],
+        "dynamic_columns": {
+          "dimension": "month",
+          "start": {
+            "type": "function",
+            "function": "earliest_date",
+            "args": {
+              "source": "统计使用-7月余额",
+              "date_field": "日期",
+              "output_format": "month",
+              "offset": 1
+            }
+          },
+          "end": {
+            "type": "function",
+            "function": "month_of",
+            "args": {
+              "date": {
+                "type": "function",
+                "function": "current_date",
+                "args": {}
+              }
+            }
+          },
+          "columns_pattern": [
+            {
+              "name": "{month}月逾期",
+              "variables": {
+                "month": {
+                  "type": "context",
+                  "name": "month"
+                }
+              },
+              "data_type": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "default": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step_id": "step4_sync_final_overdue_fixed_fields",
+      "description": "从逾期统计中间表筛选逾期合计大于0的数据写入正式逾期统计固定字段",
+      "depends_on": [
+        "step4_create_overdue_statistics_output"
+      ],
+      "action": "write_dataset",
+      "target_table": "逾期统计",
+      "sources": [
+        {
+          "table": "逾期统计-中间",
+          "alias": "overdue_statistics"
+        }
+      ],
+      "filter": {
+        "type": "formula",
+        "expr": "{overdue_total} > 0",
+        "bindings": {
+          "overdue_total": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "逾期合计"
+            }
+          }
+        }
+      },
+      "match": {
+        "sources": [
+          {
+            "alias": "overdue_statistics",
+            "keys": [
+              {
+                "field": "对应科目编码",
+                "target_field": "对应科目编码"
+              },
+              {
+                "field": "对应科目",
+                "target_field": "对应科目"
+              },
+              {
+                "field": "公司名称",
+                "target_field": "公司名称"
+              },
+              {
+                "field": "客商名称",
+                "target_field": "客商名称"
+              },
+              {
+                "field": "周期",
+                "target_field": "周期"
+              },
+              {
+                "field": "中心",
+                "target_field": "中心"
+              }
+            ]
+          }
+        ]
+      },
+      "mappings": [
+        {
+          "target_field": "对应科目编码",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "对应科目编码"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "对应科目",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "对应科目"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "公司名称",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "公司名称"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "客商名称",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "客商名称"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "周期",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "周期"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "中心",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "中心"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "计算余额",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "计算余额"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "逾期合计",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "逾期合计"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "逾期金额",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "逾期金额"
+            }
+          },
+          "field_write_mode": "overwrite"
+        },
+        {
+          "target_field": "7月逾期",
+          "value": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "7月逾期"
+            }
+          },
+          "field_write_mode": "overwrite"
+        }
+      ],
+      "row_write_mode": "upsert"
+    },
+    {
+      "step_id": "step4_sync_final_overdue_dynamic_fields",
+      "description": "从逾期统计中间表回填正式逾期统计的动态月逾期字段",
+      "depends_on": [
+        "step4_sync_final_overdue_fixed_fields"
+      ],
+      "action": "write_dataset",
+      "target_table": "逾期统计",
+      "sources": [
+        {
+          "table": "逾期统计-中间",
+          "alias": "overdue_statistics"
+        }
+      ],
+      "filter": {
+        "type": "formula",
+        "expr": "{overdue_total} > 0",
+        "bindings": {
+          "overdue_total": {
+            "type": "source",
+            "source": {
+              "alias": "overdue_statistics",
+              "field": "逾期合计"
+            }
+          }
+        }
+      },
+      "match": {
+        "sources": [
+          {
+            "alias": "overdue_statistics",
+            "keys": [
+              {
+                "field": "对应科目编码",
+                "target_field": "对应科目编码"
+              },
+              {
+                "field": "对应科目",
+                "target_field": "对应科目"
+              },
+              {
+                "field": "公司名称",
+                "target_field": "公司名称"
+              },
+              {
+                "field": "客商名称",
+                "target_field": "客商名称"
+              },
+              {
+                "field": "周期",
+                "target_field": "周期"
+              },
+              {
+                "field": "中心",
+                "target_field": "中心"
+              }
+            ]
+          }
+        ]
+      },
+      "dynamic_mappings": {
+        "dimension": "month",
+        "start": {
+          "type": "function",
+          "function": "earliest_date",
+          "args": {
+            "source": "统计使用-7月余额",
+            "date_field": "日期",
+            "output_format": "month",
+            "offset": 1
+          }
+        },
+        "end": {
+          "type": "function",
+          "function": "month_of",
+          "args": {
+            "date": {
+              "type": "function",
+              "function": "current_date",
+              "args": {}
+            }
+          }
+        },
+        "mappings": [
+          {
+            "target_field_template": {
+              "template": "{month}月逾期",
+              "variables": {
+                "month": {
+                  "type": "context",
+                  "name": "month"
+                }
+              }
+            },
+            "value": {
+              "type": "template_source",
+              "source": {
+                "alias": "overdue_statistics"
+              },
+              "template": "{month}月逾期",
+              "variables": {
+                "month": {
+                  "type": "context",
+                  "name": "month"
+                }
+              },
+              "default": 0
+            },
+            "field_write_mode": "overwrite"
+          }
+        ]
+      },
       "row_write_mode": "update_only"
     }
   ]

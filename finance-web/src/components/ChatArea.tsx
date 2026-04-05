@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -7,12 +7,10 @@ import {
   Loader2,
   X,
   FileSpreadsheet,
-  Moon,
-  SunMedium,
 } from 'lucide-react';
-import { getThemeMode, subscribeTheme, toggleTheme } from '../theme';
 import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTaskRule } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
+import ReconConversationBar, { type ReconExecutionMode } from './recon/ReconConversationBar';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
@@ -24,35 +22,30 @@ interface StagedFile {
   size: number;
 }
 
+const EMPTY_STATE_CAPABILITIES = [
+  {
+    key: 'proc',
+    label: '数据整理',
+    accentClass: 'border-[rgba(59,130,246,0.24)] bg-[rgba(59,130,246,0.1)] text-blue-600',
+  },
+  {
+    key: 'recon',
+    label: '数据对账',
+    accentClass: 'border-[rgba(14,165,233,0.24)] bg-[rgba(14,165,233,0.1)] text-sky-600',
+  },
+  {
+    key: 'insight',
+    label: '数据洞察',
+    accentClass: 'border-[rgba(245,158,11,0.24)] bg-[rgba(245,158,11,0.1)] text-amber-600',
+  },
+] as const;
+
 function _formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 void _formatFileSize; // Reserved for future use
-
-const ThemeToggleButton = memo(function ThemeToggleButton() {
-  const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
-
-  const handleToggleTheme = useCallback(() => {
-    toggleTheme();
-  }, []);
-
-  return (
-    <button
-      type="button"
-      onClick={handleToggleTheme}
-      className="h-9 w-9 rounded-lg border border-border bg-surface-elevated text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors flex items-center justify-center"
-      title={themeMode === 'light' ? '切换到深色模式' : '切换到浅色模式'}
-    >
-      {themeMode === 'light' ? (
-        <Moon className="w-4 h-4" />
-      ) : (
-        <SunMedium className="w-4 h-4" />
-      )}
-    </button>
-  );
-});
 
 interface ChatAreaProps {
   messages: Message[];
@@ -78,6 +71,20 @@ interface ChatAreaProps {
   streamingMessageId?: string | null;
   /** 选中的任务 */
   selectedTask?: UserTaskRule | null;
+  /** 对账规则列表，主线程接入后可启用规则切换 */
+  reconRules?: UserTaskRule[];
+  /** 当前选中的对账规则 code */
+  selectedReconRuleCode?: string | null;
+  /** 当前对账执行方式 */
+  reconExecutionMode?: ReconExecutionMode;
+  /** 切换对账规则 */
+  onSelectReconRule?: (ruleCode: string) => void;
+  /** 切换对账执行方式 */
+  onChangeReconExecutionMode?: (mode: ReconExecutionMode) => void;
+  /** 打开数据连接入口 */
+  onOpenDataConnections?: () => void;
+  /** 嵌入对账工作台时隐藏聊天页自身头部，避免和工作台头部重叠 */
+  hideHeader?: boolean;
 }
 
 export default function ChatArea({
@@ -96,13 +103,71 @@ export default function ChatArea({
   onToggleSidebar,
   streamingMessageId,
   authToken,
+  selectedTask,
+  reconRules = [],
+  selectedReconRuleCode,
+  reconExecutionMode,
+  onSelectReconRule,
+  onChangeReconExecutionMode,
+  onOpenDataConnections,
+  hideHeader = false,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  const [internalReconExecutionMode, setInternalReconExecutionMode] =
+    useState<ReconExecutionMode>('upload');
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const isReconContext = selectedTask?.task_type === 'recon';
+  const availableReconRules = isReconContext
+    ? reconRules.filter((rule) => rule.task_type === 'recon')
+    : [];
+  const resolvedReconExecutionMode =
+    reconExecutionMode ?? internalReconExecutionMode;
+  const currentReconRule = isReconContext
+    ? availableReconRules.find((rule) => rule.rule_code === selectedReconRuleCode) ??
+      selectedTask ??
+      availableReconRules[0] ??
+      null
+    : null;
+  const activeStagedFiles =
+    isReconContext && resolvedReconExecutionMode === 'data_source'
+      ? []
+      : stagedFiles;
+  const canStartReconFromDataSource =
+    isReconContext &&
+    resolvedReconExecutionMode === 'data_source' &&
+    Boolean(currentReconRule);
+
+  const handleReconExecutionModeChange = useCallback(
+    (mode: ReconExecutionMode) => {
+      if (onChangeReconExecutionMode) {
+        onChangeReconExecutionMode(mode);
+        return;
+      }
+      setInternalReconExecutionMode(mode);
+    },
+    [onChangeReconExecutionMode]
+  );
+
+  useEffect(() => {
+    if (reconExecutionMode) {
+      setInternalReconExecutionMode(reconExecutionMode);
+    }
+  }, [reconExecutionMode]);
+
+  const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior,
+    });
+  }, []);
 
   // 自动滚动到最新消息
   useEffect(() => {
@@ -110,29 +175,29 @@ export default function ChatArea({
     if (!isLoadingConversation && messages.length > 0) {
       // 使用 setTimeout 确保 DOM 完全渲染后再滚动（修复刷新页面不滚动的问题）
       const timer = setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        scrollMessagesToBottom('auto');
       }, 50);
       return () => clearTimeout(timer);
     }
-  }, [isLoadingConversation, messages.length]);
+  }, [isLoadingConversation, messages.length, scrollMessagesToBottom]);
 
   // 新消息时平滑滚动（避免在初始加载时触发）
   useEffect(() => {
     // 只在消息数量变化且不在加载会话时才平滑滚动
     if (!isLoadingConversation && messages.length > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollMessagesToBottom('smooth');
     }
-  }, [messages.length, isLoading, isLoadingConversation]);
+  }, [messages.length, isLoading, isLoadingConversation, scrollMessagesToBottom]);
 
   // 流式消息内容变化时也触发滚动（确保长消息流式输出时页面自动下滑）
   useEffect(() => {
     if (!isLoadingConversation && messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg.role === 'assistant') {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        scrollMessagesToBottom('smooth');
       }
     }
-  }, [messages.map(m => m.content).join(''), isLoadingConversation]);
+  }, [messages.map(m => m.content).join(''), isLoadingConversation, scrollMessagesToBottom]);
 
   // 聚焦输入框
   useEffect(() => {
@@ -155,25 +220,26 @@ export default function ChatArea({
   // 发送消息（含文件上传）
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
-    if ((!text && stagedFiles.length === 0) || isLoading || isUploading) return;
+    if ((!text && activeStagedFiles.length === 0 && !canStartReconFromDataSource) || isLoading || isUploading) return;
 
     let attachments: MessageAttachment[] | undefined;
     let uploadedList: UploadedFile[] = [];
 
     // 有暂存文件时先上传
-    if (stagedFiles.length > 0) {
-    setIsUploading(true);
-    try {
+    if (activeStagedFiles.length > 0) {
+      setIsUploading(true);
+      let uploadFailed = false;
+      let uploadErrorMessage = '';
+      let authExpired = false;
+      try {
         const attachmentsList: MessageAttachment[] = [];
 
-        for (const [index, staged] of stagedFiles.entries()) {
-        try {
+        for (const [index, staged] of activeStagedFiles.entries()) {
           const formData = new FormData();
-            formData.append('file', staged.file);
+          formData.append('file', staged.file);
           formData.append('thread_id', threadId);
-          // ⚠️ 修复：第一个文件时设置 is_first_file=1，其他为0（避免字符串"false"被当成真值）
+          // 第一个文件时设置 is_first_file=1，其他为0，避免字符串 "false" 被后端当成真值。
           formData.append('is_first_file', index === 0 ? '1' : '0');
-          // 如果有 auth_token，添加到表单（游客模式下为空）
           if (authToken) {
             formData.append('auth_token', authToken);
           }
@@ -185,42 +251,59 @@ export default function ChatArea({
 
           if (!resp.ok) {
             const err = await resp.json().catch(() => ({}));
-            throw new Error(err.detail || '上传失败');
+            const detail = String(err.detail || err.message || '上传失败');
+            uploadFailed = true;
+            uploadErrorMessage = detail;
+            authExpired =
+              resp.status === 401 ||
+              detail.includes('无效的 auth_token') ||
+              detail.includes('token') ||
+              detail.includes('登录');
+            break;
           }
 
           const result = await resp.json();
-            attachmentsList.push({
-              name: result.filename,
-              size: result.size,
-              path: result.file_path,
-            });
-            uploadedList.push({
+          attachmentsList.push({
+            name: result.filename,
+            size: result.size,
+            path: result.file_path,
+          });
+          uploadedList.push({
             name: result.filename,
             path: result.file_path,
             size: result.size,
             uploadedAt: new Date(),
-            });
-        } catch (err) {
-            console.error('File upload error:', err);
-            // 上传失败也加入附件列表，但不设 path
-            attachmentsList.push({
-              name: staged.name,
-              size: staged.size,
-            });
+          });
         }
+
+        if (uploadFailed) {
+          const message = authExpired
+            ? '登录已过期，请重新登录后再上传文件。'
+            : uploadErrorMessage || '文件上传失败，请重试。';
+          window.alert(message);
+          if (authExpired) {
+            onLogin?.();
+          }
+          return;
         }
 
         attachments = attachmentsList;
       } catch {
-        // ignore
+        window.alert('文件上传失败，请重试。');
+        return;
       } finally {
         setIsUploading(false);
-        setStagedFiles([]);
+        if (attachments) {
+          setStagedFiles([]);
         }
+      }
     }
 
-    // 如果没有文字但有文件，自动生成文字
-    const finalText = text || `已上传 ${attachments?.length || 0} 个文件，请处理。`;
+    const finalText =
+      text ||
+      (attachments && attachments.length > 0
+        ? `已上传 ${attachments.length} 个文件，请按当前对账规则处理。`
+        : `请按规则「${currentReconRule?.name || '当前对账规则'}」使用数据源执行对账。`);
 
     // 先发送用户消息（显示文件附件）
     onSendMessage(finalText, attachments);
@@ -229,7 +312,19 @@ export default function ChatArea({
     uploadedList.forEach((f) => onFileUploaded(f));
     
     setInputText('');
-  }, [inputText, isLoading, isUploading, stagedFiles, threadId, onFileUploaded, onSendMessage]);
+  }, [
+    activeStagedFiles,
+    canStartReconFromDataSource,
+    currentReconRule?.name,
+    inputText,
+    isLoading,
+    isUploading,
+    authToken,
+    onFileUploaded,
+    onLogin,
+    onSendMessage,
+    threadId,
+  ]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // 忽略输入法组合过程中的按键事件（中文、日文等）
@@ -291,69 +386,89 @@ export default function ChatArea({
     onSendMessage(jsonMessage, undefined, true); // silent = true
   }, [onSendMessage]);
 
+  const inputPlaceholder = isReconContext
+    ? resolvedReconExecutionMode === 'data_source'
+      ? `当前规则：${currentReconRule?.name || '未选择规则'}。可直接发送开始按数据源执行，或补充说明。`
+      : `当前规则：${currentReconRule?.name || '未选择规则'}。可上传待对账文件，或补充执行说明。`
+    : '描述您的分析需求 (Shift+Enter 换行)...';
+
   return (
-    <div className="flex-1 flex flex-col min-w-0 bg-surface-secondary relative">
+    <div className="flex min-h-0 flex-1 flex-col min-w-0 bg-surface-secondary relative">
       {/* ── Header ── */}
-      <header className="h-14 bg-surface border-b border-border flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          {onToggleSidebar && (
-            <button
-              onClick={onToggleSidebar}
-              className="p-1.5 rounded-lg text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors shrink-0"
-              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            >
-              {sidebarCollapsed ? (
-                <ChevronRight className="w-5 h-5" />
-              ) : (
-                <ChevronLeft className="w-5 h-5" />
-              )}
-            </button>
-          )}
-          
-          <div
-            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-              connectionStatus === 'connected'
-                ? 'bg-green-500'
-                : connectionStatus === 'connecting'
-                ? 'bg-yellow-500 animate-pulse'
-                : 'bg-red-500'
-            }`}
-          />
-          <span className="text-sm font-medium text-text-primary truncate">
-            {conversationTitle || 'Tally 智能财务助手'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <ThemeToggleButton />
-          {!currentUser && onLogin ? (
-            <button
-              onClick={onLogin}
-              className="px-4 py-2 text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-            >
-              登录
-            </button>
-          ) : currentUser ? null : (
-            <span
-              className={`text-xs font-medium px-3 py-1.5 rounded-full ${
+      {!hideHeader && (
+        <header className="sticky top-0 z-20 h-14 bg-surface border-b border-border flex items-center justify-between px-6 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            {onToggleSidebar && (
+              <button
+                onClick={onToggleSidebar}
+                className="p-1.5 rounded-lg text-text-secondary hover:bg-surface-tertiary hover:text-text-primary transition-colors shrink-0"
+                title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+              >
+                {sidebarCollapsed ? (
+                  <ChevronRight className="w-5 h-5" />
+                ) : (
+                  <ChevronLeft className="w-5 h-5" />
+                )}
+              </button>
+            )}
+
+            <div
+              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
                 connectionStatus === 'connected'
-                  ? 'bg-green-50 text-green-600'
+                  ? 'bg-green-500'
                   : connectionStatus === 'connecting'
-                  ? 'bg-yellow-50 text-yellow-600'
-                  : 'bg-red-50 text-red-600'
+                  ? 'bg-yellow-500 animate-pulse'
+                  : 'bg-red-500'
               }`}
-            >
-              {connectionStatus === 'connected'
-                ? '已连接'
-                : connectionStatus === 'connecting'
-                ? '连接中'
-                : '未连接'}
+            />
+            <span className="text-sm font-medium text-text-primary truncate">
+              {conversationTitle || 'Tally 智能财务助手'}
             </span>
-          )}
-        </div>
-      </header>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {!currentUser && onLogin ? (
+              <button
+                onClick={onLogin}
+                className="px-4 py-2 text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+              >
+                登录
+              </button>
+            ) : currentUser ? null : (
+              <span
+                className={`text-xs font-medium px-3 py-1.5 rounded-full ${
+                  connectionStatus === 'connected'
+                    ? 'bg-green-50 text-green-600'
+                    : connectionStatus === 'connecting'
+                    ? 'bg-yellow-50 text-yellow-600'
+                    : 'bg-red-50 text-red-600'
+                }`}
+              >
+                {connectionStatus === 'connected'
+                  ? '已连接'
+                  : connectionStatus === 'connecting'
+                  ? '连接中'
+                  : '未连接'}
+              </span>
+            )}
+          </div>
+        </header>
+      )}
 
       {/* ── Messages ── */}
-      <div className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
+        {isReconContext && !hideHeader && (
+          <ReconConversationBar
+            ruleName={currentReconRule?.name ?? selectedTask?.name ?? null}
+            rules={availableReconRules}
+            selectedRuleCode={selectedReconRuleCode ?? currentReconRule?.rule_code ?? null}
+            executionMode={resolvedReconExecutionMode}
+            showRuleSelector
+            onSelectRule={onSelectReconRule}
+            onChangeExecutionMode={handleReconExecutionModeChange}
+            onOpenDataConnections={onOpenDataConnections}
+          />
+        )}
+
         {/* 会话加载中 */}
         {isLoadingConversation && (
           <div className="flex items-center justify-center h-full">
@@ -366,32 +481,37 @@ export default function ChatArea({
         
         {/* 空状态 */}
         {!isLoadingConversation && messages.length === 0 && !isLoading && (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="w-16 h-16 rounded-full bg-surface-tertiary flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+          <div className="flex justify-center pt-10">
+            <div className="w-full max-w-2xl text-center">
+              <h3 className="text-base font-semibold text-text-primary">
+                {currentUser ? '开始一条财务对话' : 'Tally 财务助手已就绪'}
+              </h3>
+              <p className="mt-2 text-sm text-text-secondary leading-6">
+                直接输入需求或上传文件，我会自动匹配处理流程。
+              </p>
+
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+                {EMPTY_STATE_CAPABILITIES.map((capability) => (
+                  <span
+                    key={capability.key}
+                    className={`inline-flex items-center rounded-full border px-3 py-1.5 text-xs font-medium ${capability.accentClass}`}
+                  >
+                    {capability.label}
+                  </span>
+                ))}
               </div>
-              {currentUser ? (
-                <>
-                  <h3 className="text-base font-medium text-text-primary mb-2">
-                    开启新对话，开始交流
-                  </h3>
-                  <p className="text-sm text-text-secondary">
-                    上传数据文件或直接描述您的分析需求
+
+              {!currentUser && onLogin && (
+                <div className="mt-4">
+                  <p className="text-xs text-text-muted">
+                    登录后即可使用以上能力，并保存您的规则与对话记录。请点击右上角登录。
                   </p>
-                </>
-              ) : (
-                <>
-                  <h3 className="text-base font-medium text-text-primary mb-2">
-                    您好！我是 Tally 智能对账助手
-                  </h3>
-                  <p className="text-sm text-text-secondary">
-                    我可以帮助您进行数据对比对账，上传两个文件即可开始
-                  </p>
-                </>
+                </div>
               )}
+
+              <p className="mt-4 text-xs text-text-muted">
+                例如：整理本月台账、对比两份结算明细、给出经营洞察建议
+              </p>
             </div>
           </div>
         )}
@@ -419,9 +539,9 @@ export default function ChatArea({
             {/* Floating container with shadow */}
             <div className="bg-surface-elevated rounded-2xl shadow-lg border border-border pointer-events-auto overflow-hidden">
               {/* 暂存文件预览条 */}
-              {stagedFiles.length > 0 && (
+              {activeStagedFiles.length > 0 && (
                 <div className="px-3 pt-3 flex flex-wrap gap-2">
-                  {stagedFiles.map((sf, i) => (
+                  {activeStagedFiles.map((sf, i) => (
                     <div
                       key={i}
                       className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 text-sm group animate-fade-in-up"
@@ -451,21 +571,23 @@ export default function ChatArea({
                   onChange={handleFileSelect}
                   className="hidden"
                 />
-                <button
-                  type="button"
-                  onClick={handleUploadClick}
-                  disabled={isUploading}
-                  className="w-9 h-9 rounded-lg flex items-center justify-center
-                    text-text-secondary hover:text-blue-500 hover:bg-blue-50
-                    transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
-                  title={'添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
-                >
-                  {isUploading ? (
-                    <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />
-                  ) : (
-                    <Paperclip className="w-4.5 h-4.5" />
-                  )}
-                </button>
+                {(!isReconContext || resolvedReconExecutionMode === 'upload') && (
+                  <button
+                    type="button"
+                    onClick={handleUploadClick}
+                    disabled={isUploading}
+                    className="w-9 h-9 rounded-lg flex items-center justify-center
+                      text-text-secondary hover:text-blue-500 hover:bg-blue-50
+                      transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
+                    title={'添加 Excel 或 CSV 文件（.xlsx、.xls、.xlsm、.xlsb、.csv）'}
+                  >
+                    {isUploading ? (
+                      <Loader2 className="w-4.5 h-4.5 animate-spin text-blue-500" />
+                    ) : (
+                      <Paperclip className="w-4.5 h-4.5" />
+                    )}
+                  </button>
+                )}
 
                 {/* Text input */}
                 <div className="flex-1 relative">
@@ -474,7 +596,7 @@ export default function ChatArea({
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="描述您的分析需求 (Shift+Enter 换行)..."
+                    placeholder={inputPlaceholder}
                     rows={1}
                     className="w-full px-3 py-2 text-sm rounded-lg
                       bg-transparent text-text-primary resize-none
@@ -492,10 +614,8 @@ export default function ChatArea({
                 {/* Send button */}
                 <button
                   onClick={handleSend}
-                  disabled={(!inputText.trim() && stagedFiles.length === 0) || isLoading || isUploading}
-                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0
-                    bg-gradient-to-r from-blue-500 to-blue-600 text-white
-                    hover:shadow-md hover:shadow-blue-500/30 transition-all
+                  disabled={(!inputText.trim() && activeStagedFiles.length === 0 && !canStartReconFromDataSource) || isLoading || isUploading}
+                  className="sidebar-primary-cta w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-white
                     disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none cursor-pointer"
                 >
                   <Send className="w-4 h-4" />

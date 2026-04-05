@@ -302,3 +302,6 @@ finance-ui/.vite/
 /finance-mcp/proc/output
 /proc-agent/*
 /proc-agent
+
+!finance-agents/data-agent/tests/
+!finance-agents/data-agent/tests/test_notifications_dingtalk.py

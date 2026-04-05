@@ -39,6 +39,18 @@ from tools.rules import create_tools as create_rules_tools, handle_tool_call as 
 
 # 导入对账模块
 from recon.mcp_server.recon_tool import create_recon_tools, handle_recon_tool_call
+from tools.platform_connections import (
+    create_tools as create_platform_tools,
+    handle_tool_call as handle_platform_tool_call,
+)
+from tools.data_sources import (
+    create_tools as create_data_source_tools,
+    handle_tool_call as handle_data_source_tool_call,
+)
+from tools.recon_auto_runs import (
+    create_tools as create_recon_auto_tools,
+    handle_tool_call as handle_recon_auto_tool_call,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -98,8 +110,29 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载对账工具失败: {str(e)}", exc_info=True)
         recon_tools_2 = []
+
+    try:
+        platform_tools = create_platform_tools()
+        logger.info(f"平台连接工具数量: {len(platform_tools)}")
+    except Exception as e:
+        logger.error(f"加载平台连接工具失败: {str(e)}", exc_info=True)
+        platform_tools = []
+
+    try:
+        data_source_tools = create_data_source_tools()
+        logger.info(f"统一数据源工具数量: {len(data_source_tools)}")
+    except Exception as e:
+        logger.error(f"加载统一数据源工具失败: {str(e)}", exc_info=True)
+        data_source_tools = []
+
+    try:
+        recon_auto_tools = create_recon_auto_tools()
+        logger.info(f"自动对账闭环工具数量: {len(recon_auto_tools)}")
+    except Exception as e:
+        logger.error(f"加载自动对账闭环工具失败: {str(e)}", exc_info=True)
+        recon_auto_tools = []
     
-    all_tools = auth_tools + upload_tools + file_validate_tools + proc_tools + rules_tools + recon_tools_2
+    all_tools = auth_tools + upload_tools + file_validate_tools + proc_tools + rules_tools + recon_tools_2 + platform_tools + data_source_tools + recon_auto_tools
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -137,6 +170,59 @@ _RECON_TOOL_NAMES = {
     "recon_execute",
 }
 
+_PLATFORM_TOOL_NAMES = {
+    "platform_list_connections",
+    "platform_create_auth_session",
+    "platform_handle_auth_callback",
+    "platform_reauthorize_shop",
+    "platform_disable_shop",
+    "platform_get_shop_detail",
+}
+
+_DATA_SOURCE_TOOL_NAMES = {
+    "data_source_list",
+    "data_source_get",
+    "data_source_discover_datasets",
+    "data_source_list_datasets",
+    "data_source_get_dataset",
+    "data_source_upsert_dataset",
+    "data_source_disable_dataset",
+    "data_source_import_openapi",
+    "data_source_preflight_rule_binding",
+    "data_source_list_events",
+    "data_source_create",
+    "data_source_update",
+    "data_source_disable",
+    "data_source_test",
+    "data_source_authorize",
+    "data_source_handle_callback",
+    "data_source_trigger_sync",
+    "data_source_get_sync_job",
+    "data_source_list_sync_jobs",
+    "data_source_preview",
+    "data_source_get_published_snapshot",
+}
+
+_RECON_AUTO_TOOL_NAMES = {
+    "recon_auto_task_list",
+    "recon_auto_task_get",
+    "recon_auto_task_create",
+    "recon_auto_task_update",
+    "recon_auto_task_delete",
+    "recon_auto_run_create",
+    "recon_auto_run_update",
+    "recon_auto_run_list",
+    "recon_auto_run_get",
+    "recon_auto_run_rerun",
+    "recon_auto_run_verify",
+    "recon_auto_run_job_create",
+    "recon_auto_run_job_update",
+    "recon_auto_run_exceptions",
+    "recon_exception_get",
+    "recon_exception_create",
+    "recon_exception_update",
+}
+
 _UPLOAD_TOOL_NAMES = {"file_upload"}
 
 
@@ -169,6 +255,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         # 6) 对账模块
         elif name in _RECON_TOOL_NAMES:
             result = await handle_recon_tool_call(name, arguments)
+
+        # 7) 平台连接模块
+        elif name in _PLATFORM_TOOL_NAMES:
+            result = await handle_platform_tool_call(name, arguments)
+
+        # 8) 统一数据连接模块
+        elif name in _DATA_SOURCE_TOOL_NAMES:
+            result = await handle_data_source_tool_call(name, arguments)
+
+        # 9) 自动对账与异常闭环模块
+        elif name in _RECON_AUTO_TOOL_NAMES:
+            result = await handle_recon_auto_tool_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -204,7 +302,7 @@ async def health_check(request):
         "status": "healthy",
         "service": "financial-mcp-server",
         "version": "1.0.0",
-        "modules": ["auth", "upload", "rules", "proc", "recon"]
+        "modules": ["auth", "upload", "rules", "proc", "recon", "platform", "data_source"]
     })
 
 

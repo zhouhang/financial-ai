@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
+import DataConnectionsPanel from './components/DataConnectionsPanel';
+import ReconWorkspace from './components/ReconWorkspace';
 import LoginModal from './components/LoginModal';
+import type { ReconExecutionMode } from './components/recon/ReconConversationBar';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
 import type {
+  AppSection,
+  AuthCallbackPayload,
+  CollaborationProvider,
   Conversation,
+  DataConnectionView,
+  DataSourceKind,
   Message,
   Task,
   UploadedFile,
@@ -13,17 +21,20 @@ import type {
   WsOutgoing,
 } from './types';
 
+type MainPanelView = 'conversation' | 'data-connections';
+
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-function createConversation(): Conversation {
+function createConversation(taskContext: UserTaskRule | null = null): Conversation {
   return {
     id: generateId(),
     title: '新对话',
     createdAt: new Date(),
     updatedAt: new Date(),
     messages: [],
+    taskContext,
   };
 }
 
@@ -32,8 +43,37 @@ const STORAGE_KEY_ACTIVE_CONV = 'tally_active_conversation_id';
 const STORAGE_KEY_IS_NEW_CONV = 'tally_is_new_conversation';
 const STORAGE_KEY_GUEST_CONV = 'tally_guest_conversation';
 
-// 创建初始会话（在组件外部，确保只创建一次）
-const initialPendingConv = createConversation();
+function parsePanelViewFromLocation(): MainPanelView {
+  const path = window.location.pathname.toLowerCase();
+  const section = new URLSearchParams(window.location.search).get('section');
+  if (section === 'data-connections') {
+    return 'data-connections';
+  }
+  if (path.includes('/data-connections')) {
+    return 'data-connections';
+  }
+  return 'conversation';
+}
+
+function parseAuthCallbackPayloadFromLocation(): AuthCallbackPayload | null {
+  const path = window.location.pathname.toLowerCase();
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get('platform_auth_status') || params.get('status');
+  const platformCode = params.get('platform_code') || params.get('platform') || '';
+  const message = params.get('platform_auth_message') || params.get('message') || '';
+  const shopName = params.get('shop_name') || undefined;
+
+  if (!status && !path.includes('auth-callback') && !path.includes('auth_result')) {
+    return null;
+  }
+
+  return {
+    platformCode: platformCode || 'unknown',
+    status: status || 'unknown',
+    message: message || '授权流程已返回，请检查授权结果。',
+    shopName,
+  };
+}
 
 /** 序列化会话用于 localStorage（Date 转为 ISO 字符串） */
 function serializeGuestConv(conv: Conversation): string {
@@ -93,6 +133,29 @@ function isBlockingBackdrop(element: HTMLElement): boolean {
   return Number.isFinite(zIndex) && zIndex >= 40 && isDarkBackdrop;
 }
 
+function removeBlockingBackdrop(element: HTMLElement): void {
+  element.style.display = 'none';
+  element.style.pointerEvents = 'none';
+  element.setAttribute('aria-hidden', 'true');
+  element.remove();
+}
+
+function clearResidualBlockingBackdrops(): void {
+  document.body.style.removeProperty('overflow');
+
+  document.querySelectorAll<HTMLElement>('[data-login-modal-backdrop="true"]').forEach((element) => {
+    removeBlockingBackdrop(element);
+  });
+
+  document.querySelectorAll<HTMLElement>('body *').forEach((element) => {
+    if (!isBlockingBackdrop(element)) {
+      return;
+    }
+
+    removeBlockingBackdrop(element);
+  });
+}
+
 // 从 localStorage 读取初始会话状态（区分游客/登录）
 function getInitialConversationState(): {
   activeId: string;
@@ -113,11 +176,10 @@ function getInitialConversationState(): {
   }
   // 已登录
   const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_CONV);
-  const savedIsNewConv = localStorage.getItem(STORAGE_KEY_IS_NEW_CONV) === 'true';
-  if (savedIsNewConv || !savedActiveId) {
-    return { activeId: initialPendingConv.id, isNewConv: true, conversations: [], pendingNew: initialPendingConv };
+  if (savedActiveId) {
+    return { activeId: savedActiveId, isNewConv: false, conversations: [], pendingNew: null };
   }
-  return { activeId: savedActiveId, isNewConv: false, conversations: [], pendingNew: null };
+  return { activeId: '', isNewConv: false, conversations: [], pendingNew: null };
 }
 
 const initialState = getInitialConversationState();
@@ -137,6 +199,7 @@ export default function App() {
   const activeConv = conversations.find((c) => c.id === activeConvId) 
     || (pendingNewConvRef.current?.id === activeConvId ? pendingNewConvRef.current : undefined);
   const messages = activeConv?.messages || [];
+  const selectedTask = activeConv?.taskContext ?? null;
 
   // ── 认证状态 ────────────────────────────────────────────────
   const [authToken, setAuthToken] = useState<string | null>(() => {
@@ -150,9 +213,16 @@ export default function App() {
   /** 登录框标题提示，如「登录后使用完整功能」；为空时显示默认「登录」/「注册」 */
   const [loginModalTitleHint, setLoginModalTitleHint] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  
-  /** 选中的任务 */
-  const [selectedTask, setSelectedTask] = useState<UserTaskRule | null>(null);
+  const [panelView, setPanelView] = useState<MainPanelView>(() => parsePanelViewFromLocation());
+  const [selectedDataConnectionView, setSelectedDataConnectionView] = useState<DataConnectionView>('data_sources');
+  const [selectedDataSourceKind, setSelectedDataSourceKind] = useState<DataSourceKind>('platform_oauth');
+  const [selectedCollaborationProvider, setSelectedCollaborationProvider] = useState<CollaborationProvider>('dingtalk_dws');
+  const [reconRules, setReconRules] = useState<UserTaskRule[]>([]);
+  const [reconExecutionMode, setReconExecutionMode] = useState<ReconExecutionMode>('upload');
+  const [hiddenConversationIds, setHiddenConversationIds] = useState<string[]>([]);
+  const [authCallbackPayload] = useState<AuthCallbackPayload | null>(() =>
+    parseAuthCallbackPayloadFromLocation(),
+  );
 
   const isGuest = !authToken;
 
@@ -162,38 +232,122 @@ export default function App() {
     setLoginModalTitleHint(null);
   }, [authToken]);
 
+  useEffect(() => {
+    let aborted = false;
+
+    if (!authToken) {
+      setReconRules([]);
+      return undefined;
+    }
+
+    const loadReconRules = async () => {
+      try {
+        const response = await fetch('/api/proc/list_user_tasks', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '加载对账规则失败'));
+        }
+
+        const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+        const rules = tasks
+          .filter((task: { task_type?: string }) => task.task_type === 'recon')
+          .flatMap((task: {
+            task_code?: string;
+            task_name?: string;
+            task_type?: string;
+            rules?: Array<Record<string, unknown>>;
+          }) =>
+            (task.rules || []).map((rule) => ({
+              id: Number(rule.id || 0),
+              user_id: typeof rule.user_id === 'string' ? rule.user_id : null,
+              task_id: typeof rule.task_id === 'number' ? rule.task_id : null,
+              rule_code: String(rule.rule_code || ''),
+              name: String(rule.name || ''),
+              rule_type: String(rule.rule_type || ''),
+              remark: typeof rule.remark === 'string' ? rule.remark : '',
+              task_code: String(task.task_code || ''),
+              task_name: String(task.task_name || ''),
+              task_type: String(task.task_type || 'recon'),
+              file_rule_code:
+                typeof rule.file_rule_code === 'string' ? rule.file_rule_code : undefined,
+            })),
+          )
+          .filter((rule: UserTaskRule) => rule.rule_code);
+
+        if (!aborted) {
+          setReconRules(rules);
+        }
+      } catch (error) {
+        if (!aborted) {
+          console.error('加载对账规则失败:', error);
+          setReconRules([]);
+        }
+      }
+    };
+
+    void loadReconRules();
+    return () => {
+      aborted = true;
+    };
+  }, [authToken]);
+
+  useEffect(() => {
+    if (authToken) return;
+    if (panelView !== 'data-connections') return;
+    setPanelView('conversation');
+  }, [panelView, authToken]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (panelView === 'data-connections') {
+      url.searchParams.set('section', 'data-connections');
+    } else {
+      url.searchParams.delete('section');
+      [
+        'platform_auth_status',
+        'platform_code',
+        'platform_auth_message',
+        'status',
+        'platform',
+        'message',
+        'shop_name',
+      ].forEach((key) => url.searchParams.delete(key));
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [panelView]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [panelView, selectedTask?.rule_code, activeConvId]);
+
   useLayoutEffect(() => {
-    if (!authToken && !currentUser) {
+    if (isLoginModalOpen) {
       return;
     }
 
     const clearStaleBackdrop = () => {
-      document.body.style.overflow = 'unset';
-
-      document.querySelectorAll<HTMLElement>('[data-login-modal-backdrop="true"]').forEach((element) => {
-        element.style.display = 'none';
-        element.style.pointerEvents = 'none';
-      });
-
-      document.querySelectorAll<HTMLElement>('body *').forEach((element) => {
-        if (!isBlockingBackdrop(element)) {
-          return;
-        }
-
-        element.style.display = 'none';
-        element.style.pointerEvents = 'none';
-      });
+      clearResidualBlockingBackdrops();
     };
 
     clearStaleBackdrop();
     const rafId = window.requestAnimationFrame(clearStaleBackdrop);
     const timerId = window.setTimeout(clearStaleBackdrop, 120);
+    const laterTimerId = window.setTimeout(clearStaleBackdrop, 600);
+
+    const handlePageShow = () => {
+      clearStaleBackdrop();
+    };
+    window.addEventListener('pageshow', handlePageShow);
 
     return () => {
       window.cancelAnimationFrame(rafId);
       window.clearTimeout(timerId);
+      window.clearTimeout(laterTimerId);
+      window.removeEventListener('pageshow', handlePageShow);
     };
-  }, [authToken, currentUser]);
+  }, [isLoginModalOpen, authToken, currentUser]);
 
   // 保存当前会话状态到 localStorage（游客用 guest 存储，已登录用 active/id）
   useEffect(() => {
@@ -322,55 +476,64 @@ export default function App() {
     }
   }, [authToken, serverConversations, isLoadingConversations, loadConversation]);
   
-  // 刷新页面时，如果有保存的会话ID且不是新对话，尝试加载该会话
+  // 刷新页面时：优先恢复已保存会话；否则选最近历史；仅在完全没有历史时创建新对话
   useEffect(() => {
     console.log('[刷新加载] effect触发', {
       hasLoaded: hasLoadedInitialConvRef.current,
       authToken: !!authToken,
       activeId: initialState.activeId,
       serverConversationsCount: serverConversations.length,
-      isNewConv: initialState.isNewConv,
+      isLoadingConversations,
     });
 
-    // 保护 1: 已经加载过初始对话
     if (hasLoadedInitialConvRef.current) {
       console.log('[刷新加载] 跳过：已加载过');
       return;
     }
 
-    // 保护 2: 必要条件不满足
-    if (!authToken || !initialState.activeId || serverConversations.length === 0) {
-      console.log('[刷新加载] 跳过：条件不满足');
+    if (!authToken || isLoadingConversations) {
+      console.log('[刷新加载] 跳过：等待认证或列表加载完成');
       return;
     }
 
-    // 保护 3: 如果是新对话，不需要恢复
-    if (initialState.isNewConv) {
-      console.log('[刷新加载] 跳过：是新对话');
+    if (serverConversations.length === 0) {
+      console.log('[刷新加载] 无历史对话，创建新对话');
+      hasLoadedInitialConvRef.current = true;
+      const newConv = createConversation();
+      pendingNewConvRef.current = newConv;
+      setActiveConvId(newConv.id);
       return;
     }
 
-    // 检查 savedConvId 是否在 serverConversations 中
-    const savedConvExists = serverConversations.some((c) => c.id === initialState.activeId);
-    console.log('[刷新加载] savedConvExists:', savedConvExists, 'activeId:', initialState.activeId);
+    const savedConvId = initialState.activeId;
+    if (!savedConvId) {
+      console.log('[刷新加载] 未保存活动会话，切换到最近对话');
+      hasLoadedInitialConvRef.current = true;
+      pendingNewConvRef.current = null;
+      setActiveConvId(serverConversations[0].id);
+      return;
+    }
+
+    const savedConvExists = serverConversations.some((c) => c.id === savedConvId);
+    console.log('[刷新加载] savedConvExists:', savedConvExists, 'activeId:', savedConvId);
 
     if (savedConvExists) {
-      console.log('[刷新加载] 开始加载对话:', initialState.activeId);
-      // 标记为已加载（防止重复触发）
+      console.log('[刷新加载] 开始加载对话:', savedConvId);
       hasLoadedInitialConvRef.current = true;
+      pendingNewConvRef.current = null;
+      setActiveConvId(savedConvId);
 
-      // 加载对话详情
       setIsLoadingConversation(true);
-      loadConversation(initialState.activeId)
+      loadConversation(savedConvId)
         .then((conv) => {
           console.log('[刷新加载] 加载完成，消息数:', conv?.messages.length || 0);
-          if (conv && conv.messages.length > 0) {
+          if (conv) {
             setConversations((prev) => {
-              const existing = prev.find((c) => c.id === initialState.activeId);
+              const existing = prev.find((c) => c.id === savedConvId);
               if (existing) {
                 return prev.map((c) =>
-                  c.id === initialState.activeId
-                    ? { ...c, messages: conv.messages, title: conv.title }
+                  c.id === savedConvId
+                    ? { ...c, ...conv, taskContext: conv.taskContext ?? null }
                     : c
                 );
               } else {
@@ -383,16 +546,15 @@ export default function App() {
         .catch((err) => {
           console.error('[刷新加载] 加载对话失败:', err);
           setIsLoadingConversation(false);
-          // 降级：切换到第一个可用对话
           if (serverConversations.length > 0) {
             console.log('[刷新加载] 降级到第一个对话:', serverConversations[0].id);
             setActiveConvId(serverConversations[0].id);
           }
         });
     } else {
-      // savedConvId 不存在，切换到最新对话
       console.log('[刷新加载] savedConvId不存在，切换到最新对话');
       hasLoadedInitialConvRef.current = true;
+      pendingNewConvRef.current = null;
       const latestConv = serverConversations[0];
       if (latestConv) {
         console.log('[刷新加载] 切换到:', latestConv.id);
@@ -403,8 +565,8 @@ export default function App() {
     serverConversations,
     loadConversation,
     authToken,
+    isLoadingConversations,
     initialState.activeId,
-    initialState.isNewConv,
   ]);
 
   // ── 加载和中断状态 ────────────────────────────────────────
@@ -829,6 +991,11 @@ export default function App() {
           if (data.conversation_id && data.thread_id) {
             console.log('[conversation_created] 本地ID:', data.thread_id, '→ 服务器ID:', data.conversation_id);
             convIdMapRef.current.set(data.thread_id, data.conversation_id);
+            setHiddenConversationIds((prev) => {
+              if (!prev.includes(data.thread_id as string)) return prev;
+              if (prev.includes(data.conversation_id as string)) return prev;
+              return [...prev, data.conversation_id as string];
+            });
             remapNodeStatusConversationId(data.thread_id, data.conversation_id);
             // 如果是登录会话，更新服务器ID
             if (loginConvIdRef.current.localId === data.thread_id) {
@@ -1032,6 +1199,10 @@ export default function App() {
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
       const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
+      const activeTaskContext =
+        panelView !== 'data-connections'
+          ? activeConv?.taskContext ?? null
+          : null;
       sendMessage(
         text,
         activeConvId,
@@ -1039,13 +1210,13 @@ export default function App() {
         authToken || undefined,
         filesToSend,
         conversationId,
-        selectedTask?.task_type,
-        selectedTask?.rule_code,
-        selectedTask?.name,
-        selectedTask?.file_rule_code,
+        activeTaskContext?.task_type,
+        activeTaskContext?.rule_code,
+        activeTaskContext?.name,
+        activeTaskContext?.file_rule_code,
       );
     },
-    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, selectedTask]
+    [isGuest, conversations.length, appendMessage, sendMessage, activeConvId, waitingForFileUpload, authToken, pendingConvIdRef, convIdMapRef, streamingMessageId, activeConv, panelView]
   );
 
   // ── 文件上传回调 ──────────────────────────────────────────
@@ -1080,6 +1251,7 @@ export default function App() {
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
+    setHiddenConversationIds([]);
     hasLoadedInitialConvRef.current = false;
   }, [clearConversationsCache]);
 
@@ -1087,6 +1259,8 @@ export default function App() {
   const handleNewConversation = useCallback(() => {
     // 如果正在加载中，不允许创建新会话（避免消息显示错乱）
     if (isLoading) return;
+    setPanelView('conversation');
+    setReconExecutionMode('upload');
     const conv = createConversation();
     pendingNewConvRef.current = conv;
     setActiveConvId(conv.id);
@@ -1098,8 +1272,21 @@ export default function App() {
 
   // ── 切换会话 ──────────────────────────────────────────────
   const handleSelectConversation = useCallback(async (id: string) => {
+    if (panelView === 'data-connections') {
+      setPanelView('conversation');
+    }
     // 切换到其他会话时，清除待确认的新会话
     pendingNewConvRef.current = null;
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === id && conversation.taskContext
+          ? {
+              ...conversation,
+              taskContext: null,
+            }
+          : conversation,
+      ),
+    );
     setActiveConvId(id);
     setIsLoading(false);
     
@@ -1116,10 +1303,10 @@ export default function App() {
         setConversations((prev) => {
           const existing = prev.find((c) => c.id === id);
           if (existing) {
-            // 更新现有会话的消息
+            // 服务端会话以服务端返回为准，避免残留本地 taskContext
             return prev.map((c) =>
               c.id === id
-                ? { ...c, messages: serverConv.messages, title: serverConv.title }
+                ? { ...c, ...serverConv, taskContext: serverConv.taskContext ?? null }
                 : c
             );
           } else {
@@ -1129,7 +1316,7 @@ export default function App() {
         });
       }
     }
-  }, [conversations, serverConversations, loadConversation]);
+  }, [conversations, serverConversations, loadConversation, panelView]);
 
   // ── 删除会话 ──────────────────────────────────────────────
   const handleDeleteConversation = useCallback(async (id: string) => {
@@ -1145,6 +1332,7 @@ export default function App() {
     
     // 无论服务器删除成功与否，都从本地列表中移除
     setConversations((prev) => prev.filter((c) => c.id !== id));
+    setHiddenConversationIds((prev) => prev.filter((item) => item !== id));
     
     // 如果删除的是当前活动会话，切换到其他会话
     if (activeConvId === id) {
@@ -1161,11 +1349,85 @@ export default function App() {
     }
   }, [activeConvId, conversations, serverConversations, deleteServerConversation]);
 
+  const updateConversationTaskContext = useCallback((conversationId: string, task: UserTaskRule | null) => {
+    if (!conversationId) return;
+
+    if (pendingNewConvRef.current?.id === conversationId) {
+      pendingNewConvRef.current = {
+        ...pendingNewConvRef.current,
+        taskContext: task,
+      };
+    }
+
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              taskContext: task,
+            }
+          : conversation,
+      ),
+    );
+  }, []);
+
   // ── 选择任务 ────────────────────────────────────────────────
   const handleSelectTask = useCallback((task: UserTaskRule) => {
-    setSelectedTask(task);
+    setPanelView('conversation');
+    setReconExecutionMode('upload');
+    const conversation = createConversation(task);
+    pendingNewConvRef.current = conversation;
+    setHiddenConversationIds((prev) =>
+      prev.includes(conversation.id) ? prev : [...prev, conversation.id],
+    );
+    setActiveConvId(conversation.id);
+    setTasks([]);
+    setUploadedFiles([]);
+    setTaskResult(null);
+    setWaitingForFileUpload(false);
+    setIsLoading(false);
     console.log('选中规则:', task.task_type, '-', task.task_name, '-', task.name);
   }, []);
+
+  const handleOpenTask = useCallback((task: { task_type?: string; task_name?: string }) => {
+    setPanelView('conversation');
+    console.log('打开任务工作台:', task.task_type, '-', task.task_name);
+  }, []);
+
+  const handleSelectSection = useCallback((section: AppSection) => {
+    if (section === 'data-connections') {
+      setPanelView('data-connections');
+      return;
+    }
+    setPanelView('conversation');
+  }, []);
+
+  const handleBackToChat = useCallback(() => {
+    setPanelView('conversation');
+  }, []);
+
+  const handleOpenCollaborationChannels = useCallback((provider?: CollaborationProvider) => {
+    setSelectedDataConnectionView('collaboration_channels');
+    if (provider) {
+      setSelectedCollaborationProvider(provider);
+    }
+    setPanelView('data-connections');
+  }, []);
+
+  const availableReconRules = useMemo(() => {
+    if (selectedTask?.task_type !== 'recon') return reconRules;
+    if (reconRules.some((rule) => rule.rule_code === selectedTask.rule_code)) return reconRules;
+    return [...reconRules, selectedTask];
+  }, [reconRules, selectedTask]);
+
+  const handleSelectReconRule = useCallback(
+    (ruleCode: string) => {
+      const rule = availableReconRules.find((item) => item.rule_code === ruleCode);
+      if (!rule) return;
+      updateConversationTaskContext(activeConvId, rule);
+    },
+    [activeConvId, availableReconRules, updateConversationTaskContext],
+  );
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
   // 服务器会话优先，本地会话补充（未同步的新会话）
@@ -1177,21 +1439,70 @@ export default function App() {
     
     const serverIds = new Set(serverConversations.map((c) => c.id));
     // 本地会话中不在服务器列表中的（新创建的、未保存的），排除登录会话
-    const localOnly = conversations.filter((c) => !serverIds.has(c.id) && c.id !== loginLocalId);
+    const localOnly = conversations.filter(
+      (c) =>
+        !serverIds.has(c.id) &&
+        c.id !== loginLocalId &&
+        !hiddenConversationIds.includes(c.id),
+    );
     // 服务器会话，如果刚登录则排除登录会话
     const serverFiltered = justLoggedInRef.current && loginServerId
       ? serverConversations.filter((c) => c.id !== loginServerId)
       : serverConversations;
-    const base = [...localOnly, ...serverFiltered];
+    const base = [...localOnly, ...serverFiltered.filter((c) => !hiddenConversationIds.includes(c.id))];
     // 无会话时，将待确认的新对话加入列表（用户提交后即创建新对话）
     const pending = pendingNewConvRef.current;
-    if (pending && activeConvId === pending.id && !base.some((c) => c.id === pending.id)) {
+    if (
+      pending &&
+      activeConvId === pending.id &&
+      !hiddenConversationIds.includes(pending.id) &&
+      !base.some((c) => c.id === pending.id)
+    ) {
       return [pending, ...base];
     }
     return base;
-  }, [conversations, serverConversations, activeConvId]);
+  }, [conversations, serverConversations, activeConvId, hiddenConversationIds]);
 
   const displayConversations = mergedConversations();
+  const activeSection: AppSection =
+    panelView === 'data-connections' ? 'data-connections' : 'chat';
+  const isReconWorkspace =
+    panelView !== 'data-connections' &&
+    selectedTask?.task_type === 'recon';
+  const chatAreaNode = (
+    <ChatArea
+      onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+      sidebarCollapsed={sidebarCollapsed}
+      messages={messages}
+      isLoading={isLoading}
+      isLoadingConversation={isLoadingConversation}
+      connectionStatus={status}
+      onSendMessage={handleSendMessage}
+      onFileUploaded={handleFileUploaded}
+      threadId={activeConvId}
+      showInput={!!activeConvId}
+      currentUser={currentUser}
+      conversationTitle={activeConv?.title}
+      authToken={authToken}
+      onLogin={() => {
+        setLoginModalTitleHint(null);
+        setIsLoginModalOpen(true);
+      }}
+      streamingMessageId={streamingMessageId}
+      selectedTask={selectedTask?.task_type === 'recon' ? selectedTask : null}
+      reconRules={selectedTask?.task_type === 'recon' ? availableReconRules : []}
+      selectedReconRuleCode={
+        selectedTask?.task_type === 'recon'
+          ? selectedTask.rule_code
+          : null
+      }
+      reconExecutionMode={reconExecutionMode}
+      onSelectReconRule={handleSelectReconRule}
+      onChangeReconExecutionMode={setReconExecutionMode}
+      onOpenDataConnections={() => setPanelView('data-connections')}
+      hideHeader={isReconWorkspace}
+    />
+  );
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-surface-secondary text-text-primary">
@@ -1199,37 +1510,53 @@ export default function App() {
         collapsed={sidebarCollapsed}
         conversations={displayConversations}
         activeConversationId={activeConvId}
+        activeSection={activeSection}
         connectionStatus={status}
         onNewConversation={handleNewConversation}
+        onSelectSection={handleSelectSection}
         onSelectConversation={handleSelectConversation}
         onDeleteConversation={currentUser ? handleDeleteConversation : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
         onSelectRule={handleSelectTask}
+        onOpenTask={handleOpenTask}
         selectedRuleCode={selectedTask?.rule_code}
         authToken={authToken}
+        selectedDataConnectionView={selectedDataConnectionView}
+        onSelectDataConnectionView={setSelectedDataConnectionView}
+        selectedDataSourceKind={selectedDataSourceKind}
+        onSelectDataSourceKind={setSelectedDataSourceKind}
+        selectedCollaborationProvider={selectedCollaborationProvider}
+        onSelectCollaborationProvider={setSelectedCollaborationProvider}
       />
-      <ChatArea
-        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-        sidebarCollapsed={sidebarCollapsed}
-        messages={messages}
-        isLoading={isLoading}
-        isLoadingConversation={isLoadingConversation}
-        connectionStatus={status}
-        onSendMessage={handleSendMessage}
-        onFileUploaded={handleFileUploaded}
-        threadId={activeConvId}
-        showInput={!!activeConvId}
-        currentUser={currentUser}
-        conversationTitle={activeConv?.title}
-        authToken={authToken}
-        onLogin={() => {
-          setLoginModalTitleHint(null);
-          setIsLoginModalOpen(true);
-        }}
-        streamingMessageId={streamingMessageId}
-        selectedTask={selectedTask}
-      />
+      {panelView !== 'data-connections' ? (
+        isReconWorkspace && selectedTask ? (
+          <ReconWorkspace
+            selectedTask={selectedTask}
+            availableRules={availableReconRules}
+            selectedRuleCode={selectedTask.rule_code}
+            executionMode={reconExecutionMode}
+            authToken={authToken}
+            onSelectRule={handleSelectReconRule}
+            onChangeExecutionMode={setReconExecutionMode}
+            onOpenDataConnections={() => setPanelView('data-connections')}
+            onOpenCollaborationChannels={handleOpenCollaborationChannels}
+          >
+            {chatAreaNode}
+          </ReconWorkspace>
+        ) : (
+          chatAreaNode
+        )
+      ) : (
+        <DataConnectionsPanel
+          authToken={authToken}
+          initialCallback={authCallbackPayload}
+          onBackToChat={handleBackToChat}
+          selectedConnectionView={selectedDataConnectionView}
+          selectedSourceKind={selectedDataSourceKind}
+          selectedCollaborationProvider={selectedCollaborationProvider}
+        />
+      )}
       {!authToken && isLoginModalOpen && (
         <LoginModal
           isOpen={isLoginModalOpen}

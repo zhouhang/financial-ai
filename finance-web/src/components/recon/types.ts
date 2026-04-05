@@ -1,0 +1,68 @@
+export type ReconWorkspaceTab = 'instant' | 'auto' | 'rules';
+
+export type ReconAutoSubTab = 'configs' | 'runs';
+
+export type StartMode = 'upload' | 'source';
+
+export type NoticeTone = 'info' | 'success' | 'warning';
+
+export interface ReconRuleListItem {
+  id: number;
+  user_id?: string | null;
+  task_id?: number | null;
+  rule_code: string;
+  name: string;
+  rule_type: string;
+  remark?: string;
+  task_code: string;
+  task_name: string;
+  task_type: 'proc' | 'recon' | string;
+  file_rule_code?: string;
+  updated_hint?: string;
+}
+
+export interface ReconAutoTaskItem {
+  id: string;
+  name: string;
+  company: string;
+  ruleCode: string;
+  ruleName: string;
+  schedule: string;
+  dateOffset: string;
+  ownerMode: string;
+  channel: string;
+  status: 'enabled' | 'paused';
+}
+
+export interface ReconRunItem {
+  id: string;
+  autoTaskId: string;
+  taskName: string;
+  triggerMode: string;
+  businessDate: string;
+  status: 'success' | 'running' | 'warning' | 'failed';
+  dataReady: string;
+  exceptionCount: number;
+  closureStatus: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface ReconExceptionItem {
+  id: string;
+  type: string;
+  summary: string;
+  owner: string;
+  reminderStatus: string;
+  feedback: string;
+  handlingStatus: string;
+}
+
+export interface LaunchNotice {
+  tone: NoticeTone;
+  text: string;
+}
+
+export function cn(...classNames: Array<string | false | null | undefined>) {
+  return classNames.filter(Boolean).join(' ');
+}

@@ -1,13 +1,19 @@
 # MCP 数据库迁移脚本
 
-当前目录只保留两份基线脚本，直接对应现在本地 PostgreSQL `tally` 库的真实结构和真实数据，用于初始化或重建数据库。
+当前目录包含基线脚本与后续增量脚本，按文件名顺序执行即可完成初始化和功能演进。
 
 ## 执行顺序
 
-按文件名顺序执行以下两份脚本：
+按文件名顺序执行以下脚本：
 
 1. **001_initial_schema.sql** - 当前完整表结构、函数、索引、触发器、外键、视图
 2. **002_seed_data.sql** - 当前完整初始化数据
+3. **003_company_channel_configs.sql** - 公司通知渠道配置
+4. **004_data_connection_tables.sql** - 数据连接（平台应用、店铺连接、授权、同步源、授权会话）
+5. **005_unified_data_source_model.sql** - 通用数据连接模型（data_sources、sync_jobs、dataset_snapshots 等）
+6. **006_recon_auto_closure_tables.sql** - 自动对账任务与异常闭环模型（recon_auto_tasks / recon_auto_runs / recon_exception_tasks / recon_run_jobs）
+7. **007_data_source_datasets_and_health.sql** - 数据集目录模型（data_source_datasets）与 source/dataset 健康状态字段
+8. **008_recon_auto_tasks_rule_id.sql** - 为 recon_auto_tasks 增量补齐 rule_id 字段
 
 ## 使用方法
 
@@ -50,6 +56,6 @@ done
 
 - `001_initial_schema.sql` 基于当前库的 schema dump 生成，并补充了 `uuid-ossp` 扩展创建语句
 - `002_seed_data.sql` 直接基于当前库的 data dump 生成
-- 目录中已不再保留历史增量迁移；这是“总量基线”，不是“演进历史”
+- `003` / `004` / `005` / `006` / `007` / `008` 为基线之后的增量迁移，需继续按顺序执行
 - 首次安装请先创建空数据库：`CREATE DATABASE tally;`
 - 若需重建，请先 `DROP DATABASE tally; CREATE DATABASE tally;` 再按顺序执行

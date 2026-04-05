@@ -61,7 +61,7 @@ export function useConversations({
   onError,
 }: UseConversationsOptions): UseConversationsResult {
   const [serverConversations, setServerConversations] = useState<Conversation[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState<boolean>(() => Boolean(authToken));
 
   /** 加载会话列表 */
   const loadConversations = useCallback(async () => {
