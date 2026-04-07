@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import operator
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Sequence
 
@@ -175,6 +175,50 @@ class PreviewResult(BaseModel):
     missing_in_business: int = 0
     missing_in_finance: int = 0
     sample_issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SchemeDesignStatus(str, Enum):
+    DRAFT = "draft"
+    WAITING_CONFIRM = "waiting_confirm"
+    CONFIRMED = "confirmed"
+    DISCARDED = "discarded"
+    EXPIRED = "expired"
+
+
+class SchemeDesignMessage(BaseModel):
+    role: Literal["system", "assistant", "user"]
+    content: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SchemeDesignDraftState(BaseModel):
+    proc_draft_json: dict[str, Any] = Field(default_factory=dict)
+    recon_draft_json: dict[str, Any] = Field(default_factory=dict)
+    proc_trial_result: dict[str, Any] = Field(default_factory=dict)
+    recon_trial_result: dict[str, Any] = Field(default_factory=dict)
+    open_questions: list[str] = Field(default_factory=list)
+    user_confirmations: list[str] = Field(default_factory=list)
+
+
+class SchemeDesignSession(BaseModel):
+    session_id: str
+    status: SchemeDesignStatus = SchemeDesignStatus.DRAFT
+    scheme_name: str = ""
+    biz_goal: str = ""
+    source_description: str = ""
+    sample_files: list[str] = Field(default_factory=list)
+    sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    skill_hints: list[str] = Field(default_factory=lambda: ["proc-config", "recon-config"])
+    executor_name: str = "fallback-no-deepagent"
+    messages: list[SchemeDesignMessage] = Field(default_factory=list)
+    drafts: SchemeDesignDraftState = Field(default_factory=SchemeDesignDraftState)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc) + timedelta(hours=2)
+    )
+    confirmed_at: Optional[datetime] = None
+    persist_result: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

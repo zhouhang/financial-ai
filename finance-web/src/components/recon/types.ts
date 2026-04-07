@@ -1,6 +1,4 @@
-export type ReconWorkspaceTab = 'instant' | 'auto' | 'rules';
-
-export type ReconAutoSubTab = 'configs' | 'runs';
+export type ReconCenterTab = 'schemes' | 'tasks' | 'runs';
 
 export type StartMode = 'upload' | 'source';
 

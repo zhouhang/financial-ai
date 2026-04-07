@@ -56,6 +56,7 @@ from tools.mcp_client import (
 from graphs.proc.api import router as proc_router
 from graphs.recon.api import router as recon_router
 from graphs.recon.auto_run_api import router as recon_auto_router
+from graphs.recon.scheme_design.api import router as recon_scheme_design_router
 from graphs.platform.api import router as platform_router
 from graphs.data_source.api import router as data_source_router
 from graphs.collaboration.api import router as collaboration_router
@@ -314,6 +315,7 @@ app = FastAPI(title="Financial Data Agent", version="0.1.0")
 app.include_router(proc_router)
 app.include_router(recon_router)
 app.include_router(recon_auto_router)
+app.include_router(recon_scheme_design_router)
 app.include_router(platform_router)
 app.include_router(data_source_router)
 app.include_router(collaboration_router)

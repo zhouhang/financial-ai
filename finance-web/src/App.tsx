@@ -15,8 +15,10 @@ import type {
   DataConnectionView,
   DataSourceKind,
   Message,
+  ReconWorkspaceMode,
   Task,
   UploadedFile,
+  UserTask,
   UserTaskRule,
   WsOutgoing,
 } from './types';
@@ -42,6 +44,22 @@ function createConversation(taskContext: UserTaskRule | null = null): Conversati
 const STORAGE_KEY_ACTIVE_CONV = 'tally_active_conversation_id';
 const STORAGE_KEY_IS_NEW_CONV = 'tally_is_new_conversation';
 const STORAGE_KEY_GUEST_CONV = 'tally_guest_conversation';
+const STORAGE_KEY_HIDDEN_TASK_CONVS = 'tally_hidden_task_conversation_ids';
+
+function parseStoredStringArray(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function isServerConversationId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
 
 function parsePanelViewFromLocation(): MainPanelView {
   const path = window.location.pathname.toLowerCase();
@@ -217,9 +235,12 @@ export default function App() {
   const [selectedDataConnectionView, setSelectedDataConnectionView] = useState<DataConnectionView>('data_sources');
   const [selectedDataSourceKind, setSelectedDataSourceKind] = useState<DataSourceKind>('platform_oauth');
   const [selectedCollaborationProvider, setSelectedCollaborationProvider] = useState<CollaborationProvider>('dingtalk_dws');
-  const [reconRules, setReconRules] = useState<UserTaskRule[]>([]);
+  const [userTasks, setUserTasks] = useState<UserTask[]>([]);
   const [reconExecutionMode, setReconExecutionMode] = useState<ReconExecutionMode>('upload');
-  const [hiddenConversationIds, setHiddenConversationIds] = useState<string[]>([]);
+  const [reconWorkspaceMode, setReconWorkspaceMode] = useState<ReconWorkspaceMode>('upload');
+  const [hiddenConversationIds, setHiddenConversationIds] = useState<string[]>(
+    () => parseStoredStringArray(STORAGE_KEY_HIDDEN_TASK_CONVS),
+  );
   const [authCallbackPayload] = useState<AuthCallbackPayload | null>(() =>
     parseAuthCallbackPayloadFromLocation(),
   );
@@ -236,11 +257,11 @@ export default function App() {
     let aborted = false;
 
     if (!authToken) {
-      setReconRules([]);
+      setUserTasks([]);
       return undefined;
     }
 
-    const loadReconRules = async () => {
+    const loadUserTasks = async () => {
       try {
         const response = await fetch('/api/proc/list_user_tasks', {
           headers: { Authorization: `Bearer ${authToken}` },
@@ -250,48 +271,58 @@ export default function App() {
           throw new Error(String(data?.detail || data?.message || '加载对账规则失败'));
         }
 
-        const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
-        const rules = tasks
-          .filter((task: { task_type?: string }) => task.task_type === 'recon')
-          .flatMap((task: {
-            task_code?: string;
-            task_name?: string;
-            task_type?: string;
-            rules?: Array<Record<string, unknown>>;
-          }) =>
-            (task.rules || []).map((rule) => ({
-              id: Number(rule.id || 0),
-              user_id: typeof rule.user_id === 'string' ? rule.user_id : null,
-              task_id: typeof rule.task_id === 'number' ? rule.task_id : null,
-              rule_code: String(rule.rule_code || ''),
-              name: String(rule.name || ''),
-              rule_type: String(rule.rule_type || ''),
-              remark: typeof rule.remark === 'string' ? rule.remark : '',
-              task_code: String(task.task_code || ''),
-              task_name: String(task.task_name || ''),
-              task_type: String(task.task_type || 'recon'),
-              file_rule_code:
-                typeof rule.file_rule_code === 'string' ? rule.file_rule_code : undefined,
-            })),
-          )
-          .filter((rule: UserTaskRule) => rule.rule_code);
+        const tasks = (Array.isArray(data?.tasks) ? data.tasks : []).map((task: Record<string, unknown>) => ({
+          id: Number(task.id || 0),
+          user_id: typeof task.user_id === 'string' ? task.user_id : null,
+          task_code: String(task.task_code || ''),
+          task_name: String(task.task_name || ''),
+          description: typeof task.description === 'string' ? task.description : '',
+          task_type: String(task.task_type || ''),
+          rules: Array.isArray(task.rules)
+            ? task.rules.map((rule: Record<string, unknown>) => ({
+                id: Number(rule.id || 0),
+                user_id: typeof rule.user_id === 'string' ? rule.user_id : null,
+                task_id: typeof rule.task_id === 'number' ? rule.task_id : null,
+                rule_code: String(rule.rule_code || ''),
+                name: String(rule.name || ''),
+                rule_type: String(rule.rule_type || ''),
+                remark: typeof rule.remark === 'string' ? rule.remark : '',
+                task_code: String(task.task_code || ''),
+                task_name: String(task.task_name || ''),
+                task_type: String(task.task_type || ''),
+                file_rule_code:
+                  typeof rule.file_rule_code === 'string' ? rule.file_rule_code : undefined,
+              }))
+            : [],
+        }));
 
         if (!aborted) {
-          setReconRules(rules);
+          setUserTasks(tasks);
         }
       } catch (error) {
         if (!aborted) {
-          console.error('加载对账规则失败:', error);
-          setReconRules([]);
+          console.error('加载任务规则失败:', error);
+          setUserTasks([]);
         }
       }
     };
 
-    void loadReconRules();
+    void loadUserTasks();
     return () => {
       aborted = true;
     };
   }, [authToken]);
+
+  useEffect(() => {
+    if (!authToken) {
+      localStorage.removeItem(STORAGE_KEY_HIDDEN_TASK_CONVS);
+      return;
+    }
+    localStorage.setItem(
+      STORAGE_KEY_HIDDEN_TASK_CONVS,
+      JSON.stringify(hiddenConversationIds.filter(isServerConversationId)),
+    );
+  }, [authToken, hiddenConversationIds]);
 
   useEffect(() => {
     if (authToken) return;
@@ -1236,6 +1267,7 @@ export default function App() {
     localStorage.removeItem('tally_current_user');
     localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
     localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
+    localStorage.removeItem(STORAGE_KEY_HIDDEN_TASK_CONVS);
     
     // 清除服务器会话缓存
     clearConversationsCache();
@@ -1261,6 +1293,7 @@ export default function App() {
     if (isLoading) return;
     setPanelView('conversation');
     setReconExecutionMode('upload');
+    setReconWorkspaceMode('upload');
     const conv = createConversation();
     pendingNewConvRef.current = conv;
     setActiveConvId(conv.id);
@@ -1323,7 +1356,7 @@ export default function App() {
     console.log('handleDeleteConversation called, id:', id);
     
     // 检查是否是服务器会话 ID（UUID 格式）
-    const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    const isServerId = isServerConversationId(id);
     
     // 如果是服务器会话，调用删除 API
     if (isServerId) {
@@ -1359,40 +1392,121 @@ export default function App() {
       };
     }
 
-    setConversations((prev) =>
-      prev.map((conversation) =>
-        conversation.id === conversationId
-          ? {
-              ...conversation,
-              taskContext: task,
-            }
-          : conversation,
-      ),
-    );
-  }, []);
+    setConversations((prev) => {
+      const existing = prev.find((conversation) => conversation.id === conversationId);
+      if (existing) {
+        return prev.map((conversation) =>
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                taskContext: task,
+              }
+            : conversation,
+        );
+      }
+
+      const serverConversation = serverConversations.find((conversation) => conversation.id === conversationId);
+      if (serverConversation) {
+        return [
+          {
+            ...serverConversation,
+            taskContext: task,
+          },
+          ...prev,
+        ];
+      }
+
+      return [
+        {
+          id: conversationId,
+          title: '新对话',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          messages: [],
+          taskContext: task,
+        },
+        ...prev,
+      ];
+    });
+  }, [serverConversations]);
 
   // ── 选择任务 ────────────────────────────────────────────────
   const handleSelectTask = useCallback((task: UserTaskRule) => {
     setPanelView('conversation');
     setReconExecutionMode('upload');
-    const conversation = createConversation(task);
-    pendingNewConvRef.current = conversation;
-    setHiddenConversationIds((prev) =>
-      prev.includes(conversation.id) ? prev : [...prev, conversation.id],
-    );
-    setActiveConvId(conversation.id);
+    if (task.task_type === 'recon') {
+      setReconWorkspaceMode('upload');
+    }
+    if (task.task_type === 'proc') {
+      const conversation = createConversation(task);
+      pendingNewConvRef.current = conversation;
+      setHiddenConversationIds((prev) =>
+        prev.includes(conversation.id) ? prev : [...prev, conversation.id],
+      );
+      setActiveConvId(conversation.id);
+    } else {
+      let targetConversationId = activeConvId;
+      if (!targetConversationId) {
+        const conversation = createConversation(task);
+        pendingNewConvRef.current = conversation;
+        setActiveConvId(conversation.id);
+        targetConversationId = conversation.id;
+      } else {
+        pendingNewConvRef.current = null;
+      }
+      setHiddenConversationIds((prev) => prev.filter((id) => id !== targetConversationId));
+      updateConversationTaskContext(targetConversationId, task);
+    }
     setTasks([]);
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
     setIsLoading(false);
     console.log('选中规则:', task.task_type, '-', task.task_name, '-', task.name);
-  }, []);
+  }, [activeConvId, updateConversationTaskContext]);
 
-  const handleOpenTask = useCallback((task: { task_type?: string; task_name?: string }) => {
+  const resolveDefaultReconRule = useCallback((): UserTaskRule | null => {
+    if (selectedTask?.task_type === 'recon') return selectedTask;
+    const reconTask = userTasks.find((task) => task.task_type === 'recon');
+    if (!reconTask) return null;
+    const fallbackRule = reconTask.rules?.[0];
+    if (!fallbackRule) return null;
+    return {
+      ...fallbackRule,
+      task_code: fallbackRule.task_code || reconTask.task_code,
+      task_name: fallbackRule.task_name || reconTask.task_name,
+      task_type: fallbackRule.task_type || reconTask.task_type,
+    };
+  }, [selectedTask, userTasks]);
+
+  const handleSelectReconEntry = useCallback((entry: ReconWorkspaceMode) => {
     setPanelView('conversation');
-    console.log('打开任务工作台:', task.task_type, '-', task.task_name);
-  }, []);
+    setReconWorkspaceMode(entry);
+    setReconExecutionMode('upload');
+
+    const targetRule = resolveDefaultReconRule();
+    if (!targetRule) {
+      window.alert('暂无可用的数据对账规则，请先创建对账方案。');
+      return;
+    }
+    handleSelectTask(targetRule);
+    setReconWorkspaceMode(entry);
+  }, [handleSelectTask, resolveDefaultReconRule]);
+
+  const handleOpenTask = useCallback((task: UserTask) => {
+    setPanelView('conversation');
+    const fallbackRule = task.rules?.[0];
+    if (fallbackRule) {
+      handleSelectTask({
+        ...fallbackRule,
+        task_code: fallbackRule.task_code || task.task_code,
+        task_name: fallbackRule.task_name || task.task_name,
+        task_type: fallbackRule.task_type || task.task_type,
+      });
+      return;
+    }
+    console.log('打开任务聊天页:', task.task_type, '-', task.task_name);
+  }, [handleSelectTask]);
 
   const handleSelectSection = useCallback((section: AppSection) => {
     if (section === 'data-connections') {
@@ -1406,6 +1520,60 @@ export default function App() {
     setPanelView('conversation');
   }, []);
 
+  const procTaskRules = useMemo(() => {
+    if (!selectedTask || selectedTask.task_type !== 'proc') return [];
+
+    const task = userTasks.find((item) => item.task_code === selectedTask.task_code);
+    const rules = (task?.rules || []).map((rule) => ({
+      ...rule,
+      task_code: rule.task_code || task?.task_code || selectedTask.task_code,
+      task_name: rule.task_name || task?.task_name || selectedTask.task_name,
+      task_type: rule.task_type || task?.task_type || selectedTask.task_type,
+    }));
+
+    if (rules.some((rule) => rule.rule_code === selectedTask.rule_code)) {
+      return rules;
+    }
+
+    return [...rules, selectedTask];
+  }, [selectedTask, userTasks]);
+
+  const handleSelectTaskRule = useCallback(
+    (ruleCode: string) => {
+      const rule = procTaskRules.find((item) => item.rule_code === ruleCode);
+      if (!rule) return;
+      updateConversationTaskContext(activeConvId, rule);
+    },
+    [activeConvId, procTaskRules, updateConversationTaskContext],
+  );
+
+  const reconRules = useMemo(() => {
+    const rules = userTasks
+      .filter((task) => task.task_type === 'recon')
+      .flatMap((task) =>
+        (task.rules || []).map((rule) => ({
+          ...rule,
+          task_code: rule.task_code || task.task_code,
+          task_name: rule.task_name || task.task_name,
+          task_type: rule.task_type || task.task_type,
+        })),
+      )
+      .filter((rule) => rule.rule_code);
+
+    if (selectedTask?.task_type !== 'recon') return rules;
+    if (rules.some((rule) => rule.rule_code === selectedTask.rule_code)) return rules;
+    return [...rules, selectedTask];
+  }, [selectedTask, userTasks]);
+
+  const handleSelectReconRule = useCallback(
+    (ruleCode: string) => {
+      const rule = reconRules.find((item) => item.rule_code === ruleCode);
+      if (!rule) return;
+      updateConversationTaskContext(activeConvId, rule);
+    },
+    [activeConvId, reconRules, updateConversationTaskContext],
+  );
+
   const handleOpenCollaborationChannels = useCallback((provider?: CollaborationProvider) => {
     setSelectedDataConnectionView('collaboration_channels');
     if (provider) {
@@ -1413,21 +1581,6 @@ export default function App() {
     }
     setPanelView('data-connections');
   }, []);
-
-  const availableReconRules = useMemo(() => {
-    if (selectedTask?.task_type !== 'recon') return reconRules;
-    if (reconRules.some((rule) => rule.rule_code === selectedTask.rule_code)) return reconRules;
-    return [...reconRules, selectedTask];
-  }, [reconRules, selectedTask]);
-
-  const handleSelectReconRule = useCallback(
-    (ruleCode: string) => {
-      const rule = availableReconRules.find((item) => item.rule_code === ruleCode);
-      if (!rule) return;
-      updateConversationTaskContext(activeConvId, rule);
-    },
-    [activeConvId, availableReconRules, updateConversationTaskContext],
-  );
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
   // 服务器会话优先，本地会话补充（未同步的新会话）
@@ -1489,8 +1642,11 @@ export default function App() {
         setIsLoginModalOpen(true);
       }}
       streamingMessageId={streamingMessageId}
-      selectedTask={selectedTask?.task_type === 'recon' ? selectedTask : null}
-      reconRules={selectedTask?.task_type === 'recon' ? availableReconRules : []}
+      selectedTask={selectedTask}
+      taskRules={selectedTask?.task_type === 'proc' ? procTaskRules : []}
+      selectedRuleCode={selectedTask?.task_type === 'proc' ? selectedTask?.rule_code ?? null : null}
+      onSelectTaskRule={selectedTask?.task_type === 'proc' ? handleSelectTaskRule : undefined}
+      reconRules={selectedTask?.task_type === 'recon' ? reconRules : []}
       selectedReconRuleCode={
         selectedTask?.task_type === 'recon'
           ? selectedTask.rule_code
@@ -1528,12 +1684,15 @@ export default function App() {
         onSelectDataSourceKind={setSelectedDataSourceKind}
         selectedCollaborationProvider={selectedCollaborationProvider}
         onSelectCollaborationProvider={setSelectedCollaborationProvider}
+        selectedReconEntry={reconWorkspaceMode}
+        onSelectReconEntry={handleSelectReconEntry}
       />
       {panelView !== 'data-connections' ? (
         isReconWorkspace && selectedTask ? (
           <ReconWorkspace
             selectedTask={selectedTask}
-            availableRules={availableReconRules}
+            mode={reconWorkspaceMode}
+            availableRules={reconRules}
             selectedRuleCode={selectedTask.rule_code}
             executionMode={reconExecutionMode}
             authToken={authToken}
