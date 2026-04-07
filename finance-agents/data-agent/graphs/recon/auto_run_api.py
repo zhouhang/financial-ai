@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from graphs.recon.auto_run_service import (
+    execute_run_plan_run,
     execute_auto_task_run,
     send_exception_reminder,
     sync_exception_reminder,
@@ -113,6 +114,12 @@ class AutoTaskExecuteRequest(BaseModel):
     trigger_mode: str = "manual"
     run_context: dict[str, Any] = Field(default_factory=dict)
     input_bindings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RunPlanExecuteRequest(BaseModel):
+    biz_date: str = ""
+    trigger_mode: str = "manual"
+    run_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExceptionUpdateRequest(BaseModel):
@@ -241,6 +248,27 @@ async def execute_auto_task(
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "执行自动对账失败"))
+    return result
+
+
+@router.post("/run-plans/{run_plan_code}/run")
+async def execute_run_plan(
+    run_plan_code: str,
+    body: RunPlanExecuteRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await execute_run_plan_run(
+        auth_token=auth_token,
+        run_plan_code=run_plan_code,
+        biz_date=body.biz_date,
+        trigger_mode=body.trigger_mode,
+        run_context=body.run_context,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "执行运行计划失败"))
     return result
 
 

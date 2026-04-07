@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
+from graphs.recon.auto_scheme_run import run_auto_scheme_run_graph
 from graphs.recon.execution_service import (
     build_execution_request,
     build_recon_ctx_update_from_execution,
@@ -276,6 +277,45 @@ def _compose_reminder_text(task: dict[str, Any], run: dict[str, Any], exception:
         ]
     )
     return title, content
+
+
+async def execute_run_plan_run(
+    *,
+    auth_token: str,
+    run_plan_code: str,
+    biz_date: str = "",
+    trigger_mode: str = "manual",
+    run_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute one run-plan by auto scheme graph (execution_* first)."""
+    output = await run_auto_scheme_run_graph(
+        auth_token=auth_token,
+        run_plan_code=run_plan_code,
+        biz_date=biz_date,
+        trigger_mode=trigger_mode,
+        run_context=run_context,
+    )
+    ctx = _safe_dict(output.get("recon_ctx"))
+    exec_status = str(ctx.get("exec_status") or "").strip()
+    failed_reason = str(ctx.get("failed_reason") or "").strip()
+    failed_stage = str(ctx.get("failed_stage") or "").strip()
+    non_error_statuses = {"success", "partial_success", "skipped"}
+    success = (exec_status in non_error_statuses) and not failed_reason
+
+    run_record = _safe_dict(ctx.get("execution_run_record"))
+    return {
+        "success": success,
+        "error": "" if success else (failed_reason or str(ctx.get("exec_error") or "执行失败")),
+        "failed_stage": failed_stage,
+        "run_plan_code": run_plan_code,
+        "scheme_code": str(ctx.get("scheme_code") or ""),
+        "biz_date": str(ctx.get("biz_date") or biz_date),
+        "run": run_record,
+        "subtasks_json": _safe_list(ctx.get("subtasks_json")),
+        "execution_result": _safe_dict(ctx.get("execution_result")),
+        "recon_observation": _safe_dict(ctx.get("recon_observation")),
+        "recon_ctx": ctx,
+    }
 
 
 async def execute_auto_task_run(

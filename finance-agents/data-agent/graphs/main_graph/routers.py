@@ -15,7 +15,8 @@ from models import (
     UserIntent,
 )
 from graphs.proc import build_proc_subgraph
-from graphs.recon import build_recon_subgraph
+from graphs.recon.manual_notify import build_manual_notify_followup_graph
+from graphs.recon.manual_scheme_run import build_manual_scheme_run_graph
 from .nodes import (
     router_node,
 )
@@ -28,11 +29,15 @@ from .nodes import (
 def route_after_router(state: AgentState) -> str:
     """router 之后的条件路由。"""
     intent = state.get("user_intent", "")
+    recon_ctx = state.get("recon_ctx") or {}
+    pending_manual_notify = bool(recon_ctx.get("pending_manual_notify")) and bool(state.get("auth_token"))
 
     if intent == UserIntent.PROC.value:
         return "proc_subgraph"
     if intent == UserIntent.RECON.value:
-        return "recon_subgraph"
+        return "manual_scheme_run_graph"
+    if pending_manual_notify:
+        return "manual_notify_followup_graph"
     return END
 
 
@@ -43,7 +48,8 @@ def route_after_router(state: AgentState) -> str:
 def build_main_graph() -> StateGraph:
     """构建主 Agent 图。"""
     proc_sg = build_proc_subgraph()
-    recon_sg = build_recon_subgraph()
+    manual_recon_sg = build_manual_scheme_run_graph()
+    manual_notify_sg = build_manual_notify_followup_graph()
 
     graph = StateGraph(AgentState)
 
@@ -51,7 +57,8 @@ def build_main_graph() -> StateGraph:
     graph.add_node("router", router_node)
 
     graph.add_node("proc_subgraph", proc_sg.compile())
-    graph.add_node("recon_subgraph", recon_sg.compile())
+    graph.add_node("manual_scheme_run_graph", manual_recon_sg.compile())
+    graph.add_node("manual_notify_followup_graph", manual_notify_sg.compile())
 
     # ── 边 ────────────────────────────────────────────────────────────────
     graph.set_entry_point("router")
@@ -59,12 +66,14 @@ def build_main_graph() -> StateGraph:
     # router 后路由
     graph.add_conditional_edges("router", route_after_router, {
         "proc_subgraph": "proc_subgraph",
-        "recon_subgraph": "recon_subgraph",
+        "manual_scheme_run_graph": "manual_scheme_run_graph",
+        "manual_notify_followup_graph": "manual_notify_followup_graph",
         END: END,
     })
 
     graph.add_edge("proc_subgraph", END)
-    graph.add_edge("recon_subgraph", END)
+    graph.add_edge("manual_scheme_run_graph", END)
+    graph.add_edge("manual_notify_followup_graph", END)
 
     return graph
 

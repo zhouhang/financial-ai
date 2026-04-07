@@ -11,6 +11,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from graphs.recon.auto_run_service import execute_run_plan_run
 from graphs.recon.execution_service import (
     build_execution_request,
     build_recon_ctx_update_from_execution,
@@ -39,6 +40,12 @@ class InternalReconRunRequest(BaseModel):
     entry_mode: str = "dataset"
     run_context: dict[str, Any] = Field(default_factory=dict)
     recon_inputs: list[ReconInputPayload] = Field(default_factory=list)
+
+
+class InternalRunPlanRunRequest(BaseModel):
+    biz_date: str = ""
+    trigger_mode: str = "api"
+    run_context: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/run")
@@ -130,3 +137,28 @@ async def run_internal_recon(
         "execution_result": execution_result,
         "recon_observation": recon_observation,
     }
+
+
+@router.post("/run-plan/{plan_code}/run")
+async def run_internal_recon_by_plan(
+    plan_code: str,
+    body: InternalRunPlanRunRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """内部执行入口：按 run_plan 触发自动对账。"""
+    auth_token = ""
+    if authorization:
+        auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="缺少 Authorization token")
+
+    result = await execute_run_plan_run(
+        auth_token=auth_token,
+        run_plan_code=plan_code,
+        biz_date=body.biz_date,
+        trigger_mode=body.trigger_mode,
+        run_context=body.run_context,
+    )
+    if not bool(result.get("success")):
+        raise HTTPException(status_code=400, detail=str(result.get("error") or "run_plan 执行失败"))
+    return result
