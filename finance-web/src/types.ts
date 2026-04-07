@@ -123,7 +123,6 @@ export interface UserTask {
 // ── 数据连接类型 ────────────────────────────────────────────────────────────
 
 export type AppSection = 'chat' | 'data-connections';
-export type ReconWorkspaceMode = 'upload' | 'center';
 
 export type DataConnectionView = 'data_sources' | 'collaboration_channels';
 

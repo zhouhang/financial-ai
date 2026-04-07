@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ChevronDown, FolderOpen } from 'lucide-react';
-
-import type { CollaborationProvider, ReconWorkspaceMode, UserTaskRule } from '../types';
+import { ChevronDown } from 'lucide-react';
+import type { CollaborationProvider, UserTaskRule } from '../types';
 import ReconAutoRunsPanel from './recon/ReconAutoRunsPanel';
 import ReconAutoTaskConfigs from './recon/ReconAutoTaskConfigs';
 import ReconRulesList from './recon/ReconRulesList';
@@ -9,11 +8,19 @@ import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import { fetchReconAutoApi } from './recon/autoApi';
 import { RECON_COPY } from './recon/reconCopy';
 import type { ReconExecutionMode } from './recon/ReconConversationBar';
-import { type ReconCenterTab, type ReconExceptionItem, type ReconRuleListItem, type ReconRunItem } from './recon/types';
+import {
+  cn,
+  type ReconAutoSubTab,
+  type ReconAutoTaskItem,
+  type ReconExceptionItem,
+  type ReconRuleListItem,
+  type ReconRunItem,
+  type ReconWorkspaceTab,
+} from './recon/types';
+import { AUTO_SUB_TABS } from './recon/workspaceCopy';
 
 interface ReconWorkspaceProps {
   selectedTask: UserTaskRule;
-  mode?: ReconWorkspaceMode;
   availableRules?: UserTaskRule[];
   selectedRuleCode?: string | null;
   executionMode?: ReconExecutionMode;
@@ -106,7 +113,6 @@ function toRunUiStatus(runStatus: string, exceptionCount: number): ReconRunItem[
 
 export default function ReconWorkspace({
   selectedTask,
-  mode = 'upload',
   availableRules = [],
   selectedRuleCode = null,
   authToken,
@@ -114,19 +120,9 @@ export default function ReconWorkspace({
   onOpenCollaborationChannels,
   children,
 }: ReconWorkspaceProps) {
-  const [centerTab, setCenterTab] = useState<ReconCenterTab>('schemes');
-  const [autoTasks, setAutoTasks] = useState<Array<{
-    id: string;
-    name: string;
-    company: string;
-    ruleCode: string;
-    ruleName: string;
-    schedule: string;
-    dateOffset: string;
-    ownerMode: string;
-    channel: string;
-    status: 'enabled' | 'paused';
-  }>>([]);
+  const [activeTab, setActiveTab] = useState<ReconWorkspaceTab>('instant');
+  const [autoSubTab, setAutoSubTab] = useState<ReconAutoSubTab>('configs');
+  const [autoTasks, setAutoTasks] = useState<ReconAutoTaskItem[]>([]);
   const [autoRuns, setAutoRuns] = useState<ReconRunItem[]>([]);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconExceptionItem[]>>(
     {},
@@ -139,20 +135,23 @@ export default function ReconWorkspace({
   const [autoError, setAutoError] = useState<string | null>(null);
   const [exceptionError, setExceptionError] = useState<string | null>(null);
   const [focusedRunId, setFocusedRunId] = useState<string | null>(null);
-  const [showCreateSchemePlaceholder, setShowCreateSchemePlaceholder] = useState(false);
+  const [showCreateRulePlaceholder, setShowCreateRulePlaceholder] = useState(false);
 
   useEffect(() => {
-    if (mode === 'upload') return;
+    setActiveTab('instant');
+    setAutoSubTab('configs');
+    setFocusedRunId(null);
     setAutoError(null);
     setExceptionError(null);
-  }, [mode]);
+    setShowCreateRulePlaceholder(false);
+  }, [selectedTask]);
 
   const ruleList = useMemo<ReconRuleListItem[]>(() => {
     const sourceRules = availableRules.filter((rule) => rule.task_type === 'recon');
     const rules = sourceRules.length > 0 ? sourceRules : [selectedTask];
     return rules.map((rule) => ({
       ...rule,
-      updated_hint: rule.rule_code === selectedTask.rule_code ? '当前方案' : '方案实例',
+      updated_hint: rule.rule_code === selectedTask.rule_code ? '当前规则' : '规则实例',
     }));
   }, [availableRules, selectedTask]);
 
@@ -160,12 +159,12 @@ export default function ReconWorkspace({
     return (
       ruleList.find((rule) => rule.rule_code === (selectedRuleCode || selectedTask.rule_code)) || {
         ...selectedTask,
-        updated_hint: '当前方案',
+        updated_hint: '当前规则',
       }
     );
   }, [ruleList, selectedRuleCode, selectedTask]);
 
-  const uploadRightControls = (
+  const instantRightControls = activeTab === 'instant' ? (
     <div className="flex flex-wrap items-center justify-end gap-2">
       {ruleList.length > 0 && onSelectRule ? (
         <div className="relative min-w-[280px]">
@@ -184,7 +183,35 @@ export default function ReconWorkspace({
         </div>
       ) : null}
     </div>
+  ) : null;
+
+  const scopedAutoTasks = useMemo(() => {
+    return autoTasks.filter(
+      (task) =>
+        task.ruleCode === activeRule.rule_code ||
+        task.ruleName === activeRule.rule_code ||
+        task.ruleName === activeRule.name,
+    );
+  }, [activeRule.name, activeRule.rule_code, autoTasks]);
+
+  const scopedTaskIds = useMemo(
+    () => new Set(scopedAutoTasks.map((task) => task.id)),
+    [scopedAutoTasks],
   );
+
+  const scopedRuns = useMemo(() => {
+    if (scopedTaskIds.size === 0) return [];
+    return autoRuns.filter((run) => scopedTaskIds.has(run.autoTaskId));
+  }, [autoRuns, scopedTaskIds]);
+
+  const handleOpenCreateRule = () => {
+    setActiveTab('rules');
+    setShowCreateRulePlaceholder(true);
+  };
+
+  const handleCloseCreateRule = () => {
+    setShowCreateRulePlaceholder(false);
+  };
 
   const loadAutoTasks = async (token: string) => {
     setLoadingAutoTasks(true);
@@ -194,18 +221,19 @@ export default function ReconWorkspace({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '对账任务加载失败'));
+        throw new Error(String(data?.detail || data?.message || '任务配置加载失败'));
       }
 
       const rows = Array.isArray(data?.tasks) ? data.tasks : [];
-      const mapped = rows.map((raw: unknown) => {
+      const mapped: ReconAutoTaskItem[] = rows.map((raw: unknown) => {
         const item = asRecord(raw);
         const ownerMapping = asRecord(item.owner_mapping_json);
         const ownerMappings = Array.isArray(ownerMapping.mappings) ? ownerMapping.mappings.length : 0;
         const defaultOwner = asRecord(ownerMapping.default_owner);
         const defaultOwnerName = toText(defaultOwner?.name, '').trim();
         const ruleCode = toText(item.rule_code, '');
-        const matchedRuleName = ruleList.find((rule) => rule.rule_code === ruleCode)?.name || '';
+        const matchedRuleName =
+          ruleList.find((rule) => rule.rule_code === ruleCode)?.name || '';
         return {
           id: toText(item.id, ''),
           name: toText(item.task_name, '未命名任务'),
@@ -222,7 +250,7 @@ export default function ReconWorkspace({
       setAutoTasks(mapped);
     } catch (error) {
       setAutoTasks([]);
-      setAutoError(error instanceof Error ? error.message : '对账任务加载失败');
+      setAutoError(error instanceof Error ? error.message : '任务配置加载失败');
     } finally {
       setLoadingAutoTasks(false);
     }
@@ -236,7 +264,7 @@ export default function ReconWorkspace({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '运行记录加载失败'));
+        throw new Error(String(data?.detail || data?.message || '任务运行加载失败'));
       }
 
       const rows = Array.isArray(data?.runs) ? data.runs : [];
@@ -265,7 +293,7 @@ export default function ReconWorkspace({
       setAutoRuns(mapped);
     } catch (error) {
       setAutoRuns([]);
-      setAutoError(error instanceof Error ? error.message : '运行记录加载失败');
+      setAutoError(error instanceof Error ? error.message : '任务运行加载失败');
     } finally {
       setLoadingAutoRuns(false);
     }
@@ -400,9 +428,9 @@ export default function ReconWorkspace({
   };
 
   useEffect(() => {
-    if (mode !== 'center') return;
+    if (activeTab !== 'auto') return;
     if (!authToken) {
-      setAutoError('请先登录后查看对账中心数据');
+      setAutoError('请先登录后查看自动对账任务与运行数据');
       setAutoTasks([]);
       setAutoRuns([]);
       setFocusedRunId(null);
@@ -411,100 +439,101 @@ export default function ReconWorkspace({
 
     setAutoError(null);
     void Promise.all([loadAutoTasks(authToken), loadAutoRuns(authToken)]);
-  }, [mode, authToken]);
+  }, [activeTab, authToken]);
 
   useEffect(() => {
-    if (autoRuns.length === 0) {
+    if (scopedRuns.length === 0) {
       setFocusedRunId(null);
       return;
     }
-    if (focusedRunId && autoRuns.some((run) => run.id === focusedRunId)) return;
-    setFocusedRunId(autoRuns[0].id);
-  }, [focusedRunId, autoRuns]);
+    if (focusedRunId && scopedRuns.some((run) => run.id === focusedRunId)) return;
+    setFocusedRunId(scopedRuns[0].id);
+  }, [focusedRunId, scopedRuns]);
 
   useEffect(() => {
-    if (mode !== 'center') return;
-    if (centerTab !== 'runs') return;
+    if (activeTab !== 'auto') return;
+    if (autoSubTab !== 'runs') return;
     if (!focusedRunId) return;
     if (exceptionsByRunId[focusedRunId]) return;
     void loadRunExceptions(focusedRunId);
-  }, [mode, centerTab, focusedRunId, exceptionsByRunId]);
-
-  if (mode === 'upload') {
-    return (
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-secondary">
-        <div className="sticky top-0 z-20 shrink-0 border-b border-border bg-surface/95 px-6 py-4 backdrop-blur">
-          <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3">
-            <div className="inline-flex items-center gap-2">
-              <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-surface-secondary text-sky-600">
-                <FolderOpen className="h-4 w-4" />
-              </span>
-              <div>
-                <h3 className="text-sm font-semibold text-text-primary">上传文件对账</h3>
-                <p className="text-xs text-text-secondary">选择方案后上传文件，执行手工对账</p>
-              </div>
-            </div>
-            {uploadRightControls}
-          </div>
-        </div>
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {children}
-        </div>
-      </div>
-    );
-  }
+  }, [activeTab, autoSubTab, focusedRunId, exceptionsByRunId]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-secondary">
-      <ReconWorkspaceHeader activeTab={centerTab} onTabChange={setCenterTab} />
+      <ReconWorkspaceHeader activeTab={activeTab} onTabChange={setActiveTab} rightSlot={instantRightControls} />
 
-      <div className="flex min-h-0 flex-1 overflow-y-auto px-6 py-6">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
-          <div>
-            <h3 className="text-lg font-semibold text-text-primary">{RECON_COPY.center.sectionTitle}</h3>
-            <p className="mt-1 text-sm text-text-secondary">{RECON_COPY.center.sectionSubtitle}</p>
-          </div>
-
-          {autoError && (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-              {autoError}
+      {activeTab === 'instant' && (
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {children ?? (
+            <div className="flex h-full items-center justify-center px-6 py-10">
+              <div className="rounded-2xl border border-border bg-surface px-6 py-8 text-center shadow-sm">
+                <h3 className="text-base font-semibold text-text-primary">立即对账</h3>
+                <p className="mt-2 text-sm leading-6 text-text-secondary">
+                  请在当前对话中选择规则后直接发起对账。
+                </p>
+              </div>
             </div>
           )}
+        </div>
+      )}
 
-          {centerTab === 'schemes' && (
-            <ReconRulesList
-              rules={ruleList}
-              emptyText="当前暂无对账方案，请先新增方案。"
-              aiEntryLabel="AI 新建对账方案"
-              showCreatePlaceholder={showCreateSchemePlaceholder}
-              onCreateByAI={() => setShowCreateSchemePlaceholder(true)}
-              onCloseCreatePlaceholder={() => setShowCreateSchemePlaceholder(false)}
-            />
-          )}
+      {activeTab === 'auto' && (
+        <div className="flex min-h-0 flex-1 overflow-y-auto px-6 py-6">
+          <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-text-primary">
+                  {RECON_COPY.auto.sectionTitle}
+                </h3>
+                <p className="mt-1 text-sm text-text-secondary">
+                  {RECON_COPY.auto.sectionSubtitle}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {AUTO_SUB_TABS.map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setAutoSubTab(tab.key)}
+                    className={cn(
+                      'rounded-full border px-3.5 py-2 text-sm font-medium transition-colors',
+                      autoSubTab === tab.key
+                        ? 'border-sky-200 bg-sky-50 text-sky-700'
+                        : 'border-border bg-surface text-text-secondary hover:bg-surface-secondary',
+                    )}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-          {centerTab === 'tasks' && (
-            <ReconAutoTaskConfigs
-              tasks={autoTasks}
-              availableRules={ruleList}
-              defaultRuleCode={activeRule.rule_code}
-              authToken={authToken}
-              loading={loadingAutoTasks}
-              errorText={null}
-              createButtonLabel={RECON_COPY.center.actions.createTask}
-              onCreateRule={() => setCenterTab('schemes')}
-              onOpenCollaborationChannels={onOpenCollaborationChannels}
-              onCreatedTaskConfig={() => {
-                if (!authToken) return;
-                setAutoError(null);
-                return loadAutoTasks(authToken);
-              }}
-            />
-          )}
+            {autoError && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                {autoError}
+              </div>
+            )}
 
-          {centerTab === 'runs' && (
-            <div className="space-y-4">
+            {autoSubTab === 'configs' ? (
+              <ReconAutoTaskConfigs
+                tasks={scopedAutoTasks}
+                availableRules={ruleList}
+                defaultRuleCode={activeRule.rule_code}
+                authToken={authToken}
+                loading={loadingAutoTasks}
+                errorText={null}
+                createButtonLabel={RECON_COPY.auto.actions.createTask}
+                onCreateRule={handleOpenCreateRule}
+                onOpenCollaborationChannels={onOpenCollaborationChannels}
+                onCreatedTaskConfig={() => {
+                  if (!authToken) return;
+                  setAutoError(null);
+                  return loadAutoTasks(authToken);
+                }}
+              />
+            ) : (
               <ReconAutoRunsPanel
-                runs={autoRuns}
+                runs={scopedRuns}
                 focusedRunId={focusedRunId}
                 exceptionsByRunId={exceptionsByRunId}
                 loadingRuns={loadingAutoRuns}
@@ -512,17 +541,30 @@ export default function ReconWorkspace({
                 verifyRunId={verifyRunId}
                 exceptionActionId={exceptionActionId}
                 exceptionError={exceptionError}
-                emptyRunsText="暂无运行记录"
+                emptyRunsText="暂无自动对账运行批次"
                 onFocusRun={setFocusedRunId}
                 onOpenFollowup={loadRunExceptions}
                 onVerifyRun={handleVerifyRun}
                 onRemindException={handleRemindException}
                 onSyncException={handleSyncException}
               />
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
+      )}
+
+      {activeTab === 'rules' && (
+        <div className="flex min-h-0 flex-1 overflow-y-auto px-6 py-6">
+          <div className="mx-auto w-full max-w-6xl">
+            <ReconRulesList
+              rules={ruleList}
+              showCreatePlaceholder={showCreateRulePlaceholder}
+              onCreateByAI={handleOpenCreateRule}
+              onCloseCreatePlaceholder={handleCloseCreateRule}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
