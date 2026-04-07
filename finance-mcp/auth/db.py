@@ -5818,3 +5818,945 @@ def update_recon_exception_task(
     except Exception as e:
         logger.error(f"更新 recon_exception_tasks 失败 (company_id={company_id}, id={exception_id}): {e}")
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 执行模型（execution_schemes / execution_run_plans / execution_runs / execution_run_exceptions）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_execution_code(prefix: str) -> str:
+    import uuid as _uuid
+
+    return f"{prefix}_{_uuid.uuid4().hex[:12]}"
+
+
+def create_execution_scheme(
+    *,
+    company_id: str,
+    scheme_name: str,
+    scheme_code: str = "",
+    scheme_type: str = "recon",
+    description: str = "",
+    file_rule_code: str = "",
+    proc_rule_code: str = "",
+    recon_rule_code: str = "",
+    scheme_meta_json: dict | None = None,
+    is_enabled: bool = True,
+    created_by: str | None = None,
+) -> dict | None:
+    """创建执行方案。"""
+    conn_manager = get_conn()
+    try:
+        resolved_scheme_code = str(scheme_code or "").strip() or _generate_execution_code("scheme")
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO execution_schemes (
+                        company_id, scheme_code, scheme_name, scheme_type, description,
+                        file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                        is_enabled, created_by
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s::jsonb,
+                        %s, %s
+                    )
+                    RETURNING id, company_id, scheme_code, scheme_name, scheme_type, description,
+                              file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                              is_enabled, created_by, created_at, updated_at
+                    """,
+                    (
+                        company_id,
+                        resolved_scheme_code,
+                        scheme_name,
+                        scheme_type,
+                        description,
+                        file_rule_code,
+                        proc_rule_code,
+                        recon_rule_code,
+                        psycopg2.extras.Json(scheme_meta_json or {}),
+                        is_enabled,
+                        created_by,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"创建 execution_schemes 失败 (company_id={company_id}, scheme_name={scheme_name}): {e}")
+        return None
+
+
+def update_execution_scheme(
+    *,
+    company_id: str,
+    scheme_id: str,
+    scheme_name: str | None = None,
+    scheme_type: str | None = None,
+    description: str | None = None,
+    file_rule_code: str | None = None,
+    proc_rule_code: str | None = None,
+    recon_rule_code: str | None = None,
+    scheme_meta_json: dict | None = None,
+    is_enabled: bool | None = None,
+) -> dict | None:
+    """更新执行方案。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE execution_schemes
+                    SET scheme_name = COALESCE(%s, scheme_name),
+                        scheme_type = COALESCE(%s, scheme_type),
+                        description = COALESCE(%s, description),
+                        file_rule_code = COALESCE(%s, file_rule_code),
+                        proc_rule_code = COALESCE(%s, proc_rule_code),
+                        recon_rule_code = COALESCE(%s, recon_rule_code),
+                        scheme_meta_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN scheme_meta_json
+                            ELSE %s::jsonb
+                        END,
+                        is_enabled = COALESCE(%s, is_enabled),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, scheme_code, scheme_name, scheme_type, description,
+                              file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                              is_enabled, created_by, created_at, updated_at
+                    """,
+                    (
+                        scheme_name,
+                        scheme_type,
+                        description,
+                        file_rule_code,
+                        proc_rule_code,
+                        recon_rule_code,
+                        psycopg2.extras.Json(scheme_meta_json) if scheme_meta_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(scheme_meta_json) if scheme_meta_json is not None else psycopg2.extras.Json(None),
+                        is_enabled,
+                        scheme_id,
+                        company_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 execution_schemes 失败 (company_id={company_id}, scheme_id={scheme_id}): {e}")
+        return None
+
+
+def disable_execution_scheme(*, company_id: str, scheme_id: str) -> dict | None:
+    """停用执行方案。"""
+    return update_execution_scheme(company_id=company_id, scheme_id=scheme_id, is_enabled=False)
+
+
+def get_execution_scheme(*, company_id: str, scheme_id: str | None = None, scheme_code: str | None = None) -> dict | None:
+    """查询单个执行方案（按 id 或 scheme_code）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if scheme_id:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, scheme_code, scheme_name, scheme_type, description,
+                               file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_schemes
+                        WHERE company_id = %s
+                          AND id = %s
+                        LIMIT 1
+                        """,
+                        (company_id, scheme_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, scheme_code, scheme_name, scheme_type, description,
+                               file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_schemes
+                        WHERE company_id = %s
+                          AND scheme_code = %s
+                        LIMIT 1
+                        """,
+                        (company_id, str(scheme_code or "").strip()),
+                    )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"查询 execution_schemes 失败 (company_id={company_id}, scheme_id={scheme_id}, scheme_code={scheme_code}): {e}"
+        )
+        return None
+
+
+def list_execution_schemes(
+    *,
+    company_id: str,
+    include_disabled: bool = True,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询执行方案列表。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, scheme_code, scheme_name, scheme_type, description,
+                           file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                           is_enabled, created_by, created_at, updated_at
+                    FROM execution_schemes
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if not include_disabled:
+                    sql += " AND is_enabled = true"
+                sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(f"查询 execution_schemes 列表失败 (company_id={company_id}): {e}")
+        return []
+
+
+def create_execution_run_plan(
+    *,
+    company_id: str,
+    plan_name: str,
+    scheme_code: str,
+    plan_code: str = "",
+    schedule_type: str = "daily",
+    schedule_expr: str = "",
+    biz_date_offset: str = "previous_day",
+    input_bindings_json: list[dict] | None = None,
+    channel_config_id: str | None = None,
+    owner_mapping_json: dict | None = None,
+    plan_meta_json: dict | None = None,
+    is_enabled: bool = True,
+    created_by: str | None = None,
+) -> dict | None:
+    """创建执行运行计划。"""
+    conn_manager = get_conn()
+    try:
+        resolved_plan_code = str(plan_code or "").strip() or _generate_execution_code("plan")
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO execution_run_plans (
+                        company_id, plan_code, plan_name, scheme_code,
+                        schedule_type, schedule_expr, biz_date_offset,
+                        input_bindings_json, channel_config_id,
+                        owner_mapping_json, plan_meta_json,
+                        is_enabled, created_by
+                    ) VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s::jsonb, %s,
+                        %s::jsonb, %s::jsonb,
+                        %s, %s
+                    )
+                    RETURNING id, company_id, plan_code, plan_name, scheme_code,
+                              schedule_type, schedule_expr, biz_date_offset,
+                              input_bindings_json, channel_config_id,
+                              owner_mapping_json, plan_meta_json,
+                              is_enabled, created_by, created_at, updated_at
+                    """,
+                    (
+                        company_id,
+                        resolved_plan_code,
+                        plan_name,
+                        scheme_code,
+                        schedule_type,
+                        schedule_expr,
+                        biz_date_offset,
+                        psycopg2.extras.Json(input_bindings_json or []),
+                        channel_config_id,
+                        psycopg2.extras.Json(owner_mapping_json or {}),
+                        psycopg2.extras.Json(plan_meta_json or {}),
+                        is_enabled,
+                        created_by,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"创建 execution_run_plans 失败 (company_id={company_id}, plan_name={plan_name}): {e}")
+        return None
+
+
+def update_execution_run_plan(
+    *,
+    company_id: str,
+    plan_id: str,
+    plan_name: str | None = None,
+    scheme_code: str | None = None,
+    schedule_type: str | None = None,
+    schedule_expr: str | None = None,
+    biz_date_offset: str | None = None,
+    input_bindings_json: list[dict] | None = None,
+    channel_config_id: str | None = None,
+    owner_mapping_json: dict | None = None,
+    plan_meta_json: dict | None = None,
+    is_enabled: bool | None = None,
+) -> dict | None:
+    """更新执行运行计划。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE execution_run_plans
+                    SET plan_name = COALESCE(%s, plan_name),
+                        scheme_code = COALESCE(%s, scheme_code),
+                        schedule_type = COALESCE(%s, schedule_type),
+                        schedule_expr = COALESCE(%s, schedule_expr),
+                        biz_date_offset = COALESCE(%s, biz_date_offset),
+                        input_bindings_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN input_bindings_json
+                            ELSE %s::jsonb
+                        END,
+                        channel_config_id = COALESCE(%s, channel_config_id),
+                        owner_mapping_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN owner_mapping_json
+                            ELSE %s::jsonb
+                        END,
+                        plan_meta_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN plan_meta_json
+                            ELSE %s::jsonb
+                        END,
+                        is_enabled = COALESCE(%s, is_enabled),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, plan_code, plan_name, scheme_code,
+                              schedule_type, schedule_expr, biz_date_offset,
+                              input_bindings_json, channel_config_id,
+                              owner_mapping_json, plan_meta_json,
+                              is_enabled, created_by, created_at, updated_at
+                    """,
+                    (
+                        plan_name,
+                        scheme_code,
+                        schedule_type,
+                        schedule_expr,
+                        biz_date_offset,
+                        psycopg2.extras.Json(input_bindings_json) if input_bindings_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(input_bindings_json) if input_bindings_json is not None else psycopg2.extras.Json(None),
+                        channel_config_id,
+                        psycopg2.extras.Json(owner_mapping_json) if owner_mapping_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(owner_mapping_json) if owner_mapping_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(plan_meta_json) if plan_meta_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(plan_meta_json) if plan_meta_json is not None else psycopg2.extras.Json(None),
+                        is_enabled,
+                        plan_id,
+                        company_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 execution_run_plans 失败 (company_id={company_id}, plan_id={plan_id}): {e}")
+        return None
+
+
+def disable_execution_run_plan(*, company_id: str, plan_id: str) -> dict | None:
+    """停用执行运行计划。"""
+    return update_execution_run_plan(company_id=company_id, plan_id=plan_id, is_enabled=False)
+
+
+def get_execution_run_plan(*, company_id: str, plan_id: str | None = None, plan_code: str | None = None) -> dict | None:
+    """查询单个执行运行计划（按 id 或 plan_code）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if plan_id:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, plan_code, plan_name, scheme_code,
+                               schedule_type, schedule_expr, biz_date_offset,
+                               input_bindings_json, channel_config_id,
+                               owner_mapping_json, plan_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_run_plans
+                        WHERE company_id = %s
+                          AND id = %s
+                        LIMIT 1
+                        """,
+                        (company_id, plan_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, plan_code, plan_name, scheme_code,
+                               schedule_type, schedule_expr, biz_date_offset,
+                               input_bindings_json, channel_config_id,
+                               owner_mapping_json, plan_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_run_plans
+                        WHERE company_id = %s
+                          AND plan_code = %s
+                        LIMIT 1
+                        """,
+                        (company_id, str(plan_code or "").strip()),
+                    )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"查询 execution_run_plans 失败 (company_id={company_id}, plan_id={plan_id}, plan_code={plan_code}): {e}"
+        )
+        return None
+
+
+def list_execution_run_plans(
+    *,
+    company_id: str,
+    scheme_code: str | None = None,
+    include_disabled: bool = True,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询执行运行计划列表。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, plan_code, plan_name, scheme_code,
+                           schedule_type, schedule_expr, biz_date_offset,
+                           input_bindings_json, channel_config_id,
+                           owner_mapping_json, plan_meta_json,
+                           is_enabled, created_by, created_at, updated_at
+                    FROM execution_run_plans
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if scheme_code:
+                    sql += " AND scheme_code = %s"
+                    params.append(scheme_code)
+                if not include_disabled:
+                    sql += " AND is_enabled = true"
+                sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(f"查询 execution_run_plans 列表失败 (company_id={company_id}, scheme_code={scheme_code}): {e}")
+        return []
+
+
+def create_execution_run(
+    *,
+    company_id: str,
+    scheme_code: str,
+    run_code: str = "",
+    plan_code: str | None = None,
+    scheme_type: str = "recon",
+    trigger_type: str = "chat",
+    entry_mode: str = "file",
+    execution_status: str = "running",
+    failed_stage: str = "",
+    failed_reason: str = "",
+    run_context_json: dict | None = None,
+    source_snapshot_json: dict | None = None,
+    subtasks_json: list[dict] | None = None,
+    proc_result_json: dict | None = None,
+    recon_result_summary_json: dict | None = None,
+    artifacts_json: dict | None = None,
+    anomaly_count: int = 0,
+    started_at_now: bool = True,
+    finished_at_now: bool = False,
+) -> dict | None:
+    """创建执行记录。"""
+    conn_manager = get_conn()
+    try:
+        resolved_run_code = str(run_code or "").strip() or _generate_execution_code("run")
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO execution_runs (
+                        company_id, run_code, scheme_code, plan_code, scheme_type,
+                        trigger_type, entry_mode, execution_status,
+                        failed_stage, failed_reason,
+                        run_context_json, source_snapshot_json, subtasks_json,
+                        proc_result_json, recon_result_summary_json, artifacts_json,
+                        anomaly_count, started_at, finished_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s,
+                        CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                        CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END
+                    )
+                    RETURNING id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                              trigger_type, entry_mode, execution_status,
+                              failed_stage, failed_reason,
+                              run_context_json, source_snapshot_json, subtasks_json,
+                              proc_result_json, recon_result_summary_json, artifacts_json,
+                              anomaly_count, started_at, finished_at, created_at, updated_at
+                    """,
+                    (
+                        company_id,
+                        resolved_run_code,
+                        scheme_code,
+                        plan_code,
+                        scheme_type,
+                        trigger_type,
+                        entry_mode,
+                        execution_status,
+                        failed_stage,
+                        failed_reason,
+                        psycopg2.extras.Json(run_context_json or {}),
+                        psycopg2.extras.Json(source_snapshot_json or {}),
+                        psycopg2.extras.Json(subtasks_json or []),
+                        psycopg2.extras.Json(proc_result_json or {}),
+                        psycopg2.extras.Json(recon_result_summary_json or {}),
+                        psycopg2.extras.Json(artifacts_json or {}),
+                        max(0, int(anomaly_count)),
+                        started_at_now,
+                        finished_at_now,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"创建 execution_runs 失败 (company_id={company_id}, scheme_code={scheme_code}): {e}")
+        return None
+
+
+def update_execution_run(
+    *,
+    company_id: str,
+    run_id: str,
+    execution_status: str | None = None,
+    failed_stage: str | None = None,
+    failed_reason: str | None = None,
+    run_context_json: dict | None = None,
+    source_snapshot_json: dict | None = None,
+    subtasks_json: list[dict] | None = None,
+    proc_result_json: dict | None = None,
+    recon_result_summary_json: dict | None = None,
+    artifacts_json: dict | None = None,
+    anomaly_count: int | None = None,
+    started_at_now: bool = False,
+    finished_at_now: bool = False,
+) -> dict | None:
+    """更新执行记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE execution_runs
+                    SET execution_status = COALESCE(%s, execution_status),
+                        failed_stage = COALESCE(%s, failed_stage),
+                        failed_reason = COALESCE(%s, failed_reason),
+                        run_context_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN run_context_json
+                            ELSE %s::jsonb
+                        END,
+                        source_snapshot_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN source_snapshot_json
+                            ELSE %s::jsonb
+                        END,
+                        subtasks_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN subtasks_json
+                            ELSE %s::jsonb
+                        END,
+                        proc_result_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN proc_result_json
+                            ELSE %s::jsonb
+                        END,
+                        recon_result_summary_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN recon_result_summary_json
+                            ELSE %s::jsonb
+                        END,
+                        artifacts_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN artifacts_json
+                            ELSE %s::jsonb
+                        END,
+                        anomaly_count = COALESCE(%s, anomaly_count),
+                        started_at = CASE WHEN %s THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END,
+                        finished_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE finished_at END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                              trigger_type, entry_mode, execution_status,
+                              failed_stage, failed_reason,
+                              run_context_json, source_snapshot_json, subtasks_json,
+                              proc_result_json, recon_result_summary_json, artifacts_json,
+                              anomaly_count, started_at, finished_at, created_at, updated_at
+                    """,
+                    (
+                        execution_status,
+                        failed_stage,
+                        failed_reason,
+                        psycopg2.extras.Json(run_context_json) if run_context_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(run_context_json) if run_context_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(source_snapshot_json) if source_snapshot_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(source_snapshot_json) if source_snapshot_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(subtasks_json) if subtasks_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(subtasks_json) if subtasks_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(proc_result_json) if proc_result_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(proc_result_json) if proc_result_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(recon_result_summary_json) if recon_result_summary_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(recon_result_summary_json) if recon_result_summary_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(artifacts_json) if artifacts_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(artifacts_json) if artifacts_json is not None else psycopg2.extras.Json(None),
+                        anomaly_count,
+                        started_at_now,
+                        finished_at_now,
+                        run_id,
+                        company_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 execution_runs 失败 (company_id={company_id}, run_id={run_id}): {e}")
+        return None
+
+
+def get_execution_run(*, company_id: str, run_id: str | None = None, run_code: str | None = None) -> dict | None:
+    """查询单个执行记录（按 id 或 run_code）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if run_id:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                               trigger_type, entry_mode, execution_status,
+                               failed_stage, failed_reason,
+                               run_context_json, source_snapshot_json, subtasks_json,
+                               proc_result_json, recon_result_summary_json, artifacts_json,
+                               anomaly_count, started_at, finished_at, created_at, updated_at
+                        FROM execution_runs
+                        WHERE company_id = %s
+                          AND id = %s
+                        LIMIT 1
+                        """,
+                        (company_id, run_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                               trigger_type, entry_mode, execution_status,
+                               failed_stage, failed_reason,
+                               run_context_json, source_snapshot_json, subtasks_json,
+                               proc_result_json, recon_result_summary_json, artifacts_json,
+                               anomaly_count, started_at, finished_at, created_at, updated_at
+                        FROM execution_runs
+                        WHERE company_id = %s
+                          AND run_code = %s
+                        LIMIT 1
+                        """,
+                        (company_id, str(run_code or "").strip()),
+                    )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"查询 execution_runs 失败 (company_id={company_id}, run_id={run_id}, run_code={run_code}): {e}")
+        return None
+
+
+def list_execution_runs(
+    *,
+    company_id: str,
+    scheme_code: str | None = None,
+    plan_code: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询执行记录列表。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                           trigger_type, entry_mode, execution_status,
+                           failed_stage, failed_reason,
+                           run_context_json, source_snapshot_json, subtasks_json,
+                           proc_result_json, recon_result_summary_json, artifacts_json,
+                           anomaly_count, started_at, finished_at, created_at, updated_at
+                    FROM execution_runs
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if scheme_code:
+                    sql += " AND scheme_code = %s"
+                    params.append(scheme_code)
+                if plan_code:
+                    sql += " AND plan_code = %s"
+                    params.append(plan_code)
+                sql += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(
+            f"查询 execution_runs 列表失败 (company_id={company_id}, scheme_code={scheme_code}, plan_code={plan_code}): {e}"
+        )
+        return []
+
+
+def create_execution_run_exception(
+    *,
+    company_id: str,
+    run_id: str,
+    scheme_code: str,
+    anomaly_key: str,
+    anomaly_type: str,
+    summary: str,
+    detail_json: dict | None = None,
+    owner_name: str = "",
+    owner_identifier: str = "",
+    owner_contact_json: dict | None = None,
+    reminder_status: str = "pending",
+    processing_status: str = "pending",
+    fix_status: str = "pending",
+    latest_feedback: str = "",
+    feedback_json: dict | None = None,
+    is_closed: bool = False,
+) -> dict | None:
+    """创建或幂等更新执行异常。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO execution_run_exceptions (
+                        company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                        summary, detail_json,
+                        owner_name, owner_identifier, owner_contact_json,
+                        reminder_status, processing_status, fix_status,
+                        latest_feedback, feedback_json, is_closed
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s::jsonb,
+                        %s, %s, %s::jsonb,
+                        %s, %s, %s,
+                        %s, %s::jsonb, %s
+                    )
+                    ON CONFLICT (run_id, anomaly_key)
+                    DO UPDATE SET
+                        anomaly_type = EXCLUDED.anomaly_type,
+                        summary = EXCLUDED.summary,
+                        detail_json = EXCLUDED.detail_json,
+                        owner_name = CASE
+                            WHEN EXCLUDED.owner_name <> '' THEN EXCLUDED.owner_name
+                            ELSE execution_run_exceptions.owner_name
+                        END,
+                        owner_identifier = CASE
+                            WHEN EXCLUDED.owner_identifier <> '' THEN EXCLUDED.owner_identifier
+                            ELSE execution_run_exceptions.owner_identifier
+                        END,
+                        owner_contact_json = CASE
+                            WHEN EXCLUDED.owner_contact_json <> '{}'::jsonb THEN EXCLUDED.owner_contact_json
+                            ELSE execution_run_exceptions.owner_contact_json
+                        END,
+                        reminder_status = EXCLUDED.reminder_status,
+                        processing_status = EXCLUDED.processing_status,
+                        fix_status = EXCLUDED.fix_status,
+                        latest_feedback = CASE
+                            WHEN EXCLUDED.latest_feedback <> '' THEN EXCLUDED.latest_feedback
+                            ELSE execution_run_exceptions.latest_feedback
+                        END,
+                        feedback_json = CASE
+                            WHEN EXCLUDED.feedback_json <> '{}'::jsonb THEN EXCLUDED.feedback_json
+                            ELSE execution_run_exceptions.feedback_json
+                        END,
+                        is_closed = EXCLUDED.is_closed,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                              summary, detail_json,
+                              owner_name, owner_identifier, owner_contact_json,
+                              reminder_status, processing_status, fix_status,
+                              latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    """,
+                    (
+                        company_id,
+                        run_id,
+                        scheme_code,
+                        anomaly_key,
+                        anomaly_type,
+                        summary,
+                        psycopg2.extras.Json(detail_json or {}),
+                        owner_name,
+                        owner_identifier,
+                        psycopg2.extras.Json(owner_contact_json or {}),
+                        reminder_status,
+                        processing_status,
+                        fix_status,
+                        latest_feedback,
+                        psycopg2.extras.Json(feedback_json or {}),
+                        is_closed,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"创建 execution_run_exceptions 失败 (company_id={company_id}, run_id={run_id}, anomaly_key={anomaly_key}): {e}"
+        )
+        return None
+
+
+def get_execution_run_exception(*, company_id: str, exception_id: str) -> dict | None:
+    """查询单个执行异常。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                           summary, detail_json,
+                           owner_name, owner_identifier, owner_contact_json,
+                           reminder_status, processing_status, fix_status,
+                           latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    FROM execution_run_exceptions
+                    WHERE company_id = %s
+                      AND id = %s
+                    LIMIT 1
+                    """,
+                    (company_id, exception_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"查询 execution_run_exceptions 失败 (company_id={company_id}, exception_id={exception_id}): {e}")
+        return None
+
+
+def list_execution_run_exceptions(
+    *,
+    company_id: str,
+    run_id: str,
+    limit: int = 500,
+    offset: int = 0,
+) -> list[dict]:
+    """按执行记录查询异常列表。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                           summary, detail_json,
+                           owner_name, owner_identifier, owner_contact_json,
+                           reminder_status, processing_status, fix_status,
+                           latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    FROM execution_run_exceptions
+                    WHERE company_id = %s
+                      AND run_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (company_id, run_id, limit, offset),
+                )
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(f"查询 execution_run_exceptions 列表失败 (company_id={company_id}, run_id={run_id}): {e}")
+        return []
+
+
+def update_execution_run_exception(
+    *,
+    company_id: str,
+    exception_id: str,
+    owner_name: str | None = None,
+    owner_identifier: str | None = None,
+    owner_contact_json: dict | None = None,
+    reminder_status: str | None = None,
+    processing_status: str | None = None,
+    fix_status: str | None = None,
+    latest_feedback: str | None = None,
+    feedback_json: dict | None = None,
+    is_closed: bool | None = None,
+) -> dict | None:
+    """更新执行异常状态。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE execution_run_exceptions
+                    SET owner_name = COALESCE(%s, owner_name),
+                        owner_identifier = COALESCE(%s, owner_identifier),
+                        owner_contact_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN owner_contact_json
+                            ELSE %s::jsonb
+                        END,
+                        reminder_status = COALESCE(%s, reminder_status),
+                        processing_status = COALESCE(%s, processing_status),
+                        fix_status = COALESCE(%s, fix_status),
+                        latest_feedback = COALESCE(%s, latest_feedback),
+                        feedback_json = CASE
+                            WHEN %s::jsonb = 'null'::jsonb THEN feedback_json
+                            ELSE %s::jsonb
+                        END,
+                        is_closed = COALESCE(%s, is_closed),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                              summary, detail_json,
+                              owner_name, owner_identifier, owner_contact_json,
+                              reminder_status, processing_status, fix_status,
+                              latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    """,
+                    (
+                        owner_name,
+                        owner_identifier,
+                        psycopg2.extras.Json(owner_contact_json) if owner_contact_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(owner_contact_json) if owner_contact_json is not None else psycopg2.extras.Json(None),
+                        reminder_status,
+                        processing_status,
+                        fix_status,
+                        latest_feedback,
+                        psycopg2.extras.Json(feedback_json) if feedback_json is not None else psycopg2.extras.Json(None),
+                        psycopg2.extras.Json(feedback_json) if feedback_json is not None else psycopg2.extras.Json(None),
+                        is_closed,
+                        exception_id,
+                        company_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"更新 execution_run_exceptions 失败 (company_id={company_id}, exception_id={exception_id}): {e}"
+        )
+        return None
