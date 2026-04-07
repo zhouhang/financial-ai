@@ -27,6 +27,7 @@ import type {
   Conversation,
   DataConnectionView,
   DataSourceKind,
+  ReconWorkspaceMode,
   UserTask,
   UserTaskRule,
 } from '../types';
@@ -107,6 +108,8 @@ interface SidebarProps {
   onSelectDataSourceKind?: (kind: DataSourceKind) => void;
   selectedCollaborationProvider?: CollaborationProvider;
   onSelectCollaborationProvider?: (provider: CollaborationProvider) => void;
+  selectedReconEntry?: ReconWorkspaceMode;
+  onSelectReconEntry?: (entry: ReconWorkspaceMode) => void;
 }
 
 function sourceKindIcon(kind: DataSourceKind) {
@@ -146,6 +149,8 @@ export default function Sidebar({
   onSelectDataSourceKind,
   selectedCollaborationProvider = 'dingtalk_dws',
   onSelectCollaborationProvider,
+  selectedReconEntry = 'upload',
+  onSelectReconEntry,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<UserTask[]>([]);
@@ -279,6 +284,7 @@ export default function Sidebar({
 
   const dataSourceGroupPreview = `${SOURCE_TYPE_CARDS.length} 个数据源`;
   const collaborationGroupPreview = COLLABORATION_CHANNEL_CARDS.map((card) => card.title).join('、');
+  const procTasks = tasks.filter((task) => task.task_type === 'proc');
 
   const handleProfileMenuToggle = () => {
     setIsProfileMenuOpen((prev) => !prev);
@@ -393,19 +399,18 @@ export default function Sidebar({
         </div>
       )}
 
-      {!collapsed && activeSection === 'chat' && !!authToken && tasks.length > 0 && (
+      {!collapsed && activeSection === 'chat' && !!authToken && (
         <div className="px-4 mb-3">
           <div className="mb-2 px-0.5">
             <p className="text-[11px] font-semibold tracking-[0.12em] text-text-muted">选择任务</p>
           </div>
           <div className="space-y-2.5">
-            {tasks.map((task) => {
+            {procTasks.map((task) => {
               const isExpanded = expandedTaskCodes.includes(task.task_code);
               const isTaskActive = task.rules?.some((rule) => rule.rule_code === selectedRuleCode);
               const ruleCount = task.rules?.length ?? 0;
               const taskMeta = getTaskTypeMeta(task.task_type);
-              const isReconTask = task.task_type === 'recon';
-              const isTaskButtonActive = isReconTask ? isTaskActive : isExpanded;
+              const isTaskButtonActive = isExpanded;
 
               return (
                 <div
@@ -444,11 +449,11 @@ export default function Sidebar({
                     </span>
                     <ChevronRight
                       className={`h-4 w-4 shrink-0 text-text-muted transition-transform duration-200 ${
-                        isReconTask ? 'text-text-secondary' : isExpanded ? 'rotate-90 text-text-secondary' : ''
+                        isExpanded ? 'rotate-90 text-text-secondary' : ''
                       }`}
                     />
                   </button>
-                  {!isReconTask && isExpanded && task.rules && task.rules.length > 0 && (
+                  {isExpanded && task.rules && task.rules.length > 0 && (
                     <div className="mt-1.5 space-y-1 rounded-[14px] border border-border-subtle bg-surface-elevated p-1.5">
                       {task.rules.map((rule) => {
                         const isSelected = selectedRuleCode === rule.rule_code;
@@ -486,6 +491,44 @@ export default function Sidebar({
                 </div>
               );
             })}
+
+            <div
+              className="rounded-2xl border border-[rgba(14,165,233,0.18)] bg-[rgba(14,165,233,0.08)] p-1.5 transition-all duration-200 hover:border-white/70 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.28),0_10px_24px_rgba(15,23,42,0.14)]"
+              title="数据对账"
+            >
+              <div className="w-full rounded-[14px] bg-surface-elevated px-3 py-2.5">
+                <div className="flex items-center gap-2.5">
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500" />
+                  <span className="min-w-0 flex-1 text-sm font-semibold text-text-primary">数据对账</span>
+                </div>
+                <div className="mt-2 border-t border-border-subtle pt-2">
+                  <button
+                    type="button"
+                    onClick={() => onSelectReconEntry?.('upload')}
+                    className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                      selectedReconEntry === 'upload'
+                        ? 'bg-sky-50 text-sky-700'
+                        : 'text-text-secondary hover:bg-surface-secondary'
+                    }`}
+                  >
+                    <span>上传文件对账</span>
+                    <ChevronRight className="h-4 w-4 shrink-0" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSelectReconEntry?.('center')}
+                    className={`mt-1 flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                      selectedReconEntry === 'center'
+                        ? 'bg-sky-50 text-sky-700'
+                        : 'text-text-secondary hover:bg-surface-secondary'
+                    }`}
+                  >
+                    <span>对账中心</span>
+                    <ChevronRight className="h-4 w-4 shrink-0" />
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

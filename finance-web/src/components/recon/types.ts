@@ -1,6 +1,4 @@
-export type ReconWorkspaceTab = 'instant' | 'auto' | 'rules';
-
-export type ReconAutoSubTab = 'configs' | 'runs';
+export type ReconCenterTab = 'schemes' | 'tasks' | 'runs';
 
 export type StartMode = 'upload' | 'source';
 
@@ -56,6 +54,134 @@ export interface ReconExceptionItem {
   reminderStatus: string;
   feedback: string;
   handlingStatus: string;
+}
+
+export interface ReconSchemeListItem {
+  id: string;
+  schemeCode: string;
+  name: string;
+  description: string;
+  fileRuleCode: string;
+  procRuleCode: string;
+  reconRuleCode: string;
+  status: 'enabled' | 'paused';
+  updatedAt: string;
+  createdAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconTaskListItem {
+  id: string;
+  planCode: string;
+  name: string;
+  schemeCode: string;
+  schemeName: string;
+  scheduleType: string;
+  scheduleExpr: string;
+  bizDateOffset: string;
+  channelConfigId: string;
+  ownerSummary: string;
+  status: 'enabled' | 'paused';
+  updatedAt: string;
+  createdAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconCenterRunItem {
+  id: string;
+  runCode: string;
+  schemeCode: string;
+  planCode: string;
+  schemeName: string;
+  planName: string;
+  executionStatus: string;
+  triggerType: string;
+  entryMode: string;
+  anomalyCount: number;
+  failedStage: string;
+  failedReason: string;
+  startedAt: string;
+  finishedAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconRunExceptionDetail {
+  id: string;
+  anomalyType: string;
+  summary: string;
+  ownerName: string;
+  reminderStatus: string;
+  processingStatus: string;
+  fixStatus: string;
+  latestFeedback: string;
+  isClosed: boolean;
+  createdAt: string;
+  updatedAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconSchemeListItem {
+  id: string;
+  schemeCode: string;
+  name: string;
+  description: string;
+  fileRuleCode: string;
+  procRuleCode: string;
+  reconRuleCode: string;
+  status: 'enabled' | 'paused';
+  updatedAt: string;
+  createdAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconTaskListItem {
+  id: string;
+  planCode: string;
+  name: string;
+  schemeCode: string;
+  schemeName: string;
+  scheduleType: string;
+  scheduleExpr: string;
+  bizDateOffset: string;
+  channelConfigId: string;
+  ownerSummary: string;
+  status: 'enabled' | 'paused';
+  updatedAt: string;
+  createdAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconCenterRunItem {
+  id: string;
+  runCode: string;
+  schemeCode: string;
+  planCode: string;
+  schemeName: string;
+  planName: string;
+  executionStatus: string;
+  triggerType: string;
+  entryMode: string;
+  anomalyCount: number;
+  failedStage: string;
+  failedReason: string;
+  startedAt: string;
+  finishedAt: string;
+  raw: Record<string, unknown>;
+}
+
+export interface ReconRunExceptionDetail {
+  id: string;
+  anomalyType: string;
+  summary: string;
+  ownerName: string;
+  reminderStatus: string;
+  processingStatus: string;
+  fixStatus: string;
+  latestFeedback: string;
+  isClosed: boolean;
+  createdAt: string;
+  updatedAt: string;
+  raw: Record<string, unknown>;
 }
 
 export interface LaunchNotice {

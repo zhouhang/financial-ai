@@ -494,7 +494,7 @@ export default function ReconAutoTaskConfigs({
   authToken = null,
   loading = false,
   errorText = null,
-  createButtonLabel = '新建任务配置',
+  createButtonLabel = '新建对账任务',
   onCreatedTaskConfig,
   onCreateRule,
   onOpenCollaborationChannels,
@@ -746,7 +746,7 @@ export default function ReconAutoTaskConfigs({
         if (!cancelled) {
           setRuleInputSlots(slots);
           if (slots.length === 0) {
-            setRuleInputError('当前规则未解析到对账输入表，请先完善规则后再创建自动任务。');
+            setRuleInputError('当前规则未解析到对账输入表，请先完善规则后再创建对账任务。');
           }
           if (Object.keys(directSchemaMap).length > 0) {
             setTableSchemaMap(directSchemaMap);
@@ -1075,7 +1075,7 @@ export default function ReconAutoTaskConfigs({
       if (!ruleCode) return '请选择要绑定的对账规则。';
       if (loadingRuleInputs) return '正在读取规则输入，请稍候。';
       if (ruleInputError) return ruleInputError;
-      if (ruleInputSlots.length === 0) return '当前规则未配置对账输入，暂时无法创建自动任务。';
+      if (ruleInputSlots.length === 0) return '当前规则未配置对账输入，暂时无法创建对账任务。';
       return null;
     }
 
@@ -1134,7 +1134,7 @@ export default function ReconAutoTaskConfigs({
     setSubmitError(null);
     setValidationPreview({
       status: 'running',
-      summary: '正在验证当前任务配置...',
+      summary: '正在验证当前对账任务配置...',
       checkedAt: '',
       errors: [],
       warnings: [],
@@ -1225,7 +1225,7 @@ export default function ReconAutoTaskConfigs({
     }
 
     if (!authToken) {
-      setSubmitError('请先登录后再创建自动对账任务。');
+      setSubmitError('请先登录后再创建对账任务。');
       return;
     }
 
@@ -1300,14 +1300,14 @@ export default function ReconAutoTaskConfigs({
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '创建任务配置失败'));
+        throw new Error(String(data?.detail || data?.message || '创建对账任务失败'));
       }
 
       setIsCreateOpen(false);
-      setSuccessNotice(`已创建任务配置「${taskName.trim()}」`);
+      setSuccessNotice(`已创建对账任务「${taskName.trim()}」`);
       await onCreatedTaskConfig?.();
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : '创建任务配置失败');
+      setSubmitError(error instanceof Error ? error.message : '创建对账任务失败');
     } finally {
       setIsSaving(false);
     }
@@ -1317,9 +1317,9 @@ export default function ReconAutoTaskConfigs({
     <section className="mt-4 rounded-2xl border border-border bg-surface shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-4 py-3">
         <div>
-          <h4 className="text-sm font-semibold text-text-primary">任务配置</h4>
+          <h4 className="text-sm font-semibold text-text-primary">对账任务</h4>
           <p className="mt-1 text-xs text-text-secondary">
-            管理自动对账任务、调度、对账异常处理人与协作通道。
+            管理对账任务、调度、异常处理人与协作通道。
           </p>
         </div>
         <button
@@ -1368,7 +1368,7 @@ export default function ReconAutoTaskConfigs({
             {loading ? (
               <tr className="border-t border-border-subtle text-text-secondary">
                 <td className="px-4 py-8 text-center" colSpan={7}>
-                  正在加载任务配置...
+                  正在加载对账任务...
                 </td>
               </tr>
             ) : tasks.length > 0 ? (
@@ -1401,7 +1401,7 @@ export default function ReconAutoTaskConfigs({
             ) : (
               <tr className="border-t border-border-subtle text-text-secondary">
                 <td className="px-4 py-8 text-center" colSpan={7}>
-                  暂无任务配置数据，点击右上角“新建任务配置”开始创建。
+                  暂无对账任务数据，点击右上角“新建对账任务”开始创建。
                 </td>
               </tr>
             )}
@@ -1420,7 +1420,7 @@ export default function ReconAutoTaskConfigs({
           >
             <div className="flex items-start justify-between border-b border-border-subtle px-5 py-4">
               <div>
-                <h4 className="text-base font-semibold text-text-primary">新建任务配置</h4>
+                <h4 className="text-base font-semibold text-text-primary">新建对账任务</h4>
                 <p className="mt-1 text-sm text-text-secondary">
                   按步骤完成任务、数据源、调度与协作设置，保存前先跑一次验证。
                 </p>
@@ -1506,7 +1506,7 @@ export default function ReconAutoTaskConfigs({
                       <input
                         value={taskName}
                         onChange={(event) => setTaskName(event.target.value)}
-                        placeholder="例如：商户对账 T+1 自动任务"
+                        placeholder="例如：商户对账 T+1 任务"
                         className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-sky-300"
                       />
                     </label>
@@ -1968,7 +1968,7 @@ export default function ReconAutoTaskConfigs({
                           <div className="max-w-2xl">
                             <h6 className="text-sm font-medium text-text-primary">还没有可用的协作通道</h6>
                             <p className="mt-1 text-xs leading-6 text-text-secondary">
-                              先连接一个默认通道，后续异常催办、消息提醒和待办创建都会走这里。连接完成后，返回任务配置重新选择即可。
+                              先连接一个默认通道，后续异常催办、消息提醒和待办创建都会走这里。连接完成后，返回对账任务配置重新选择即可。
                             </p>
                           </div>
 
@@ -2184,7 +2184,7 @@ export default function ReconAutoTaskConfigs({
                         </div>
                       ) : (
                         <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface-secondary px-4 py-4 text-xs leading-6 text-text-secondary">
-                          还未执行验证。点击“开始验证”后，系统会检查任务配置是否完整，并给出需要确认的建议。
+                          还未执行验证。点击“开始验证”后，系统会检查对账任务配置是否完整，并给出需要确认的建议。
                         </div>
                       )}
                     </div>

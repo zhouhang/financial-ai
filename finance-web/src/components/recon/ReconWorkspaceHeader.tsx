@@ -1,16 +1,16 @@
 import type { ReactNode } from 'react';
-import { cn, type ReconWorkspaceTab } from './types';
-import { WORKSPACE_TABS } from './workspaceCopy';
+import { cn, type ReconCenterTab } from './types';
+import { CENTER_TABS } from './workspaceCopy';
 
 export interface ReconWorkspaceHeaderTab {
-  key: ReconWorkspaceTab;
+  key: ReconCenterTab;
   label: string;
   disabled?: boolean;
 }
 
 export interface ReconWorkspaceHeaderProps {
-  activeTab: ReconWorkspaceTab;
-  onTabChange: (tab: ReconWorkspaceTab) => void;
+  activeTab: ReconCenterTab;
+  onTabChange: (tab: ReconCenterTab) => void;
   tabs?: ReconWorkspaceHeaderTab[];
   className?: string;
   contentClassName?: string;
@@ -20,7 +20,7 @@ export interface ReconWorkspaceHeaderProps {
 export default function ReconWorkspaceHeader({
   activeTab,
   onTabChange,
-  tabs = WORKSPACE_TABS,
+  tabs = CENTER_TABS,
   className,
   contentClassName,
   rightSlot,

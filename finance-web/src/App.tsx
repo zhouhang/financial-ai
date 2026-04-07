@@ -15,6 +15,7 @@ import type {
   DataConnectionView,
   DataSourceKind,
   Message,
+  ReconWorkspaceMode,
   Task,
   UploadedFile,
   UserTaskRule,
@@ -42,6 +43,15 @@ function createConversation(taskContext: UserTaskRule | null = null): Conversati
 const STORAGE_KEY_ACTIVE_CONV = 'tally_active_conversation_id';
 const STORAGE_KEY_IS_NEW_CONV = 'tally_is_new_conversation';
 const STORAGE_KEY_GUEST_CONV = 'tally_guest_conversation';
+const EMPTY_RECON_RULE: UserTaskRule = {
+  id: 0,
+  rule_code: '',
+  name: '未命名方案',
+  rule_type: 'recon',
+  task_code: 'recon',
+  task_name: '数据对账',
+  task_type: 'recon',
+};
 
 function parsePanelViewFromLocation(): MainPanelView {
   const path = window.location.pathname.toLowerCase();
@@ -219,6 +229,7 @@ export default function App() {
   const [selectedCollaborationProvider, setSelectedCollaborationProvider] = useState<CollaborationProvider>('dingtalk_dws');
   const [reconRules, setReconRules] = useState<UserTaskRule[]>([]);
   const [reconExecutionMode, setReconExecutionMode] = useState<ReconExecutionMode>('upload');
+  const [reconWorkspaceMode, setReconWorkspaceMode] = useState<ReconWorkspaceMode>('upload');
   const [hiddenConversationIds, setHiddenConversationIds] = useState<string[]>([]);
   const [authCallbackPayload] = useState<AuthCallbackPayload | null>(() =>
     parseAuthCallbackPayloadFromLocation(),
@@ -1260,6 +1271,7 @@ export default function App() {
     // 如果正在加载中，不允许创建新会话（避免消息显示错乱）
     if (isLoading) return;
     setPanelView('conversation');
+    setReconWorkspaceMode('upload');
     setReconExecutionMode('upload');
     const conv = createConversation();
     pendingNewConvRef.current = conv;
@@ -1275,6 +1287,7 @@ export default function App() {
     if (panelView === 'data-connections') {
       setPanelView('conversation');
     }
+    setReconWorkspaceMode('upload');
     // 切换到其他会话时，清除待确认的新会话
     pendingNewConvRef.current = null;
     setConversations((prev) =>
@@ -1374,6 +1387,7 @@ export default function App() {
   // ── 选择任务 ────────────────────────────────────────────────
   const handleSelectTask = useCallback((task: UserTaskRule) => {
     setPanelView('conversation');
+    setReconWorkspaceMode('upload');
     setReconExecutionMode('upload');
     const conversation = createConversation(task);
     pendingNewConvRef.current = conversation;
@@ -1388,6 +1402,27 @@ export default function App() {
     setIsLoading(false);
     console.log('选中规则:', task.task_type, '-', task.task_name, '-', task.name);
   }, []);
+
+  const handleSelectReconEntry = useCallback((entry: ReconWorkspaceMode) => {
+    setPanelView('conversation');
+    setReconWorkspaceMode(entry);
+    setReconExecutionMode('upload');
+
+    const targetRule =
+      selectedTask?.task_type === 'recon'
+        ? selectedTask
+        : reconRules.find((rule) => rule.rule_code) ?? null;
+
+    if (!targetRule) {
+      if (entry === 'upload') {
+        window.alert('暂无可用的数据对账规则，请先创建对账方案。');
+      }
+      return;
+    }
+
+    handleSelectTask(targetRule);
+    setReconWorkspaceMode(entry);
+  }, [handleSelectTask, reconRules, selectedTask]);
 
   const handleOpenTask = useCallback((task: { task_type?: string; task_name?: string }) => {
     setPanelView('conversation');
@@ -1466,9 +1501,13 @@ export default function App() {
   const displayConversations = mergedConversations();
   const activeSection: AppSection =
     panelView === 'data-connections' ? 'data-connections' : 'chat';
+  const reconWorkspaceRule =
+    selectedTask?.task_type === 'recon'
+      ? selectedTask
+      : reconRules.find((rule) => rule.rule_code) ?? EMPTY_RECON_RULE;
   const isReconWorkspace =
     panelView !== 'data-connections' &&
-    selectedTask?.task_type === 'recon';
+    (selectedTask?.task_type === 'recon' || reconWorkspaceMode === 'center');
   const chatAreaNode = (
     <ChatArea
       onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
@@ -1528,13 +1567,16 @@ export default function App() {
         onSelectDataSourceKind={setSelectedDataSourceKind}
         selectedCollaborationProvider={selectedCollaborationProvider}
         onSelectCollaborationProvider={setSelectedCollaborationProvider}
+        selectedReconEntry={reconWorkspaceMode}
+        onSelectReconEntry={handleSelectReconEntry}
       />
       {panelView !== 'data-connections' ? (
-        isReconWorkspace && selectedTask ? (
+        isReconWorkspace ? (
           <ReconWorkspace
-            selectedTask={selectedTask}
+            selectedTask={reconWorkspaceRule}
+            mode={reconWorkspaceMode}
             availableRules={availableReconRules}
-            selectedRuleCode={selectedTask.rule_code}
+            selectedRuleCode={selectedTask?.task_type === 'recon' ? selectedTask.rule_code : null}
             executionMode={reconExecutionMode}
             authToken={authToken}
             onSelectRule={handleSelectReconRule}

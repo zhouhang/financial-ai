@@ -6,6 +6,9 @@ interface ReconRulesListProps {
   rules: ReconRuleListItem[];
   loading?: boolean;
   className?: string;
+  title?: string;
+  subtitle?: string;
+  loadingText?: string;
   emptyText?: string;
   aiEntryLabel?: string;
   showCreatePlaceholder?: boolean;
@@ -17,6 +20,9 @@ export default function ReconRulesList({
   rules,
   loading = false,
   className,
+  title = '规则列表',
+  subtitle = '当前仅展示规则，不提供详情面板、选中态和规则修改入口。',
+  loadingText = '正在加载规则列表...',
   emptyText = '当前暂无规则，请先新增规则。',
   aiEntryLabel = 'AI 新增规则',
   showCreatePlaceholder,
@@ -44,10 +50,8 @@ export default function ReconRulesList({
     <section className={cn('rounded-2xl border border-border bg-surface p-5 shadow-sm', className)}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-base font-semibold text-text-primary">规则列表</h3>
-          <p className="mt-1 text-sm text-text-secondary">
-            当前仅展示规则，不提供详情面板、选中态和规则修改入口。
-          </p>
+          <h3 className="text-base font-semibold text-text-primary">{title}</h3>
+          <p className="mt-1 text-sm text-text-secondary">{subtitle}</p>
         </div>
         <button
           type="button"
@@ -78,7 +82,7 @@ export default function ReconRulesList({
       <div className="mt-4 space-y-2">
         {loading && (
           <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-8 text-center text-sm text-text-secondary">
-            正在加载规则列表...
+            {loadingText}
           </div>
         )}
 

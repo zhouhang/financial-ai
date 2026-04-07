@@ -67,7 +67,7 @@ export default function ReconAutoRunsPanel({
   verifyRunId = null,
   exceptionActionId = null,
   exceptionError = null,
-  emptyRunsText = '暂无运行批次数据',
+  emptyRunsText = '暂无运行记录',
   onFocusRun,
   onOpenFollowup,
   onVerifyRun,
@@ -111,7 +111,7 @@ export default function ReconAutoRunsPanel({
             {loadingRuns ? (
               <tr className="border-t border-border-subtle text-text-secondary">
                 <td className="px-4 py-8 text-center" colSpan={8}>
-                  正在加载运行批次...
+                  正在加载运行记录...
                 </td>
               </tr>
             ) : runs.length > 0 ? (
@@ -167,7 +167,7 @@ export default function ReconAutoRunsPanel({
                           className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-secondary"
                         >
                           <ArrowUpRight className="h-3.5 w-3.5" />
-                          异常跟进
+                          异常处理
                         </button>
                         <button
                           type="button"
@@ -201,7 +201,7 @@ export default function ReconAutoRunsPanel({
         <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h4 className="text-base font-semibold text-text-primary">运行明细与异常跟进</h4>
+              <h4 className="text-base font-semibold text-text-primary">运行明细与异常处理</h4>
               <p className="mt-1 text-sm text-text-secondary">
                 批次 {focusedRun.id}，任务 {focusedRun.taskName}，业务日期 {focusedRun.businessDate}
               </p>
