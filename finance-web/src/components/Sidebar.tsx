@@ -59,33 +59,6 @@ function formatConversationTime(date: Date | string): string {
   return d.toLocaleDateString('zh-CN', { year: 'numeric' });
 }
 
-function getTaskTypeMeta(taskType: string): {
-  dotClass: string;
-  badgeClass: string;
-  panelClass: string;
-} {
-  switch (taskType) {
-    case 'proc':
-      return {
-        dotClass: 'bg-blue-500',
-        badgeClass: 'bg-[rgba(59,130,246,0.12)] text-blue-600',
-        panelClass: 'border-[rgba(59,130,246,0.18)] bg-[rgba(59,130,246,0.08)]',
-      };
-    case 'recon':
-      return {
-        dotClass: 'bg-sky-500',
-        badgeClass: 'bg-[rgba(14,165,233,0.12)] text-sky-600',
-        panelClass: 'border-[rgba(14,165,233,0.18)] bg-[rgba(14,165,233,0.08)]',
-      };
-    default:
-      return {
-        dotClass: 'bg-blue-500',
-        badgeClass: 'bg-[rgba(59,130,246,0.12)] text-blue-600',
-        panelClass: 'border-border bg-surface-tertiary',
-      };
-  }
-}
-
 interface SidebarProps {
   conversations: Conversation[];
   activeConversationId: string | null;
@@ -140,7 +113,6 @@ export default function Sidebar({
   onLogout,
   collapsed = false,
   onSelectRule,
-  onOpenTask,
   selectedRuleCode,
   authToken,
   selectedDataConnectionView = 'data_sources',
@@ -154,12 +126,15 @@ export default function Sidebar({
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<UserTask[]>([]);
-  const [expandedTaskCodes, setExpandedTaskCodes] = useState<string[]>([]);
+  const [isProcMenuExpanded, setIsProcMenuExpanded] = useState(false);
+  const [isReconMenuExpanded, setIsReconMenuExpanded] = useState(false);
   const [expandedConnectionGroups, setExpandedConnectionGroups] = useState<DataConnectionView[]>([
     selectedDataConnectionView,
   ]);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
+  const previousSelectedProcRuleCodeRef = useRef<string | null>(null);
+  const previousReconAutoOpenKeyRef = useRef<string | null>(null);
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
   const displayName = typeof currentUser?.username === 'string' && currentUser.username
     ? currentUser.username
@@ -168,7 +143,8 @@ export default function Sidebar({
   useEffect(() => {
     if (authToken) return;
     setTasks([]);
-    setExpandedTaskCodes([]);
+    setIsProcMenuExpanded(false);
+    setIsReconMenuExpanded(false);
   }, [authToken]);
 
   useEffect(() => {
@@ -206,15 +182,6 @@ export default function Sidebar({
         const data = await response.json();
         if (data.success && data.tasks) {
           setTasks(data.tasks);
-          setExpandedTaskCodes((prev) => {
-            if (prev.length > 0) return prev;
-            if (!selectedRuleCode) return [];
-
-            const activeTask = data.tasks.find((task: UserTask) =>
-              task.rules?.some((rule) => rule.rule_code === selectedRuleCode)
-            );
-            return activeTask ? [activeTask.task_code] : [];
-          });
         }
       } catch (error) {
         console.error('加载任务列表失败:', error);
@@ -239,33 +206,6 @@ export default function Sidebar({
     };
   };
 
-  const handleRuleClick = (task: UserTask, rule: UserTaskRule) => {
-    onSelectRule?.(normalizeRuleFromTask(task, rule));
-  };
-
-  const handleToggleTask = (taskCode: string) => {
-    setExpandedTaskCodes((prev) =>
-      prev.includes(taskCode)
-        ? prev.filter((code) => code !== taskCode)
-        : [...prev, taskCode]
-    );
-  };
-
-  const handleTaskClick = (task: UserTask) => {
-    if (task.task_type === 'recon') {
-      const selectedRule =
-        task.rules?.find((rule) => rule.rule_code === selectedRuleCode) || task.rules?.[0];
-      if (selectedRule) {
-        onSelectRule?.(normalizeRuleFromTask(task, selectedRule));
-      } else {
-        onOpenTask?.(task);
-      }
-      return;
-    }
-
-    handleToggleTask(task.task_code);
-  };
-
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('确定要删除这个会话吗？')) {
@@ -285,6 +225,45 @@ export default function Sidebar({
   const dataSourceGroupPreview = `${SOURCE_TYPE_CARDS.length} 个数据源`;
   const collaborationGroupPreview = COLLABORATION_CHANNEL_CARDS.map((card) => card.title).join('、');
   const procTasks = tasks.filter((task) => task.task_type === 'proc');
+  const reconTasks = tasks.filter((task) => task.task_type === 'recon');
+  const procRules = procTasks.flatMap((task) =>
+    (task.rules || []).map((rule) => normalizeRuleFromTask(task, rule)),
+  );
+  const reconRules = reconTasks.flatMap((task) =>
+    (task.rules || []).map((rule) => normalizeRuleFromTask(task, rule)),
+  );
+  const isReconCenterActive = selectedReconEntry === 'center';
+  const selectedProcRule = isReconCenterActive
+    ? null
+    : procRules.find((rule) => rule.rule_code === selectedRuleCode) || null;
+  const selectedReconRule =
+    selectedReconEntry === 'upload'
+      ? reconRules.find((rule) => rule.rule_code === selectedRuleCode) || null
+      : null;
+  const selectedProcRuleCode = selectedProcRule?.rule_code || null;
+  const reconAutoOpenKey = selectedReconEntry === 'center'
+    ? 'center'
+    : selectedReconRule?.rule_code || null;
+
+  useEffect(() => {
+    if (selectedProcRuleCode && previousSelectedProcRuleCodeRef.current !== selectedProcRuleCode) {
+      setIsProcMenuExpanded(true);
+    }
+    previousSelectedProcRuleCodeRef.current = selectedProcRuleCode;
+  }, [selectedProcRuleCode]);
+
+  useEffect(() => {
+    if (reconAutoOpenKey && previousReconAutoOpenKeyRef.current !== reconAutoOpenKey) {
+      setIsReconMenuExpanded(true);
+    }
+    previousReconAutoOpenKeyRef.current = reconAutoOpenKey;
+  }, [reconAutoOpenKey]);
+
+  const handleOpenProcUpload = () => {
+    if (procRules[0]) {
+      onSelectRule?.(procRules[0]);
+    }
+  };
 
   const handleProfileMenuToggle = () => {
     setIsProfileMenuOpen((prev) => !prev);
@@ -405,108 +384,77 @@ export default function Sidebar({
             <p className="text-[11px] font-semibold tracking-[0.12em] text-text-muted">选择任务</p>
           </div>
           <div className="space-y-2.5">
-            {procTasks.map((task) => {
-              const isExpanded = expandedTaskCodes.includes(task.task_code);
-              const isTaskActive = task.rules?.some((rule) => rule.rule_code === selectedRuleCode);
-              const ruleCount = task.rules?.length ?? 0;
-              const taskMeta = getTaskTypeMeta(task.task_type);
-              const isTaskButtonActive = isExpanded;
-
-              return (
-                <div
-                  key={task.task_code}
-                  className={`rounded-2xl border p-1.5 transition-all duration-200 ${
-                    taskMeta.panelClass
-                  } ${
-                    isTaskActive
-                      ? 'hover:border-white/80 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.42),0_12px_28px_rgba(15,23,42,0.18)]'
-                      : 'hover:border-white/70 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.28),0_10px_24px_rgba(15,23,42,0.14)]'
+            <div
+              className="rounded-2xl border border-[rgba(59,130,246,0.18)] bg-[rgba(59,130,246,0.08)] p-1.5 transition-all duration-200 hover:border-white/70 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.28),0_10px_24px_rgba(15,23,42,0.14)]"
+              title="数据整理"
+            >
+              <button
+                type="button"
+                onClick={() => setIsProcMenuExpanded((prev) => !prev)}
+                className={`w-full flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left transition-all duration-200 ${
+                  isProcMenuExpanded
+                    ? 'bg-surface-elevated text-text-primary shadow-sm ring-1 ring-white/80'
+                    : 'text-text-secondary hover:bg-surface-elevated hover:ring-1 hover:ring-white/55'
+                }`}
+              >
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500" />
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate text-sm font-semibold leading-5 text-text-primary">
+                    数据整理
+                  </span>
+                </span>
+                <ChevronRight
+                  className={`h-4 w-4 shrink-0 text-text-muted transition-transform duration-200 ${
+                    isProcMenuExpanded ? 'rotate-90 text-text-secondary' : ''
                   }`}
-                  title={task.description || task.task_name}
-                >
+                />
+              </button>
+              {isProcMenuExpanded && (
+                <div className="mt-1.5 space-y-1 rounded-[14px] border border-border-subtle bg-surface-elevated p-1.5">
                   <button
                     type="button"
-                    onClick={() => handleTaskClick(task)}
-                    className={`w-full flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left transition-all duration-200 ${
-                      isTaskButtonActive
-                        ? 'bg-surface-elevated text-text-primary'
-                        : 'text-text-secondary hover:bg-surface-elevated'
-                    } ${
-                      isTaskActive
-                        ? 'shadow-sm ring-1 ring-white/80'
-                        : 'hover:ring-1 hover:ring-white/55'
+                    onClick={handleOpenProcUpload}
+                    className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                      selectedProcRule
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-text-secondary hover:bg-surface-secondary'
                     }`}
-                    title={task.description || task.task_name}
                   >
-                    <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${taskMeta.dotClass}`} />
-                    <span className="min-w-0 flex-1 text-left">
-                      <span className="block truncate text-sm font-semibold leading-5">
-                        {task.task_name}
-                      </span>
-                    </span>
-                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${taskMeta.badgeClass}`}>
-                      {ruleCount}
-                    </span>
-                    <ChevronRight
-                      className={`h-4 w-4 shrink-0 text-text-muted transition-transform duration-200 ${
-                        isExpanded ? 'rotate-90 text-text-secondary' : ''
-                      }`}
-                    />
+                    <span>上传文件整理</span>
+                    <ChevronRight className="h-4 w-4 shrink-0" />
                   </button>
-                  {isExpanded && task.rules && task.rules.length > 0 && (
-                    <div className="mt-1.5 space-y-1 rounded-[14px] border border-border-subtle bg-surface-elevated p-1.5">
-                      {task.rules.map((rule) => {
-                        const isSelected = selectedRuleCode === rule.rule_code;
-
-                        return (
-                          <button
-                            key={rule.rule_code}
-                            type="button"
-                            className={`group flex w-full items-center gap-2.5 rounded-xl border px-3 py-2 text-left transition-all duration-200 ${
-                              isSelected
-                                ? 'border-[rgba(59,130,246,0.18)] bg-surface-accent text-blue-600 shadow-sm'
-                                : 'border-transparent bg-transparent text-text-secondary hover:border-border-subtle hover:bg-surface-tertiary hover:text-text-primary'
-                            }`}
-                            onClick={() => handleRuleClick(task, rule)}
-                            title={rule.name}
-                          >
-                            <span
-                              className={`h-1.5 w-1.5 shrink-0 rounded-full transition-colors ${
-                                isSelected ? 'bg-blue-500' : 'bg-slate-300 group-hover:bg-blue-300'
-                              }`}
-                            />
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                              {rule.name}
-                            </span>
-                            {isSelected && (
-                              <span className="shrink-0 text-[11px] font-medium text-blue-500">
-                                当前
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
-              );
-            })}
+              )}
+            </div>
 
             <div
               className="rounded-2xl border border-[rgba(14,165,233,0.18)] bg-[rgba(14,165,233,0.08)] p-1.5 transition-all duration-200 hover:border-white/70 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.28),0_10px_24px_rgba(15,23,42,0.14)]"
               title="数据对账"
             >
-              <div className="w-full rounded-[14px] bg-surface-elevated px-3 py-2.5">
-                <div className="flex items-center gap-2.5">
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500" />
-                  <span className="min-w-0 flex-1 text-sm font-semibold text-text-primary">数据对账</span>
-                </div>
-                <div className="mt-2 border-t border-border-subtle pt-2">
+              <button
+                type="button"
+                onClick={() => setIsReconMenuExpanded((prev) => !prev)}
+                className={`w-full flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left transition-all duration-200 ${
+                  isReconMenuExpanded
+                    ? 'bg-surface-elevated text-text-primary shadow-sm ring-1 ring-white/80'
+                    : 'text-text-secondary hover:bg-surface-elevated hover:ring-1 hover:ring-white/55'
+                }`}
+              >
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500" />
+                <span className="min-w-0 flex-1 text-sm font-semibold text-text-primary">数据对账</span>
+                <ChevronRight
+                  className={`h-4 w-4 shrink-0 text-text-muted transition-transform duration-200 ${
+                    isReconMenuExpanded ? 'rotate-90 text-text-secondary' : ''
+                  }`}
+                />
+              </button>
+              {isReconMenuExpanded && (
+                <div className="mt-1.5 space-y-1 rounded-[14px] border border-border-subtle bg-surface-elevated p-1.5">
                   <button
                     type="button"
                     onClick={() => onSelectReconEntry?.('upload')}
                     className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
-                      selectedReconEntry === 'upload'
+                      selectedReconEntry === 'upload' && selectedReconRule
                         ? 'bg-sky-50 text-sky-700'
                         : 'text-text-secondary hover:bg-surface-secondary'
                     }`}
@@ -517,7 +465,7 @@ export default function Sidebar({
                   <button
                     type="button"
                     onClick={() => onSelectReconEntry?.('center')}
-                    className={`mt-1 flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                    className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
                       selectedReconEntry === 'center'
                         ? 'bg-sky-50 text-sky-700'
                         : 'text-text-secondary hover:bg-surface-secondary'
@@ -527,7 +475,7 @@ export default function Sidebar({
                     <ChevronRight className="h-4 w-4 shrink-0" />
                   </button>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         </div>

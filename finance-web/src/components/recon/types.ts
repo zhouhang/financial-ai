@@ -79,6 +79,8 @@ export interface ReconTaskListItem {
   scheduleType: string;
   scheduleExpr: string;
   bizDateOffset: string;
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
   channelConfigId: string;
   ownerSummary: string;
   status: 'enabled' | 'paused';
@@ -143,6 +145,8 @@ export interface ReconTaskListItem {
   scheduleType: string;
   scheduleExpr: string;
   bizDateOffset: string;
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
   channelConfigId: string;
   ownerSummary: string;
   status: 'enabled' | 'paused';

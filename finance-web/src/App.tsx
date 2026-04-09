@@ -227,6 +227,7 @@ export default function App() {
   const [selectedDataConnectionView, setSelectedDataConnectionView] = useState<DataConnectionView>('data_sources');
   const [selectedDataSourceKind, setSelectedDataSourceKind] = useState<DataSourceKind>('platform_oauth');
   const [selectedCollaborationProvider, setSelectedCollaborationProvider] = useState<CollaborationProvider>('dingtalk_dws');
+  const [procRules, setProcRules] = useState<UserTaskRule[]>([]);
   const [reconRules, setReconRules] = useState<UserTaskRule[]>([]);
   const [reconExecutionMode, setReconExecutionMode] = useState<ReconExecutionMode>('upload');
   const [reconWorkspaceMode, setReconWorkspaceMode] = useState<ReconWorkspaceMode>('upload');
@@ -247,23 +248,23 @@ export default function App() {
     let aborted = false;
 
     if (!authToken) {
+      setProcRules([]);
       setReconRules([]);
       return undefined;
     }
 
-    const loadReconRules = async () => {
+    const loadTaskRules = async () => {
       try {
         const response = await fetch('/api/proc/list_user_tasks', {
           headers: { Authorization: `Bearer ${authToken}` },
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(String(data?.detail || data?.message || '加载对账规则失败'));
+          throw new Error(String(data?.detail || data?.message || '加载任务规则失败'));
         }
 
         const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
-        const rules = tasks
-          .filter((task: { task_type?: string }) => task.task_type === 'recon')
+        const allRules = tasks
           .flatMap((task: {
             task_code?: string;
             task_name?: string;
@@ -288,17 +289,19 @@ export default function App() {
           .filter((rule: UserTaskRule) => rule.rule_code);
 
         if (!aborted) {
-          setReconRules(rules);
+          setProcRules(allRules.filter((rule: UserTaskRule) => rule.task_type === 'proc'));
+          setReconRules(allRules.filter((rule: UserTaskRule) => rule.task_type === 'recon'));
         }
       } catch (error) {
         if (!aborted) {
-          console.error('加载对账规则失败:', error);
+          console.error('加载任务规则失败:', error);
+          setProcRules([]);
           setReconRules([]);
         }
       }
     };
 
-    void loadReconRules();
+    void loadTaskRules();
     return () => {
       aborted = true;
     };
@@ -1408,6 +1411,10 @@ export default function App() {
     setReconWorkspaceMode(entry);
     setReconExecutionMode('upload');
 
+    if (entry === 'center') {
+      return;
+    }
+
     const targetRule =
       selectedTask?.task_type === 'recon'
         ? selectedTask
@@ -1455,6 +1462,12 @@ export default function App() {
     return [...reconRules, selectedTask];
   }, [reconRules, selectedTask]);
 
+  const availableProcRules = useMemo(() => {
+    if (selectedTask?.task_type !== 'proc') return procRules;
+    if (procRules.some((rule) => rule.rule_code === selectedTask.rule_code)) return procRules;
+    return [...procRules, selectedTask];
+  }, [procRules, selectedTask]);
+
   const handleSelectReconRule = useCallback(
     (ruleCode: string) => {
       const rule = availableReconRules.find((item) => item.rule_code === ruleCode);
@@ -1462,6 +1475,15 @@ export default function App() {
       updateConversationTaskContext(activeConvId, rule);
     },
     [activeConvId, availableReconRules, updateConversationTaskContext],
+  );
+
+  const handleSelectProcRule = useCallback(
+    (ruleCode: string) => {
+      const rule = availableProcRules.find((item) => item.rule_code === ruleCode);
+      if (!rule) return;
+      updateConversationTaskContext(activeConvId, rule);
+    },
+    [activeConvId, availableProcRules, updateConversationTaskContext],
   );
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
@@ -1507,7 +1529,7 @@ export default function App() {
       : reconRules.find((rule) => rule.rule_code) ?? EMPTY_RECON_RULE;
   const isReconWorkspace =
     panelView !== 'data-connections' &&
-    (selectedTask?.task_type === 'recon' || reconWorkspaceMode === 'center');
+    reconWorkspaceMode === 'center';
   const chatAreaNode = (
     <ChatArea
       onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
@@ -1528,13 +1550,12 @@ export default function App() {
         setIsLoginModalOpen(true);
       }}
       streamingMessageId={streamingMessageId}
-      selectedTask={selectedTask?.task_type === 'recon' ? selectedTask : null}
+      selectedTask={selectedTask ?? null}
+      taskRules={selectedTask?.task_type === 'proc' ? availableProcRules : []}
+      selectedRuleCode={selectedTask?.task_type === 'proc' ? selectedTask.rule_code : null}
+      onSelectTaskRule={handleSelectProcRule}
       reconRules={selectedTask?.task_type === 'recon' ? availableReconRules : []}
-      selectedReconRuleCode={
-        selectedTask?.task_type === 'recon'
-          ? selectedTask.rule_code
-          : null
-      }
+      selectedReconRuleCode={selectedTask?.task_type === 'recon' ? selectedTask.rule_code : null}
       reconExecutionMode={reconExecutionMode}
       onSelectReconRule={handleSelectReconRule}
       onChangeReconExecutionMode={setReconExecutionMode}

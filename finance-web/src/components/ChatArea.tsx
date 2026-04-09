@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Paperclip,
@@ -10,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { ConnectionStatus, Message, MessageAttachment, UploadedFile, UserTaskRule } from '../types';
 import MessageBubble, { LoadingIndicator } from './MessageBubble';
-import ReconConversationBar, { type ReconExecutionMode } from './recon/ReconConversationBar';
+import type { ReconExecutionMode } from './recon/ReconConversationBar';
 
 /** 仅允许上传 Excel 和 CSV 文件 */
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv'];
@@ -71,6 +72,12 @@ interface ChatAreaProps {
   streamingMessageId?: string | null;
   /** 选中的任务 */
   selectedTask?: UserTaskRule | null;
+  /** 当前任务下可选规则 */
+  taskRules?: UserTaskRule[];
+  /** 当前选中的规则 code */
+  selectedRuleCode?: string | null;
+  /** 切换规则 */
+  onSelectTaskRule?: (ruleCode: string) => void;
   /** 对账规则列表，主线程接入后可启用规则切换 */
   reconRules?: UserTaskRule[];
   /** 当前选中的对账规则 code */
@@ -104,12 +111,13 @@ export default function ChatArea({
   streamingMessageId,
   authToken,
   selectedTask,
+  taskRules = [],
+  selectedRuleCode,
+  onSelectTaskRule,
   reconRules = [],
   selectedReconRuleCode,
   reconExecutionMode,
   onSelectReconRule,
-  onChangeReconExecutionMode,
-  onOpenDataConnections,
   hideHeader = false,
 }: ChatAreaProps) {
   const [inputText, setInputText] = useState('');
@@ -122,7 +130,19 @@ export default function ChatArea({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  const isProcContext = selectedTask?.task_type === 'proc';
   const isReconContext = selectedTask?.task_type === 'recon';
+  const availableTaskRules =
+    isProcContext && taskRules.length > 0
+      ? taskRules
+      : isProcContext && selectedTask
+        ? [selectedTask]
+        : [];
+  const currentTaskRule =
+    availableTaskRules.find((rule) => rule.rule_code === selectedRuleCode) ??
+    (isProcContext ? selectedTask : null) ??
+    availableTaskRules[0] ??
+    null;
   const availableReconRules = isReconContext
     ? reconRules.filter((rule) => rule.task_type === 'recon')
     : [];
@@ -134,6 +154,16 @@ export default function ChatArea({
       availableReconRules[0] ??
       null
     : null;
+  const headerRuleOptions = isProcContext
+    ? availableTaskRules
+    : isReconContext
+      ? availableReconRules
+      : [];
+  const headerSelectedRuleCode = isProcContext
+    ? selectedRuleCode ?? currentTaskRule?.rule_code ?? ''
+    : isReconContext
+      ? selectedReconRuleCode ?? currentReconRule?.rule_code ?? ''
+      : '';
   const activeStagedFiles =
     isReconContext && resolvedReconExecutionMode === 'data_source'
       ? []
@@ -142,17 +172,6 @@ export default function ChatArea({
     isReconContext &&
     resolvedReconExecutionMode === 'data_source' &&
     Boolean(currentReconRule);
-
-  const handleReconExecutionModeChange = useCallback(
-    (mode: ReconExecutionMode) => {
-      if (onChangeReconExecutionMode) {
-        onChangeReconExecutionMode(mode);
-        return;
-      }
-      setInternalReconExecutionMode(mode);
-    },
-    [onChangeReconExecutionMode]
-  );
 
   useEffect(() => {
     if (reconExecutionMode) {
@@ -302,8 +321,10 @@ export default function ChatArea({
     const finalText =
       text ||
       (attachments && attachments.length > 0
-        ? `已上传 ${attachments.length} 个文件，请按当前对账规则处理。`
-        : `请按规则「${currentReconRule?.name || '当前对账规则'}」使用数据源执行对账。`);
+        ? `已上传 ${attachments.length} 个文件，请按当前规则处理。`
+        : isReconContext
+          ? `请按规则「${currentReconRule?.name || '当前对账规则'}」使用数据源执行对账。`
+          : `请按规则「${currentTaskRule?.name || '当前规则'}」处理。`);
 
     // 先发送用户消息（显示文件附件）
     onSendMessage(finalText, attachments);
@@ -316,10 +337,12 @@ export default function ChatArea({
     activeStagedFiles,
     canStartReconFromDataSource,
     currentReconRule?.name,
+    currentTaskRule?.name,
     inputText,
     isLoading,
     isUploading,
     authToken,
+    isReconContext,
     onFileUploaded,
     onLogin,
     onSendMessage,
@@ -390,13 +413,15 @@ export default function ChatArea({
     ? resolvedReconExecutionMode === 'data_source'
       ? `当前规则：${currentReconRule?.name || '未选择规则'}。可直接发送开始按数据源执行，或补充说明。`
       : `当前规则：${currentReconRule?.name || '未选择规则'}。可上传待对账文件，或补充执行说明。`
-    : '描述您的分析需求 (Shift+Enter 换行)...';
+    : selectedTask
+      ? `当前规则：${currentTaskRule?.name || selectedTask.name || '未选择规则'}。可上传文件，或补充执行说明。`
+      : '描述您的分析需求 (Shift+Enter 换行)...';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col min-w-0 bg-surface-secondary relative">
       {/* ── Header ── */}
       {!hideHeader && (
-        <header className="sticky top-0 z-20 h-14 bg-surface border-b border-border flex items-center justify-between px-6 shrink-0">
+        <header className="sticky top-0 z-20 h-14 bg-surface border-b border-border flex items-center justify-between gap-4 px-6 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             {onToggleSidebar && (
               <button
@@ -417,15 +442,38 @@ export default function ChatArea({
                 connectionStatus === 'connected'
                   ? 'bg-green-500'
                   : connectionStatus === 'connecting'
-                  ? 'bg-yellow-500 animate-pulse'
-                  : 'bg-red-500'
+                    ? 'bg-yellow-500 animate-pulse'
+                    : 'bg-red-500'
               }`}
             />
             <span className="text-sm font-medium text-text-primary truncate">
               {conversationTitle || 'Tally 智能财务助手'}
             </span>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex min-w-0 items-center justify-end gap-2 shrink-0">
+            {(isProcContext || isReconContext) && (
+              <div className="relative min-w-[240px] max-w-[360px]">
+                <select
+                  value={headerSelectedRuleCode}
+                  onChange={(event) => {
+                    if (isProcContext) {
+                      onSelectTaskRule?.(event.target.value);
+                      return;
+                    }
+                    onSelectReconRule?.(event.target.value);
+                  }}
+                  disabled={headerRuleOptions.length === 0}
+                  className="h-11 w-full appearance-none rounded-xl border border-border bg-surface pl-4 pr-12 text-sm font-medium text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-surface-secondary disabled:text-text-muted"
+                >
+                  {headerRuleOptions.map((rule) => (
+                    <option key={rule.rule_code} value={rule.rule_code}>
+                      {rule.name}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
+              </div>
+            )}
             {!currentUser && onLogin ? (
               <button
                 onClick={onLogin}
@@ -439,15 +487,15 @@ export default function ChatArea({
                   connectionStatus === 'connected'
                     ? 'bg-green-50 text-green-600'
                     : connectionStatus === 'connecting'
-                    ? 'bg-yellow-50 text-yellow-600'
-                    : 'bg-red-50 text-red-600'
+                      ? 'bg-yellow-50 text-yellow-600'
+                      : 'bg-red-50 text-red-600'
                 }`}
               >
                 {connectionStatus === 'connected'
                   ? '已连接'
                   : connectionStatus === 'connecting'
-                  ? '连接中'
-                  : '未连接'}
+                    ? '连接中'
+                    : '未连接'}
               </span>
             )}
           </div>
@@ -456,19 +504,6 @@ export default function ChatArea({
 
       {/* ── Messages ── */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-5">
-        {isReconContext && !hideHeader && (
-          <ReconConversationBar
-            ruleName={currentReconRule?.name ?? selectedTask?.name ?? null}
-            rules={availableReconRules}
-            selectedRuleCode={selectedReconRuleCode ?? currentReconRule?.rule_code ?? null}
-            executionMode={resolvedReconExecutionMode}
-            showRuleSelector
-            onSelectRule={onSelectReconRule}
-            onChangeExecutionMode={handleReconExecutionModeChange}
-            onOpenDataConnections={onOpenDataConnections}
-          />
-        )}
-
         {/* 会话加载中 */}
         {isLoadingConversation && (
           <div className="flex items-center justify-center h-full">
