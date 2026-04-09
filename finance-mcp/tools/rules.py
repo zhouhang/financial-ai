@@ -6,6 +6,7 @@ Rules MCP 工具定义和实现。
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +44,48 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="save_rule",
+            description="保存或更新 rule_detail 规则记录。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {
+                        "type": "string",
+                        "description": "JWT token，用户登录后获取的身份证书",
+                    },
+                    "rule_code": {
+                        "type": "string",
+                        "description": "规则编码（全局唯一）",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "规则名称",
+                    },
+                    "rule": {
+                        "type": "object",
+                        "description": "规则 JSON",
+                    },
+                    "rule_type": {
+                        "type": "string",
+                        "description": "规则类型：file/proc/recon",
+                    },
+                    "remark": {
+                        "type": "string",
+                        "description": "备注",
+                    },
+                    "task_id": {
+                        "type": ["integer", "null"],
+                        "description": "可选：关联任务 ID",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "若 rule_code 已存在，是否覆盖当前用户自己的规则",
+                    },
+                },
+                "required": ["auth_token", "rule_code", "name", "rule", "rule_type"],
+            },
+        ),
+        Tool(
             name="list_user_tasks",
             description="获取当前用户可用的任务列表。需要登录 token。",
             inputSchema={
@@ -64,6 +107,8 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
     try:
         if name == "get_rule":
             return await _handle_get_rule(arguments)
+        if name == "save_rule":
+            return await _handle_save_rule(arguments)
         if name == "list_user_tasks":
             return await _handle_list_user_tasks(arguments)
         return {"error": f"未知的工具: {name}"}
@@ -163,6 +208,119 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
         return result
     except Exception as e:
         logger.error(f"[SQL] 查询 rule_detail 失败: {e}", exc_info=True)
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def _clear_rule_cache(rule_code: str) -> None:
+    keys = [key for key in _rule_cache if key[0] == rule_code]
+    for key in keys:
+        _rule_cache.pop(key, None)
+
+
+def save_rule(
+    *,
+    rule_code: str,
+    name: str,
+    rule: dict[str, Any],
+    rule_type: str,
+    user_id: str,
+    remark: str = "",
+    task_id: int | None = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """保存或更新 rule_detail。"""
+    normalized_rule_code = rule_code.strip()
+    normalized_name = name.strip()
+    normalized_rule_type = rule_type.strip().lower()
+    normalized_remark = remark.strip()
+    if not normalized_rule_code:
+        raise ValueError("rule_code 不能为空")
+    if not normalized_name:
+        raise ValueError("name 不能为空")
+    if normalized_rule_type not in {"file", "proc", "recon"}:
+        raise ValueError("rule_type 仅支持 file/proc/recon")
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, user_id
+            FROM rule_detail
+            WHERE rule_code = %s
+            LIMIT 1
+            """,
+            (normalized_rule_code,),
+        )
+        row = cur.fetchone()
+
+        if row:
+            existing_id = row[0]
+            existing_user_id = str(row[1] or "")
+            if not overwrite:
+                raise ValueError(f"rule_code '{normalized_rule_code}' 已存在")
+            if existing_user_id and existing_user_id != user_id:
+                raise ValueError(f"rule_code '{normalized_rule_code}' 不属于当前用户，不能覆盖")
+            cur.execute(
+                """
+                UPDATE rule_detail
+                   SET name = %s,
+                       rule = %s::jsonb,
+                       remark = %s,
+                       rule_type = %s,
+                       user_id = %s,
+                       task_id = %s
+                 WHERE id = %s
+             RETURNING id, user_id, task_id, rule_code, name, rule, rule_type, remark
+                """,
+                (
+                    normalized_name,
+                    json.dumps(rule, ensure_ascii=False),
+                    normalized_remark,
+                    normalized_rule_type,
+                    user_id,
+                    task_id,
+                    existing_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO rule_detail (rule_code, rule, remark, rule_type, user_id, name, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s)
+             RETURNING id, user_id, task_id, rule_code, name, rule, rule_type, remark
+                """,
+                (
+                    normalized_rule_code,
+                    json.dumps(rule, ensure_ascii=False),
+                    normalized_remark,
+                    normalized_rule_type,
+                    user_id,
+                    normalized_name,
+                    task_id,
+                ),
+            )
+
+        saved = cur.fetchone()
+        conn.commit()
+        _clear_rule_cache(normalized_rule_code)
+        return {
+            "id": saved[0],
+            "user_id": saved[1],
+            "task_id": saved[2],
+            "rule_code": saved[3],
+            "name": saved[4],
+            "rule": saved[5],
+            "rule_type": saved[6],
+            "remark": saved[7],
+        }
+    except Exception:
+        if conn:
+            conn.rollback()
         raise
     finally:
         if conn:
@@ -295,6 +453,53 @@ async def _handle_get_rule(arguments: dict) -> dict:
     except Exception as e:
         logger.error(f"获取规则失败: {e}")
         return {"success": False, "error": f"获取规则失败: {str(e)}"}
+
+
+async def _handle_save_rule(arguments: dict) -> dict:
+    auth_token = str(arguments.get("auth_token") or "").strip()
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+
+    user = get_user_from_token(auth_token)
+    if not user:
+        return {"success": False, "error": "token 无效或已过期，请重新登录"}
+
+    user_id = str(user.get("user_id") or user.get("id") or "")
+    if not user_id:
+        return {"success": False, "error": "token 中缺少用户标识"}
+
+    rule_code = str(arguments.get("rule_code") or "").strip()
+    name = str(arguments.get("name") or "").strip()
+    rule = arguments.get("rule")
+    rule_type = str(arguments.get("rule_type") or "").strip()
+    remark = str(arguments.get("remark") or "").strip()
+    overwrite = bool(arguments.get("overwrite", False))
+    task_id_raw = arguments.get("task_id")
+    task_id = int(task_id_raw) if isinstance(task_id_raw, int) else None
+
+    if not isinstance(rule, dict):
+        return {"success": False, "error": "rule 必须是对象"}
+
+    try:
+        saved = save_rule(
+            rule_code=rule_code,
+            name=name,
+            rule=rule,
+            rule_type=rule_type,
+            user_id=user_id,
+            remark=remark,
+            task_id=task_id,
+            overwrite=overwrite,
+        )
+        return {
+            "success": True,
+            "rule_code": str(saved.get("rule_code") or ""),
+            "data": saved,
+            "message": "规则保存成功",
+        }
+    except Exception as e:
+        logger.error(f"保存规则失败: {e}", exc_info=True)
+        return {"success": False, "error": f"保存规则失败: {str(e)}"}
 
 
 async def _handle_list_user_tasks(arguments: dict) -> dict:

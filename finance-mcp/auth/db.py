@@ -6175,6 +6175,33 @@ def disable_execution_run_plan(*, company_id: str, plan_id: str) -> dict | None:
     return update_execution_run_plan(company_id=company_id, plan_id=plan_id, is_enabled=False)
 
 
+def delete_execution_run_plan(*, company_id: str, plan_id: str) -> dict | None:
+    """删除执行运行计划。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM execution_run_plans
+                    WHERE company_id = %s
+                      AND id = %s
+                    RETURNING id, company_id, plan_code, plan_name, scheme_code,
+                              schedule_type, schedule_expr, biz_date_offset,
+                              input_bindings_json, channel_config_id,
+                              owner_mapping_json, plan_meta_json,
+                              is_enabled, created_by, created_at, updated_at
+                    """,
+                    (company_id, plan_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"删除 execution_run_plans 失败 (company_id={company_id}, plan_id={plan_id}): {e}")
+        return None
+
+
 def get_execution_run_plan(*, company_id: str, plan_id: str | None = None, plan_code: str | None = None) -> dict | None:
     """查询单个执行运行计划（按 id 或 plan_code）。"""
     conn_manager = get_conn()

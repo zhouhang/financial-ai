@@ -51,6 +51,10 @@ from tools.recon_auto_runs import (
     create_tools as create_recon_auto_tools,
     handle_tool_call as handle_recon_auto_tool_call,
 )
+from tools.execution_runs import (
+    create_tools as create_execution_tools,
+    handle_tool_call as handle_execution_tool_call,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -131,8 +135,26 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载自动对账闭环工具失败: {str(e)}", exc_info=True)
         recon_auto_tools = []
+
+    try:
+        execution_tools = create_execution_tools()
+        logger.info(f"execution 模型工具数量: {len(execution_tools)}")
+    except Exception as e:
+        logger.error(f"加载 execution 模型工具失败: {str(e)}", exc_info=True)
+        execution_tools = []
     
-    all_tools = auth_tools + upload_tools + file_validate_tools + proc_tools + rules_tools + recon_tools_2 + platform_tools + data_source_tools + recon_auto_tools
+    all_tools = (
+        auth_tools
+        + upload_tools
+        + file_validate_tools
+        + proc_tools
+        + rules_tools
+        + recon_tools_2
+        + platform_tools
+        + data_source_tools
+        + recon_auto_tools
+        + execution_tools
+    )
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -223,6 +245,29 @@ _RECON_AUTO_TOOL_NAMES = {
     "recon_exception_update",
 }
 
+_EXECUTION_TOOL_NAMES = {
+    "execution_scheme_list",
+    "execution_scheme_get",
+    "execution_scheme_create",
+    "execution_scheme_update",
+    "execution_scheme_delete",
+    "execution_run_plan_list",
+    "execution_run_plan_get",
+    "execution_run_plan_create",
+    "execution_run_plan_update",
+    "execution_run_plan_delete",
+    "execution_run_list",
+    "execution_run_get",
+    "execution_run_create",
+    "execution_run_update",
+    "execution_run_exceptions",
+    "execution_run_exception_get",
+    "execution_run_exception_create",
+    "execution_run_exception_update",
+    "execution_proc_draft_trial",
+    "execution_recon_draft_trial",
+}
+
 _UPLOAD_TOOL_NAMES = {"file_upload"}
 
 
@@ -268,6 +313,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         elif name in _RECON_AUTO_TOOL_NAMES:
             result = await handle_recon_auto_tool_call(name, arguments)
 
+        # 10) execution 方案/计划/运行模块
+        elif name in _EXECUTION_TOOL_NAMES:
+            result = await handle_execution_tool_call(name, arguments)
+
         else:
             result = {"error": f"未知的工具: {name}"}
         
@@ -302,7 +351,7 @@ async def health_check(request):
         "status": "healthy",
         "service": "financial-mcp-server",
         "version": "1.0.0",
-        "modules": ["auth", "upload", "rules", "proc", "recon", "platform", "data_source"]
+        "modules": ["auth", "upload", "rules", "proc", "recon", "platform", "data_source", "execution"]
     })
 
 
