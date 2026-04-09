@@ -1,0 +1,186 @@
+{
+  "project": "financial-ai",
+  "branchName": "ralph/proc-draft-and-compat-check",
+  "description": "Recon 方案向导第二步：让 AI 生成的 proc 草稿叙事具体到数据集.字段.操作并按左右分组、强制 JSON 通过 ProcStepsRuleSetModel 校验、新增 proc/recon 规则与所选数据源的运行时字段兼容性校验（选择时黄色警告、运行前红色阻塞）。",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "LLM 提示词强制每个 proc step 输出 description 字段",
+      "description": "作为 AI 方案设计器，我需要让 LLM 在每个 proc step 中输出具体的 description 文字，说明输入数据集名、字段、操作和目标表，便于前端原样渲染。",
+      "acceptanceCriteria": [
+        "修改 finance-agents/data-agent/graphs/recon/scheme_design/executor.py 的 _build_proc_prompt，新增要求：每个 step 必须输出 description 字段，描述输入数据集名、涉及字段、操作（filter/aggregate/mapping/write）和目标表",
+        "提示词中给出一个 description 正面示例，且示例 mapping 使用 target_field + value.type=source + source.alias/field 的合法格式",
+        "_build_proc_draft 本地 fallback 为每个 step 写入最简 description 字符串",
+        "_normalize_proc_draft 在 step 缺少 description 时不抛错（用空字符串占位）",
+        "新增单元测试：含 description 的合法草稿原样返回；不含 description 的草稿规范化后每个 step 都有 description 键",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "在 finance-mcp 新增 rule_validate MCP 工具",
+      "description": "作为规则体系维护者，我需要把 validate_rule_record 暴露成 MCP 工具 rule_validate，作为规则 JSON 校验的唯一入口。",
+      "acceptanceCriteria": [
+        "在 finance-mcp/tools/rules.py 或新建 finance-mcp/tools/rule_validate_tool.py 注册 MCP 工具 name=rule_validate",
+        "input_schema 包含 rule_code(str?), rule(object), expected_kind(枚举: proc_steps/recon/proc/merge/file_validation/proc_entry)",
+        "工具内部委托给 tools.rule_schema.validate_rule_record，返回体透传 success/validation_errors/rule/rule_type",
+        "在 finance-mcp/unified_mcp_server.py 的工具注册列表中挂载 rule_validate（参考 create_*_tools 的注册模式）",
+        "新增集成测试 finance-mcp/qa：传入合法 proc_steps JSON 返回 success=True；传入含 from/to mapping 的 JSON 返回 success=False 且错误 path 指向 steps.*.mappings；传入合法 recon JSON 返回 success=True",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "scheme_design 执行器迁移到 MCP rule_validate 并自动重试一次",
+      "description": "作为 AI 方案设计器，我需要 executor.py 通过 MCP 调用 rule_validate（不再用 importlib 动态加载 finance-mcp 模块），并在校验失败时自动拼错误重试一次 LLM。",
+      "acceptanceCriteria": [
+        "修改 finance-agents/data-agent/graphs/recon/scheme_design/executor.py 的 _normalize_proc_draft 和 _normalize_recon_draft 改为通过 tools/mcp_client.py 调用 rule_validate MCP 工具",
+        "完全删除 _load_finance_mcp_rule_schema_module 函数及其 importlib.util.spec_from_file_location 调用，grep 不到任何 finance_mcp_rule_schema 字样",
+        "首次校验失败时，读取 validation_errors[0].path/message，拼成中文修复提示附加到原 prompt 末尾，重新调用 LLM 一次；二次仍失败抛 ValueError，错误信息含首条 path/message",
+        "自动重试只执行一次，禁止无限循环",
+        "新增单元测试：mock LLM 首次返回带 from/to 的 mapping、第二次返回合法 JSON，executor 最终返回合法 JSON 且 LLM 被调用 2 次",
+        "新增单元测试：mock LLM 两次都返回非法 JSON，executor 抛异常且异常信息含 mappings 字样",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "实现 rule_contract 输入契约抽取函数",
+      "description": "作为兼容性校验模块，我需要一个 extract_rule_input_contract(rule, kind) 函数，从 proc_steps/recon 规则中静态抽出每个输入位置需要的字段集合。",
+      "acceptanceCriteria": [
+        "新建 finance-mcp/tools/rule_contract.py，导出 extract_rule_input_contract(rule: dict, kind: str) -> dict",
+        "返回结构：{ kind, inputs: [{ role, table, required_fields }] }",
+        "proc_steps 抽取：扫描所有 write_dataset step 的 sources[].alias，required_fields = mappings[].value.source.field（同 alias）∪ match.sources[*].keys[].field（同 alias）∪ aggregate[*].group_fields（同 source_alias）",
+        "recon 抽取：固定 left_recon_ready 和 right_recon_ready 两个角色，left.required_fields 来自 rules[*].recon.key_columns.mappings[].source_field ∪ compare_columns.columns[].source_column ∪ aggregation.group_by[].source_field ∪ aggregation.aggregations[].source_field；right 对应 *.target_field/target_column",
+        "字段抽取严格按源字段名（不做大小写折叠）",
+        "单元测试：proc 含 2 sources + 3 mappings 正确聚合；recon 含聚合 + compare_columns left/right 字段集合正确；空 steps/rules 返回 inputs=[] 不抛错",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "在 finance-mcp 新增 rule_contract_extract MCP 工具",
+      "description": "作为方案向导后端，我需要通过 MCP 拿到指定 rule_code 的输入契约，避免在前端或 data-agent 重复实现字段扫描。",
+      "acceptanceCriteria": [
+        "在 finance-mcp/tools/rules.py 注册 MCP 工具 name=rule_contract_extract",
+        "input_schema：{ rule_code: str, expected_kind: str }",
+        "工具行为：调用 load_and_validate_rule(rule_code, expected_kind)，若合法则调用 US-004 的 extract_rule_input_contract 并返回 { success: true, contract }；不合法则返回 success=false + validation_errors",
+        "在 unified_mcp_server.py 注册挂载",
+        "集成测试：对数据库中一条真实 proc_steps 规则调用返回结构正确；对不存在的 rule_code 返回 RULE_NOT_FOUND",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "新增 /scheme_design/compatibility_check API 接口",
+      "description": "作为方案向导前端，我需要一个 HTTP 接口接受所选规则 + 数据源字段列表，返回字段兼容性检查结果。",
+      "acceptanceCriteria": [
+        "在 finance-agents/data-agent/graphs/recon/scheme_design/api.py 新增 POST /scheme_design/compatibility_check",
+        "入参 pydantic 模型：{ kind: 'proc_steps'|'recon', rule_code: str, bindings: [{ role, source_type, source_id, fields: list[str] }] }",
+        "后端调用 MCP rule_contract_extract 获取契约后逐个 role 比对 missing_fields = required_fields - provided_fields",
+        "严格字段名字符串相等（不做大小写折叠、不做同义词映射）",
+        "返回体：{ status: 'passed'|'failed', details: [{ role, required_fields, provided_fields, missing_fields, message }] }",
+        "rule_contract_extract 返回非 success 时整体 status=failed，details 带规则校验错误",
+        "单元测试：所有字段齐全 → passed；缺一个字段 → failed 且 missing_fields 命中；大小写不一致 → failed；未知 rule_code → failed 且 details 含 RULE_NOT_FOUND",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "前端重写 summarizeProcDraft 为左右分组编号叙事",
+      "description": "作为用户，我希望第二步看到的叙事文本按左右分组、每个子步骤指明具体数据集和字段操作，不再出现“当前选择的数据集”占位词。",
+      "acceptanceCriteria": [
+        "重写 finance-web/src/components/ReconWorkspace.tsx 的 summarizeProcDraft 函数",
+        "按 step.target_table 的 left_/right_ 前缀分到 left/right/other 三组，渲染顺序：左侧标题 + 左侧子步骤(1.1/1.2..) → 右侧标题 + 右侧子步骤(2.1/2.2..) → other（如有）",
+        "每个子步骤优先使用 step.description 文本；description 缺失时回退到结构化拼接（写出 X 数据集的 Y 字段经过 Z 操作写入 target.A 字段），任何情况下都不出现“当前选择的数据集”字样",
+        "标题固定为 ## 左侧数据整理 / ## 右侧数据整理；steps 为空时显示“尚未生成整理步骤”",
+        "Vitest 单元测试：4 个 step (left create + left write + right create + right write) 输入下，输出文本同时含两个一级标题、左侧子步骤 1.1/1.2 编号、右侧 2.1/2.2 编号，且每个 write_dataset 子步骤含对应 source.table 的名字",
+        "Vitest 单元测试：含 description 字段时输出含 description 原文；不含 description 时输出不含“当前选择的数据集”",
+        "Tests pass",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "前端在选择规则/数据源时显示黄色兼容性警告",
+      "description": "作为用户，当我在第二步/第三步选择已有规则后，希望立刻看到字段不兼容的黄色提示而无需等到点运行。",
+      "acceptanceCriteria": [
+        "扩展 CompatibilityCheckResult 类型：status 增加 'checking'|'warning'，details 数组项包含 role、missingFields、message",
+        "在 ReconWorkspace.tsx 中：proc configMode==='existing' 且 selectedProcConfigId/leftSourceIds/rightSourceIds 变更时防抖 400ms 调用 /scheme_design/compatibility_check；recon 同理（基于已选 recon 规则 + 当前 proc 输出 schema）",
+        "失败结果以 status='warning' 写入 procCompatibility/reconCompatibility state（不阻塞编辑）",
+        "SchemeWizardTargetProcStep.tsx 和 SchemeWizardReconStep.tsx 渲染：warning 显示黄色 banner + AlertTriangle 图标，文案含“所选数据源缺少字段：<role>.<field>，仍可继续但运行时会被阻塞”；passed 显示绿色 banner",
+        "rule_code 为空时不触发请求",
+        "Vitest 单元测试：mock 返回 missing_fields → state=warning 且 banner 含“缺少字段”；返回 passed → state=passed；rule_code 空 → 未发起 fetch",
+        "Tests pass",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "前端在试运行/提交方案前做红色阻塞式兼容性校验",
+      "description": "作为用户，当我点击试运行或提交方案时，若字段不兼容应被红色提示阻止，避免浪费执行资源。",
+      "acceptanceCriteria": [
+        "ReconWorkspace.tsx 中的 onTrialRecon/onGenerateRecon/onSubmitScheme handler 在执行前同步再调用一次 /scheme_design/compatibility_check（用最新数据源/规则/proc 输出 schema）",
+        "返回 failed 时阻止后续动作，顶部显示红色 banner 列出 missing_fields，按钮禁用并聚焦受影响的选择框；trialDisabled 计算追加 status==='failed' 条件",
+        "返回 passed 时继续原有流程",
+        "请求异常（网络/服务不可达）时显示 warning 级提示“兼容性检查失败，已跳过校验继续执行”，不永久阻塞",
+        "Vitest 单元测试：mock failed → 按钮被阻止/弹红色提示；mock passed → 继续调用 onTrialRecon/onGenerateRecon；mock 异常 → 警告但继续执行",
+        "Tests pass",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "端到端坏 LLM 输出 fixture 回归测试套件",
+      "description": "作为维护者，我需要一批典型坏 LLM 输出的 fixture 文件，对 executor → rule_validate → retry → summarize 全链路做端到端回归测试。",
+      "acceptanceCriteria": [
+        "在 finance-agents/data-agent/tests/recon/scheme_design/fixtures/ 下新建 4 个文件：llm_output_from_to_mapping.json（mappings 用 from/to）、llm_output_missing_step_id.json、llm_output_wrong_value_type.json（value.type=calc）、llm_output_valid.json",
+        "新增 test_proc_draft_pipeline.py：对每个坏 fixture，mock LLM 第一次返回该 fixture、第二次返回 valid fixture，断言 executor 最终返回 draft 通过 rule_validate 且 LLM 调用次数=2；对 valid fixture 调用次数=1",
+        "新增 ReconWorkspace.tsx 的 summarizeProcDraft Vitest 快照测试：使用一份规范化 fixture，输出文本同时含“左侧数据整理”和“右侧数据整理”两个一级标题",
+        "新增 test_compatibility_check_api.py：使用内存规则 fixture + mock MCP 客户端覆盖字段齐全、缺字段、规则不存在三种场景",
+        "所有测试可在 CI 自动运行：pytest finance-agents/data-agent/tests/recon/scheme_design 和 pnpm -C finance-web test 全绿",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
