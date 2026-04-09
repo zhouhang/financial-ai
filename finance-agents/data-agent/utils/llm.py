@@ -59,4 +59,5 @@ def get_llm(
         base_url=base_url,
         temperature=temperature,
         streaming=True,  # 启用流式输出
+        request_timeout=60,
     )

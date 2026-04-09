@@ -287,6 +287,42 @@ async def load_scheme_node(state: AgentState) -> dict[str, Any]:
             ctx["failed_reason"] = str(scheme_result.get("error") or "方案不存在")
             return {"recon_ctx": ctx}
 
+    scheme_meta = _safe_dict(
+        scheme.get("scheme_meta_json")
+        or scheme.get("scheme_meta")
+        or scheme.get("meta")
+    )
+    embedded_rule = _safe_dict(scheme_meta.get("recon_rule_json"))
+    if embedded_rule:
+        embedded_rule_code = str(
+            scheme.get("recon_rule_code")
+            or run_plan.get("legacy_rule_code")
+            or ctx.get("rule_code")
+            or f"embedded:{scheme_code or 'scheme'}"
+        ).strip()
+        ctx.update(
+            {
+                "scheme": scheme,
+                "scheme_code": scheme_code or str(ctx.get("scheme_code") or ""),
+                "rule_code": embedded_rule_code,
+                "rule_name": str(
+                    embedded_rule.get("rule_name")
+                    or scheme_meta.get("recon_rule_name")
+                    or scheme.get("name")
+                    or embedded_rule_code
+                ),
+                "rule": embedded_rule,
+                "file_rule_code": str(
+                    scheme.get("file_rule_code")
+                    or embedded_rule.get("file_rule_code")
+                    or ""
+                ).strip(),
+                "proc_rule_code": str(scheme.get("proc_rule_code") or "").strip(),
+                "scheme_type": str(scheme.get("scheme_type") or "recon"),
+            }
+        )
+        return {"recon_ctx": ctx}
+
     recon_rule_code = str(
         scheme.get("recon_rule_code")
         or run_plan.get("legacy_rule_code")
@@ -566,4 +602,3 @@ def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     ctx["auto_notify_status"] = "skipped"
     return {"recon_ctx": ctx}
-

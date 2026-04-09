@@ -32,12 +32,12 @@ def route_after_router(state: AgentState) -> str:
     recon_ctx = state.get("recon_ctx") or {}
     pending_manual_notify = bool(recon_ctx.get("pending_manual_notify")) and bool(state.get("auth_token"))
 
+    if pending_manual_notify:
+        return "manual_notify_followup_graph"
     if intent == UserIntent.PROC.value:
         return "proc_subgraph"
     if intent == UserIntent.RECON.value:
         return "manual_scheme_run_graph"
-    if pending_manual_notify:
-        return "manual_notify_followup_graph"
     return END
 
 

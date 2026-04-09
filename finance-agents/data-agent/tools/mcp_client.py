@@ -545,6 +545,32 @@ async def get_file_validation_rule(rule_code: str, auth_token: str = "") -> dict
     return await call_mcp_tool("get_rule", args)
 
 
+async def save_rule(
+    auth_token: str,
+    *,
+    rule_code: str,
+    name: str,
+    rule: dict[str, Any],
+    rule_type: str,
+    remark: str = "",
+    task_id: int | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """保存或更新 rule_detail 规则。"""
+    args: dict[str, Any] = {
+      "auth_token": auth_token,
+      "rule_code": rule_code,
+      "name": name,
+      "rule": rule,
+      "rule_type": rule_type,
+      "remark": remark,
+      "overwrite": overwrite,
+    }
+    if task_id is not None:
+        args["task_id"] = task_id
+    return await call_mcp_tool("save_rule", args)
+
+
 async def validate_files(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
@@ -813,20 +839,33 @@ async def recon_exception_update(auth_token: str, exception_id: str, payload: di
 async def execution_scheme_list(
     auth_token: str,
     *,
+    include_disabled: bool = True,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_scheme_list",
-        {"auth_token": auth_token, "limit": limit, "offset": offset},
+        {
+            "auth_token": auth_token,
+            "include_disabled": include_disabled,
+            "limit": limit,
+            "offset": offset,
+        },
     )
 
 
-async def execution_scheme_get(auth_token: str, scheme_id: str) -> dict[str, Any]:
-    return await call_mcp_tool(
-        "execution_scheme_get",
-        {"auth_token": auth_token, "scheme_id": scheme_id},
-    )
+async def execution_scheme_get(
+    auth_token: str,
+    *,
+    scheme_id: str = "",
+    scheme_code: str = "",
+) -> dict[str, Any]:
+    args: dict[str, Any] = {"auth_token": auth_token}
+    if scheme_id:
+        args["scheme_id"] = scheme_id
+    if scheme_code:
+        args["scheme_code"] = scheme_code
+    return await call_mcp_tool("execution_scheme_get", args)
 
 
 async def execution_scheme_create(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -850,21 +889,34 @@ async def execution_scheme_delete(auth_token: str, scheme_id: str) -> dict[str, 
 async def execution_run_plan_list(
     auth_token: str,
     *,
+    include_disabled: bool = True,
     limit: int = 100,
     offset: int = 0,
-    scheme_id: str = "",
+    scheme_code: str = "",
 ) -> dict[str, Any]:
-    args: dict[str, Any] = {"auth_token": auth_token, "limit": limit, "offset": offset}
-    if scheme_id:
-        args["scheme_id"] = scheme_id
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "include_disabled": include_disabled,
+        "limit": limit,
+        "offset": offset,
+    }
+    if scheme_code:
+        args["scheme_code"] = scheme_code
     return await call_mcp_tool("execution_run_plan_list", args)
 
 
-async def execution_run_plan_get(auth_token: str, run_plan_id: str) -> dict[str, Any]:
-    return await call_mcp_tool(
-        "execution_run_plan_get",
-        {"auth_token": auth_token, "run_plan_id": run_plan_id},
-    )
+async def execution_run_plan_get(
+    auth_token: str,
+    *,
+    plan_id: str = "",
+    plan_code: str = "",
+) -> dict[str, Any]:
+    args: dict[str, Any] = {"auth_token": auth_token}
+    if plan_id:
+        args["plan_id"] = plan_id
+    if plan_code:
+        args["plan_code"] = plan_code
+    return await call_mcp_tool("execution_run_plan_get", args)
 
 
 async def execution_run_plan_create(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -876,19 +928,27 @@ async def execution_run_plan_create(auth_token: str, payload: dict[str, Any]) ->
 
 async def execution_run_plan_update(
     auth_token: str,
-    run_plan_id: str,
+    plan_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_run_plan_update",
-        {"auth_token": auth_token, "run_plan_id": run_plan_id, **(payload or {})},
+        {"auth_token": auth_token, "plan_id": plan_id, **(payload or {})},
     )
 
 
-async def execution_run_plan_delete(auth_token: str, run_plan_id: str) -> dict[str, Any]:
+async def execution_run_plan_delete(
+    auth_token: str,
+    plan_id: str,
+    plan_code: str | None = None,
+) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_run_plan_delete",
-        {"auth_token": auth_token, "run_plan_id": run_plan_id},
+        {
+            "auth_token": auth_token,
+            "plan_id": plan_id,
+            **({"plan_code": plan_code} if str(plan_code or "").strip() else {}),
+        },
     )
 
 
@@ -897,11 +957,14 @@ async def execution_run_list(
     *,
     limit: int = 100,
     offset: int = 0,
-    run_plan_id: str = "",
+    scheme_code: str = "",
+    plan_code: str = "",
 ) -> dict[str, Any]:
     args: dict[str, Any] = {"auth_token": auth_token, "limit": limit, "offset": offset}
-    if run_plan_id:
-        args["run_plan_id"] = run_plan_id
+    if scheme_code:
+        args["scheme_code"] = scheme_code
+    if plan_code:
+        args["plan_code"] = plan_code
     return await call_mcp_tool("execution_run_list", args)
 
 
@@ -923,7 +986,7 @@ async def execution_run_update(auth_token: str, run_id: str, payload: dict[str, 
     )
 
 
-async def execution_run_exception_list(
+async def execution_run_exceptions(
     auth_token: str,
     run_id: str,
     *,
@@ -931,8 +994,48 @@ async def execution_run_exception_list(
     offset: int = 0,
 ) -> dict[str, Any]:
     return await call_mcp_tool(
-        "execution_run_exception_list",
+        "execution_run_exceptions",
         {"auth_token": auth_token, "run_id": run_id, "limit": limit, "offset": offset},
+    )
+
+
+async def execution_run_exception_list(
+    auth_token: str,
+    run_id: str,
+    *,
+    limit: int = 500,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return await execution_run_exceptions(
+        auth_token,
+        run_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+async def execution_run_exception_get(auth_token: str, exception_id: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_get",
+        {"auth_token": auth_token, "exception_id": exception_id},
+    )
+
+
+async def execution_run_exception_create(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_create",
+        {"auth_token": auth_token, **(payload or {})},
+    )
+
+
+async def execution_run_exception_update(
+    auth_token: str,
+    exception_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_update",
+        {"auth_token": auth_token, "exception_id": exception_id, **(payload or {})},
     )
 
 

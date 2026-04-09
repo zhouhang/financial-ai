@@ -43,6 +43,20 @@ async def load_scheme_node(state: AgentState) -> dict[str, Any]:
         )
         if bool(scheme_result.get("success")):
             scheme = scheme_result.get("scheme") if isinstance(scheme_result.get("scheme"), dict) else {}
+            scheme_meta = (
+                scheme.get("scheme_meta_json")
+                if isinstance(scheme.get("scheme_meta_json"), dict)
+                else scheme.get("scheme_meta")
+                if isinstance(scheme.get("scheme_meta"), dict)
+                else scheme.get("meta")
+                if isinstance(scheme.get("meta"), dict)
+                else {}
+            )
+            embedded_rule = (
+                scheme_meta.get("recon_rule_json")
+                if isinstance(scheme_meta.get("recon_rule_json"), dict)
+                else {}
+            )
             recon_rule_code = str(
                 scheme.get("recon_rule_code")
                 or scheme.get("recon_rule")
@@ -56,6 +70,26 @@ async def load_scheme_node(state: AgentState) -> dict[str, Any]:
                 or state.get("file_rule_code")
                 or ""
             ).strip()
+            if embedded_rule:
+                embedded_rule_code = recon_rule_code or f"embedded:{scheme_code or 'scheme'}"
+                ctx.update(
+                    {
+                        "scheme_code": scheme_code,
+                        "scheme": scheme,
+                        "proc_rule_code": proc_rule_code,
+                        "rule_code": embedded_rule_code,
+                        "rule_name": str(
+                            embedded_rule.get("rule_name")
+                            or scheme_meta.get("recon_rule_name")
+                            or scheme.get("name")
+                            or embedded_rule_code
+                        ),
+                        "rule": embedded_rule,
+                        "file_rule_code": file_rule_code or str(embedded_rule.get("file_rule_code") or "").strip(),
+                        "phase": ReconAgentPhase.CHECKING_FILES.value,
+                    }
+                )
+                return {"recon_ctx": ctx}
             if recon_rule_code:
                 ctx.update(
                     {
@@ -180,4 +214,3 @@ def maybe_offer_notify_node(state: AgentState) -> dict[str, Any]:
     else:
         ctx["pending_manual_notify"] = False
     return {"recon_ctx": ctx, "messages": messages}
-
