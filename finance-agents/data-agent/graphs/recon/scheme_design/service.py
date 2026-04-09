@@ -1,4 +1,4 @@
-"""Scheme design service (fallback executor + in-memory sessions)."""
+"""Scheme design service (LLM executor + in-memory sessions)."""
 
 from __future__ import annotations
 
@@ -42,6 +42,13 @@ class ConfirmSessionInput:
     proc_rule_code: str = ""
     recon_rule_code: str = ""
     confirmation_note: str = ""
+
+
+@dataclass(slots=True)
+class ProcTrialInput:
+    proc_rule_json: dict[str, Any]
+    sample_datasets: list[dict[str, Any]] | None = None
+    uploaded_files: list[dict[str, Any]] | None = None
 
 
 class SchemeDesignService:
@@ -162,7 +169,7 @@ class SchemeDesignService:
             persist_payload: dict[str, Any] = {
                 "scheme_name": scheme_name or "未命名方案",
                 "recon_rule_code": recon_rule_code,
-                "meta_json": {
+                "scheme_meta_json": {
                     "biz_goal": session.biz_goal,
                     "source_description": session.source_description,
                     "sample_files": session.sample_files,
@@ -176,8 +183,11 @@ class SchemeDesignService:
             persist_result = await execution_scheme_create(auth_token, persist_payload)
 
         now = datetime.now(timezone.utc)
-        session.status = SchemeDesignStatus.CONFIRMED
-        session.confirmed_at = now
+        if bool(persist_result.get("success")):
+            session.status = SchemeDesignStatus.CONFIRMED
+            session.confirmed_at = now
+        else:
+            session.status = SchemeDesignStatus.WAITING_CONFIRM
         session.updated_at = now
         session.persist_result = persist_result
         session.messages.append(
@@ -186,7 +196,7 @@ class SchemeDesignService:
                 content=(
                     "已确认当前设计会话。"
                     if persist_result.get("success")
-                    else f"会话已确认，但后端持久化未完成：{persist_result.get('error', 'unknown')}"
+                    else f"当前草稿已保留，但后端持久化未完成：{persist_result.get('error', 'unknown')}"
                 ),
                 created_at=now,
             )
@@ -196,6 +206,16 @@ class SchemeDesignService:
 
     async def discard_session(self, session_id: str) -> bool:
         return await self._store.delete(session_id)
+
+    async def run_proc_trial(self, *, auth_token: str, payload: ProcTrialInput) -> dict[str, Any]:
+        return await execution_proc_draft_trial(
+            auth_token,
+            {
+                "proc_rule_json": payload.proc_rule_json,
+                "sample_datasets": list(payload.sample_datasets or []),
+                "uploaded_files": list(payload.uploaded_files or []),
+            },
+        )
 
     def _apply_executor_result(self, session: SchemeDesignSession, result: Any) -> None:
         now = datetime.now(timezone.utc)
@@ -229,11 +249,17 @@ class SchemeDesignService:
 
         uploaded_files = self._build_uploaded_files(session.sample_files)
         if session.drafts.proc_draft_json:
-            payload = {
-                "proc_rule_json": session.drafts.proc_draft_json,
-                "uploaded_files": uploaded_files,
-            }
-            session.drafts.proc_trial_result = await execution_proc_draft_trial(auth_token, payload)
+            session.drafts.proc_trial_result = await self.run_proc_trial(
+                auth_token=auth_token,
+                payload=ProcTrialInput(
+                    proc_rule_json=session.drafts.proc_draft_json,
+                    sample_datasets=self._build_proc_trial_datasets(session),
+                    uploaded_files=uploaded_files,
+                ),
+            )
+            normalized_rule = session.drafts.proc_trial_result.get("normalized_rule")
+            if isinstance(normalized_rule, dict) and normalized_rule.get("steps"):
+                session.drafts.proc_draft_json = normalized_rule
 
         if session.drafts.recon_draft_json:
             payload = {
@@ -241,6 +267,9 @@ class SchemeDesignService:
                 "validated_inputs": self._build_recon_trial_inputs(session),
             }
             session.drafts.recon_trial_result = await execution_recon_draft_trial(auth_token, payload)
+            normalized_rule = session.drafts.recon_trial_result.get("normalized_rule")
+            if isinstance(normalized_rule, dict) and normalized_rule.get("rules"):
+                session.drafts.recon_draft_json = normalized_rule
 
     def _build_uploaded_files(self, sample_files: list[str]) -> list[dict[str, Any]]:
         files: list[dict[str, Any]] = []
@@ -256,16 +285,59 @@ class SchemeDesignService:
             )
         return files
 
+    def _build_proc_trial_datasets(self, session: SchemeDesignSession) -> list[dict[str, Any]]:
+        datasets: list[dict[str, Any]] = []
+        for item in session.sample_datasets:
+            if not isinstance(item, dict):
+                continue
+            table_name = str(
+                item.get("table_name")
+                or item.get("resource_key")
+                or item.get("dataset_code")
+                or item.get("dataset_name")
+                or item.get("source_id")
+                or ""
+            ).strip()
+            if not table_name:
+                continue
+            sample_rows = item.get("sample_rows") if isinstance(item.get("sample_rows"), list) else []
+            datasets.append(
+                {
+                    "side": str(item.get("side") or "").strip(),
+                    "table_name": table_name,
+                    "dataset_name": str(item.get("dataset_name") or table_name).strip(),
+                    "source_id": str(item.get("source_id") or item.get("source_key") or table_name).strip(),
+                    "source_key": str(item.get("source_key") or item.get("source_id") or table_name).strip(),
+                    "resource_key": str(item.get("resource_key") or table_name).strip(),
+                    "source_kind": str(item.get("source_kind") or "").strip(),
+                    "provider_code": str(item.get("provider_code") or "").strip(),
+                    "description": str(item.get("description") or "").strip(),
+                    "schema_summary": item.get("schema_summary") if isinstance(item.get("schema_summary"), dict) else {},
+                    "sample_rows": [row for row in sample_rows if isinstance(row, dict)][:3],
+                }
+            )
+        return datasets
+
     def _build_recon_trial_inputs(self, session: SchemeDesignSession) -> list[dict[str, Any]]:
         inputs: list[dict[str, Any]] = []
         for item in session.sample_datasets:
             table_name = str(item.get("table_name") or item.get("dataset_code") or "").strip()
             source_type = str(item.get("source_type") or "dataset").strip() or "dataset"
             source_key = str(item.get("source_key") or item.get("source_id") or "").strip()
+            resource_key = str(item.get("resource_key") or item.get("dataset_code") or "").strip()
             if not table_name:
                 continue
-            payload = {"dataset_ref": {"source_type": source_type, "source_key": source_key, "query": {}}}
-            inputs.append({"table_name": table_name, "input_type": "dataset", "payload": payload})
+            inputs.append(
+                {
+                    "table_name": table_name,
+                    "input_type": "dataset",
+                    "dataset_ref": {
+                        "source_type": source_type,
+                        "source_key": source_key,
+                        "query": {"resource_key": resource_key} if resource_key else {},
+                    },
+                }
+            )
         for path in session.sample_files:
             file_path = str(path or "").strip()
             if not file_path:
@@ -275,7 +347,7 @@ class SchemeDesignService:
                 {
                     "table_name": table_name,
                     "input_type": "file",
-                    "payload": {"file_path": file_path},
+                    "file_path": file_path,
                 }
             )
         return inputs
@@ -292,4 +364,3 @@ def get_scheme_design_service() -> SchemeDesignService:
             executor=FallbackSchemeDesignExecutor(),
         )
     return _service_singleton
-

@@ -7,7 +7,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .service import ConfirmSessionInput, StartSessionInput, get_scheme_design_service
+from .service import ConfirmSessionInput, ProcTrialInput, StartSessionInput, get_scheme_design_service
 
 router = APIRouter(prefix="/recon/schemes/design", tags=["recon-scheme-design"])
 
@@ -41,6 +41,12 @@ class ConfirmDesignSessionRequest(BaseModel):
     proc_rule_code: str = ""
     recon_rule_code: str = ""
     confirmation_note: str = ""
+
+
+class ProcTrialRequest(BaseModel):
+    proc_rule_json: dict[str, Any] = Field(default_factory=dict)
+    sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/start")
@@ -156,6 +162,26 @@ async def confirm_design_session(
     return {"success": True, "session": session.model_dump(mode="json")}
 
 
+@router.post("/proc-trial")
+async def proc_trial(
+    body: ProcTrialRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    result = await service.run_proc_trial(
+        auth_token=auth_token,
+        payload=ProcTrialInput(
+            proc_rule_json=body.proc_rule_json,
+            sample_datasets=body.sample_datasets,
+            uploaded_files=body.uploaded_files,
+        ),
+    )
+    return result
+
+
 @router.delete("/{session_id}")
 async def delete_design_session(
     session_id: str,
@@ -169,4 +195,3 @@ async def delete_design_session(
     if not deleted:
         raise HTTPException(status_code=404, detail="design session 不存在")
     return {"success": True, "deleted": True}
-
