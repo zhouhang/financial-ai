@@ -45,6 +45,7 @@ export interface ProcTrialPreview {
   rightSourceSamples: ProcSampleGroup[];
   leftOutputSamples: ProcSampleGroup[];
   rightOutputSamples: ProcSampleGroup[];
+  validations?: string[];
 }
 
 export interface ExistingConfigOption {
@@ -372,13 +373,13 @@ function ProcTrialPreviewPanel({
 }) {
   const [activeSection, setActiveSection] = useState<PreviewSection>('left');
   const hasPreview = Boolean(preview);
+  const summary = preview?.summary || draftSummary;
+  const meta = trialStatusMeta(preview?.status || draftStatus);
+  const validations = preview?.validations || [];
 
-  if (!hasPreview) {
+  if (!hasPreview && !summary) {
     return null;
   }
-
-  const meta = trialStatusMeta(preview?.status || draftStatus);
-  const summary = preview?.summary || draftSummary;
 
   return (
     <div className="space-y-4">
@@ -391,66 +392,80 @@ function ProcTrialPreviewPanel({
             {summary || '点击试跑验证后，会展示整理前后的抽样数据结果。'}
           </p>
         </div>
-      </div>
-
-      <div className="space-y-4">
-        <div className="sticky top-0 z-[1] rounded-2xl border border-border bg-surface/95 p-2 backdrop-blur supports-[backdrop-filter]:bg-surface/80">
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveSection('left')}
-              className={cn(
-                'rounded-xl px-4 py-2 text-sm font-medium transition',
-                activeSection === 'left'
-                  ? 'bg-text-primary text-white'
-                  : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
-              )}
-            >
-              左侧数据
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSection('right')}
-              className={cn(
-                'rounded-xl px-4 py-2 text-sm font-medium transition',
-                activeSection === 'right'
-                  ? 'bg-text-primary text-white'
-                  : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
-              )}
-            >
-              右侧数据
-            </button>
-          </div>
-        </div>
-
-        {activeSection === 'left' && preview ? (
-          <div className="space-y-4">
-            <PreviewSectionBlock
-              title="左侧原始数据抽样"
-              description="每个数据源分别展示列名与 3 条抽样数据。"
-              groups={preview.leftSourceSamples}
-            />
-            <PreviewSectionBlock
-              title="整理后左侧输出"
-              description="根据当前数据整理配置生成的左侧标准化结果。"
-              groups={preview.leftOutputSamples}
-            />
-          </div>
-        ) : preview ? (
-          <div className="space-y-4">
-            <PreviewSectionBlock
-              title="右侧原始数据抽样"
-              description="每个数据源分别展示列名与 3 条抽样数据。"
-              groups={preview.rightSourceSamples}
-            />
-            <PreviewSectionBlock
-              title="整理后右侧输出"
-              description="根据当前数据整理配置生成的右侧标准化结果。"
-              groups={preview.rightOutputSamples}
-            />
+        {validations.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {validations.map((item) => (
+              <span
+                key={item}
+                className="rounded-full border border-current/15 bg-white/70 px-2.5 py-1 text-xs text-text-secondary"
+              >
+                {item}
+              </span>
+            ))}
           </div>
         ) : null}
       </div>
+
+      {hasPreview ? (
+        <div className="space-y-4">
+          <div className="sticky top-0 z-[1] rounded-2xl border border-border bg-surface/95 p-2 backdrop-blur supports-[backdrop-filter]:bg-surface/80">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveSection('left')}
+                className={cn(
+                  'rounded-xl px-4 py-2 text-sm font-medium transition',
+                  activeSection === 'left'
+                    ? 'bg-text-primary text-white'
+                    : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                )}
+              >
+                左侧数据
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSection('right')}
+                className={cn(
+                  'rounded-xl px-4 py-2 text-sm font-medium transition',
+                  activeSection === 'right'
+                    ? 'bg-text-primary text-white'
+                    : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                )}
+              >
+                右侧数据
+              </button>
+            </div>
+          </div>
+
+          {activeSection === 'left' && preview ? (
+            <div className="space-y-4">
+              <PreviewSectionBlock
+                title="左侧原始数据抽样"
+                description="每个数据源分别展示列名与 3 条抽样数据。"
+                groups={preview.leftSourceSamples}
+              />
+              <PreviewSectionBlock
+                title="整理后左侧输出"
+                description="根据当前数据整理配置生成的左侧标准化结果。"
+                groups={preview.leftOutputSamples}
+              />
+            </div>
+          ) : preview ? (
+            <div className="space-y-4">
+              <PreviewSectionBlock
+                title="右侧原始数据抽样"
+                description="每个数据源分别展示列名与 3 条抽样数据。"
+                groups={preview.rightSourceSamples}
+              />
+              <PreviewSectionBlock
+                title="整理后右侧输出"
+                description="根据当前数据整理配置生成的右侧标准化结果。"
+                groups={preview.rightOutputSamples}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -527,7 +542,7 @@ export default function SchemeWizardTargetProcStep({
             onChange={(event) => onBusinessGoalChange(event.target.value)}
             rows={4}
             className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-            placeholder="一句话描述对账的目的，比如核对平台订单数据与电商店铺订单数据是否一致，并输出差异订单明细，让AI更好的帮你达成目的。"
+            placeholder="告诉AI对账目标是什么，让AI知道如何帮你整理数据"
           />
         </label>
 
@@ -569,7 +584,7 @@ export default function SchemeWizardTargetProcStep({
               onChange={(event) => onDescriptionChange('left', event.target.value)}
               rows={4}
               className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="一句话描述期望将原始数据转化成一个结果数据让AI理解后进行转化，例如：将左侧原始数据转化成有订单号、金额、时间的数据。"
+              placeholder="告诉AI左侧想生成什么业务数据，包含哪些列/字段，AI下一步整理成你要的数据"
             />
           </label>
           <label className="block">
@@ -579,7 +594,7 @@ export default function SchemeWizardTargetProcStep({
               onChange={(event) => onDescriptionChange('right', event.target.value)}
               rows={4}
               className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="一句话描述期望将原始数据转化成一个结果数据让AI理解后进行转化，例如：将右侧原始数据转化成有订单号、金额、时间的数据。"
+              placeholder="告诉AI右侧想生成什么业务数据，包含哪些列/字段，AI下一步整理成你要的数据"
             />
           </label>
         </div>
@@ -664,102 +679,106 @@ export default function SchemeWizardTargetProcStep({
         ) : null}
       </div>
 
-      <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-sky-600" />
-          <p className="text-sm font-semibold text-text-primary">数据整理</p>
+      {schemeDraft.procConfigMode === 'ai' ? (
+        <div className="rounded-3xl border border-border bg-surface-secondary p-4">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-sky-600" />
+            <p className="text-sm font-semibold text-text-primary">数据整理</p>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {[
+              { label: '左侧数据', value: selectedLeftSources.map((item) => item.name).join('、') || '--' },
+              { label: '左侧描述', value: schemeDraft.leftDescription || '--' },
+              { label: '右侧数据', value: selectedRightSources.map((item) => item.name).join('、') || '--' },
+              { label: '右侧描述', value: schemeDraft.rightDescription || '--' },
+            ].map((item) => (
+              <div key={item.label} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                <p className="text-[11px] font-semibold tracking-[0.14em] text-text-muted">{item.label}</p>
+                <p className="mt-2 text-sm leading-6 text-text-primary">{item.value}</p>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {[
-            { label: '左侧数据', value: selectedLeftSources.map((item) => item.name).join('、') || '--' },
-            { label: '左侧描述', value: schemeDraft.leftDescription || '--' },
-            { label: '右侧数据', value: selectedRightSources.map((item) => item.name).join('、') || '--' },
-            { label: '右侧描述', value: schemeDraft.rightDescription || '--' },
-          ].map((item) => (
-            <div key={item.label} className="rounded-2xl border border-border bg-surface px-4 py-3">
-              <p className="text-[11px] font-semibold tracking-[0.14em] text-text-muted">{item.label}</p>
-              <p className="mt-2 text-sm leading-6 text-text-primary">{item.value}</p>
-            </div>
-          ))}
-        </div>
-      </div>
+      ) : null}
 
-      {isGeneratingProc || isTrialingProc ? (
+      {isTrialingProc ? (
         <div className="flex items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50/60 px-5 py-4">
           <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-          <span className="text-sm font-medium text-sky-700">
-            {isTrialingProc
-              ? 'AI 正在试跑数据整理，请稍候…'
-              : schemeDraft.procConfigMode === 'existing'
-              ? '正在加载已有配置，请稍候…'
-              : 'AI 正在生成整理配置，请稍候…'}
-          </span>
+          <span className="text-sm font-medium text-sky-700">AI 正在试跑数据整理，请稍候…</span>
         </div>
-      ) : (
-        <div className="flex flex-wrap items-center gap-3">
-          {schemeDraft.procConfigMode === 'ai' ? (
-            <button
-              type="button"
-              onClick={onGenerateProc}
-              disabled={isTrialingProc}
-              className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-            >
-              <Sparkles className="h-4 w-4" />
-              AI生成整理配置
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={handleTrialProc}
-            disabled={
-              isTrialingProc
-              || isGeneratingProc
-              || (
+      ) : null}
+
+      {schemeDraft.procConfigMode === 'ai' ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            {isGeneratingProc ? (
+              <div className="flex items-center gap-2 text-sm font-medium text-sky-700">
+                <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
+                AI 正在生成整理配置，请稍候…
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onGenerateProc}
+                disabled={isTrialingProc}
+                className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Sparkles className="h-4 w-4" />
+                AI生成整理配置
+              </button>
+            )}
+          </div>
+
+          <label className="block">
+            <span className="text-xs font-medium text-text-secondary">数据整理配置</span>
+            <textarea
+              value={schemeDraft.procDraft}
+              onChange={(event) => onProcDraftChange(event.target.value)}
+              rows={14}
+              className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 text-sm leading-7 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+              placeholder="AI 生成后，可在这里继续调整数据整理配置。"
+            />
+          </label>
+        </>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={handleTrialProc}
+          disabled={
+            isTrialingProc
+            || isGeneratingProc
+            || (
               !schemeDraft.procDraft.trim()
               && !(schemeDraft.procConfigMode === 'existing' && schemeDraft.selectedProcConfigId)
-              )
-            }
-            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            试跑验证
-          </button>
-          <button
-            type="button"
-            onClick={onViewProcJson}
-            disabled={
-              isTrialingProc
-              || isGeneratingProc
-              || (
+            )
+          }
+          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <CheckCircle2 className="h-4 w-4" />
+          试跑验证
+        </button>
+        <button
+          type="button"
+          onClick={onViewProcJson}
+          disabled={
+            isTrialingProc
+            || isGeneratingProc
+            || (
               !procJsonPreview
               || (
                 !schemeDraft.procDraft.trim()
                 && !(schemeDraft.procConfigMode === 'existing' && schemeDraft.selectedProcConfigId)
               )
-              )
-            }
-            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            JSON
-          </button>
-          {procJsonPreview ? <span className="text-xs text-text-secondary">已生成 JSON</span> : null}
-        </div>
-      )}
-
-      <label className="block">
-        <span className="text-xs font-medium text-text-secondary">数据整理配置</span>
-        <textarea
-          value={schemeDraft.procDraft}
-          onChange={(event) => onProcDraftChange(event.target.value)}
-          rows={14}
-          className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 text-sm leading-7 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-          placeholder={
-            schemeDraft.procConfigMode === 'existing'
-              ? '选择已有配置后，可在这里继续调整数据整理配置。'
-              : 'AI 生成后，可在这里继续调整数据整理配置。'
+            )
           }
-        />
-      </label>
+          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          JSON
+        </button>
+        {procJsonPreview ? <span className="text-xs text-text-secondary">已生成 JSON</span> : null}
+      </div>
 
       <div ref={previewAnchorRef} className="scroll-mt-24">
         <ProcTrialPreviewPanel

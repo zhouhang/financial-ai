@@ -48,6 +48,9 @@ CONFIG_TYPES = ("connection", "extract", "mapping", "runtime")
 AGENT_ASSISTED_KINDS = {"browser", "desktop_cli"}
 HEALTH_STATUSES = {"unknown", "healthy", "warning", "error", "auth_expired", "disabled"}
 DATASET_ORIGIN_TYPES = {"fixed", "discovered", "imported_openapi", "manual"}
+AUTO_DISCOVER_DATASET_LIMIT = 300
+AUTO_SAMPLE_DATASET_LIMIT = 20
+AUTO_SAMPLE_ROW_LIMIT = 10
 
 
 def _default_execution_mode(source_kind: str) -> str:
@@ -258,6 +261,139 @@ def _load_source_configs(source_id: str) -> dict[str, dict[str, Any]]:
         )
         result[config_type] = dict((config_row or {}).get("config") or {})
     return result
+
+
+async def _refresh_dataset_samples(
+    *,
+    auth_token: str,
+    company_id: str,
+    source_row: dict[str, Any],
+    mode: str = "",
+    reason: str = "",
+) -> int:
+    source_kind = str(source_row.get("source_kind") or "")
+    if source_kind != "database" or not auth_token:
+        return 0
+    source_id = str(source_row.get("id") or "")
+    dataset_rows = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        status=None,
+        include_deleted=False,
+        limit=AUTO_SAMPLE_DATASET_LIMIT,
+    )
+    if not dataset_rows:
+        return 0
+
+    runtime_source = _load_runtime_source(source_row, include_secret=True)
+    connector = build_connector(runtime_source)
+    sampled = 0
+    for dataset_row in dataset_rows[:AUTO_SAMPLE_DATASET_LIMIT]:
+        resource_key = str(dataset_row.get("resource_key") or "")
+        preview_result = connector.preview(
+            {
+                "resource_key": resource_key,
+                "dataset_code": str(dataset_row.get("dataset_code") or ""),
+                "limit": AUTO_SAMPLE_ROW_LIMIT,
+                "dataset": {
+                    "dataset_code": dataset_row.get("dataset_code"),
+                    "resource_key": resource_key,
+                    "extract_config": dataset_row.get("extract_config"),
+                },
+            }
+        )
+        rows = [row for row in preview_result.get("rows") or [] if isinstance(row, dict)]
+        if not rows:
+            continue
+
+        snapshot = auth_db.create_unified_dataset_snapshot(
+            company_id=company_id,
+            data_source_id=source_id,
+            resource_key=resource_key or "default",
+            snapshot_name=f"auto_sample_{dataset_row.get('dataset_code')}",
+            record_count=len(rows),
+            meta={
+                "dataset_code": dataset_row.get("dataset_code"),
+                "refresh_reason": reason or "auto_refresh",
+                "mode": mode,
+            },
+        )
+        if not snapshot:
+            continue
+
+        items = []
+        for index, row in enumerate(rows):
+            items.append(
+                {
+                    "item_key": str(index + 1),
+                    "item_payload": row,
+                    "item_hash": _hash_payload(row),
+                }
+            )
+        auth_db.append_unified_dataset_snapshot_items(
+            company_id=company_id,
+            data_source_id=source_id,
+            snapshot_id=str(snapshot["id"]),
+            items=items,
+        )
+        auth_db.mark_unified_dataset_snapshot_published(snapshot_id=str(snapshot["id"]))
+        sampled += 1
+
+    if sampled:
+        auth_db.create_unified_data_source_event(
+            company_id=company_id,
+            data_source_id=source_id,
+            event_type="dataset_samples_refreshed",
+            event_level="info",
+            event_message=f"采集 {sampled} 个数据集的样例数据",
+            event_payload={
+                "sampled_dataset_count": sampled,
+                "row_limit": AUTO_SAMPLE_ROW_LIMIT,
+                "reason": reason or "auto_refresh",
+            },
+        )
+    return sampled
+
+
+async def _auto_refresh_datasets_and_samples(
+    *,
+    auth_token: str,
+    company_id: str,
+    source_row: dict[str, Any],
+    mode: str = "",
+    reason: str = "",
+) -> dict[str, int]:
+    summary = {"discovered": 0, "sampled": 0}
+    source_kind = str(source_row.get("source_kind") or "")
+    if source_kind != "database" or not auth_token:
+        return summary
+
+    source_id = str(source_row.get("id") or "")
+    try:
+        discover_args = {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "persist": True,
+            "limit": AUTO_DISCOVER_DATASET_LIMIT,
+            "mode": mode,
+        }
+        discover_result = await _handle_data_source_discover_datasets(discover_args)
+        if not discover_result.get("success"):
+            return summary
+        summary["discovered"] = int(discover_result.get("dataset_count") or 0)
+
+        sampled = await _refresh_dataset_samples(
+            auth_token=auth_token,
+            company_id=company_id,
+            source_row=source_row,
+            mode=mode,
+            reason=reason or "auto_refresh",
+        )
+        summary["sampled"] = sampled
+        return summary
+    except Exception as exc:
+        logger.error("auto refresh datasets and samples failed: %s", exc, exc_info=True)
+        return summary
 
 
 def _load_runtime_source(
@@ -983,6 +1119,18 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_delete",
+            description="删除数据源（标记为 deleted 并禁用）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_test",
             description="测试数据源连接能力。",
             inputSchema={
@@ -1128,6 +1276,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_update(arguments)
         if name == "data_source_disable":
             return await _handle_data_source_disable(arguments)
+        if name == "data_source_delete":
+            return await _handle_data_source_delete(arguments)
         if name == "data_source_test":
             return await _handle_data_source_test(arguments)
         if name == "data_source_authorize":
@@ -1350,6 +1500,19 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
             "persist_errors": persist_errors,
         },
     )
+    sampled_count = 0
+    auth_token = str(arguments.get("auth_token") or "").strip()
+    if persist and auth_token:
+        try:
+            sampled_count = await _refresh_dataset_samples(
+                auth_token=auth_token,
+                company_id=company_id,
+                source_row=source_row,
+                mode=str(arguments.get("mode") or ""),
+                reason="discover",
+            )
+        except Exception as exc:
+            logger.error("refresh dataset samples after discover failed: %s", exc, exc_info=True)
     return {
         "success": True,
         "source_id": source_id,
@@ -1357,6 +1520,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
         "dataset_count": len(datasets),
         "persisted_count": len(persisted_rows),
         "persist_error_count": len(persist_errors),
+        "sampled_dataset_count": sampled_count,
         "datasets": datasets,
         "dataset_summary": dataset_summary,
         "message": f"发现 {len(normalized)} 个数据集",
@@ -1737,6 +1901,37 @@ async def _handle_data_source_disable(arguments: dict[str, Any]) -> dict[str, An
     }
 
 
+async def _handle_data_source_delete(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    current = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not current:
+        return {"success": False, "error": "数据源不存在"}
+
+    row = auth_db.update_unified_data_source_status(
+        data_source_id=source_id,
+        status="deleted",
+        is_enabled=False,
+    )
+    if not row:
+        return {"success": False, "error": "删除数据源失败"}
+
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        event_type="data_source_deleted",
+        event_level="warn",
+        event_message="数据源已删除",
+        event_payload={"source_id": source_id},
+    )
+    return {
+        "success": True,
+        "source": _build_data_source_view(row),
+        "message": "数据源已删除",
+    }
+
+
 async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -1770,6 +1965,9 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
             "execution_mode": runtime_source.get("execution_mode"),
             "message": str(connector_result.get("message") or connector_result.get("error") or ""),
         }
+        for key in ("db_type", "provider_code", "source_id"):
+            if connector_result.get(key) is not None:
+                result[key] = connector_result.get(key)
 
     source_health_status = "healthy" if success else "error"
     if not success and runtime_source["source_kind"] == "platform_oauth":
@@ -1787,7 +1985,15 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
         event_message=result["message"],
         event_payload=result,
     )
-    return {"success": success, "source_id": source_id, "result": result}
+    response = {
+        "success": success,
+        "source_id": source_id,
+        "result": result,
+        "message": result["message"],
+    }
+    if not success:
+        response["error"] = result["message"] or "数据源测试失败"
+    return response
 
 
 async def _handle_data_source_authorize(arguments: dict[str, Any]) -> dict[str, Any]:

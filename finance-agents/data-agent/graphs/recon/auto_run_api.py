@@ -13,6 +13,7 @@ from graphs.recon.auto_run_service import (
     send_exception_reminder,
     sync_exception_reminder,
 )
+from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
 from tools.mcp_client import (
     execution_run_exception_get,
     execution_run_exception_update,
@@ -287,17 +288,37 @@ async def create_execution_scheme_api(
     recon_rule_json = _safe_dict(scheme_meta_json.get("recon_rule_json"))
     scheme_name = str(payload.get("scheme_name") or "未命名方案").strip() or "未命名方案"
 
-    # 当前方案内 proc 仍以 scheme_meta_json 内联保存为主，不再要求额外落 rule_detail。
-    # 这样可避免保存方案时被 save_rule 工具注册状态卡住。
-    if not proc_rule_code and proc_rule_json:
-        scheme_meta_json["proc_rule_storage"] = "embedded"
+    if proc_rule_json and not proc_rule_code:
+        proc_saved = await ensure_scheme_rule_saved(
+            auth_token,
+            scheme_name=scheme_name,
+            rule_type="proc",
+            rule_json=proc_rule_json,
+            remark="API 创建方案自动生成整理规则",
+            supported_entry_modes=['dataset'],
+        )
+        proc_rule_code = str(proc_saved.get("rule_code") or proc_rule_code).strip()
 
-    if not recon_rule_code and recon_rule_json:
-        scheme_meta_json["recon_rule_storage"] = "embedded"
+    if recon_rule_json and not recon_rule_code:
+        recon_saved = await ensure_scheme_rule_saved(
+            auth_token,
+            scheme_name=scheme_name,
+            rule_type="recon",
+            rule_json=recon_rule_json,
+            remark="API 创建方案自动生成对账逻辑",
+            supported_entry_modes=['dataset'],
+        )
+        recon_rule_code = str(recon_saved.get("rule_code") or recon_rule_code).strip()
 
     if not recon_rule_code and not recon_rule_json:
         raise HTTPException(status_code=400, detail="缺少可执行的对账规则，无法保存方案")
 
+    if proc_rule_json:
+        scheme_meta_json["proc_rule_json"] = proc_rule_json
+    if recon_rule_json:
+        scheme_meta_json["recon_rule_json"] = recon_rule_json
+    scheme_meta_json["proc_rule_storage"] = "rule_detail" if proc_rule_code else "embedded"
+    scheme_meta_json["recon_rule_storage"] = "rule_detail" if recon_rule_code else "embedded"
     scheme_meta_json["proc_rule_code"] = proc_rule_code
     scheme_meta_json["recon_rule_code"] = recon_rule_code
     payload["proc_rule_code"] = proc_rule_code

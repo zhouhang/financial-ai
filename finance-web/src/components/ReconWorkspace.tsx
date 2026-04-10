@@ -12,6 +12,7 @@ import {
 import { collaborationProviderLabel } from '../collaborationChannelConfig';
 import { normalizeChannelConfig } from '../collaborationChannelDrafts';
 import { sourceKindLabel } from '../dataSourceConfig';
+import { ruleSupportsEntryMode } from '../utils/ruleEntryModes';
 import type {
   CollaborationChannelListItem,
   CollaborationProvider,
@@ -43,6 +44,7 @@ interface ReconWorkspaceProps {
   onChangeExecutionMode?: (mode: 'upload' | 'data_source') => void;
   onOpenDataConnections?: () => void;
   onOpenCollaborationChannels?: (provider?: CollaborationProvider) => void;
+  onSchemeCreated?: () => void;
   children?: ReactNode;
 }
 
@@ -185,6 +187,13 @@ interface ReconTrialPreview {
   leftRows: PreviewTableRow[];
   rightRows: PreviewTableRow[];
   results: ReconResultRow[];
+  resultSummary?: {
+    matched?: number;
+    unmatchedLeft?: number;
+    unmatchedRight?: number;
+    amountDiff?: number;
+    diffCount?: number;
+  };
 }
 
 interface ParsedReconDraftConfig {
@@ -602,18 +611,14 @@ function formatDateTime(value: string): string {
   });
 }
 
-function formatDateLabel(value: string): string {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+function toSortableTimestamp(value: string): number {
+  if (!value) return 0;
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function buildDefaultReconRuleName(schemeName: string): string {
-  return `${schemeName.trim() || '未命名对账方案'} · 对账逻辑`;
+  return `${schemeName.trim() || '未命名对账方案'} 对账逻辑`;
 }
 
 function formatScheduleLabel(scheduleType: string, scheduleExpr: string): string {
@@ -1112,6 +1117,7 @@ function buildDatasetSamplePayload(
 ): Record<string, unknown> {
   const tableName = options?.tableName || resolveDatasetTableName(source);
   const sampleRows = options?.sampleRows || buildRawSourceRows(source, side, seedText);
+  const sourceSchemaSummary = asRecord(source.schemaSummary);
   return {
     side,
     dataset_name: source.name,
@@ -1124,7 +1130,11 @@ function buildDatasetSamplePayload(
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     description,
-    schema_summary: options?.schemaSummary || asRecord(source.schemaSummary),
+    schema_summary:
+      options?.schemaSummary
+      || (Object.keys(sourceSchemaSummary).length > 0
+        ? sourceSchemaSummary
+        : inferSchemaSummaryFromRows(sampleRows)),
     sample_rows: sampleRows,
   };
 }
@@ -1596,6 +1606,7 @@ export default function ReconWorkspace({
   availableRules = [],
   authToken,
   onOpenCollaborationChannels,
+  onSchemeCreated,
   children,
 }: ReconWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<ReconCenterTab>('schemes');
@@ -1617,6 +1628,7 @@ export default function ReconWorkspace({
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
   const [schemeDraft, setSchemeDraft] = useState<SchemeDraft>(() => createEmptySchemeDraft());
+  const [designSessionId, setDesignSessionId] = useState('');
   const [planDraft, setPlanDraft] = useState<PlanDraft>(EMPTY_PLAN_DRAFT);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmittingScheme, setIsSubmittingScheme] = useState(false);
@@ -1624,6 +1636,7 @@ export default function ReconWorkspace({
   const [isGeneratingProc, setIsGeneratingProc] = useState(false);
   const [isTrialingProc, setIsTrialingProc] = useState(false);
   const [isGeneratingRecon, setIsGeneratingRecon] = useState(false);
+  const [isTrialingRecon, setIsTrialingRecon] = useState(false);
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
@@ -1700,16 +1713,16 @@ export default function ReconWorkspace({
       const id = `scheme:${scheme.schemeCode || scheme.id}:proc`;
       if (seen.has(id)) return;
       seen.add(id);
-      options.push({
-        id,
-        name: `${scheme.name} · 数据整理配置`,
-        draftText,
-        ruleJson: Object.keys(procRuleJson).length > 0 ? procRuleJson : null,
-        schemeCode: scheme.schemeCode,
-        ruleCode: scheme.procRuleCode || toText(scheme.raw.proc_rule_code),
-        leftSources: meta.leftSources,
-        rightSources: meta.rightSources,
-      });
+options.push({
+          id,
+          name: `${scheme.name} 整理规则`,
+          draftText,
+          ruleJson: Object.keys(procRuleJson).length > 0 ? procRuleJson : null,
+          schemeCode: scheme.schemeCode,
+          ruleCode: scheme.procRuleCode || toText(scheme.raw.proc_rule_code),
+          leftSources: meta.leftSources,
+          rightSources: meta.rightSources,
+        });
     });
     return options;
   }, [availableProcRules, schemes]);
@@ -1718,7 +1731,7 @@ export default function ReconWorkspace({
     const seen = new Set<string>();
 
     availableRules
-      .filter((rule) => rule.task_type === 'recon')
+      .filter((rule) => rule.task_type === 'recon' && ruleSupportsEntryMode(rule, 'dataset'))
       .forEach((rule) => {
         const id = `rule:${rule.rule_code}`;
         if (seen.has(id)) return;
@@ -1743,7 +1756,7 @@ export default function ReconWorkspace({
       seen.add(id);
       options.push({
         id,
-        name: meta.reconRuleName || `${scheme.name} · 数据对账逻辑`,
+        name: meta.reconRuleName || `${scheme.name} 对账逻辑`,
         draftText,
         ruleJson: Object.keys(reconRuleJson).length > 0 ? reconRuleJson : null,
         schemeCode: scheme.schemeCode,
@@ -1769,13 +1782,8 @@ export default function ReconWorkspace({
     [existingReconOptions, schemeDraft.selectedReconConfigId],
   );
   const procJsonPreview = useMemo(
-    () =>
-      JSON.stringify(
-        schemeDraft.procRuleJson || buildProcJsonPayload(schemeDraft, selectedLeftSources, selectedRightSources),
-        null,
-        2,
-      ),
-    [schemeDraft, selectedLeftSources, selectedRightSources],
+    () => (schemeDraft.procRuleJson ? JSON.stringify(schemeDraft.procRuleJson, null, 2) : ''),
+    [schemeDraft.procRuleJson],
   );
   const parsedReconConfig = useMemo(
     () =>
@@ -1795,13 +1803,8 @@ export default function ReconWorkspace({
     ],
   );
   const reconJsonPreview = useMemo(
-    () =>
-      JSON.stringify(
-        schemeDraft.reconRuleJson || buildReconJsonPayload(schemeDraft, parsedReconConfig),
-        null,
-        2,
-      ),
-    [parsedReconConfig, schemeDraft],
+    () => (schemeDraft.reconRuleJson ? JSON.stringify(schemeDraft.reconRuleJson, null, 2) : ''),
+    [schemeDraft.reconRuleJson],
   );
   const preparedLeftRows = useMemo(
     () => procTrialPreview?.preparedOutputs.find((item) => item.side === 'left')?.rows || [],
@@ -1882,7 +1885,13 @@ export default function ReconWorkspace({
       const allTasks = asList(taskData.tasks || taskData.run_plans).map((item) =>
         mapTask(item, backendSchemeNameByCode),
       );
-      const nextTasks = allTasks.filter((item) => !isTaskMarkedDeleted(item));
+      const nextTasks = allTasks
+        .filter((item) => !isTaskMarkedDeleted(item))
+        .sort((left, right) => {
+          const timeDiff = toSortableTimestamp(right.createdAt) - toSortableTimestamp(left.createdAt);
+          if (timeDiff !== 0) return timeDiff;
+          return left.name.localeCompare(right.name, 'zh-CN');
+        });
       const backendTaskNameByCode = new Map(allTasks.map((item) => [item.planCode, item.name]));
       const nextRuns = asList(runData.runs).map((item) =>
         mapRun(item, backendSchemeNameByCode, backendTaskNameByCode),
@@ -2094,7 +2103,7 @@ export default function ReconWorkspace({
         });
       });
 
-      setAvailableProcRules(nextRules);
+      setAvailableProcRules(nextRules.filter((rule) => ruleSupportsEntryMode(rule, 'dataset')));
     } catch {
       setAvailableProcRules([]);
     }
@@ -2118,6 +2127,7 @@ export default function ReconWorkspace({
   const resetSchemeWizard = useCallback(() => {
     setSchemeWizardStep(1);
     setSchemeDraft(createEmptySchemeDraft());
+    setDesignSessionId('');
     setWizardJsonPanel(null);
     setProcTrialPreview(null);
     setReconTrialPreview(null);
@@ -2162,6 +2172,7 @@ export default function ReconWorkspace({
     setModalError(null);
     setWizardJsonPanel(null);
     setModalState(null);
+    setDesignSessionId('');
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
   }, []);
@@ -2186,6 +2197,7 @@ export default function ReconWorkspace({
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
       }));
+      setDesignSessionId('');
       setWizardJsonPanel(null);
       setProcTrialPreview(null);
       setReconTrialPreview(null);
@@ -2220,6 +2232,7 @@ export default function ReconWorkspace({
         reconTrialSummary: '',
       };
     });
+    setDesignSessionId('');
     setWizardJsonPanel(null);
     setProcTrialPreview(null);
     setReconTrialPreview(null);
@@ -2277,6 +2290,206 @@ export default function ReconWorkspace({
     },
     [authToken],
   );
+
+  const buildTargetSampleDatasets = useCallback(
+    (seedText = '') => [
+      ...selectedLeftSources.map((item) =>
+        buildDatasetSamplePayload(item, 'left', schemeDraft.leftDescription.trim(), seedText || schemeDraft.procDraft.trim()),
+      ),
+      ...selectedRightSources.map((item) =>
+        buildDatasetSamplePayload(item, 'right', schemeDraft.rightDescription.trim(), seedText || schemeDraft.procDraft.trim()),
+      ),
+    ],
+    [
+      schemeDraft.leftDescription,
+      schemeDraft.procDraft,
+      schemeDraft.rightDescription,
+      selectedLeftSources,
+      selectedRightSources,
+    ],
+  );
+
+  const ensureDesignSession = useCallback(async () => {
+    if (!authToken) {
+      throw new Error('请先登录后再配置对账方案。');
+    }
+    if (designSessionId) {
+      return designSessionId;
+    }
+    const response = await fetchReconAutoApi('/schemes/design/start', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        scheme_name: schemeDraft.name.trim(),
+        biz_goal: schemeDraft.businessGoal.trim(),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(data.detail || data.message || '创建设计会话失败'));
+    }
+    const nextSessionId = toText(data.design_session_id, toText(asRecord(data.session).session_id));
+    if (!nextSessionId) {
+      throw new Error('后端未返回 design session id');
+    }
+    setDesignSessionId(nextSessionId);
+    return nextSessionId;
+  }, [authToken, designSessionId, schemeDraft.businessGoal, schemeDraft.name]);
+
+  const syncDesignTarget = useCallback(
+    async (sessionId: string) => {
+      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/target`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          left_datasets: buildTargetSampleDatasets(schemeDraft.procDraft.trim()).filter((item) => item.side === 'left'),
+          right_datasets: buildTargetSampleDatasets(schemeDraft.procDraft.trim()).filter((item) => item.side === 'right'),
+          left_description: schemeDraft.leftDescription.trim(),
+          right_description: schemeDraft.rightDescription.trim(),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.detail || data.message || '同步目标数据失败'));
+      }
+      return asRecord(data.session);
+    },
+    [
+      authToken,
+      buildTargetSampleDatasets,
+      schemeDraft.leftDescription,
+      schemeDraft.procDraft,
+      schemeDraft.rightDescription,
+    ],
+  );
+
+  const toCompatibilityResult = useCallback((value: unknown, fallbackMessage = '等待校验'): CompatibilityCheckResult => {
+    const raw = asRecord(value);
+    const statusText = toText(raw.status).trim().toLowerCase();
+    const compatible =
+      raw.compatible === true
+      || statusText === 'compatible'
+      || statusText === 'passed'
+      || statusText === 'trial_passed';
+    const issues = parseTrialMessages(raw.issues);
+    const missingFields = Object.entries(asRecord(raw.missing_fields)).flatMap(([bucket, fields]) => {
+      const items = asList(fields).map((item) => toText(item)).filter(Boolean);
+      if (items.length === 0) return [];
+      const label = bucket === 'left' || bucket === 'source' ? '左侧' : '右侧';
+      return [`${label}缺少字段：${items.join('、')}`];
+    });
+    const details = [
+      ...issues,
+      ...missingFields,
+    ].filter(Boolean);
+    return {
+      status: compatible ? 'passed' : raw.status ? 'failed' : 'idle',
+      message: toText(raw.message, fallbackMessage),
+      details,
+    };
+  }, []);
+
+  const buildProcPreviewFromTrial = useCallback((trialResult: unknown): ProcTrialPreview | null => {
+    const raw = asRecord(trialResult);
+    if (Object.keys(raw).length === 0) return null;
+    const sourceSamples = asList(raw.source_samples)
+      .filter((item) => typeof item === 'object' && item !== null)
+      .map((item) => asRecord(item));
+    const outputSamples = asList(raw.output_samples)
+      .filter((item) => typeof item === 'object' && item !== null)
+      .map((item) => asRecord(item));
+    return {
+      status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
+      summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据整理试跑完成'))),
+      rawSources: sourceSamples.map((item) => ({
+        sourceId: toText(item.source_id, toText(item.table_name)),
+        sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
+        side: toText(item.side) === 'right' ? 'right' : 'left',
+        rows: toPreviewTableRows(item.rows),
+      })),
+      preparedOutputs: outputSamples.map((item) => ({
+        side: toText(item.side) === 'right' ? 'right' : 'left',
+        title: toText(item.title, toText(item.target_table, 'output')),
+        rows: toPreviewTableRows(item.rows),
+      })),
+      validations: [
+        ...parseTrialMessages(raw.errors),
+        ...parseTrialMessages(raw.warnings),
+        ...parseTrialMessages(raw.highlights),
+      ],
+    };
+  }, []);
+
+  const buildReconPreviewFromTrial = useCallback((trialResult: unknown): ReconTrialPreview | null => {
+    const raw = asRecord(trialResult);
+    if (Object.keys(raw).length === 0) return null;
+    const resultSamples = asRecord(raw.result_samples);
+    const matchedWithDiff = toPreviewTableRows(resultSamples.matched_with_diff);
+    const sourceOnly = toPreviewTableRows(resultSamples.source_only);
+    const targetOnly = toPreviewTableRows(resultSamples.target_only);
+    const resolvePreviewNumber = (row: PreviewTableRow, keys: string[]): number | '--' => {
+      for (const key of keys) {
+        const value = row[key];
+        if (typeof value === 'number') return value;
+        const parsed = Number(value);
+        if (value !== null && value !== undefined && Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+      return '--';
+    };
+    const resolveMatchKey = (row: PreviewTableRow): string =>
+      toText(
+        row.source_biz_key,
+        toText(row.target_biz_key, toText(row.biz_key, toText(row.match_key, '--'))),
+      );
+    const rows: ReconResultRow[] = [
+      ...matchedWithDiff.map((item) => ({
+        matchKey: resolveMatchKey(item),
+        result: 'amount_diff' as const,
+        leftAmount: resolvePreviewNumber(item, ['source_amount', 'left_amount', 'amount']),
+        rightAmount: resolvePreviewNumber(item, ['target_amount', 'right_amount']),
+        diffAmount: resolvePreviewNumber(item, ['diff_amount', '金额差异']),
+        note: '金额差异',
+      })),
+      ...sourceOnly.map((item) => ({
+        matchKey: resolveMatchKey(item),
+        result: 'left_only' as const,
+        leftAmount: resolvePreviewNumber(item, ['source_amount', 'left_amount', 'amount']),
+        rightAmount: '--' as const,
+        diffAmount: '--' as const,
+        note: '左侧独有',
+      })),
+      ...targetOnly.map((item) => ({
+        matchKey: resolveMatchKey(item),
+        result: 'right_only' as const,
+        leftAmount: '--' as const,
+        rightAmount: resolvePreviewNumber(item, ['target_amount', 'right_amount', 'amount']),
+        diffAmount: '--' as const,
+        note: '右侧独有',
+      })),
+    ];
+    const resultSummary = asRecord(raw.result_summary);
+    return {
+      status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
+      summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据对账试跑完成'))),
+      leftRows: toPreviewTableRows(raw.left_samples),
+      rightRows: toPreviewTableRows(raw.right_samples),
+      results: rows,
+      resultSummary: {
+        matched: toInt(resultSummary.matched_exact, 0),
+        unmatchedLeft: toInt(resultSummary.source_only, 0),
+        unmatchedRight: toInt(resultSummary.target_only, 0),
+        diffCount: toInt(resultSummary.matched_with_diff, 0),
+      },
+    };
+  }, []);
 
   const evaluateSourceCompatibility = useCallback(
     (
@@ -2455,6 +2668,7 @@ export default function ReconWorkspace({
     },
     [],
   );
+  void applyProcEvaluation;
 
   const resolvePreparedRowsForRecon = useCallback(() => {
     const procSeed =
@@ -2694,6 +2908,7 @@ export default function ReconWorkspace({
     },
     [],
   );
+  void applyReconEvaluation;
 
   const handleSelectExistingProcConfig = useCallback(
     async (configId: string) => {
@@ -2711,6 +2926,7 @@ export default function ReconWorkspace({
           reconTrialStatus: 'idle',
           reconTrialSummary: '',
         }));
+        setDesignSessionId('');
         setProcTrialPreview(null);
         setReconTrialPreview(null);
         setProcCompatibility(emptyCompatibilityResult());
@@ -2724,13 +2940,43 @@ export default function ReconWorkspace({
       setIsGeneratingProc(true);
       try {
         const ruleJson = option.ruleJson || (option.ruleCode ? await loadRuleJsonByCode(option.ruleCode) : null);
-        const draftText = option.draftText.trim() || (ruleJson ? summarizeProcDraft(ruleJson) : '');
+        if (!ruleJson) {
+          throw new Error('已有数据整理配置缺少可用的规则 JSON');
+        }
+        const sessionId = await ensureDesignSession();
+        await syncDesignTarget(sessionId);
+        const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/use-existing`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            rule_code: option.ruleCode || '',
+            rule_json: ruleJson,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data.detail || data.message || '加载已有数据整理配置失败'));
+        }
+        const session = asRecord(data.session);
+        const procStep = asRecord(session.proc_step);
+        const compatibility = toCompatibilityResult(
+          procStep.compatibility_result,
+          '已载入已有数据整理配置，请继续试跑验证。',
+        );
+        const normalizedRuleJson = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
+        const draftText =
+          toText(procStep.normalized_display_text, toText(procStep.editable_instruction_text))
+          || option.draftText.trim()
+          || summarizeProcDraft(normalizedRuleJson);
         setSchemeDraft((prev) => ({
           ...prev,
           procConfigMode: 'existing',
           selectedProcConfigId: configId,
           procDraft: draftText,
-          procRuleJson: ruleJson,
+          procRuleJson: normalizedRuleJson,
           procTrialStatus: 'idle',
           procTrialSummary: '',
           reconDraft: '',
@@ -2740,11 +2986,7 @@ export default function ReconWorkspace({
         }));
         setProcTrialPreview(null);
         setReconTrialPreview(null);
-        setProcCompatibility({
-          status: 'idle',
-          message: '已载入已有数据整理配置，请点击试跑验证或直接下一步执行兼容性检查。',
-          details: [option.name],
-        });
+        setProcCompatibility(compatibility);
         setReconCompatibility(emptyCompatibilityResult());
       } catch (error) {
         setModalError(error instanceof Error ? error.message : '加载已有数据整理配置失败');
@@ -2752,7 +2994,14 @@ export default function ReconWorkspace({
         setIsGeneratingProc(false);
       }
     },
-    [existingProcOptions, loadRuleJsonByCode],
+    [
+      authToken,
+      ensureDesignSession,
+      existingProcOptions,
+      loadRuleJsonByCode,
+      syncDesignTarget,
+      toCompatibilityResult,
+    ],
   );
 
   const handleSelectExistingReconConfig = useCallback(
@@ -2772,6 +3021,7 @@ export default function ReconWorkspace({
           reconTrialStatus: 'idle',
           reconTrialSummary: '',
         }));
+        setDesignSessionId('');
         setReconTrialPreview(null);
         setReconCompatibility(emptyCompatibilityResult());
         return;
@@ -2783,21 +3033,40 @@ export default function ReconWorkspace({
       setIsGeneratingRecon(true);
       try {
         const ruleJson = option.ruleJson || (option.ruleCode ? await loadRuleJsonByCode(option.ruleCode) : null);
-        const parsed = ruleJson
-          ? parseReconRuleJsonConfig(ruleJson)
-          : {
-              matchKey: option.matchKey || '',
-              leftAmountField: option.leftAmountField || '',
-              rightAmountField: option.rightAmountField || '',
-              tolerance: option.tolerance || '',
-            };
-        const draftText = option.draftText.trim() || (ruleJson ? summarizeReconDraft(ruleJson) : '');
+        if (!ruleJson) {
+          throw new Error('已有对账逻辑缺少可用的规则 JSON');
+        }
+        const sessionId = await ensureDesignSession();
+        await syncDesignTarget(sessionId);
+        const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/use-existing`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            rule_code: option.ruleCode || '',
+            rule_json: ruleJson,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data.detail || data.message || '加载已有数据对账逻辑失败'));
+        }
+        const session = asRecord(data.session);
+        const reconStep = asRecord(session.recon_step);
+        const normalizedRuleJson = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+        const parsed = parseReconRuleJsonConfig(normalizedRuleJson);
+        const draftText =
+          toText(reconStep.normalized_display_text, toText(reconStep.editable_instruction_text))
+          || option.draftText.trim()
+          || summarizeReconDraft(normalizedRuleJson);
         setSchemeDraft((prev) => ({
           ...prev,
           reconConfigMode: 'existing',
           selectedReconConfigId: configId,
           reconDraft: draftText,
-          reconRuleJson: ruleJson,
+          reconRuleJson: normalizedRuleJson,
           matchKey: parsed.matchKey,
           leftAmountField: parsed.leftAmountField,
           rightAmountField: parsed.rightAmountField,
@@ -2806,18 +3075,23 @@ export default function ReconWorkspace({
           reconTrialSummary: '',
         }));
         setReconTrialPreview(null);
-        setReconCompatibility({
-          status: 'idle',
-          message: '已载入已有数据对账逻辑，请点击试跑验证或直接下一步执行兼容性检查。',
-          details: [option.name],
-        });
+        setReconCompatibility(
+          toCompatibilityResult(reconStep.compatibility_result, '已载入已有数据对账逻辑，请继续试跑验证。'),
+        );
       } catch (error) {
         setModalError(error instanceof Error ? error.message : '加载已有数据对账逻辑失败');
       } finally {
         setIsGeneratingRecon(false);
       }
     },
-    [existingReconOptions, loadRuleJsonByCode],
+    [
+      authToken,
+      ensureDesignSession,
+      existingReconOptions,
+      loadRuleJsonByCode,
+      syncDesignTarget,
+      toCompatibilityResult,
+    ],
   );
 
   const generateProcDraft = useCallback(async () => {
@@ -2833,58 +3107,36 @@ export default function ReconWorkspace({
     setIsGeneratingProc(true);
     setModalError(null);
     try {
-      const response = await fetchReconAutoApi('/schemes/design/start', {
+      const sessionId = await ensureDesignSession();
+      await syncDesignTarget(sessionId);
+      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/generate`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${authToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          scheme_name: schemeDraft.name.trim(),
-          biz_goal: schemeDraft.businessGoal.trim(),
-          source_description: [
-            `左侧数据描述：${schemeDraft.leftDescription.trim() || '--'}`,
-            `右侧数据描述：${schemeDraft.rightDescription.trim() || '--'}`,
-          ].join('\n'),
-          sample_datasets: [
-            ...selectedLeftSources.map((item) =>
-              buildDatasetSamplePayload(item, 'left', schemeDraft.leftDescription.trim(), schemeDraft.procDraft.trim()),
-            ),
-            ...selectedRightSources.map((item) =>
-              buildDatasetSamplePayload(item, 'right', schemeDraft.rightDescription.trim(), schemeDraft.procDraft.trim()),
-            ),
-          ],
-          initial_message: [
-            '只生成proc。',
-            '请输出可用于 left_recon_ready / right_recon_ready 的数据整理配置。',
-            schemeDraft.procDraft.trim()
-              ? `以下是当前的数据整理配置说明，用户已经做过调整，请优先按这个说明重新生成：\n${schemeDraft.procDraft.trim()}`
-              : '',
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          run_trial: false,
+          instruction_text: schemeDraft.procDraft.trim(),
         }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(data.detail || data.message || 'AI 生成整理配置失败'));
       }
-      const normalizedProcRuleJson = asRecord(data.session?.drafts?.proc_trial_result?.normalized_rule);
-      const procRuleJson = Object.keys(normalizedProcRuleJson).length > 0
-        ? normalizedProcRuleJson
-        : asRecord(data.session?.drafts?.proc_draft_json);
+      const session = asRecord(data.session);
+      const procStep = asRecord(session.proc_step);
+      const procRuleJson = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
       if (!procRuleJson || !Array.isArray(procRuleJson.steps)) {
         throw new Error('AI 未返回有效的数据整理配置');
       }
       setSchemeDraft((prev) => ({
         ...prev,
-        procDraft: summarizeProcDraft(procRuleJson),
+        procConfigMode: 'ai',
+        selectedProcConfigId: '',
+        procDraft: toText(procStep.normalized_display_text, summarizeProcDraft(procRuleJson)),
         procRuleJson,
         procTrialStatus: 'idle',
         procTrialSummary: '',
-        procConfigMode: 'ai',
-        selectedProcConfigId: '',
         reconDraft: '',
         reconRuleJson: null,
         reconTrialStatus: 'idle',
@@ -2892,7 +3144,7 @@ export default function ReconWorkspace({
       }));
       setProcTrialPreview(null);
       setReconTrialPreview(null);
-      setProcCompatibility(emptyCompatibilityResult());
+      setProcCompatibility(toCompatibilityResult(procStep.compatibility_result, 'AI 已生成数据整理配置。'));
       setReconCompatibility(emptyCompatibilityResult());
     } catch (error) {
       setModalError(error instanceof Error ? error.message : 'AI 生成整理配置失败');
@@ -2901,110 +3153,56 @@ export default function ReconWorkspace({
     }
   }, [
     authToken,
-    schemeDraft.businessGoal,
-    schemeDraft.leftDescription,
-    schemeDraft.name,
     schemeDraft.procDraft,
-    schemeDraft.rightDescription,
-    selectedLeftSources,
-    selectedRightSources,
+    ensureDesignSession,
+    syncDesignTarget,
+    toCompatibilityResult,
   ]);
 
-  const trialProcDraft = useCallback(async () => {
+  const trialProcDraft = useCallback(async (): Promise<boolean> => {
     setModalError(null);
-    const preflight = evaluateProcDraftState();
-    setProcCompatibility(preflight.compatibility);
-    if (!preflight.passed || !preflight.ruleJson) {
-      applyProcEvaluation(preflight);
-      return;
+    if (!schemeDraft.procRuleJson) {
+      setModalError('请先 AI 生成或选择已有数据整理配置。');
+      return false;
     }
     if (!authToken) {
       setModalError('请先登录后再试跑验证。');
-      return;
+      return false;
     }
-
-    const seedText =
-      preflight.draftText
-      || JSON.stringify(preflight.ruleJson, null, 2)
-      || schemeDraft.name
-      || 'proc';
 
     setIsTrialingProc(true);
     try {
-      const response = await fetchReconAutoApi('/schemes/design/proc-trial', {
+      const sessionId = await ensureDesignSession();
+      await syncDesignTarget(sessionId);
+      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/trial`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          proc_rule_json: preflight.ruleJson,
-          sample_datasets: [
-            ...selectedLeftSources.map((item) =>
-              buildDatasetSamplePayload(item, 'left', schemeDraft.leftDescription.trim(), seedText),
-            ),
-            ...selectedRightSources.map((item) =>
-              buildDatasetSamplePayload(item, 'right', schemeDraft.rightDescription.trim(), seedText),
-            ),
-          ],
-        }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(data.detail || data.message || data.error || '数据整理试跑失败'));
       }
-
-      const normalizedRule = asRecord(data.normalized_rule);
-      const rawSources: SourcePreviewBlock[] = Array.isArray(data.source_samples)
-        ? data.source_samples
-          .filter((item: unknown): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-          .map((item: Record<string, unknown>) => ({
-            sourceId: toText(item.source_id, toText(item.table_name, 'source')),
-            sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
-            side: toText(item.side) === 'right' ? 'right' as const : 'left' as const,
-            rows: toPreviewTableRows(item.rows),
-          }))
-          : preflight.preview.rawSources;
-      const preparedOutputs: PreparedPreviewBlock[] = Array.isArray(data.output_samples)
-        ? data.output_samples
-          .filter((item: unknown): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-          .map((item: Record<string, unknown>) => ({
-            side: toText(item.side) === 'right' ? 'right' as const : 'left' as const,
-            title: toText(item.title, toText(item.target_table, 'output')),
-            rows: toPreviewTableRows(item.rows),
-          }))
-        : [];
-      const details = [
-        ...parseTrialMessages(data.errors),
-        ...parseTrialMessages(data.warnings),
-        ...parseTrialMessages(data.highlights),
-      ];
-      const readyForConfirm =
-        Boolean(data.ready_for_confirm)
-        || (
-          preparedOutputs.some((item) => item.title === 'left_recon_ready')
-          && preparedOutputs.some((item) => item.title === 'right_recon_ready')
-        );
-      const passed = Boolean(data.success) && readyForConfirm;
+      const session = asRecord(data.session);
+      const procStep = asRecord(session.proc_step);
+      const trialResult = asRecord(procStep.trial_result);
+      const normalizedRule = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
+      const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
       const summary = toText(
-        data.summary,
-        toText(
-          data.message,
-          passed
-            ? '已完成数据整理试跑，左右两侧对账数据均已生成。'
-            : toText(data.error, '数据整理试跑未通过，请调整配置后重试。'),
+        trialResult.summary,
+        toText(trialResult.message, toText(trialResult.error, passed ? '数据整理试跑通过' : '数据整理试跑未通过')),
+      );
+      setProcCompatibility(
+        toCompatibilityResult(
+          procStep.compatibility_result,
+          passed ? '试跑验证通过，可进入下一步。' : '试跑未通过，请调整数据整理配置后重试。',
         ),
       );
-
-      setProcCompatibility({
-        status: passed ? 'passed' : 'failed',
-        message: passed ? '试跑验证通过，可进入下一步。' : '试跑未通过，请调整数据整理配置后重试。',
-        details: details.length > 0 ? details : [summary],
-      });
       setSchemeDraft((prev) => ({
         ...prev,
-        procDraft: preflight.draftText || prev.procDraft,
-        procRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : preflight.ruleJson,
+        procDraft: toText(procStep.normalized_display_text, prev.procDraft),
+        procRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.procRuleJson,
         procTrialStatus: passed ? 'passed' : 'needs_adjustment',
         procTrialSummary: summary,
         reconDraft: passed ? prev.reconDraft : '',
@@ -3012,15 +3210,10 @@ export default function ReconWorkspace({
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
       }));
-      setProcTrialPreview({
-        status: passed ? 'passed' : 'needs_adjustment',
-        summary,
-        rawSources,
-        preparedOutputs,
-        validations: details,
-      });
+      setProcTrialPreview(buildProcPreviewFromTrial(trialResult));
       setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
+      return passed;
     } catch (error) {
       const message = error instanceof Error ? error.message : '数据整理试跑失败';
       setModalError(message);
@@ -3038,27 +3231,20 @@ export default function ReconWorkspace({
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
       }));
-      setProcTrialPreview({
-        status: 'needs_adjustment',
-        summary: message,
-        rawSources: preflight.preview.rawSources,
-        preparedOutputs: [],
-        validations: [message],
-      });
+      setProcTrialPreview(null);
       setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
+      return false;
     } finally {
       setIsTrialingProc(false);
     }
   }, [
-    applyProcEvaluation,
     authToken,
-    evaluateProcDraftState,
-    schemeDraft.leftDescription,
-    schemeDraft.name,
-    schemeDraft.rightDescription,
-    selectedLeftSources,
-    selectedRightSources,
+    buildProcPreviewFromTrial,
+    ensureDesignSession,
+    schemeDraft.procRuleJson,
+    syncDesignTarget,
+    toCompatibilityResult,
   ]);
 
   const generateReconDraft = useCallback(async () => {
@@ -3070,10 +3256,7 @@ export default function ReconWorkspace({
       setModalError('请先完成左右数据集选择。');
       return;
     }
-    const { leftRows, rightRows } = resolvePreparedRowsForRecon();
-    const leftSchemaSummary = inferSchemaSummaryFromRows(leftRows);
-    const rightSchemaSummary = inferSchemaSummaryFromRows(rightRows);
-    if (!leftRows.length || !rightRows.length) {
+    if (schemeDraft.procTrialStatus !== 'passed' || !schemeDraft.procRuleJson) {
       setModalError('请先完成数据整理试跑，再生成对账逻辑。');
       return;
     }
@@ -3081,87 +3264,50 @@ export default function ReconWorkspace({
     setIsGeneratingRecon(true);
     setModalError(null);
     try {
-      const response = await fetchReconAutoApi('/schemes/design/start', {
+      const sessionId = await ensureDesignSession();
+      await syncDesignTarget(sessionId);
+      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/generate`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${authToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          scheme_name: schemeDraft.name.trim(),
-          biz_goal: schemeDraft.businessGoal.trim(),
-          source_description: [
-            `左侧数据描述：${schemeDraft.leftDescription.trim() || '--'}`,
-            `右侧数据描述：${schemeDraft.rightDescription.trim() || '--'}`,
-            `左侧整理后抽样：${JSON.stringify(leftRows, null, 2)}`,
-            `右侧整理后抽样：${JSON.stringify(rightRows, null, 2)}`,
-          ].join('\n'),
-          sample_datasets: [
-            ...selectedLeftSources.map((item) => ({
-              side: 'left',
-              dataset_name: item.name,
-              dataset_code: item.datasetCode,
-              table_name: 'left_recon_ready',
-              source_type: 'dataset',
-              source_id: item.sourceId,
-              source_key: item.sourceId,
-              resource_key: item.resourceKey || item.datasetCode || item.name,
-              source_kind: item.sourceKind,
-              provider_code: item.providerCode,
-              description: schemeDraft.leftDescription.trim(),
-              schema_summary: leftSchemaSummary,
-              sample_rows: leftRows.slice(0, 3),
-            })),
-            ...selectedRightSources.map((item) => ({
-              side: 'right',
-              dataset_name: item.name,
-              dataset_code: item.datasetCode,
-              table_name: 'right_recon_ready',
-              source_type: 'dataset',
-              source_id: item.sourceId,
-              source_key: item.sourceId,
-              resource_key: item.resourceKey || item.datasetCode || item.name,
-              source_kind: item.sourceKind,
-              provider_code: item.providerCode,
-              description: schemeDraft.rightDescription.trim(),
-              schema_summary: rightSchemaSummary,
-              sample_rows: rightRows.slice(0, 3),
-            })),
-          ],
-          initial_message: [
-            '只生成recon。',
-            '请基于 left_recon_ready 与 right_recon_ready 生成符合现有 recon 引擎定义的对账逻辑。',
-            schemeDraft.reconDraft.trim()
-              ? `以下是当前的数据对账逻辑说明，用户已经做过调整，请优先按这个说明重新生成：\n${schemeDraft.reconDraft.trim()}`
-              : '',
-          ].join('\n'),
-          run_trial: false,
+          instruction_text: schemeDraft.reconDraft.trim(),
         }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(data.detail || data.message || 'AI 生成对账逻辑失败'));
       }
-      const reconRuleJson = asRecord(data.session?.drafts?.recon_draft_json);
-      if (!reconRuleJson || !Array.isArray(reconRuleJson.rules) || reconRuleJson.rules.length === 0) {
+      const session = asRecord(data.session);
+      const reconStep = asRecord(session.recon_step);
+      const reconRuleJson = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+      if (!Array.isArray(reconRuleJson.rules) || reconRuleJson.rules.length === 0) {
         throw new Error('AI 未返回有效的数据对账逻辑');
       }
       const nextConfig = parseReconRuleJsonConfig(reconRuleJson);
+      const draftText =
+        toText(reconStep.normalized_display_text, toText(reconStep.editable_instruction_text))
+        || summarizeReconDraft(reconRuleJson);
       setSchemeDraft((prev) => ({
         ...prev,
         reconConfigMode: 'ai',
         selectedReconConfigId: '',
+        reconRuleName: toText(reconRuleJson.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
         matchKey: nextConfig.matchKey,
         leftAmountField: nextConfig.leftAmountField,
         rightAmountField: nextConfig.rightAmountField,
         tolerance: nextConfig.tolerance,
-        reconDraft: summarizeReconDraft(reconRuleJson),
+        reconDraft: draftText,
         reconRuleJson,
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
       }));
       setReconTrialPreview(null);
-      setReconCompatibility(emptyCompatibilityResult());
+      setReconCompatibility(
+        toCompatibilityResult(reconStep.compatibility_result, 'AI 已生成数据对账逻辑。'),
+      );
       setWizardJsonPanel(null);
     } catch (error) {
       setModalError(error instanceof Error ? error.message : 'AI 生成对账逻辑失败');
@@ -3170,7 +3316,11 @@ export default function ReconWorkspace({
     }
   }, [
     authToken,
-    resolvePreparedRowsForRecon,
+    ensureDesignSession,
+    schemeDraft.procRuleJson,
+    schemeDraft.procTrialStatus,
+    syncDesignTarget,
+    toCompatibilityResult,
     schemeDraft.businessGoal,
     schemeDraft.leftDescription,
     schemeDraft.name,
@@ -3180,10 +3330,93 @@ export default function ReconWorkspace({
     selectedRightSources,
   ]);
 
-  const trialReconDraft = useCallback(() => {
+  const trialReconDraft = useCallback(async (): Promise<boolean> => {
     setModalError(null);
-    applyReconEvaluation(evaluateReconDraftState());
-  }, [applyReconEvaluation, evaluateReconDraftState]);
+    if (!schemeDraft.reconRuleJson) {
+      setModalError('请先 AI 生成或选择已有数据对账逻辑。');
+      return false;
+    }
+    if (!authToken) {
+      setModalError('请先登录后再试跑验证。');
+      return false;
+    }
+    if (schemeDraft.procTrialStatus !== 'passed' || !schemeDraft.procRuleJson) {
+      setModalError('请先完成数据整理试跑，再进行对账试跑。');
+      return false;
+    }
+
+    setIsTrialingRecon(true);
+    try {
+      const sessionId = await ensureDesignSession();
+      await syncDesignTarget(sessionId);
+      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/trial`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.detail || data.message || data.error || '数据对账试跑失败'));
+      }
+      const session = asRecord(data.session);
+      const reconStep = asRecord(session.recon_step);
+      const trialResult = asRecord(reconStep.trial_result);
+      const normalizedRule = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+      const parsed = parseReconRuleJsonConfig(normalizedRule);
+      const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
+      const summary = toText(
+        trialResult.summary,
+        toText(trialResult.message, toText(trialResult.error, passed ? '数据对账试跑通过' : '数据对账试跑未通过')),
+      );
+      setReconCompatibility(
+        toCompatibilityResult(
+          reconStep.compatibility_result,
+          passed ? '试跑验证通过，可进入保存方案。' : '试跑未通过，请调整数据对账逻辑后重试。',
+        ),
+      );
+      setSchemeDraft((prev) => ({
+        ...prev,
+        reconDraft: toText(reconStep.normalized_display_text, prev.reconDraft),
+        reconRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.reconRuleJson,
+        reconRuleName: toText(normalizedRule.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
+        matchKey: parsed.matchKey,
+        leftAmountField: parsed.leftAmountField,
+        rightAmountField: parsed.rightAmountField,
+        tolerance: parsed.tolerance,
+        reconTrialStatus: passed ? 'passed' : 'needs_adjustment',
+        reconTrialSummary: summary,
+      }));
+      setReconTrialPreview(buildReconPreviewFromTrial(trialResult));
+      return passed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '数据对账试跑失败';
+      setModalError(message);
+      setReconCompatibility({
+        status: 'failed',
+        message: '试跑未通过，请检查对账逻辑或整理后的样本数据。',
+        details: [message],
+      });
+      setSchemeDraft((prev) => ({
+        ...prev,
+        reconTrialStatus: 'needs_adjustment',
+        reconTrialSummary: message,
+      }));
+      setReconTrialPreview(null);
+      return false;
+    } finally {
+      setIsTrialingRecon(false);
+    }
+  }, [
+    authToken,
+    buildReconPreviewFromTrial,
+    ensureDesignSession,
+    schemeDraft.procRuleJson,
+    schemeDraft.procTrialStatus,
+    schemeDraft.reconRuleJson,
+    syncDesignTarget,
+    toCompatibilityResult,
+  ]);
 
   const handleViewProcJson = useCallback(() => {
     setWizardJsonPanel((prev) => (prev === 'proc' ? null : 'proc'));
@@ -3198,19 +3431,28 @@ export default function ReconWorkspace({
       setModalError('请先登录后再保存对账方案。');
       return;
     }
+    if (!schemeDraft.procRuleJson || !schemeDraft.reconRuleJson) {
+      setModalError('请先生成并验证数据整理与对账逻辑。');
+      return;
+    }
+    if (schemeDraft.procTrialStatus !== 'passed' || schemeDraft.reconTrialStatus !== 'passed') {
+      setModalError('请先完成数据整理和对账逻辑的试跑验证，再保存方案。');
+      return;
+    }
 
     setIsSubmittingScheme(true);
     setModalError(null);
 
     try {
-      const reconRuleName = buildDefaultReconRuleName(schemeDraft.name);
-      const procRuleJson =
-        schemeDraft.procRuleJson || buildProcJsonPayload(schemeDraft, selectedLeftSources, selectedRightSources);
-      const reconRuleJson = {
-        ...(schemeDraft.reconRuleJson || buildReconJsonPayload(schemeDraft, parsedReconConfig)),
-        rule_id: sanitizeRuleId(reconRuleName, 'DRAFT_RECON_RULE'),
-        rule_name: reconRuleName,
-      };
+      const procRuleJson = schemeDraft.procRuleJson;
+      const reconRuleJson = schemeDraft.reconRuleJson;
+      const parsedReconRule = parseReconRuleJsonConfig(reconRuleJson);
+      const procRuleName =
+        selectedProcOption?.name
+        || (schemeDraft.name.trim() ? `${schemeDraft.name.trim()} 整理规则` : '整理规则');
+      const reconRuleName =
+        selectedReconOption?.name
+        || toText(asRecord(reconRuleJson).rule_name, buildDefaultReconRuleName(schemeDraft.name));
       const response = await fetchReconAutoApi('/schemes', {
         method: 'POST',
         headers: {
@@ -3253,16 +3495,14 @@ export default function ReconWorkspace({
             proc_trial_summary: schemeDraft.procTrialSummary.trim(),
             recon_trial_status: schemeDraft.reconTrialStatus,
             recon_trial_summary: schemeDraft.reconTrialSummary.trim(),
-            match_key: parsedReconConfig.matchKey.trim(),
-            left_amount_field: parsedReconConfig.leftAmountField.trim(),
-            right_amount_field: parsedReconConfig.rightAmountField.trim(),
-            tolerance: parsedReconConfig.tolerance.trim(),
-            proc_rule_name:
-              selectedProcOption?.name
-              || (schemeDraft.name.trim() ? `${schemeDraft.name.trim()} · 数据整理配置` : '数据整理配置'),
+            match_key: parsedReconRule.matchKey.trim() || parsedReconConfig.matchKey.trim(),
+            left_amount_field: parsedReconRule.leftAmountField.trim() || parsedReconConfig.leftAmountField.trim(),
+            right_amount_field: parsedReconRule.rightAmountField.trim() || parsedReconConfig.rightAmountField.trim(),
+            tolerance: parsedReconRule.tolerance.trim() || parsedReconConfig.tolerance.trim(),
+            proc_rule_name: procRuleName,
             recon_rule_name: reconRuleName,
-            proc_draft_text: schemeDraft.procDraft.trim(),
-            recon_draft_text: schemeDraft.reconDraft.trim(),
+            proc_draft_text: schemeDraft.procDraft.trim() || summarizeProcDraft(procRuleJson),
+            recon_draft_text: schemeDraft.reconDraft.trim() || summarizeReconDraft(reconRuleJson),
             proc_rule_json: procRuleJson,
             recon_rule_json: reconRuleJson,
           },
@@ -3273,6 +3513,7 @@ export default function ReconWorkspace({
         throw new Error(String(data.detail || data.message || '保存对账方案失败'));
       }
       await loadCenterData();
+      onSchemeCreated?.();
       setActiveTab('schemes');
       closeModal();
     } catch (error) {
@@ -3288,6 +3529,7 @@ export default function ReconWorkspace({
     schemeDraft,
     selectedProcOption?.name,
     selectedProcOption?.ruleCode,
+    selectedReconOption?.name,
     selectedReconOption?.ruleCode,
     selectedLeftSources,
     selectedRightSources,
@@ -3373,18 +3615,22 @@ export default function ReconWorkspace({
   const handleDeleteScheme = useCallback(
     async (scheme: ReconSchemeListItem) => {
       if (!authToken) {
-        setModalError('请先登录后再删除对账方案。');
+        setCenterNotice(null);
+        setCenterError('请先登录后再删除对账方案。');
         return;
       }
       const relatedTaskCount = tasks.filter((item) => item.schemeCode === scheme.schemeCode).length;
       if (relatedTaskCount > 0) {
-        setModalError(`当前方案下还有 ${relatedTaskCount} 个运行计划，请先删除运行计划后再删除对账方案。`);
+        setCenterNotice(null);
+        setCenterError(`当前方案下还有 ${relatedTaskCount} 个运行计划，请先删除运行计划后再删除对账方案。`);
         return;
       }
       if (!window.confirm(`确定要删除对账方案「${scheme.name}」吗？此操作不可恢复。`)) {
         return;
       }
       try {
+        setCenterError(null);
+        setCenterNotice(null);
         const response = await fetchReconAutoApi(`/schemes/${encodeURIComponent(scheme.id)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${authToken}` },
@@ -3397,9 +3643,11 @@ export default function ReconWorkspace({
         if (modalState?.kind === 'scheme-detail' && modalState.scheme.id === scheme.id) {
           closeModal();
         }
+        setCenterNotice(`对账方案「${scheme.name}」已删除。`);
         await loadCenterData();
       } catch (error) {
-        setModalError(error instanceof Error ? error.message : '删除对账方案失败');
+        setCenterNotice(null);
+        setCenterError(error instanceof Error ? error.message : '删除对账方案失败');
       }
     },
     [authToken, closeModal, loadCenterData, modalState, tasks],
@@ -3535,16 +3783,22 @@ export default function ReconWorkspace({
     Boolean(schemeDraft.businessGoal.trim()) &&
     selectedLeftSources.length > 0 &&
     selectedRightSources.length > 0;
-  const schemeStepTwoReady =
+  const schemeStepTwoReady = Boolean(
     schemeDraft.procConfigMode === 'existing'
-      ? Boolean(schemeDraft.selectedProcConfigId)
-      : Boolean(schemeDraft.procDraft.trim() || schemeDraft.procRuleJson);
-  const schemeStepThreeReady =
-    (schemeDraft.reconConfigMode === 'existing'
-      ? Boolean(schemeDraft.selectedReconConfigId)
-      : Boolean(schemeDraft.reconDraft.trim() || schemeDraft.reconRuleJson));
+      ? schemeDraft.selectedProcConfigId || schemeDraft.procRuleJson
+      : schemeDraft.procDraft.trim() || schemeDraft.procRuleJson,
+  );
+  const schemeStepThreeReady = Boolean(
+    schemeDraft.reconConfigMode === 'existing'
+      ? schemeDraft.selectedReconConfigId || schemeDraft.reconRuleJson
+      : schemeDraft.reconDraft.trim() || schemeDraft.reconRuleJson,
+  );
+  const schemeStepTwoPassed =
+    schemeDraft.procTrialStatus === 'passed' && Boolean(schemeDraft.procRuleJson);
+  const schemeStepThreePassed =
+    schemeDraft.reconTrialStatus === 'passed' && Boolean(schemeDraft.reconRuleJson);
 
-  const goToNextSchemeStep = useCallback(() => {
+  const goToNextSchemeStep = useCallback(async () => {
     setModalError(null);
     if (schemeWizardStep === 1) {
       if (!schemeStepOneReady) {
@@ -3555,37 +3809,48 @@ export default function ReconWorkspace({
       return;
     }
     if (schemeWizardStep === 2) {
-      const result = evaluateProcDraftState();
-      if (!result.passed) {
-        applyProcEvaluation(result);
-        setModalError(result.compatibility.message);
+      if (!schemeStepTwoReady) {
+        setModalError('请先生成或选择一条可用的数据整理配置。');
         return;
       }
-      setProcCompatibility(result.compatibility);
-      if (!(schemeDraft.procTrialStatus === 'passed' && procTrialPreview)) {
-        applyProcEvaluation(result);
+      if (!schemeStepTwoPassed) {
+        const passed = await trialProcDraft();
+        if (!passed) {
+          setModalError('数据整理试跑未通过，请调整配置后重试。');
+          return;
+        }
       }
       setSchemeWizardStep(3);
       return;
     }
     if (schemeWizardStep === 3) {
-      const result = evaluateReconDraftState();
-      applyReconEvaluation(result);
-      if (!result.passed) {
-        setModalError(result.compatibility.message);
+      if (!schemeStepThreeReady) {
+        setModalError('请先生成或选择一条可用的数据对账逻辑。');
+        return;
+      }
+      if (!schemeStepThreePassed) {
+        const passed = await trialReconDraft();
+        if (!passed) {
+          setModalError('数据对账试跑未通过，请调整逻辑后重试。');
+          return;
+        }
+      }
+      if (!schemeDraft.reconRuleJson) {
+        setModalError('当前缺少可保存的数据对账逻辑。');
         return;
       }
       setSchemeWizardStep(4);
     }
   }, [
-    applyProcEvaluation,
-    applyReconEvaluation,
-    evaluateProcDraftState,
-    evaluateReconDraftState,
-    procTrialPreview,
     schemeStepOneReady,
-    schemeDraft.procTrialStatus,
+    schemeStepThreePassed,
+    schemeStepThreeReady,
+    schemeStepTwoPassed,
+    schemeStepTwoReady,
+    schemeDraft.reconRuleJson,
     schemeWizardStep,
+    trialProcDraft,
+    trialReconDraft,
   ]);
 
   const goToPreviousSchemeStep = useCallback(() => {
@@ -3648,11 +3913,8 @@ export default function ReconWorkspace({
         />
         {schemes.map((item) => {
           const schemeMeta = extractSchemeMeta(item);
-          const procRuleLabel =
-            schemeMeta.procRuleName || (item.name ? `${item.name} · 数据整理配置` : '未命名整理规则');
-          const savedDateLabel = formatDateLabel(item.updatedAt || item.createdAt);
-          const reconRuleLabel = `${item.name || '未命名对账方案'}${savedDateLabel ? ` · ${savedDateLabel}` : ''}`;
-          const reconRuleHint = schemeMeta.reconRuleName || '已保存对账逻辑';
+          const procRuleLabel = schemeMeta.procRuleName || (item.name ? `${item.name} 整理规则` : '未命名整理规则');
+          const reconRuleLabel = schemeMeta.reconRuleName || (item.name ? `${item.name} 对账逻辑` : '未命名对账逻辑');
           return (
             <div
               key={item.id}
@@ -3661,19 +3923,12 @@ export default function ReconWorkspace({
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
-                <p className="mt-1 line-clamp-2 text-sm leading-6 text-text-secondary">
-                  {schemeMeta.businessGoal || item.description || item.schemeCode || '--'}
-                </p>
               </div>
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-text-primary">{procRuleLabel}</p>
-                <p className="mt-1 truncate text-xs text-text-secondary">
-                  {schemeMeta.procTrialSummary || '已保存整理规则'}
-                </p>
               </div>
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-text-primary">{reconRuleLabel}</p>
-                <p className="mt-1 truncate text-xs text-text-secondary">{reconRuleHint}</p>
               </div>
               <div className="flex items-center justify-self-end gap-2">
                 <button
@@ -3735,7 +3990,7 @@ export default function ReconWorkspace({
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
                 <p className="mt-1 line-clamp-2 text-sm leading-6 text-text-secondary">
-                  通道 {resolveChannelProviderLabel(item.channelConfigId)} · 责任人 {item.ownerSummary || '--'}
+                  {resolveChannelProviderLabel(item.channelConfigId)} · {item.ownerSummary || '--'}
                 </p>
               </div>
               <span className="truncate text-sm text-text-secondary">{item.schemeName || '--'}</span>
@@ -3868,6 +4123,7 @@ export default function ReconWorkspace({
           rightOutputSamples: procTrialPreview.preparedOutputs
             .filter((item) => item.side === 'right')
             .map((item) => ({ title: item.title, rows: item.rows })),
+          validations: procTrialPreview.validations,
         }
       : undefined;
     const mappedReconTrialPreview = reconTrialPreview
@@ -3884,12 +4140,7 @@ export default function ReconWorkspace({
             diff_amount: item.diffAmount,
             note: item.note,
           })),
-          resultSummary: {
-            matched: reconTrialPreview.results.filter((item) => item.result === 'matched').length,
-            unmatchedLeft: reconTrialPreview.results.filter((item) => item.result === 'left_only').length,
-            unmatchedRight: reconTrialPreview.results.filter((item) => item.result === 'right_only').length,
-            diffCount: reconTrialPreview.results.filter((item) => item.result === 'amount_diff').length,
-          },
+          resultSummary: reconTrialPreview.resultSummary,
         }
       : undefined;
 
@@ -3929,6 +4180,7 @@ export default function ReconWorkspace({
                 ...prev,
                 procConfigMode: mode,
                 selectedProcConfigId: mode === 'existing' ? prev.selectedProcConfigId : '',
+                procRuleJson: null,
                 procTrialStatus: 'idle',
                 procTrialSummary: '',
                 reconDraft: '',
@@ -3950,6 +4202,7 @@ export default function ReconWorkspace({
               setSchemeDraft((prev) => ({
                 ...prev,
                 procDraft: value,
+                procRuleJson: null,
                 procTrialStatus: 'idle',
                 procTrialSummary: '',
                 reconDraft: '',
@@ -3967,23 +4220,6 @@ export default function ReconWorkspace({
             procTrialPreview={mappedProcTrialPreview}
           />
 
-          {schemeWizardStep === 2 && wizardJsonPanel === 'proc' ? (
-            <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-text-primary">PROC JSON</p>
-                <button
-                  type="button"
-                  onClick={handleViewProcJson}
-                  className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary transition hover:border-sky-200 hover:text-sky-700"
-                >
-                  收起
-                </button>
-              </div>
-              <pre className="mt-3 overflow-x-auto rounded-2xl border border-border bg-surface px-4 py-3 text-xs leading-6 text-text-primary">
-                {procJsonPreview}
-              </pre>
-            </div>
-          ) : null}
         </div>
       );
     }
@@ -4006,6 +4242,12 @@ export default function ReconWorkspace({
                 ...prev,
                 reconConfigMode: mode,
                 selectedReconConfigId: mode === 'existing' ? prev.selectedReconConfigId : '',
+                reconRuleName: '',
+                matchKey: '',
+                leftAmountField: '',
+                rightAmountField: '',
+                tolerance: '',
+                reconRuleJson: null,
                 reconTrialStatus: 'idle',
                 reconTrialSummary: '',
               }));
@@ -4024,37 +4266,13 @@ export default function ReconWorkspace({
             onGenerateRecon={generateReconDraft}
             onTrialRecon={trialReconDraft}
             onReconDraftChange={(value) => {
-              setSchemeDraft((prev) => {
-                const nextConfig = parseReconDraftConfig({
-                  reconDraft: value,
-                  matchKey: prev.matchKey,
-                  leftAmountField: prev.leftAmountField,
-                  rightAmountField: prev.rightAmountField,
-                  tolerance: prev.tolerance,
-                });
-
-                return {
-                  ...prev,
-                  reconDraft: value,
-                  matchKey: nextConfig.matchKey,
-                  leftAmountField: nextConfig.leftAmountField,
-                  rightAmountField: nextConfig.rightAmountField,
-                  tolerance: nextConfig.tolerance,
-                  reconRuleJson: buildReconJsonPayload(
-                    {
-                      ...prev,
-                      reconDraft: value,
-                      matchKey: nextConfig.matchKey,
-                      leftAmountField: nextConfig.leftAmountField,
-                      rightAmountField: nextConfig.rightAmountField,
-                      tolerance: nextConfig.tolerance,
-                    },
-                    nextConfig,
-                  ),
-                  reconTrialStatus: 'idle',
-                  reconTrialSummary: '',
-                };
-              });
+              setSchemeDraft((prev) => ({
+                ...prev,
+                reconDraft: value,
+                reconRuleJson: null,
+                reconTrialStatus: 'idle',
+                reconTrialSummary: '',
+              }));
               setReconTrialPreview(null);
               setReconCompatibility(emptyCompatibilityResult());
             }}
@@ -4062,39 +4280,31 @@ export default function ReconWorkspace({
             reconJsonPreview={reconJsonPreview}
             reconTrialPreview={mappedReconTrialPreview}
             trialDisabled={
-              !(
+              isTrialingRecon
+              || isGeneratingRecon
+              || !schemeDraft.procRuleJson
+              || schemeDraft.procTrialStatus !== 'passed'
+              || !(
                 (schemeDraft.reconConfigMode === 'existing'
                   ? schemeDraft.selectedReconConfigId
                   : schemeDraft.reconDraft.trim() || schemeDraft.reconRuleJson)
               )
             }
             isGeneratingRecon={isGeneratingRecon}
+            isTrialingRecon={isTrialingRecon}
           />
 
-          {wizardJsonPanel === 'recon' ? (
-            <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-text-primary">RECON JSON</p>
-                <button
-                  type="button"
-                  onClick={handleViewReconJson}
-                  className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary transition hover:border-sky-200 hover:text-sky-700"
-                >
-                  收起
-                </button>
-              </div>
-              <pre className="mt-3 overflow-x-auto rounded-2xl border border-border bg-surface px-4 py-3 text-xs leading-6 text-text-primary">
-                {reconJsonPreview}
-              </pre>
-            </div>
-          ) : null}
         </div>
       );
     }
 
     const procDisplayName =
       selectedProcOption?.name || (schemeDraft.name ? `${schemeDraft.name} · 数据整理配置` : '数据整理配置');
-    const reconDisplayName = buildDefaultReconRuleName(schemeDraft.name);
+    const reconDisplayName =
+      selectedReconOption?.name
+      || schemeDraft.reconRuleName
+      || toText(asRecord(schemeDraft.reconRuleJson || {}).rule_name)
+      || buildDefaultReconRuleName(schemeDraft.name);
 
     return (
       <div className="space-y-5">
@@ -4189,8 +4399,8 @@ export default function ReconWorkspace({
                 disabled={
                   isSubmittingScheme ||
                   !schemeStepOneReady ||
-                  !schemeStepTwoReady ||
-                  !schemeStepThreeReady
+                  !schemeStepTwoPassed ||
+                  !schemeStepThreePassed
                 }
                 className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -4781,6 +4991,39 @@ export default function ReconWorkspace({
               </button>
             </div>
             <div className="max-h-[calc(88vh-57px)] overflow-y-auto">{renderModalContent()}</div>
+          </div>
+        </div>
+      ) : null}
+
+      {wizardJsonPanel ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(15,23,42,0.24)] px-4 py-8">
+          <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <p className="text-sm font-semibold text-text-primary">
+                {wizardJsonPanel === 'proc' ? '数据整理配置 JSON' : '对账逻辑 JSON'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setWizardJsonPanel(null)}
+                className="rounded-lg p-2 text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              <pre className="overflow-x-auto rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-xs leading-6 text-text-primary">
+                {wizardJsonPanel === 'proc' ? procJsonPreview : reconJsonPreview}
+              </pre>
+            </div>
+            <div className="flex items-center justify-end border-t border-border px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setWizardJsonPanel(null)}
+                className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200"
+              >
+                取消
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

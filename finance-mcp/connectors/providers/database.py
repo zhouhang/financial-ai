@@ -9,6 +9,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import sql as pg_sql
 
 from connectors.base import BaseDataSourceConnector
 
@@ -263,6 +264,64 @@ class DatabaseConnector(BaseDataSourceConnector):
             "message": f"已发现 {len(datasets)} 个数据库对象",
         }
 
+    def preview(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        cfg = self._resolved_connection_config()
+        db_type = _normalize_db_type(cfg.get("db_type"))
+        resource_key = str(arguments.get("resource_key") or "").strip()
+        dataset = arguments.get("dataset") if isinstance(arguments.get("dataset"), dict) else {}
+        extract_config = dataset.get("extract_config") if isinstance(dataset, dict) else {}
+        limit = max(1, min(_to_int(arguments.get("limit"), 10), 200))
+
+        schema_name = str(arguments.get("schema") or extract_config.get("schema") or "").strip()
+        table_name = str(arguments.get("table") or extract_config.get("table") or "").strip()
+
+        if not table_name and resource_key:
+            if "." in resource_key:
+                schema_name, table_name = resource_key.split(".", 1)
+            else:
+                table_name = resource_key
+
+        if not table_name:
+            return {
+                "success": False,
+                "error": "missing_table",
+                "message": "预览数据需要提供 resource_key 或表名",
+                "rows": [],
+            }
+
+        rows: list[dict[str, Any]] = []
+        try:
+            if db_type == "postgresql":
+                rows = self._preview_postgresql(cfg, schema_name or "public", table_name, limit)
+            elif db_type == "mysql":
+                rows = self._preview_mysql(cfg, schema_name or str(cfg.get("database") or ""), table_name, limit)
+            elif db_type == "sqlite":
+                rows = self._preview_sqlite(cfg, table_name, limit)
+            else:
+                return {
+                    "success": False,
+                    "error": f"unsupported_db_type:{db_type}",
+                    "message": f"暂不支持 {db_type} 的预览",
+                    "rows": [],
+                }
+        except Exception as exc:
+            logger.error("database preview failed: %s", exc, exc_info=True)
+            return {
+                "success": False,
+                "error": str(exc),
+                "message": "查询样例数据失败",
+                "rows": [],
+            }
+
+        return {
+            "success": True,
+            "source_id": self.ctx.source_id,
+            "provider_code": self.ctx.provider_code,
+            "rows": rows,
+            "count": len(rows),
+            "message": f"已返回 {len(rows)} 行样例数据",
+        }
+
     def _discover_postgresql(
         self,
         cfg: dict[str, Any],
@@ -373,6 +432,66 @@ class DatabaseConnector(BaseDataSourceConnector):
                 }
             )
         return datasets
+
+    def _preview_postgresql(
+        self,
+        cfg: dict[str, Any],
+        schema_name: str,
+        table_name: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_postgresql(cfg)
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                query = pg_sql.SQL("SELECT * FROM {}.{} LIMIT %s").format(
+                    pg_sql.Identifier(schema_name),
+                    pg_sql.Identifier(table_name),
+                )
+                cur.execute(query, (limit,))
+                return [dict(row) for row in cur.fetchall() or []]
+        finally:
+            conn.close()
+
+    def _preview_mysql(
+        self,
+        cfg: dict[str, Any],
+        schema_name: str,
+        table_name: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_mysql(cfg)
+        safe_schema = schema_name.replace("`", "``") or str(cfg.get("database") or "")
+        safe_table = table_name.replace("`", "``")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM `{safe_schema}`.`{safe_table}` LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall() or []
+                return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def _preview_sqlite(
+        self,
+        cfg: dict[str, Any],
+        table_name: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_sqlite(cfg)
+        conn.row_factory = sqlite3.Row
+        safe_table = table_name.replace("'", "''")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM '{safe_table}' LIMIT ?",
+                    (limit,),
+                )
+                rows = cur.fetchall() or []
+                return [dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def _discover_mysql(self, cfg: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
         conn = self._connect_mysql(cfg)

@@ -17,6 +17,7 @@ from starlette.responses import RedirectResponse
 from tools.mcp_client import (
     data_source_authorize,
     data_source_create,
+    data_source_delete,
     data_source_disable_dataset,
     data_source_disable,
     data_source_discover_datasets,
@@ -374,6 +375,13 @@ class DataSourceTestRequest(BaseModel):
     mode: str = ""
 
 
+class DataSourceDeleteResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    source: Optional[DataSourceItem] = None
+    message: str = ""
+
+
 class DataSourceAuthorizeRequest(BaseModel):
     return_path: str = "/"
     mode: str = ""
@@ -687,6 +695,26 @@ async def disable_data_source(
         mode=str(result.get("mode") or body.mode or "mock"),
         source=result.get("source"),
         message=str(result.get("message") or "数据源已停用"),
+    )
+
+
+@router.delete("/data-sources/{source_id}", response_model=DataSourceDeleteResponse)
+async def delete_data_source(
+    source_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_delete(auth_token, source_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "删除数据源失败"))
+    return DataSourceDeleteResponse(
+        success=True,
+        mode=str(result.get("mode") or "mock"),
+        source=result.get("source"),
+        message=str(result.get("message") or "数据源已删除"),
     )
 
 

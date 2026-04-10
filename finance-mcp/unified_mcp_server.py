@@ -19,6 +19,7 @@ from starlette.responses import Response, JSONResponse, FileResponse
 import uvicorn
 import logging
 from auth.jwt_utils import get_user_from_token
+from auth import db as auth_db
 from security_utils import read_output_metadata
 
 # 导入上传模块
@@ -215,6 +216,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_create",
     "data_source_update",
     "data_source_disable",
+    "data_source_delete",
     "data_source_test",
     "data_source_authorize",
     "data_source_handle_callback",
@@ -486,6 +488,13 @@ async def main():
     """启动服务器"""
     host = DEFAULT_HOST
     port = DEFAULT_PORT
+
+    try:
+        applied = auth_db.ensure_unified_data_source_schema()
+        if applied:
+            logger.info("启动时已补齐统一数据源 schema: %s", ", ".join(applied))
+    except Exception as e:
+        logger.error("统一数据源 schema 自检失败: %s", e, exc_info=True)
     
     # 动态获取工具列表用于显示
     try:

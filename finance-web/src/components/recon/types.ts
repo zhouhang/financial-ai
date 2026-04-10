@@ -16,6 +16,7 @@ export interface ReconRuleListItem {
   task_name: string;
   task_type: 'proc' | 'recon' | string;
   file_rule_code?: string;
+  supported_entry_modes?: string[];
   updated_hint?: string;
 }
 

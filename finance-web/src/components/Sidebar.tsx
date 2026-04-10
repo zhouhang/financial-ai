@@ -20,6 +20,7 @@ import {
 import { COLLABORATION_CHANNEL_CARDS } from '../collaborationChannelConfig';
 import { SOURCE_TYPE_CARDS } from '../dataSourceConfig';
 import { getThemeMode, subscribeTheme, toggleTheme } from '../theme';
+import { ruleSupportsEntryMode } from '../utils/ruleEntryModes';
 import type {
   AppSection,
   CollaborationProvider,
@@ -83,6 +84,7 @@ interface SidebarProps {
   onSelectCollaborationProvider?: (provider: CollaborationProvider) => void;
   selectedReconEntry?: ReconWorkspaceMode;
   onSelectReconEntry?: (entry: ReconWorkspaceMode) => void;
+  rulesVersion?: number;
 }
 
 function sourceKindIcon(kind: DataSourceKind) {
@@ -123,6 +125,7 @@ export default function Sidebar({
   onSelectCollaborationProvider,
   selectedReconEntry = 'upload',
   onSelectReconEntry,
+  rulesVersion,
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<UserTask[]>([]);
@@ -189,7 +192,7 @@ export default function Sidebar({
     };
 
     fetchTasks();
-  }, [authToken, selectedRuleCode]);
+  }, [authToken, selectedRuleCode, rulesVersion]);
 
   useEffect(() => {
     setExpandedConnectionGroups((prev) =>
@@ -232,13 +235,15 @@ export default function Sidebar({
   const reconRules = reconTasks.flatMap((task) =>
     (task.rules || []).map((rule) => normalizeRuleFromTask(task, rule)),
   );
+  const uploadProcRules = procRules.filter((rule) => ruleSupportsEntryMode(rule, 'upload'));
+  const uploadReconRules = reconRules.filter((rule) => ruleSupportsEntryMode(rule, 'upload'));
   const isReconCenterActive = selectedReconEntry === 'center';
   const selectedProcRule = isReconCenterActive
     ? null
-    : procRules.find((rule) => rule.rule_code === selectedRuleCode) || null;
+    : uploadProcRules.find((rule) => rule.rule_code === selectedRuleCode) || null;
   const selectedReconRule =
     selectedReconEntry === 'upload'
-      ? reconRules.find((rule) => rule.rule_code === selectedRuleCode) || null
+      ? uploadReconRules.find((rule) => rule.rule_code === selectedRuleCode) || null
       : null;
   const selectedProcRuleCode = selectedProcRule?.rule_code || null;
   const reconAutoOpenKey = selectedReconEntry === 'center'
@@ -260,8 +265,8 @@ export default function Sidebar({
   }, [reconAutoOpenKey]);
 
   const handleOpenProcUpload = () => {
-    if (procRules[0]) {
-      onSelectRule?.(procRules[0]);
+    if (uploadProcRules[0]) {
+      onSelectRule?.(uploadProcRules[0]);
     }
   };
 

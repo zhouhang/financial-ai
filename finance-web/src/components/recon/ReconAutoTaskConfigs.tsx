@@ -14,6 +14,7 @@ import type {
   CollaborationProvider,
   DataSourceKind,
 } from '../../types';
+import { ruleSupportsEntryMode } from '../../utils/ruleEntryModes';
 import { cn, type ReconAutoTaskItem, type ReconRuleListItem } from './types';
 import { fetchReconAutoApi } from './autoApi';
 
@@ -536,7 +537,10 @@ export default function ReconAutoTaskConfigs({
   const [selectedChannelId, setSelectedChannelId] = useState('');
 
   const ruleOptions = useMemo(
-    () => availableRules.filter((rule) => rule.task_type === 'recon'),
+    () =>
+      availableRules.filter(
+        (rule) => rule.task_type === 'recon' && ruleSupportsEntryMode(rule, 'dataset'),
+      ),
     [availableRules],
   );
 

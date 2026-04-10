@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _RESULT_WAIT_TIMEOUT = 60.0  # 等待 SSE 结果超时秒数
 _PLATFORM_CONNECTION_MODE = os.getenv("PLATFORM_CONNECTION_MODE", "mock").strip().lower() or "mock"
+_DATA_SOURCE_CONNECTION_MODE = (
+    os.getenv("DATA_SOURCE_CONNECTION_MODE")
+    or os.getenv("DATA_SOURCE_MODE")
+    or "real"
+).strip().lower() or "real"
 
 
 def _get_result_wait_timeout(tool_name: str) -> float:
@@ -554,6 +559,7 @@ async def save_rule(
     rule_type: str,
     remark: str = "",
     task_id: int | None = None,
+    supported_entry_modes: list[str] | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """保存或更新 rule_detail 规则。"""
@@ -568,6 +574,8 @@ async def save_rule(
     }
     if task_id is not None:
         args["task_id"] = task_id
+    if supported_entry_modes:
+        args["supported_entry_modes"] = supported_entry_modes
     return await call_mcp_tool("save_rule", args)
 
 
@@ -1053,6 +1061,26 @@ async def execution_recon_draft_trial(auth_token: str, payload: dict[str, Any]) 
     )
 
 
+async def execution_proc_rule_compatibility_check(
+    auth_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_proc_rule_compatibility_check",
+        {"auth_token": auth_token, **(payload or {})},
+    )
+
+
+async def execution_recon_rule_compatibility_check(
+    auth_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_recon_rule_compatibility_check",
+        {"auth_token": auth_token, **(payload or {})},
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 高级辅助函数 - Platform 连接中心（店铺授权）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1073,11 +1101,20 @@ def _platform_name(platform_code: str) -> str:
     return _MOCK_PLATFORM_NAME_MAP.get(platform_code, platform_code)
 
 
-def _normalize_mode(mode: str = "") -> str:
+def _normalize_mode(mode: str = "", *, default_mode: str | None = None) -> str:
     normalized = (mode or "").strip().lower()
     if normalized in {"mock", "real"}:
         return normalized
-    return _PLATFORM_CONNECTION_MODE if _PLATFORM_CONNECTION_MODE in {"mock", "real"} else "mock"
+    resolved_default = default_mode if default_mode in {"mock", "real"} else _PLATFORM_CONNECTION_MODE
+    return resolved_default if resolved_default in {"mock", "real"} else "mock"
+
+
+def _attach_mode(result: dict[str, Any], mode: str) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"success": False, "mode": mode, "error": "MCP 返回结果格式无效"}
+    if str(result.get("mode") or "").strip():
+        return result
+    return {**result, "mode": mode}
 
 
 def _auth_user_key(auth_token: str) -> str:
@@ -2077,6 +2114,20 @@ def _mock_disable_data_source(auth_token: str, source_id: str, reason: str = "")
     return {"success": True, "mode": "mock", "source": source, "message": "数据源已停用"}
 
 
+def _mock_delete_data_source(auth_token: str, source_id: str) -> dict[str, Any]:
+    user_key = _auth_user_key(auth_token)
+    source_map = _mock_seed_data_sources(user_key)
+    dataset_map, _ = _mock_ensure_data_source_context(user_key)
+    source = source_map.pop(source_id, None)
+    dataset_map.pop(source_id, None)
+    if not source:
+        return {"success": False, "mode": "mock", "error": "not_found", "message": "数据源不存在"}
+    source["status"] = "deleted"
+    source["enabled"] = False
+    source["updated_at"] = _now_iso()
+    return {"success": True, "mode": "mock", "source": source, "message": "数据源已删除"}
+
+
 def _mock_test_data_source(auth_token: str, source_id: str) -> dict[str, Any]:
     user_key = _auth_user_key(auth_token)
     source = _mock_seed_data_sources(user_key).get(source_id)
@@ -2789,7 +2840,7 @@ async def data_source_list(
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_list_data_sources(auth_token, source_kind=source_kind, domain_type=domain_type)
 
@@ -2801,7 +2852,7 @@ async def data_source_list(
     result = await call_mcp_tool("data_source_list", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_list_data_sources(auth_token, source_kind=source_kind, domain_type=domain_type)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_get(
@@ -2815,7 +2866,7 @@ async def data_source_get(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_get_data_source(auth_token, source_id)
 
@@ -2825,7 +2876,7 @@ async def data_source_get(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_get_data_source(auth_token, source_id)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_create(
@@ -2837,7 +2888,7 @@ async def data_source_create(
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_create_data_source(auth_token, payload)
 
@@ -2847,7 +2898,7 @@ async def data_source_create(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_create_data_source(auth_token, payload)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_update(
@@ -2862,7 +2913,7 @@ async def data_source_update(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_update_data_source(auth_token, source_id, payload)
 
@@ -2877,7 +2928,7 @@ async def data_source_update(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_update_data_source(auth_token, source_id, payload)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_disable(
@@ -2892,7 +2943,7 @@ async def data_source_disable(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_disable_data_source(auth_token, source_id, reason=reason)
 
@@ -2906,7 +2957,35 @@ async def data_source_disable(
     result = await call_mcp_tool("data_source_disable", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_disable_data_source(auth_token, source_id, reason=reason)
-    return result
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_delete(
+    auth_token: str,
+    source_id: str,
+    *,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_delete_data_source(auth_token, source_id)
+
+    result = await call_mcp_tool(
+        "data_source_delete",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "mode": normalized_mode,
+        },
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_delete_data_source(auth_token, source_id)
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_test(
@@ -2920,7 +2999,7 @@ async def data_source_test(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_test_data_source(auth_token, source_id)
 
@@ -2930,7 +3009,7 @@ async def data_source_test(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_test_data_source(auth_token, source_id)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_authorize(
@@ -2945,7 +3024,7 @@ async def data_source_authorize(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_authorize_data_source(auth_token, source_id, return_path=return_path)
 
@@ -2960,7 +3039,7 @@ async def data_source_authorize(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_authorize_data_source(auth_token, source_id, return_path=return_path)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_handle_callback(
@@ -2975,7 +3054,7 @@ async def data_source_handle_callback(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_handle_data_source_callback(
             source_id,
@@ -3004,7 +3083,7 @@ async def data_source_handle_callback(
             error=error,
             error_description=error_description,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_trigger_sync(
@@ -3022,7 +3101,7 @@ async def data_source_trigger_sync(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_trigger_sync(
             auth_token,
@@ -3056,7 +3135,7 @@ async def data_source_trigger_sync(
             window_end=window_end,
             params=params,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_get_sync_job(
@@ -3070,7 +3149,7 @@ async def data_source_get_sync_job(
     if not sync_job_id:
         return {"success": False, "error": "sync_job_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_get_sync_job(auth_token, sync_job_id)
 
@@ -3080,7 +3159,7 @@ async def data_source_get_sync_job(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_get_sync_job(auth_token, sync_job_id)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_list_sync_jobs(
@@ -3093,7 +3172,7 @@ async def data_source_list_sync_jobs(
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_list_sync_jobs(auth_token, source_id=source_id, limit=limit)
 
@@ -3103,7 +3182,7 @@ async def data_source_list_sync_jobs(
     result = await call_mcp_tool("data_source_list_sync_jobs", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_list_sync_jobs(auth_token, source_id=source_id, limit=limit)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_preview(
@@ -3118,7 +3197,7 @@ async def data_source_preview(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_preview_data_source(auth_token, source_id, limit=limit)
 
@@ -3133,7 +3212,7 @@ async def data_source_preview(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_preview_data_source(auth_token, source_id, limit=limit)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_get_published_snapshot(
@@ -3148,7 +3227,7 @@ async def data_source_get_published_snapshot(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_get_published_snapshot(auth_token, source_id)
 
@@ -3163,7 +3242,7 @@ async def data_source_get_published_snapshot(
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_get_published_snapshot(auth_token, source_id)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_discover_datasets(
@@ -3184,7 +3263,7 @@ async def data_source_discover_datasets(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_discover_data_source_datasets(
             auth_token,
@@ -3225,7 +3304,7 @@ async def data_source_discover_datasets(
             openapi_spec=openapi_spec,
             manual_endpoints=manual_endpoints,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_list_datasets(
@@ -3240,7 +3319,7 @@ async def data_source_list_datasets(
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_list_data_source_datasets(
             auth_token,
@@ -3269,7 +3348,7 @@ async def data_source_list_datasets(
             include_deleted=include_deleted,
             limit=limit,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_get_dataset(
@@ -3286,7 +3365,7 @@ async def data_source_get_dataset(
     if not dataset_id and not source_id:
         return {"success": False, "error": "dataset_id 或 source_id 至少提供一个"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_get_data_source_dataset(
             auth_token,
@@ -3317,7 +3396,7 @@ async def data_source_get_dataset(
             dataset_code=dataset_code,
             resource_key=resource_key,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_upsert_dataset(
@@ -3332,7 +3411,7 @@ async def data_source_upsert_dataset(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_upsert_data_source_dataset(auth_token, source_id, payload)
 
@@ -3341,7 +3420,7 @@ async def data_source_upsert_dataset(
     result = await call_mcp_tool("data_source_upsert_dataset", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_upsert_data_source_dataset(auth_token, source_id, payload)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_disable_dataset(
@@ -3356,7 +3435,7 @@ async def data_source_disable_dataset(
     if not dataset_id:
         return {"success": False, "error": "dataset_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_disable_data_source_dataset(auth_token, dataset_id, reason=reason)
 
@@ -3366,7 +3445,7 @@ async def data_source_disable_dataset(
     result = await call_mcp_tool("data_source_disable_dataset", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_disable_data_source_dataset(auth_token, dataset_id, reason=reason)
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_import_openapi(
@@ -3385,7 +3464,7 @@ async def data_source_import_openapi(
     if not openapi_url and openapi_spec is None:
         return {"success": False, "error": "请提供 OpenAPI 文档地址或文档内容"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_discover_data_source_datasets(
             auth_token,
@@ -3416,7 +3495,7 @@ async def data_source_import_openapi(
             openapi_url=openapi_url,
             openapi_spec=openapi_spec,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_list_events(
@@ -3431,7 +3510,7 @@ async def data_source_list_events(
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_list_data_source_events(
             auth_token,
@@ -3461,7 +3540,7 @@ async def data_source_list_events(
             event_level=event_level,
             limit=limit,
         )
-    return result
+    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_preflight_rule_binding(
@@ -3479,7 +3558,7 @@ async def data_source_preflight_rule_binding(
     if not binding_code:
         return {"success": False, "error": "binding_code 不能为空"}
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_preflight_rule_binding(
             auth_token,
@@ -3499,6 +3578,7 @@ async def data_source_preflight_rule_binding(
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return {
             "success": False,
+            "mode": normalized_mode,
             "error": "任务前检查能力暂不可用，请联系管理员检查数据连接服务",
         }
-    return result
+    return _attach_mode(result, normalized_mode)

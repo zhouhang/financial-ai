@@ -3,6 +3,7 @@
 import logging
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 import time
 
@@ -21,6 +22,27 @@ except Exception:
         return value or ""
 
 logger = logging.getLogger(__name__)
+_UNIFIED_DATA_SOURCE_SCHEMA_READY = False
+
+_UNIFIED_DATA_SOURCE_BASE_TABLES = {
+    "data_sources",
+    "data_source_credentials",
+    "data_source_configs",
+    "sync_jobs",
+    "sync_job_attempts",
+    "sync_checkpoints",
+    "raw_ingestion_batches",
+    "raw_ingestion_records",
+    "dataset_snapshots",
+    "dataset_snapshot_items",
+    "dataset_bindings",
+}
+
+_UNIFIED_DATA_SOURCE_HEALTH_COLUMNS = (
+    "health_status",
+    "last_checked_at",
+    "last_error_message",
+)
 
 
 def _serialize_datetimes(d: dict) -> dict:
@@ -93,6 +115,125 @@ def get_conn(max_retries=3, retry_delay=1):
             else:
                 logger.error(f"数据库连接失败，已达到最大重试次数: {e}")
                 raise
+
+
+def _migration_path(filename: str) -> Path:
+    return Path(__file__).resolve().parent / "migrations" / filename
+
+
+def _table_exists(table_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = %s
+                          AND table_name = %s
+                    )
+                    """,
+                    (schema, table_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(f"检查表是否存在失败 (schema={schema}, table={table_name}): {e}")
+        raise
+
+
+def _column_exists(table_name: str, column_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = %s
+                          AND table_name = %s
+                          AND column_name = %s
+                    )
+                    """,
+                    (schema, table_name, column_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(
+            f"检查列是否存在失败 (schema={schema}, table={table_name}, column={column_name}): {e}"
+        )
+        raise
+
+
+def _execute_sql_script(script_path: Path) -> None:
+    sql = script_path.read_text(encoding="utf-8").strip()
+    if not sql:
+        return
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+    except Exception as e:
+        try:
+            conn_manager.rollback()
+        except Exception:
+            pass
+        logger.error(f"执行 SQL 迁移失败 ({script_path.name}): {e}")
+        raise
+
+
+def ensure_unified_data_source_schema() -> list[str]:
+    """确保统一数据源 schema 至少满足当前代码对 005/007 的要求。"""
+    global _UNIFIED_DATA_SOURCE_SCHEMA_READY
+    if _UNIFIED_DATA_SOURCE_SCHEMA_READY:
+        return []
+
+    missing_base_tables = sorted(
+        table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
+    )
+    missing_health_columns = sorted(
+        column_name
+        for column_name in _UNIFIED_DATA_SOURCE_HEALTH_COLUMNS
+        if not _column_exists("data_sources", column_name)
+    ) if _table_exists("data_sources") else list(_UNIFIED_DATA_SOURCE_HEALTH_COLUMNS)
+    datasets_table_missing = not _table_exists("data_source_datasets")
+
+    applied: list[str] = []
+    if missing_base_tables:
+        _execute_sql_script(_migration_path("005_unified_data_source_model.sql"))
+        applied.append("005_unified_data_source_model.sql")
+    if missing_base_tables or missing_health_columns or datasets_table_missing:
+        _execute_sql_script(_migration_path("007_data_source_datasets_and_health.sql"))
+        applied.append("007_data_source_datasets_and_health.sql")
+
+    remaining_missing_tables = sorted(
+        table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
+    )
+    remaining_missing_health_columns = sorted(
+        column_name
+        for column_name in _UNIFIED_DATA_SOURCE_HEALTH_COLUMNS
+        if not _column_exists("data_sources", column_name)
+    )
+    if remaining_missing_tables or remaining_missing_health_columns or not _table_exists("data_source_datasets"):
+        raise RuntimeError(
+            "统一数据源 schema 仍不完整: "
+            f"missing_tables={remaining_missing_tables}, "
+            f"missing_health_columns={remaining_missing_health_columns}, "
+            f"missing_data_source_datasets={not _table_exists('data_source_datasets')}"
+        )
+
+    _UNIFIED_DATA_SOURCE_SCHEMA_READY = True
+    if applied:
+        logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
+    return applied
 
 
 class _ConnectionContextManager:

@@ -7,7 +7,16 @@ from typing import Any, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .service import ConfirmSessionInput, ProcTrialInput, StartSessionInput, get_scheme_design_service
+from .service import (
+    ConfirmSessionInput,
+    ProcTrialInput,
+    ReconTrialInput,
+    RuleGenerateInput,
+    StartSessionInput,
+    TargetStepInput,
+    UseExistingRuleInput,
+    get_scheme_design_service,
+)
 
 router = APIRouter(prefix="/recon/schemes/design", tags=["recon-scheme-design"])
 
@@ -35,6 +44,22 @@ class DesignSessionMessageRequest(BaseModel):
     run_trial: bool = True
 
 
+class TargetStepRequest(BaseModel):
+    left_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    right_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    left_description: str = ""
+    right_description: str = ""
+
+
+class RuleGenerateRequest(BaseModel):
+    instruction_text: str = ""
+
+
+class UseExistingRuleRequest(BaseModel):
+    rule_code: str = ""
+    rule_json: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConfirmDesignSessionRequest(BaseModel):
     scheme_name: str = ""
     file_rule_code: str = ""
@@ -47,6 +72,12 @@ class ProcTrialRequest(BaseModel):
     proc_rule_json: dict[str, Any] = Field(default_factory=dict)
     sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
     uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ReconTrialRequest(BaseModel):
+    recon_rule_json: dict[str, Any] = Field(default_factory=dict)
+    sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    validated_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/start")
@@ -130,7 +161,142 @@ async def get_design_session(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     service = get_scheme_design_service()
-    session = await service.get_session(session_id)
+    session = await service.get_session(auth_token, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/target")
+async def update_target_step(
+    session_id: str,
+    body: TargetStepRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.update_target(
+        auth_token=auth_token,
+        session_id=session_id,
+        payload=TargetStepInput(
+            left_datasets=body.left_datasets,
+            right_datasets=body.right_datasets,
+            left_description=body.left_description,
+            right_description=body.right_description,
+        ),
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/proc/generate")
+async def generate_proc_step(
+    session_id: str,
+    body: RuleGenerateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.generate_proc_step(
+        auth_token=auth_token,
+        session_id=session_id,
+        payload=RuleGenerateInput(instruction_text=body.instruction_text),
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/proc/use-existing")
+async def use_existing_proc_rule(
+    session_id: str,
+    body: UseExistingRuleRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.use_existing_proc_rule(
+        auth_token=auth_token,
+        session_id=session_id,
+        payload=UseExistingRuleInput(rule_code=body.rule_code, rule_json=body.rule_json),
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/proc/trial")
+async def trial_proc_step(
+    session_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.trial_proc_step(auth_token=auth_token, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/recon/generate")
+async def generate_recon_step(
+    session_id: str,
+    body: RuleGenerateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.generate_recon_step(
+        auth_token=auth_token,
+        session_id=session_id,
+        payload=RuleGenerateInput(instruction_text=body.instruction_text),
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/recon/use-existing")
+async def use_existing_recon_rule(
+    session_id: str,
+    body: UseExistingRuleRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.use_existing_recon_rule(
+        auth_token=auth_token,
+        session_id=session_id,
+        payload=UseExistingRuleInput(rule_code=body.rule_code, rule_json=body.rule_json),
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="design session 不存在")
+    return {"success": True, "session": session.model_dump(mode="json")}
+
+
+@router.post("/{session_id}/recon/trial")
+async def trial_recon_step(
+    session_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    session = await service.trial_recon_step(auth_token=auth_token, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="design session 不存在")
     return {"success": True, "session": session.model_dump(mode="json")}
@@ -182,6 +348,26 @@ async def proc_trial(
     return result
 
 
+@router.post("/recon-trial")
+async def recon_trial(
+    body: ReconTrialRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    service = get_scheme_design_service()
+    result = await service.run_recon_trial(
+        auth_token=auth_token,
+        payload=ReconTrialInput(
+            recon_rule_json=body.recon_rule_json,
+            sample_datasets=body.sample_datasets,
+            validated_inputs=body.validated_inputs,
+        ),
+    )
+    return result
+
+
 @router.delete("/{session_id}")
 async def delete_design_session(
     session_id: str,
@@ -191,7 +377,7 @@ async def delete_design_session(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     service = get_scheme_design_service()
-    deleted = await service.discard_session(session_id)
+    deleted = await service.discard_session(auth_token, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="design session 不存在")
     return {"success": True, "deleted": True}

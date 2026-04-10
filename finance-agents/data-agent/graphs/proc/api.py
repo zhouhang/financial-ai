@@ -36,6 +36,7 @@ class UserTaskRule(BaseModel):
     task_name: str
     task_type: str
     file_rule_code: Optional[str] = None
+    supported_entry_modes: list[str] = Field(default_factory=list)
 
 
 class UserTask(BaseModel):

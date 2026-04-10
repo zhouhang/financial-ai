@@ -108,6 +108,7 @@ export interface UserTaskRule {
   task_name: string;
   task_type: 'proc' | 'recon' | string;
   file_rule_code?: string;
+  supported_entry_modes?: string[];
 }
 
 export interface UserTask {

@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from config import PROJECT_ROOT
 from models import SchemeDesignSession
+from skills.deep_agent_runner import DeepAgentSkillRunner, SkillGenerationResult, get_skill_runner
 from utils.llm import get_llm
 
 
@@ -524,6 +525,100 @@ class FallbackSchemeDesignExecutor:
         path = str(first_error.get("path") or "$").strip()
         message = str(first_error.get("message") or "unknown").strip()
         raise ValueError(f"recon 草稿不符合引擎定义: {path} {message}".strip())
+
+
+class DeepAgentSchemeDesignExecutor(FallbackSchemeDesignExecutor):
+    """Executor that defers generation to the DeepAgent skill runner."""
+
+    name = "deep-agent-skills"
+
+    def __init__(self, runner: DeepAgentSkillRunner | None = None) -> None:
+        super().__init__()
+        self._skill_runner = runner or get_skill_runner()
+
+    async def run_turn(
+        self,
+        *,
+        session: SchemeDesignSession,
+        user_message: str,
+        is_resume: bool = False,
+    ) -> SchemeDesignExecutorResult:
+        text = (user_message or "").strip()
+        normalized = text.lower()
+        focus = self._infer_focus(text, normalized)
+        should_build_proc = focus in {"proc", "both"} and (
+            focus == "proc" or not session.drafts.proc_draft_json
+        )
+        should_build_recon = focus in {"recon", "both"} and (
+            focus == "recon" or not session.drafts.recon_draft_json
+        )
+
+        proc_draft: dict[str, Any] | None = None
+        recon_draft: dict[str, Any] | None = None
+        llm_errors: list[str] = []
+        skill_notes: list[str] = []
+
+        if should_build_proc:
+            try:
+                proc_result = await self._skill_runner.generate_proc_draft(session=session, user_message=text)
+                proc_draft = self._normalize_proc_draft(proc_result.candidate_rule_json)
+                notes = self._format_skill_notes("数据整理", proc_result)
+                if notes:
+                    skill_notes.append(notes)
+            except Exception as exc:  # noqa: BLE001
+                llm_errors.append(f"proc 生成失败：{exc}")
+                proc_draft = self._build_proc_draft(session)
+
+        if should_build_recon:
+            try:
+                recon_result = await self._skill_runner.generate_recon_draft(session=session, user_message=text)
+                recon_draft = self._normalize_recon_draft(recon_result.candidate_rule_json)
+                notes = self._format_skill_notes("对账逻辑", recon_result)
+                if notes:
+                    skill_notes.append(notes)
+            except Exception as exc:  # noqa: BLE001
+                llm_errors.append(f"recon 生成失败：{exc}")
+                recon_draft = self._build_recon_draft(session)
+
+        open_questions = self._build_open_questions(session)
+        phase = "恢复会话" if is_resume else "处理消息"
+        if llm_errors:
+            assistant_message = (
+                f"[{phase}] 已尝试使用 DeepAgent skill 生成配置，但存在回退："
+                + "；".join(llm_errors)
+                + "。当前已返回可继续编辑的 JSON 草稿。"
+            )
+        else:
+            assistant_message = (
+                f"[{phase}] 已根据当前目标、数据集描述和样例数据生成最新草稿。"
+                " 你可以直接继续试跑验证或补充约束后重新生成。"
+            )
+        if skill_notes:
+            assistant_message += "\n" + "\n".join(skill_notes)
+
+        return SchemeDesignExecutorResult(
+            assistant_message=assistant_message,
+            loaded_skills=["proc-config", "recon-config"],
+            open_questions=open_questions,
+            proc_draft_json=proc_draft,
+            recon_draft_json=recon_draft,
+            pending_interrupt={
+                "type": "design_review",
+                "message": "请确认当前草稿方向，或继续补充约束。",
+            },
+        )
+
+    def _format_skill_notes(self, title: str, result: SkillGenerationResult) -> str:
+        sections: list[str] = []
+        if result.assumptions:
+            sections.append(f"假设：{'；'.join(result.assumptions)}")
+        if result.change_summary:
+            sections.append(f"调整摘要：{'；'.join(result.change_summary)}")
+        if result.unsupported_points:
+            sections.append(f"暂不支持：{'；'.join(result.unsupported_points)}")
+        if not sections:
+            return ""
+        return f"{title} Skill 提示：" + " | ".join(sections)
 
 
 @lru_cache(maxsize=1)

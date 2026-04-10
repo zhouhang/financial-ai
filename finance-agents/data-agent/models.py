@@ -200,9 +200,30 @@ class SchemeDesignDraftState(BaseModel):
     user_confirmations: list[str] = Field(default_factory=list)
 
 
+class SchemeDesignTargetState(BaseModel):
+    left_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    right_datasets: list[dict[str, Any]] = Field(default_factory=list)
+    left_description: str = ""
+    right_description: str = ""
+
+
+class SchemeDesignRuleStepState(BaseModel):
+    mode: Literal["ai_generated", "existing", "idle"] = "idle"
+    selected_rule_code: str = ""
+    editable_instruction_text: str = ""
+    normalized_display_text: str = ""
+    candidate_rule_json: dict[str, Any] = Field(default_factory=dict)
+    normalized_rule_json: dict[str, Any] = Field(default_factory=dict)
+    compatibility_result: dict[str, Any] = Field(default_factory=dict)
+    validation_result: dict[str, Any] = Field(default_factory=dict)
+    trial_result: dict[str, Any] = Field(default_factory=dict)
+    status: str = "idle"
+
+
 class SchemeDesignSession(BaseModel):
     session_id: str
     status: SchemeDesignStatus = SchemeDesignStatus.DRAFT
+    owner_user_id: str = ""
     scheme_name: str = ""
     biz_goal: str = ""
     source_description: str = ""
@@ -212,6 +233,9 @@ class SchemeDesignSession(BaseModel):
     executor_name: str = "fallback-no-deepagent"
     messages: list[SchemeDesignMessage] = Field(default_factory=list)
     drafts: SchemeDesignDraftState = Field(default_factory=SchemeDesignDraftState)
+    target_step: SchemeDesignTargetState = Field(default_factory=SchemeDesignTargetState)
+    proc_step: SchemeDesignRuleStepState = Field(default_factory=SchemeDesignRuleStepState)
+    recon_step: SchemeDesignRuleStepState = Field(default_factory=SchemeDesignRuleStepState)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime = Field(

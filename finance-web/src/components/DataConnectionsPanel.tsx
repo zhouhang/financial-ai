@@ -1777,9 +1777,9 @@ export default function DataConnectionsPanel({
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(String(data?.detail || data?.message || '测试连接失败'));
+          throw new Error(String(data?.detail || data?.message || data?.result?.message || '测试连接失败'));
         }
-        setSourceActionNotice(String(data?.message || '连接测试通过'));
+        setSourceActionNotice(String(data?.message || data?.result?.message || '连接测试通过'));
         await fetchRemoteSources();
         await hydrateSourceDetail(source.id);
       } catch (error) {
@@ -1835,6 +1835,56 @@ export default function DataConnectionsPanel({
       }
     },
     [authHeaders, authToken, draftSourceIdSet, fetchRemoteSources, fetchSourceEvents, updateSourceDetail],
+  );
+
+  const handleDeleteSource = useCallback(
+    async (source: DataSourceListItem) => {
+      if (draftSourceIdSet.has(source.id)) {
+        setDraftSources((prev) => prev.filter((item) => item.id !== source.id));
+        setSourceDetails((prev) => {
+          const next = { ...prev };
+          delete next[source.id];
+          return next;
+        });
+        if (selectedSourceId === source.id) {
+          setSelectedSourceId(null);
+        }
+        setSourceActionNotice('本地草稿已删除');
+        return;
+      }
+      if (!authToken) return;
+      const confirmed = window.confirm(`确认删除“${source.name || '未命名连接'}”？此操作不可恢复。`);
+      if (!confirmed) return;
+
+      setSourceActionBusy(`delete:${source.id}`);
+      setSourceActionError('');
+      setSourceActionNotice('');
+      try {
+        const response = await fetch(`/api/data-sources/${source.id}`, {
+          method: 'DELETE',
+          headers: authHeaders,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '删除连接失败'));
+        }
+        setRemoteSources((prev) => prev.filter((item) => item.id !== source.id));
+        setSourceDetails((prev) => {
+          const next = { ...prev };
+          delete next[source.id];
+          return next;
+        });
+        if (selectedSourceId === source.id) {
+          setSelectedSourceId(null);
+        }
+        setSourceActionNotice(String(data?.message || '连接已删除'));
+      } catch (error) {
+        setSourceActionError(error instanceof Error ? error.message : '删除连接失败');
+      } finally {
+        setSourceActionBusy(null);
+      }
+    },
+    [authHeaders, authToken, draftSourceIdSet, selectedSourceId],
   );
 
   const handleGenerateApiDatasetsFromDocument = useCallback(
@@ -2124,17 +2174,6 @@ export default function DataConnectionsPanel({
                   )}
                   <button
                     type="button"
-                    onClick={() => {
-                      primeSourceDetail(activeSource);
-                      void hydrateSourceDetail(activeSource.id);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    刷新状态
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void handleTestSource(activeSource)}
                     disabled={sourceActionBusy !== null || isDraftSource}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
@@ -2161,6 +2200,19 @@ export default function DataConnectionsPanel({
                       更新数据集
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteSource(activeSource)}
+                    disabled={sourceActionBusy !== null}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {sourceActionBusy === `delete:${activeSource.id}` ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                    删除连接
+                  </button>
                   {isDraftSource && (
                     <button
                       type="button"
@@ -2221,7 +2273,7 @@ export default function DataConnectionsPanel({
                           className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <RefreshCw className="h-4 w-4" />
-                          恢复已保存
+                          还原已保存配置
                         </button>
                         <button
                           type="button"

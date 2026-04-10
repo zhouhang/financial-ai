@@ -375,13 +375,40 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="execution_recon_draft_trial",
-            description="recon 草稿试跑（最小可用：规则结构校验，不落库）。",
+            description="recon 草稿试跑（规则结构校验 + 真实对账试跑，不落库）。",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "auth_token": {"type": "string"},
                     "recon_rule_json": {"type": "object"},
                     "validated_inputs": {"type": "array"},
+                    "sample_datasets": {"type": "array"},
+                },
+                "required": ["auth_token", "recon_rule_json"],
+            },
+        ),
+        Tool(
+            name="execution_proc_rule_compatibility_check",
+            description="检查 proc 规则与当前样例数据集结构是否兼容。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "proc_rule_json": {"type": "object"},
+                    "sample_datasets": {"type": "array"},
+                },
+                "required": ["auth_token", "proc_rule_json"],
+            },
+        ),
+        Tool(
+            name="execution_recon_rule_compatibility_check",
+            description="检查 recon 规则与当前整理后样例数据结构是否兼容。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "recon_rule_json": {"type": "object"},
+                    "sample_datasets": {"type": "array"},
                 },
                 "required": ["auth_token", "recon_rule_json"],
             },
@@ -431,6 +458,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _proc_draft_trial(arguments)
         if name == "execution_recon_draft_trial":
             return _recon_draft_trial(arguments)
+        if name == "execution_proc_rule_compatibility_check":
+            return _proc_rule_compatibility_check(arguments)
+        if name == "execution_recon_rule_compatibility_check":
+            return _recon_rule_compatibility_check(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
@@ -675,6 +706,286 @@ def _build_proc_trial_inputs(
             )
 
     return validated_files, source_samples, warnings, temp_input_dir
+
+
+def _extract_schema_field_names(item: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    schema_summary = item.get("schema_summary")
+    if isinstance(schema_summary, dict):
+        columns = schema_summary.get("columns")
+        if isinstance(columns, list):
+            for column in columns:
+                column_dict = _safe_dict(column)
+                name = _as_text(column_dict.get("name") or column_dict.get("column_name"))
+                if name:
+                    names.append(name)
+        elif isinstance(columns, dict):
+            names.extend(_as_text(key) for key in columns.keys() if _as_text(key))
+        else:
+            names.extend(_as_text(key) for key in schema_summary.keys() if _as_text(key) != "columns")
+    if names:
+        return list(dict.fromkeys(names))
+
+    sample_rows = [row for row in _safe_list(item.get("sample_rows")) if isinstance(row, dict)]
+    if not sample_rows:
+        return []
+    discovered: list[str] = []
+    for row in sample_rows[:3]:
+        for key in row.keys():
+            field_name = _as_text(key)
+            if field_name and field_name not in discovered:
+                discovered.append(field_name)
+    return discovered
+
+
+def _build_observed_fields_by_side(sample_datasets: list[dict[str, Any]]) -> dict[str, list[str]]:
+    observed: dict[str, list[str]] = {
+        "left": [],
+        "right": [],
+        "source": [],
+        "target": [],
+    }
+    for item in sample_datasets:
+        side = _infer_preview_side(item.get("side") or item.get("table_name"))
+        fields = _extract_schema_field_names(item)
+        if side == "right":
+            buckets = ("right", "target")
+        else:
+            buckets = ("left", "source")
+        for bucket in buckets:
+            for field_name in fields:
+                if field_name not in observed[bucket]:
+                    observed[bucket].append(field_name)
+    return observed
+
+
+def _extract_proc_required_fields(rule_json: dict[str, Any]) -> dict[str, list[str]]:
+    required: dict[str, list[str]] = {"left": [], "right": []}
+    alias_to_side: dict[str, str] = {}
+
+    def add_field(side: str, field_name: Any) -> None:
+        normalized_side = "right" if _infer_preview_side(side) == "right" else "left"
+        field_text = _as_text(field_name)
+        if field_text and field_text not in required[normalized_side]:
+            required[normalized_side].append(field_text)
+
+    def add_field_from_alias(alias: Any, field_name: Any, default_side: str) -> None:
+        alias_side = alias_to_side.get(_as_text(alias)) or default_side
+        add_field(alias_side, field_name)
+
+    def walk_value_node(side: str, value_node: Any) -> None:
+        value_dict = _safe_dict(value_node)
+        source = _safe_dict(value_dict.get("source"))
+        add_field_from_alias(source.get("alias"), source.get("field"), side)
+        for binding in _safe_dict(value_dict.get("bindings")).values():
+            binding_dict = _safe_dict(binding)
+            binding_source = _safe_dict(binding_dict.get("source"))
+            add_field_from_alias(binding_source.get("alias"), binding_source.get("field"), side)
+
+    for step in _safe_list(rule_json.get("steps")):
+        step_dict = _safe_dict(step)
+        side = _infer_preview_side(step_dict.get("target_table"))
+        for source in _safe_list(step_dict.get("sources")):
+            source_dict = _safe_dict(source)
+            alias = _as_text(source_dict.get("alias"))
+            if alias:
+                alias_to_side[alias] = side
+        for match_source in _safe_list(_safe_dict(step_dict.get("match")).get("sources")):
+            match_source_dict = _safe_dict(match_source)
+            alias = match_source_dict.get("alias")
+            for key in _safe_list(match_source_dict.get("keys")):
+                add_field_from_alias(alias, _safe_dict(key).get("field"), side)
+                add_field_from_alias(alias, _safe_dict(key).get("source_field"), side)
+        reference_filter = _safe_dict(step_dict.get("reference_filter"))
+        add_field_from_alias(reference_filter.get("source_alias"), reference_filter.get("source_field"), side)
+        for key in _safe_list(reference_filter.get("keys")):
+            key_dict = _safe_dict(key)
+            add_field_from_alias(reference_filter.get("source_alias"), key_dict.get("source_field"), side)
+        filter_config = step_dict.get("filter")
+        if isinstance(filter_config, list):
+            for item in filter_config:
+                item_dict = _safe_dict(item)
+                add_field_from_alias(item_dict.get("source_alias"), item_dict.get("field"), side)
+        else:
+            add_field_from_alias(_safe_dict(filter_config).get("source_alias"), _safe_dict(filter_config).get("field"), side)
+        for aggregate in _safe_list(step_dict.get("aggregate")):
+            aggregate_dict = _safe_dict(aggregate)
+            source_alias = aggregate_dict.get("source_alias")
+            for group_by in _safe_list(aggregate_dict.get("group_by")):
+                add_field_from_alias(source_alias, _safe_dict(group_by).get("field"), side)
+            for aggregation in _safe_list(aggregate_dict.get("aggregations")):
+                add_field_from_alias(source_alias, _safe_dict(aggregation).get("field"), side)
+        for mapping in _safe_list(step_dict.get("mappings")):
+            walk_value_node(side, _safe_dict(mapping).get("value"))
+            for binding in _safe_dict(mapping).get("bindings", {}).values():
+                binding_dict = _safe_dict(binding)
+                binding_source = _safe_dict(binding_dict.get("source"))
+                add_field_from_alias(binding_source.get("alias"), binding_source.get("field"), side)
+        dynamic_mappings = _safe_dict(step_dict.get("dynamic_mappings"))
+        for mapping in _safe_list(dynamic_mappings.get("mappings")):
+            walk_value_node(side, _safe_dict(mapping).get("value"))
+    return required
+
+
+def _extract_recon_required_fields(rule_json: dict[str, Any]) -> dict[str, list[str]]:
+    required: dict[str, list[str]] = {"source": [], "target": []}
+
+    def add_field(bucket: str, field_name: Any) -> None:
+        normalized_bucket = "target" if bucket == "target" else "source"
+        field_text = _as_text(field_name)
+        if field_text and field_text not in required[normalized_bucket]:
+            required[normalized_bucket].append(field_text)
+
+    for item in _safe_list(rule_json.get("rules")):
+        item_dict = _safe_dict(item)
+        recon = _safe_dict(item_dict.get("recon") or item_dict.get("reconciliation_config"))
+        key_columns = _safe_dict(recon.get("key_columns"))
+        for mapping in _safe_list(key_columns.get("mappings")):
+            mapping_dict = _safe_dict(mapping)
+            add_field("source", mapping_dict.get("source_field"))
+            add_field("target", mapping_dict.get("target_field"))
+        transformations = _safe_dict(key_columns.get("transformations"))
+        for field_name in _safe_dict(transformations.get("source")).keys():
+            add_field("source", field_name)
+        for field_name in _safe_dict(transformations.get("target")).keys():
+            add_field("target", field_name)
+        for compare in _safe_list(_safe_dict(recon.get("compare_columns")).get("columns")):
+            compare_dict = _safe_dict(compare)
+            add_field("source", compare_dict.get("source_column"))
+            add_field("target", compare_dict.get("target_column"))
+        aggregation = _safe_dict(recon.get("aggregation"))
+        group_by = aggregation.get("group_by")
+        if isinstance(group_by, dict):
+            group_by = [group_by]
+        for group in _safe_list(group_by):
+            group_dict = _safe_dict(group)
+            add_field("source", group_dict.get("source_field"))
+            add_field("target", group_dict.get("target_field"))
+        aggregations = aggregation.get("aggregations")
+        if isinstance(aggregations, dict):
+            aggregations = [aggregations]
+        for agg in _safe_list(aggregations):
+            agg_dict = _safe_dict(agg)
+            add_field("source", agg_dict.get("source_field"))
+            add_field("target", agg_dict.get("target_field"))
+        source_column_mapping = _safe_dict(_safe_dict(item_dict.get("source_file")).get("column_mapping")).get("mappings")
+        target_column_mapping = _safe_dict(_safe_dict(item_dict.get("target_file")).get("column_mapping")).get("mappings")
+        if isinstance(source_column_mapping, dict):
+            for field_name in source_column_mapping.keys():
+                add_field("source", field_name)
+        if isinstance(target_column_mapping, dict):
+            for field_name in target_column_mapping.keys():
+                add_field("target", field_name)
+    return required
+
+
+def _build_field_compatibility_report(
+    *,
+    normalized_rule: dict[str, Any],
+    expected_kind: str,
+    required_fields: dict[str, list[str]],
+    observed_fields: dict[str, list[str]],
+) -> dict[str, Any]:
+    issues: list[str] = []
+    missing_fields: dict[str, list[str]] = {}
+    for bucket, required in required_fields.items():
+        observed = observed_fields.get(bucket, [])
+        missing = [field for field in required if field not in observed]
+        if missing:
+            missing_fields[bucket] = missing
+            label = "左侧" if bucket in {"left", "source"} else "右侧"
+            issues.append(f"{label}缺少字段：{'、'.join(missing)}")
+    compatible = len(issues) == 0
+    kind_label = "数据整理规则" if expected_kind == "proc_steps" else "对账规则"
+    return {
+        "success": True,
+        "compatible": compatible,
+        "status": "compatible" if compatible else "incompatible",
+        "message": (
+            f"{kind_label}与当前样例数据结构兼容。"
+            if compatible
+            else f"{kind_label}与当前样例数据结构不兼容，请补齐缺失字段或重新生成。"
+        ),
+        "issues": issues,
+        "missing_fields": missing_fields,
+        "required_fields": required_fields,
+        "observed_fields": observed_fields,
+        "normalized_rule": normalized_rule,
+    }
+
+
+def _build_recon_trial_inputs(
+    *,
+    validated_inputs: list[dict[str, Any]],
+    sample_datasets: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], str | None]:
+    normalized_inputs: list[dict[str, Any]] = []
+    source_samples: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    temp_input_dir: str | None = None
+
+    for item in validated_inputs:
+        item_dict = _safe_dict(item)
+        table_name = _as_text(item_dict.get("table_name"))
+        input_type = _as_text(item_dict.get("input_type")).lower()
+        if not table_name or input_type not in {"file", "dataset"}:
+            continue
+        if input_type == "file":
+            file_path = _as_text(item_dict.get("file_path"))
+            if not file_path:
+                continue
+            normalized_inputs.append({
+                "table_name": table_name,
+                "input_type": "file",
+                "file_path": file_path,
+            })
+            preview_rows: list[dict[str, Any]] = []
+            try:
+                preview_rows = _dataframe_to_preview_rows(_read_preview_dataframe(file_path))
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"读取试跑文件 {Path(file_path).name} 抽样失败：{exc}")
+            source_samples.append(
+                {
+                    "side": _infer_preview_side(item_dict.get("side") or table_name),
+                    "table_name": table_name,
+                    "display_name": _as_text(item_dict.get("display_name") or Path(file_path).name or table_name),
+                    "rows": preview_rows,
+                }
+            )
+            continue
+        dataset_ref = _safe_dict(item_dict.get("dataset_ref"))
+        normalized_inputs.append(
+            {
+                "table_name": table_name,
+                "input_type": "dataset",
+                "dataset_ref": dataset_ref,
+            }
+        )
+        source_samples.append(
+            {
+                "side": _infer_preview_side(item_dict.get("side") or table_name),
+                "table_name": table_name,
+                "display_name": _as_text(item_dict.get("display_name") or table_name),
+                "rows": [],
+            }
+        )
+
+    dataset_inputs, dataset_samples, dataset_warnings, temp_input_dir = _build_proc_trial_inputs(
+        uploaded_files=[],
+        sample_datasets=sample_datasets,
+    )
+    warnings.extend(dataset_warnings)
+    source_samples.extend(dataset_samples)
+    for item in dataset_inputs:
+        normalized_inputs.append(
+            {
+                "table_name": _as_text(item.get("table_name")),
+                "input_type": "file",
+                "file_path": _as_text(item.get("file_path")),
+            }
+        )
+
+    return normalized_inputs, source_samples, warnings, temp_input_dir
 
 
 def _pick_plan_id(arguments: dict[str, Any]) -> str:
@@ -1378,26 +1689,303 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             "validation": validation,
         }
 
-    validated_inputs = _safe_list(arguments.get("validated_inputs"))
-    validated_input_dicts = [v for v in validated_inputs if isinstance(v, dict)]
-    recon_rules = _safe_list((validation.get("rule") or {}).get("rules"))
-    highlights = [f"输入数据条目: {len(validated_input_dicts)}", "当前阶段为结构校验，尚未执行真实试跑"]
-    return {
-        "success": True,
-        "trial_status": "validated_only",
-        "backend": "schema_validator",
-        "ready_for_confirm": True,
-        "message": "当前为最小可用实现：仅完成规则结构校验，未执行正式试跑。",
-        "summary": "recon 草稿结构校验通过",
-        "rule_type": str(validation.get("rule_type") or ""),
-        "validated_inputs_count": len(validated_input_dicts),
-        "errors": [],
-        "warnings": [],
-        "highlights": highlights,
-        "metrics": {
-            "validated_inputs_total": len(validated_inputs),
-            "validated_inputs_valid": len(validated_input_dicts),
-            "recon_rules_count": len(recon_rules),
-        },
-        "normalized_rule": validation.get("rule") or {},
-    }
+    validated_inputs = [item for item in _safe_list(arguments.get("validated_inputs")) if isinstance(item, dict)]
+    sample_datasets = [item for item in _safe_list(arguments.get("sample_datasets")) if isinstance(item, dict)]
+    normalized_rule = _safe_dict(validation.get("rule"))
+    temp_input_dir: str | None = None
+    temp_output_dir: str | None = None
+
+    try:
+        normalized_inputs, source_samples, input_warnings, temp_input_dir = _build_recon_trial_inputs(
+            validated_inputs=validated_inputs,
+            sample_datasets=sample_datasets,
+        )
+        if not normalized_inputs:
+            return {
+                "success": False,
+                "trial_status": "input_missing",
+                "backend": "trial_input_builder",
+                "ready_for_confirm": False,
+                "error": "缺少可用于试跑的左右样例数据，请先完成数据整理试跑或提供样例数据。",
+                "errors": [{"message": "缺少可用于试跑的左右样例数据"}],
+                "warnings": input_warnings,
+                "highlights": [
+                    f"validated_inputs 条数: {len(validated_inputs)}",
+                    f"样例数据集条数: {len(sample_datasets)}",
+                ],
+                "metrics": {
+                    "validated_inputs_total": len(validated_inputs),
+                    "validated_inputs_valid": 0,
+                    "sample_datasets_total": len(sample_datasets),
+                    "recon_rules_count": len(_safe_list(normalized_rule.get("rules"))),
+                },
+                "normalized_rule": normalized_rule,
+            }
+
+        from recon.mcp_server import recon_tool
+
+        temp_output_dir = tempfile.mkdtemp(prefix="recon_trial_output_")
+        table_input_map = {
+            _as_text(item.get("table_name")): item
+            for item in normalized_inputs
+            if _as_text(item.get("table_name"))
+        }
+        rule_results: list[dict[str, Any]] = []
+        preview_payloads: list[dict[str, Any]] = []
+
+        for rule_item in _safe_list(normalized_rule.get("rules")):
+            item_dict = _safe_dict(rule_item)
+            rule_id = _as_text(normalized_rule.get("rule_id")) or "DRAFT_RECON_RULE"
+            rule_name = _as_text(normalized_rule.get("rule_name")) or "未命名对账逻辑"
+            source_file_config = _safe_dict(item_dict.get("source_file"))
+            target_file_config = _safe_dict(item_dict.get("target_file"))
+            source_input = recon_tool._find_input_by_identification(  # noqa: SLF001
+                _safe_dict(source_file_config.get("identification")),
+                table_input_map,
+                rule_id,
+                "source",
+            )
+            target_input = recon_tool._find_input_by_identification(  # noqa: SLF001
+                _safe_dict(target_file_config.get("identification")),
+                table_input_map,
+                rule_id,
+                "target",
+            )
+            if source_input is None or target_input is None:
+                missing = "source" if source_input is None else "target"
+                rule_results.append(
+                    {
+                        "success": False,
+                        "status": "skipped",
+                        "rule_id": rule_id,
+                        "rule_name": rule_name,
+                        "skip_reason": f"missing_{missing}_input",
+                        "message": f"缺少{missing}输入，无法执行试跑",
+                    }
+                )
+                continue
+
+            df_source, source_ref = recon_tool._resolve_input_to_df(  # noqa: SLF001
+                source_input,
+                rule_id,
+                _as_text(source_file_config.get("table_name")) or "源数据",
+            )
+            df_target, target_ref = recon_tool._resolve_input_to_df(  # noqa: SLF001
+                target_input,
+                rule_id,
+                _as_text(target_file_config.get("table_name")) or "目标数据",
+            )
+
+            source_rows = _dataframe_to_preview_rows(df_source)
+            target_rows = _dataframe_to_preview_rows(df_target)
+
+            df_source = recon_tool.filter_dataframe_by_rule_config(df_source, source_file_config)
+            df_target = recon_tool.filter_dataframe_by_rule_config(df_target, target_file_config)
+            df_source = recon_tool._apply_column_mapping(df_source, _safe_dict(source_file_config.get("column_mapping")))  # noqa: SLF001
+            df_target = recon_tool._apply_column_mapping(df_target, _safe_dict(target_file_config.get("column_mapping")))  # noqa: SLF001
+
+            recon_config = _safe_dict(item_dict.get("recon") or item_dict.get("reconciliation_config"))
+            key_columns_config = _safe_dict(recon_config.get("key_columns"))
+            compare_columns_config = _safe_list(_safe_dict(recon_config.get("compare_columns")).get("columns"))
+            aggregation_config = _safe_dict(recon_config.get("aggregation"))
+            if aggregation_config.get("enabled", False):
+                df_source = recon_tool._apply_aggregation(df_source, aggregation_config, rule_id, "source")  # noqa: SLF001
+                df_target = recon_tool._apply_aggregation(df_target, aggregation_config, rule_id, "target")  # noqa: SLF001
+
+            diff_result = recon_tool._execute_comparison(  # noqa: SLF001
+                df_source=df_source,
+                df_target=df_target,
+                key_mappings=recon_tool._get_key_mappings(key_columns_config),  # noqa: SLF001
+                compare_columns_config=compare_columns_config,
+                rule_id=rule_id,
+                key_columns_config=key_columns_config,
+            )
+            output_path = recon_tool._write_recon_result(  # noqa: SLF001
+                diff_result=diff_result,
+                output_dir=temp_output_dir,
+                output_config=_safe_dict(item_dict.get("output")),
+                rule_id=rule_id,
+                rule_name=rule_name,
+                rule=item_dict,
+                key_columns_config=key_columns_config,
+                compare_columns_config=compare_columns_config,
+            )
+            matched_with_diff_df = diff_result.get("matched_with_diff")
+            source_only_df = diff_result.get("source_only")
+            target_only_df = diff_result.get("target_only")
+            matched_exact_df = diff_result.get("matched_exact")
+            matched_with_diff = matched_with_diff_df if isinstance(matched_with_diff_df, pd.DataFrame) else pd.DataFrame()
+            source_only = source_only_df if isinstance(source_only_df, pd.DataFrame) else pd.DataFrame()
+            target_only = target_only_df if isinstance(target_only_df, pd.DataFrame) else pd.DataFrame()
+            matched_exact = matched_exact_df if isinstance(matched_exact_df, pd.DataFrame) else pd.DataFrame()
+            rule_results.append(
+                {
+                    "success": True,
+                    "status": "succeeded",
+                    "rule_id": rule_id,
+                    "rule_name": rule_name,
+                    "source_file": source_ref,
+                    "target_file": target_ref,
+                    "source_rows": len(df_source),
+                    "target_rows": len(df_target),
+                    "matched_with_diff": len(matched_with_diff),
+                    "source_only": len(source_only),
+                    "target_only": len(target_only),
+                    "matched_exact": len(matched_exact),
+                    "output_file": output_path,
+                    "message": (
+                        f"试跑完成：差异 {len(matched_with_diff)} 条，"
+                        f"左侧独有 {len(source_only)} 条，右侧独有 {len(target_only)} 条"
+                    ),
+                }
+            )
+            preview_payloads.append(
+                {
+                    "rule_id": rule_id,
+                    "rule_name": rule_name,
+                    "left_samples": source_rows,
+                    "right_samples": target_rows,
+                    "matched_with_diff_samples": _dataframe_to_preview_rows(matched_with_diff),
+                    "source_only_samples": _dataframe_to_preview_rows(source_only),
+                    "target_only_samples": _dataframe_to_preview_rows(target_only),
+                    "matched_exact_samples": _dataframe_to_preview_rows(matched_exact),
+                    "result_summary": {
+                        "matched_exact": len(matched_exact),
+                        "matched_with_diff": len(matched_with_diff),
+                        "source_only": len(source_only),
+                        "target_only": len(target_only),
+                    },
+                }
+            )
+
+        summary = recon_tool._build_recon_summary(rule_results)  # noqa: SLF001
+        status = recon_tool._derive_recon_status(summary)  # noqa: SLF001
+        primary_preview = preview_payloads[0] if preview_payloads else {}
+        ready_for_confirm = (
+            summary.get("failed_rules", 0) == 0
+            and summary.get("succeeded_rules", 0) > 0
+        )
+        warnings = list(input_warnings)
+        if not preview_payloads:
+            warnings.append("未产出可展示的对账试跑结果。")
+        return {
+            "success": ready_for_confirm,
+            "trial_status": "executed" if preview_payloads else "failed",
+            "backend": "recon_runtime",
+            "ready_for_confirm": ready_for_confirm,
+            "message": (
+                "recon 试跑执行完成。"
+                if ready_for_confirm
+                else "recon 试跑已执行，但仍存在未匹配输入或差异结果，请继续调整。"
+            ),
+            "summary": (
+                "已完成对账试跑，可继续保存方案。"
+                if ready_for_confirm
+                else "已完成对账试跑，但结果仍需继续调整。"
+            ),
+            "rule_type": str(validation.get("rule_type") or ""),
+            "validated_inputs_count": len(normalized_inputs),
+            "errors": [],
+            "warnings": warnings,
+            "highlights": [
+                f"输入数据条目: {len(normalized_inputs)}",
+                f"成功执行规则数: {summary.get('succeeded_rules', 0)}",
+            ],
+            "metrics": {
+                "validated_inputs_total": len(validated_inputs),
+                "validated_inputs_valid": len(normalized_inputs),
+                "sample_datasets_total": len(sample_datasets),
+                "recon_rules_count": len(_safe_list(normalized_rule.get("rules"))),
+            },
+            "normalized_rule": normalized_rule,
+            "source_samples": source_samples,
+            "left_samples": primary_preview.get("left_samples", []),
+            "right_samples": primary_preview.get("right_samples", []),
+            "result_samples": {
+                "matched_with_diff": primary_preview.get("matched_with_diff_samples", []),
+                "source_only": primary_preview.get("source_only_samples", []),
+                "target_only": primary_preview.get("target_only_samples", []),
+                "matched_exact": primary_preview.get("matched_exact_samples", []),
+            },
+            "result_summary": primary_preview.get("result_summary", {}),
+            "results": rule_results,
+            "preview_results": preview_payloads,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "trial_status": "failed",
+            "backend": "recon_runtime",
+            "ready_for_confirm": False,
+            "error": f"recon 试跑执行失败：{exc}",
+            "errors": _format_trial_errors([exc]),
+            "warnings": [],
+            "highlights": [
+                f"validated_inputs 条数: {len(validated_inputs)}",
+                f"样例数据集条数: {len(sample_datasets)}",
+            ],
+            "metrics": {
+                "validated_inputs_total": len(validated_inputs),
+                "sample_datasets_total": len(sample_datasets),
+                "recon_rules_count": len(_safe_list(normalized_rule.get("rules"))),
+            },
+            "normalized_rule": normalized_rule,
+        }
+    finally:
+        for path in (temp_input_dir, temp_output_dir):
+            if path:
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def _proc_rule_compatibility_check(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_user(arguments.get("auth_token", ""))
+    rule_json = arguments.get("proc_rule_json")
+    if not isinstance(rule_json, dict):
+        return {"success": False, "error": "proc_rule_json 必须是对象"}
+    validation = validate_rule_record(
+        {"rule_code": "compat_proc", "rule": rule_json},
+        expected_kind="proc_entry",
+    )
+    if not validation.get("success"):
+        return {
+            "success": False,
+            "status": "invalid",
+            "message": "proc 规则结构校验失败",
+            "validation": validation,
+            "issues": [item for item in _safe_list(validation.get("validation_errors")) if isinstance(item, dict)],
+        }
+    normalized_rule = _safe_dict(validation.get("rule"))
+    sample_datasets = [item for item in _safe_list(arguments.get("sample_datasets")) if isinstance(item, dict)]
+    return _build_field_compatibility_report(
+        normalized_rule=normalized_rule,
+        expected_kind="proc_steps",
+        required_fields=_extract_proc_required_fields(normalized_rule),
+        observed_fields=_build_observed_fields_by_side(sample_datasets),
+    )
+
+
+def _recon_rule_compatibility_check(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_user(arguments.get("auth_token", ""))
+    rule_json = arguments.get("recon_rule_json")
+    if not isinstance(rule_json, dict):
+        return {"success": False, "error": "recon_rule_json 必须是对象"}
+    validation = validate_rule_record(
+        {"rule_code": "compat_recon", "rule": rule_json},
+        expected_kind="recon",
+    )
+    if not validation.get("success"):
+        return {
+            "success": False,
+            "status": "invalid",
+            "message": "recon 规则结构校验失败",
+            "validation": validation,
+            "issues": [item for item in _safe_list(validation.get("validation_errors")) if isinstance(item, dict)],
+        }
+    normalized_rule = _safe_dict(validation.get("rule"))
+    sample_datasets = [item for item in _safe_list(arguments.get("sample_datasets")) if isinstance(item, dict)]
+    return _build_field_compatibility_report(
+        normalized_rule=normalized_rule,
+        expected_kind="recon",
+        required_fields=_extract_recon_required_fields(normalized_rule),
+        observed_fields=_build_observed_fields_by_side(sample_datasets),
+    )

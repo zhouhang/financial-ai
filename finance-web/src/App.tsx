@@ -21,6 +21,7 @@ import type {
   UserTaskRule,
   WsOutgoing,
 } from './types';
+import { ruleSupportsEntryMode } from './utils/ruleEntryModes';
 
 type MainPanelView = 'conversation' | 'data-connections';
 
@@ -229,6 +230,7 @@ export default function App() {
   const [selectedCollaborationProvider, setSelectedCollaborationProvider] = useState<CollaborationProvider>('dingtalk_dws');
   const [procRules, setProcRules] = useState<UserTaskRule[]>([]);
   const [reconRules, setReconRules] = useState<UserTaskRule[]>([]);
+  const [rulesVersion, setRulesVersion] = useState(0);
   const [reconExecutionMode, setReconExecutionMode] = useState<ReconExecutionMode>('upload');
   const [reconWorkspaceMode, setReconWorkspaceMode] = useState<ReconWorkspaceMode>('upload');
   const [hiddenConversationIds, setHiddenConversationIds] = useState<string[]>([]);
@@ -284,6 +286,11 @@ export default function App() {
               task_type: String(task.task_type || 'recon'),
               file_rule_code:
                 typeof rule.file_rule_code === 'string' ? rule.file_rule_code : undefined,
+              supported_entry_modes: Array.isArray(rule.supported_entry_modes)
+                ? (rule.supported_entry_modes as unknown[])
+                    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+                    .map((item) => item.trim().toLowerCase())
+                : undefined,
             })),
           )
           .filter((rule: UserTaskRule) => rule.rule_code);
@@ -305,7 +312,20 @@ export default function App() {
     return () => {
       aborted = true;
     };
-  }, [authToken]);
+  }, [authToken, rulesVersion]);
+
+  const uploadProcRules = useMemo(
+    () => procRules.filter((rule) => ruleSupportsEntryMode(rule, 'upload')),
+    [procRules],
+  );
+  const uploadReconRules = useMemo(
+    () => reconRules.filter((rule) => ruleSupportsEntryMode(rule, 'upload')),
+    [reconRules],
+  );
+  const datasetReconRules = useMemo(
+    () => reconRules.filter((rule) => ruleSupportsEntryMode(rule, 'dataset')),
+    [reconRules],
+  );
 
   useEffect(() => {
     if (authToken) return;
@@ -1416,9 +1436,9 @@ export default function App() {
     }
 
     const targetRule =
-      selectedTask?.task_type === 'recon'
+      selectedTask?.task_type === 'recon' && ruleSupportsEntryMode(selectedTask, 'upload')
         ? selectedTask
-        : reconRules.find((rule) => rule.rule_code) ?? null;
+        : uploadReconRules[0] ?? null;
 
     if (!targetRule) {
       if (entry === 'upload') {
@@ -1429,7 +1449,7 @@ export default function App() {
 
     handleSelectTask(targetRule);
     setReconWorkspaceMode(entry);
-  }, [handleSelectTask, reconRules, selectedTask]);
+  }, [handleSelectTask, selectedTask, uploadReconRules]);
 
   const handleOpenTask = useCallback((task: { task_type?: string; task_name?: string }) => {
     setPanelView('conversation');
@@ -1457,16 +1477,24 @@ export default function App() {
   }, []);
 
   const availableReconRules = useMemo(() => {
-    if (selectedTask?.task_type !== 'recon') return reconRules;
-    if (reconRules.some((rule) => rule.rule_code === selectedTask.rule_code)) return reconRules;
-    return [...reconRules, selectedTask];
-  }, [reconRules, selectedTask]);
+    if (selectedTask?.task_type === 'recon' && ruleSupportsEntryMode(selectedTask, 'upload')) {
+      if (uploadReconRules.some((rule) => rule.rule_code === selectedTask.rule_code)) {
+        return uploadReconRules;
+      }
+      return [...uploadReconRules, selectedTask];
+    }
+    return uploadReconRules;
+  }, [selectedTask, uploadReconRules]);
 
   const availableProcRules = useMemo(() => {
-    if (selectedTask?.task_type !== 'proc') return procRules;
-    if (procRules.some((rule) => rule.rule_code === selectedTask.rule_code)) return procRules;
-    return [...procRules, selectedTask];
-  }, [procRules, selectedTask]);
+    if (selectedTask?.task_type === 'proc' && ruleSupportsEntryMode(selectedTask, 'upload')) {
+      if (uploadProcRules.some((rule) => rule.rule_code === selectedTask.rule_code)) {
+        return uploadProcRules;
+      }
+      return [...uploadProcRules, selectedTask];
+    }
+    return uploadProcRules;
+  }, [selectedTask, uploadProcRules]);
 
   const handleSelectReconRule = useCallback(
     (ruleCode: string) => {
@@ -1524,9 +1552,9 @@ export default function App() {
   const activeSection: AppSection =
     panelView === 'data-connections' ? 'data-connections' : 'chat';
   const reconWorkspaceRule =
-    selectedTask?.task_type === 'recon'
-      ? selectedTask
-      : reconRules.find((rule) => rule.rule_code) ?? EMPTY_RECON_RULE;
+    datasetReconRules.find((rule) => rule.rule_code === selectedTask?.rule_code) ??
+    datasetReconRules[0] ??
+    EMPTY_RECON_RULE;
   const isReconWorkspace =
     panelView !== 'data-connections' &&
     reconWorkspaceMode === 'center';
@@ -1590,13 +1618,14 @@ export default function App() {
         onSelectCollaborationProvider={setSelectedCollaborationProvider}
         selectedReconEntry={reconWorkspaceMode}
         onSelectReconEntry={handleSelectReconEntry}
+        rulesVersion={rulesVersion}
       />
       {panelView !== 'data-connections' ? (
         isReconWorkspace ? (
           <ReconWorkspace
             selectedTask={reconWorkspaceRule}
             mode={reconWorkspaceMode}
-            availableRules={availableReconRules}
+            availableRules={datasetReconRules}
             selectedRuleCode={selectedTask?.task_type === 'recon' ? selectedTask.rule_code : null}
             executionMode={reconExecutionMode}
             authToken={authToken}
@@ -1604,6 +1633,7 @@ export default function App() {
             onChangeExecutionMode={setReconExecutionMode}
             onOpenDataConnections={() => setPanelView('data-connections')}
             onOpenCollaborationChannels={handleOpenCollaborationChannels}
+            onSchemeCreated={() => setRulesVersion((v) => v + 1)}
           >
             {chatAreaNode}
           </ReconWorkspace>

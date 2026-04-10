@@ -58,6 +58,7 @@ interface SchemeWizardReconStepProps {
   reconTrialPreview?: ReconTrialPreview;
   trialDisabled?: boolean;
   isGeneratingRecon?: boolean;
+  isTrialingRecon?: boolean;
 }
 
 function cn(...classes: Array<string | false | null | undefined>) {
@@ -118,6 +119,7 @@ export default function SchemeWizardReconStep({
   reconConfigMode = 'ai',
   selectedReconConfigId = '',
   existingReconOptions = [],
+  reconCompatibility,
   onReconConfigModeChange,
   onSelectExistingReconConfig,
   onGenerateRecon,
@@ -128,11 +130,17 @@ export default function SchemeWizardReconStep({
   reconTrialPreview,
   trialDisabled,
   isGeneratingRecon = false,
+  isTrialingRecon = false,
 }: SchemeWizardReconStepProps) {
   const previewAnchorRef = useRef<HTMLDivElement | null>(null);
   const scrollToPreviewPendingRef = useRef(false);
   const preview = reconTrialPreview;
   const showTrialResult = schemeDraft.reconTrialStatus !== 'idle' || Boolean(preview?.summary);
+  const compatibility = reconCompatibility;
+  const showCompatibility =
+    (compatibility?.status || 'idle') !== 'idle'
+    || (compatibility?.details.length || 0) > 0
+    || (compatibility?.message || '等待校验') !== '等待校验';
 
   useEffect(() => {
     if (!scrollToPreviewPendingRef.current || !showTrialResult) {
@@ -195,60 +203,113 @@ export default function SchemeWizardReconStep({
             </select>
           </label>
         ) : null}
+
+        {showTrialResult ? (
+          <div
+            className={cn(
+              'mt-4 rounded-2xl border px-4 py-3 text-sm',
+              (preview?.status || schemeDraft.reconTrialStatus) === 'passed'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : (preview?.status || schemeDraft.reconTrialStatus) === 'needs_adjustment'
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
+                : 'border-border bg-surface text-text-secondary',
+            )}
+          >
+            <p>{preview?.summary || schemeDraft.reconTrialSummary}</p>
+          </div>
+        ) : null}
+
+        {showCompatibility ? (
+          <div
+            className={cn(
+              'mt-4 rounded-2xl border px-4 py-3 text-sm',
+              compatibility?.status === 'passed'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : compatibility?.status === 'failed'
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
+                : 'border-border bg-surface text-text-secondary',
+            )}
+          >
+            <p>{compatibility?.message || '等待校验'}</p>
+            {compatibility?.details.length ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {compatibility.details.map((detail: string) => (
+                  <span
+                    key={detail}
+                    className="rounded-full border border-current/15 bg-white/70 px-2.5 py-1 text-xs"
+                  >
+                    {detail}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
-      {isGeneratingRecon ? (
+      {reconConfigMode === 'ai' ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            {isGeneratingRecon ? (
+              <div className="flex items-center gap-2 text-sm font-medium text-sky-700">
+                <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
+                AI 正在生成对账逻辑，请稍候…
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onGenerateRecon}
+                disabled={isTrialingRecon}
+                className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Sparkles className="h-4 w-4" />
+                AI生成对账逻辑
+              </button>
+            )}
+          </div>
+
+          <label className="block">
+            <span className="text-xs font-medium text-text-secondary">数据对账逻辑</span>
+            <textarea
+              value={schemeDraft.reconDraft}
+              onChange={(event) => onReconDraftChange(event.target.value)}
+              rows={12}
+              className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 font-mono text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+              placeholder="AI 生成后，可继续调整 recon 配置。"
+            />
+          </label>
+        </>
+      ) : null}
+
+      {isTrialingRecon ? (
         <div className="flex items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50/60 px-5 py-4">
           <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-          <span className="text-sm font-medium text-sky-700">
-            {reconConfigMode === 'existing' ? '正在加载已有配置，请稍候…' : 'AI 正在生成对账逻辑，请稍候…'}
-          </span>
+          <span className="text-sm font-medium text-sky-700">AI 正在试跑数据对账，请稍候…</span>
         </div>
-      ) : (
-        <div className="flex flex-wrap items-center gap-3">
-          {reconConfigMode === 'ai' ? (
-            <button
-              type="button"
-              onClick={onGenerateRecon}
-              className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-            >
-              <Sparkles className="h-4 w-4" />
-              AI生成对账逻辑
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={handleTrialRecon}
-            disabled={trialDisabled}
-            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <FlaskConical className="h-4 w-4" />
-            试跑验证
-          </button>
-          <button
-            type="button"
-            onClick={onViewReconJson}
-            disabled={!reconJsonPreview}
-            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            JSON
-          </button>
-          {reconJsonPreview ? (
-            <span className="text-xs text-text-muted">已生成 JSON 预览</span>
-          ) : null}
-        </div>
-      )}
+      ) : null}
 
-      <label className="block">
-        <span className="text-xs font-medium text-text-secondary">数据对账逻辑</span>
-        <textarea
-          value={schemeDraft.reconDraft}
-          onChange={(event) => onReconDraftChange(event.target.value)}
-          rows={12}
-          className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 font-mono text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-          placeholder="AI 生成后，可继续调整 recon 配置。"
-        />
-      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={handleTrialRecon}
+          disabled={trialDisabled || isTrialingRecon || isGeneratingRecon}
+          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <FlaskConical className="h-4 w-4" />
+          试跑验证
+        </button>
+        <button
+          type="button"
+          onClick={onViewReconJson}
+          disabled={!reconJsonPreview || isTrialingRecon || isGeneratingRecon}
+          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          JSON
+        </button>
+        {reconJsonPreview ? (
+          <span className="text-xs text-text-muted">已生成 JSON 预览</span>
+        ) : null}
+      </div>
 
       {showTrialResult ? (
         <div ref={previewAnchorRef} className="space-y-4">
