@@ -27,6 +27,7 @@ class TableSchemaState:
     column_order: list[str] = field(default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
     export_layout: dict[str, Any] = field(default_factory=dict)
+    export_enabled: bool = True
 
 
 def execute_steps_rule(
@@ -192,6 +193,7 @@ class StepsProcRuntime:
             column_order=column_order,
             defaults=defaults,
             export_layout=dict(schema_def.get("export_layout") or {}),
+            export_enabled=bool(schema_def.get("export_enabled", True)),
         )
         self.tables[target_table] = pd.DataFrame(columns=column_order)
 
@@ -1113,6 +1115,7 @@ class StepsProcRuntime:
                 primary_key=[],
                 column_order=list(df.columns),
                 defaults={column: None for column in df.columns},
+                export_enabled=True,
             )
         self._invalidate_row_index_cache(table_name)
         return df
@@ -1160,6 +1163,9 @@ class StepsProcRuntime:
         for table_name in self.materialized_targets:
             df = self.tables.get(table_name)
             if df is None:
+                continue
+            schema = self.schemas.get(table_name)
+            if schema and not schema.export_enabled:
                 continue
             output_name = f"{_safe_table_name(table_name)}_{timestamp}.xlsx"
             output_path = self.output_dir / output_name

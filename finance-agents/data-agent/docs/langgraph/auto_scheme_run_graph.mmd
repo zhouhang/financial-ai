@@ -1,0 +1,33 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	load_run_plan_node(load_run_plan_node)
+	load_scheme_node(load_scheme_node)
+	resolve_plan_inputs_node(resolve_plan_inputs_node)
+	fetch_dataset_inputs_node(fetch_dataset_inputs_node)
+	validate_dataset_inputs_node(validate_dataset_inputs_node)
+	build_auto_run_context_node(build_auto_run_context_node)
+	scheme_execution_graph(scheme_execution_graph)
+	persist_auto_run_node(persist_auto_run_node)
+	create_exception_tasks_node(create_exception_tasks_node)
+	maybe_auto_notify_node(maybe_auto_notify_node)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> load_run_plan_node;
+	load_run_plan_node --> load_scheme_node;
+	load_scheme_node --> resolve_plan_inputs_node;
+	resolve_plan_inputs_node --> fetch_dataset_inputs_node;
+	fetch_dataset_inputs_node --> validate_dataset_inputs_node;
+	validate_dataset_inputs_node -.-> __end__;
+	validate_dataset_inputs_node -.-> build_auto_run_context_node;
+	build_auto_run_context_node --> scheme_execution_graph;
+	scheme_execution_graph --> persist_auto_run_node;
+	persist_auto_run_node --> create_exception_tasks_node;
+	create_exception_tasks_node --> maybe_auto_notify_node;
+	maybe_auto_notify_node --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

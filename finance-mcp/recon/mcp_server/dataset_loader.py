@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -23,6 +24,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
+from auth import db as auth_db
 from db_config import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -35,15 +37,34 @@ _SOURCE_KEY_HANDLERS: dict[tuple[str, str], SourceKeyHandler] = {}
 _DATASET_REF_ALLOWED_KEYS = {"source_type", "source_key", "query"}
 _DB_QUERY_ALLOWED_KEYS = {"columns", "filters", "order_by", "limit"}
 _API_QUERY_ALLOWED_KEYS = {"filters", "body", "timeout_seconds"}
+_SNAPSHOT_QUERY_ALLOWED_KEYS = {"snapshot_id", "resource_key", "filters", "order_by", "limit"}
 
 
 class DatasetLoadError(RuntimeError):
     """Raised when dataset loading fails."""
 
 
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _is_scalar_filter_value(value: Any) -> bool:
     """Only allow scalar DB filter values to avoid passing arbitrary structures."""
     return isinstance(value, (str, int, float, bool)) or value is None
+
+
+def _apply_snapshot_scalar_filter(df: pd.DataFrame, field_name: str, value: Any) -> pd.DataFrame:
+    if value is None:
+        return df[df[field_name].isna()]
+
+    expected = str(value)
+    series = df[field_name]
+    exact_mask = series.astype(str) == expected
+    if isinstance(value, str) and _DATE_ONLY_RE.fullmatch(expected):
+        parsed = pd.to_datetime(series, errors="coerce")
+        if parsed.notna().any():
+            date_mask = parsed.dt.strftime("%Y-%m-%d") == expected
+            return df[exact_mask | date_mask.fillna(False)]
+    return df[exact_mask]
 
 
 def _safe_query_param_name(name: str) -> str:
@@ -450,6 +471,99 @@ def _load_from_api(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def _load_from_snapshot(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
+    """Load dataset from published/unified snapshot rows."""
+    source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
+    extra_keys = sorted(set(query.keys()) - _SNAPSHOT_QUERY_ALLOWED_KEYS)
+    if extra_keys:
+        raise DatasetLoadError(
+            f"source_key={source_key} query 含不支持字段。"
+            f"仅支持: {', '.join(sorted(_SNAPSHOT_QUERY_ALLOWED_KEYS))}"
+        )
+
+    snapshot_id = str(query.get("snapshot_id") or "").strip()
+    resource_key = str(query.get("resource_key") or "default").strip() or "default"
+
+    snapshot = None
+    if snapshot_id:
+        snapshot = auth_db.get_unified_dataset_snapshot_by_id(snapshot_id=snapshot_id)
+        if snapshot and str(snapshot.get("data_source_id") or "") != source_key:
+            raise DatasetLoadError(
+                f"source_key={source_key} 与 snapshot_id={snapshot_id} 不匹配。"
+            )
+    else:
+        snapshot = auth_db.get_unified_published_dataset_snapshot(
+            data_source_id=source_key,
+            resource_key=resource_key,
+        )
+
+    if not snapshot:
+        raise DatasetLoadError(
+            f"source_key={source_key} 未找到可用快照。请先完成数据同步并发布快照。"
+        )
+
+    rows = auth_db.list_unified_dataset_snapshot_items(
+        snapshot_id=str(snapshot.get("id") or ""),
+        limit=None,
+        offset=0,
+    )
+    payload_rows: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("item_payload")
+        if isinstance(payload, dict):
+            payload_rows.append(payload)
+    df = pd.DataFrame(payload_rows)
+
+    filters = query.get("filters")
+    if filters is None:
+        filters = {}
+    if not isinstance(filters, dict):
+        raise DatasetLoadError("snapshot query.filters 必须是对象")
+    for field, value in filters.items():
+        field_name = str(field or "").strip()
+        if not field_name:
+            continue
+        if field_name not in df.columns:
+            raise DatasetLoadError(f"snapshot 数据中不存在过滤字段: {field_name}")
+        if not _is_scalar_filter_value(value):
+            raise DatasetLoadError(f"snapshot query.filters 字段 '{field_name}' 仅支持标量值")
+        df = _apply_snapshot_scalar_filter(df, field_name, value)
+
+    order_by = query.get("order_by")
+    if isinstance(order_by, str):
+        order_by = [order_by]
+    if order_by is None:
+        order_by = []
+    if not isinstance(order_by, list):
+        raise DatasetLoadError("snapshot query.order_by 必须是字符串或数组")
+    if order_by:
+        sort_columns: list[str] = []
+        ascending_flags: list[bool] = []
+        for item in order_by:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            parts = token.split()
+            field_name = parts[0]
+            direction = parts[1].upper() if len(parts) > 1 else "ASC"
+            if field_name not in df.columns:
+                raise DatasetLoadError(f"snapshot 数据中不存在排序字段: {field_name}")
+            if direction not in {"ASC", "DESC"}:
+                raise DatasetLoadError(f"snapshot query.order_by 仅支持 ASC/DESC，当前: {direction}")
+            sort_columns.append(field_name)
+            ascending_flags.append(direction == "ASC")
+        if sort_columns:
+            df = df.sort_values(by=sort_columns, ascending=ascending_flags, kind="stable")
+
+    limit = query.get("limit")
+    if limit is not None:
+        if not isinstance(limit, int) or limit <= 0:
+            raise DatasetLoadError("snapshot query.limit 必须是正整数")
+        df = df.head(limit)
+
+    return df.reset_index(drop=True)
+
+
 def load_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
     """Load dataset by source_type using source_key + query conditions."""
     source_type, _, _ = _require_dataset_protocol(dataset_ref, table_name)
@@ -464,3 +578,6 @@ def load_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataF
                 f"不支持的 dataset source_type={source_type}。可通过 register_dataset_loader 扩展。"
             )
     return loader(dataset_ref, table_name)
+
+
+register_dataset_loader("snapshot", _load_from_snapshot)

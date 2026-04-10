@@ -315,6 +315,15 @@ finance-agents/data-agent/.langgraph_api/
 /proc-agent/*
 /proc-agent
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> recon
 =======
+>>>>>>> recon
+=======
+
+!finance-agents/data-agent/tests/
+!finance-agents/data-agent/tests/test_notifications_dingtalk.py
+
+# Ralph (cloned repo - only keep scripts/ralph)
+/ralph/
 >>>>>>> recon

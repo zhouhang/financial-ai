@@ -1,0 +1,19 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	parse_notify_targets_node(parse_notify_targets_node)
+	send_manual_notify_node(send_manual_notify_node)
+	render_notify_result_node(render_notify_result_node)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> parse_notify_targets_node;
+	parse_notify_targets_node -.-> __end__;
+	parse_notify_targets_node -.-> send_manual_notify_node;
+	send_manual_notify_node --> render_notify_result_node;
+	render_notify_result_node --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

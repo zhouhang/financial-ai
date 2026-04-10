@@ -48,12 +48,18 @@ from tools.mcp_client import (
     list_conversations as mcp_list_conversations,
     get_conversation as mcp_get_conversation,
     delete_conversation as mcp_delete_conversation,
+    data_source_preflight_rule_binding,
     call_mcp_tool,
 )
 
 # 导入 proc 路由
 from graphs.proc.api import router as proc_router
 from graphs.recon.api import router as recon_router
+from graphs.recon.auto_run_api import router as recon_auto_router
+from graphs.recon.scheme_design.api import router as recon_scheme_design_router
+from graphs.platform.api import router as platform_router
+from graphs.data_source.api import router as data_source_router
+from graphs.collaboration.api import router as collaboration_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -175,6 +181,132 @@ def _format_exception_message(exc: Exception) -> str:
         return detail
     return f"{exc.__class__.__name__}: 未提供详细错误信息"
 
+
+def _sanitize_preflight_backend_error(detail: str) -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return "任务前检查暂时不可用，请稍后重试"
+    lowered = text.lower()
+    if any(token in lowered for token in ("unknown tool", "未知的工具", "no such tool")):
+        return "任务前检查能力暂不可用，请联系管理员检查数据连接服务"
+    if any(token in lowered for token in ("timeout", "超时")):
+        return "任务前检查超时，请稍后重试"
+    if any(token in lowered for token in ("traceback", "jsonrpc", "runtimeerror", "exception", "stack")):
+        return "任务前检查失败，请稍后重试或联系管理员"
+    if len(text) > 180:
+        return "任务前检查失败，请稍后重试或联系管理员"
+    return text
+
+
+def _build_preflight_issue_message(result: dict[str, Any]) -> str:
+    preflight = result.get("preflight") if isinstance(result.get("preflight"), dict) else {}
+    issues = [item for item in (preflight.get("issues") or []) if isinstance(item, dict)]
+    if not issues:
+        return "规则绑定的数据源或数据集暂不可用，请先检查数据连接配置"
+
+    blocking = [item for item in issues if str(item.get("level") or "").lower() == "error"]
+    focus = blocking[0] if blocking else issues[0]
+    code = str(focus.get("code") or "").strip().lower()
+    issue_message = str(focus.get("message") or "").strip()
+    source_name = str(focus.get("source_name") or focus.get("source_id") or "").strip()
+    dataset_name = str(focus.get("dataset_name") or focus.get("resource_key") or "").strip()
+
+    if code == "source_missing":
+        main = "当前规则未绑定数据源，请先在数据连接中完成规则绑定"
+    elif code == "dataset_missing":
+        target = dataset_name or "所需数据集"
+        main = f"规则依赖的数据集“{target}”未配置，请先补齐数据集"
+    elif code == "source_disabled":
+        target = source_name or "数据源"
+        main = f"数据源“{target}”未启用或状态异常，请先修复后重试"
+    elif code == "source_unhealthy":
+        target = source_name or "数据源"
+        if "auth_expired" in issue_message:
+            main = f"数据源“{target}”授权已过期，请先重新授权"
+        else:
+            main = f"数据源“{target}”健康状态异常，请先修复后重试"
+    elif code == "dataset_disabled":
+        target = dataset_name or "数据集"
+        main = f"数据集“{target}”未启用，请先启用后重试"
+    elif code == "dataset_unhealthy":
+        target = dataset_name or "数据集"
+        if "auth_expired" in issue_message:
+            main = f"数据集“{target}”授权已失效，请先重新授权"
+        else:
+            main = f"数据集“{target}”健康状态异常，请先修复后重试"
+    elif code == "dataset_stale":
+        target = dataset_name or "数据集"
+        main = f"数据集“{target}”最近快照已过旧，请先执行同步后重试"
+    elif code == "dataset_sync_time_invalid":
+        target = dataset_name or "数据集"
+        main = f"数据集“{target}”最近快照时间异常，请先执行同步后重试"
+    else:
+        main = issue_message or "规则绑定的数据源或数据集暂不可用，请先检查后重试"
+
+    extra_count = max(0, len(blocking or issues) - 1)
+    if extra_count > 0:
+        main = f"{main}（另有 {extra_count} 项问题待处理）"
+    return main
+
+
+async def _resolve_preflight_binding(
+    config: dict[str, Any],
+    explicit_task_code: str,
+    explicit_rule_code: str,
+) -> tuple[str, str]:
+    task_kind = explicit_task_code if explicit_task_code in {"proc", "recon"} else ""
+    rule_code = str(explicit_rule_code or "").strip()
+    if task_kind and rule_code:
+        return task_kind, rule_code
+
+    try:
+        snapshot = await _get_langgraph_app().aget_state(config)
+    except Exception:
+        return task_kind, rule_code
+
+    values = snapshot.values if snapshot else {}
+    if not task_kind:
+        selected_task_code = str(values.get("selected_task_code") or "").strip()
+        if selected_task_code in {"proc", "recon"}:
+            task_kind = selected_task_code
+    if not rule_code:
+        rule_code = str(values.get("selected_rule_code") or "").strip()
+    return task_kind, rule_code
+
+
+async def _maybe_run_rule_binding_preflight(
+    *,
+    auth_token: str,
+    config: dict[str, Any],
+    explicit_task_code: str,
+    explicit_rule_code: str,
+) -> str | None:
+    if not auth_token:
+        return None
+
+    task_kind, rule_code = await _resolve_preflight_binding(
+        config,
+        explicit_task_code=explicit_task_code,
+        explicit_rule_code=explicit_rule_code,
+    )
+    if task_kind not in {"proc", "recon"} or not rule_code:
+        return None
+
+    try:
+        result = await data_source_preflight_rule_binding(
+            auth_token,
+            binding_scope=task_kind,
+            binding_code=rule_code,
+        )
+    except Exception as exc:
+        return _sanitize_preflight_backend_error(str(exc))
+
+    if not result.get("success"):
+        return _sanitize_preflight_backend_error(str(result.get("error") or ""))
+    if not bool(result.get("ready")):
+        return _build_preflight_issue_message(result)
+    return None
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Financial Data Agent", version="0.1.0")
@@ -182,6 +314,11 @@ app = FastAPI(title="Financial Data Agent", version="0.1.0")
 # 注册 proc 路由
 app.include_router(proc_router)
 app.include_router(recon_router)
+app.include_router(recon_auto_router)
+app.include_router(recon_scheme_design_router)
+app.include_router(platform_router)
+app.include_router(data_source_router)
+app.include_router(collaboration_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -423,6 +560,9 @@ async def upload_file(
             error_msg = result.get("error", "上传失败")
             if "errors" in result and result["errors"]:
                 error_msg = result["errors"][0].get("error", error_msg)
+            lowered = str(error_msg).lower()
+            if "auth_token" in lowered or "token" in lowered or "登录" in error_msg:
+                raise HTTPException(401, error_msg)
             raise HTTPException(500, error_msg)
 
         # 获取上传的文件信息
@@ -638,6 +778,60 @@ async def websocket_chat(ws: WebSocket):
                     except Exception as e:
                         logger.warning(f"写入 task/rule code/name 失败: {e}")
 
+                effective_task_kind = await _resolve_task_kind(config, task_code)
+                effective_rule_code = str(rule_code or "").strip()
+                if not effective_rule_code and effective_task_kind in {"proc", "recon"}:
+                    try:
+                        snapshot = await _get_langgraph_app().aget_state(config)
+                        effective_rule_code = str(snapshot.values.get("selected_rule_code") or "").strip()
+                    except Exception as e:
+                        logger.warning(f"读取规则编码失败 (thread={thread_id}): {e}")
+
+                if not is_resume and effective_task_kind in {"proc", "recon"}:
+                    if not auth_token:
+                        await ws.send_json(
+                            {
+                                "type": "message",
+                                "content": "任务启动前检查未通过：登录状态已失效，请重新登录后重试。",
+                                "thread_id": thread_id,
+                            }
+                        )
+                        await ws.send_json({"type": "done", "thread_id": thread_id})
+                        continue
+                    if not effective_rule_code:
+                        await ws.send_json(
+                            {
+                                "type": "message",
+                                "content": "任务启动前检查未通过：请先选择规则后再执行任务。",
+                                "thread_id": thread_id,
+                            }
+                        )
+                        await ws.send_json({"type": "done", "thread_id": thread_id})
+                        continue
+                    preflight_message = await _maybe_run_rule_binding_preflight(
+                        auth_token=auth_token,
+                        config=config,
+                        explicit_task_code=effective_task_kind,
+                        explicit_rule_code=effective_rule_code,
+                    )
+                    if preflight_message:
+                        logger.warning(
+                            "任务前检查阻断 (thread=%s task=%s rule=%s): %s",
+                            thread_id,
+                            effective_task_kind,
+                            effective_rule_code,
+                            preflight_message,
+                        )
+                        await ws.send_json(
+                            {
+                                "type": "message",
+                                "content": f"任务启动前检查未通过：{preflight_message}",
+                                "thread_id": thread_id,
+                            }
+                        )
+                        await ws.send_json({"type": "done", "thread_id": thread_id})
+                        continue
+
                 logger.info(f"开始执行 LangGraph: thread_id={thread_id}")
                 
                 # ── 流式输出策略 ──
@@ -649,7 +843,7 @@ async def websocket_chat(ws: WebSocket):
                 streamed_content = ""
                 router_buffer = ""
                 router_mode = "detect"  # "detect" | "stream" | "json"
-                active_task_kind = await _resolve_task_kind(config, task_code)
+                active_task_kind = effective_task_kind
                 event_count = 0
                 sent_contents: set[str] = set()
                 baseline_message_len = 0
@@ -967,6 +1161,9 @@ async def stream_chat(
     message: str,
     thread_id: str | None = None,
     resume: bool = False,
+    auth_token: str = "",
+    task_code: str = "",
+    rule_code: str = "",
 ):
     """SSE 流式端点。
 
@@ -983,6 +1180,31 @@ async def stream_chat(
 
     async def event_generator():
         try:
+            if auth_token or task_code or rule_code:
+                update_state: dict[str, Any] = {}
+                if auth_token:
+                    update_state["auth_token"] = auth_token
+                if task_code:
+                    update_state["selected_task_code"] = task_code
+                if rule_code:
+                    update_state["selected_rule_code"] = rule_code
+                if update_state:
+                    await _get_langgraph_app().aupdate_state(config, update_state)
+
+            preflight_error = await _maybe_run_rule_binding_preflight(
+                auth_token=auth_token,
+                config=config,
+                explicit_task_code=task_code,
+                explicit_rule_code=rule_code,
+            )
+            if preflight_error:
+                error_payload = json.dumps(
+                    {"type": "error", "content": preflight_error, "thread_id": tid},
+                    ensure_ascii=False,
+                )
+                yield f"data: {error_payload}\n\n"
+                return
+
             if resume:
                 invoke_input = Command(resume=message)
             else:

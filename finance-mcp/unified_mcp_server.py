@@ -19,6 +19,7 @@ from starlette.responses import Response, JSONResponse, FileResponse
 import uvicorn
 import logging
 from auth.jwt_utils import get_user_from_token
+from auth import db as auth_db
 from security_utils import read_output_metadata
 
 # 导入上传模块
@@ -39,6 +40,22 @@ from tools.rules import create_tools as create_rules_tools, handle_tool_call as 
 
 # 导入对账模块
 from recon.mcp_server.recon_tool import create_recon_tools, handle_recon_tool_call
+from tools.platform_connections import (
+    create_tools as create_platform_tools,
+    handle_tool_call as handle_platform_tool_call,
+)
+from tools.data_sources import (
+    create_tools as create_data_source_tools,
+    handle_tool_call as handle_data_source_tool_call,
+)
+from tools.recon_auto_runs import (
+    create_tools as create_recon_auto_tools,
+    handle_tool_call as handle_recon_auto_tool_call,
+)
+from tools.execution_runs import (
+    create_tools as create_execution_tools,
+    handle_tool_call as handle_execution_tool_call,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -98,8 +115,47 @@ async def list_tools() -> list[types.Tool]:
     except Exception as e:
         logger.error(f"加载对账工具失败: {str(e)}", exc_info=True)
         recon_tools_2 = []
+
+    try:
+        platform_tools = create_platform_tools()
+        logger.info(f"平台连接工具数量: {len(platform_tools)}")
+    except Exception as e:
+        logger.error(f"加载平台连接工具失败: {str(e)}", exc_info=True)
+        platform_tools = []
+
+    try:
+        data_source_tools = create_data_source_tools()
+        logger.info(f"统一数据源工具数量: {len(data_source_tools)}")
+    except Exception as e:
+        logger.error(f"加载统一数据源工具失败: {str(e)}", exc_info=True)
+        data_source_tools = []
+
+    try:
+        recon_auto_tools = create_recon_auto_tools()
+        logger.info(f"自动对账闭环工具数量: {len(recon_auto_tools)}")
+    except Exception as e:
+        logger.error(f"加载自动对账闭环工具失败: {str(e)}", exc_info=True)
+        recon_auto_tools = []
+
+    try:
+        execution_tools = create_execution_tools()
+        logger.info(f"execution 模型工具数量: {len(execution_tools)}")
+    except Exception as e:
+        logger.error(f"加载 execution 模型工具失败: {str(e)}", exc_info=True)
+        execution_tools = []
     
-    all_tools = auth_tools + upload_tools + file_validate_tools + proc_tools + rules_tools + recon_tools_2
+    all_tools = (
+        auth_tools
+        + upload_tools
+        + file_validate_tools
+        + proc_tools
+        + rules_tools
+        + recon_tools_2
+        + platform_tools
+        + data_source_tools
+        + recon_auto_tools
+        + execution_tools
+    )
     logger.info(f"总工具数量: {len(all_tools)}")
     return all_tools
 
@@ -137,6 +193,83 @@ _RECON_TOOL_NAMES = {
     "recon_execute",
 }
 
+_PLATFORM_TOOL_NAMES = {
+    "platform_list_connections",
+    "platform_create_auth_session",
+    "platform_handle_auth_callback",
+    "platform_reauthorize_shop",
+    "platform_disable_shop",
+    "platform_get_shop_detail",
+}
+
+_DATA_SOURCE_TOOL_NAMES = {
+    "data_source_list",
+    "data_source_get",
+    "data_source_discover_datasets",
+    "data_source_list_datasets",
+    "data_source_get_dataset",
+    "data_source_upsert_dataset",
+    "data_source_disable_dataset",
+    "data_source_import_openapi",
+    "data_source_preflight_rule_binding",
+    "data_source_list_events",
+    "data_source_create",
+    "data_source_update",
+    "data_source_disable",
+    "data_source_delete",
+    "data_source_test",
+    "data_source_authorize",
+    "data_source_handle_callback",
+    "data_source_trigger_sync",
+    "data_source_get_sync_job",
+    "data_source_list_sync_jobs",
+    "data_source_preview",
+    "data_source_get_published_snapshot",
+}
+
+_RECON_AUTO_TOOL_NAMES = {
+    "recon_auto_task_list",
+    "recon_auto_task_get",
+    "recon_auto_task_create",
+    "recon_auto_task_update",
+    "recon_auto_task_delete",
+    "recon_auto_run_create",
+    "recon_auto_run_update",
+    "recon_auto_run_list",
+    "recon_auto_run_get",
+    "recon_auto_run_rerun",
+    "recon_auto_run_verify",
+    "recon_auto_run_job_create",
+    "recon_auto_run_job_update",
+    "recon_auto_run_exceptions",
+    "recon_exception_get",
+    "recon_exception_create",
+    "recon_exception_update",
+}
+
+_EXECUTION_TOOL_NAMES = {
+    "execution_scheme_list",
+    "execution_scheme_get",
+    "execution_scheme_create",
+    "execution_scheme_update",
+    "execution_scheme_delete",
+    "execution_run_plan_list",
+    "execution_run_plan_get",
+    "execution_run_plan_create",
+    "execution_run_plan_update",
+    "execution_run_plan_delete",
+    "execution_run_list",
+    "execution_run_get",
+    "execution_run_create",
+    "execution_run_update",
+    "execution_run_exceptions",
+    "execution_run_exception_get",
+    "execution_run_exception_create",
+    "execution_run_exception_update",
+    "execution_proc_draft_trial",
+    "execution_recon_draft_trial",
+}
+
 _UPLOAD_TOOL_NAMES = {"file_upload"}
 
 
@@ -169,6 +302,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         # 6) 对账模块
         elif name in _RECON_TOOL_NAMES:
             result = await handle_recon_tool_call(name, arguments)
+
+        # 7) 平台连接模块
+        elif name in _PLATFORM_TOOL_NAMES:
+            result = await handle_platform_tool_call(name, arguments)
+
+        # 8) 统一数据连接模块
+        elif name in _DATA_SOURCE_TOOL_NAMES:
+            result = await handle_data_source_tool_call(name, arguments)
+
+        # 9) 自动对账与异常闭环模块
+        elif name in _RECON_AUTO_TOOL_NAMES:
+            result = await handle_recon_auto_tool_call(name, arguments)
+
+        # 10) execution 方案/计划/运行模块
+        elif name in _EXECUTION_TOOL_NAMES:
+            result = await handle_execution_tool_call(name, arguments)
 
         else:
             result = {"error": f"未知的工具: {name}"}
@@ -204,7 +353,7 @@ async def health_check(request):
         "status": "healthy",
         "service": "financial-mcp-server",
         "version": "1.0.0",
-        "modules": ["auth", "upload", "rules", "proc", "recon"]
+        "modules": ["auth", "upload", "rules", "proc", "recon", "platform", "data_source", "execution"]
     })
 
 
@@ -339,6 +488,13 @@ async def main():
     """启动服务器"""
     host = DEFAULT_HOST
     port = DEFAULT_PORT
+
+    try:
+        applied = auth_db.ensure_unified_data_source_schema()
+        if applied:
+            logger.info("启动时已补齐统一数据源 schema: %s", ", ".join(applied))
+    except Exception as e:
+        logger.error("统一数据源 schema 自检失败: %s", e, exc_info=True)
     
     # 动态获取工具列表用于显示
     try:

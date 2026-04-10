@@ -14,7 +14,7 @@ export type SendMessageFn = (
   authToken?: string,
   attachments?: Array<{ name: string; path: string }>,
   conversationId?: string,
-  employeeCode?: string,
+  taskCode?: string,
   ruleCode?: string,
   ruleName?: string,
   fileRuleCode?: string
@@ -48,7 +48,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       authToken?: string,
       attachments?: Array<{ name: string; path: string }>,
       conversationId?: string,
-      employeeCode?: string,
+      taskCode?: string,
       ruleCode?: string,
       ruleName?: string,
       fileRuleCode?: string
@@ -74,8 +74,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       if (conversationId) {
         payload.conversation_id = conversationId;
       }
-      if (employeeCode) {
-        payload.employee_code = employeeCode;
+      if (taskCode) {
+        payload.employee_code = taskCode;
       }
       if (ruleCode) {
         payload.rule_code = ruleCode;

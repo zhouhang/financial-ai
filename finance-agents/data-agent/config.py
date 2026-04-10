@@ -71,3 +71,24 @@ FINANCE_MCP_UPLOAD_DIR: str = os.getenv(
 # ── 上传 ──────────────────────────────────────────────────────────────────────
 UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", FINANCE_MCP_UPLOAD_DIR)
 MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", str(100 * 1024 * 1024)))
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+# ── 通知适配器 ────────────────────────────────────────────────────────────────
+NOTIFICATION_PROVIDER: str = os.getenv("NOTIFICATION_PROVIDER", "dingtalk_dws").strip()
+NOTIFICATION_DEFAULT_CHANNEL_CODE: str = os.getenv("NOTIFICATION_DEFAULT_CHANNEL_CODE", "default").strip()
+NOTIFICATION_CLI_TIMEOUT_SECONDS: float = float(os.getenv("NOTIFICATION_CLI_TIMEOUT_SECONDS", "20"))
+NOTIFICATION_CLI_DEFAULT_ENCODING: str = os.getenv("NOTIFICATION_CLI_DEFAULT_ENCODING", "utf-8")
+
+# DingTalk DWS CLI
+DINGTALK_DWS_ENABLED: bool = _get_bool_env("DINGTALK_DWS_ENABLED", True)
+DINGTALK_DWS_BIN: str = os.getenv("DINGTALK_DWS_BIN", "dws").strip()
+DINGTALK_CLIENT_ID: str = os.getenv("DINGTALK_CLIENT_ID", "").strip()
+DINGTALK_CLIENT_SECRET: str = os.getenv("DINGTALK_CLIENT_SECRET", "").strip()
+DINGTALK_ROBOT_CODE: str = os.getenv("DINGTALK_ROBOT_CODE", "").strip()
+DINGTALK_DEFAULT_TODO_PRIORITY: str = os.getenv("DINGTALK_DEFAULT_TODO_PRIORITY", "20").strip()
+DINGTALK_DEFAULT_TODO_PAGE_SIZE: int = int(os.getenv("DINGTALK_DEFAULT_TODO_PAGE_SIZE", "20"))
