@@ -5,6 +5,50 @@ set -e  # 遇到错误立即退出
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$PROJECT_ROOT/logs"
+TRACE_LANGSMITH_MODE="${TRACE_LANGSMITH:-0}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --trace-langsmith)
+            TRACE_LANGSMITH_MODE="1"
+            ;;
+        --no-trace-langsmith)
+            TRACE_LANGSMITH_MODE="0"
+            ;;
+        --help|-h)
+            cat <<'EOF'
+用法：
+  ./START_ALL_SERVICES.sh
+  TRACE_LANGSMITH=1 ./START_ALL_SERVICES.sh
+  ./START_ALL_SERVICES.sh --trace-langsmith
+
+说明：
+  - 默认关闭 LangSmith tracing，避免本地网络波动拖慢 data-agent 的 skill 请求。
+  - 需要调试 LangGraph / DeepAgent / skill 细节时，再显式开启 tracing。
+EOF
+            exit 0
+            ;;
+    esac
+done
+
+load_project_env() {
+    set -a
+    [ -f "$PROJECT_ROOT/.env" ] && source "$PROJECT_ROOT/.env"
+    set +a
+}
+
+configure_langsmith_env() {
+    if [ "$TRACE_LANGSMITH_MODE" = "1" ]; then
+        export LANGSMITH_TRACING=true
+        export LANGCHAIN_TRACING_V2=true
+        export TRACE_LANGSMITH=1
+        return
+    fi
+
+    export LANGSMITH_TRACING=false
+    export LANGCHAIN_TRACING_V2=false
+    export TRACE_LANGSMITH=0
+}
 
 # 创建日志目录
 mkdir -p "$LOG_DIR"
@@ -12,11 +56,14 @@ mkdir -p "$LOG_DIR"
 echo "=========================================="
 echo "🚀 启动 Financial AI 服务"
 echo "=========================================="
+echo "🔎 LangSmith tracing: $([ "$TRACE_LANGSMITH_MODE" = "1" ] && echo "开启" || echo "关闭")"
 
 # 停止现有服务
 echo ""
 echo "📌 步骤 1: 停止现有服务..."
 lsof -ti:3335,8100,5173 | xargs kill -9 2>/dev/null || true
+[ -f /tmp/finance-cron.pid ] && kill -9 "$(cat /tmp/finance-cron.pid)" 2>/dev/null || true
+rm -f /tmp/finance-cron.pid
 sleep 2
 echo "✅ 现有服务已停止"
 
@@ -25,6 +72,7 @@ echo ""
 echo "📌 步骤 2: 启动 finance-mcp (端口 3335)..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
+load_project_env
 cd finance-mcp
 nohup python unified_mcp_server.py > "$LOG_DIR/finance-mcp.log" 2>&1 &
 FINANCE_MCP_PID=$!
@@ -40,11 +88,10 @@ echo "📌 步骤 3: 启动 data-agent (端口 8100)..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
 cd finance-agents/data-agent
+load_project_env
 # 在 Python 启动前导出 LangSmith 环境变量（必须在进程启动时已存在，否则 LangSmith 追踪不生效）
-set -a
-[ -f "$PROJECT_ROOT/.env" ] && source "$PROJECT_ROOT/.env"
 [ -f .env ] && source .env
-set +a
+configure_langsmith_env
 nohup python -m server > "$LOG_DIR/data-agent.log" 2>&1 &
 DATA_AGENT_PID=$!
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
@@ -52,9 +99,23 @@ echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
 # 等待 data-agent 启动
 sleep 3
 
+# 启动 finance-cron
+echo ""
+echo "📌 步骤 4: 启动 finance-cron..."
+cd "$PROJECT_ROOT"
+source .venv/bin/activate
+load_project_env
+nohup python finance-cron/run_scheduler.py --config finance-cron/config/cron_config.yaml > "$LOG_DIR/finance-cron.log" 2>&1 &
+FINANCE_CRON_PID=$!
+echo "$FINANCE_CRON_PID" > /tmp/finance-cron.pid
+echo "✅ finance-cron 已启动 (PID: $FINANCE_CRON_PID)"
+
+# 等待 finance-cron 启动
+sleep 2
+
 # 启动 finance-web
 echo ""
-echo "📌 步骤 4: 启动 finance-web (端口 5173)..."
+echo "📌 步骤 5: 启动 finance-web (端口 5173)..."
 cd "$PROJECT_ROOT/finance-web"
 nohup npm run dev > "$LOG_DIR/finance-web.log" 2>&1 &
 FINANCE_WEB_PID=$!
@@ -95,6 +156,14 @@ else
     SERVICES_OK=false
 fi
 
+# 检查 finance-cron
+if [ -f /tmp/finance-cron.pid ] && kill -0 "$(cat /tmp/finance-cron.pid)" 2>/dev/null; then
+    echo "✅ finance-cron  (scheduler) - 运行正常"
+else
+    echo "❌ finance-cron  (scheduler) - 启动失败"
+    SERVICES_OK=false
+fi
+
 echo ""
 echo "=========================================="
 
@@ -109,10 +178,16 @@ if [ "$SERVICES_OK" = true ]; then
     echo "📋 查看日志："
     echo "   - finance-mcp: tail -f $LOG_DIR/finance-mcp.log"
     echo "   - data-agent:  tail -f $LOG_DIR/data-agent.log"
+    echo "   - finance-cron: tail -f $LOG_DIR/finance-cron.log"
     echo "   - finance-web: tail -f $LOG_DIR/finance-web.log"
     echo ""
+    echo "🧭 LangSmith 调试："
+    echo "   - 默认关闭 tracing：./START_ALL_SERVICES.sh"
+    echo "   - 显式开启 tracing：TRACE_LANGSMITH=1 ./START_ALL_SERVICES.sh"
+    echo "   - 或：./START_ALL_SERVICES.sh --trace-langsmith"
+    echo ""
     echo "🛑 停止所有服务："
-    echo "   lsof -ti:3335,8100,5173 | xargs kill -9"
+    echo "   ./STOP_ALL_SERVICES.sh"
     echo ""
 else
     echo "⚠️  部分服务启动失败，请检查日志："

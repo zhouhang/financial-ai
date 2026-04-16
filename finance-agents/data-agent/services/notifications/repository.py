@@ -105,6 +105,45 @@ def load_company_channel_config(
     )
 
 
+def load_company_channel_config_by_id(*, channel_id: str) -> NotificationChannelConfig | None:
+    if not channel_id:
+        return None
+
+    sql = """
+        SELECT id, company_id, provider, channel_code, name,
+               client_id, client_secret, robot_code,
+               is_default, is_enabled, extra
+        FROM company_channel_configs
+        WHERE id = %s
+          AND is_enabled = TRUE
+        LIMIT 1
+    """
+    try:
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (channel_id,))
+                row = cur.fetchone()
+    except Exception as exc:
+        logger.error("查询 company_channel_configs(id=%s) 失败: %s", channel_id, exc)
+        return None
+
+    if not row:
+        return None
+    return NotificationChannelConfig(
+        id=str(row.get("id") or ""),
+        company_id=str(row.get("company_id") or ""),
+        provider=str(row.get("provider") or ""),
+        channel_code=str(row.get("channel_code") or "default"),
+        name=str(row.get("name") or ""),
+        client_id=str(row.get("client_id") or ""),
+        client_secret=str(row.get("client_secret") or ""),
+        robot_code=str(row.get("robot_code") or ""),
+        is_default=bool(row.get("is_default")),
+        is_enabled=bool(row.get("is_enabled")),
+        extra=dict(row.get("extra") or {}),
+    )
+
+
 def list_company_channel_configs(*, company_id: str) -> list[dict[str, Any]]:
     sql = """
         SELECT id, company_id, provider, channel_code, name,

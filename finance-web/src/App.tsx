@@ -40,6 +40,10 @@ function createConversation(taskContext: UserTaskRule | null = null): Conversati
   };
 }
 
+function isServerConversationId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 // localStorage 键名
 const STORAGE_KEY_ACTIVE_CONV = 'tally_active_conversation_id';
 const STORAGE_KEY_IS_NEW_CONV = 'tally_is_new_conversation';
@@ -179,8 +183,11 @@ function getInitialConversationState(): {
     // 游客模式：从本地存储恢复
     const guest = localStorage.getItem(STORAGE_KEY_GUEST_CONV);
     const conv = guest ? parseGuestConv(guest) : null;
-    if (conv) {
+    if (conv && !isServerConversationId(conv.id)) {
       return { activeId: conv.id, isNewConv: false, conversations: [conv], pendingNew: null };
+    }
+    if (conv && isServerConversationId(conv.id)) {
+      localStorage.removeItem(STORAGE_KEY_GUEST_CONV);
     }
     const newConv = createConversation();
     return { activeId: newConv.id, isNewConv: true, conversations: [], pendingNew: newConv };
@@ -464,6 +471,39 @@ export default function App() {
   const loginConvIdRef = useRef<{ localId: string | null; serverId: string | null }>({ localId: null, serverId: null });
   // 追踪是否已加载初始会话（用于防止刷新时重复加载）
   const hasLoadedInitialConvRef = useRef<boolean>(false);
+
+  const resetToGuestWorkspace = useCallback(() => {
+    const newConv = createConversation();
+
+    clearConversationsCache();
+    convIdMapRef.current.clear();
+    loginConvIdRef.current = { localId: null, serverId: null };
+    justLoggedInRef.current = false;
+    hasLoadedInitialConvRef.current = false;
+    taskStartedRef.current.clear();
+    nodeStatusMessageIdsRef.current.clear();
+    pendingConvIdRef.current = null;
+    pendingSendConvRef.current = null;
+    pendingNewConvRef.current = newConv;
+
+    localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
+    localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
+    localStorage.setItem(STORAGE_KEY_GUEST_CONV, serializeGuestConv(newConv));
+
+    setConversations([]);
+    setActiveConvId(newConv.id);
+    setIsLoadingConversation(false);
+    setIsLoading(false);
+    setWaitingForFileUpload(false);
+    setStreamingMessageId(null);
+    setTasks([]);
+    setUploadedFiles([]);
+    setTaskResult(null);
+    setHiddenConversationIds([]);
+    setPanelView('conversation');
+    setReconWorkspaceMode('upload');
+    setReconExecutionMode('upload');
+  }, [clearConversationsCache]);
 
   // 登录成功后，等会话列表加载完成，选中最近对话（不创建新对话）
   useEffect(() => {
@@ -1014,6 +1054,7 @@ export default function App() {
               setCurrentUser(null);
               localStorage.removeItem('tally_auth_token');
               localStorage.removeItem('tally_current_user');
+              resetToGuestWorkspace();
             } else {
               console.warn('Auth verification skipped due to transient backend issue:', data.payload);
             }
@@ -1231,7 +1272,7 @@ export default function App() {
       // 获取对应的 server conversation_id
       // activeConvId 可能是本地 ID（随机字符串）或服务器 ID（UUID）
       // 如果是服务器 ID（UUID 格式），直接使用；否则从映射表查找
-      const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeConvId);
+      const isServerId = isServerConversationId(activeConvId);
       const conversationId = isServerId ? activeConvId : convIdMapRef.current.get(activeConvId);
       const activeTaskContext =
         panelView !== 'data-connections'
@@ -1268,26 +1309,8 @@ export default function App() {
     setCurrentUser(null);
     localStorage.removeItem('tally_auth_token');
     localStorage.removeItem('tally_current_user');
-    localStorage.removeItem(STORAGE_KEY_ACTIVE_CONV);
-    localStorage.removeItem(STORAGE_KEY_IS_NEW_CONV);
-    
-    // 清除服务器会话缓存
-    clearConversationsCache();
-    convIdMapRef.current.clear();
-    
-    // 清除所有会话，创建新的待确认会话
-    const newConv = createConversation();
-    pendingNewConvRef.current = newConv;
-    setConversations([]);
-    setActiveConvId(newConv.id);
-    setIsLoading(false);
-    setTasks([]);
-    setUploadedFiles([]);
-    setTaskResult(null);
-    setWaitingForFileUpload(false);
-    setHiddenConversationIds([]);
-    hasLoadedInitialConvRef.current = false;
-  }, [clearConversationsCache]);
+    resetToGuestWorkspace();
+  }, [resetToGuestWorkspace]);
 
   // ── 新建会话 ──────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
@@ -1359,7 +1382,7 @@ export default function App() {
     console.log('handleDeleteConversation called, id:', id);
     
     // 检查是否是服务器会话 ID（UUID 格式）
-    const isServerId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    const isServerId = isServerConversationId(id);
     
     // 如果是服务器会话，调用删除 API
     if (isServerId) {

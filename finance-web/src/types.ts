@@ -199,6 +199,14 @@ export interface DataSourceDatasetSummary {
   id: string;
   dataset_code: string;
   dataset_name: string;
+  business_name?: string;
+  business_description?: string;
+  semantic_status?: string;
+  semantic_updated_at?: string | null;
+  key_fields?: string[];
+  field_label_map?: Record<string, string>;
+  semantic_fields?: Array<Record<string, unknown>>;
+  low_confidence_fields?: string[];
   origin_type?: 'fixed' | 'discovered' | 'imported_openapi' | 'manual' | string;
   dataset_kind?: string;
   resource_key?: string;
@@ -232,7 +240,6 @@ export interface DataSourceDatabaseConfig {
   username?: string;
   password?: string;
   ssl_mode?: string;
-  connect_timeout?: number;
   schema_whitelist?: string[];
 }
 

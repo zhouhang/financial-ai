@@ -124,6 +124,14 @@ def resolve_upload_file_path(file_path: str) -> Path:
     return resolve_path_under_roots(file_path, [UPLOAD_ROOT])
 
 
+def resolve_recon_input_file_path(file_path: str) -> Path:
+    """解析对账输入文件路径。
+
+    recon 既可能直接读取上传文件，也可能读取 proc 产出的中间结果。
+    """
+    return resolve_path_under_roots(file_path, [UPLOAD_ROOT, PROC_OUTPUT_ROOT])
+
+
 def get_output_metadata_path(file_path: str | Path) -> Path:
     """获取输出文件 sidecar 元数据路径。"""
     target = Path(file_path)

@@ -248,6 +248,56 @@ def test_sync_todo_status_returns_terminal_completed():
     assert result.history == [UnifiedTodoStatus.COMPLETED]
 
 
+def test_get_todo_falls_back_to_completed_list_when_detail_is_empty():
+    executor = FakeExecutor(
+        [
+            _result({"success": True, "result": {}}),
+            _result(
+                {
+                    "success": True,
+                    "result": {
+                        "todoCards": [
+                            {
+                                "taskId": "todo-1",
+                                "subject": "任务",
+                                "finalStatusStage": 2,
+                            }
+                        ]
+                    },
+                }
+            ),
+        ]
+    )
+    adapter = DingTalkDwsAdapter(
+        executor=executor,
+        cli_bin="dws",
+        client_id="cid",
+        client_secret="secret",
+        robot_code="robot-1",
+    )
+
+    result = adapter.get_todo(todo_id="todo-1")
+
+    assert result.success is True
+    assert result.todo is not None
+    assert result.todo.todo_id == "todo-1"
+    assert result.todo.status == UnifiedTodoStatus.COMPLETED
+    assert executor.calls[1]["args"] == [
+        "dws",
+        "todo",
+        "task",
+        "list",
+        "--page",
+        "1",
+        "--size",
+        "20",
+        "--status",
+        "true",
+        "-f",
+        "json",
+    ]
+
+
 def test_create_todo_fails_when_task_id_is_missing():
     executor = FakeExecutor(
         [

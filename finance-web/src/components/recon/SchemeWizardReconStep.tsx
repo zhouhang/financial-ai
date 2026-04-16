@@ -16,7 +16,7 @@ export interface ExistingConfigOption {
 }
 
 export interface CompatibilityCheckResult {
-  status: 'idle' | 'passed' | 'failed';
+  status: 'idle' | 'passed' | 'failed' | 'warning';
   message: string;
   details: string[];
 }
@@ -39,6 +39,9 @@ export interface ReconTrialPreview {
   leftSamples?: ReconSampleRow[];
   rightSamples?: ReconSampleRow[];
   resultSamples?: ReconSampleRow[];
+  leftFieldLabelMap?: Record<string, string>;
+  rightFieldLabelMap?: Record<string, string>;
+  resultFieldLabelMap?: Record<string, string>;
   resultSummary?: ReconResultSummary;
 }
 
@@ -58,6 +61,9 @@ interface SchemeWizardReconStepProps {
   reconTrialPreview?: ReconTrialPreview;
   trialDisabled?: boolean;
   isGeneratingRecon?: boolean;
+  generationSkill?: string;
+  generationPhase?: string;
+  generationMessage?: string;
   isTrialingRecon?: boolean;
 }
 
@@ -65,7 +71,21 @@ function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
 }
 
-function renderSampleTable(rows: ReconSampleRow[] | undefined, title: string) {
+function formatGenerationPhase(phase: string) {
+  if (phase === 'preparing_context') return '准备样例';
+  if (phase === 'generating_rule') return '生成规则';
+  if (phase === 'validating_rule') return '校验 JSON';
+  if (phase === 'rendering_draft_text') return '整理说明';
+  if (phase === 'completed') return '生成完成';
+  if (phase === 'failed') return '生成失败';
+  return '处理中';
+}
+
+function renderSampleTable(
+  rows: ReconSampleRow[] | undefined,
+  title: string,
+  fieldLabelMap?: Record<string, string>,
+) {
   if (!rows || rows.length === 0) {
     return (
       <div className="rounded-2xl border border-border bg-surface px-4 py-3 text-sm text-text-secondary">
@@ -92,7 +112,12 @@ function renderSampleTable(rows: ReconSampleRow[] | undefined, title: string) {
             <tr>
               {columns.map((col) => (
                 <th key={col} className="px-4 py-2 font-semibold">
-                  {col}
+                  <span className="block max-w-[220px] truncate">{fieldLabelMap?.[col] || col}</span>
+                  {fieldLabelMap?.[col] && fieldLabelMap[col] !== col ? (
+                    <span className="mt-0.5 block max-w-[220px] truncate text-[10px] font-normal normal-case tracking-normal text-text-muted">
+                      {col}
+                    </span>
+                  ) : null}
                 </th>
               ))}
             </tr>
@@ -130,6 +155,9 @@ export default function SchemeWizardReconStep({
   reconTrialPreview,
   trialDisabled,
   isGeneratingRecon = false,
+  generationSkill = '对账逻辑生成器',
+  generationPhase = 'generating_rule',
+  generationMessage = '正在分析整理后的左右数据，并生成数据对账 JSON。',
   isTrialingRecon = false,
 }: SchemeWizardReconStepProps) {
   const previewAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -225,6 +253,8 @@ export default function SchemeWizardReconStep({
               'mt-4 rounded-2xl border px-4 py-3 text-sm',
               compatibility?.status === 'passed'
                 ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : compatibility?.status === 'warning'
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
                 : compatibility?.status === 'failed'
                 ? 'border-amber-200 bg-amber-50 text-amber-700'
                 : 'border-border bg-surface text-text-secondary',
@@ -251,9 +281,21 @@ export default function SchemeWizardReconStep({
         <>
           <div className="flex flex-wrap items-center gap-3">
             {isGeneratingRecon ? (
-              <div className="flex items-center gap-2 text-sm font-medium text-sky-700">
-                <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-                AI 正在生成对账逻辑，请稍候…
+              <div className="w-full rounded-2xl border border-sky-200 bg-sky-50/70 px-4 py-3 text-sky-700">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
+                  AI 正在生成对账逻辑，请稍候…
+                </div>
+                <div className="mt-2 space-y-1 text-xs leading-6 text-sky-700/90">
+                  <p>
+                    当前生成器：
+                    <span className="ml-1 rounded-full border border-sky-200 bg-white/70 px-2 py-0.5 font-semibold text-sky-700">
+                      {generationSkill}
+                    </span>
+                  </p>
+                  <p>当前阶段：{formatGenerationPhase(generationPhase)}</p>
+                  <p>{generationMessage}</p>
+                </div>
               </div>
             ) : (
               <button
@@ -313,8 +355,8 @@ export default function SchemeWizardReconStep({
 
       {showTrialResult ? (
         <div ref={previewAnchorRef} className="space-y-4">
-          {renderSampleTable(preview?.leftSamples, '左侧整理结果抽样')}
-          {renderSampleTable(preview?.rightSamples, '右侧整理结果抽样')}
+          {renderSampleTable(preview?.leftSamples, '左侧整理结果抽样', preview?.leftFieldLabelMap)}
+          {renderSampleTable(preview?.rightSamples, '右侧整理结果抽样', preview?.rightFieldLabelMap)}
 
           <div className="rounded-3xl border border-border bg-surface-secondary p-4">
             <p className="text-sm font-semibold text-text-primary">对账结果摘要</p>
@@ -352,7 +394,7 @@ export default function SchemeWizardReconStep({
             )}
           </div>
 
-          {renderSampleTable(preview?.resultSamples, '对账差异抽样')}
+          {renderSampleTable(preview?.resultSamples, '对账差异抽样', preview?.resultFieldLabelMap)}
         </div>
       ) : null}
     </div>

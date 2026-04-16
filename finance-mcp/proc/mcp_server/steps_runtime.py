@@ -648,7 +648,10 @@ class StepsProcRuntime:
                 )
                 for name, spec in bindings.items()
             }
-            return _evaluate_formula_expression(value_node.get("expr", ""), env)
+            expr = value_node.get("expr", "")
+            if not expr and isinstance(value_node.get("formula"), str):
+                expr = value_node.get("formula", "")
+            return _evaluate_formula_expression(expr, env)
         raise ValueError(f"不支持的 value.type: {node_type}")
 
     def _evaluate_value_spec(
@@ -699,7 +702,10 @@ class StepsProcRuntime:
                 )
                 for name, value in (spec.get("bindings") or {}).items()
             }
-            return _evaluate_formula_expression(spec.get("expr", ""), env)
+            expr = spec.get("expr", "")
+            if not expr and isinstance(spec.get("formula"), str):
+                expr = spec.get("formula", "")
+            return _evaluate_formula_expression(expr, env)
         return spec
 
     def _evaluate_source_node(

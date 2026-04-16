@@ -400,6 +400,8 @@ function splitByHtmlTables(content: string): ({ type: 'markdown'; text: string }
 
 /** 渲染带有表格支持的内容 */
 function ContentWithTables({ content }: { content: string }) {
+  const markdownBlockClass =
+    '[&_ul]:list-disc [&_ul]:list-inside [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:list-inside [&_ol]:pl-5 [&_*]:my-0.5';
   const processedContent = useMemo(() => preprocessBulletList(content), [content]);
   const { columnTables, before, after } = useMemo(() => extractFileColumnTables(processedContent), [processedContent]);
   const regularTables = useMemo(() => extractTablesFromMarkdown(processedContent), [processedContent]);
@@ -408,7 +410,7 @@ function ContentWithTables({ content }: { content: string }) {
     return (
       <>
         {before && (
-          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+          <div className={markdownBlockClass}>
             <ReactMarkdown>{before}</ReactMarkdown>
           </div>
         )}
@@ -422,7 +424,7 @@ function ContentWithTables({ content }: { content: string }) {
           />
         ))}
         {after && (
-          <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+          <div className={markdownBlockClass}>
             <ReactMarkdown>{after}</ReactMarkdown>
           </div>
         )}
@@ -458,7 +460,7 @@ function ContentWithTables({ content }: { content: string }) {
 
     if (hasHtmlTables && htmlTableParts.length > 0) {
       return (
-        <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+        <div className={markdownBlockClass}>
           {htmlTableParts.map((part, idx) =>
             part.type === 'markdown' ? (
               part.text.trim() ? (
@@ -481,7 +483,7 @@ function ContentWithTables({ content }: { content: string }) {
     }
 
     return (
-      <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+      <div className={markdownBlockClass}>
         <ReactMarkdown components={markdownComponents}>{processedContent}</ReactMarkdown>
       </div>
     );
@@ -492,7 +494,7 @@ function ContentWithTables({ content }: { content: string }) {
       {regularTables.map((item: { table: ParsedTable; before: string; after: string }, idx: number) => (
         <div key={idx}>
           {item.before && (
-            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+            <div className={markdownBlockClass}>
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,
@@ -518,7 +520,7 @@ function ContentWithTables({ content }: { content: string }) {
           )}
           <TableRenderer table={item.table} beforeContent={item.before} />
           {item.after && (
-            <div className="[&_ul]:list-disc [[&_ul]:list-inside_ul]:pl-5 [&_ol]:list-decimal [[&_ol]:list-inside_ol]:pl-5 [&_*]:my-0.5">
+            <div className={markdownBlockClass}>
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p className="my-1">{children}</p>,

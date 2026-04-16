@@ -100,7 +100,6 @@ interface EditableSourceConfig {
     database: string;
     username: string;
     password: string;
-    connect_timeout: string;
   };
   api: {
     auth_mode: string;
@@ -145,6 +144,22 @@ interface ApiDiscoveryFormState {
   manualJsonText: string;
 }
 
+interface DatasetSemanticInfo {
+  businessName?: string;
+  keyFields: string[];
+  fieldLabelMap: Record<string, string>;
+}
+
+interface EditableDatasetSemantic {
+  sourceId: string;
+  datasetId: string;
+  datasetCode: string;
+  datasetName: string;
+  resourceKey: string;
+  businessName: string;
+  fieldRows: EditableKeyValueRow[];
+}
+
 const PLATFORM_FIXED_DATASET_FALLBACK = ['订单', '支付单', '退款单', '结算单'];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -183,6 +198,100 @@ function asNumberRecord(value: unknown): Record<string, number> | undefined {
 function asStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((item): item is string => typeof item === 'string');
+}
+
+function asStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, item]) => [key, typeof item === 'string' ? item.trim() : ''] as const)
+    .filter(([key, item]) => key.trim().length > 0 && item.length > 0);
+  if (entries.length === 0) return undefined;
+  return Object.fromEntries(entries);
+}
+
+function extractDatasetSchemaFields(dataset: DataSourceDatasetSummary): string[] {
+  const schema = asRecord(dataset.schema_summary);
+  if (!schema) return [];
+  const columns = Array.isArray(schema.columns) ? schema.columns : [];
+  const names: string[] = [];
+
+  columns.forEach((column) => {
+    if (typeof column === 'string') {
+      const trimmed = column.trim();
+      if (trimmed) names.push(trimmed);
+      return;
+    }
+    const item = asRecord(column);
+    const name =
+      asString(item?.name) ??
+      asString(item?.column_name) ??
+      asString(item?.field) ??
+      asString(item?.key) ??
+      '';
+    if (name.trim()) names.push(name.trim());
+  });
+
+  return Array.from(new Set(names));
+}
+
+function readDatasetSemanticInfo(dataset: DataSourceDatasetSummary): DatasetSemanticInfo {
+  const datasetRecord = asRecord(dataset as unknown) ?? {};
+  const metaRecord = asRecord(dataset.meta) ?? {};
+  const semanticRecord =
+    asRecord(datasetRecord.semantic_profile) ??
+    asRecord(metaRecord.semantic_profile) ??
+    asRecord(metaRecord.semantic) ??
+    {};
+
+  let fieldLabelMap =
+    asStringRecord(datasetRecord.field_label_map) ??
+    asStringRecord(semanticRecord.field_label_map) ??
+    asStringRecord(metaRecord.field_label_map) ??
+    {};
+
+  if (Object.keys(fieldLabelMap).length === 0) {
+    const semanticFields = Array.isArray(semanticRecord.fields) ? semanticRecord.fields : [];
+    const fallbackEntries = semanticFields
+      .map((item) => asRecord(item))
+      .map((item) => {
+        const rawName = asString(item?.raw_name) ?? asString(item?.field_name) ?? asString(item?.name) ?? '';
+        const displayName =
+          asString(item?.display_name) ??
+          asString(item?.display_name_zh) ??
+          asString(item?.label) ??
+          '';
+        return [rawName.trim(), displayName.trim()] as const;
+      })
+      .filter(([rawName, displayName]) => rawName.length > 0 && displayName.length > 0);
+    if (fallbackEntries.length > 0) {
+      fieldLabelMap = Object.fromEntries(fallbackEntries);
+    }
+  }
+
+  const businessName =
+    asString(datasetRecord.business_name) ??
+    asString(semanticRecord.business_name) ??
+    asString(metaRecord.business_name) ??
+    undefined;
+
+  const keyFields =
+    asStringArray(datasetRecord.key_fields) ??
+    asStringArray(semanticRecord.key_fields) ??
+    asStringArray(metaRecord.key_fields) ??
+    Object.values(fieldLabelMap).slice(0, 6);
+
+  return {
+    businessName: businessName?.trim() || undefined,
+    keyFields: keyFields.map((item) => item.trim()).filter(Boolean),
+    fieldLabelMap,
+  };
+}
+
+function buildDatasetTechSubtitle(source: DataSourceListItem, dataset: DataSourceDatasetSummary): string {
+  const provider = source.provider_code || sourceKindLabel(source.source_kind);
+  const sourceName = source.name || source.id;
+  const techDataset = dataset.resource_key || dataset.dataset_name || dataset.dataset_code;
+  return `${provider} / ${sourceName} / ${techDataset}`;
 }
 
 function isSourceKind(value: string): value is DataSourceKind {
@@ -308,7 +417,6 @@ function createEditableSourceConfig(source: DataSourceListItem): EditableSourceC
       database: databaseConfig?.database || '',
       username: databaseConfig?.username || '',
       password: databaseConfig?.password || '',
-      connect_timeout: databaseConfig?.connect_timeout ? String(databaseConfig.connect_timeout) : '',
     },
     api: {
       auth_mode: apiConfig?.auth_mode || (apiConfig?.auth_request_url ? 'request' : 'none'),
@@ -334,6 +442,97 @@ function createEditableSourceConfig(source: DataSourceListItem): EditableSourceC
   };
 }
 
+function buildSourceConnectionConfigs(
+  source: DataSourceListItem,
+  form: EditableSourceConfig,
+): {
+  connectionConfig: Record<string, unknown>;
+  authConfig: Record<string, unknown>;
+} {
+  let connectionConfig: Record<string, unknown> = {};
+  let authConfig: Record<string, unknown> = {};
+
+  if (source.source_kind === 'database') {
+    const dbType = inferDatabaseType(source.provider_code, form.database.db_type);
+    connectionConfig = compactObject({
+      db_type: dbType,
+      host: form.database.host.trim(),
+      port: parseOptionalNumber(form.database.port, '端口'),
+      database: form.database.database.trim(),
+      username: form.database.username.trim(),
+    });
+    authConfig = compactObject({
+      password: form.database.password.trim(),
+    });
+  } else if (source.source_kind === 'api') {
+    const authMode = form.api.auth_mode.trim() || 'none';
+    const authRequestHeaders = keyValueRowsToRecord(form.api.auth_request_headers);
+    const authRequestParams = keyValueRowsToRecord(form.api.auth_request_params);
+    const authRequestJsonPayload =
+      form.api.auth_request_payload_type === 'json'
+        ? parseJsonObjectText(form.api.auth_request_json_text, '鉴权请求参数')
+        : undefined;
+
+    if (authMode === 'request') {
+      if (!form.api.auth_request_url.trim()) {
+        throw new Error('请填写鉴权请求地址');
+      }
+      if (!form.api.auth_apply_header_name.trim()) {
+        throw new Error('请填写凭证写入的 Header 名称');
+      }
+      if (!form.api.auth_apply_value_template.trim()) {
+        throw new Error('请填写 Header 取值');
+      }
+    }
+
+    connectionConfig = compactObject({
+      auth_mode: authMode,
+      auth_request_url: authMode === 'request' ? form.api.auth_request_url.trim() : '',
+      auth_request_method: authMode === 'request' ? form.api.auth_request_method.trim() : '',
+      auth_request_payload_type: authMode === 'request' ? form.api.auth_request_payload_type.trim() : '',
+      auth_apply_header_name: authMode === 'request' ? form.api.auth_apply_header_name.trim() : '',
+      auth_apply_value_template: authMode === 'request' ? form.api.auth_apply_value_template.trim() : '',
+      auth_request_configured: authMode === 'request',
+    });
+    authConfig =
+      authMode === 'request'
+        ? compactObject({
+            auth_request_headers: authRequestHeaders ?? {},
+            auth_request_params: form.api.auth_request_payload_type !== 'json' ? authRequestParams ?? {} : {},
+            auth_request_json_payload: form.api.auth_request_payload_type === 'json' ? authRequestJsonPayload ?? {} : {},
+          })
+        : {};
+  }
+
+  return { connectionConfig, authConfig };
+}
+
+function buildSourceSavePayload(
+  source: DataSourceListItem,
+  form: EditableSourceConfig,
+): {
+  payload: Record<string, unknown>;
+  connectionConfig: Record<string, unknown>;
+  authConfig: Record<string, unknown>;
+} {
+  const trimmedName = form.name.trim();
+  const { connectionConfig, authConfig } = buildSourceConnectionConfigs(source, form);
+
+  return {
+    connectionConfig,
+    authConfig,
+    payload: {
+      name:
+        trimmedName ||
+        source.name ||
+        `${source.source_kind === 'database' ? '数据库' : source.source_kind === 'api' ? 'API' : '文件'}连接`,
+      description: form.description.trim(),
+      connection_config: connectionConfig,
+      ...(Object.keys(authConfig).length > 0 ? { auth_config: authConfig } : {}),
+    },
+  };
+}
+
 function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
   const value = asRecord(raw);
   if (!value) return null;
@@ -346,6 +545,16 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
     id: id || datasetCode || `dataset-${datasetName}`,
     dataset_code: datasetCode || id || datasetName,
     dataset_name: datasetName || datasetCode || id,
+    business_name: asString(value.business_name),
+    business_description: asString(value.business_description),
+    semantic_status: asString(value.semantic_status),
+    semantic_updated_at: asStringOrNull(value.semantic_updated_at),
+    key_fields: asStringArray(value.key_fields),
+    field_label_map: asStringRecord(value.field_label_map),
+    semantic_fields: Array.isArray(value.semantic_fields)
+      ? value.semantic_fields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : undefined,
+    low_confidence_fields: asStringArray(value.low_confidence_fields),
     origin_type: asString(value.origin_type),
     dataset_kind: asString(value.dataset_kind),
     resource_key: asString(value.resource_key),
@@ -469,7 +678,6 @@ function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
             username: asString(databaseConfigRaw.username),
             password: asString(databaseConfigRaw.password),
             ssl_mode: asString(databaseConfigRaw.ssl_mode),
-            connect_timeout: asNumber(databaseConfigRaw.connect_timeout),
             schema_whitelist: asStringArray(databaseConfigRaw.schema_whitelist),
           }
         : undefined,
@@ -732,6 +940,9 @@ export default function DataConnectionsPanel({
   const [channelApiAvailable, setChannelApiAvailable] = useState<boolean | null>(null);
   const [editingChannel, setEditingChannel] = useState<EditableChannelConfig | null>(null);
   const [savingChannel, setSavingChannel] = useState(false);
+  const [editingDatasetSemantic, setEditingDatasetSemantic] = useState<EditableDatasetSemantic | null>(null);
+  const [savingDatasetSemantic, setSavingDatasetSemantic] = useState(false);
+  const [datasetSemanticError, setDatasetSemanticError] = useState('');
 
   useEffect(() => {
     if (!initialCallback) return;
@@ -1562,78 +1773,17 @@ export default function DataConnectionsPanel({
       if (!authToken) return;
 
       const form = sourceForms[source.id] ?? createEditableSourceConfig(source);
-      const trimmedName = form.name.trim();
 
       let connectionConfig: Record<string, unknown> = {};
       let authConfig: Record<string, unknown> = {};
+      let payload: Record<string, unknown> = {};
       try {
-        if (source.source_kind === 'database') {
-          const dbType = inferDatabaseType(source.provider_code, form.database.db_type);
-          connectionConfig = compactObject({
-            db_type: dbType,
-            host: form.database.host.trim(),
-            port: parseOptionalNumber(form.database.port, '端口'),
-            database: form.database.database.trim(),
-            username: form.database.username.trim(),
-            connect_timeout: parseOptionalNumber(form.database.connect_timeout, '连接超时'),
-          });
-          authConfig = compactObject({
-            password: form.database.password.trim(),
-          });
-        } else if (source.source_kind === 'api') {
-          const authMode = form.api.auth_mode.trim() || 'none';
-          const authRequestHeaders = keyValueRowsToRecord(form.api.auth_request_headers);
-          const authRequestParams = keyValueRowsToRecord(form.api.auth_request_params);
-          const authRequestJsonPayload =
-            form.api.auth_request_payload_type === 'json'
-              ? parseJsonObjectText(form.api.auth_request_json_text, '鉴权请求参数')
-              : undefined;
-
-          if (authMode === 'request') {
-            if (!form.api.auth_request_url.trim()) {
-              throw new Error('请填写鉴权请求地址');
-            }
-            if (!form.api.auth_apply_header_name.trim()) {
-              throw new Error('请填写凭证写入的 Header 名称');
-            }
-            if (!form.api.auth_apply_value_template.trim()) {
-              throw new Error('请填写 Header 取值');
-            }
-          }
-
-          connectionConfig = compactObject({
-            auth_mode: authMode,
-            auth_request_url: authMode === 'request' ? form.api.auth_request_url.trim() : '',
-            auth_request_method: authMode === 'request' ? form.api.auth_request_method.trim() : '',
-            auth_request_payload_type: authMode === 'request' ? form.api.auth_request_payload_type.trim() : '',
-            auth_apply_header_name: authMode === 'request' ? form.api.auth_apply_header_name.trim() : '',
-            auth_apply_value_template: authMode === 'request' ? form.api.auth_apply_value_template.trim() : '',
-            auth_request_configured: authMode === 'request',
-          });
-          authConfig =
-            authMode === 'request'
-              ? compactObject({
-                  auth_request_headers: authRequestHeaders ?? {},
-                  auth_request_params: form.api.auth_request_payload_type !== 'json' ? authRequestParams ?? {} : {},
-                  auth_request_json_payload: form.api.auth_request_payload_type === 'json' ? authRequestJsonPayload ?? {} : {},
-                })
-              : {};
-        }
+        ({ connectionConfig, authConfig, payload } = buildSourceSavePayload(source, form));
       } catch (error) {
         setSourceActionError(error instanceof Error ? error.message : '连接配置格式不正确');
         setSourceActionNotice('');
         return;
       }
-
-      const payload = {
-        name:
-          trimmedName ||
-          source.name ||
-          `${source.source_kind === 'database' ? '数据库' : source.source_kind === 'api' ? 'API' : '文件'}连接`,
-        description: form.description.trim(),
-        connection_config: connectionConfig,
-        ...(Object.keys(authConfig).length > 0 ? { auth_config: authConfig } : {}),
-      };
 
       const buildLocalSource = (): DataSourceListItem => {
         const localConnectionConfig =
@@ -1766,6 +1916,16 @@ export default function DataConnectionsPanel({
   const handleTestSource = useCallback(
     async (source: DataSourceListItem) => {
       if (!authToken || draftSourceIdSet.has(source.id)) return;
+      const form = sourceForms[source.id] ?? createEditableSourceConfig(source);
+      let connectionConfig: Record<string, unknown> = {};
+      let authConfig: Record<string, unknown> = {};
+      try {
+        ({ connectionConfig, authConfig } = buildSourceConnectionConfigs(source, form));
+      } catch (error) {
+        setSourceActionError(error instanceof Error ? error.message : '连接配置格式不正确');
+        setSourceActionNotice('');
+        return;
+      }
       setSourceActionBusy(`test:${source.id}`);
       setSourceActionError('');
       setSourceActionNotice('');
@@ -1773,7 +1933,10 @@ export default function DataConnectionsPanel({
         const response = await fetch(`/api/data-sources/${source.id}/test`, {
           method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({}),
+          body: JSON.stringify({
+            ...(Object.keys(connectionConfig).length > 0 ? { connection_config: connectionConfig } : {}),
+            ...(Object.keys(authConfig).length > 0 ? { auth_config: authConfig } : {}),
+          }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -1794,6 +1957,16 @@ export default function DataConnectionsPanel({
   const handleDiscoverSource = useCallback(
     async (source: DataSourceListItem) => {
       if (!authToken || draftSourceIdSet.has(source.id)) return;
+      const form = sourceForms[source.id] ?? createEditableSourceConfig(source);
+      let connectionConfig: Record<string, unknown> = {};
+      let authConfig: Record<string, unknown> = {};
+      try {
+        ({ connectionConfig, authConfig } = buildSourceConnectionConfigs(source, form));
+      } catch (error) {
+        setSourceActionError(error instanceof Error ? error.message : '连接配置格式不正确');
+        setSourceActionNotice('');
+        return;
+      }
       setSourceActionBusy(`discover:${source.id}`);
       setSourceActionError('');
       setSourceActionNotice('');
@@ -1804,6 +1977,8 @@ export default function DataConnectionsPanel({
           body: JSON.stringify({
             persist: true,
             schema_whitelist: [],
+            ...(Object.keys(connectionConfig).length > 0 ? { connection_config: connectionConfig } : {}),
+            ...(Object.keys(authConfig).length > 0 ? { auth_config: authConfig } : {}),
           }),
         });
         const data = await response.json().catch(() => ({}));
@@ -2034,6 +2209,182 @@ export default function DataConnectionsPanel({
     [apiDiscoveryForms, handleApplyManualEndpoint, handleGenerateApiDatasetsFromDocument],
   );
 
+  const updateDatasetInState = useCallback(
+    (
+      sourceId: string,
+      datasetId: string,
+      datasetCode: string,
+      updater: (dataset: DataSourceDatasetSummary) => DataSourceDatasetSummary,
+    ) => {
+      const applyPatch = (dataset: DataSourceDatasetSummary): DataSourceDatasetSummary => {
+        const matched = dataset.id === datasetId || (datasetCode && dataset.dataset_code === datasetCode);
+        return matched ? updater(dataset) : dataset;
+      };
+
+      updateSourceDetail(sourceId, (current) => ({
+        ...current,
+        datasets: current.datasets.map((dataset) => applyPatch(dataset)),
+      }));
+
+      setRemoteSources((prev) =>
+        prev.map((source) => {
+          if (source.id !== sourceId || !Array.isArray(source.datasets)) return source;
+          return {
+            ...source,
+            datasets: source.datasets.map((dataset) => applyPatch(dataset)),
+          };
+        }),
+      );
+    },
+    [updateSourceDetail],
+  );
+
+  const startEditDatasetSemantic = useCallback((source: DataSourceListItem, dataset: DataSourceDatasetSummary) => {
+    const semantic = readDatasetSemanticInfo(dataset);
+    const schemaFields = extractDatasetSchemaFields(dataset);
+    const orderedKeys = Array.from(new Set([...Object.keys(semantic.fieldLabelMap), ...schemaFields]));
+    const fieldRows =
+      orderedKeys.length > 0
+        ? orderedKeys.map((rawName) => createEditableKeyValueRow(rawName, semantic.fieldLabelMap[rawName] || ''))
+        : [createEditableKeyValueRow()];
+
+    setEditingDatasetSemantic({
+      sourceId: source.id,
+      datasetId: dataset.id,
+      datasetCode: dataset.dataset_code,
+      datasetName: dataset.dataset_name,
+      resourceKey: dataset.resource_key || '',
+      businessName: semantic.businessName || dataset.dataset_name,
+      fieldRows,
+    });
+    setDatasetSemanticError('');
+  }, []);
+
+  const updateEditingDatasetSemanticRow = useCallback((rowId: string, patch: Partial<EditableKeyValueRow>) => {
+    setEditingDatasetSemantic((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        fieldRows: prev.fieldRows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)),
+      };
+    });
+  }, []);
+
+  const addEditingDatasetSemanticRow = useCallback(() => {
+    setEditingDatasetSemantic((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        fieldRows: [...prev.fieldRows, createEditableKeyValueRow()],
+      };
+    });
+  }, []);
+
+  const removeEditingDatasetSemanticRow = useCallback((rowId: string) => {
+    setEditingDatasetSemantic((prev) => {
+      if (!prev) return prev;
+      const nextRows = prev.fieldRows.filter((row) => row.id !== rowId);
+      return {
+        ...prev,
+        fieldRows: nextRows.length > 0 ? nextRows : [createEditableKeyValueRow()],
+      };
+    });
+  }, []);
+
+  const saveEditingDatasetSemantic = useCallback(async () => {
+    if (!editingDatasetSemantic) return;
+
+    const businessName = editingDatasetSemantic.businessName.trim() || editingDatasetSemantic.datasetName;
+    const fieldLabelMap = Object.fromEntries(
+      editingDatasetSemantic.fieldRows
+        .map((row) => [row.key.trim(), row.value.trim()] as const)
+        .filter(([rawName, displayName]) => rawName.length > 0 && displayName.length > 0),
+    );
+    const keyFields = Object.values(fieldLabelMap).slice(0, 6);
+    const semanticProfile = {
+      version: 1,
+      status: 'confirmed',
+      business_name: businessName,
+      field_label_map: fieldLabelMap,
+      key_fields: keyFields,
+      tech_name: editingDatasetSemantic.resourceKey || editingDatasetSemantic.datasetName,
+      updated_at: new Date().toISOString(),
+    };
+
+    const applyLocalUpdate = (notice: string) => {
+      updateDatasetInState(
+        editingDatasetSemantic.sourceId,
+        editingDatasetSemantic.datasetId,
+        editingDatasetSemantic.datasetCode,
+        (dataset) => ({
+          ...dataset,
+          meta: {
+            ...(dataset.meta || {}),
+            semantic_profile: semanticProfile,
+          },
+        }),
+      );
+      setEditingDatasetSemantic(null);
+      setDatasetSemanticError('');
+      setSourceActionNotice(notice);
+      setSourceActionError('');
+    };
+
+    if (!authToken || draftSourceIdSet.has(editingDatasetSemantic.sourceId)) {
+      applyLocalUpdate('业务名称和字段中文名已更新（本地会话）。');
+      return;
+    }
+
+    setSavingDatasetSemantic(true);
+    setDatasetSemanticError('');
+    try {
+      const response = await fetch(
+        `/api/data-sources/${editingDatasetSemantic.sourceId}/datasets/${editingDatasetSemantic.datasetId}/semantic-profile`,
+        {
+          method: 'PATCH',
+          headers: authHeaders,
+          body: JSON.stringify({
+            semantic_profile: semanticProfile,
+            business_name: businessName,
+            field_label_map: fieldLabelMap,
+            key_fields: keyFields,
+          }),
+        },
+      );
+
+      if (response.status === 404 || response.status === 405 || response.status === 501) {
+        applyLocalUpdate('后端语义编辑接口未接入，当前修改已保存在本地会话。');
+        return;
+      }
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '保存业务名称与字段中文名失败'));
+      }
+
+      const savedDataset = normalizeDataset(data?.dataset ?? data?.item ?? data?.data?.dataset);
+      if (savedDataset) {
+        updateDatasetInState(
+          editingDatasetSemantic.sourceId,
+          editingDatasetSemantic.datasetId,
+          editingDatasetSemantic.datasetCode,
+          () => savedDataset,
+        );
+        setEditingDatasetSemantic(null);
+        setDatasetSemanticError('');
+        setSourceActionNotice(String(data?.message || '业务名称和字段中文名已保存'));
+        setSourceActionError('');
+        return;
+      }
+
+      applyLocalUpdate(String(data?.message || '业务名称和字段中文名已保存'));
+    } catch (error) {
+      setDatasetSemanticError(error instanceof Error ? error.message : '保存业务名称与字段中文名失败');
+    } finally {
+      setSavingDatasetSemantic(false);
+    }
+  }, [authHeaders, authToken, draftSourceIdSet, editingDatasetSemantic, updateDatasetInState]);
+
   const renderSourceList = (kind: Extract<DataSourceKind, 'database' | 'api' | 'file'>) => {
     const rows = selectedKindSources.filter((item) => item.source_kind === kind);
     const activeSource =
@@ -2057,6 +2408,7 @@ export default function DataConnectionsPanel({
       : null;
 
     return (
+      <>
       <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
         <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
           {sourcesError && (
@@ -2424,25 +2776,8 @@ export default function DataConnectionsPanel({
                       </label>
 
                       <label className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                        <span className="text-xs text-text-muted">连接超时（秒）</span>
-                        <input
-                          value={sourceForm.database.connect_timeout}
-                          onChange={(event) =>
-                            updateSourceForm(activeSource.id, (current) => ({
-                              ...current,
-                              database: {
-                                ...current.database,
-                                connect_timeout: event.target.value,
-                              },
-                            }))
-                          }
-                          className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                          placeholder="默认 5"
-                        />
-                      </label>
-
-                      <label className="rounded-2xl border border-border bg-surface-secondary px-4 py-3 md:col-span-2">
                         <span className="text-xs text-text-muted">说明</span>
+                        <div className="mt-1 text-xs text-text-muted">连接超时固定为 5 秒，无需额外配置。</div>
                         <textarea
                           value={sourceForm.description}
                           onChange={(event) =>
@@ -3017,34 +3352,75 @@ export default function DataConnectionsPanel({
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {datasets.map((dataset) => (
-                      <div key={dataset.id} className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <p className="text-sm font-medium text-text-primary">{dataset.dataset_name}</p>
-                              <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${statusBadgeClass(dataset.health_status || dataset.status)}`}>
-                                {getStatusLabel(dataset.health_status || dataset.status)}
-                              </span>
-                              <span className="inline-flex rounded-full bg-surface px-2 py-0.5 text-[11px] text-text-secondary">
-                                {dataset.dataset_kind || 'dataset'}
-                              </span>
+                    {datasets.map((dataset) => {
+                      const semanticInfo = readDatasetSemanticInfo(dataset);
+                      const title = semanticInfo.businessName || dataset.dataset_name;
+                      const keyFields = semanticInfo.keyFields.slice(0, 6);
+                      const techSubtitle = buildDatasetTechSubtitle(activeSource, dataset);
+                      const hasBusinessTitle = Boolean(
+                        semanticInfo.businessName && semanticInfo.businessName !== dataset.dataset_name,
+                      );
+                      return (
+                        <div key={dataset.id} className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-sm font-medium text-text-primary">{title}</p>
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${statusBadgeClass(dataset.health_status || dataset.status)}`}>
+                                  {getStatusLabel(dataset.health_status || dataset.status)}
+                                </span>
+                                <span className="inline-flex rounded-full bg-surface px-2 py-0.5 text-[11px] text-text-secondary">
+                                  {dataset.dataset_kind || 'dataset'}
+                                </span>
+                              </div>
+                              <p className="mt-1 truncate text-xs text-text-muted" title={techSubtitle}>
+                                {techSubtitle}
+                              </p>
+                              {hasBusinessTitle && (
+                                <p className="mt-1 truncate text-[11px] text-text-muted" title={dataset.dataset_name}>
+                                  技术名：{dataset.dataset_name}
+                                </p>
+                              )}
                             </div>
-                            <p className="mt-1 text-xs text-text-muted">
+                            <div className="text-right text-xs text-text-secondary">
+                              <p>最近同步：{formatTime(dataset.last_sync_at)}</p>
+                              <p>最近检查：{formatTime(dataset.last_checked_at)}</p>
+                            </div>
+                          </div>
+
+                          {keyFields.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {keyFields.map((field) => (
+                                <span
+                                  key={`${dataset.id}-${field}`}
+                                  className="inline-flex rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-text-secondary"
+                                >
+                                  {field}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="mt-2 flex items-center justify-between gap-2">
+                            <p className="truncate text-[11px] text-text-muted">
                               {dataset.dataset_code}
                               {dataset.resource_key ? ` · ${dataset.resource_key}` : ''}
                             </p>
+                            <button
+                              type="button"
+                              onClick={() => startEditDatasetSemantic(activeSource, dataset)}
+                              className="inline-flex shrink-0 items-center rounded-lg border border-border bg-surface px-2.5 py-1 text-[11px] text-text-primary transition-colors hover:bg-surface-tertiary"
+                            >
+                              编辑命名
+                            </button>
                           </div>
-                          <div className="text-right text-xs text-text-secondary">
-                            <p>最近同步：{formatTime(dataset.last_sync_at)}</p>
-                            <p>最近检查：{formatTime(dataset.last_checked_at)}</p>
-                          </div>
+
+                          {dataset.last_error_message && (
+                            <p className="mt-2 text-xs text-red-600">{dataset.last_error_message}</p>
+                          )}
                         </div>
-                        {dataset.last_error_message && (
-                          <p className="mt-2 text-xs text-red-600">{dataset.last_error_message}</p>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>
@@ -3052,6 +3428,122 @@ export default function DataConnectionsPanel({
           )}
         </div>
       </div>
+      {editingDatasetSemantic && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 px-4 py-6">
+          <div className="w-full max-w-3xl rounded-2xl border border-border bg-surface p-5 shadow-lg">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h4 className="text-base font-semibold text-text-primary">编辑业务名称与字段中文名</h4>
+                <p className="mt-1 truncate text-xs text-text-secondary">
+                  数据集：{editingDatasetSemantic.datasetName}
+                  {editingDatasetSemantic.resourceKey ? ` · ${editingDatasetSemantic.resourceKey}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingDatasetSemantic(null);
+                  setDatasetSemanticError('');
+                }}
+                className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <label className="block rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                <span className="text-xs text-text-muted">业务名称</span>
+                <input
+                  value={editingDatasetSemantic.businessName}
+                  onChange={(event) =>
+                    setEditingDatasetSemantic((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            businessName: event.target.value,
+                          }
+                        : prev,
+                    )
+                  }
+                  className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                  placeholder="例如：订单交易明细"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs text-text-muted">字段中文名</span>
+                  <button
+                    type="button"
+                    onClick={addEditingDatasetSemanticRow}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    新增字段
+                  </button>
+                </div>
+
+                <div className="max-h-72 space-y-2 overflow-auto pr-1">
+                  {editingDatasetSemantic.fieldRows.map((row) => (
+                    <div key={row.id} className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                      <input
+                        value={row.key}
+                        onChange={(event) => updateEditingDatasetSemanticRow(row.id, { key: event.target.value })}
+                        className="rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        placeholder="技术字段名，例如 order_id"
+                      />
+                      <input
+                        value={row.value}
+                        onChange={(event) => updateEditingDatasetSemanticRow(row.id, { value: event.target.value })}
+                        className="rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        placeholder="中文名，例如 订单号"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeEditingDatasetSemanticRow(row.id)}
+                        className="inline-flex items-center justify-center rounded-xl border border-border bg-surface px-3 text-text-secondary transition-colors hover:bg-surface-tertiary"
+                        aria-label="删除字段中文名映射"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {datasetSemanticError && (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                {datasetSemanticError}
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingDatasetSemantic(null);
+                  setDatasetSemanticError('');
+                }}
+                className="inline-flex items-center rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveEditingDatasetSemantic()}
+                disabled={savingDatasetSemantic}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {savingDatasetSemantic ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
     );
   };
 

@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Sequence
 
 from langchain_core.messages import AnyMessage
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 
@@ -208,16 +208,37 @@ class SchemeDesignTargetState(BaseModel):
 
 
 class SchemeDesignRuleStepState(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     mode: Literal["ai_generated", "existing", "idle"] = "idle"
     selected_rule_code: str = ""
-    editable_instruction_text: str = ""
-    normalized_display_text: str = ""
-    candidate_rule_json: dict[str, Any] = Field(default_factory=dict)
-    normalized_rule_json: dict[str, Any] = Field(default_factory=dict)
+    draft_text: str = Field(
+        default="",
+        validation_alias=AliasChoices("draft_text", "editable_instruction_text"),
+    )
+    rule_summary: str = Field(
+        default="",
+        validation_alias=AliasChoices("rule_summary", "normalized_display_text"),
+    )
+    effective_rule_json: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices(
+            "effective_rule_json",
+            "normalized_rule_json",
+            "candidate_rule_json",
+        ),
+    )
     compatibility_result: dict[str, Any] = Field(default_factory=dict)
     validation_result: dict[str, Any] = Field(default_factory=dict)
     trial_result: dict[str, Any] = Field(default_factory=dict)
     status: str = "idle"
+    generation_used_fallback: bool = False
+    generation_note: str = ""
+    generation_phase: str = ""
+    generation_message: str = ""
+    generation_skill: str = ""
+    generation_started_at: Optional[datetime] = None
+    generation_finished_at: Optional[datetime] = None
 
 
 class SchemeDesignSession(BaseModel):

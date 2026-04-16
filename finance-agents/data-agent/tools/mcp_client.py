@@ -11,11 +11,13 @@ MCP SSE 协议说明：
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -37,6 +39,9 @@ _DATA_SOURCE_CONNECTION_MODE = (
     or os.getenv("DATA_SOURCE_MODE")
     or "real"
 ).strip().lower() or "real"
+_MOCK_SNAPSHOT_EXPORT_ROOT = (
+    Path(__file__).resolve().parents[3] / "finance-mcp" / "uploads" / "mock_snapshot_exports"
+)
 
 
 def _get_result_wait_timeout(tool_name: str) -> float:
@@ -1107,6 +1112,10 @@ def _normalize_mode(mode: str = "", *, default_mode: str | None = None) -> str:
         return normalized
     resolved_default = default_mode if default_mode in {"mock", "real"} else _PLATFORM_CONNECTION_MODE
     return resolved_default if resolved_default in {"mock", "real"} else "mock"
+
+
+def _is_mock_source_id(source_id: str) -> bool:
+    return str(source_id or "").strip().startswith("mock-source-")
 
 
 def _attach_mode(result: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -2438,6 +2447,88 @@ def _mock_get_published_snapshot(auth_token: str, source_id: str) -> dict[str, A
     }
 
 
+def _mock_list_published_snapshot_rows(auth_token: str, source_id: str, limit: int = 3) -> dict[str, Any]:
+    snapshot_result = _mock_get_published_snapshot(auth_token, source_id)
+    if not snapshot_result.get("published_snapshot"):
+        return {
+            **snapshot_result,
+            "rows": [],
+            "count": 0,
+        }
+    preview_result = _mock_preview_data_source(auth_token, source_id, limit=limit)
+    rows = [row for row in preview_result.get("rows") or [] if isinstance(row, dict)]
+    return {
+        "success": True,
+        "mode": "mock",
+        "source_id": source_id,
+        "resource_key": "default",
+        "snapshot_id": str(snapshot_result.get("published_snapshot", {}).get("snapshot_id") or ""),
+        "published_snapshot": snapshot_result.get("published_snapshot"),
+        "rows": rows,
+        "count": len(rows),
+    }
+
+
+def _mock_export_published_snapshot(
+    auth_token: str,
+    source_id: str,
+    *,
+    table_name: str = "",
+    resource_key: str = "",
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    user_key = _auth_user_key(auth_token)
+    source = _mock_seed_data_sources(user_key).get(source_id)
+    snapshot = _MOCK_PUBLISHED_SNAPSHOTS_BY_USER.setdefault(user_key, {}).get(source_id)
+    if not source or not snapshot:
+        return {
+            "success": False,
+            "mode": "mock",
+            "source_id": source_id,
+            "error": "暂无已发布快照，无法导出",
+        }
+
+    resolved_table_name = table_name or resource_key or str(snapshot.get("dataset_code") or "") or source_id
+    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
+    biz_date = str(
+        filters.get("biz_date")
+        or filters.get("accounting_date")
+        or filters.get("event_time")
+        or datetime.now(timezone.utc).date().isoformat()
+    )
+    source_name = str(source.get("name") or source_id)
+    rows = [
+        {
+            "biz_key": f"{source_id[-6:]}_{index + 1}",
+            "amount": round(100 + index * 1.23, 2),
+            "biz_date": biz_date,
+            "source_name": source_name,
+        }
+        for index in range(3)
+    ]
+    _MOCK_SNAPSHOT_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="mock_snapshot_export_", dir=str(_MOCK_SNAPSHOT_EXPORT_ROOT)))
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", resolved_table_name).strip("_") or "dataset"
+    output_path = temp_dir / f"{safe_name}.csv"
+    with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["biz_key", "amount", "biz_date", "source_name"])
+        writer.writeheader()
+        writer.writerows(rows)
+    return {
+        "success": True,
+        "mode": "mock",
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+        "table_name": resolved_table_name,
+        "file_path": str(output_path),
+        "row_count": len(rows),
+        "query": query or {},
+        "published_snapshot": snapshot,
+        "message": "已导出 mock 已发布快照",
+    }
+
+
 def _mock_discover_data_source_datasets(
     auth_token: str,
     source_id: str,
@@ -2993,6 +3084,8 @@ async def data_source_test(
     source_id: str,
     *,
     mode: str = "",
+    connection_config: dict[str, Any] | None = None,
+    auth_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
@@ -3005,7 +3098,13 @@ async def data_source_test(
 
     result = await call_mcp_tool(
         "data_source_test",
-        {"auth_token": auth_token, "source_id": source_id, "mode": normalized_mode},
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "mode": normalized_mode,
+            **({"connection_config": connection_config} if isinstance(connection_config, dict) and connection_config else {}),
+            **({"auth_config": auth_config} if isinstance(auth_config, dict) and auth_config else {}),
+        },
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_test_data_source(auth_token, source_id)
@@ -3101,7 +3200,7 @@ async def data_source_trigger_sync(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_trigger_sync(
             auth_token,
@@ -3197,7 +3296,7 @@ async def data_source_preview(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_preview_data_source(auth_token, source_id, limit=limit)
 
@@ -3227,7 +3326,7 @@ async def data_source_get_published_snapshot(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
         return _mock_get_published_snapshot(auth_token, source_id)
 
@@ -3245,6 +3344,76 @@ async def data_source_get_published_snapshot(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_list_published_snapshot_rows(
+    auth_token: str,
+    source_id: str,
+    *,
+    resource_key: str = "",
+    limit: int = 3,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_list_published_snapshot_rows(auth_token, source_id, limit=limit)
+
+    result = await call_mcp_tool(
+        "data_source_list_published_snapshot_rows",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "mode": normalized_mode,
+            "limit": max(1, min(limit, 100)),
+            **({"resource_key": resource_key} if resource_key else {}),
+        },
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_list_published_snapshot_rows(auth_token, source_id, limit=limit)
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_export_published_snapshot(
+    auth_token: str,
+    source_id: str,
+    *,
+    table_name: str = "",
+    resource_key: str = "",
+    query: dict[str, Any] | None = None,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_export_published_snapshot(
+            auth_token,
+            source_id,
+            table_name=table_name,
+            resource_key=resource_key,
+            query=query,
+        )
+
+    result = await call_mcp_tool(
+        "data_source_export_published_snapshot",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "mode": normalized_mode,
+            **({"resource_key": resource_key} if resource_key else {}),
+            **({"table_name": table_name} if table_name else {}),
+            **({"query": query} if isinstance(query, dict) and query else {}),
+        },
+    )
+    return _attach_mode(result, normalized_mode)
+
+
 async def data_source_discover_datasets(
     auth_token: str,
     source_id: str,
@@ -3257,6 +3426,8 @@ async def data_source_discover_datasets(
     openapi_spec: Any = None,
     manual_endpoints: list[dict[str, Any]] | None = None,
     mode: str = "",
+    connection_config: dict[str, Any] | None = None,
+    auth_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
@@ -3292,6 +3463,10 @@ async def data_source_discover_datasets(
         args["openapi_spec"] = openapi_spec
     if manual_endpoints:
         args["manual_endpoints"] = manual_endpoints
+    if isinstance(connection_config, dict) and connection_config:
+        args["connection_config"] = connection_config
+    if isinstance(auth_config, dict) and auth_config:
+        args["auth_config"] = auth_config
 
     result = await call_mcp_tool("data_source_discover_datasets", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
@@ -3445,6 +3620,255 @@ async def data_source_disable_dataset(
     result = await call_mcp_tool("data_source_disable_dataset", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_disable_data_source_dataset(auth_token, dataset_id, reason=reason)
+    return _attach_mode(result, normalized_mode)
+
+
+def _mock_extract_dataset_field_names(dataset: dict[str, Any]) -> list[str]:
+    schema_summary = dataset.get("schema_summary")
+    names: list[str] = []
+    if isinstance(schema_summary, dict):
+        columns = schema_summary.get("columns")
+        if isinstance(columns, list):
+            for column in columns:
+                if not isinstance(column, dict):
+                    continue
+                name = str(column.get("name") or column.get("column_name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _mock_build_dataset_semantic_profile(dataset: dict[str, Any]) -> dict[str, Any]:
+    dataset_name = str(dataset.get("dataset_name") or dataset.get("dataset_code") or "业务数据集").strip() or "业务数据集"
+    field_names = _mock_extract_dataset_field_names(dataset)
+    field_label_map = {name: name for name in field_names}
+    key_fields = list(field_label_map.values())[:6]
+    fields = [
+        {
+            "raw_name": name,
+            "display_name": field_label_map[name],
+            "semantic_type": "",
+            "business_role": "",
+            "description": "",
+            "confidence": 0.6,
+            "sample_values": [],
+            "confirmed_by_user": False,
+        }
+        for name in field_names
+    ]
+    return {
+        "version": 1,
+        "status": "generated_basic",
+        "business_name": dataset_name,
+        "business_description": f"{dataset_name}，用于 mock 数据连接场景。",
+        "key_fields": key_fields,
+        "field_label_map": field_label_map,
+        "fields": fields,
+        "low_confidence_fields": field_names,
+        "generated_from": {
+            "source_kind": str(dataset.get("source_kind") or ""),
+            "provider_code": str(dataset.get("provider_code") or ""),
+            "dataset_kind": str(dataset.get("dataset_kind") or ""),
+            "resource_key": str(dataset.get("resource_key") or ""),
+            "has_sample_rows": False,
+        },
+        "updated_at": _now_iso(),
+    }
+
+
+def _mock_apply_dataset_semantic_profile(
+    auth_token: str,
+    dataset_id: str,
+    semantic_profile: dict[str, Any],
+) -> dict[str, Any]:
+    user_key = _auth_user_key(auth_token)
+    dataset_map, _ = _mock_ensure_data_source_context(user_key)
+    target: dict[str, Any] | None = None
+    for rows in dataset_map.values():
+        if dataset_id in rows:
+            target = rows[dataset_id]
+            break
+    if not target:
+        return {"success": False, "mode": "mock", "error": "not_found", "message": "数据集不存在"}
+
+    meta = dict(target.get("meta") or {})
+    meta["semantic_profile"] = semantic_profile
+    target["meta"] = meta
+    target["business_name"] = str(semantic_profile.get("business_name") or target.get("dataset_name") or "")
+    target["business_description"] = str(semantic_profile.get("business_description") or "")
+    target["key_fields"] = [item for item in semantic_profile.get("key_fields") or [] if str(item or "").strip()]
+    target["field_label_map"] = dict(semantic_profile.get("field_label_map") or {})
+    target["semantic_fields"] = [item for item in semantic_profile.get("fields") or [] if isinstance(item, dict)]
+    target["low_confidence_fields"] = [
+        item for item in semantic_profile.get("low_confidence_fields") or [] if str(item or "").strip()
+    ]
+    target["semantic_status"] = str(semantic_profile.get("status") or "manual_updated")
+    target["semantic_updated_at"] = str(semantic_profile.get("updated_at") or _now_iso())
+    target["updated_at"] = _now_iso()
+    return {
+        "success": True,
+        "mode": "mock",
+        "dataset": target,
+        "message": "数据集语义层已更新",
+    }
+
+
+async def data_source_refresh_dataset_semantic_profile(
+    auth_token: str,
+    *,
+    dataset_id: str = "",
+    source_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    sample_limit: int = 10,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not dataset_id and not source_id:
+        return {"success": False, "error": "dataset_id 或 source_id 至少提供一个"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        result = _mock_get_data_source_dataset(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+        )
+        if not result.get("success"):
+            return result
+        dataset = dict(result.get("dataset") or {})
+        semantic_profile = _mock_build_dataset_semantic_profile(dataset)
+        semantic_profile["status"] = "generated_basic"
+        return _mock_apply_dataset_semantic_profile(auth_token, str(dataset.get("id") or dataset_id), semantic_profile)
+
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "mode": normalized_mode,
+        "sample_limit": max(1, min(sample_limit, 100)),
+    }
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if source_id:
+        args["source_id"] = source_id
+    if dataset_code:
+        args["dataset_code"] = dataset_code
+    if resource_key:
+        args["resource_key"] = resource_key
+    result = await call_mcp_tool("data_source_refresh_dataset_semantic_profile", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return await data_source_refresh_dataset_semantic_profile(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            sample_limit=sample_limit,
+            mode="mock",
+        )
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_update_dataset_semantic_profile(
+    auth_token: str,
+    *,
+    dataset_id: str = "",
+    source_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    semantic_profile: dict[str, Any] | None = None,
+    business_name: str = "",
+    business_description: str = "",
+    key_fields: list[str] | None = None,
+    field_label_map: dict[str, Any] | None = None,
+    fields: list[dict[str, Any]] | None = None,
+    status: str = "",
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not dataset_id and not source_id:
+        return {"success": False, "error": "dataset_id 或 source_id 至少提供一个"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        result = _mock_get_data_source_dataset(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+        )
+        if not result.get("success"):
+            return result
+        dataset = dict(result.get("dataset") or {})
+        next_profile = dict(semantic_profile or dataset.get("meta", {}).get("semantic_profile") or {})
+        if not next_profile:
+            next_profile = _mock_build_dataset_semantic_profile(dataset)
+        if business_name.strip():
+            next_profile["business_name"] = business_name.strip()
+        if business_description.strip():
+            next_profile["business_description"] = business_description.strip()
+        if isinstance(key_fields, list):
+            next_profile["key_fields"] = [str(item).strip() for item in key_fields if str(item).strip()]
+        if isinstance(field_label_map, dict):
+            next_profile["field_label_map"] = {
+                str(key).strip(): (str(value).strip() or str(key).strip())
+                for key, value in field_label_map.items()
+                if str(key).strip()
+            }
+        if isinstance(fields, list):
+            next_profile["fields"] = [item for item in fields if isinstance(item, dict)]
+        next_profile["status"] = status.strip() or "manual_updated"
+        next_profile["updated_at"] = _now_iso()
+        return _mock_apply_dataset_semantic_profile(auth_token, str(dataset.get("id") or dataset_id), next_profile)
+
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if source_id:
+        args["source_id"] = source_id
+    if dataset_code:
+        args["dataset_code"] = dataset_code
+    if resource_key:
+        args["resource_key"] = resource_key
+    if semantic_profile is not None:
+        args["semantic_profile"] = semantic_profile
+    if business_name.strip():
+        args["business_name"] = business_name.strip()
+    if business_description.strip():
+        args["business_description"] = business_description.strip()
+    if isinstance(key_fields, list):
+        args["key_fields"] = [str(item).strip() for item in key_fields if str(item).strip()]
+    if isinstance(field_label_map, dict):
+        args["field_label_map"] = field_label_map
+    if isinstance(fields, list):
+        args["fields"] = fields
+    if status.strip():
+        args["status"] = status.strip()
+
+    result = await call_mcp_tool("data_source_update_dataset_semantic_profile", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return await data_source_update_dataset_semantic_profile(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            semantic_profile=semantic_profile,
+            business_name=business_name,
+            business_description=business_description,
+            key_fields=key_fields,
+            field_label_map=field_label_map,
+            fields=fields,
+            status=status,
+            mode="mock",
+        )
     return _attach_mode(result, normalized_mode)
 
 

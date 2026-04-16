@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import shutil
 import tempfile
@@ -31,6 +32,12 @@ _ALLOWED_SCHEDULE_TYPES = {"manual_trigger", "daily", "weekly", "monthly", "cron
 _ALLOWED_TRIGGER_TYPES = {"chat", "schedule", "api"}
 _ALLOWED_ENTRY_MODES = {"file", "dataset"}
 _ALLOWED_EXECUTION_STATUS = {"running", "success", "failed"}
+_DEFAULT_RECON_OUTPUT_SHEETS = {
+    "summary": "核对汇总",
+    "source_only": "源文件独有",
+    "target_only": "目标文件独有",
+    "matched_with_diff": "差异记录",
+}
 
 
 def create_tools() -> list[Tool]:
@@ -142,6 +149,33 @@ def create_tools() -> list[Tool]:
                     "plan_code": {"type": "string"},
                 },
                 "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="execution_scheduler_list_run_plans",
+            description="供内部调度器查询全部启用中的运行计划。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="execution_scheduler_get_slot_run",
+            description="供内部调度器按 company_id + plan_code + schedule_slot 查询是否已触发。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "plan_code": {"type": "string"},
+                    "schedule_slot": {"type": "string"},
+                },
+                "required": ["auth_token", "company_id", "plan_code", "schedule_slot"],
             },
         ),
         Tool(
@@ -432,6 +466,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _plan_list(arguments)
         if name == "execution_run_plan_get":
             return _plan_get(arguments)
+        if name == "execution_scheduler_list_run_plans":
+            return _scheduler_list_run_plans(arguments)
+        if name == "execution_scheduler_get_slot_run":
+            return _scheduler_get_slot_run(arguments)
         if name == "execution_run_plan_create":
             return _plan_create(arguments)
         if name == "execution_run_plan_update":
@@ -481,12 +519,95 @@ def _require_user(auth_token: str) -> dict[str, Any]:
     return user
 
 
+def _require_scheduler_user(auth_token: str) -> dict[str, Any]:
+    token = str(auth_token or "").strip()
+    if not token:
+        raise ValueError("未提供认证 token")
+    user = get_user_from_token(token)
+    if not user:
+        raise ValueError("token 无效或已过期")
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"system", "scheduler"}:
+        raise ValueError("当前 token 无权限执行调度器内部调用")
+    return user
+
+
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
 def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
+
+
+def _resolve_sample_origin(value: Any, *, fallback: str) -> str:
+    origin = _as_text(value).lower()
+    return origin or fallback
+
+
+def _normalize_recon_output_rule(rule_json: dict[str, Any]) -> dict[str, Any]:
+    normalized_rule = copy.deepcopy(rule_json)
+    rules = normalized_rule.get("rules")
+    if not isinstance(rules, list):
+        return normalized_rule
+
+    for item in rules:
+        if not isinstance(item, dict):
+            continue
+        output = item.get("output")
+        if not isinstance(output, dict):
+            output = {}
+            item["output"] = output
+        sheets = output.get("sheets")
+        output["sheets"] = _normalize_recon_output_sheets(sheets)
+    return normalized_rule
+
+
+def _normalize_recon_output_sheets(raw_sheets: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(raw_sheets, list):
+        enabled_keys: set[str] = set()
+        custom_names: dict[str, str] = {}
+        for item in raw_sheets:
+            if isinstance(item, str):
+                key = item.strip()
+                if key in _DEFAULT_RECON_OUTPUT_SHEETS:
+                    enabled_keys.add(key)
+                continue
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or item.get("type") or item.get("sheet") or item.get("name") or "").strip()
+            if key not in _DEFAULT_RECON_OUTPUT_SHEETS:
+                continue
+            enabled_keys.add(key)
+            custom_name = str(item.get("name") or "").strip()
+            if custom_name:
+                custom_names[key] = custom_name
+        normalized = {
+            key: {
+                "name": custom_names.get(key, default_name),
+                "enabled": key in enabled_keys,
+            }
+            for key, default_name in _DEFAULT_RECON_OUTPUT_SHEETS.items()
+        }
+    else:
+        config_dict = raw_sheets if isinstance(raw_sheets, dict) else {}
+        normalized = {}
+        for key, default_name in _DEFAULT_RECON_OUTPUT_SHEETS.items():
+            raw_item = config_dict.get(key)
+            if isinstance(raw_item, str):
+                normalized[key] = {"name": raw_item.strip() or default_name, "enabled": True}
+                continue
+            if raw_item is False:
+                normalized[key] = {"name": default_name, "enabled": False}
+                continue
+            raw_dict = raw_item if isinstance(raw_item, dict) else {}
+            normalized[key] = {
+                "name": str(raw_dict.get("name") or "").strip() or default_name,
+                "enabled": bool(raw_dict.get("enabled", True)),
+            }
+    if not any(bool(item.get("enabled")) for item in normalized.values()):
+        normalized["summary"] = {"name": _DEFAULT_RECON_OUTPUT_SHEETS["summary"], "enabled": True}
+    return normalized
 
 
 def _as_text(value: Any) -> str:
@@ -660,6 +781,7 @@ def _build_proc_trial_inputs(
                 "table_name": table_name,
                 "display_name": _as_text(item.get("display_name") or file_name or table_name),
                 "source_id": _as_text(item.get("source_id") or file_name or table_name),
+                "sample_origin": "uploaded_file",
                 "rows": preview_rows,
             }
         )
@@ -688,6 +810,7 @@ def _build_proc_trial_inputs(
                 warnings.append(f"{table_name} 未提供 sample_rows，已跳过。")
                 continue
             sample_file_path = _write_trial_dataset_file(input_dir, table_name, sample_rows, index)
+            snapshot_id = _as_text(item.get("snapshot_id"))
             validated_files.append(
                 {
                     "file_name": sample_file_path.name,
@@ -701,6 +824,8 @@ def _build_proc_trial_inputs(
                     "table_name": table_name,
                     "display_name": _as_text(item.get("display_name") or item.get("dataset_name") or table_name),
                     "source_id": _as_text(item.get("source_id") or item.get("source_key") or table_name),
+                    "sample_origin": _resolve_sample_origin(item.get("sample_origin"), fallback="sample_rows"),
+                    **({"snapshot_id": snapshot_id} if snapshot_id else {}),
                     "rows": _rows_to_preview_rows(sample_rows),
                 }
             )
@@ -949,6 +1074,7 @@ def _build_recon_trial_inputs(
                     "side": _infer_preview_side(item_dict.get("side") or table_name),
                     "table_name": table_name,
                     "display_name": _as_text(item_dict.get("display_name") or Path(file_path).name or table_name),
+                    "sample_origin": "uploaded_file",
                     "rows": preview_rows,
                 }
             )
@@ -966,6 +1092,10 @@ def _build_recon_trial_inputs(
                 "side": _infer_preview_side(item_dict.get("side") or table_name),
                 "table_name": table_name,
                 "display_name": _as_text(item_dict.get("display_name") or table_name),
+                "sample_origin": _resolve_sample_origin(
+                    item_dict.get("sample_origin") or dataset_ref.get("sample_origin"),
+                    fallback="sample_rows",
+                ),
                 "rows": [],
             }
         )
@@ -1160,6 +1290,34 @@ def _plan_get(arguments: dict[str, Any]) -> dict[str, Any]:
     if not item:
         return {"success": False, "error": "运行计划不存在"}
     return {"success": True, "run_plan": item}
+
+
+def _scheduler_list_run_plans(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_scheduler_user(arguments.get("auth_token", ""))
+    items = auth_db.list_enabled_execution_run_plans_for_scheduler(
+        limit=_as_int(arguments.get("limit"), 200, minimum=1, maximum=1000),
+        offset=_as_int(arguments.get("offset"), 0, minimum=0),
+    )
+    return {"success": True, "count": len(items), "run_plans": items}
+
+
+def _scheduler_get_slot_run(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_scheduler_user(arguments.get("auth_token", ""))
+    company_id = _as_text(arguments.get("company_id"))
+    plan_code = _as_text(arguments.get("plan_code"))
+    schedule_slot = _as_text(arguments.get("schedule_slot"))
+    if not company_id:
+        return {"success": False, "error": "company_id 不能为空"}
+    if not plan_code:
+        return {"success": False, "error": "plan_code 不能为空"}
+    if not schedule_slot:
+        return {"success": False, "error": "schedule_slot 不能为空"}
+    item = auth_db.get_execution_run_by_schedule_slot(
+        company_id=company_id,
+        plan_code=plan_code,
+        schedule_slot=schedule_slot,
+    )
+    return {"success": True, "exists": item is not None, "run": item}
 
 
 def _plan_create(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1495,6 +1653,30 @@ def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "exception": item}
 
 
+def _validate_proc_source_tables(rule_json: dict[str, Any]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for step in _safe_list(rule_json.get("steps")):
+        step_dict = _safe_dict(step)
+        if _as_text(step_dict.get("action")) != "write_dataset":
+            continue
+        step_id = _as_text(step_dict.get("step_id")) or "write_dataset"
+        for index, source in enumerate(_safe_list(step_dict.get("sources")), start=1):
+            source_dict = _safe_dict(source)
+            table_name = _as_text(source_dict.get("table"))
+            if table_name and table_name.lower() != "unknown":
+                continue
+            alias = _as_text(source_dict.get("alias")) or f"source_{index}"
+            errors.append(
+                {
+                    "path": f"$.steps[{step_id}].sources[{index - 1}].table",
+                    "step_id": step_id,
+                    "alias": alias,
+                    "message": f"step `{step_id}` 的 source `{alias}` 缺少 table 绑定",
+                }
+            )
+    return errors
+
+
 def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
     _require_user(arguments.get("auth_token", ""))
     rule_json = arguments.get("proc_rule_json")
@@ -1520,7 +1702,18 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
     uploaded_files = _safe_list(arguments.get("uploaded_files"))
     uploaded_file_dicts = [v for v in uploaded_files if isinstance(v, dict)]
     sample_datasets = [v for v in _safe_list(arguments.get("sample_datasets")) if isinstance(v, dict)]
-    normalized_rule = _safe_dict(validation.get("rule"))
+    normalized_rule = _normalize_recon_output_rule(_safe_dict(validation.get("rule")))
+    missing_source_bindings = _validate_proc_source_tables(normalized_rule)
+    if missing_source_bindings:
+        return {
+            "success": False,
+            "trial_status": "invalid",
+            "backend": "preflight_validator",
+            "ready_for_confirm": False,
+            "error": "proc 草稿缺少源表绑定，请先补齐 write_dataset.sources[].table",
+            "errors": missing_source_bindings,
+            "normalized_rule": normalized_rule,
+        }
     expected_targets = {
         _as_text(_safe_dict(step).get("target_table"))
         for step in _safe_list(normalized_rule.get("steps"))
@@ -1595,11 +1788,21 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
 
         has_left_output = "left_recon_ready" in output_targets
         has_right_output = "right_recon_ready" in output_targets
-        ready_for_confirm = has_left_output and has_right_output
+        has_left_preview_rows = any(
+            item.get("target_table") == "left_recon_ready" and bool(item.get("rows"))
+            for item in output_samples
+        )
+        has_right_preview_rows = any(
+            item.get("target_table") == "right_recon_ready" and bool(item.get("rows"))
+            for item in output_samples
+        )
+        ready_for_confirm = has_left_output and has_right_output and has_left_preview_rows and has_right_preview_rows
         warnings = [*input_warnings, *output_warnings]
         if expected_targets and not expected_targets.issubset(output_targets):
             missing_targets = sorted(expected_targets - output_targets)
             warnings.append(f"试跑未生成预期输出：{', '.join(missing_targets)}")
+        if not has_left_preview_rows or not has_right_preview_rows:
+            warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
         if not ready_for_confirm:
             warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
 
@@ -1691,7 +1894,7 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
 
     validated_inputs = [item for item in _safe_list(arguments.get("validated_inputs")) if isinstance(item, dict)]
     sample_datasets = [item for item in _safe_list(arguments.get("sample_datasets")) if isinstance(item, dict)]
-    normalized_rule = _safe_dict(validation.get("rule"))
+    normalized_rule = _normalize_recon_output_rule(_safe_dict(validation.get("rule")))
     temp_input_dir: str | None = None
     temp_output_dir: str | None = None
 
@@ -1954,7 +2157,7 @@ def _proc_rule_compatibility_check(arguments: dict[str, Any]) -> dict[str, Any]:
             "validation": validation,
             "issues": [item for item in _safe_list(validation.get("validation_errors")) if isinstance(item, dict)],
         }
-    normalized_rule = _safe_dict(validation.get("rule"))
+    normalized_rule = _normalize_recon_output_rule(_safe_dict(validation.get("rule")))
     sample_datasets = [item for item in _safe_list(arguments.get("sample_datasets")) if isinstance(item, dict)]
     return _build_field_compatibility_report(
         normalized_rule=normalized_rule,

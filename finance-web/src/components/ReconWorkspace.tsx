@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
+  Check,
+  Copy,
   Eye,
   Pause,
   Play,
@@ -20,7 +22,7 @@ import type {
   ReconWorkspaceMode,
   UserTaskRule,
 } from '../types';
-import { fetchReconAutoApi } from './recon/autoApi';
+import { consumeReconAutoSse, fetchReconAutoApi } from './recon/autoApi';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
 import SchemeWizardTargetProcStep from './recon/SchemeWizardTargetProcStep';
@@ -63,6 +65,10 @@ type SupportedSourceKind = Extract<DataSourceKind, 'platform_oauth' | 'database'
 interface SchemeSourceOption {
   id: string;
   name: string;
+  businessName?: string;
+  technicalName?: string;
+  keyFields?: string[];
+  fieldLabelMap?: Record<string, string>;
   sourceId: string;
   sourceName: string;
   sourceKind: SupportedSourceKind;
@@ -85,6 +91,10 @@ interface SchemeSourceRecord {
 interface SchemeSourceDraft {
   id: string;
   name: string;
+  businessName?: string;
+  technicalName?: string;
+  fieldLabelMap?: Record<string, string>;
+  keyFields?: string[];
   sourceId?: string;
   sourceName?: string;
   sourceKind: SupportedSourceKind;
@@ -139,6 +149,12 @@ interface ExistingConfigOption {
   rightTimeSemantic?: string;
 }
 
+interface RuleGenerationProgress {
+  skill: string;
+  phase: string;
+  message: string;
+}
+
 interface CompatibilityCheckResult {
   status: 'idle' | 'passed' | 'failed';
   message: string;
@@ -155,12 +171,18 @@ interface SourcePreviewBlock {
   sourceId: string;
   sourceName: string;
   side: 'left' | 'right';
+  fieldLabelMap?: Record<string, string>;
+  sampleOrigin: string;
+  sampleOriginLabel: string;
+  sampleOriginHint?: string;
+  snapshotId?: string;
   rows: PreviewTableRow[];
 }
 
 interface PreparedPreviewBlock {
   side: 'left' | 'right';
   title: string;
+  fieldLabelMap?: Record<string, string>;
   rows: PreviewTableRow[];
 }
 
@@ -186,6 +208,9 @@ interface ReconTrialPreview {
   summary: string;
   leftRows: PreviewTableRow[];
   rightRows: PreviewTableRow[];
+  leftFieldLabelMap?: Record<string, string>;
+  rightFieldLabelMap?: Record<string, string>;
+  resultFieldLabelMap?: Record<string, string>;
   results: ReconResultRow[];
   resultSummary?: {
     matched?: number;
@@ -253,6 +278,25 @@ const TASK_LIST_TEMPLATE =
 const RUN_LIST_TEMPLATE =
   'minmax(0,2.4fr) minmax(190px,1fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(148px,auto)';
 
+const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
+  biz_key: '业务主键',
+  amount: '金额',
+  biz_date: '业务日期',
+  source_name: '来源名称',
+  source_count: '来源数量',
+  source_side: '输出侧',
+  source_hint: '来源提示',
+};
+
+const RECON_RESULT_FIELD_LABEL_MAP: Record<string, string> = {
+  match_key: '匹配键',
+  result: '对账结果',
+  left_amount: '左侧金额',
+  right_amount: '右侧金额',
+  diff_amount: '差额',
+  note: '说明',
+};
+
 const SCHEME_WIZARD_STEPS: Array<{ id: SchemeWizardStep; title: string; description: string }> = [
   { id: 1, title: '对账目标', description: '选择左右数据并描述口径' },
   { id: 2, title: '数据整理', description: 'AI 生成整理配置并试跑' },
@@ -319,6 +363,46 @@ function toText(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number') return String(value);
   return fallback;
+}
+
+function normalizeFieldLabelMap(value: unknown): Record<string, string> | undefined {
+  const record = asRecord(value);
+  const entries = Object.entries(record)
+    .map(([key, raw]) => [key.trim(), toText(raw).trim()] as const)
+    .filter(([key, label]) => Boolean(key && label));
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(entries);
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return asList(value).map((item) => toText(item).trim()).filter(Boolean);
+}
+
+function mergeFieldLabelMaps(
+  ...maps: Array<Record<string, string> | undefined>
+): Record<string, string> | undefined {
+  const merged: Record<string, string> = {};
+  maps.forEach((map) => {
+    if (!map) return;
+    Object.entries(map).forEach(([key, value]) => {
+      if (!key || !value || merged[key]) return;
+      merged[key] = value;
+    });
+  });
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function resolveWizardDraftText(
+  draftText: unknown,
+  ruleSummary: unknown,
+  fallback = '',
+): string {
+  const resolvedDraftText = toText(draftText).trim();
+  if (resolvedDraftText) return resolvedDraftText;
+  const resolvedRuleSummary = toText(ruleSummary).trim();
+  return resolvedRuleSummary || fallback;
 }
 
 function toInt(value: unknown, fallback = 0): number {
@@ -710,10 +794,136 @@ function executionStatusMeta(status: string): { label: string; className: string
       className: 'border-red-200 bg-red-50 text-red-700',
     };
   }
+  if (normalized === 'error') {
+    return {
+      label: '失败',
+      className: 'border-red-200 bg-red-50 text-red-700',
+    };
+  }
   return {
     label: status || '未知',
     className: 'border-border bg-surface-secondary text-text-secondary',
   };
+}
+
+function canRetryExecutionRun(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized === 'failed' || normalized === 'error';
+}
+
+function formatAnomalyTypeLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'source_only') return '源侧独有';
+  if (normalized === 'target_only') return '目标侧独有';
+  if (normalized === 'matched_with_diff') return '匹配但字段有差异';
+  if (normalized === 'value_mismatch') return '字段值不一致';
+  if (normalized === 'amount_diff') return '金额不一致';
+  return value || '未知异常';
+}
+
+function formatReminderStatusLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'pending') return '待催办';
+  if (normalized === 'sent') return '已催办';
+  if (normalized === 'completed') return '已完成';
+  if (normalized === 'channel_missing') return '缺少协作通道';
+  if (normalized === 'owner_missing') return '缺少责任人';
+  if (normalized === 'owner_unresolved') return '责任人未识别';
+  if (normalized === 'send_failed') return '催办发送失败';
+  if (normalized === 'cancelled') return '已取消';
+  if (normalized === 'sync_failed') return '状态同步失败';
+  if (normalized === 'skipped') return '已跳过';
+  return value || '--';
+}
+
+function formatProcessingStatusLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'pending') return '待处理';
+  if (normalized === 'owner_done') return '责任人已处理';
+  if (normalized === 'in_progress' || normalized === 'processing') return '处理中';
+  if (normalized === 'verifying') return '复核中';
+  if (normalized === 'verified') return '已复核';
+  if (normalized === 'closed') return '已关闭';
+  return value || '--';
+}
+
+function formatFixStatusLabel(value: string, isClosed: boolean): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'pending') return '待修复';
+  if (normalized === 'ready_for_verify') return '待复核';
+  if (normalized === 'fixed') return '已修复';
+  if (normalized === 'verified') return '已确认';
+  if (normalized === 'cancelled') return '已取消';
+  if (!value && isClosed) return '已关闭';
+  return value || '--';
+}
+
+function formatDetailValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '--';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildRunExceptionReasonLines(item: ReconRunExceptionDetail): string[] {
+  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
+  const compareValues = asList(detail.compare_values).map((entry) => asRecord(entry));
+  const anomalyType = item.anomalyType.trim().toLowerCase();
+
+  if (compareValues.length > 0) {
+    const lines = compareValues
+      .map((entry) => {
+        const label = toText(entry.name, '差异字段');
+        const sourceField = toText(entry.source_field);
+        const targetField = toText(entry.target_field);
+        const sourceValue = formatDetailValue(entry.source_value);
+        const targetValue = formatDetailValue(entry.target_value);
+        const diffValue = formatDetailValue(entry.diff_value);
+        return `${label}不一致：源侧${sourceField || '--'}=${sourceValue}，目标侧${targetField || '--'}=${targetValue}，差额=${diffValue}。`;
+      })
+      .filter(Boolean);
+    if (lines.length > 0) return lines;
+  }
+
+  if (anomalyType === 'source_only') {
+    return ['该记录只出现在源侧数据，目标侧没有找到相同对账键的记录。'];
+  }
+  if (anomalyType === 'target_only') {
+    return ['该记录只出现在目标侧数据，源侧没有找到相同对账键的记录。'];
+  }
+  if (anomalyType === 'matched_with_diff' || anomalyType === 'value_mismatch' || anomalyType === 'amount_diff') {
+    return ['源侧与目标侧已匹配到同一笔记录，但用于核对的字段值不一致。'];
+  }
+
+  const latestFeedback = item.latestFeedback.trim();
+  if (latestFeedback) {
+    return [latestFeedback];
+  }
+  return ['当前没有更详细的差异原因，建议结合明细数据继续核查。'];
+}
+
+function getRunExceptionJoinKeys(item: ReconRunExceptionDetail): Array<Record<string, unknown>> {
+  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
+  return asList(detail.join_key)
+    .map((entry) => asRecord(entry))
+    .filter((entry) => Object.keys(entry).length > 0);
+}
+
+function getRunExceptionCompareValues(item: ReconRunExceptionDetail): Array<Record<string, unknown>> {
+  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
+  return asList(detail.compare_values)
+    .map((entry) => asRecord(entry))
+    .filter((entry) => Object.keys(entry).length > 0);
+}
+
+function getRunExceptionRawRecord(item: ReconRunExceptionDetail): Record<string, unknown> {
+  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
+  return firstNonEmptyRecord(detail.raw_record, detail.record, detail.source_record, detail.left_record);
 }
 
 function enabledStatusMeta(enabled: boolean): { label: string; className: string } {
@@ -759,6 +969,7 @@ function normalizeSourceDatasetOption(
 ): SchemeSourceOption | null {
   const value = asRecord(raw);
   if (!value) return null;
+  const semanticProfile = asRecord(value.semantic_profile);
 
   const datasetId = toText(value.id, toText(value.dataset_id)).trim();
   const datasetCode = toText(value.dataset_code, toText(value.code)).trim();
@@ -776,9 +987,31 @@ function normalizeSourceDatasetOption(
     return null;
   }
 
+  const businessName = toText(
+    value.business_name,
+    toText(value.display_name, toText(semanticProfile.business_name)),
+  ).trim();
+  const technicalName = toText(
+    value.technical_name,
+    toText(value.resource_key, toText(value.table_name, datasetCode || datasetName || datasetId)),
+  ).trim();
+  const fieldLabelMap =
+    normalizeFieldLabelMap(value.field_label_map)
+    || normalizeFieldLabelMap(semanticProfile.field_label_map)
+    || normalizeFieldLabelMap(semanticProfile.fields_map);
+  const explicitKeyFields = normalizeStringList(value.key_fields);
+  const keyFields =
+    explicitKeyFields.length > 0
+      ? explicitKeyFields
+      : normalizeStringList(semanticProfile.key_fields);
+
   return {
     id: datasetId || datasetCode || `${source.id}-${datasetName}`,
     name: datasetName || datasetCode || datasetId,
+    businessName: businessName || undefined,
+    technicalName: technicalName || undefined,
+    keyFields: keyFields.length > 0 ? keyFields : undefined,
+    fieldLabelMap,
     sourceId: source.id,
     sourceName: source.name,
     sourceKind: source.sourceKind,
@@ -901,9 +1134,16 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
   const leftSources = asList(schemeMeta.left_sources).map((raw) => {
     const value = asRecord(raw);
+    const semanticProfile = asRecord(value.semantic_profile);
+    const explicitKeyFields = normalizeStringList(value.key_fields);
     return {
       id: toText(value.id),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
+      businessName: toText(value.business_name, toText(value.display_name, toText(semanticProfile.business_name))),
+      technicalName: toText(value.technical_name, toText(value.resource_key, toText(value.table_name))),
+      fieldLabelMap:
+        normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
+      keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       sourceId: toText(value.source_id, toText(value.data_source_id)),
       sourceName: toText(value.source_name),
       sourceKind: (toText(value.source_kind) as SupportedSourceKind) || 'platform_oauth',
@@ -915,9 +1155,16 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   });
   const rightSources = asList(schemeMeta.right_sources).map((raw) => {
     const value = asRecord(raw);
+    const semanticProfile = asRecord(value.semantic_profile);
+    const explicitKeyFields = normalizeStringList(value.key_fields);
     return {
       id: toText(value.id),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
+      businessName: toText(value.business_name, toText(value.display_name, toText(semanticProfile.business_name))),
+      technicalName: toText(value.technical_name, toText(value.resource_key, toText(value.table_name))),
+      fieldLabelMap:
+        normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
+      keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       sourceId: toText(value.source_id, toText(value.data_source_id)),
       sourceName: toText(value.source_name),
       sourceKind: (toText(value.source_kind) as SupportedSourceKind) || 'platform_oauth',
@@ -965,6 +1212,93 @@ function formatPreviewAmount(value: number): number {
 
 function resolveDatasetTableName(source: SchemeSourceOption): string {
   return source.resourceKey || source.datasetCode || source.name;
+}
+
+function resolveDatasetDisplayName(source: SchemeSourceOption | SchemeSourceDraft): string {
+  return toText((source as { businessName?: string }).businessName, source.name).trim() || source.name;
+}
+
+function resolveSourceFieldLabelMap(
+  source: SchemeSourceOption | SchemeSourceDraft | null | undefined,
+): Record<string, string> | undefined {
+  if (!source) return undefined;
+  return normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap);
+}
+
+function resolveSampleOriginMeta(
+  origin: unknown,
+  snapshotId?: unknown,
+): {
+  key: string;
+  label: string;
+  hint?: string;
+} {
+  const originKey = toText(origin).trim().toLowerCase();
+  const resolvedSnapshotId = toText(snapshotId).trim();
+  if (originKey === 'published_snapshot') {
+    return {
+      key: originKey,
+      label: '已发布快照',
+      hint: resolvedSnapshotId ? `来自真实已发布快照：${resolvedSnapshotId}` : '来自真实已发布快照',
+    };
+  }
+  if (originKey === 'uploaded_file') {
+    return {
+      key: originKey,
+      label: '上传文件',
+      hint: '当前抽样来自上传文件',
+    };
+  }
+  return {
+    key: originKey || 'sample_rows',
+    label: '样本数据',
+    hint: '当前抽样来自数据集内置样本',
+  };
+}
+
+function buildRunPlanBinding(
+  source: SchemeSourceDraft,
+  dateField: string,
+): Record<string, unknown> | null {
+  const sourceId = toText(source.sourceId).trim();
+  const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
+  if (!sourceId || !tableName) return null;
+
+  const query: Record<string, unknown> = {};
+  if (tableName) {
+    query.resource_key = tableName;
+  }
+  if (dateField.trim()) {
+    query.date_field = dateField.trim();
+  }
+
+  return {
+    data_source_id: sourceId,
+    table_name: tableName,
+    resource_key: tableName,
+    dataset_source_type: 'snapshot',
+    query,
+  };
+}
+
+function buildRunPlanBindings(
+  schemeMeta: SchemeMetaSummary | null,
+  leftTimeSemantic: string,
+  rightTimeSemantic: string,
+): Array<Record<string, unknown>> {
+  if (!schemeMeta) return [];
+  const bindings = [
+    ...schemeMeta.leftSources.map((source) => buildRunPlanBinding(source, leftTimeSemantic)),
+    ...schemeMeta.rightSources.map((source) => buildRunPlanBinding(source, rightTimeSemantic)),
+  ].filter(Boolean) as Array<Record<string, unknown>>;
+
+  const seen = new Set<string>();
+  return bindings.filter((item) => {
+    const key = `${toText(item.data_source_id)}::${toText(item.table_name)}::${toText(item.resource_key)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeSchemaType(value: unknown): string {
@@ -1623,6 +1957,17 @@ export default function ReconWorkspace({
   const [loadingExceptionsRunId, setLoadingExceptionsRunId] = useState<string | null>(null);
   const [centerError, setCenterError] = useState<string | null>(null);
   const [centerNotice, setCenterNotice] = useState<string | null>(null);
+  const [schemeDeleteGuard, setSchemeDeleteGuard] = useState<{
+    schemeId: string;
+    message: string;
+    tasks: Array<{
+      id: string;
+      name: string;
+      scheduleLabel: string;
+      statusLabel: string;
+    }>;
+  } | null>(null);
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [sourceLoadError, setSourceLoadError] = useState('');
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
@@ -1637,12 +1982,20 @@ export default function ReconWorkspace({
   const [isTrialingProc, setIsTrialingProc] = useState(false);
   const [isGeneratingRecon, setIsGeneratingRecon] = useState(false);
   const [isTrialingRecon, setIsTrialingRecon] = useState(false);
+  const [procGenerationProgress, setProcGenerationProgress] = useState<RuleGenerationProgress | null>(null);
+  const [reconGenerationProgress, setReconGenerationProgress] = useState<RuleGenerationProgress | null>(null);
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
   const [procCompatibility, setProcCompatibility] = useState<CompatibilityCheckResult>(emptyCompatibilityResult);
   const [reconCompatibility, setReconCompatibility] = useState<CompatibilityCheckResult>(emptyCompatibilityResult);
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
+  const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
+    panel: 'proc' | 'recon';
+    status: 'success' | 'error';
+  } | null>(null);
+  const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const sourceById = useMemo(
     () => new Map(availableSources.map((item) => [item.id, item])),
@@ -1840,6 +2193,8 @@ options.push({
       setExceptionsByRunId(options?.exceptionsByRunId || {});
       setCenterNotice(options?.notice || null);
       setCenterError(null);
+      setSchemeDeleteGuard(null);
+      setFocusedTaskId(null);
     },
     [],
   );
@@ -1907,10 +2262,37 @@ options.push({
       setExceptionsByRunId({});
       setCenterNotice(null);
       setCenterError(error instanceof Error ? error.message : '对账中心加载失败');
+      setSchemeDeleteGuard(null);
+      setFocusedTaskId(null);
     } finally {
       setLoadingCenter(false);
     }
   }, [applyCenterPayload, authToken]);
+
+  useEffect(() => {
+    if (activeTab !== 'schemes') {
+      setSchemeDeleteGuard(null);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'tasks' || !focusedTaskId) return;
+    const target = taskRowRefs.current[focusedTaskId];
+    if (!target) return;
+
+    target.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'center',
+    });
+
+    const timer = window.setTimeout(() => {
+      setFocusedTaskId((current) => (current === focusedTaskId ? null : current));
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [activeTab, focusedTaskId, tasks]);
 
   const loadRunExceptions = useCallback(
     async (runId: string) => {
@@ -2171,11 +2553,44 @@ options.push({
   const closeModal = useCallback(() => {
     setModalError(null);
     setWizardJsonPanel(null);
+    setWizardJsonCopyState(null);
+    setSelectedExceptionDetail(null);
     setModalState(null);
     setDesignSessionId('');
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
   }, []);
+
+  const handleCopyWizardJson = useCallback(async (panel: 'proc' | 'recon') => {
+    const jsonText = panel === 'proc' ? procJsonPreview : reconJsonPreview;
+    if (!jsonText.trim()) {
+      setWizardJsonCopyState({ panel, status: 'error' });
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(jsonText);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = jsonText;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setWizardJsonCopyState({ panel, status: 'success' });
+    } catch {
+      setWizardJsonCopyState({ panel, status: 'error' });
+    }
+
+    window.setTimeout(() => {
+      setWizardJsonCopyState((prev) => (prev?.panel === panel ? null : prev));
+    }, 1800);
+  }, [procJsonPreview, reconJsonPreview]);
 
   const resetSchemeDraftFromGoalChange = useCallback(
     (patch: Partial<SchemeDraft>) => {
@@ -2369,9 +2784,81 @@ options.push({
     ],
   );
 
+  const consumeRuleGenerationStream = useCallback(
+    async (
+      sessionId: string,
+      stage: 'proc' | 'recon',
+      instructionText: string,
+    ) => {
+      let finalSession: Record<string, unknown> | null = null;
+
+      const response = await consumeReconAutoSse(
+        `/schemes/design/${encodeURIComponent(sessionId)}/${stage}/generate/stream`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            instruction_text: instructionText,
+          }),
+        },
+        (event) => {
+          const payload = asRecord(event.data);
+          const progress = {
+            skill: toText(payload.skill, stage === 'proc' ? '整理配置生成器' : '对账逻辑生成器'),
+            phase: toText(payload.phase, 'generating_rule'),
+            message: toText(
+              payload.message,
+              stage === 'proc'
+                ? '正在生成数据整理 JSON'
+                : '正在生成数据对账 JSON',
+            ),
+          };
+
+          if (stage === 'proc') {
+            setProcGenerationProgress(progress);
+          } else {
+            setReconGenerationProgress(progress);
+          }
+
+          if (event.event === 'error') {
+            throw new Error(
+              toText(
+                payload.message,
+                stage === 'proc' ? 'AI 生成整理配置失败' : 'AI 生成对账逻辑失败',
+              ),
+            );
+          }
+          if (event.event === 'completed') {
+            finalSession = asRecord(payload.session);
+          }
+        },
+      );
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(
+          String(
+            data.detail
+            || data.message
+            || (stage === 'proc' ? 'AI 生成整理配置失败' : 'AI 生成对账逻辑失败'),
+          ),
+        );
+      }
+      if (!finalSession) {
+        throw new Error(stage === 'proc' ? 'AI 生成整理配置未返回完成结果' : 'AI 生成对账逻辑未返回完成结果');
+      }
+      return finalSession;
+    },
+    [authToken],
+  );
+
   const toCompatibilityResult = useCallback((value: unknown, fallbackMessage = '等待校验'): CompatibilityCheckResult => {
     const raw = asRecord(value);
     const statusText = toText(raw.status).trim().toLowerCase();
+    const usedFallback = raw.used_fallback === true;
     const compatible =
       raw.compatible === true
       || statusText === 'compatible'
@@ -2389,7 +2876,7 @@ options.push({
       ...missingFields,
     ].filter(Boolean);
     return {
-      status: compatible ? 'passed' : raw.status ? 'failed' : 'idle',
+      status: usedFallback ? 'warning' : compatible ? 'passed' : raw.status ? 'failed' : 'idle',
       message: toText(raw.message, fallbackMessage),
       details,
     };
@@ -2407,17 +2894,37 @@ options.push({
     return {
       status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
       summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据整理试跑完成'))),
-      rawSources: sourceSamples.map((item) => ({
-        sourceId: toText(item.source_id, toText(item.table_name)),
-        sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
-        side: toText(item.side) === 'right' ? 'right' : 'left',
-        rows: toPreviewTableRows(item.rows),
-      })),
-      preparedOutputs: outputSamples.map((item) => ({
-        side: toText(item.side) === 'right' ? 'right' : 'left',
-        title: toText(item.title, toText(item.target_table, 'output')),
-        rows: toPreviewTableRows(item.rows),
-      })),
+      rawSources: sourceSamples.map((item) => {
+        const snapshotId = toText(item.snapshot_id);
+        const originMeta = resolveSampleOriginMeta(item.sample_origin, snapshotId);
+        const fieldLabelMap =
+          normalizeFieldLabelMap(item.field_label_map)
+          || normalizeFieldLabelMap(item.columns_label_map)
+          || normalizeFieldLabelMap(item.column_display_map);
+        return {
+          sourceId: toText(item.source_id, toText(item.table_name)),
+          sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
+          side: toText(item.side) === 'right' ? 'right' : 'left',
+          fieldLabelMap,
+          sampleOrigin: originMeta.key,
+          sampleOriginLabel: originMeta.label,
+          sampleOriginHint: originMeta.hint,
+          snapshotId: snapshotId || undefined,
+          rows: toPreviewTableRows(item.rows),
+        };
+      }),
+      preparedOutputs: outputSamples.map((item) => {
+        const fieldLabelMap =
+          normalizeFieldLabelMap(item.field_label_map)
+          || normalizeFieldLabelMap(item.columns_label_map)
+          || PREPARED_OUTPUT_FIELD_LABEL_MAP;
+        return {
+          side: toText(item.side) === 'right' ? 'right' : 'left',
+          title: toText(item.title, toText(item.target_table, 'output')),
+          fieldLabelMap,
+          rows: toPreviewTableRows(item.rows),
+        };
+      }),
       validations: [
         ...parseTrialMessages(raw.errors),
         ...parseTrialMessages(raw.warnings),
@@ -2476,11 +2983,26 @@ options.push({
       })),
     ];
     const resultSummary = asRecord(raw.result_summary);
+    const leftFieldLabelMap =
+      normalizeFieldLabelMap(raw.left_field_label_map)
+      || normalizeFieldLabelMap(resultSamples.left_field_label_map)
+      || PREPARED_OUTPUT_FIELD_LABEL_MAP;
+    const rightFieldLabelMap =
+      normalizeFieldLabelMap(raw.right_field_label_map)
+      || normalizeFieldLabelMap(resultSamples.right_field_label_map)
+      || PREPARED_OUTPUT_FIELD_LABEL_MAP;
+    const resultFieldLabelMap =
+      normalizeFieldLabelMap(raw.result_field_label_map)
+      || normalizeFieldLabelMap(resultSamples.result_field_label_map)
+      || RECON_RESULT_FIELD_LABEL_MAP;
     return {
       status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
       summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据对账试跑完成'))),
       leftRows: toPreviewTableRows(raw.left_samples),
       rightRows: toPreviewTableRows(raw.right_samples),
+      leftFieldLabelMap,
+      rightFieldLabelMap,
+      resultFieldLabelMap,
       results: rows,
       resultSummary: {
         matched: toInt(resultSummary.matched_exact, 0),
@@ -2518,7 +3040,7 @@ options.push({
         return {
           status: 'passed',
           message: `${label}数据集与历史配置一致。`,
-          details: expectedSources.map((item) => item.name),
+          details: expectedSources.map((item) => resolveDatasetDisplayName(item)),
         };
       }
 
@@ -2535,8 +3057,8 @@ options.push({
           status: 'passed',
           message: `${label}数据集发生变化，但数据源类型结构一致，允许继续试跑。`,
           details: [
-            `当前：${currentSources.map((item) => item.name).join('、')}`,
-            `历史：${expectedSources.map((item) => item.name).join('、')}`,
+            `当前：${currentSources.map((item) => resolveDatasetDisplayName(item)).join('、')}`,
+            `历史：${expectedSources.map((item) => resolveDatasetDisplayName(item)).join('、')}`,
           ],
         };
       }
@@ -2545,8 +3067,8 @@ options.push({
         status: 'failed',
         message: `${label}数据集与历史配置差异较大，请更换配置或重新生成。`,
         details: [
-          `当前：${currentSources.map((item) => item.name).join('、') || '--'}`,
-          `历史：${expectedSources.map((item) => item.name).join('、') || '--'}`,
+          `当前：${currentSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--'}`,
+          `历史：${expectedSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--'}`,
         ],
       };
     },
@@ -2591,6 +3113,7 @@ options.push({
     }
 
     const seedText = draftText || JSON.stringify(ruleJson || {}, null, 2) || schemeDraft.name || 'proc';
+    const sampleOriginMeta = resolveSampleOriginMeta('sample_rows');
     const preview: ProcTrialPreview = {
       status: failed ? 'needs_adjustment' : 'passed',
       summary: failed
@@ -2599,14 +3122,22 @@ options.push({
       rawSources: [
         ...selectedLeftSources.map((source) => ({
           sourceId: source.id,
-          sourceName: source.name,
+          sourceName: resolveDatasetDisplayName(source),
           side: 'left' as const,
+          fieldLabelMap: resolveSourceFieldLabelMap(source),
+          sampleOrigin: sampleOriginMeta.key,
+          sampleOriginLabel: sampleOriginMeta.label,
+          sampleOriginHint: sampleOriginMeta.hint,
           rows: buildRawSourceRows(source, 'left', seedText),
         })),
         ...selectedRightSources.map((source) => ({
           sourceId: source.id,
-          sourceName: source.name,
+          sourceName: resolveDatasetDisplayName(source),
           side: 'right' as const,
+          fieldLabelMap: resolveSourceFieldLabelMap(source),
+          sampleOrigin: sampleOriginMeta.key,
+          sampleOriginLabel: sampleOriginMeta.label,
+          sampleOriginHint: sampleOriginMeta.hint,
           rows: buildRawSourceRows(source, 'right', seedText),
         })),
       ],
@@ -2616,11 +3147,13 @@ options.push({
             {
               side: 'left',
               title: 'left_recon_ready',
+              fieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
               rows: buildPreparedRows(selectedLeftSources, 'left', seedText),
             },
             {
               side: 'right',
               title: 'right_recon_ready',
+              fieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
               rows: buildPreparedRows(selectedRightSources, 'right', seedText),
             },
           ],
@@ -2877,6 +3410,9 @@ options.push({
           : `试跑结果：已按 ${parsedConfig.matchKey} 对抽样数据完成验证，可进入保存方案。`,
         leftRows,
         rightRows,
+        leftFieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
+        rightFieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
+        resultFieldLabelMap: RECON_RESULT_FIELD_LABEL_MAP,
         results,
       } as ReconTrialPreview,
     };
@@ -2966,11 +3502,12 @@ options.push({
           procStep.compatibility_result,
           '已载入已有数据整理配置，请继续试跑验证。',
         );
-        const normalizedRuleJson = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
-        const draftText =
-          toText(procStep.normalized_display_text, toText(procStep.editable_instruction_text))
-          || option.draftText.trim()
-          || summarizeProcDraft(normalizedRuleJson);
+        const normalizedRuleJson = asRecord(procStep.effective_rule_json);
+        const draftText = resolveWizardDraftText(
+          procStep.draft_text,
+          procStep.rule_summary,
+          option.draftText.trim() || summarizeProcDraft(normalizedRuleJson),
+        );
         setSchemeDraft((prev) => ({
           ...prev,
           procConfigMode: 'existing',
@@ -3055,12 +3592,13 @@ options.push({
         }
         const session = asRecord(data.session);
         const reconStep = asRecord(session.recon_step);
-        const normalizedRuleJson = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+        const normalizedRuleJson = asRecord(reconStep.effective_rule_json);
         const parsed = parseReconRuleJsonConfig(normalizedRuleJson);
-        const draftText =
-          toText(reconStep.normalized_display_text, toText(reconStep.editable_instruction_text))
-          || option.draftText.trim()
-          || summarizeReconDraft(normalizedRuleJson);
+        const draftText = resolveWizardDraftText(
+          reconStep.draft_text,
+          reconStep.rule_summary,
+          option.draftText.trim() || summarizeReconDraft(normalizedRuleJson),
+        );
         setSchemeDraft((prev) => ({
           ...prev,
           reconConfigMode: 'existing',
@@ -3105,27 +3643,18 @@ options.push({
     }
 
     setIsGeneratingProc(true);
+    setProcGenerationProgress({
+      skill: '整理配置生成器',
+      phase: 'preparing_context',
+      message: '正在准备左右数据集样例',
+    });
     setModalError(null);
     try {
       const sessionId = await ensureDesignSession();
       await syncDesignTarget(sessionId);
-      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/generate`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          instruction_text: schemeDraft.procDraft.trim(),
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data.detail || data.message || 'AI 生成整理配置失败'));
-      }
-      const session = asRecord(data.session);
+      const session = await consumeRuleGenerationStream(sessionId, 'proc', schemeDraft.procDraft.trim());
       const procStep = asRecord(session.proc_step);
-      const procRuleJson = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
+      const procRuleJson = asRecord(procStep.effective_rule_json);
       if (!procRuleJson || !Array.isArray(procRuleJson.steps)) {
         throw new Error('AI 未返回有效的数据整理配置');
       }
@@ -3133,7 +3662,11 @@ options.push({
         ...prev,
         procConfigMode: 'ai',
         selectedProcConfigId: '',
-        procDraft: toText(procStep.normalized_display_text, summarizeProcDraft(procRuleJson)),
+        procDraft: resolveWizardDraftText(
+          procStep.draft_text,
+          procStep.rule_summary,
+          summarizeProcDraft(procRuleJson),
+        ),
         procRuleJson,
         procTrialStatus: 'idle',
         procTrialSummary: '',
@@ -3149,11 +3682,13 @@ options.push({
     } catch (error) {
       setModalError(error instanceof Error ? error.message : 'AI 生成整理配置失败');
     } finally {
+      setProcGenerationProgress(null);
       setIsGeneratingProc(false);
     }
   }, [
     authToken,
     schemeDraft.procDraft,
+    consumeRuleGenerationStream,
     ensureDesignSession,
     syncDesignTarget,
     toCompatibilityResult,
@@ -3187,7 +3722,7 @@ options.push({
       const session = asRecord(data.session);
       const procStep = asRecord(session.proc_step);
       const trialResult = asRecord(procStep.trial_result);
-      const normalizedRule = asRecord(procStep.normalized_rule_json || procStep.candidate_rule_json);
+      const normalizedRule = asRecord(procStep.effective_rule_json);
       const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
       const summary = toText(
         trialResult.summary,
@@ -3201,7 +3736,11 @@ options.push({
       );
       setSchemeDraft((prev) => ({
         ...prev,
-        procDraft: toText(procStep.normalized_display_text, prev.procDraft),
+        procDraft: resolveWizardDraftText(
+          procStep.draft_text,
+          procStep.rule_summary,
+          prev.procDraft,
+        ),
         procRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.procRuleJson,
         procTrialStatus: passed ? 'passed' : 'needs_adjustment',
         procTrialSummary: summary,
@@ -3262,34 +3801,27 @@ options.push({
     }
 
     setIsGeneratingRecon(true);
+    setReconGenerationProgress({
+      skill: '对账逻辑生成器',
+      phase: 'preparing_context',
+      message: '正在准备数据整理后的左右输出样例',
+    });
     setModalError(null);
     try {
       const sessionId = await ensureDesignSession();
       await syncDesignTarget(sessionId);
-      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/generate`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          instruction_text: schemeDraft.reconDraft.trim(),
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data.detail || data.message || 'AI 生成对账逻辑失败'));
-      }
-      const session = asRecord(data.session);
+      const session = await consumeRuleGenerationStream(sessionId, 'recon', schemeDraft.reconDraft.trim());
       const reconStep = asRecord(session.recon_step);
-      const reconRuleJson = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+      const reconRuleJson = asRecord(reconStep.effective_rule_json);
       if (!Array.isArray(reconRuleJson.rules) || reconRuleJson.rules.length === 0) {
         throw new Error('AI 未返回有效的数据对账逻辑');
       }
       const nextConfig = parseReconRuleJsonConfig(reconRuleJson);
-      const draftText =
-        toText(reconStep.normalized_display_text, toText(reconStep.editable_instruction_text))
-        || summarizeReconDraft(reconRuleJson);
+      const draftText = resolveWizardDraftText(
+        reconStep.draft_text,
+        reconStep.rule_summary,
+        summarizeReconDraft(reconRuleJson),
+      );
       setSchemeDraft((prev) => ({
         ...prev,
         reconConfigMode: 'ai',
@@ -3312,10 +3844,12 @@ options.push({
     } catch (error) {
       setModalError(error instanceof Error ? error.message : 'AI 生成对账逻辑失败');
     } finally {
+      setReconGenerationProgress(null);
       setIsGeneratingRecon(false);
     }
   }, [
     authToken,
+    consumeRuleGenerationStream,
     ensureDesignSession,
     schemeDraft.procRuleJson,
     schemeDraft.procTrialStatus,
@@ -3362,7 +3896,7 @@ options.push({
       const session = asRecord(data.session);
       const reconStep = asRecord(session.recon_step);
       const trialResult = asRecord(reconStep.trial_result);
-      const normalizedRule = asRecord(reconStep.normalized_rule_json || reconStep.candidate_rule_json);
+      const normalizedRule = asRecord(reconStep.effective_rule_json);
       const parsed = parseReconRuleJsonConfig(normalizedRule);
       const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
       const summary = toText(
@@ -3377,7 +3911,11 @@ options.push({
       );
       setSchemeDraft((prev) => ({
         ...prev,
-        reconDraft: toText(reconStep.normalized_display_text, prev.reconDraft),
+        reconDraft: resolveWizardDraftText(
+          reconStep.draft_text,
+          reconStep.rule_summary,
+          prev.reconDraft,
+        ),
         reconRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.reconRuleJson,
         reconRuleName: toText(normalizedRule.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
         matchKey: parsed.matchKey,
@@ -3470,6 +4008,8 @@ options.push({
             left_sources: selectedLeftSources.map((item) => ({
               id: item.id,
               name: item.name,
+              business_name: item.businessName,
+              technical_name: item.technicalName,
               source_id: item.sourceId,
               source_name: item.sourceName,
               source_kind: item.sourceKind,
@@ -3477,10 +4017,14 @@ options.push({
               dataset_code: item.datasetCode,
               resource_key: item.resourceKey,
               dataset_kind: item.datasetKind,
+              key_fields: item.keyFields,
+              field_label_map: item.fieldLabelMap,
             })),
             right_sources: selectedRightSources.map((item) => ({
               id: item.id,
               name: item.name,
+              business_name: item.businessName,
+              technical_name: item.technicalName,
               source_id: item.sourceId,
               source_name: item.sourceName,
               source_kind: item.sourceKind,
@@ -3488,6 +4032,8 @@ options.push({
               dataset_code: item.datasetCode,
               resource_key: item.resourceKey,
               dataset_kind: item.datasetKind,
+              key_fields: item.keyFields,
+              field_label_map: item.fieldLabelMap,
             })),
             left_description: schemeDraft.leftDescription.trim(),
             right_description: schemeDraft.rightDescription.trim(),
@@ -3556,8 +4102,19 @@ options.push({
 
     const matchedScheme = schemes.find((s) => s.schemeCode === schemeCode);
     const schemeName = matchedScheme?.name || schemeCode;
+    const matchedSchemeMeta = matchedScheme ? extractSchemeMeta(matchedScheme) : null;
     const todayStr = new Date().toISOString().slice(0, 10);
     const autoName = `${schemeName} ${todayStr}`;
+    const inputBindings = buildRunPlanBindings(
+      matchedSchemeMeta,
+      planDraft.leftTimeSemantic.trim(),
+      planDraft.rightTimeSemantic.trim(),
+    );
+
+    if (inputBindings.length === 0) {
+      setModalError('当前方案未配置可用的数据源绑定，无法保存运行计划。');
+      return;
+    }
 
     const timeExpr = `${planDraft.scheduleHour}:${planDraft.scheduleMinute}`;
     let scheduleTypeForSave: string = planDraft.scheduleType;
@@ -3585,6 +4142,8 @@ options.push({
           scheme_code: schemeCode,
           schedule_type: scheduleTypeForSave,
           schedule_expr: scheduleExpr,
+          biz_date_offset: 'previous_day',
+          input_bindings_json: inputBindings,
           channel_config_id: planDraft.channelConfigId.trim(),
           owner_mapping_json: planDraft.ownerSummary.trim()
             ? { default_owner: { name: planDraft.ownerSummary.trim() } }
@@ -3595,6 +4154,7 @@ options.push({
             time_semantic: [planDraft.leftTimeSemantic.trim(), planDraft.rightTimeSemantic.trim()]
               .filter(Boolean)
               .join(' / '),
+            input_bindings: inputBindings,
           },
         }),
       });
@@ -3615,16 +4175,29 @@ options.push({
   const handleDeleteScheme = useCallback(
     async (scheme: ReconSchemeListItem) => {
       if (!authToken) {
+        setSchemeDeleteGuard(null);
         setCenterNotice(null);
         setCenterError('请先登录后再删除对账方案。');
         return;
       }
-      const relatedTaskCount = tasks.filter((item) => item.schemeCode === scheme.schemeCode).length;
+      const relatedTasks = tasks.filter((item) => item.schemeCode === scheme.schemeCode);
+      const relatedTaskCount = relatedTasks.length;
       if (relatedTaskCount > 0) {
+        setSchemeDeleteGuard({
+          schemeId: scheme.id,
+          message: `当前方案下还有 ${relatedTaskCount} 个运行计划，请先删除运行计划后再删除对账方案。`,
+          tasks: relatedTasks.map((item) => ({
+            id: item.id,
+            name: item.name,
+            scheduleLabel: formatScheduleLabel(item.scheduleType, item.scheduleExpr),
+            statusLabel: enabledStatusMeta(item.status === 'enabled').label,
+          })),
+        });
         setCenterNotice(null);
-        setCenterError(`当前方案下还有 ${relatedTaskCount} 个运行计划，请先删除运行计划后再删除对账方案。`);
+        setCenterError(null);
         return;
       }
+      setSchemeDeleteGuard(null);
       if (!window.confirm(`确定要删除对账方案「${scheme.name}」吗？此操作不可恢复。`)) {
         return;
       }
@@ -3797,9 +4370,15 @@ options.push({
     schemeDraft.procTrialStatus === 'passed' && Boolean(schemeDraft.procRuleJson);
   const schemeStepThreePassed =
     schemeDraft.reconTrialStatus === 'passed' && Boolean(schemeDraft.reconRuleJson);
+  const isSchemeWizardBusy =
+    isGeneratingProc || isTrialingProc || isGeneratingRecon || isTrialingRecon;
 
   const goToNextSchemeStep = useCallback(async () => {
     setModalError(null);
+    if (isSchemeWizardBusy) {
+      setModalError('当前正在生成或试跑，请等待本次操作完成后再进入下一步。');
+      return;
+    }
     if (schemeWizardStep === 1) {
       if (!schemeStepOneReady) {
         setModalError('请先完成方案名称、对账目标以及左右数据集选择。');
@@ -3847,6 +4426,7 @@ options.push({
     schemeStepThreeReady,
     schemeStepTwoPassed,
     schemeStepTwoReady,
+    isSchemeWizardBusy,
     schemeDraft.reconRuleJson,
     schemeWizardStep,
     trialProcDraft,
@@ -3898,6 +4478,26 @@ options.push({
     </div>
   );
 
+  const selectedExceptionReasonLines = selectedExceptionDetail
+    ? buildRunExceptionReasonLines(selectedExceptionDetail)
+    : [];
+  const selectedExceptionPayload = selectedExceptionDetail
+    ? firstNonEmptyRecord(
+        selectedExceptionDetail.raw.detail_json,
+        selectedExceptionDetail.raw.detail,
+        selectedExceptionDetail.raw,
+      )
+    : {};
+  const selectedExceptionJoinKeys = selectedExceptionDetail
+    ? getRunExceptionJoinKeys(selectedExceptionDetail)
+    : [];
+  const selectedExceptionCompareValues = selectedExceptionDetail
+    ? getRunExceptionCompareValues(selectedExceptionDetail)
+    : [];
+  const selectedExceptionRawRecord = selectedExceptionDetail
+    ? getRunExceptionRawRecord(selectedExceptionDetail)
+    : {};
+
   const renderSchemeRows = () =>
     schemes.length === 0
       ? renderEmptyState({
@@ -3915,47 +4515,96 @@ options.push({
           const schemeMeta = extractSchemeMeta(item);
           const procRuleLabel = schemeMeta.procRuleName || (item.name ? `${item.name} 整理规则` : '未命名整理规则');
           const reconRuleLabel = schemeMeta.reconRuleName || (item.name ? `${item.name} 对账逻辑` : '未命名对账逻辑');
+          const isGuardVisible = schemeDeleteGuard?.schemeId === item.id;
+          const guardTasks = isGuardVisible ? schemeDeleteGuard?.tasks || [] : [];
           return (
             <div
               key={item.id}
-              className="grid items-center gap-4 border-b border-border-subtle px-5 py-4 last:border-b-0"
-              style={{ gridTemplateColumns: SCHEME_LIST_TEMPLATE }}
+              className="border-b border-border-subtle last:border-b-0"
             >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
+              <div
+                className="grid items-center gap-4 px-5 py-4"
+                style={{ gridTemplateColumns: SCHEME_LIST_TEMPLATE }}
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-text-primary">{procRuleLabel}</p>
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-text-primary">{reconRuleLabel}</p>
+                </div>
+                <div className="flex items-center justify-self-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setModalState({ kind: 'scheme-detail', scheme: item })}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                  >
+                    <Eye className="h-4 w-4" />
+                    查看详情
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openCreatePlanModal(item)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                  >
+                    <Plus className="h-4 w-4" />
+                    新增运行计划
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteScheme(item)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition hover:border-red-200 hover:text-red-600"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    删除
+                  </button>
+                </div>
               </div>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-text-primary">{procRuleLabel}</p>
-              </div>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-text-primary">{reconRuleLabel}</p>
-              </div>
-              <div className="flex items-center justify-self-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setModalState({ kind: 'scheme-detail', scheme: item })}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition hover:border-sky-200 hover:text-sky-700"
-                >
-                  <Eye className="h-4 w-4" />
-                  查看详情
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openCreatePlanModal(item)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-                >
-                  <Plus className="h-4 w-4" />
-                  新增运行计划
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDeleteScheme(item)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition hover:border-red-200 hover:text-red-600"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  删除
-                </button>
-              </div>
+              {isGuardVisible ? (
+                <div className="px-5 pb-4">
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <p className="min-w-0">{schemeDeleteGuard?.message}</p>
+                        </div>
+                        {guardTasks.length > 0 ? (
+                          <div className="mt-3 rounded-xl border border-amber-200/70 bg-white/65 px-3 py-2.5">
+                            <p className="text-xs font-semibold tracking-[0.08em] text-amber-700">关联运行计划</p>
+                            <div className="mt-2 space-y-1.5">
+                              {guardTasks.map((task, index) => (
+                                <div
+                                  key={task.id}
+                                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-amber-900"
+                                >
+                                  <span className="font-medium">{index + 1}. {task.name}</span>
+                                  <span className="text-amber-700">· {task.scheduleLabel}</span>
+                                  <span className="text-amber-700">· {task.statusLabel}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const firstTaskId = guardTasks[0]?.id || null;
+                          setSchemeDeleteGuard(null);
+                          setActiveTab('tasks');
+                          setFocusedTaskId(firstTaskId);
+                        }}
+                        className="inline-flex shrink-0 items-center rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-800 transition hover:bg-amber-100"
+                      >
+                        去运行计划
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           );
         })}
@@ -3981,10 +4630,19 @@ options.push({
         />
         {tasks.map((item) => {
           const statusMeta = enabledStatusMeta(item.status === 'enabled');
+          const isFocusedTask = focusedTaskId === item.id;
           return (
             <div
               key={item.id}
-              className="grid items-center gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
+              ref={(node) => {
+                taskRowRefs.current[item.id] = node;
+              }}
+              data-testid={`recon-task-row-${item.id}`}
+              data-highlighted={isFocusedTask ? 'true' : 'false'}
+              className={cn(
+                'grid items-center gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0 transition-colors',
+                isFocusedTask && 'bg-sky-50/80 ring-1 ring-inset ring-sky-200',
+              )}
               style={{ gridTemplateColumns: TASK_LIST_TEMPLATE }}
             >
               <div className="min-w-0">
@@ -4053,6 +4711,7 @@ options.push({
           return (
             <div
               key={item.id}
+              data-testid={`execution-run-row-${item.id}`}
               className="grid items-center gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
               style={{ gridTemplateColumns: RUN_LIST_TEMPLATE }}
             >
@@ -4078,7 +4737,7 @@ options.push({
               </span>
               <div className="justify-self-end">
                 <div className="flex items-center gap-2">
-                  {item.executionStatus.trim().toLowerCase() === 'failed' ? (
+                  {canRetryExecutionRun(item.executionStatus) ? (
                     <button
                       type="button"
                       onClick={() => void handleRetryRun(item.id)}
@@ -4091,6 +4750,7 @@ options.push({
                   ) : null}
                   <button
                     type="button"
+                    data-testid={`execution-run-exceptions-${item.id}`}
                     onClick={() => setModalState({ kind: 'run-exceptions', run: item })}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition hover:border-sky-200 hover:text-sky-700"
                   >
@@ -4107,22 +4767,64 @@ options.push({
   );
 
   const renderSchemeWizardContent = () => {
+    const selectedSourcesForLookup = [...selectedLeftSources, ...selectedRightSources];
+    const findSourceByPreview = (previewSource: { sourceId: string; sourceName: string }) =>
+      selectedSourcesForLookup.find((source) => (
+        source.id === previewSource.sourceId
+        || source.datasetCode === previewSource.sourceId
+        || source.resourceKey === previewSource.sourceId
+        || source.name === previewSource.sourceName
+        || source.businessName === previewSource.sourceName
+      ));
+
     const mappedProcTrialPreview = procTrialPreview
       ? {
           status: procTrialPreview.status,
           summary: procTrialPreview.summary,
           leftSourceSamples: procTrialPreview.rawSources
             .filter((item) => item.side === 'left')
-            .map((item) => ({ title: item.sourceName, rows: item.rows })),
+            .map((item) => {
+              const matchedSource = findSourceByPreview(item);
+              return {
+                title: matchedSource ? resolveDatasetDisplayName(matchedSource) : item.sourceName,
+                fieldLabelMap: mergeFieldLabelMaps(
+                  item.fieldLabelMap,
+                  resolveSourceFieldLabelMap(matchedSource),
+                ),
+                originLabel: item.sampleOriginLabel,
+                originHint: item.sampleOriginHint,
+                rows: item.rows,
+              };
+            }),
           rightSourceSamples: procTrialPreview.rawSources
             .filter((item) => item.side === 'right')
-            .map((item) => ({ title: item.sourceName, rows: item.rows })),
+            .map((item) => {
+              const matchedSource = findSourceByPreview(item);
+              return {
+                title: matchedSource ? resolveDatasetDisplayName(matchedSource) : item.sourceName,
+                fieldLabelMap: mergeFieldLabelMaps(
+                  item.fieldLabelMap,
+                  resolveSourceFieldLabelMap(matchedSource),
+                ),
+              originLabel: item.sampleOriginLabel,
+              originHint: item.sampleOriginHint,
+              rows: item.rows,
+              };
+            }),
           leftOutputSamples: procTrialPreview.preparedOutputs
             .filter((item) => item.side === 'left')
-            .map((item) => ({ title: item.title, rows: item.rows })),
+            .map((item) => ({
+              title: item.title,
+              fieldLabelMap: item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              rows: item.rows,
+            })),
           rightOutputSamples: procTrialPreview.preparedOutputs
             .filter((item) => item.side === 'right')
-            .map((item) => ({ title: item.title, rows: item.rows })),
+            .map((item) => ({
+              title: item.title,
+              fieldLabelMap: item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              rows: item.rows,
+            })),
           validations: procTrialPreview.validations,
         }
       : undefined;
@@ -4132,6 +4834,8 @@ options.push({
           summary: reconTrialPreview.summary,
           leftSamples: reconTrialPreview.leftRows,
           rightSamples: reconTrialPreview.rightRows,
+          leftFieldLabelMap: reconTrialPreview.leftFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+          rightFieldLabelMap: reconTrialPreview.rightFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
           resultSamples: reconTrialPreview.results.map((item) => ({
             match_key: item.matchKey,
             result: item.result,
@@ -4140,6 +4844,7 @@ options.push({
             diff_amount: item.diffAmount,
             note: item.note,
           })),
+          resultFieldLabelMap: reconTrialPreview.resultFieldLabelMap || RECON_RESULT_FIELD_LABEL_MAP,
           resultSummary: reconTrialPreview.resultSummary,
         }
       : undefined;
@@ -4195,6 +4900,9 @@ options.push({
             }}
             onSelectExistingProcConfig={(configId) => void handleSelectExistingProcConfig(configId)}
             isGeneratingProc={isGeneratingProc}
+            generationSkill={procGenerationProgress?.skill}
+            generationPhase={procGenerationProgress?.phase}
+            generationMessage={procGenerationProgress?.message}
             isTrialingProc={isTrialingProc}
             onGenerateProc={generateProcDraft}
             onTrialProc={trialProcDraft}
@@ -4291,6 +4999,9 @@ options.push({
               )
             }
             isGeneratingRecon={isGeneratingRecon}
+            generationSkill={reconGenerationProgress?.skill}
+            generationPhase={reconGenerationProgress?.phase}
+            generationMessage={reconGenerationProgress?.message}
             isTrialingRecon={isTrialingRecon}
           />
 
@@ -4384,6 +5095,7 @@ options.push({
                 onClick={goToNextSchemeStep}
                 disabled={
                   isSubmittingScheme ||
+                  isSchemeWizardBusy ||
                   (schemeWizardStep === 1 && !schemeStepOneReady) ||
                   (schemeWizardStep === 2 && !schemeStepTwoReady) ||
                   (schemeWizardStep === 3 && !schemeStepThreeReady)
@@ -4695,13 +5407,21 @@ options.push({
               </p>
             </div>
             <div className="grid gap-4 xl:grid-cols-2">
-              <div className="rounded-3xl border border-border bg-surface-secondary p-4">
+              <div className="min-w-0 overflow-hidden rounded-3xl border border-border bg-surface-secondary p-4">
                 <p className="text-sm font-semibold text-text-primary">左侧数据</p>
-                <div className="mt-3 space-y-2">
+                <div className="mt-3 min-w-0 space-y-2">
                   {schemeMeta.leftSources.map((source) => (
-                    <div key={source.id || source.name} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                      <p className="text-sm font-medium text-text-primary">{source.name}</p>
-                      <p className="mt-1 text-xs text-text-secondary">
+                    <div
+                      key={source.id || source.name}
+                      className="min-w-0 overflow-hidden rounded-2xl border border-border bg-surface px-4 py-3"
+                    >
+                      <p
+                        className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
+                        title={source.name}
+                      >
+                        {source.name}
+                      </p>
+                      <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
                         {source.sourceName ? `${source.sourceName} · ` : ''}
                         {sourceKindLabel(source.sourceKind)}
                       </p>
@@ -4710,13 +5430,21 @@ options.push({
                   <p className="text-sm leading-6 text-text-secondary">{schemeMeta.leftDescription || '未补充说明。'}</p>
                 </div>
               </div>
-              <div className="rounded-3xl border border-border bg-surface-secondary p-4">
+              <div className="min-w-0 overflow-hidden rounded-3xl border border-border bg-surface-secondary p-4">
                 <p className="text-sm font-semibold text-text-primary">右侧数据</p>
-                <div className="mt-3 space-y-2">
+                <div className="mt-3 min-w-0 space-y-2">
                   {schemeMeta.rightSources.map((source) => (
-                    <div key={source.id || source.name} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                      <p className="text-sm font-medium text-text-primary">{source.name}</p>
-                      <p className="mt-1 text-xs text-text-secondary">
+                    <div
+                      key={source.id || source.name}
+                      className="min-w-0 overflow-hidden rounded-2xl border border-border bg-surface px-4 py-3"
+                    >
+                      <p
+                        className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
+                        title={source.name}
+                      >
+                        {source.name}
+                      </p>
+                      <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
                         {source.sourceName ? `${source.sourceName} · ` : ''}
                         {sourceKindLabel(source.sourceKind)}
                       </p>
@@ -4845,7 +5573,7 @@ options.push({
           ) : modalExceptions.length > 0 ? (
             <div className="overflow-x-auto rounded-3xl border border-border bg-surface">
               <div className="min-w-[940px]">
-                <div className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_140px] gap-6 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
+                <div className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_170px] gap-6 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
                   <span>异常内容</span>
                   <span>责任人</span>
                   <span>催办</span>
@@ -4855,18 +5583,26 @@ options.push({
                 {modalExceptions.map((item) => (
                   <div
                     key={item.id}
-                    className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_140px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
+                    className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_170px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-text-primary">{item.summary}</p>
                       <p className="mt-1 text-xs leading-5 text-text-secondary">
-                        {item.anomalyType || 'unknown'}
+                        {formatAnomalyTypeLabel(item.anomalyType)}
                         {item.latestFeedback ? ` · 最新反馈：${item.latestFeedback}` : ''}
                       </p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedExceptionDetail(item)}
+                        className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        查看详细
+                      </button>
                     </div>
                     <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
-                    <span className="text-sm text-text-secondary">{item.reminderStatus || '--'}</span>
-                    <span className="text-sm text-text-secondary">{item.processingStatus || '--'}</span>
+                    <span className="text-sm text-text-secondary">{formatReminderStatusLabel(item.reminderStatus)}</span>
+                    <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
                     <div className="flex items-center gap-2">
                       <span
                         className={cn(
@@ -4876,7 +5612,7 @@ options.push({
                             : 'border-amber-200 bg-amber-50 text-amber-700',
                         )}
                       >
-                        {item.fixStatus || (item.isClosed ? '已关闭' : '待修复')}
+                        {formatFixStatusLabel(item.fixStatus, item.isClosed)}
                       </span>
                     </div>
                   </div>
@@ -4995,6 +5731,162 @@ options.push({
         </div>
       ) : null}
 
+      {selectedExceptionDetail ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-8">
+          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
+              <div>
+                <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常详情</p>
+                <h3 className="mt-1 text-lg font-semibold text-text-primary">{selectedExceptionDetail.summary}</h3>
+                <p className="mt-2 text-sm text-text-secondary">
+                  {formatAnomalyTypeLabel(selectedExceptionDetail.anomalyType)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedExceptionDetail(null)}
+                className="rounded-lg p-2 text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                  <p className="text-xs text-text-secondary">责任人</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{selectedExceptionDetail.ownerName || '--'}</p>
+                </div>
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                  <p className="text-xs text-text-secondary">催办状态</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">
+                    {formatReminderStatusLabel(selectedExceptionDetail.reminderStatus)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                  <p className="text-xs text-text-secondary">处理进展</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">
+                    {formatProcessingStatusLabel(selectedExceptionDetail.processingStatus)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                  <p className="text-xs text-text-secondary">修复状态</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">
+                    {formatFixStatusLabel(selectedExceptionDetail.fixStatus, selectedExceptionDetail.isClosed)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                <p className="text-sm font-semibold text-text-primary">为什么对不上</p>
+                <div className="mt-3 space-y-2 text-sm leading-6 text-text-secondary">
+                  {selectedExceptionReasonLines.map((line) => (
+                    <p key={line}>{line}</p>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                  <p className="text-sm font-semibold text-text-primary">对账键</p>
+                  {selectedExceptionJoinKeys.length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {selectedExceptionJoinKeys.map((entry, index) => (
+                        <div key={`${selectedExceptionDetail.id}-join-${index}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <DetailRow
+                              label={`源侧字段 ${index + 1}`}
+                              value={`${toText(entry.source_field, '--')} = ${formatDetailValue(entry.source_value)}`}
+                            />
+                            <DetailRow
+                              label={`目标侧字段 ${index + 1}`}
+                              value={`${toText(entry.target_field, '--')} = ${formatDetailValue(entry.target_value)}`}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-sm text-text-secondary">当前没有返回对账键明细。</p>
+                  )}
+                </div>
+
+                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                  <p className="text-sm font-semibold text-text-primary">差异字段</p>
+                  {selectedExceptionCompareValues.length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {selectedExceptionCompareValues.map((entry, index) => (
+                        <div key={`${selectedExceptionDetail.id}-compare-${index}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                          <p className="text-sm font-medium text-text-primary">{toText(entry.name, `差异字段 ${index + 1}`)}</p>
+                          <div className="mt-2 grid gap-2 md:grid-cols-2">
+                            <DetailRow
+                              label="源侧"
+                              value={`${toText(entry.source_field, '--')} = ${formatDetailValue(entry.source_value)}`}
+                            />
+                            <DetailRow
+                              label="目标侧"
+                              value={`${toText(entry.target_field, '--')} = ${formatDetailValue(entry.target_value)}`}
+                            />
+                          </div>
+                          <DetailRow label="差额" value={formatDetailValue(entry.diff_value)} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-sm text-text-secondary">当前没有返回差异字段明细。</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                <p className="text-sm font-semibold text-text-primary">异常记录明细</p>
+                {Object.keys(selectedExceptionRawRecord).length > 0 ? (
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    {Object.entries(selectedExceptionRawRecord).map(([key, value]) => (
+                      <div key={`${selectedExceptionDetail.id}-field-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                        <p className="text-xs text-text-secondary">{key}</p>
+                        <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
+                          {formatDetailValue(value)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-text-secondary">当前没有返回原始异常记录。</p>
+                )}
+              </div>
+
+              {selectedExceptionDetail.latestFeedback ? (
+                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                  <p className="text-sm font-semibold text-text-primary">最新反馈</p>
+                  <p className="mt-3 text-sm leading-6 text-text-secondary">{selectedExceptionDetail.latestFeedback}</p>
+                </div>
+              ) : null}
+
+              {(toText(selectedExceptionPayload.source_ref) || toText(selectedExceptionPayload.target_ref)) ? (
+                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                  <p className="text-sm font-semibold text-text-primary">来源文件</p>
+                  <div className="mt-3 divide-y divide-border-subtle">
+                    <DetailRow label="源侧文件" value={toText(selectedExceptionPayload.source_ref, '--')} />
+                    <DetailRow label="目标侧文件" value={toText(selectedExceptionPayload.target_ref, '--')} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end border-t border-border px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setSelectedExceptionDetail(null)}
+                className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {wizardJsonPanel ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(15,23,42,0.24)] px-4 py-8">
           <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
@@ -5002,13 +5894,41 @@ options.push({
               <p className="text-sm font-semibold text-text-primary">
                 {wizardJsonPanel === 'proc' ? '数据整理配置 JSON' : '对账逻辑 JSON'}
               </p>
-              <button
-                type="button"
-                onClick={() => setWizardJsonPanel(null)}
-                className="rounded-lg p-2 text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyWizardJson(wizardJsonPanel)}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition',
+                    wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'error'
+                      ? 'border-red-200 bg-red-50 text-red-700'
+                      : 'border-border bg-surface text-text-primary hover:border-sky-200 hover:text-sky-700',
+                  )}
+                >
+                  {wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success' ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                  {wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success'
+                    ? '已复制'
+                    : wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'error'
+                    ? '复制失败'
+                    : '复制 JSON'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWizardJsonPanel(null);
+                    setWizardJsonCopyState(null);
+                  }}
+                  className="rounded-lg p-2 text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-5">
               <pre className="overflow-x-auto rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-xs leading-6 text-text-primary">

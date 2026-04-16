@@ -366,7 +366,7 @@ def list_companies() -> list[dict]:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql)
-                return [dict(r) for r in cur.fetchall()]
+                return [_normalize_record(dict(r)) for r in cur.fetchall()]
     except Exception as e:
         logger.error(f"查询公司列表失败: {e}")
         return []
@@ -396,7 +396,7 @@ def list_departments(company_id: str | None = None) -> list[dict]:
                         ORDER BY created_at DESC
                         """
                     )
-                return [dict(r) for r in cur.fetchall()]
+                return [_normalize_record(dict(r)) for r in cur.fetchall()]
     except Exception as e:
         logger.error(f"查询部门列表失败 (company_id={company_id}): {e}")
         return []
@@ -3711,6 +3711,39 @@ def update_unified_data_source_dataset_health(
         return None
 
 
+def update_unified_data_source_dataset_meta(
+    *,
+    dataset_id: str,
+    meta: dict | None = None,
+) -> dict | None:
+    """仅更新数据集 meta 字段。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE data_source_datasets
+                    SET meta = %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
+                              resource_key, dataset_kind, origin_type,
+                              extract_config, schema_summary, sync_strategy,
+                              status, is_enabled, health_status,
+                              last_checked_at, last_sync_at, last_error_message, meta,
+                              created_at, updated_at
+                    """,
+                    (psycopg2.extras.Json(meta or {}), dataset_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 data_source_datasets meta 失败 (id={dataset_id}): {e}")
+        return None
+
+
 def list_unified_rule_binding_requirements(
     *,
     company_id: str,
@@ -6424,6 +6457,76 @@ def list_execution_run_plans(
     except Exception as e:
         logger.error(f"查询 execution_run_plans 列表失败 (company_id={company_id}, scheme_code={scheme_code}): {e}")
         return []
+
+
+def list_enabled_execution_run_plans_for_scheduler(
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict]:
+    """供后台调度器查询全部启用中的运行计划。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, plan_code, plan_name, scheme_code,
+                           schedule_type, schedule_expr, biz_date_offset,
+                           input_bindings_json, channel_config_id,
+                           owner_mapping_json, plan_meta_json,
+                           is_enabled, created_by, created_at, updated_at
+                    FROM execution_run_plans
+                    WHERE is_enabled = true
+                    ORDER BY updated_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(f"查询启用中的 execution_run_plans 失败 (limit={limit}, offset={offset}): {e}")
+        return []
+
+
+def get_execution_run_by_schedule_slot(
+    *,
+    company_id: str,
+    plan_code: str,
+    schedule_slot: str,
+) -> dict | None:
+    """按计划编码 + 调度窗口查询已触发的执行记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                           trigger_type, entry_mode, execution_status,
+                           failed_stage, failed_reason,
+                           run_context_json, source_snapshot_json, subtasks_json,
+                           proc_result_json, recon_result_summary_json, artifacts_json,
+                           anomaly_count, started_at, finished_at, created_at, updated_at
+                    FROM execution_runs
+                    WHERE company_id = %s
+                      AND plan_code = %s
+                      AND trigger_type = 'schedule'
+                      AND COALESCE(run_context_json ->> 'schedule_slot', '') = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, plan_code, schedule_slot),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            "查询 execution_runs 调度窗口失败 "
+            f"(company_id={company_id}, plan_code={plan_code}, schedule_slot={schedule_slot}): {e}"
+        )
+        return None
 
 
 def create_execution_run(

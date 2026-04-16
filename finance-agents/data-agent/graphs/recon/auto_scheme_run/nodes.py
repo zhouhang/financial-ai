@@ -9,9 +9,13 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from models import AgentState
+from services.notifications import get_notification_adapter
+from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
     call_mcp_tool,
     data_source_get_published_snapshot,
+    data_source_trigger_sync,
+    execution_run_exception_update,
     get_file_validation_rule,
     recon_auto_task_get,
 )
@@ -30,8 +34,23 @@ def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _merge_feedback(existing: Any, patch: Any) -> dict[str, Any]:
+    return {**_safe_dict(existing), **_safe_dict(patch)}
+
+
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
+
+
+def _normalize_execution_trigger_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"chat", "schedule", "api"}:
+        return normalized
+    if normalized in {"cron", "scheduler", "scheduled"}:
+        return "schedule"
+    if normalized in {"manual", "manual_trigger", "retry"}:
+        return "api"
+    return "schedule"
 
 
 def _is_unknown_tool_error(error: Any) -> bool:
@@ -51,6 +70,83 @@ def _get_binding_required(binding: dict[str, Any]) -> bool:
     if "required" not in binding:
         return True
     return bool(binding.get("required"))
+
+
+def _build_plan_binding_from_source(source: dict[str, Any], date_field: str) -> dict[str, Any] | None:
+    source_id = str(source.get("source_id") or source.get("data_source_id") or "").strip()
+    table_name = str(
+        source.get("resource_key")
+        or source.get("dataset_code")
+        or source.get("name")
+        or ""
+    ).strip()
+    if not source_id or not table_name:
+        return None
+    query: dict[str, Any] = {"resource_key": table_name}
+    if date_field:
+        query["date_field"] = date_field
+    return {
+        "data_source_id": source_id,
+        "table_name": table_name,
+        "resource_key": table_name,
+        "dataset_source_type": "snapshot",
+        "query": query,
+    }
+
+
+def _infer_plan_bindings_from_scheme(
+    *,
+    run_plan: dict[str, Any],
+    scheme: dict[str, Any],
+) -> list[dict[str, Any]]:
+    plan_meta = _safe_dict(
+        run_plan.get("plan_meta_json")
+        or run_plan.get("plan_meta")
+        or run_plan.get("meta")
+    )
+    scheme_meta = _safe_dict(
+        scheme.get("scheme_meta_json")
+        or scheme.get("scheme_meta")
+        or scheme.get("meta")
+    )
+    left_time_semantic = str(
+        plan_meta.get("left_time_semantic")
+        or scheme_meta.get("left_time_semantic")
+        or ""
+    ).strip()
+    right_time_semantic = str(
+        plan_meta.get("right_time_semantic")
+        or scheme_meta.get("right_time_semantic")
+        or ""
+    ).strip()
+
+    bindings: list[dict[str, Any]] = []
+    for source in _safe_list(scheme_meta.get("left_sources")):
+        source_dict = _safe_dict(source)
+        binding = _build_plan_binding_from_source(source_dict, left_time_semantic)
+        if binding:
+            bindings.append(binding)
+    for source in _safe_list(scheme_meta.get("right_sources")):
+        source_dict = _safe_dict(source)
+        binding = _build_plan_binding_from_source(source_dict, right_time_semantic)
+        if binding:
+            bindings.append(binding)
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in bindings:
+        key = "::".join(
+            [
+                str(item.get("data_source_id") or ""),
+                str(item.get("table_name") or ""),
+                str(item.get("resource_key") or ""),
+            ]
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _build_recon_inputs_from_ready_snapshots(
@@ -179,7 +275,7 @@ async def _persist_execution_run(
             "scheme_code": scheme_code,
             "plan_code": str(ctx.get("run_plan_code") or ""),
             "scheme_type": str(ctx.get("scheme_type") or "recon"),
-            "trigger_type": str(run_context.get("trigger_type") or "schedule"),
+            "trigger_type": _normalize_execution_trigger_type(run_context.get("trigger_type")),
             "entry_mode": str(run_context.get("entry_mode") or "dataset"),
             "execution_status": execution_status,
             "failed_stage": failed_stage,
@@ -196,6 +292,13 @@ async def _persist_execution_run(
     )
     if bool(result.get("success")):
         return _safe_dict(result.get("run"))
+    logger.warning(
+        "[auto_scheme_run] execution_run_create failed: scheme_code=%s plan_code=%s trigger_type=%s error=%s",
+        scheme_code,
+        str(ctx.get("run_plan_code") or ""),
+        _normalize_execution_trigger_type(run_context.get("trigger_type")),
+        str(result.get("error") or ""),
+    )
     return {}
 
 
@@ -373,6 +476,22 @@ def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     run_plan = _safe_dict(ctx.get("run_plan"))
     bindings = [v for v in _safe_list(run_plan.get("input_bindings_json")) if isinstance(v, dict)]
+    if not bindings:
+        bindings = [
+            v for v in _safe_list(
+                _safe_dict(
+                    run_plan.get("plan_meta_json")
+                    or run_plan.get("plan_meta")
+                    or run_plan.get("meta")
+                ).get("input_bindings")
+            )
+            if isinstance(v, dict)
+        ]
+    if not bindings:
+        bindings = _infer_plan_bindings_from_scheme(
+            run_plan=run_plan,
+            scheme=_safe_dict(ctx.get("scheme")),
+        )
     ctx["plan_input_bindings"] = bindings
     return {"recon_ctx": ctx}
 
@@ -430,6 +549,8 @@ async def retry_collection_node(state: AgentState) -> dict[str, Any]:
     ready_snapshots = [v for v in _safe_list(ctx.get("ready_snapshots")) if isinstance(v, dict)]
     subtasks = [v for v in _safe_list(ctx.get("subtasks_json")) if isinstance(v, dict)]
     unresolved: list[dict[str, Any]] = []
+    biz_date = str(ctx.get("biz_date") or "")
+    run_plan_code = str(ctx.get("run_plan_code") or "")
 
     for binding in targets:
         source_id = _get_binding_source_id(binding)
@@ -438,12 +559,45 @@ async def retry_collection_node(state: AgentState) -> dict[str, Any]:
             unresolved.append(binding)
             continue
 
+        raw_query = _safe_dict(binding.get("query"))
+        resource_key = _get_binding_resource_key(binding)
+        trigger_result = await data_source_trigger_sync(
+            auth_token,
+            source_id,
+            idempotency_key="::".join(
+                [
+                    run_plan_code or "run_plan",
+                    source_id,
+                    resource_key,
+                    biz_date or "biz_date_unknown",
+                ]
+            ),
+            params={
+                "biz_date": biz_date,
+                "resource_key": resource_key,
+                "query": raw_query,
+            },
+        )
+        subtasks.append(
+            {
+                "type": "collect_trigger",
+                "dataset_code": str(binding.get("dataset_code") or table_name),
+                "source_id": source_id,
+                "table_name": table_name,
+                "status": "success" if bool(trigger_result.get("success")) else "failed",
+                "error": "" if bool(trigger_result.get("success")) else str(trigger_result.get("error") or "触发采集失败"),
+            }
+        )
+        if not bool(trigger_result.get("success")):
+            unresolved.append(binding)
+            continue
+
         succeeded = False
         for attempt in range(1, COLLECT_MAX_RETRIES + 1):
             result = await data_source_get_published_snapshot(
                 auth_token,
                 source_id,
-                resource_key=_get_binding_resource_key(binding),
+                resource_key=resource_key,
             )
             snapshot = _safe_dict(result.get("published_snapshot"))
             ok = bool(result.get("success")) and bool(snapshot)
@@ -518,7 +672,7 @@ def build_auto_run_context_node(state: AgentState) -> dict[str, Any]:
     run_context = _safe_dict(ctx.get("run_context"))
     run_context.update(
         {
-            "trigger_type": str(run_context.get("trigger_type") or "schedule"),
+            "trigger_type": _normalize_execution_trigger_type(run_context.get("trigger_type")),
             "entry_mode": "dataset",
             "biz_date": str(ctx.get("biz_date") or ""),
             "run_plan_code": str(ctx.get("run_plan_code") or ""),
@@ -551,17 +705,316 @@ async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
     status = str(ctx.get("exec_status") or "success")
-    normalized_status = "succeeded" if status in {"success", "partial_success", "skipped"} else "failed"
+    normalized_status = "success" if status in {"success", "partial_success", "skipped"} else "failed"
+    failed_stage = str(ctx.get("failed_stage") or "")
+    failed_reason = str(ctx.get("failed_reason") or "")
+    if normalized_status == "success":
+        # 成功态不应携带历史失败标记，否则 run API 会出现“已成功但返回失败”的语义漂移。
+        failed_stage = ""
+        failed_reason = ""
+        ctx["failed_stage"] = ""
+        ctx["failed_reason"] = ""
+
     run = await _persist_execution_run(
         auth_token=auth_token,
         ctx=ctx,
         execution_status=normalized_status,
-        failed_stage=str(ctx.get("failed_stage") or ""),
-        failed_reason=str(ctx.get("failed_reason") or ""),
+        failed_stage=failed_stage,
+        failed_reason=failed_reason,
     )
     if run:
         ctx["execution_run_record"] = run
     return {"recon_ctx": ctx}
+
+
+def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
+    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+    default_owner = _safe_dict(owner_mapping.get("default_owner"))
+    owner_name = str(default_owner.get("name") or default_owner.get("display_name") or "")
+    owner_identifier = str(default_owner.get("identifier") or default_owner.get("owner_identifier") or "")
+    raw_contact = (
+        default_owner.get("contact")
+        or default_owner.get("owner_contact_json")
+        or default_owner.get("contact_json")
+        or default_owner.get("contact_info")
+    )
+    owner_contact_json = _safe_dict(raw_contact)
+    owner_available = bool(owner_name or owner_identifier or owner_contact_json)
+    return owner_name, owner_identifier, owner_contact_json, owner_available
+
+
+def _compose_execution_exception_reminder_text(
+    *,
+    run_plan: dict[str, Any],
+    scheme: dict[str, Any],
+    biz_date: str,
+    exception: dict[str, Any],
+) -> tuple[str, str]:
+    plan_name = str(
+        run_plan.get("plan_name")
+        or run_plan.get("name")
+        or scheme.get("scheme_name")
+        or scheme.get("name")
+        or "自动对账任务"
+    ).strip()
+    scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
+    title = f"{plan_name} 异常催办"
+    lines = [
+        f"任务：{plan_name}",
+        f"业务日期：{biz_date}" if biz_date else "业务日期：未提供",
+        f"对账方案：{scheme_name}" if scheme_name else "",
+        f"异常类型：{str(exception.get('anomaly_type') or '未知')}",
+        f"异常摘要：{str(exception.get('summary') or '未提供')}",
+        "请尽快处理，并在待办中标记完成后同步给财务复核。",
+    ]
+    content = "\n".join(line for line in lines if line)
+    return title, content
+
+
+def _resolve_exception_mobile(exception: dict[str, Any]) -> str:
+    contact = _safe_dict(exception.get("owner_contact_json"))
+    return str(contact.get("mobile") or contact.get("phone") or contact.get("telephone") or "").strip()
+
+
+def _resolve_exception_user(adapter: Any, exception: dict[str, Any]) -> tuple[Any | None, str]:
+    owner_identifier = str(exception.get("owner_identifier") or "").strip()
+    owner_name = str(exception.get("owner_name") or "").strip()
+    mobile = _resolve_exception_mobile(exception)
+    last_message = ""
+
+    if owner_identifier:
+        resolved = adapter.resolve_user(user_id=owner_identifier)
+        if resolved.success:
+            user = resolved.resolved_user or (resolved.users[0] if resolved.users else None)
+            if user is not None:
+                return user, ""
+        last_message = resolved.message
+
+    if mobile:
+        resolved = adapter.resolve_user(mobile=mobile)
+        if resolved.success:
+            user = resolved.resolved_user or (resolved.users[0] if resolved.users else None)
+            if user is not None:
+                return user, ""
+        last_message = resolved.message
+
+    if owner_name:
+        resolved = adapter.resolve_user(keyword=owner_name)
+        if resolved.success:
+            user = resolved.resolved_user or (resolved.users[0] if resolved.users else None)
+            if user is not None:
+                return user, ""
+        last_message = resolved.message
+
+    return None, last_message or "责任人未能解析为可触达用户"
+
+
+async def _mark_execution_exception_status(
+    *,
+    auth_token: str,
+    exception: dict[str, Any],
+    reminder_status: str,
+    latest_feedback: str,
+    feedback_patch: dict[str, Any] | None = None,
+    owner_name: str | None = None,
+    owner_identifier: str | None = None,
+    owner_contact_json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    exception_id = str(exception.get("id") or exception.get("exception_id") or "").strip()
+    if not exception_id:
+        return exception
+
+    feedback_json = _merge_feedback(exception.get("feedback_json"), feedback_patch or {})
+    update_result = await execution_run_exception_update(
+        auth_token,
+        exception_id,
+        {
+            "owner_name": owner_name,
+            "owner_identifier": owner_identifier,
+            "owner_contact_json": owner_contact_json,
+            "reminder_status": reminder_status,
+            "latest_feedback": latest_feedback,
+            "feedback_json": feedback_json,
+        },
+    )
+    if bool(update_result.get("success")):
+        updated = _safe_dict(update_result.get("exception"))
+        if updated:
+            return updated
+    return {
+        **exception,
+        **({"owner_name": owner_name} if owner_name is not None else {}),
+        **({"owner_identifier": owner_identifier} if owner_identifier is not None else {}),
+        **({"owner_contact_json": owner_contact_json} if owner_contact_json is not None else {}),
+        "reminder_status": reminder_status,
+        "latest_feedback": latest_feedback,
+        "feedback_json": feedback_json,
+    }
+
+
+async def _send_execution_run_exception_reminder(
+    *,
+    auth_token: str,
+    exception_ref: dict[str, Any],
+    channel_config: Any,
+    run_plan: dict[str, Any],
+    scheme: dict[str, Any],
+    biz_date: str,
+) -> dict[str, Any]:
+    exception = _safe_dict(exception_ref.get("exception"))
+    exception_id = str(exception_ref.get("exception_id") or exception.get("id") or "").strip()
+    if not exception_id:
+        return {
+            "status": "skipped",
+            "reason": "missing_exception_id",
+            "error": "异常记录缺少 exception_id，无法自动催办",
+            "exception_id": "",
+            "exception": exception,
+        }
+
+    if not any(
+        [
+            str(exception.get("owner_name") or "").strip(),
+            str(exception.get("owner_identifier") or "").strip(),
+            _resolve_exception_mobile(exception),
+        ]
+    ):
+        updated = await _mark_execution_exception_status(
+            auth_token=auth_token,
+            exception=exception,
+            reminder_status="owner_missing",
+            latest_feedback="运行计划未配置可触达的责任人，已跳过自动催办",
+            feedback_patch={"auto_notify_skipped_reason": "owner_missing"},
+        )
+        return {
+            "status": "skipped",
+            "reason": "owner_missing",
+            "error": "缺少责任人信息",
+            "exception_id": exception_id,
+            "exception": updated,
+        }
+
+    adapter = get_notification_adapter(
+        provider=str(getattr(channel_config, "provider", "") or ""),
+        channel_config=channel_config,
+    )
+    resolved_user, resolve_error = _resolve_exception_user(adapter, exception)
+    if resolved_user is None:
+        updated = await _mark_execution_exception_status(
+            auth_token=auth_token,
+            exception=exception,
+            reminder_status="owner_unresolved",
+            latest_feedback=resolve_error,
+            feedback_patch={"auto_notify_skipped_reason": "owner_unresolved"},
+        )
+        return {
+            "status": "skipped",
+            "reason": "owner_unresolved",
+            "error": resolve_error,
+            "exception_id": exception_id,
+            "exception": updated,
+        }
+
+    title, content = _compose_execution_exception_reminder_text(
+        run_plan=run_plan,
+        scheme=scheme,
+        biz_date=biz_date,
+        exception=exception,
+    )
+    reminder = adapter.send_reminder(
+        title=title,
+        content=content,
+        assignee_user_id=str(resolved_user.user_id or ""),
+        source_id=exception_id,
+    )
+    if not reminder.success:
+        updated = await _mark_execution_exception_status(
+            auth_token=auth_token,
+            exception=exception,
+            owner_name=str(resolved_user.display_name or exception.get("owner_name") or ""),
+            owner_identifier=str(resolved_user.user_id or ""),
+            owner_contact_json={
+                "provider": adapter.provider,
+                "display_name": str(resolved_user.display_name or ""),
+                "mobile": str(resolved_user.mobile or ""),
+            },
+            reminder_status="send_failed",
+            latest_feedback=str(reminder.message or "自动催办发送失败"),
+            feedback_patch={
+                "provider": adapter.provider,
+                "channel_config_id": str(getattr(channel_config, "id", "") or ""),
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "send_failed",
+            "error": str(reminder.message or "自动催办发送失败"),
+            "exception_id": exception_id,
+            "exception": updated,
+        }
+
+    feedback_patch = {
+        "provider": adapter.provider,
+        "channel_config_id": str(getattr(channel_config, "id", "") or ""),
+        "message_id": reminder.bot_result.message_id if reminder.bot_result else "",
+        "todo_id": reminder.todo_result.todo.todo_id if reminder.todo_result and reminder.todo_result.todo else "",
+        "last_reminded_at": datetime.now().isoformat(),
+    }
+    updated = await _mark_execution_exception_status(
+        auth_token=auth_token,
+        exception=exception,
+        owner_name=str(resolved_user.display_name or exception.get("owner_name") or ""),
+        owner_identifier=str(resolved_user.user_id or ""),
+        owner_contact_json={
+            "provider": adapter.provider,
+            "display_name": str(resolved_user.display_name or ""),
+            "mobile": str(resolved_user.mobile or ""),
+        },
+        reminder_status="sent",
+        latest_feedback="已自动发送催办消息并创建待办",
+        feedback_patch=feedback_patch,
+    )
+    return {
+        "status": "sent",
+        "reason": "",
+        "error": "",
+        "exception_id": exception_id,
+        "exception": updated,
+        "reminder": {
+            "provider": adapter.provider,
+            "message_id": feedback_patch.get("message_id"),
+            "todo_id": feedback_patch.get("todo_id"),
+        },
+    }
+
+
+async def _mark_created_exceptions_skipped(
+    *,
+    auth_token: str,
+    created_exceptions: list[dict[str, Any]],
+    reminder_status: str,
+    latest_feedback: str,
+    feedback_patch: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    updated_refs: list[dict[str, Any]] = []
+    for item in created_exceptions:
+        item_dict = _safe_dict(item)
+        exception = _safe_dict(item_dict.get("exception"))
+        updated = await _mark_execution_exception_status(
+            auth_token=auth_token,
+            exception=exception,
+            reminder_status=reminder_status,
+            latest_feedback=latest_feedback,
+            feedback_patch=feedback_patch,
+        )
+        updated_refs.append(
+            {
+                **item_dict,
+                "exception_id": str(item_dict.get("exception_id") or updated.get("id") or ""),
+                "exception": updated,
+            }
+        )
+    return updated_refs
 
 
 async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
@@ -574,7 +1027,17 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     if not run_id or not scheme_code or not anomalies:
         return {"recon_ctx": ctx}
 
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    owner_name, owner_identifier, owner_contact_json, owner_available = _resolve_run_plan_default_owner(run_plan)
+    ctx["exception_owner_available"] = owner_available
+    ctx["exception_owner_info"] = {
+        "name": owner_name,
+        "identifier": owner_identifier,
+        "contact_json": owner_contact_json,
+    }
+
     created = 0
+    created_exceptions: list[dict[str, Any]] = []
     for idx, item in enumerate(anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         payload = {
@@ -585,20 +1048,182 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             "anomaly_type": str(item.get("anomaly_type") or "unknown"),
             "summary": str(item.get("summary") or "异常"),
             "detail_json": item,
-            "owner_name": "",
-            "owner_identifier": "",
-            "owner_contact_json": {},
+            "owner_name": owner_name,
+            "owner_identifier": owner_identifier,
+            "owner_contact_json": owner_contact_json,
         }
         result = await call_mcp_tool("execution_run_exception_create", payload)
         if bool(result.get("success")):
             created += 1
+            exception = _safe_dict(result.get("exception"))
+            created_exceptions.append(
+                {
+                    "anomaly_key": anomaly_key,
+                    "exception_id": str(exception.get("id") or exception.get("exception_id") or ""),
+                    "exception": exception,
+                }
+            )
 
     ctx["exception_created_count"] = created
+    ctx["created_exceptions"] = created_exceptions
     return {"recon_ctx": ctx}
 
 
-def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
-    """Auto notify placeholder. Real channel dispatch stays outside this graph for now."""
+async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
-    ctx["auto_notify_status"] = "skipped"
+    auth_token = str(state.get("auth_token") or "")
+    created_exceptions = [item for item in _safe_list(ctx.get("created_exceptions")) if isinstance(item, dict)]
+    if not created_exceptions:
+        ctx["auto_notify_status"] = "skipped_no_exception"
+        ctx["auto_notify_result"] = {
+            "total": 0,
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+            "items": [],
+        }
+        return {"recon_ctx": ctx}
+
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    channel_config_id = str(run_plan.get("channel_config_id") or "").strip()
+    if not channel_config_id:
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=created_exceptions,
+            reminder_status="channel_missing",
+            latest_feedback="运行计划未配置协作通道，已跳过自动催办",
+            feedback_patch={"auto_notify_skipped_reason": "channel_missing"},
+        )
+        ctx["created_exceptions"] = updated_refs
+        ctx["auto_notify_status"] = "skipped_no_channel"
+        ctx["auto_notify_result"] = {
+            "total": len(created_exceptions),
+            "sent": 0,
+            "failed": 0,
+            "skipped": len(created_exceptions),
+            "channel_config_id": "",
+            "items": [
+                {
+                    "exception_id": str(item.get("exception_id") or ""),
+                    "status": "skipped",
+                    "reason": "channel_missing",
+                }
+                for item in updated_refs
+            ],
+        }
+        return {"recon_ctx": ctx}
+
+    channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+    if channel_config is None:
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=created_exceptions,
+            reminder_status="channel_missing",
+            latest_feedback="运行计划协作通道不可用，已跳过自动催办",
+            feedback_patch={"auto_notify_skipped_reason": "channel_config_not_found"},
+        )
+        ctx["created_exceptions"] = updated_refs
+        ctx["auto_notify_status"] = "skipped_no_channel"
+        ctx["auto_notify_result"] = {
+            "total": len(created_exceptions),
+            "sent": 0,
+            "failed": 0,
+            "skipped": len(created_exceptions),
+            "channel_config_id": channel_config_id,
+            "items": [
+                {
+                    "exception_id": str(item.get("exception_id") or ""),
+                    "status": "skipped",
+                    "reason": "channel_config_not_found",
+                }
+                for item in updated_refs
+            ],
+        }
+        return {"recon_ctx": ctx}
+
+    scheme = _safe_dict(ctx.get("scheme"))
+    biz_date = str(
+        ctx.get("biz_date")
+        or _safe_dict(ctx.get("run_context")).get("biz_date")
+        or _safe_dict(ctx.get("execution_run_record")).get("biz_date")
+        or ""
+    ).strip()
+
+    sent_count = 0
+    failed_count = 0
+    skipped_count = 0
+    results: list[dict[str, Any]] = []
+    updated_refs: list[dict[str, Any]] = []
+
+    try:
+        for item in created_exceptions:
+            item_dict = _safe_dict(item)
+            result = await _send_execution_run_exception_reminder(
+                auth_token=auth_token,
+                exception_ref=item_dict,
+                channel_config=channel_config,
+                run_plan=run_plan,
+                scheme=scheme,
+                biz_date=biz_date,
+            )
+            status = str(result.get("status") or "")
+            if status == "sent":
+                sent_count += 1
+            elif status == "failed":
+                failed_count += 1
+            else:
+                skipped_count += 1
+
+            updated_refs.append(
+                {
+                    **item_dict,
+                    "exception_id": str(result.get("exception_id") or item_dict.get("exception_id") or ""),
+                    "exception": _safe_dict(result.get("exception")) or _safe_dict(item_dict.get("exception")),
+                }
+            )
+            results.append(
+                {
+                    "exception_id": str(result.get("exception_id") or ""),
+                    "status": status,
+                    "reason": str(result.get("reason") or ""),
+                    "error": str(result.get("error") or ""),
+                }
+            )
+    except Exception as exc:
+        logger.error("[recon][auto_notify] 自动催办失败: %s", exc)
+        ctx["auto_notify_status"] = "failed"
+        ctx["auto_notify_result"] = {
+            "total": len(created_exceptions),
+            "sent": sent_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "channel_config_id": channel_config_id,
+            "provider": str(getattr(channel_config, "provider", "") or ""),
+            "error": str(exc),
+            "items": results,
+        }
+        return {"recon_ctx": ctx}
+
+    total = len(created_exceptions)
+    if sent_count == total:
+        auto_notify_status = "sent"
+    elif sent_count > 0:
+        auto_notify_status = "partial_success"
+    elif failed_count > 0:
+        auto_notify_status = "failed"
+    else:
+        auto_notify_status = "skipped"
+
+    ctx["created_exceptions"] = updated_refs
+    ctx["auto_notify_status"] = auto_notify_status
+    ctx["auto_notify_result"] = {
+        "total": total,
+        "sent": sent_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
+        "channel_config_id": channel_config_id,
+        "provider": str(getattr(channel_config, "provider", "") or ""),
+        "channel_name": str(getattr(channel_config, "name", "") or ""),
+        "items": results,
+    }
     return {"recon_ctx": ctx}

@@ -31,11 +31,13 @@ from tools.mcp_client import (
     data_source_list_datasets,
     data_source_list_events,
     data_source_list_sync_jobs,
+    data_source_refresh_dataset_semantic_profile,
     data_source_preflight_rule_binding,
     data_source_preview,
     data_source_test,
     data_source_trigger_sync,
     data_source_upsert_dataset,
+    data_source_update_dataset_semantic_profile,
     data_source_update,
 )
 
@@ -373,6 +375,8 @@ class DataSourceDisableRequest(BaseModel):
 
 class DataSourceTestRequest(BaseModel):
     mode: str = ""
+    connection_config: dict[str, Any] = Field(default_factory=dict)
+    auth_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class DataSourceDeleteResponse(BaseModel):
@@ -509,6 +513,22 @@ class DataSourceDatasetDisableRequest(BaseModel):
     mode: str = ""
 
 
+class DataSourceDatasetSemanticRefreshRequest(BaseModel):
+    sample_limit: int = 10
+    mode: str = ""
+
+
+class DataSourceDatasetSemanticUpdateRequest(BaseModel):
+    semantic_profile: dict[str, Any] = Field(default_factory=dict)
+    business_name: str = ""
+    business_description: str = ""
+    key_fields: list[str] = Field(default_factory=list)
+    field_label_map: dict[str, Any] = Field(default_factory=dict)
+    fields: list[dict[str, Any]] = Field(default_factory=list)
+    status: str = ""
+    mode: str = ""
+
+
 class DataSourceDatasetUpsertResponse(BaseModel):
     success: bool
     mode: str = "mock"
@@ -531,6 +551,8 @@ class DataSourceDiscoverRequest(BaseModel):
     manual_endpoints: list[dict[str, Any]] = Field(default_factory=list)
     manual_endpoint: dict[str, Any] | None = None
     mode: str = ""
+    connection_config: dict[str, Any] = Field(default_factory=dict)
+    auth_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class DataSourceDiscoverResponse(BaseModel):
@@ -728,7 +750,13 @@ async def test_data_source(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
 
-    result = await data_source_test(auth_token, source_id, mode=body.mode)
+    result = await data_source_test(
+        auth_token,
+        source_id,
+        mode=body.mode,
+        connection_config=body.connection_config,
+        auth_config=body.auth_config,
+    )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "数据源测试失败"))
     return result
@@ -1070,6 +1098,72 @@ async def disable_data_source_dataset(
     )
 
 
+@router.post("/data-sources/{source_id}/datasets/{dataset_id}/semantic-profile", response_model=DataSourceDatasetUpsertResponse)
+async def refresh_data_source_dataset_semantic_profile(
+    source_id: str,
+    dataset_id: str,
+    body: DataSourceDatasetSemanticRefreshRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_refresh_dataset_semantic_profile(
+        auth_token,
+        dataset_id=dataset_id,
+        source_id=source_id,
+        sample_limit=body.sample_limit,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "刷新数据集语义层失败"))
+    return DataSourceDatasetUpsertResponse(
+        success=True,
+        mode=str(result.get("mode") or body.mode or "mock"),
+        source_id=source_id,
+        dataset=result.get("dataset"),
+        source_summary=result.get("source_summary") or {},
+        message=str(result.get("message") or "数据集语义层已刷新"),
+    )
+
+
+@router.patch("/data-sources/{source_id}/datasets/{dataset_id}/semantic-profile", response_model=DataSourceDatasetUpsertResponse)
+async def update_data_source_dataset_semantic_profile(
+    source_id: str,
+    dataset_id: str,
+    body: DataSourceDatasetSemanticUpdateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_update_dataset_semantic_profile(
+        auth_token,
+        dataset_id=dataset_id,
+        source_id=source_id,
+        semantic_profile=body.semantic_profile,
+        business_name=body.business_name,
+        business_description=body.business_description,
+        key_fields=body.key_fields,
+        field_label_map=body.field_label_map,
+        fields=body.fields,
+        status=body.status,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "更新数据集语义层失败"))
+    return DataSourceDatasetUpsertResponse(
+        success=True,
+        mode=str(result.get("mode") or body.mode or "mock"),
+        source_id=source_id,
+        dataset=result.get("dataset"),
+        source_summary=result.get("source_summary") or {},
+        message=str(result.get("message") or "数据集语义层已更新"),
+    )
+
+
 @router.post("/data-sources/{source_id}/discover", response_model=DataSourceDiscoverResponse)
 async def discover_data_source_datasets(
     source_id: str,
@@ -1102,6 +1196,8 @@ async def discover_data_source_datasets(
         openapi_spec=discover_inputs.get("openapi_spec"),
         manual_endpoints=discover_inputs.get("manual_endpoints"),
         mode=body.mode,
+        connection_config=body.connection_config,
+        auth_config=body.auth_config,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=_safe_result_error(result, "发现数据集失败"))

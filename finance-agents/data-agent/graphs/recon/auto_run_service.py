@@ -19,7 +19,10 @@ from graphs.recon.execution_service import (
 from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from services.notifications import get_notification_adapter
 from services.notifications.models import UnifiedTodoStatus
+from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
+    execution_run_exception_get,
+    execution_run_exception_update,
     data_source_get_published_snapshot,
     get_file_validation_rule,
     recon_auto_run_create,
@@ -35,6 +38,7 @@ from tools.mcp_client import (
 
 logger = logging.getLogger(__name__)
 _BIZ_DATE_PLACEHOLDER = re.compile(r"\{\{\s*biz_date\s*\}\}")
+_RUN_SUCCESS_STATUSES = {"success", "partial_success", "skipped"}
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -50,6 +54,20 @@ def _parse_biz_date(value: str) -> str:
     if not text:
         raise ValueError("biz_date 不能为空")
     return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+
+
+def _normalize_status_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_run_plan_execution_success(ctx: dict[str, Any], run_record: dict[str, Any]) -> bool:
+    run_status = _normalize_status_text(run_record.get("execution_status"))
+    if run_status:
+        return run_status in _RUN_SUCCESS_STATUSES
+
+    exec_status = _normalize_status_text(ctx.get("exec_status"))
+    failed_reason = str(ctx.get("failed_reason") or ctx.get("exec_error") or "").strip()
+    return exec_status in _RUN_SUCCESS_STATUSES and not failed_reason
 
 
 def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -167,7 +185,7 @@ def _shift_biz_date(biz_date: str, offset_days: int) -> str:
 
 def _materialize_binding_query(binding: dict[str, Any], *, biz_date: str) -> dict[str, Any]:
     resolved_query = _safe_dict(_resolve_query_placeholders(_safe_dict(binding.get("query")), biz_date=biz_date))
-    biz_date_filter = _safe_dict(resolved_query.pop("biz_date_filter"))
+    biz_date_filter = _safe_dict(resolved_query.pop("biz_date_filter", None))
     if not biz_date_filter:
         return resolved_query
 
@@ -296,13 +314,16 @@ async def execute_run_plan_run(
         run_context=run_context,
     )
     ctx = _safe_dict(output.get("recon_ctx"))
-    exec_status = str(ctx.get("exec_status") or "").strip()
-    failed_reason = str(ctx.get("failed_reason") or "").strip()
-    failed_stage = str(ctx.get("failed_stage") or "").strip()
-    non_error_statuses = {"success", "partial_success", "skipped"}
-    success = (exec_status in non_error_statuses) and not failed_reason
 
     run_record = _safe_dict(ctx.get("execution_run_record"))
+    failed_reason = str(
+        ctx.get("failed_reason")
+        or run_record.get("failed_reason")
+        or ctx.get("exec_error")
+        or ""
+    ).strip()
+    failed_stage = str(ctx.get("failed_stage") or run_record.get("failed_stage") or "").strip()
+    success = _is_run_plan_execution_success(ctx, run_record)
     return {
         "success": success,
         "error": "" if success else (failed_reason or str(ctx.get("exec_error") or "执行失败")),
@@ -750,6 +771,108 @@ async def sync_exception_reminder(
         patch["reminder_status"] = "sync_failed"
 
     update_result = await recon_exception_update(auth_token, exception_id, patch)
+    return {
+        "success": True,
+        "exception": _safe_dict(update_result.get("exception")) or exception,
+        "sync": {
+            "todo_id": todo_id,
+            "status": status.value,
+            "is_terminal": bool(sync_result.is_terminal),
+            "polls": int(sync_result.polls),
+        },
+    }
+
+
+async def sync_execution_run_exception_reminder(
+    *,
+    auth_token: str,
+    exception_id: str,
+    provider: str = "",
+    channel_code: str = "",
+    max_polls: int = 1,
+    poll_interval_seconds: float = 2.0,
+) -> dict[str, Any]:
+    exception_result = await execution_run_exception_get(auth_token, exception_id)
+    if not exception_result.get("success"):
+        return {"success": False, "error": exception_result.get("error", "异常处理项不存在")}
+
+    exception = _safe_dict(exception_result.get("exception"))
+    feedback_json = _safe_dict(exception.get("feedback_json"))
+    todo_id = str(feedback_json.get("todo_id") or "").strip()
+    if not todo_id:
+        return {"success": False, "error": "异常尚未创建待办，无法同步状态", "exception": exception}
+
+    try:
+        adapter = None
+        channel_config_id = str(feedback_json.get("channel_config_id") or "").strip()
+        if channel_config_id:
+            channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+            if channel_config is not None:
+                adapter = get_notification_adapter(
+                    provider=str(getattr(channel_config, "provider", "") or provider or ""),
+                    channel_config=channel_config,
+                )
+
+        if adapter is None:
+            adapter = get_notification_adapter(
+                provider=provider or str(feedback_json.get("provider") or ""),
+                company_id=str(exception.get("company_id") or ""),
+                channel_code=channel_code or None,
+            )
+
+        sync_result = adapter.sync_todo_status(
+            todo_id=todo_id,
+            max_polls=max(1, max_polls),
+            poll_interval_seconds=max(0.5, poll_interval_seconds),
+        )
+    except Exception as exc:
+        message = str(exc) or "同步待办状态失败"
+        logger.error("[recon][execution_run_exception] 同步待办状态失败: %s", exc)
+        await execution_run_exception_update(
+            auth_token,
+            exception_id,
+            {
+                "latest_feedback": message,
+            },
+        )
+        return {"success": False, "error": message, "exception": exception}
+
+    if not sync_result.success:
+        await execution_run_exception_update(
+            auth_token,
+            exception_id,
+            {
+                "latest_feedback": sync_result.message,
+            },
+        )
+        return {"success": False, "error": sync_result.message, "exception": exception}
+
+    status = sync_result.status
+    patch: dict[str, Any] = {
+        "feedback_json": _merge_feedback(
+            feedback_json,
+            {
+                "todo_status": status.value,
+                "todo_synced_at": datetime.now().isoformat(),
+            },
+        ),
+        "latest_feedback": f"待办状态已同步为 {status.value}",
+    }
+    if status == UnifiedTodoStatus.COMPLETED:
+        patch.update(
+            {
+                "processing_status": "owner_done",
+                "fix_status": "ready_for_verify",
+                "verify_required": True,
+                "reminder_status": "completed",
+            }
+        )
+    elif status == UnifiedTodoStatus.CANCELLED:
+        patch["reminder_status"] = "cancelled"
+    elif status == UnifiedTodoStatus.FAILED:
+        patch["reminder_status"] = "sync_failed"
+
+    update_result = await execution_run_exception_update(auth_token, exception_id, patch)
     return {
         "success": True,
         "exception": _safe_dict(update_result.get("exception")) or exception,

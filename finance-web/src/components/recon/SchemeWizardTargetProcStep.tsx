@@ -19,6 +19,9 @@ export interface SchemeDraftLite {
 export interface SchemeSourceOption {
   id: string;
   name: string;
+  businessName?: string;
+  technicalName?: string;
+  fieldLabelMap?: Record<string, string>;
   sourceId: string;
   sourceName: string;
   sourceKind: string;
@@ -35,6 +38,9 @@ export interface ProcSampleRow {
 
 export interface ProcSampleGroup {
   title: string;
+  originLabel?: string;
+  originHint?: string;
+  fieldLabelMap?: Record<string, string>;
   rows: ProcSampleRow[];
 }
 
@@ -54,7 +60,7 @@ export interface ExistingConfigOption {
 }
 
 export interface CompatibilityCheckResult {
-  status: 'idle' | 'passed' | 'failed';
+  status: 'idle' | 'passed' | 'failed' | 'warning';
   message: string;
   details: string[];
 }
@@ -76,6 +82,9 @@ export interface SchemeWizardTargetProcStepProps {
   onProcConfigModeChange: (mode: 'ai' | 'existing') => void;
   onSelectExistingProcConfig: (configId: string) => void;
   isGeneratingProc?: boolean;
+  generationSkill?: string;
+  generationPhase?: string;
+  generationMessage?: string;
   isTrialingProc?: boolean;
   onGenerateProc: () => void;
   onTrialProc: () => void;
@@ -114,7 +123,35 @@ function formatSourceLabel(source: SchemeSourceOption) {
   return source.description || source.providerCode || source.sourceKind;
 }
 
-function RowTable({ rows }: { rows: ProcSampleRow[] }) {
+function resolveDatasetDisplayName(source: SchemeSourceOption): string {
+  return source.businessName?.trim() || source.name;
+}
+
+function resolveDatasetTechnicalName(source: SchemeSourceOption): string {
+  return source.technicalName?.trim()
+    || source.datasetCode
+    || source.resourceKey
+    || source.datasetKind
+    || formatSourceLabel(source);
+}
+
+function formatGenerationPhase(phase: string) {
+  if (phase === 'preparing_context') return '准备样例';
+  if (phase === 'generating_rule') return '生成规则';
+  if (phase === 'validating_rule') return '校验 JSON';
+  if (phase === 'rendering_draft_text') return '整理说明';
+  if (phase === 'completed') return '生成完成';
+  if (phase === 'failed') return '生成失败';
+  return '处理中';
+}
+
+function RowTable({
+  rows,
+  fieldLabelMap,
+}: {
+  rows: ProcSampleRow[];
+  fieldLabelMap?: Record<string, string>;
+}) {
   if (!rows || rows.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-border bg-surface px-4 py-4 text-xs text-text-secondary">
@@ -130,11 +167,20 @@ function RowTable({ rows }: { rows: ProcSampleRow[] }) {
       <table className="w-full min-w-[520px] border-collapse text-xs">
         <thead>
           <tr className="border-b border-border-subtle text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-            {columns.map((col) => (
-              <th key={col} className="px-4 py-2 text-left font-semibold">
-                <span className="block max-w-[200px] truncate">{col}</span>
-              </th>
-            ))}
+            {columns.map((col) => {
+              const label = fieldLabelMap?.[col]?.trim();
+              const hasAlias = Boolean(label && label !== col);
+              return (
+                <th key={col} className="px-4 py-2 text-left font-semibold">
+                  <span className="block max-w-[220px] truncate">{label || col}</span>
+                  {hasAlias ? (
+                    <span className="mt-0.5 block max-w-[220px] truncate text-[10px] font-normal normal-case tracking-normal text-text-muted">
+                      {col}
+                    </span>
+                  ) : null}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -161,8 +207,18 @@ function RowTable({ rows }: { rows: ProcSampleRow[] }) {
 function SampleGroup({ group }: { group: ProcSampleGroup }) {
   return (
     <div className="space-y-2">
-      <p className="text-xs font-semibold text-text-secondary">{group.title}</p>
-      <RowTable rows={group.rows} />
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-xs font-semibold text-text-secondary">{group.title}</p>
+        {group.originLabel ? (
+          <span
+            title={group.originHint || group.originLabel}
+            className="inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-700"
+          >
+            {group.originLabel}
+          </span>
+        ) : null}
+      </div>
+      <RowTable rows={group.rows} fieldLabelMap={group.fieldLabelMap} />
     </div>
   );
 }
@@ -245,7 +301,7 @@ function MultiSelectDropdown({
     return Array.from(groups.values());
   }, [sources]);
   const selectedNames = useMemo(
-    () => sources.filter((s) => selectedIds.includes(s.id)).map((s) => s.name),
+    () => sources.filter((s) => selectedIds.includes(s.id)).map((s) => resolveDatasetDisplayName(s)),
     [sources, selectedIds],
   );
   const displayText = selectedNames.length > 0 ? selectedNames.join('、') : '请选择数据集（可多选）';
@@ -341,9 +397,9 @@ function MultiSelectDropdown({
                                 className="mt-1 h-4 w-4 rounded border-border text-sky-600 focus:ring-sky-200"
                               />
                               <div className="min-w-0">
-                                <p className="truncate text-sm font-medium text-text-primary">{dataset.name}</p>
+                                <p className="truncate text-sm font-medium text-text-primary">{resolveDatasetDisplayName(dataset)}</p>
                                 <p className="mt-1 text-xs text-text-secondary">
-                                  {dataset.datasetCode || dataset.resourceKey || dataset.datasetKind || formatSourceLabel(dataset)}
+                                  {resolveDatasetTechnicalName(dataset)}
                                 </p>
                               </div>
                             </label>
@@ -487,6 +543,9 @@ export default function SchemeWizardTargetProcStep({
   onProcConfigModeChange,
   onSelectExistingProcConfig,
   isGeneratingProc = false,
+  generationSkill = '整理配置生成器',
+  generationPhase = 'generating_rule',
+  generationMessage = '正在分析左右数据集结构与描述，并生成数据整理 JSON。',
   isTrialingProc = false,
   onGenerateProc,
   onTrialProc,
@@ -657,6 +716,8 @@ export default function SchemeWizardTargetProcStep({
               'mt-4 rounded-2xl border px-4 py-3 text-sm',
               procCompatibility.status === 'passed'
                 ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : procCompatibility.status === 'warning'
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
                 : procCompatibility.status === 'failed'
                 ? 'border-amber-200 bg-amber-50 text-amber-700'
                 : 'border-border bg-surface text-text-secondary',
@@ -686,10 +747,10 @@ export default function SchemeWizardTargetProcStep({
             <p className="text-sm font-semibold text-text-primary">数据整理</p>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {[
-              { label: '左侧数据', value: selectedLeftSources.map((item) => item.name).join('、') || '--' },
+              {[
+              { label: '左侧数据', value: selectedLeftSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--' },
               { label: '左侧描述', value: schemeDraft.leftDescription || '--' },
-              { label: '右侧数据', value: selectedRightSources.map((item) => item.name).join('、') || '--' },
+              { label: '右侧数据', value: selectedRightSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--' },
               { label: '右侧描述', value: schemeDraft.rightDescription || '--' },
             ].map((item) => (
               <div key={item.label} className="rounded-2xl border border-border bg-surface px-4 py-3">
@@ -712,9 +773,21 @@ export default function SchemeWizardTargetProcStep({
         <>
           <div className="flex flex-wrap items-center gap-3">
             {isGeneratingProc ? (
-              <div className="flex items-center gap-2 text-sm font-medium text-sky-700">
-                <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-                AI 正在生成整理配置，请稍候…
+              <div className="w-full rounded-2xl border border-sky-200 bg-sky-50/70 px-4 py-3 text-sky-700">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
+                  AI 正在生成整理配置，请稍候…
+                </div>
+                <div className="mt-2 space-y-1 text-xs leading-6 text-sky-700/90">
+                  <p>
+                    当前生成器：
+                    <span className="ml-1 rounded-full border border-sky-200 bg-white/70 px-2 py-0.5 font-semibold text-sky-700">
+                      {generationSkill}
+                    </span>
+                  </p>
+                  <p>当前阶段：{formatGenerationPhase(generationPhase)}</p>
+                  <p>{generationMessage}</p>
+                </div>
               </div>
             ) : (
               <button
