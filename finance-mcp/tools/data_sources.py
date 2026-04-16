@@ -12,16 +12,21 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import psycopg2.extras
 from mcp import Tool
 
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from connectors.factory import build_connector
+from security_utils import UPLOAD_ROOT
 from tools.platform_connections import handle_tool_call as handle_platform_tool_call
 
 logger = logging.getLogger("tools.data_sources")
@@ -51,6 +56,336 @@ DATASET_ORIGIN_TYPES = {"fixed", "discovered", "imported_openapi", "manual"}
 AUTO_DISCOVER_DATASET_LIMIT = 300
 AUTO_SAMPLE_DATASET_LIMIT = 20
 AUTO_SAMPLE_ROW_LIMIT = 10
+SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "manual_updated"}
+SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
+SEMANTIC_SAMPLE_ROW_LIMIT = 10
+
+_FIELD_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+_SEMANTIC_ROLE_HINTS: dict[str, tuple[tuple[str, ...], str, str, str]] = {
+    "order_no": (("order", "id"), "identifier", "订单号", "订单唯一编号"),
+    "trade_no": (("trade", "id"), "identifier", "交易号", "交易流水编号"),
+    "biz_date": (("biz", "date"), "date", "业务日期", "业务发生日期"),
+    "settle_date": (("settle", "date"), "date", "结算日期", "结算发生日期"),
+    "created_at": (("created", "at"), "datetime", "创建时间", "记录创建时间"),
+    "updated_at": (("updated", "at"), "datetime", "更新时间", "记录更新时间"),
+    "pay_amount": (("pay", "amount"), "amount", "支付金额", "支付相关金额"),
+    "order_amount": (("order", "amount"), "amount", "订单金额", "订单相关金额"),
+    "total_amount": (("total", "amount"), "amount", "总金额", "汇总金额"),
+    "refund_amount": (("refund", "amount"), "amount", "退款金额", "退款相关金额"),
+    "bank_amount": (("bank", "amount"), "amount", "银行金额", "银行侧金额"),
+    "quantity": (("quantity",), "number", "数量", "数量字段"),
+    "status": (("status",), "status", "状态", "状态字段"),
+    "shop_name": (("shop", "name"), "dimension", "店铺名称", "店铺名称"),
+    "shop_id": (("shop", "id"), "identifier", "店铺ID", "店铺唯一标识"),
+}
+_BUSINESS_NAME_HINTS: list[tuple[tuple[str, ...], str]] = [
+    (("bank", "flow"), "银行流水"),
+    (("bank", "statement"), "银行流水"),
+    (("refund",), "退款明细"),
+    (("settle",), "结算明细"),
+    (("recon",), "对账明细"),
+    (("order", "pay"), "订单支付明细"),
+    (("order",), "订单明细"),
+    (("trade",), "交易明细"),
+    (("inventory",), "库存明细"),
+    (("stock",), "库存明细"),
+    (("invoice",), "发票明细"),
+]
+
+
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_semantic_status(value: Any, *, default: str = "generated_basic") -> str:
+    status = _safe_text(value).lower() or default
+    if status not in SEMANTIC_STATUS_VALUES:
+        return default
+    return status
+
+
+def _tokenize_identifier(value: Any) -> list[str]:
+    text = _safe_text(value).lower()
+    if not text:
+        return []
+    tokens = [token for token in _FIELD_TOKEN_SPLIT.split(text) if token]
+    if tokens:
+        return tokens
+    return [text]
+
+
+def _truncate_text(value: Any, *, limit: int = 80) -> str:
+    raw = _safe_text(value)
+    if len(raw) <= limit:
+        return raw
+    return f"{raw[: max(0, limit - 1)]}…"
+
+
+def _extract_dataset_columns(dataset_row: dict[str, Any], sample_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    schema_summary = dict(dataset_row.get("schema_summary") or {})
+    columns = schema_summary.get("columns")
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    if isinstance(columns, list):
+        for item in columns:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_text(item.get("name"))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(
+                {
+                    "name": name,
+                    "data_type": _safe_text(item.get("data_type")) or "unknown",
+                    "nullable": bool(item.get("nullable", True)),
+                }
+            )
+
+    for row in sample_rows:
+        if not isinstance(row, dict):
+            continue
+        for key, value in row.items():
+            name = _safe_text(key)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(
+                {
+                    "name": name,
+                    "data_type": type(value).__name__,
+                    "nullable": value is None,
+                }
+            )
+    return ordered
+
+
+def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any] | None = None) -> str:
+    dataset_name = _safe_text(dataset_row.get("dataset_name"))
+    resource_key = _safe_text(dataset_row.get("resource_key"))
+    dataset_code = _safe_text(dataset_row.get("dataset_code"))
+    raw = " ".join([dataset_name, resource_key, dataset_code])
+    tokens = set(_tokenize_identifier(raw))
+
+    for hints, label in _BUSINESS_NAME_HINTS:
+        if all(hint in tokens for hint in hints):
+            return label
+
+    source_kind = _safe_text((source_row or {}).get("source_kind")).lower()
+    if source_kind == "api":
+        return "API 数据集"
+    if source_kind == "database":
+        return "数据库数据集"
+    if source_kind == "browser":
+        return "网页采集数据集"
+    if source_kind == "desktop_cli":
+        return "桌面端采集数据集"
+    if source_kind == "file":
+        return "文件数据集"
+    return "业务数据集"
+
+
+def _guess_field_semantic(
+    field_name: str,
+    data_type: str,
+    *,
+    has_sample_rows: bool,
+) -> dict[str, Any]:
+    tokens = _tokenize_identifier(field_name)
+    token_set = set(tokens)
+    default_label = field_name
+    semantic_type = "unknown"
+    business_role = "unknown"
+    description = ""
+    confidence = 0.55
+
+    for _, (hints, semantic, label, desc) in _SEMANTIC_ROLE_HINTS.items():
+        if all(h in token_set for h in hints):
+            semantic_type = semantic
+            business_role = "_".join(hints)
+            default_label = label
+            description = desc
+            confidence = 0.88 if has_sample_rows else 0.72
+            break
+
+    if semantic_type == "unknown":
+        lowered_type = _safe_text(data_type).lower()
+        if "time" in token_set or "date" in token_set or lowered_type in {"date", "datetime", "timestamp"}:
+            semantic_type = "datetime"
+            business_role = "time"
+            default_label = "时间"
+            description = "时间字段"
+            confidence = 0.76 if has_sample_rows else 0.68
+        elif any(token in token_set for token in {"amount", "amt", "money", "price", "fee", "balance"}):
+            semantic_type = "amount"
+            business_role = "amount"
+            default_label = "金额"
+            description = "金额字段"
+            confidence = 0.8 if has_sample_rows else 0.7
+        elif any(token in token_set for token in {"id", "no", "code", "uid", "sn"}):
+            semantic_type = "identifier"
+            business_role = "identifier"
+            default_label = "标识"
+            description = "业务标识字段"
+            confidence = 0.74 if has_sample_rows else 0.66
+        elif any(token in token_set for token in {"status", "state", "flag"}):
+            semantic_type = "status"
+            business_role = "status"
+            default_label = "状态"
+            description = "状态字段"
+            confidence = 0.72 if has_sample_rows else 0.64
+
+    if not has_sample_rows:
+        confidence = min(confidence, 0.74)
+
+    return {
+        "raw_name": field_name,
+        "display_name": default_label,
+        "semantic_type": semantic_type,
+        "business_role": business_role,
+        "description": description,
+        "confidence": round(float(confidence), 4),
+    }
+
+
+def _collect_sample_values(sample_rows: list[dict[str, Any]], field_name: str, *, max_values: int = 3) -> list[str]:
+    values: list[str] = []
+    for row in sample_rows:
+        if not isinstance(row, dict) or field_name not in row:
+            continue
+        value = row.get(field_name)
+        if value is None:
+            continue
+        normalized = _truncate_text(value, limit=40)
+        if not normalized:
+            continue
+        if normalized in values:
+            continue
+        values.append(normalized)
+        if len(values) >= max_values:
+            break
+    return values
+
+
+def _build_semantic_profile(
+    *,
+    dataset_row: dict[str, Any],
+    source_row: dict[str, Any] | None,
+    sample_rows: list[dict[str, Any]],
+    status: str,
+) -> dict[str, Any]:
+    columns = _extract_dataset_columns(dataset_row, sample_rows)
+    has_sample_rows = bool(sample_rows)
+    field_items: list[dict[str, Any]] = []
+    field_label_map: dict[str, str] = {}
+    low_confidence_fields: list[str] = []
+
+    for column in columns:
+        name = _safe_text(column.get("name"))
+        if not name:
+            continue
+        semantic = _guess_field_semantic(
+            name,
+            _safe_text(column.get("data_type")),
+            has_sample_rows=has_sample_rows,
+        )
+        sample_values = _collect_sample_values(sample_rows, name)
+        field_item = {
+            **semantic,
+            "sample_values": sample_values,
+            "confirmed_by_user": False,
+        }
+        field_items.append(field_item)
+        field_label_map[name] = _safe_text(semantic.get("display_name")) or name
+        if float(semantic.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD:
+            low_confidence_fields.append(name)
+
+    key_fields: list[str] = []
+    preferred_roles = {"order_id", "trade_id", "biz_date", "amount", "identifier", "time"}
+    for field in field_items:
+        role = _safe_text(field.get("business_role"))
+        if role in preferred_roles:
+            label = _safe_text(field.get("display_name")) or _safe_text(field.get("raw_name"))
+            if label and label not in key_fields:
+                key_fields.append(label)
+        if len(key_fields) >= 6:
+            break
+    if not key_fields:
+        for field in field_items[:6]:
+            label = _safe_text(field.get("display_name")) or _safe_text(field.get("raw_name"))
+            if label:
+                key_fields.append(label)
+
+    business_name = _guess_business_name(dataset_row, source_row=source_row)
+    business_description = (
+        f"{business_name}，用于{_safe_text((source_row or {}).get('source_kind')) or '数据源'}侧的数据采集与分析。"
+    )
+    if key_fields:
+        business_description = f"{business_name}，关键字段包含：{', '.join(key_fields[:6])}。"
+
+    schema_summary = dict(dataset_row.get("schema_summary") or {})
+    generated_from = {
+        "source_kind": _safe_text((source_row or {}).get("source_kind")),
+        "provider_code": _safe_text((source_row or {}).get("provider_code")),
+        "dataset_kind": _safe_text(dataset_row.get("dataset_kind")),
+        "resource_key": _safe_text(dataset_row.get("resource_key")),
+        "schema_hash": _hash_payload(schema_summary),
+        "sample_hash": _hash_payload(sample_rows[:SEMANTIC_SAMPLE_ROW_LIMIT]) if has_sample_rows else "",
+        "has_sample_rows": has_sample_rows,
+    }
+    semantic_status = _normalize_semantic_status(
+        status,
+        default="generated_with_samples" if has_sample_rows else "generated_basic",
+    )
+    return {
+        "version": 1,
+        "status": semantic_status,
+        "business_name": business_name,
+        "business_description": business_description,
+        "key_fields": key_fields,
+        "field_label_map": field_label_map,
+        "fields": field_items,
+        "low_confidence_fields": low_confidence_fields,
+        "generated_from": generated_from,
+        "updated_at": _now_iso(),
+    }
+
+
+def _extract_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
+    meta = dict(dataset_row.get("meta") or {})
+    semantic_profile = meta.get("semantic_profile")
+    if not isinstance(semantic_profile, dict):
+        return {}
+    return semantic_profile
+
+
+def _flatten_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
+    profile = _extract_semantic_profile(dataset_row)
+    if not profile:
+        return {
+            "semantic_status": "missing",
+            "semantic_updated_at": "",
+            "business_name": "",
+            "business_description": "",
+            "key_fields": [],
+            "field_label_map": {},
+            "semantic_fields": [],
+            "low_confidence_fields": [],
+        }
+    return {
+        "semantic_status": _normalize_semantic_status(
+            profile.get("status"),
+            default="generated_with_samples" if bool(profile.get("generated_from", {}).get("has_sample_rows")) else "generated_basic",
+        ),
+        "semantic_updated_at": _safe_text(profile.get("updated_at")),
+        "business_name": _safe_text(profile.get("business_name")),
+        "business_description": _safe_text(profile.get("business_description")),
+        "key_fields": [str(item) for item in profile.get("key_fields") or [] if _safe_text(item)],
+        "field_label_map": dict(profile.get("field_label_map") or {}),
+        "semantic_fields": [item for item in profile.get("fields") or [] if isinstance(item, dict)],
+        "low_confidence_fields": [str(item) for item in profile.get("low_confidence_fields") or [] if _safe_text(item)],
+    }
 
 
 def _default_execution_mode(source_kind: str) -> str:
@@ -251,6 +586,318 @@ def _list_snapshot_rows(snapshot_id: str, limit: int = 20) -> list[dict[str, Any
         return []
 
 
+def _extract_sample_payload_rows(snapshot_rows: list[dict[str, Any]], *, limit: int = SEMANTIC_SAMPLE_ROW_LIMIT) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in snapshot_rows:
+        payload = item.get("item_payload")
+        if not isinstance(payload, dict):
+            continue
+        rows.append(payload)
+        if len(rows) >= max(1, min(limit, 100)):
+            break
+    return rows
+
+
+def _load_dataset_sample_rows_from_published_snapshot(
+    *,
+    data_source_id: str,
+    resource_key: str,
+    limit: int = SEMANTIC_SAMPLE_ROW_LIMIT,
+) -> list[dict[str, Any]]:
+    snapshot = auth_db.get_unified_published_dataset_snapshot(
+        data_source_id=data_source_id,
+        resource_key=resource_key or "default",
+    )
+    if not snapshot:
+        return []
+    snapshot_rows = auth_db.list_unified_dataset_snapshot_items(
+        snapshot_id=str(snapshot.get("id") or ""),
+        limit=max(1, min(limit, 100)),
+        offset=0,
+    )
+    return _extract_sample_payload_rows(snapshot_rows, limit=limit)
+
+
+def _persist_dataset_semantic_profile(
+    *,
+    dataset_row: dict[str, Any],
+    semantic_profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    dataset_id = _safe_text(dataset_row.get("id"))
+    if not dataset_id:
+        return None
+    meta = dict(dataset_row.get("meta") or {})
+    meta["semantic_profile"] = semantic_profile
+    return auth_db.update_unified_data_source_dataset_meta(
+        dataset_id=dataset_id,
+        meta=meta,
+    )
+
+
+def _merge_existing_semantic_profile(
+    *,
+    generated_profile: dict[str, Any],
+    existing_profile: dict[str, Any],
+) -> dict[str, Any]:
+    if not existing_profile:
+        return generated_profile
+
+    merged_profile = dict(generated_profile)
+    existing_status = _normalize_semantic_status(
+        existing_profile.get("status"),
+        default="generated_basic",
+    )
+    valid_field_names = {
+        _safe_text(item.get("raw_name"))
+        for item in generated_profile.get("fields") or []
+        if isinstance(item, dict) and _safe_text(item.get("raw_name"))
+    }
+
+    next_field_label_map = dict(generated_profile.get("field_label_map") or {})
+    generated_fields = [
+        dict(item)
+        for item in generated_profile.get("fields") or []
+        if isinstance(item, dict) and _safe_text(item.get("raw_name"))
+    ]
+    generated_fields_by_name = {
+        _safe_text(item.get("raw_name")): item
+        for item in generated_fields
+        if _safe_text(item.get("raw_name"))
+    }
+
+    existing_field_label_map = dict(existing_profile.get("field_label_map") or {})
+    existing_fields = [
+        dict(item)
+        for item in existing_profile.get("fields") or []
+        if isinstance(item, dict) and _safe_text(item.get("raw_name"))
+    ]
+    existing_fields_by_name = {
+        _safe_text(item.get("raw_name")): item
+        for item in existing_fields
+        if _safe_text(item.get("raw_name"))
+    }
+
+    preserve_manual_profile = existing_status == "manual_updated"
+    if preserve_manual_profile:
+        business_name = _safe_text(existing_profile.get("business_name"))
+        if business_name:
+            merged_profile["business_name"] = business_name
+        business_description = _safe_text(existing_profile.get("business_description"))
+        if business_description:
+            merged_profile["business_description"] = business_description
+        key_fields = [
+            _safe_text(item)
+            for item in existing_profile.get("key_fields") or []
+            if _safe_text(item)
+        ]
+        if key_fields:
+            merged_profile["key_fields"] = key_fields
+        merged_profile["status"] = "manual_updated"
+
+    for raw_name in valid_field_names:
+        existing_field = existing_fields_by_name.get(raw_name)
+        existing_label = _safe_text(existing_field_label_map.get(raw_name))
+        preserve_field = preserve_manual_profile or bool(existing_field and existing_field.get("confirmed_by_user"))
+        if not preserve_field and not existing_label:
+            continue
+
+        generated_field = dict(generated_fields_by_name.get(raw_name) or {"raw_name": raw_name})
+        if existing_label:
+            generated_field["display_name"] = existing_label
+            next_field_label_map[raw_name] = existing_label
+        for key in ("semantic_type", "business_role", "description"):
+            value = _safe_text((existing_field or {}).get(key))
+            if value:
+                generated_field[key] = value
+        if existing_field is not None and existing_field.get("confidence") is not None:
+            try:
+                generated_field["confidence"] = round(
+                    max(0.0, min(float(existing_field.get("confidence")), 1.0)),
+                    4,
+                )
+            except (TypeError, ValueError):
+                pass
+        if existing_field is not None:
+            generated_field["confirmed_by_user"] = bool(existing_field.get("confirmed_by_user", preserve_manual_profile))
+        elif existing_label:
+            generated_field["confirmed_by_user"] = preserve_manual_profile
+        generated_fields_by_name[raw_name] = generated_field
+
+    merged_fields = [
+        generated_fields_by_name.get(_safe_text(item.get("raw_name")), item)
+        for item in generated_fields
+    ]
+    low_confidence_fields = [
+        _safe_text(item.get("raw_name"))
+        for item in merged_fields
+        if _safe_text(item.get("raw_name"))
+        and float(item.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD
+        and not bool(item.get("confirmed_by_user"))
+    ]
+
+    merged_profile["field_label_map"] = next_field_label_map
+    merged_profile["fields"] = merged_fields
+    merged_profile["low_confidence_fields"] = low_confidence_fields
+    return merged_profile
+
+
+def _refresh_dataset_semantic_profile(
+    *,
+    dataset_row: dict[str, Any],
+    source_row: dict[str, Any] | None,
+    sample_rows: list[dict[str, Any]] | None = None,
+    status: str = "",
+) -> dict[str, Any] | None:
+    rows = [row for row in (sample_rows or []) if isinstance(row, dict)]
+    semantic_profile = _build_semantic_profile(
+        dataset_row=dataset_row,
+        source_row=source_row,
+        sample_rows=rows,
+        status=status or ("generated_with_samples" if rows else "generated_basic"),
+    )
+    semantic_profile = _merge_existing_semantic_profile(
+        generated_profile=semantic_profile,
+        existing_profile=_extract_semantic_profile(dataset_row),
+    )
+    updated = _persist_dataset_semantic_profile(
+        dataset_row=dataset_row,
+        semantic_profile=semantic_profile,
+    )
+    return updated or dataset_row
+
+
+def _resolve_dataset_row(
+    *,
+    company_id: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any] | None:
+    dataset_id = _dataset_id_from_args(arguments)
+    if dataset_id:
+        return auth_db.get_unified_data_source_dataset_by_id(
+            company_id=company_id,
+            dataset_id=dataset_id,
+        )
+
+    source_id = _source_id_from_args(arguments)
+    if not source_id:
+        return None
+    dataset_code = _sanitize_dataset_code(arguments.get("dataset_code"))
+    resource_key = _safe_text(arguments.get("resource_key"))
+    rows = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        status=None,
+        include_deleted=True,
+        limit=2000,
+    )
+    if dataset_code:
+        return next((item for item in rows if _safe_text(item.get("dataset_code")) == dataset_code), None)
+    if resource_key:
+        return next((item for item in rows if _safe_text(item.get("resource_key")) == resource_key), None)
+    return rows[0] if rows else None
+
+
+def _normalize_manual_semantic_patch(
+    arguments: dict[str, Any],
+    *,
+    valid_field_names: set[str],
+) -> dict[str, Any]:
+    patch = dict(arguments.get("semantic_profile") or {})
+    for key in ("business_name", "business_description", "key_fields", "field_label_map", "fields", "status"):
+        if arguments.get(key) is not None:
+            patch[key] = arguments.get(key)
+
+    normalized: dict[str, Any] = {}
+    if patch.get("business_name") is not None:
+        name = _safe_text(patch.get("business_name"))
+        if name:
+            normalized["business_name"] = name
+    if patch.get("business_description") is not None:
+        normalized["business_description"] = _safe_text(patch.get("business_description"))
+
+    key_fields = patch.get("key_fields")
+    if isinstance(key_fields, list):
+        normalized["key_fields"] = [_safe_text(item) for item in key_fields if _safe_text(item)]
+
+    field_label_map = patch.get("field_label_map")
+    fields = patch.get("fields")
+    if (isinstance(field_label_map, dict) or isinstance(fields, list)) and not valid_field_names:
+        raise ValueError("当前数据集缺少 schema 字段定义，无法更新字段中文名或字段语义")
+
+    if isinstance(field_label_map, dict):
+        cleaned_map: dict[str, str] = {}
+        for raw_name, display_name in field_label_map.items():
+            raw_key = _safe_text(raw_name)
+            if not raw_key:
+                continue
+            if raw_key not in valid_field_names:
+                raise ValueError(f"field_label_map 包含不存在字段: {raw_key}")
+            cleaned_map[raw_key] = _safe_text(display_name) or raw_key
+        normalized["field_label_map"] = cleaned_map
+
+    if isinstance(fields, list):
+        cleaned_fields: list[dict[str, Any]] = []
+        for item in fields:
+            if not isinstance(item, dict):
+                continue
+            raw_name = _safe_text(item.get("raw_name"))
+            if not raw_name:
+                continue
+            if raw_name not in valid_field_names:
+                raise ValueError(f"fields 包含不存在字段: {raw_name}")
+            confidence_value = item.get("confidence")
+            try:
+                confidence = float(confidence_value)
+            except (TypeError, ValueError):
+                confidence = 0.5
+            cleaned_fields.append(
+                {
+                    "raw_name": raw_name,
+                    "display_name": _safe_text(item.get("display_name")) or raw_name,
+                    "semantic_type": _safe_text(item.get("semantic_type")) or "unknown",
+                    "business_role": _safe_text(item.get("business_role")) or "unknown",
+                    "description": _safe_text(item.get("description")),
+                    "confidence": round(max(0.0, min(confidence, 1.0)), 4),
+                    "sample_values": [str(v) for v in item.get("sample_values") or [] if _safe_text(v)],
+                    "confirmed_by_user": bool(item.get("confirmed_by_user", True)),
+                }
+            )
+        normalized["fields"] = cleaned_fields
+
+    status = patch.get("status")
+    if status is not None:
+        normalized["status"] = _normalize_semantic_status(status, default="manual_updated")
+    return normalized
+
+def _export_snapshot_rows_to_excel(
+    *,
+    snapshot_id: str,
+    table_name: str,
+    query: dict[str, Any] | None = None,
+) -> tuple[str, int]:
+    rows = auth_db.list_unified_dataset_snapshot_items(snapshot_id=snapshot_id, limit=None, offset=0)
+    payload_rows = [
+        dict(item.get("item_payload") or {})
+        for item in rows
+        if isinstance(item, dict) and isinstance(item.get("item_payload"), dict)
+    ]
+    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
+    if filters:
+        payload_rows = [
+            row for row in payload_rows
+            if all(str(row.get(key, "")) == str(value) for key, value in filters.items())
+        ]
+    export_root = UPLOAD_ROOT / "published_snapshot_exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="published_snapshot_export_", dir=str(export_root)))
+    safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in table_name).strip("_") or "dataset"
+    output_path = temp_dir / f"{safe_name}.xlsx"
+    df = pd.DataFrame(payload_rows)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return str(output_path), len(payload_rows)
+
+
 def _load_source_configs(source_id: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for config_type in CONFIG_TYPES:
@@ -337,6 +984,22 @@ async def _refresh_dataset_samples(
             items=items,
         )
         auth_db.mark_unified_dataset_snapshot_published(snapshot_id=str(snapshot["id"]))
+        try:
+            refreshed_dataset_row = _refresh_dataset_semantic_profile(
+                dataset_row=dataset_row,
+                source_row=source_row,
+                sample_rows=rows,
+                status="generated_with_samples",
+            )
+            if refreshed_dataset_row:
+                dataset_row = refreshed_dataset_row
+        except Exception as exc:
+            logger.warning(
+                "refresh semantic profile after sample snapshot failed: source_id=%s dataset_code=%s error=%s",
+                source_id,
+                dataset_row.get("dataset_code"),
+                exc,
+            )
         sampled += 1
 
     if sampled:
@@ -421,6 +1084,24 @@ def _load_runtime_source(
     return runtime_source
 
 
+def _merge_runtime_overrides(runtime_source: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    connection_override = arguments.get("connection_config")
+    if isinstance(connection_override, dict) and connection_override:
+        runtime_source["connection_config"] = {
+            **dict(runtime_source.get("connection_config") or {}),
+            **connection_override,
+        }
+
+    auth_override = arguments.get("auth_config")
+    if isinstance(auth_override, dict) and auth_override:
+        runtime_source["auth_config"] = {
+            **dict(runtime_source.get("auth_config") or {}),
+            **auth_override,
+        }
+
+    return runtime_source
+
+
 def _normalize_health_status(value: Any, *, default: str = "unknown") -> str:
     health_status = str(value or "").strip().lower() or default
     if health_status not in HEALTH_STATUSES:
@@ -480,6 +1161,7 @@ def _build_dataset_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
     sync_strategy = dict(dataset_row.get("sync_strategy") or {})
     meta = dict(dataset_row.get("meta") or {})
     dataset_code = str(dataset_row.get("dataset_code") or "")
+    semantic_flat = _flatten_semantic_profile(dataset_row)
     return {
         "id": str(dataset_row.get("id") or ""),
         "data_source_id": str(dataset_row.get("data_source_id") or ""),
@@ -498,6 +1180,14 @@ def _build_dataset_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
         "schema_summary": schema_summary,
         "sync_strategy": sync_strategy,
         "metadata": meta,
+        "semantic_status": semantic_flat["semantic_status"],
+        "semantic_updated_at": semantic_flat["semantic_updated_at"],
+        "business_name": semantic_flat["business_name"] or str(dataset_row.get("dataset_name") or dataset_code),
+        "business_description": semantic_flat["business_description"],
+        "key_fields": semantic_flat["key_fields"],
+        "field_label_map": semantic_flat["field_label_map"],
+        "semantic_fields": semantic_flat["semantic_fields"],
+        "low_confidence_fields": semantic_flat["low_confidence_fields"],
         "created_at": dataset_row.get("created_at"),
         "updated_at": dataset_row.get("updated_at"),
     }
@@ -1014,6 +1704,44 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_refresh_dataset_semantic_profile",
+            description="基于 schema 与样本刷新数据集语义层（business_name/字段中文名等）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **dataset_id_schema,
+                    **source_id_schema,
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "sample_limit": {"type": "integer"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="data_source_update_dataset_semantic_profile",
+            description="手动更新数据集语义层（业务名称、字段中文名等）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **dataset_id_schema,
+                    **source_id_schema,
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "semantic_profile": {"type": "object"},
+                    "business_name": {"type": "string"},
+                    "business_description": {"type": "string"},
+                    "key_fields": {"type": "array", "items": {"type": "string"}},
+                    "field_label_map": {"type": "object"},
+                    "fields": {"type": "array", "items": {"type": "object"}},
+                    "status": {"type": "string"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
             name="data_source_import_openapi",
             description="通过 OpenAPI 文档导入 API 数据集（discover+upsert 封装）。",
             inputSchema={
@@ -1245,6 +1973,35 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "source_id"],
             },
         ),
+        Tool(
+            name="data_source_list_published_snapshot_rows",
+            description="读取数据源当前已发布快照的前 N 行样本，供方案设计和试跑优先使用真实采集数据。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "resource_key": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
+            name="data_source_export_published_snapshot",
+            description="将数据源当前已发布快照导出为临时 Excel 文件，供 proc/recon 运行时复用。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "resource_key": {"type": "string"},
+                    "table_name": {"type": "string"},
+                    "query": {"type": "object"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
     ]
 
 
@@ -1264,6 +2021,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_upsert_dataset(arguments)
         if name == "data_source_disable_dataset":
             return await _handle_data_source_disable_dataset(arguments)
+        if name == "data_source_refresh_dataset_semantic_profile":
+            return await _handle_data_source_refresh_dataset_semantic_profile(arguments)
+        if name == "data_source_update_dataset_semantic_profile":
+            return await _handle_data_source_update_dataset_semantic_profile(arguments)
         if name == "data_source_import_openapi":
             return await _handle_data_source_import_openapi(arguments)
         if name == "data_source_preflight_rule_binding":
@@ -1294,6 +2055,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_preview(arguments)
         if name == "data_source_get_published_snapshot":
             return await _handle_data_source_get_published_snapshot(arguments)
+        if name == "data_source_list_published_snapshot_rows":
+            return await _handle_data_source_list_published_snapshot_rows(arguments)
+        if name == "data_source_export_published_snapshot":
+            return await _handle_data_source_export_published_snapshot(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except Exception as exc:
         logger.error("data_source tool error: %s", exc, exc_info=True)
@@ -1392,7 +2157,10 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
 
-    runtime_source = _load_runtime_source(source_row, include_secret=True)
+    runtime_source = _merge_runtime_overrides(
+        _load_runtime_source(source_row, include_secret=True),
+        arguments,
+    )
     connector = build_connector(runtime_source)
     discover_result = connector.discover_datasets(arguments)
     if not bool(discover_result.get("success")):
@@ -1449,7 +2217,27 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                 meta=item["meta"],
             )
             if upserted:
-                persisted_rows.append(upserted)
+                try:
+                    semantic_sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+                        data_source_id=source_id,
+                        resource_key=_safe_text(upserted.get("resource_key")) or "default",
+                        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
+                    )
+                    refreshed = _refresh_dataset_semantic_profile(
+                        dataset_row=upserted,
+                        source_row=source_row,
+                        sample_rows=semantic_sample_rows,
+                        status="generated_with_samples" if semantic_sample_rows else "generated_basic",
+                    )
+                    persisted_rows.append(refreshed or upserted)
+                except Exception as exc:
+                    logger.warning(
+                        "generate semantic profile during discover failed: source_id=%s dataset_code=%s error=%s",
+                        source_id,
+                        item["dataset_code"],
+                        exc,
+                    )
+                    persisted_rows.append(upserted)
             else:
                 persist_errors.append(item["dataset_code"])
 
@@ -1463,6 +2251,15 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                     "id": "",
                     "data_source_id": source_id,
                     **item,
+                    "meta": {
+                        **dict(item.get("meta") or {}),
+                        "semantic_profile": _build_semantic_profile(
+                            dataset_row=item,
+                            source_row=source_row,
+                            sample_rows=[],
+                            status="generated_basic",
+                        ),
+                    },
                     "created_at": None,
                     "updated_at": None,
                 }
@@ -1563,28 +2360,7 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
 async def _handle_data_source_get_dataset(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
-    dataset_id = _dataset_id_from_args(arguments)
-
-    row = None
-    if dataset_id:
-        row = auth_db.get_unified_data_source_dataset_by_id(company_id=company_id, dataset_id=dataset_id)
-    else:
-        source_id = _source_id_from_args(arguments)
-        dataset_code = _sanitize_dataset_code(arguments.get("dataset_code"))
-        resource_key = str(arguments.get("resource_key") or "").strip()
-        if not source_id:
-            return {"success": False, "error": "缺少 dataset_id 或 source_id"}
-        rows = auth_db.list_unified_data_source_datasets(
-            company_id=company_id,
-            data_source_id=source_id,
-            status=None,
-            include_deleted=True,
-            limit=2000,
-        )
-        if dataset_code:
-            row = next((item for item in rows if str(item.get("dataset_code") or "") == dataset_code), None)
-        elif resource_key:
-            row = next((item for item in rows if str(item.get("resource_key") or "") == resource_key), None)
+    row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
     if not row:
         return {"success": False, "error": "数据集不存在"}
 
@@ -1642,6 +2418,18 @@ async def _handle_data_source_upsert_dataset(arguments: dict[str, Any]) -> dict[
     if not row:
         return {"success": False, "error": "写入数据集失败"}
 
+    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+        data_source_id=source_id,
+        resource_key=resource_key,
+        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
+    )
+    row = _refresh_dataset_semantic_profile(
+        dataset_row=row,
+        source_row=source_row,
+        sample_rows=sample_rows,
+        status="generated_with_samples" if sample_rows else "generated_basic",
+    ) or row
+
     auth_db.create_unified_data_source_event(
         company_id=company_id,
         data_source_id=source_id,
@@ -1696,6 +2484,194 @@ async def _handle_data_source_disable_dataset(arguments: dict[str, Any]) -> dict
         "success": True,
         "dataset": _build_dataset_view(health_updated or updated),
         "message": "数据集已停用",
+    }
+
+
+async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        return {"success": False, "error": "数据集不存在"}
+
+    source_id = _safe_text(dataset_row.get("data_source_id"))
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    sample_limit = max(1, min(int(arguments.get("sample_limit") or SEMANTIC_SAMPLE_ROW_LIMIT), 100))
+    resource_key = _safe_text(dataset_row.get("resource_key")) or "default"
+    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+        data_source_id=source_id,
+        resource_key=resource_key,
+        limit=sample_limit,
+    )
+    sample_source = "published_snapshot" if sample_rows else "none"
+
+    if not sample_rows and str(source_row.get("source_kind") or "") not in AGENT_ASSISTED_KINDS:
+        try:
+            runtime_source = _load_runtime_source(source_row, include_secret=True)
+            connector = build_connector(runtime_source)
+            preview_result = connector.preview(
+                {
+                    "resource_key": resource_key,
+                    "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                    "limit": sample_limit,
+                    "dataset": {
+                        "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                        "resource_key": resource_key,
+                        "extract_config": dict(dataset_row.get("extract_config") or {}),
+                    },
+                }
+            )
+            sample_rows = [item for item in preview_result.get("rows") or [] if isinstance(item, dict)]
+            if sample_rows:
+                sample_source = "connector_preview"
+        except Exception as exc:
+            logger.warning(
+                "refresh dataset semantic profile preview fallback failed: dataset_id=%s error=%s",
+                dataset_row.get("id"),
+                exc,
+            )
+
+    refreshed = _refresh_dataset_semantic_profile(
+        dataset_row=dataset_row,
+        source_row=source_row,
+        sample_rows=sample_rows,
+        status="generated_with_samples" if sample_rows else "generated_basic",
+    )
+    if not refreshed:
+        return {"success": False, "error": "刷新语义层失败"}
+
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        event_type="dataset_semantic_refreshed",
+        event_level="info",
+        event_message=f"刷新数据集语义层：{_safe_text(dataset_row.get('dataset_name')) or _safe_text(dataset_row.get('dataset_code'))}",
+        event_payload={
+            "dataset_id": _safe_text(dataset_row.get("id")),
+            "sample_rows_count": len(sample_rows),
+            "sample_source": sample_source,
+            "semantic_status": _flatten_semantic_profile(refreshed).get("semantic_status"),
+        },
+    )
+    return {
+        "success": True,
+        "dataset": _build_dataset_view(refreshed),
+        "sample_rows_count": len(sample_rows),
+        "sample_source": sample_source,
+        "message": "数据集语义层已刷新",
+    }
+
+
+async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        return {"success": False, "error": "数据集不存在"}
+
+    source_id = _safe_text(dataset_row.get("data_source_id"))
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+        data_source_id=source_id,
+        resource_key=_safe_text(dataset_row.get("resource_key")) or "default",
+        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
+    )
+    valid_field_names = {item.get("name") for item in _extract_dataset_columns(dataset_row, sample_rows) if _safe_text(item.get("name"))}
+    try:
+        patch = _normalize_manual_semantic_patch(
+            arguments,
+            valid_field_names={str(name) for name in valid_field_names if name},
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    if not patch:
+        return {"success": False, "error": "缺少可更新的语义层字段"}
+
+    base_profile = _extract_semantic_profile(dataset_row)
+    if not base_profile:
+        base_profile = _build_semantic_profile(
+            dataset_row=dataset_row,
+            source_row=source_row,
+            sample_rows=sample_rows,
+            status="generated_with_samples" if sample_rows else "generated_basic",
+        )
+    next_profile = dict(base_profile)
+
+    if "business_name" in patch:
+        next_profile["business_name"] = patch["business_name"]
+    if "business_description" in patch:
+        next_profile["business_description"] = patch["business_description"]
+    if "key_fields" in patch:
+        next_profile["key_fields"] = patch["key_fields"]
+
+    next_field_label_map = dict(next_profile.get("field_label_map") or {})
+    if "field_label_map" in patch:
+        next_field_label_map.update(dict(patch["field_label_map"]))
+
+    existing_fields = [item for item in next_profile.get("fields") or [] if isinstance(item, dict)]
+    fields_by_name = {_safe_text(item.get("raw_name")): dict(item) for item in existing_fields if _safe_text(item.get("raw_name"))}
+    if "fields" in patch:
+        for item in patch["fields"]:
+            raw_name = _safe_text(item.get("raw_name"))
+            if not raw_name:
+                continue
+            fields_by_name[raw_name] = item
+            next_field_label_map[raw_name] = _safe_text(item.get("display_name")) or raw_name
+
+    merged_fields = list(fields_by_name.values())
+    low_confidence_fields = [
+        _safe_text(item.get("raw_name"))
+        for item in merged_fields
+        if _safe_text(item.get("raw_name"))
+        and float(item.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD
+        and not bool(item.get("confirmed_by_user"))
+    ]
+
+    next_profile["field_label_map"] = next_field_label_map
+    next_profile["fields"] = merged_fields
+    next_profile["low_confidence_fields"] = low_confidence_fields
+    next_profile["status"] = _normalize_semantic_status(patch.get("status"), default="manual_updated")
+    next_profile["updated_at"] = _now_iso()
+    next_profile["version"] = 1
+    next_profile["generated_from"] = {
+        **dict(next_profile.get("generated_from") or {}),
+        "source_kind": _safe_text(source_row.get("source_kind")),
+        "provider_code": _safe_text(source_row.get("provider_code")),
+        "dataset_kind": _safe_text(dataset_row.get("dataset_kind")),
+        "resource_key": _safe_text(dataset_row.get("resource_key")),
+        "schema_hash": _hash_payload(dict(dataset_row.get("schema_summary") or {})),
+        "sample_hash": _hash_payload(sample_rows[:SEMANTIC_SAMPLE_ROW_LIMIT]) if sample_rows else "",
+        "has_sample_rows": bool(sample_rows),
+    }
+
+    updated = _persist_dataset_semantic_profile(
+        dataset_row=dataset_row,
+        semantic_profile=next_profile,
+    )
+    if not updated:
+        return {"success": False, "error": "更新语义层失败"}
+
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        event_type="dataset_semantic_updated",
+        event_level="info",
+        event_message=f"更新数据集语义层：{_safe_text(dataset_row.get('dataset_name')) or _safe_text(dataset_row.get('dataset_code'))}",
+        event_payload={
+            "dataset_id": _safe_text(dataset_row.get("id")),
+            "semantic_status": next_profile.get("status"),
+        },
+    )
+    return {
+        "success": True,
+        "dataset": _build_dataset_view(updated),
+        "message": "数据集语义层已更新",
     }
 
 
@@ -1939,7 +2915,10 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
     source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
-    runtime_source = _load_runtime_source(source_row, include_secret=True)
+    runtime_source = _merge_runtime_overrides(
+        _load_runtime_source(source_row, include_secret=True),
+        arguments,
+    )
     connector = build_connector(runtime_source)
 
     if runtime_source["source_kind"] == "platform_oauth":
@@ -2359,7 +3338,7 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
         health_status="healthy",
         last_error_message="",
     )
-    _update_dataset_health_by_resource(
+    updated_dataset_row = _update_dataset_health_by_resource(
         company_id=company_id,
         source_id=source_id,
         resource_key=resource_key,
@@ -2367,6 +3346,21 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
         last_error_message="",
         last_sync_at=_now_iso(),
     )
+    if updated_dataset_row:
+        try:
+            _refresh_dataset_semantic_profile(
+                dataset_row=updated_dataset_row,
+                source_row=source_row,
+                sample_rows=rows[:SEMANTIC_SAMPLE_ROW_LIMIT],
+                status="generated_with_samples" if rows else "generated_basic",
+            )
+        except Exception as exc:
+            logger.warning(
+                "refresh semantic profile after sync publish failed: source_id=%s resource_key=%s error=%s",
+                source_id,
+                resource_key,
+                exc,
+            )
     return {
         "success": True,
         "source_id": source_id,
@@ -2513,4 +3507,98 @@ async def _handle_data_source_get_published_snapshot(arguments: dict[str, Any]) 
         "success": True,
         "source_id": source_id,
         "published_snapshot": _attach_aliases_to_snapshot(snapshot),
+    }
+
+
+async def _handle_data_source_list_published_snapshot_rows(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    resource_key = _resource_key_from_args(arguments)
+    snapshot = auth_db.get_unified_published_dataset_snapshot(
+        data_source_id=source_id,
+        resource_key=resource_key,
+    )
+    if not snapshot:
+        return {
+            "success": True,
+            "source_id": source_id,
+            "resource_key": resource_key,
+            "published_snapshot": None,
+            "rows": [],
+            "count": 0,
+            "message": "暂无已发布快照",
+        }
+
+    limit = max(1, min(int(arguments.get("limit") or 3), 100))
+    snapshot_rows = auth_db.list_unified_dataset_snapshot_items(
+        snapshot_id=str(snapshot.get("id") or ""),
+        limit=limit,
+        offset=0,
+    )
+    rows = [
+        dict(item.get("item_payload") or {})
+        for item in snapshot_rows
+        if isinstance(item, dict) and isinstance(item.get("item_payload"), dict)
+    ]
+    return {
+        "success": True,
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "snapshot_id": str(snapshot.get("id") or ""),
+        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
+        "rows": rows,
+        "count": len(rows),
+        "message": "已读取已发布快照样本",
+    }
+
+
+async def _handle_data_source_export_published_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    resource_key = _resource_key_from_args(arguments)
+    snapshot = auth_db.get_unified_published_dataset_snapshot(
+        data_source_id=source_id,
+        resource_key=resource_key,
+    )
+    if not snapshot:
+        return {
+            "success": False,
+            "error": "暂无已发布快照，无法导出",
+            "source_id": source_id,
+        }
+
+    table_name = str(
+        arguments.get("table_name")
+        or snapshot.get("resource_key")
+        or snapshot.get("dataset_code")
+        or resource_key
+        or source_id
+    ).strip()
+    query = arguments.get("query") if isinstance(arguments.get("query"), dict) else {}
+    file_path, row_count = _export_snapshot_rows_to_excel(
+        snapshot_id=str(snapshot.get("id") or ""),
+        table_name=table_name,
+        query=query,
+    )
+    return {
+        "success": True,
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "snapshot_id": str(snapshot.get("id") or ""),
+        "table_name": table_name,
+        "file_path": file_path,
+        "row_count": row_count,
+        "query": query,
+        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
+        "message": "已导出已发布快照",
     }

@@ -11,6 +11,7 @@ from graphs.recon.auto_run_service import (
     execute_run_plan_run,
     execute_auto_task_run,
     send_exception_reminder,
+    sync_execution_run_exception_reminder,
     sync_exception_reminder,
 )
 from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
@@ -286,7 +287,14 @@ async def create_execution_scheme_api(
     recon_rule_code = str(payload.get("recon_rule_code") or "").strip()
     proc_rule_json = _safe_dict(scheme_meta_json.get("proc_rule_json"))
     recon_rule_json = _safe_dict(scheme_meta_json.get("recon_rule_json"))
+    proc_trial_status = str(scheme_meta_json.get("proc_trial_status") or "").strip().lower()
+    recon_trial_status = str(scheme_meta_json.get("recon_trial_status") or "").strip().lower()
     scheme_name = str(payload.get("scheme_name") or "未命名方案").strip() or "未命名方案"
+
+    if proc_rule_json and proc_trial_status != "passed":
+        raise HTTPException(status_code=400, detail="请先完成数据整理试跑验证，再保存方案")
+    if recon_rule_json and recon_trial_status != "passed":
+        raise HTTPException(status_code=400, detail="请先完成数据对账试跑验证，再保存方案")
 
     if proc_rule_json and not proc_rule_code:
         proc_saved = await ensure_scheme_rule_saved(
@@ -587,6 +595,28 @@ async def update_execution_run_exception_api(
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "更新异常处理失败"))
+    return result
+
+
+@router.post("/run-exceptions/{exception_id}/sync")
+async def sync_execution_run_exception_api(
+    exception_id: str,
+    body: ExceptionSyncRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await sync_execution_run_exception_reminder(
+        auth_token=auth_token,
+        exception_id=exception_id,
+        provider=body.provider,
+        channel_code=body.channel_code,
+        max_polls=body.max_polls,
+        poll_interval_seconds=body.poll_interval_seconds,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "同步待办状态失败"))
     return result
 
 

@@ -89,6 +89,8 @@ NO_STREAM_NODES = {
     "result_analysis",
 }
 
+_STATE_UPDATE_NODE = "__start__"
+
 
 def _should_track_node_status(node_name: str) -> bool:
     return node_name in TRACKED_NODE_NAMES
@@ -518,6 +520,7 @@ async def upload_file(
                     "uploaded_files": [],
                     **_build_legacy_reconciliation_state_reset(),
                 },
+                as_node=_STATE_UPDATE_NODE,
             )
             logger.info(f"已同步清空 state.uploaded_files (thread={thread_id})")
         except Exception as e:
@@ -655,6 +658,7 @@ async def websocket_chat(ws: WebSocket):
                                     "auth_token": auth_token,
                                     "current_user": me_result.get("user"),
                                 },
+                                as_node=_STATE_UPDATE_NODE,
                             )
                         except Exception as state_error:
                             logger.warning(f"认证验证写入 state 失败: {state_error}")
@@ -726,6 +730,7 @@ async def websocket_chat(ws: WebSocket):
                             "uploaded_files": file_infos,
                             **_build_legacy_reconciliation_state_reset(),
                         },
+                        as_node=_STATE_UPDATE_NODE,
                     )
                     logger.info(f"已清空 LangGraph 状态中的旧分析结果 (thread={thread_id})")
                 except Exception as e:
@@ -773,7 +778,11 @@ async def websocket_chat(ws: WebSocket):
                             update_state["selected_rule_name"] = rule_name
                         if file_rule_code:
                             update_state["file_rule_code"] = file_rule_code
-                        await _get_langgraph_app().aupdate_state(config, update_state)
+                        await _get_langgraph_app().aupdate_state(
+                            config,
+                            update_state,
+                            as_node=_STATE_UPDATE_NODE,
+                        )
                         logger.info(f"已写入 auth/task/rule 信息到 state (thread={thread_id}): has_token={bool(auth_token)}, task_code={task_code}, rule_code={rule_code}, rule_name={rule_name}, file_rule_code={file_rule_code}")
                     except Exception as e:
                         logger.warning(f"写入 task/rule code/name 失败: {e}")
@@ -1189,7 +1198,11 @@ async def stream_chat(
                 if rule_code:
                     update_state["selected_rule_code"] = rule_code
                 if update_state:
-                    await _get_langgraph_app().aupdate_state(config, update_state)
+                    await _get_langgraph_app().aupdate_state(
+                        config,
+                        update_state,
+                        as_node=_STATE_UPDATE_NODE,
+                    )
 
             preflight_error = await _maybe_run_rule_binding_preflight(
                 auth_token=auth_token,

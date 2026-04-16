@@ -222,6 +222,9 @@ uploads/
 *test*
 *Test*
 *TEST*
+!finance-web/tests/
+!finance-web/tests/e2e/
+!finance-web/tests/e2e/*.ts
 test_*.py
 *_test.py
 *_test_*.py

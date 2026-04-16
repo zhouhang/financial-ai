@@ -1,28 +1,5 @@
-rule_code: audio_recon
-rule_id: ""
-trigger_type: cron
-entry_mode: dataset
-run_context:
-  job_name: daily_xm_recon
-  biz_date: "2026-03-20"
-  request_id: generated-uuid
-  operator: finance-cron
-recon_inputs:
-  - table_name: 喜马合单表
-    input_type: dataset
-    payload:
-      source_type: db
-      source_key: xm_statement_daily
-      biz_date: "2026-03-20"
-      params: {}
-  - table_name: 喜马官网表
-    input_type: dataset
-    payload:
-      source_type: api
-      source_key: xm_official_daily
-      biz_date: "2026-03-20"
-      params: {}
-api:
-  url: "http://localhost:8100/api/internal/recon/run"
-  auth_token: ""
-  timeout_seconds: 60
+scheduler:
+  timezone: Asia/Shanghai
+  refresh_interval_seconds: 30
+  plan_page_size: 200
+  misfire_grace_seconds: 60

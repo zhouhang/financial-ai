@@ -1,6 +1,7 @@
 """统一规则加载与校验层。"""
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Literal
@@ -42,6 +43,7 @@ VALID_PROC_STEP_ACTIONS = {"create_schema", "write_dataset"}
 VALID_PROC_STEP_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
 VALID_PROC_STEP_FIELD_WRITE_MODES = {"overwrite", "increment"}
 VALID_PROC_STEP_VALUE_TYPES = {"source", "formula", "template_source", "function", "context", "lookup"}
+PROC_STEP_CONTEXT_NAMES = {"month", "prev_month", "is_first_month"}
 
 
 class StrictModel(BaseModel):
@@ -285,6 +287,137 @@ def _normalize_rule_payload(raw_rule: Any) -> dict[str, Any]:
     return raw_rule
 
 
+def _normalize_proc_step_value_spec(spec: Any) -> Any:
+    if not isinstance(spec, dict):
+        return spec
+
+    normalized = copy.deepcopy(spec)
+    spec_type = str(normalized.get("type") or "").strip()
+
+    if spec_type == "formula":
+        expr = normalized.get("expr")
+        if not isinstance(expr, str) or not expr.strip():
+            formula = normalized.get("formula")
+            if isinstance(formula, str) and formula.strip():
+                normalized["expr"] = formula.strip()
+        normalized.pop("formula", None)
+
+    if spec_type == "context":
+        name = normalized.get("name")
+        context_name = normalized.get("context")
+        if (not isinstance(name, str) or not name.strip()) and isinstance(context_name, str):
+            stripped = context_name.strip()
+            if stripped in PROC_STEP_CONTEXT_NAMES:
+                normalized["name"] = stripped
+            elif stripped:
+                return {
+                    "type": "formula",
+                    "expr": json.dumps(stripped, ensure_ascii=False),
+                }
+        normalized.pop("context", None)
+
+    bindings = normalized.get("bindings")
+    if isinstance(bindings, dict):
+        normalized["bindings"] = {
+            key: _normalize_proc_step_value_spec(value)
+            for key, value in bindings.items()
+        }
+
+    variables = normalized.get("variables")
+    if isinstance(variables, dict):
+        normalized["variables"] = {
+            key: _normalize_proc_step_value_spec(value)
+            for key, value in variables.items()
+        }
+
+    args = normalized.get("args")
+    if isinstance(args, dict):
+        normalized["args"] = {
+            key: _normalize_proc_step_value_spec(value)
+            for key, value in args.items()
+        }
+
+    keys = normalized.get("keys")
+    if isinstance(keys, list):
+        rebuilt_keys: list[Any] = []
+        for item in keys:
+            if not isinstance(item, dict):
+                rebuilt_keys.append(item)
+                continue
+            rebuilt = copy.deepcopy(item)
+            if "input" in rebuilt:
+                rebuilt["input"] = _normalize_proc_step_value_spec(rebuilt.get("input"))
+            rebuilt_keys.append(rebuilt)
+        normalized["keys"] = rebuilt_keys
+
+    return normalized
+
+
+def _normalize_proc_steps_payload(rule_payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(rule_payload)
+    steps = normalized.get("steps")
+    if not isinstance(steps, list):
+        return normalized
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        filter_def = step.get("filter")
+        if isinstance(filter_def, dict):
+            if not isinstance(filter_def.get("expr"), str) or not str(filter_def.get("expr") or "").strip():
+                formula = filter_def.get("formula")
+                if isinstance(formula, str) and formula.strip():
+                    filter_def["expr"] = formula.strip()
+            filter_def.pop("formula", None)
+            bindings = filter_def.get("bindings")
+            if isinstance(bindings, dict):
+                filter_def["bindings"] = {
+                    key: _normalize_proc_step_value_spec(value)
+                    for key, value in bindings.items()
+                }
+
+        mappings = step.get("mappings")
+        if isinstance(mappings, list):
+            normalized_mappings: list[Any] = []
+            for mapping in mappings:
+                if not isinstance(mapping, dict):
+                    normalized_mappings.append(mapping)
+                    continue
+                rebuilt = copy.deepcopy(mapping)
+                if "value" in rebuilt:
+                    rebuilt["value"] = _normalize_proc_step_value_spec(rebuilt.get("value"))
+                bindings = rebuilt.get("bindings")
+                if isinstance(bindings, dict):
+                    rebuilt["bindings"] = {
+                        key: _normalize_proc_step_value_spec(value)
+                        for key, value in bindings.items()
+                    }
+                normalized_mappings.append(rebuilt)
+            step["mappings"] = normalized_mappings
+
+        dynamic_mappings = step.get("dynamic_mappings")
+        if isinstance(dynamic_mappings, dict) and isinstance(dynamic_mappings.get("mappings"), list):
+            rebuilt_dynamic_mappings: list[Any] = []
+            for mapping in dynamic_mappings.get("mappings") or []:
+                if not isinstance(mapping, dict):
+                    rebuilt_dynamic_mappings.append(mapping)
+                    continue
+                rebuilt = copy.deepcopy(mapping)
+                if "value" in rebuilt:
+                    rebuilt["value"] = _normalize_proc_step_value_spec(rebuilt.get("value"))
+                bindings = rebuilt.get("bindings")
+                if isinstance(bindings, dict):
+                    rebuilt["bindings"] = {
+                        key: _normalize_proc_step_value_spec(value)
+                        for key, value in bindings.items()
+                    }
+                rebuilt_dynamic_mappings.append(rebuilt)
+            dynamic_mappings["mappings"] = rebuilt_dynamic_mappings
+
+    return normalized
+
+
 def _validation_failure(rule_code: str, rule_type: str, validation_errors: list[dict[str, str]]) -> dict[str, Any]:
     return {
         "success": False,
@@ -473,6 +606,22 @@ def _semantic_errors_for_proc_steps(rule: dict[str, Any]) -> list[dict[str, str]
                             "path": f"steps.{idx}.mappings.{mapping_idx}.value.type",
                             "message": f"不支持的 value.type: {value_type}",
                             "type": "invalid",
+                        }
+                    )
+                if value_type == "formula" and not str(value.get("expr") or "").strip():
+                    errors.append(
+                        {
+                            "path": f"steps.{idx}.mappings.{mapping_idx}.value.expr",
+                            "message": "formula 缺少 expr",
+                            "type": "missing",
+                        }
+                    )
+                if value_type == "context" and not str(value.get("name") or "").strip():
+                    errors.append(
+                        {
+                            "path": f"steps.{idx}.mappings.{mapping_idx}.value.name",
+                            "message": "context 缺少 name",
+                            "type": "missing",
                         }
                     )
                 if value_type == "lookup":
@@ -713,7 +862,7 @@ def validate_rule_record(rule_record: dict[str, Any], expected_kind: str) -> dic
         model = ProcRuleSetModel
         semantic_check = _semantic_errors_for_proc
     elif expected_kind == "proc_steps":
-        normalized_payload = rule_payload
+        normalized_payload = _normalize_proc_steps_payload(rule_payload)
         model = ProcStepsRuleSetModel
         semantic_check = _semantic_errors_for_proc_steps
     elif expected_kind == "merge":
@@ -721,8 +870,9 @@ def validate_rule_record(rule_record: dict[str, Any], expected_kind: str) -> dic
         model = ProcMergeRuleSetModel
         semantic_check = _semantic_errors_for_merge
     elif expected_kind == "proc_entry":
-        normalized_payload = rule_payload
+        normalized_payload = copy.deepcopy(rule_payload)
         if normalized_payload.get("steps"):
+            normalized_payload = _normalize_proc_steps_payload(normalized_payload)
             model = ProcStepsRuleSetModel
             semantic_check = _semantic_errors_for_proc_steps
             expected_kind = "proc_steps"

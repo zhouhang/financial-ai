@@ -2,8 +2,12 @@
 Financial Agent Unified MCP Server
 统一的财务助手 MCP 服务器
 """
+import json
 import os
 import asyncio
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -69,6 +73,17 @@ DEFAULT_PORT = int(os.getenv("MCP_PORT", "3335"))
 
 # 创建统一的 MCP Server
 mcp_server = Server("financial-mcp-server")
+
+
+def _json_default(value):
+    """兜底处理 MCP 工具结果中的常见非 JSON 原生类型。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 @mcp_server.list_tools()
@@ -185,6 +200,7 @@ _PROC_TOOL_NAMES = {
 # Rules 工具名集合（规则查询 + 任务管理）
 _RULES_TOOL_NAMES = {
     "get_rule",
+    "save_rule",
     "list_user_tasks",
 }
 
@@ -210,6 +226,8 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_get_dataset",
     "data_source_upsert_dataset",
     "data_source_disable_dataset",
+    "data_source_refresh_dataset_semantic_profile",
+    "data_source_update_dataset_semantic_profile",
     "data_source_import_openapi",
     "data_source_preflight_rule_binding",
     "data_source_list_events",
@@ -225,6 +243,8 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_list_sync_jobs",
     "data_source_preview",
     "data_source_get_published_snapshot",
+    "data_source_list_published_snapshot_rows",
+    "data_source_export_published_snapshot",
 }
 
 _RECON_AUTO_TOOL_NAMES = {
@@ -255,6 +275,8 @@ _EXECUTION_TOOL_NAMES = {
     "execution_scheme_delete",
     "execution_run_plan_list",
     "execution_run_plan_get",
+    "execution_scheduler_list_run_plans",
+    "execution_scheduler_get_slot_run",
     "execution_run_plan_create",
     "execution_run_plan_update",
     "execution_run_plan_delete",
@@ -268,6 +290,8 @@ _EXECUTION_TOOL_NAMES = {
     "execution_run_exception_update",
     "execution_proc_draft_trial",
     "execution_recon_draft_trial",
+    "execution_proc_rule_compatibility_check",
+    "execution_recon_rule_compatibility_check",
 }
 
 _UPLOAD_TOOL_NAMES = {"file_upload"}
@@ -277,8 +301,6 @@ _UPLOAD_TOOL_NAMES = {"file_upload"}
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """调用工具（自动路由到对应模块）"""
     try:
-        import json
-
         # 1) 认证和规则管理工具
         if name in _AUTH_TOOL_NAMES:
             result = await handle_auth_tool_call(name, arguments)
@@ -322,7 +344,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         else:
             result = {"error": f"未知的工具: {name}"}
         
-        result_str = json.dumps(result, ensure_ascii=False, indent=2)
+        result_str = json.dumps(result, ensure_ascii=False, indent=2, default=_json_default)
         return [types.TextContent(type="text", text=result_str)]
     
     except Exception as e:

@@ -247,6 +247,26 @@ class DingTalkDwsAdapter(NotificationAdapter):
         todo = _todo_from_detail(detail)
         if todo.todo_id:
             return TodoResult(success=True, provider=self.provider, message="ok", raw=result.payload, todo=todo)
+
+        # dws 对已完成待办存在 success=true 但 detail 为空的情况，回退到 list 接口兜底。
+        for status in ("completed", "open"):
+            fallback = self.list_todos(
+                status=status,
+                page_no=1,
+                page_size=max(20, self._default_todo_page_size),
+                operator_user_id=operator_user_id,
+            )
+            if not fallback.success:
+                continue
+            matched = next((item for item in fallback.todos if item.todo_id == todo_id), None)
+            if matched is not None:
+                return TodoResult(
+                    success=True,
+                    provider=self.provider,
+                    message="ok",
+                    raw=fallback.raw,
+                    todo=matched,
+                )
         return self._todo_failure("钉钉待办详情返回为空", code="empty_payload", raw=result.payload)
 
     def list_todos(
@@ -624,6 +644,22 @@ def _map_detail_status(detail: dict[str, Any]) -> UnifiedTodoStatus:
         return UnifiedTodoStatus.COMPLETED
     if detail.get("isDone") is False:
         return UnifiedTodoStatus.OPEN
+    final_status_stage = detail.get("finalStatusStage")
+    if final_status_stage is not None:
+        try:
+            final_status = int(final_status_stage)
+        except (TypeError, ValueError):
+            final_status = -1
+        if final_status == 0:
+            return UnifiedTodoStatus.OPEN
+        if final_status == 1:
+            return UnifiedTodoStatus.IN_PROGRESS
+        if final_status == 2:
+            return UnifiedTodoStatus.COMPLETED
+        if final_status == 3:
+            return UnifiedTodoStatus.CANCELLED
+        if final_status == 4:
+            return UnifiedTodoStatus.FAILED
     raw_status = str(detail.get("status") or "").strip().lower()
     return _normalize_status_name(raw_status)
 

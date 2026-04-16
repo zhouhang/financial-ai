@@ -1,84 +1,54 @@
 #!/usr/bin/env python3
-"""
-Cron-triggered recon runner.
-
-It reads a config file describing the rule, the dataset inputs, and
-the target data-agent internal API, then issues a single POST request
-to start the headless recon.
-
-TODO:
-  - implement `fetch_dataset_payload` when the real data sources are known,
-    honoring idempotency keys and retry policy.
-  - persist run metadata/results for observability.
-  - secure the internal auth token (e.g. service token rotation).
-"""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
-import sys
 from pathlib import Path
-from typing import Any
 
-import requests
-import yaml
+from dotenv import load_dotenv
+
+from data_agent_client import trigger_run_plan
+from scheduler_service import create_scheduler_auth_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("finance-cron")
 
 
-def load_config(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def load_env() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    load_dotenv(project_root / ".env")
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 
-def build_payload(config: dict[str, Any]) -> dict[str, Any]:
-    """
-    Assemble the request that will be POSTed to data-agent.
-    At this stage the dataset payloads are treated as-is; future
-    implementation should resolve the dataset references to
-    concrete data handles or snapshots.
-    """
-    return {
-        "rule_code": config["rule_code"],
-        "rule_id": config.get("rule_id", ""),
-        "trigger_type": config.get("trigger_type", "cron"),
-        "entry_mode": config.get("entry_mode", "dataset"),
-        "run_context": config.get("run_context", {}),
-        "recon_inputs": config.get("recon_inputs", []),
-    }
-
-
-def call_data_agent(payload: dict[str, Any], api_settings: dict[str, Any]) -> dict[str, Any]:
-    url = api_settings["url"]
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_settings.get('auth_token', '')}",
-    }
-    timeout = api_settings.get("timeout_seconds", 30)
-    response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+async def _main(args: argparse.Namespace) -> int:
+    auth_token = create_scheduler_auth_token(company_id=args.company_id)
+    result = await trigger_run_plan(
+        auth_token,
+        run_plan_code=args.run_plan_code,
+        biz_date=args.biz_date,
+        trigger_mode=args.trigger_mode,
+        run_context={
+            "operator": "finance-cron-manual",
+            "requested_by": args.requested_by,
+        },
+    )
+    logger.info("run result: %s", json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if bool(result.get("success")) else 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Trigger a headless reconciliation run.")
-    parser.add_argument("--config", type=Path, default=Path("config/cron_config.yaml"), help="YAML config path")
+    parser = argparse.ArgumentParser(description="Trigger one configured run plan via data-agent internal API.")
+    parser.add_argument("--run-plan-code", required=True, help="execution run plan code")
+    parser.add_argument("--company-id", required=True, help="company id for service token")
+    parser.add_argument("--biz-date", default="", help="optional biz date, format YYYY-MM-DD")
+    parser.add_argument("--trigger-mode", default="manual", help="manual/api/schedule")
+    parser.add_argument("--requested-by", default="finance-cron", help="operator label")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    payload = build_payload(config)
-
-    logger.info("payload ready, submitting to data-agent internal recon API")
-    try:
-        result = call_data_agent(payload, config["api"])
-    except Exception as exc:  # pragma: no cover
-        logger.error("failed to call data-agent recon API", exc_info=exc)
-        return 1
-
-    logger.info("recon API returned: %s", json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    load_env()
+    return asyncio.run(_main(args))
 
 
 if __name__ == "__main__":

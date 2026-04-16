@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "Financial data reconciliation and preparation agent powered by LangGraph"
 requires-python = ">=3.12"
 dependencies = [
-    "langgraph>=0.4.1",
+    "deepagents>=0.5.2",
+    "langgraph>=1.1.5",
     "langgraph-checkpoint-postgres>=3.0.5",
+    "langchain>=1.2.15",
     "langchain-openai>=0.3.0",
-    "langchain-core>=0.3.0",
+    "langchain-core>=1.2.27",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "fastapi>=0.115.0",

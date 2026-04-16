@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp import Tool
@@ -21,6 +22,22 @@ logger = logging.getLogger("tools.rules")
 RULE_CACHE_TTL_SECONDS = 5
 _rule_cache: Dict[Tuple[str, Optional[str]], Tuple[float, Optional[Dict[str, Any]]]] = {}
 _ALLOWED_ENTRY_MODES = {"upload", "dataset"}
+
+
+def _normalize_db_user_id(user_id: Any) -> Optional[str]:
+    """Normalize user_id before touching UUID columns.
+
+    Scheduler/system tokens may use non-UUID principals such as
+    ``finance-cron:<company_id>``. Those values cannot be compared with
+    ``rule_detail.user_id`` and should be treated as system context.
+    """
+    text = str(user_id or "").strip()
+    if not text:
+        return None
+    try:
+        return str(uuid.UUID(text))
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def create_tools() -> list[Tool]:
@@ -182,7 +199,8 @@ def _normalize_entry_modes(
 
 def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, Any]]:
     """从 rule_detail 表获取指定 rule_code 的规则完整记录。"""
-    cache_key = (rule_code, user_id)
+    normalized_user_id = _normalize_db_user_id(user_id)
+    cache_key = (rule_code, normalized_user_id or "<system>")
     cached = _rule_cache.get(cache_key)
     now = time.time()
     if cached is not None:
@@ -194,11 +212,14 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
 
     conn = None
     try:
-        logger.info(f"[SQL] 查询 rule_detail: rule_code={rule_code}, user_id={user_id}")
+        logger.info(
+            f"[SQL] 查询 rule_detail: rule_code={rule_code}, "
+            f"user_id={user_id}, normalized_user_id={normalized_user_id}"
+        )
         conn = get_db_connection()
         cur = conn.cursor()
 
-        if user_id:
+        if normalized_user_id:
             sql = """
                 SELECT id, user_id, task_id, rule_code, name, rule, rule_type, remark, supported_entry_modes
                 FROM rule_detail
@@ -207,13 +228,12 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
                 ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END, id DESC
                 LIMIT 1
             """
-            cur.execute(sql, (rule_code, user_id, user_id))
+            cur.execute(sql, (rule_code, normalized_user_id, normalized_user_id))
         else:
             sql = """
                 SELECT id, user_id, task_id, rule_code, name, rule, rule_type, remark, supported_entry_modes
                 FROM rule_detail
                 WHERE rule_code = %s
-                  AND user_id IS NULL
                 ORDER BY id DESC
                 LIMIT 1
             """
@@ -223,7 +243,10 @@ def get_rule(rule_code: str, user_id: str | None = None) -> Optional[Dict[str, A
         cur.close()
 
         if row is None:
-            logger.warning(f"[SQL] 未找到规则: rule_code={rule_code}, user_id={user_id}")
+            logger.warning(
+                f"[SQL] 未找到规则: rule_code={rule_code}, "
+                f"user_id={user_id}, normalized_user_id={normalized_user_id}"
+            )
             _rule_cache[cache_key] = (now, None)
             return None
 
@@ -266,7 +289,7 @@ def save_rule(
     name: str,
     rule: dict[str, Any],
     rule_type: str,
-    user_id: str,
+    user_id: str | None,
     remark: str = "",
     task_id: int | None = None,
     supported_entry_modes: list[str] | tuple[str, ...] | None = None,
@@ -277,6 +300,7 @@ def save_rule(
     normalized_name = name.strip()
     normalized_rule_type = rule_type.strip().lower()
     normalized_remark = remark.strip()
+    normalized_user_id = _normalize_db_user_id(user_id)
     if not normalized_rule_code:
         raise ValueError("rule_code 不能为空")
     if not normalized_name:
@@ -310,7 +334,7 @@ def save_rule(
             existing_user_id = str(row[1] or "")
             if not overwrite:
                 raise ValueError(f"rule_code '{normalized_rule_code}' 已存在")
-            if existing_user_id and existing_user_id != user_id:
+            if existing_user_id and existing_user_id != (normalized_user_id or ""):
                 raise ValueError(f"rule_code '{normalized_rule_code}' 不属于当前用户，不能覆盖")
             cur.execute(
                 """
@@ -330,25 +354,31 @@ def save_rule(
                     json.dumps(rule, ensure_ascii=False),
                     normalized_remark,
                     normalized_rule_type,
-                    user_id,
+                    normalized_user_id,
                     task_id,
                     normalized_entry_modes,
                     existing_id,
                 ),
             )
         else:
+            # 兼容历史 rule_detail 结构：id 为整数主键，但库里未配置默认序列。
+            cur.execute("LOCK TABLE public.rule_detail IN EXCLUSIVE MODE")
+            cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM public.rule_detail")
+            next_rule_id_row = cur.fetchone()
+            next_rule_id = int(next_rule_id_row[0]) if next_rule_id_row and next_rule_id_row[0] is not None else 1
             cur.execute(
                 """
-                INSERT INTO rule_detail (rule_code, rule, remark, rule_type, user_id, name, task_id, supported_entry_modes)
-                VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+                INSERT INTO rule_detail (id, rule_code, rule, remark, rule_type, user_id, name, task_id, supported_entry_modes)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
              RETURNING id, user_id, task_id, rule_code, name, rule, rule_type, remark, supported_entry_modes
                 """,
                 (
+                    next_rule_id,
                     normalized_rule_code,
                     json.dumps(rule, ensure_ascii=False),
                     normalized_remark,
                     normalized_rule_type,
-                    user_id,
+                    normalized_user_id,
                     normalized_name,
                     task_id,
                     normalized_entry_modes,
@@ -380,9 +410,14 @@ def save_rule(
 
 def _get_user_tasks(user_id: str) -> List[Dict[str, Any]]:
     """从 user_tasks 表获取当前用户可用任务。"""
+    normalized_user_id = _normalize_db_user_id(user_id)
+    if not normalized_user_id:
+        logger.info("[SQL] user_id 非 UUID，跳过用户任务查询: user_id=%s", user_id)
+        return []
+
     conn = None
     try:
-        logger.info(f"[SQL] 开始查询任务列表: user_id={user_id}")
+        logger.info(f"[SQL] 开始查询任务列表: user_id={normalized_user_id}")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
@@ -410,7 +445,7 @@ def _get_user_tasks(user_id: str) -> List[Dict[str, Any]]:
             WHERE ut.user_id = %s
             ORDER BY ut.id ASC, rd.id ASC
             """,
-            (user_id, user_id),
+            (normalized_user_id, normalized_user_id),
         )
         rows = cur.fetchall()
         cur.close()
@@ -495,7 +530,7 @@ async def _handle_get_rule(arguments: dict) -> dict:
         return {"success": False, "error": "token 中缺少用户标识"}
 
     try:
-        rule = get_rule(rule_code, user_id=user_id)
+        rule = get_rule(rule_code, user_id=_normalize_db_user_id(user_id))
         if rule is None:
             return {
                 "success": False,
@@ -550,7 +585,7 @@ async def _handle_save_rule(arguments: dict) -> dict:
             name=name,
             rule=rule,
             rule_type=rule_type,
-            user_id=user_id,
+            user_id=_normalize_db_user_id(user_id),
             remark=remark,
             task_id=task_id,
             supported_entry_modes=supported_entry_modes,

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _DATASET_CODE_PATTERN = re.compile(r"[^a-z0-9_]+")
 _PG_SYSTEM_SCHEMAS = {"pg_catalog", "information_schema"}
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 
 
 def _normalize_db_type(value: Any) -> str:
@@ -45,6 +46,26 @@ def _to_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _compact_error_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _friendly_database_error(exc: Exception) -> str:
+    detail = _compact_error_text(exc)
+    lowered = detail.lower()
+
+    if "password authentication failed" in lowered or "authentication failed" in lowered:
+        return "数据库认证失败：用户名或密码错误"
+    if "timeout expired" in lowered or "timed out" in lowered or "connect timeout" in lowered:
+        return "数据库连接超时，请检查网络、白名单和端口配置"
+    if "connection refused" in lowered or "could not connect to server" in lowered:
+        return "数据库连接失败：无法连接到数据库主机或端口"
+    if "no pg_hba.conf entry" in lowered or "not allowed to connect" in lowered:
+        return "数据库连接被拒绝，请检查白名单或访问控制配置"
+
+    return detail or "数据库连接失败"
 
 
 def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
@@ -112,7 +133,8 @@ class DatabaseConnector(BaseDataSourceConnector):
             "dbname": str(cfg.get("database") or ""),
             "user": str(cfg.get("username") or ""),
             "password": str(cfg.get("password") or ""),
-            "connect_timeout": _to_int(cfg.get("connect_timeout"), 5),
+            # 连接超时不再开放配置，统一固定为 5 秒。
+            "connect_timeout": DEFAULT_CONNECT_TIMEOUT_SECONDS,
         }
         ssl_mode = str(cfg.get("ssl_mode") or "").strip().lower()
         if ssl_mode:
@@ -133,7 +155,7 @@ class DatabaseConnector(BaseDataSourceConnector):
             "user": str(cfg.get("username") or ""),
             "password": str(cfg.get("password") or ""),
             "database": str(cfg.get("database") or ""),
-            "connect_timeout": _to_int(cfg.get("connect_timeout"), 5),
+            "connect_timeout": DEFAULT_CONNECT_TIMEOUT_SECONDS,
             "read_timeout": _to_int(cfg.get("read_timeout"), 10),
             "write_timeout": _to_int(cfg.get("write_timeout"), 10),
             "cursorclass": pymysql.cursors.DictCursor,
@@ -148,8 +170,7 @@ class DatabaseConnector(BaseDataSourceConnector):
         database_path = str(cfg.get("database") or cfg.get("path") or "").strip()
         if not database_path:
             raise RuntimeError("sqlite 配置缺失: database")
-        timeout_seconds = _to_int(cfg.get("connect_timeout"), 5)
-        return sqlite3.connect(database_path, timeout=timeout_seconds)
+        return sqlite3.connect(database_path, timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS)
 
     def _open_connection(self, cfg: dict[str, Any]):
         db_type = _normalize_db_type(cfg.get("db_type"))
@@ -198,11 +219,12 @@ class DatabaseConnector(BaseDataSourceConnector):
             message = "数据库连接成功"
         except Exception as exc:
             logger.error("database test connection failed: %s", exc, exc_info=True)
+            detail = _friendly_database_error(exc)
             return {
                 "success": False,
                 "source_id": self.ctx.source_id,
-                "error": str(exc),
-                "message": "数据库连接失败",
+                "error": detail,
+                "message": detail,
             }
         finally:
             try:
@@ -245,14 +267,15 @@ class DatabaseConnector(BaseDataSourceConnector):
                 return {"success": False, "error": f"暂不支持的 db_type: {db_type}"}
         except Exception as exc:
             logger.error("database discover datasets failed: %s", exc, exc_info=True)
+            detail = _friendly_database_error(exc)
             return {
                 "success": False,
                 "source_id": self.ctx.source_id,
                 "provider_code": self.ctx.provider_code,
                 "datasets": [],
                 "dataset_count": 0,
-                "error": str(exc),
-                "message": "数据库数据集发现失败",
+                "error": detail,
+                "message": detail,
             }
 
         return {

@@ -24,7 +24,7 @@ from urllib.parse import quote
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
-from security_utils import resolve_upload_file_path, write_output_metadata
+from security_utils import resolve_recon_input_file_path, write_output_metadata
 from .dataset_loader import (
     DatasetLoadError,
     dataset_display_name,
@@ -43,6 +43,82 @@ logger = logging.getLogger(__name__)
 
 # 对账报告输出目录（相对于 finance-mcp 目录）
 RECON_OUTPUT_DIR = Path(__file__).parent.parent / "output"
+_DEFAULT_OUTPUT_SHEETS = {
+    "summary": "核对汇总",
+    "source_only": "源文件独有",
+    "target_only": "目标文件独有",
+    "matched_with_diff": "差异记录",
+}
+
+
+def _normalize_output_sheets_config(sheets_config: Any) -> dict[str, dict[str, Any]]:
+    """兼容 dict/list 两种 sheets 写法，并确保至少有一个可见 sheet。"""
+    normalized: dict[str, dict[str, Any]] = {}
+
+    if isinstance(sheets_config, list):
+        enabled_map: dict[str, dict[str, Any]] = {}
+        for item in sheets_config:
+            if isinstance(item, str):
+                sheet_key = item.strip()
+                if sheet_key in _DEFAULT_OUTPUT_SHEETS:
+                    enabled_map[sheet_key] = {
+                        "name": _DEFAULT_OUTPUT_SHEETS[sheet_key],
+                        "enabled": True,
+                    }
+                continue
+            if not isinstance(item, dict):
+                continue
+            sheet_key = str(
+                item.get("key") or item.get("sheet") or item.get("type") or item.get("name") or ""
+            ).strip()
+            if sheet_key not in _DEFAULT_OUTPUT_SHEETS:
+                continue
+            normalized_name = str(item.get("name") or "").strip() or _DEFAULT_OUTPUT_SHEETS[sheet_key]
+            enabled_map[sheet_key] = {
+                "name": normalized_name,
+                "enabled": bool(item.get("enabled", True)),
+            }
+        for sheet_key, default_name in _DEFAULT_OUTPUT_SHEETS.items():
+            normalized[sheet_key] = enabled_map.get(
+                sheet_key,
+                {
+                    "name": default_name,
+                    "enabled": sheet_key in enabled_map,
+                },
+            )
+    else:
+        raw_config = sheets_config if isinstance(sheets_config, dict) else {}
+        for sheet_key, default_name in _DEFAULT_OUTPUT_SHEETS.items():
+            raw_item = raw_config.get(sheet_key)
+            if isinstance(raw_item, dict):
+                normalized[sheet_key] = {
+                    "name": str(raw_item.get("name") or "").strip() or default_name,
+                    "enabled": bool(raw_item.get("enabled", True)),
+                }
+                continue
+            if isinstance(raw_item, str):
+                normalized[sheet_key] = {
+                    "name": raw_item.strip() or default_name,
+                    "enabled": True,
+                }
+                continue
+            if isinstance(raw_item, bool):
+                normalized[sheet_key] = {
+                    "name": default_name,
+                    "enabled": raw_item,
+                }
+                continue
+            normalized[sheet_key] = {
+                "name": default_name,
+                "enabled": True,
+            }
+
+    if not any(bool(item.get("enabled")) for item in normalized.values()):
+        normalized["summary"] = {
+            "name": str(normalized.get("summary", {}).get("name") or _DEFAULT_OUTPUT_SHEETS["summary"]),
+            "enabled": True,
+        }
+    return normalized
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1252,7 +1328,7 @@ def _write_recon_result(
     filename = f"{safe_rule_name}_核对结果_{timestamp}.xlsx"
     output_path = str(Path(output_dir) / filename)
     
-    sheets_config = output_config.get("sheets", {})
+    sheets_config = _normalize_output_sheets_config(output_config.get("sheets"))
     
     # 收集需要标记的列
     _get_marked_columns._rule_context = rule or {}
@@ -1477,7 +1553,7 @@ def _apply_column_highlighting(
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = resolve_upload_file_path(file_path)
+    path = resolve_recon_input_file_path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
     
