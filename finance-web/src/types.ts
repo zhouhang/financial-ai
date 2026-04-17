@@ -199,10 +199,22 @@ export interface DataSourceDatasetSummary {
   id: string;
   dataset_code: string;
   dataset_name: string;
+  updated_at?: string | null;
+  schema_name?: string;
+  object_name?: string;
+  object_type?: string;
+  publish_status?: 'published' | 'unpublished' | 'deprecated' | string;
+  verified_status?: 'verified' | 'unverified' | 'rejected' | string;
+  business_domain?: string;
+  business_object_type?: string;
+  grain?: string;
+  usage_count?: number;
+  last_used_at?: string | null;
   business_name?: string;
   business_description?: string;
   semantic_status?: string;
   semantic_updated_at?: string | null;
+  semantic_pending_count?: number;
   key_fields?: string[];
   field_label_map?: Record<string, string>;
   semantic_fields?: Array<Record<string, unknown>>;
@@ -220,6 +232,12 @@ export interface DataSourceDatasetSummary {
   schema_summary?: Record<string, unknown>;
   sync_strategy?: Record<string, unknown>;
   meta?: Record<string, unknown>;
+  source?: {
+    id?: string;
+    name?: string;
+    source_kind?: DataSourceKind | string;
+    provider_code?: string;
+  };
 }
 
 export interface DataSourceEventSummary {
@@ -276,6 +294,16 @@ export interface DataSourceDiscoverSummary {
   last_discover_at?: string | null;
   last_discover_status?: string;
   last_discover_error?: string | null;
+  scan_mode?: string;
+  scanned_count?: number;
+  total_count?: number;
+  offset?: number;
+  requested_limit?: number;
+  has_more?: boolean;
+  next_offset?: number | null;
+  requested_count?: number;
+  matched_count?: number;
+  missing_targets?: string[];
 }
 
 export interface DataSourceCapabilities {

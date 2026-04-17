@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, Sparkles } from 'lucide-react';
+import type { DataSourceKind } from '../../types';
 
 export type SchemeWizardStep = 1 | 2;
 export type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
+type SupportedSourceKind = Extract<
+  DataSourceKind,
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+>;
 
 export interface SchemeDraftLite {
   name: string;
@@ -21,15 +26,17 @@ export interface SchemeSourceOption {
   name: string;
   businessName?: string;
   technicalName?: string;
+  keyFields?: string[];
   fieldLabelMap?: Record<string, string>;
   sourceId: string;
   sourceName: string;
-  sourceKind: string;
+  sourceKind: SupportedSourceKind;
   providerCode: string;
   description?: string;
   datasetCode?: string;
   resourceKey?: string;
   datasetKind?: string;
+  schemaSummary?: Record<string, unknown>;
 }
 
 export interface ProcSampleRow {
@@ -67,10 +74,8 @@ export interface CompatibilityCheckResult {
 
 export interface SchemeWizardTargetProcStepProps {
   step: SchemeWizardStep;
+  authToken?: string | null;
   schemeDraft: SchemeDraftLite;
-  availableSources: SchemeSourceOption[];
-  loadingSources: boolean;
-  sourceLoadError?: string;
   selectedLeftSources: SchemeSourceOption[];
   selectedRightSources: SchemeSourceOption[];
   existingProcOptions: ExistingConfigOption[];
@@ -78,7 +83,7 @@ export interface SchemeWizardTargetProcStepProps {
   onNameChange: (value: string) => void;
   onBusinessGoalChange: (value: string) => void;
   onDescriptionChange: (side: 'left' | 'right', value: string) => void;
-  onChangeSourceSelection: (side: 'left' | 'right', sourceIds: string[]) => void;
+  onChangeSourceSelection: (side: 'left' | 'right', sources: SchemeSourceOption[]) => void;
   onProcConfigModeChange: (mode: 'ai' | 'existing') => void;
   onSelectExistingProcConfig: (configId: string) => void;
   isGeneratingProc?: boolean;
@@ -256,72 +261,236 @@ function PreviewSectionBlock({
   );
 }
 
-function MultiSelectDropdown({
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function asList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function toText(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return fallback;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return asList(value).map((item) => toText(item).trim()).filter(Boolean);
+}
+
+function normalizeFieldLabelMap(value: unknown): Record<string, string> | undefined {
+  const rows = Object.entries(asRecord(value))
+    .map(([key, raw]) => [key.trim(), toText(raw).trim()] as const)
+    .filter(([key, label]) => Boolean(key && label));
+  if (rows.length === 0) return undefined;
+  return Object.fromEntries(rows);
+}
+
+function isSupportedSourceKind(value: string): value is SupportedSourceKind {
+  return (
+    value === 'platform_oauth' ||
+    value === 'database' ||
+    value === 'api' ||
+    value === 'file' ||
+    value === 'browser' ||
+    value === 'desktop_cli'
+  );
+}
+
+function normalizeCandidateDataset(
+  raw: unknown,
+  sourceFallback?: Record<string, string>,
+): SchemeSourceOption | null {
+  const value = asRecord(raw);
+  const semanticProfile = asRecord(value.semantic_profile);
+  const sourceRecord = asRecord(value.source);
+  const datasetId = toText(value.dataset_id, toText(value.id)).trim();
+  const datasetCode = toText(value.dataset_code, toText(value.code)).trim();
+  const datasetName = toText(value.dataset_name, toText(value.name, datasetCode || datasetId)).trim();
+  if (!datasetId && !datasetCode && !datasetName) {
+    return null;
+  }
+  const enabled = typeof value.is_enabled === 'boolean'
+    ? value.is_enabled
+    : typeof value.enabled === 'boolean'
+    ? value.enabled
+    : true;
+  if (!enabled) return null;
+
+  const sourceId = toText(
+    value.source_id,
+    toText(value.data_source_id, toText(sourceRecord.id, sourceFallback?.sourceId || '')),
+  ).trim();
+  const sourceName = toText(
+    value.source_name,
+    toText(value.data_source_name, toText(sourceRecord.name, sourceFallback?.sourceName || sourceId)),
+  ).trim();
+  const rawSourceKind = toText(value.source_kind, toText(sourceRecord.source_kind, sourceFallback?.sourceKind || '')).trim();
+  const providerCode = toText(
+    value.provider_code,
+    toText(sourceRecord.provider_code, sourceFallback?.providerCode || 'unknown'),
+  ).trim();
+  if (!sourceId || !isSupportedSourceKind(rawSourceKind)) return null;
+  const sourceKind = rawSourceKind;
+
+  const businessName = toText(
+    value.business_name,
+    toText(value.display_name, toText(semanticProfile.business_name)),
+  ).trim();
+  const technicalName = toText(
+    value.technical_name,
+    toText(value.resource_key, toText(value.table_name, datasetCode || datasetName || datasetId)),
+  ).trim();
+  const fieldLabelMap =
+    normalizeFieldLabelMap(value.field_label_map)
+    || normalizeFieldLabelMap(semanticProfile.field_label_map);
+  const explicitKeyFields = normalizeStringList(value.key_fields);
+  const keyFields =
+    explicitKeyFields.length > 0
+      ? explicitKeyFields
+      : normalizeStringList(semanticProfile.key_fields);
+  return {
+    id: datasetId || `${sourceId}-${datasetCode || datasetName}`,
+    name: datasetName || datasetCode || datasetId,
+    businessName: businessName || undefined,
+    technicalName: technicalName || undefined,
+    keyFields: keyFields.length > 0 ? keyFields : undefined,
+    fieldLabelMap,
+    sourceId,
+    sourceName: sourceName || sourceId,
+    sourceKind,
+    providerCode: providerCode || 'unknown',
+    description: toText(value.description, sourceFallback?.description || '').trim() || undefined,
+    datasetCode: datasetCode || datasetId || datasetName,
+    resourceKey: toText(value.resource_key).trim(),
+    datasetKind: toText(value.dataset_kind).trim(),
+    schemaSummary: asRecord(value.schema_summary),
+  };
+}
+
+function RemoteDatasetSelector({
+  side,
   title,
   description,
-  sources,
-  selectedIds,
+  authToken,
+  businessGoal,
+  sideDescription,
+  selectedSources,
   onConfirmSelection,
 }: {
+  side: 'left' | 'right';
   title: string;
   description: string;
-  sources: SchemeSourceOption[];
-  selectedIds: string[];
-  onConfirmSelection: (ids: string[]) => void;
+  authToken?: string | null;
+  businessGoal: string;
+  sideDescription: string;
+  selectedSources: SchemeSourceOption[];
+  onConfirmSelection: (sources: SchemeSourceOption[]) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draftIds, setDraftIds] = useState<string[]>(selectedIds);
-  const groupedSources = useMemo(() => {
-    const groups = new Map<
-      string,
-      {
-        sourceId: string;
-        sourceName: string;
-        sourceKind: string;
-        providerCode: string;
-        description?: string;
-        datasets: SchemeSourceOption[];
-      }
-    >();
-    sources.forEach((source) => {
-      const current = groups.get(source.sourceId);
-      if (current) {
-        current.datasets.push(source);
+  const [searchText, setSearchText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [resultSources, setResultSources] = useState<SchemeSourceOption[]>([]);
+  const [draftSources, setDraftSources] = useState<SchemeSourceOption[]>(selectedSources);
+  const searchedRef = useRef(false);
+
+  const selectedNames = useMemo(
+    () => selectedSources.map((item) => resolveDatasetDisplayName(item)),
+    [selectedSources],
+  );
+  const resultById = useMemo(
+    () => new Map(resultSources.map((item) => [item.id, item])),
+    [resultSources],
+  );
+  const draftIds = useMemo(() => draftSources.map((item) => item.id), [draftSources]);
+  const displayText = selectedNames.length > 0 ? selectedNames.join('、') : '点击搜索并选择数据集';
+
+  const fetchCandidates = useCallback(
+    async (query: string) => {
+      const keyword = query.trim();
+      if (!authToken) {
+        setError('请先登录后再选择数据集。');
+        setResultSources([]);
         return;
       }
-      groups.set(source.sourceId, {
-        sourceId: source.sourceId,
-        sourceName: source.sourceName,
-        sourceKind: source.sourceKind,
-        providerCode: source.providerCode,
-        description: source.description,
-        datasets: [source],
-      });
-    });
-    return Array.from(groups.values());
-  }, [sources]);
-  const selectedNames = useMemo(
-    () => sources.filter((s) => selectedIds.includes(s.id)).map((s) => resolveDatasetDisplayName(s)),
-    [sources, selectedIds],
+      setLoading(true);
+      setError('');
+      try {
+        const response = await fetch('/api/data-sources/dataset-candidates', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            binding_scope: 'execution_scheme',
+            scene_type: 'recon',
+            role_code: side,
+            keyword,
+            page: 1,
+            page_size: 30,
+            filters: {
+              only_published: true,
+              strict_contract: false,
+              hints: [businessGoal, sideDescription, title].filter((item) => item.trim().length > 0),
+            },
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '候选数据集搜索失败'));
+        }
+        const rows = asList(data.candidates || data.datasets || data.items);
+        const normalized = rows
+          .map((item) => normalizeCandidateDataset(item))
+          .filter(Boolean) as SchemeSourceOption[];
+        setResultSources(normalized);
+      } catch (fetchError) {
+        setError(fetchError instanceof Error ? fetchError.message : '候选数据集搜索失败');
+        setResultSources([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [authToken, businessGoal, side, sideDescription, title],
   );
-  const displayText = selectedNames.length > 0 ? selectedNames.join('、') : '请选择数据集（可多选）';
 
-  const toggleDropdown = () => {
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      searchedRef.current = true;
+      void fetchCandidates(searchText);
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [fetchCandidates, open, searchText]);
+
+  const togglePanel = () => {
     if (open) {
-      setDraftIds(selectedIds);
       setOpen(false);
+      setDraftSources(selectedSources);
       return;
     }
-    setDraftIds(selectedIds);
     setOpen(true);
+    setDraftSources(selectedSources);
+    setSearchText('');
+    setResultSources([]);
+    setError('');
+    searchedRef.current = false;
   };
 
-  const toggleDraftId = (id: string) => {
-    setDraftIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  const toggleSource = (source: SchemeSourceOption) => {
+    setDraftSources((prev) => {
+      if (prev.some((item) => item.id === source.id)) {
+        return prev.filter((item) => item.id !== source.id);
+      }
+      return [...prev, source];
+    });
   };
 
   const handleConfirm = () => {
-    onConfirmSelection(draftIds);
+    onConfirmSelection(draftSources);
     setOpen(false);
   };
 
@@ -333,83 +502,98 @@ function MultiSelectDropdown({
           <p className="mt-1 text-xs leading-5 text-text-secondary">{description}</p>
         </div>
         <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
-          已选 {selectedIds.length}
+          已选 {selectedSources.length}
         </span>
       </div>
 
       <div className="relative mt-4">
         <button
           type="button"
-          onClick={toggleDropdown}
+          onClick={togglePanel}
           className="flex w-full items-center justify-between rounded-2xl border border-border bg-surface px-4 py-3 text-left text-sm text-text-primary transition hover:border-sky-200"
         >
-          <span className={cn('truncate', selectedNames.length === 0 && 'text-text-secondary')}>
-            {displayText}
-          </span>
+          <span className={cn('truncate', selectedNames.length === 0 && 'text-text-secondary')}>{displayText}</span>
           <ChevronDown className={cn('ml-2 h-4 w-4 shrink-0 text-text-muted transition-transform', open && 'rotate-180')} />
         </button>
 
         {open ? (
           <div className="absolute z-10 mt-2 w-full rounded-2xl border border-border bg-surface shadow-lg">
-            {groupedSources.length > 0 ? (
-              <div className="border-b border-border bg-surface px-3 py-3">
+            <div className="border-b border-border bg-surface px-3 py-3">
+              <input
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                placeholder="搜索业务名称/技术名/数据源，不输入则展示已发布候选"
+              />
+              <div className="mt-3 flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={handleConfirm}
-                  className="w-full rounded-xl bg-text-primary px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90"
+                  className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-500"
                 >
                   确定
                 </button>
               </div>
-            ) : null}
+            </div>
             <div className="max-h-72 overflow-y-auto p-3">
-              {groupedSources.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border bg-surface-secondary px-4 py-4 text-sm text-text-secondary">
-                  暂无可选数据集
+              {error ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  {error}
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {groupedSources.map((group) => (
-                    <div key={group.sourceId} className="rounded-2xl border border-border-subtle bg-surface-secondary p-3">
-                      <div className="pb-2">
-                        <p className="text-sm font-semibold text-text-primary">{group.sourceName}</p>
-                        <p className="mt-1 text-xs text-text-secondary">
-                          {group.description || group.providerCode || group.sourceKind}
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        {group.datasets.map((dataset) => {
-                          const checked = draftIds.includes(dataset.id);
-                          return (
-                            <label
-                              key={dataset.id}
-                              className={cn(
-                                'flex items-start gap-3 rounded-xl border px-3 py-2 text-left transition',
-                                checked
-                                  ? 'border-sky-200 bg-sky-50'
-                                  : 'border-transparent bg-surface hover:border-border-subtle',
-                              )}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleDraftId(dataset.id)}
-                                className="mt-1 h-4 w-4 rounded border-border text-sky-600 focus:ring-sky-200"
-                              />
-                              <div className="min-w-0">
-                                <p className="truncate text-sm font-medium text-text-primary">{resolveDatasetDisplayName(dataset)}</p>
-                                <p className="mt-1 text-xs text-text-secondary">
-                                  {resolveDatasetTechnicalName(dataset)}
-                                </p>
-                              </div>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
+              ) : null}
+              {loading ? (
+                <div className="rounded-xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                  正在远程搜索候选数据集...
                 </div>
-              )}
+              ) : null}
+              {!loading && !error && !searchedRef.current ? (
+                <div className="rounded-xl border border-dashed border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                  正在准备候选数据集，你也可以直接输入关键字缩小范围。
+                </div>
+              ) : null}
+              {!loading && !error && searchedRef.current && resultSources.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                  当前没有可用候选数据集。可尝试更换关键字，或到数据连接的物理目录发布数据集后再返回选择。
+                </div>
+              ) : null}
+              {!loading && !error && resultSources.length > 0 ? (
+                <div className="space-y-2">
+                  {resultSources.map((dataset) => {
+                    const checked = draftIds.includes(dataset.id);
+                    const checkedSource = checked ? draftSources.find((item) => item.id === dataset.id) : undefined;
+                    const resolved = checkedSource || resultById.get(dataset.id) || dataset;
+                    return (
+                      <label
+                        key={dataset.id}
+                        className={cn(
+                          'flex items-start gap-3 rounded-xl border px-3 py-2 text-left transition',
+                          checked
+                            ? 'border-sky-200 bg-sky-50'
+                            : 'border-transparent bg-surface hover:border-border-subtle',
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSource(resolved)}
+                          className="mt-1 h-4 w-4 rounded border-border text-sky-600 focus:ring-sky-200"
+                        />
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-text-primary">
+                            {resolveDatasetDisplayName(dataset)}
+                          </p>
+                          <p className="mt-1 truncate text-xs text-text-secondary">
+                            {resolveDatasetTechnicalName(dataset)}
+                          </p>
+                          <p className="mt-1 truncate text-[11px] text-text-muted">
+                            {dataset.sourceName} · {dataset.providerCode} · {dataset.sourceKind}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -528,10 +712,8 @@ function ProcTrialPreviewPanel({
 
 export default function SchemeWizardTargetProcStep({
   step,
+  authToken,
   schemeDraft,
-  availableSources,
-  loadingSources,
-  sourceLoadError,
   selectedLeftSources,
   selectedRightSources,
   existingProcOptions,
@@ -605,35 +787,28 @@ export default function SchemeWizardTargetProcStep({
           />
         </label>
 
-        {sourceLoadError ? (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            {sourceLoadError}
-          </div>
-        ) : null}
-
-        {loadingSources ? (
-          <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
-            <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-border border-t-sky-500" />
-            正在加载可选数据集...
-          </div>
-        ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            <MultiSelectDropdown
-              title="左侧原始数据"
-              description="选择左侧原始数据集，可同时选多份平台、数据库或 API 数据集。"
-              sources={availableSources}
-              selectedIds={selectedLeftSources.map((item) => item.id)}
-              onConfirmSelection={(ids) => onChangeSourceSelection('left', ids)}
-            />
-            <MultiSelectDropdown
-              title="右侧原始数据"
-              description="选择右侧原始数据集，可同时选多份平台、数据库或 API 数据集。"
-              sources={availableSources}
-              selectedIds={selectedRightSources.map((item) => item.id)}
-              onConfirmSelection={(ids) => onChangeSourceSelection('right', ids)}
-            />
-          </div>
-        )}
+        <div className="grid gap-4 xl:grid-cols-2">
+          <RemoteDatasetSelector
+            side="left"
+            title="左侧原始数据"
+            description="按关键字远程搜索候选数据集，可多选并确认。"
+            authToken={authToken}
+            businessGoal={schemeDraft.businessGoal}
+            sideDescription={schemeDraft.leftDescription}
+            selectedSources={selectedLeftSources}
+            onConfirmSelection={(sources) => onChangeSourceSelection('left', sources)}
+          />
+          <RemoteDatasetSelector
+            side="right"
+            title="右侧原始数据"
+            description="按关键字远程搜索候选数据集，可多选并确认。"
+            authToken={authToken}
+            businessGoal={schemeDraft.businessGoal}
+            sideDescription={schemeDraft.rightDescription}
+            selectedSources={selectedRightSources}
+            onConfirmSelection={(sources) => onChangeSourceSelection('right', sources)}
+          />
+        </div>
 
         <div className="grid gap-4 xl:grid-cols-2">
           <label className="block">

@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import psycopg2
+import psycopg2.extras
 from mcp import Tool
 
 from auth import db as auth_db
@@ -32,6 +34,7 @@ _ALLOWED_SCHEDULE_TYPES = {"manual_trigger", "daily", "weekly", "monthly", "cron
 _ALLOWED_TRIGGER_TYPES = {"chat", "schedule", "api"}
 _ALLOWED_ENTRY_MODES = {"file", "dataset"}
 _ALLOWED_EXECUTION_STATUS = {"running", "success", "failed"}
+_ALLOWED_BINDING_SCOPES = {"execution_scheme", "execution_run_plan", "recon_scheme", "recon_task"}
 _DEFAULT_RECON_OUTPUT_SHEETS = {
     "summary": "核对汇总",
     "source_only": "源文件独有",
@@ -84,6 +87,7 @@ def create_tools() -> list[Tool]:
                     "proc_rule_code": {"type": "string"},
                     "recon_rule_code": {"type": "string"},
                     "scheme_meta_json": {"type": "object"},
+                    "dataset_bindings_json": {"type": "array"},
                     "is_enabled": {"type": "boolean"},
                 },
                 "required": ["auth_token", "scheme_name"],
@@ -104,6 +108,7 @@ def create_tools() -> list[Tool]:
                     "proc_rule_code": {"type": "string"},
                     "recon_rule_code": {"type": "string"},
                     "scheme_meta_json": {"type": "object"},
+                    "dataset_bindings_json": {"type": "array"},
                     "is_enabled": {"type": "boolean"},
                 },
                 "required": ["auth_token", "scheme_id"],
@@ -119,6 +124,51 @@ def create_tools() -> list[Tool]:
                     "scheme_id": {"type": "string"},
                 },
                 "required": ["auth_token", "scheme_id"],
+            },
+        ),
+        Tool(
+            name="execution_dataset_binding_replace",
+            description="覆盖写入数据集绑定（同 scope+code 下未提交的旧绑定将停用）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "binding_scope": {"type": "string"},
+                    "binding_code": {"type": "string"},
+                    "binding_name": {"type": "string"},
+                    "bindings": {"type": "array"},
+                },
+                "required": ["auth_token", "binding_scope", "binding_code", "bindings"],
+            },
+        ),
+        Tool(
+            name="execution_dataset_binding_list",
+            description="查询数据集绑定。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "binding_scope": {"type": "string"},
+                    "binding_code": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["auth_token", "binding_scope", "binding_code"],
+            },
+        ),
+        Tool(
+            name="execution_dataset_binding_touch_usage",
+            description="更新绑定使用统计（usage_count 与 last_used_at）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "binding_scope": {"type": "string"},
+                    "binding_code": {"type": "string"},
+                    "role_code": {"type": "string"},
+                    "data_source_id": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                },
+                "required": ["auth_token", "binding_scope", "binding_code"],
             },
         ),
         Tool(
@@ -192,6 +242,7 @@ def create_tools() -> list[Tool]:
                     "schedule_expr": {"type": "string"},
                     "biz_date_offset": {"type": "string"},
                     "input_bindings_json": {"type": "array"},
+                    "dataset_bindings_json": {"type": "array"},
                     "channel_config_id": {"type": "string"},
                     "owner_mapping_json": {"type": "object"},
                     "plan_meta_json": {"type": "object"},
@@ -215,6 +266,7 @@ def create_tools() -> list[Tool]:
                     "schedule_expr": {"type": "string"},
                     "biz_date_offset": {"type": "string"},
                     "input_bindings_json": {"type": "array"},
+                    "dataset_bindings_json": {"type": "array"},
                     "channel_config_id": {"type": "string"},
                     "owner_mapping_json": {"type": "object"},
                     "plan_meta_json": {"type": "object"},
@@ -232,6 +284,7 @@ def create_tools() -> list[Tool]:
                     "auth_token": {"type": "string"},
                     "plan_id": {"type": "string"},
                     "run_plan_id": {"type": "string"},
+                    "plan_code": {"type": "string"},
                 },
                 "required": ["auth_token"],
             },
@@ -462,6 +515,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _scheme_update(arguments)
         if name == "execution_scheme_delete":
             return _scheme_delete(arguments)
+        if name == "execution_dataset_binding_replace":
+            return _dataset_binding_replace(arguments)
+        if name == "execution_dataset_binding_list":
+            return _dataset_binding_list(arguments)
+        if name == "execution_dataset_binding_touch_usage":
+            return _dataset_binding_touch_usage(arguments)
         if name == "execution_run_plan_list":
             return _plan_list(arguments)
         if name == "execution_run_plan_get":
@@ -1148,6 +1207,217 @@ def _resolve_plan_code(company_id: str, arguments: dict[str, Any]) -> tuple[str 
     return _as_text(plan.get("plan_code")), None
 
 
+def _normalize_binding_scope(value: Any) -> str:
+    scope = _as_text(value).lower()
+    if not scope:
+        raise ValueError("binding_scope 不能为空")
+    if scope not in _ALLOWED_BINDING_SCOPES:
+        raise ValueError(f"binding_scope 取值非法，可选：{', '.join(sorted(_ALLOWED_BINDING_SCOPES))}")
+    return scope
+
+
+def _normalize_dataset_binding_item(
+    raw: Any,
+    *,
+    index: int,
+    fallback_name: str,
+) -> dict[str, Any] | None:
+    item = _safe_dict(raw)
+    source_id = _as_text(item.get("data_source_id") or item.get("source_id"))
+    resource_key = _as_text(item.get("resource_key") or item.get("dataset_code") or item.get("table_name"))
+    if not source_id or not resource_key:
+        return None
+    role_code = _as_text(item.get("role_code") or item.get("role") or f"source_{index}")
+    query = _safe_dict(item.get("query"))
+    filter_config = _safe_dict(item.get("filter_config"))
+    if query:
+        filter_config = {
+            **filter_config,
+            "query": query,
+        }
+    mapping_config = _safe_dict(item.get("mapping_config"))
+    for key in ("table_name", "dataset_code", "dataset_source_type", "side"):
+        value = item.get(key)
+        if value is None:
+            continue
+        text = _as_text(value)
+        if text:
+            mapping_config[key] = text
+    if "is_required" not in item and "required" in item:
+        item["is_required"] = item.get("required")
+    return {
+        "data_source_id": source_id,
+        "resource_key": resource_key,
+        "role_code": role_code,
+        "binding_name": _as_text(item.get("binding_name") or item.get("name") or fallback_name),
+        "is_required": _as_bool(item.get("is_required"), True),
+        "priority": _as_int(item.get("priority"), index, minimum=1, maximum=1000000),
+        "filter_config": filter_config,
+        "mapping_config": mapping_config,
+        "status": _as_text(item.get("status") or "active") or "active",
+    }
+
+
+def _replace_dataset_bindings_for_scope(
+    *,
+    company_id: str,
+    binding_scope: str,
+    binding_code: str,
+    binding_name: str,
+    bindings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_bindings: list[dict[str, Any]] = []
+    for idx, raw in enumerate(bindings, start=1):
+        normalized = _normalize_dataset_binding_item(
+            raw,
+            index=idx,
+            fallback_name=binding_name,
+        )
+        if normalized is not None:
+            normalized_bindings.append(normalized)
+
+    existing_bindings = auth_db.list_unified_dataset_bindings(
+        company_id=company_id,
+        binding_scope=binding_scope,
+        binding_code=binding_code,
+        status=None,
+    )
+    existing_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in existing_bindings:
+        item_dict = _safe_dict(item)
+        key = (
+            _as_text(item_dict.get("data_source_id")),
+            _as_text(item_dict.get("resource_key") or "default"),
+            _as_text(item_dict.get("role_code")),
+        )
+        if key[0] and key[2]:
+            existing_map[key] = item_dict
+
+    desired_keys: set[tuple[str, str, str]] = set()
+    saved_count = 0
+    write_failed_count = 0
+    for item in normalized_bindings:
+        key = (
+            _as_text(item.get("data_source_id")),
+            _as_text(item.get("resource_key") or "default"),
+            _as_text(item.get("role_code")),
+        )
+        desired_keys.add(key)
+        saved = auth_db.upsert_unified_dataset_binding(
+            company_id=company_id,
+            binding_scope=binding_scope,
+            binding_code=binding_code,
+            binding_name=_as_text(item.get("binding_name") or binding_name),
+            data_source_id=key[0],
+            resource_key=key[1],
+            role_code=key[2],
+            is_required=bool(item.get("is_required", True)),
+            priority=_as_int(item.get("priority"), 100, minimum=1, maximum=1000000),
+            filter_config=_safe_dict(item.get("filter_config")),
+            mapping_config=_safe_dict(item.get("mapping_config")),
+            status="active",
+        )
+        if saved:
+            saved_count += 1
+        else:
+            write_failed_count += 1
+
+    disabled_count = 0
+    for key, current in existing_map.items():
+        if key in desired_keys:
+            continue
+        disabled = auth_db.upsert_unified_dataset_binding(
+            company_id=company_id,
+            binding_scope=binding_scope,
+            binding_code=binding_code,
+            binding_name=_as_text(current.get("binding_name") or binding_name),
+            data_source_id=key[0],
+            resource_key=key[1],
+            role_code=key[2],
+            is_required=bool(current.get("is_required", True)),
+            priority=_as_int(current.get("priority"), 100, minimum=1, maximum=1000000),
+            filter_config=_safe_dict(current.get("filter_config")),
+            mapping_config=_safe_dict(current.get("mapping_config")),
+            status="disabled",
+        )
+        if disabled:
+            disabled_count += 1
+        else:
+            write_failed_count += 1
+
+    active_bindings = auth_db.list_unified_dataset_bindings(
+        company_id=company_id,
+        binding_scope=binding_scope,
+        binding_code=binding_code,
+        status="active",
+    )
+    if write_failed_count > 0:
+        return {
+            "success": False,
+            "error": f"dataset_bindings 覆盖写入失败，失败条数={write_failed_count}",
+            "binding_scope": binding_scope,
+            "binding_code": binding_code,
+            "saved_count": saved_count,
+            "disabled_count": disabled_count,
+            "bindings": active_bindings,
+        }
+    return {
+        "success": True,
+        "binding_scope": binding_scope,
+        "binding_code": binding_code,
+        "saved_count": saved_count,
+        "disabled_count": disabled_count,
+        "bindings": active_bindings,
+    }
+
+
+def _extract_run_plan_dataset_bindings(
+    arguments: dict[str, Any],
+    *,
+    fallback_name: str,
+) -> list[dict[str, Any]] | None:
+    explicit = arguments.get("dataset_bindings_json")
+    if explicit is not None:
+        return [
+            binding
+            for idx, item in enumerate(_safe_list(explicit), start=1)
+            for binding in [_normalize_dataset_binding_item(item, index=idx, fallback_name=fallback_name)]
+            if binding is not None
+        ]
+
+    raw_input_bindings = arguments.get("input_bindings_json")
+    if raw_input_bindings is None:
+        return None
+
+    normalized: list[dict[str, Any]] = []
+    for idx, raw in enumerate(_safe_list(raw_input_bindings), start=1):
+        item = _safe_dict(raw)
+        source_id = _as_text(item.get("data_source_id") or item.get("source_id"))
+        resource_key = _as_text(item.get("resource_key") or item.get("table_name") or item.get("dataset_code"))
+        if not source_id or not resource_key:
+            continue
+        normalized_item = {
+            "role_code": _as_text(item.get("role_code") or item.get("role") or f"source_{idx}"),
+            "data_source_id": source_id,
+            "resource_key": resource_key,
+            "binding_name": _as_text(item.get("binding_name") or item.get("table_name") or resource_key or fallback_name),
+            "is_required": item.get("is_required", item.get("required", True)),
+            "priority": item.get("priority", idx),
+            "query": _safe_dict(item.get("query")),
+            "table_name": _as_text(item.get("table_name") or resource_key),
+            "dataset_code": _as_text(item.get("dataset_code") or resource_key),
+            "dataset_source_type": _as_text(item.get("dataset_source_type") or "snapshot"),
+        }
+        binding = _normalize_dataset_binding_item(
+            normalized_item,
+            index=idx,
+            fallback_name=fallback_name,
+        )
+        if binding is not None:
+            normalized.append(binding)
+    return normalized
+
+
 def _ensure_allowed(value: str, allowed: set[str], field_name: str) -> str:
     normalized = _as_text(value).lower()
     if normalized not in allowed:
@@ -1213,6 +1483,21 @@ def _scheme_create(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not item:
         return {"success": False, "error": "创建方案失败"}
+    dataset_bindings = [v for v in _safe_list(arguments.get("dataset_bindings_json")) if isinstance(v, dict)]
+    if dataset_bindings:
+        replace_result = _replace_dataset_bindings_for_scope(
+            company_id=company_id,
+            binding_scope="execution_scheme",
+            binding_code=_as_text(item.get("scheme_code")),
+            binding_name=_as_text(item.get("scheme_name") or scheme_name),
+            bindings=dataset_bindings,
+        )
+        if not bool(replace_result.get("success")):
+            return {
+                "success": False,
+                "error": "方案已创建，但写入 dataset_bindings 失败",
+                "scheme": item,
+            }
     return {"success": True, "scheme": item}
 
 
@@ -1243,7 +1528,112 @@ def _scheme_update(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not item:
         return {"success": False, "error": "方案不存在或更新失败"}
+    if arguments.get("dataset_bindings_json") is not None:
+        dataset_bindings = [v for v in _safe_list(arguments.get("dataset_bindings_json")) if isinstance(v, dict)]
+        replace_result = _replace_dataset_bindings_for_scope(
+            company_id=str(user.get("company_id") or ""),
+            binding_scope="execution_scheme",
+            binding_code=_as_text(item.get("scheme_code")),
+            binding_name=_as_text(item.get("scheme_name") or arguments.get("scheme_name")),
+            bindings=dataset_bindings,
+        )
+        if not bool(replace_result.get("success")):
+            return {
+                "success": False,
+                "error": "方案已更新，但写入 dataset_bindings 失败",
+                "scheme": item,
+            }
     return {"success": True, "scheme": item}
+
+
+def _dataset_binding_replace(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
+    binding_scope = _normalize_binding_scope(arguments.get("binding_scope"))
+    binding_code = _as_text(arguments.get("binding_code"))
+    if not binding_code:
+        return {"success": False, "error": "binding_code 不能为空"}
+    bindings = [v for v in _safe_list(arguments.get("bindings")) if isinstance(v, dict)]
+    binding_name = _as_text(arguments.get("binding_name") or binding_code)
+    return _replace_dataset_bindings_for_scope(
+        company_id=company_id,
+        binding_scope=binding_scope,
+        binding_code=binding_code,
+        binding_name=binding_name,
+        bindings=bindings,
+    )
+
+
+def _dataset_binding_list(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    binding_scope = _normalize_binding_scope(arguments.get("binding_scope"))
+    binding_code = _as_text(arguments.get("binding_code"))
+    if not binding_code:
+        return {"success": False, "error": "binding_code 不能为空"}
+    status_raw = arguments.get("status")
+    status = None if status_raw is None else _as_text(status_raw) or None
+    bindings = auth_db.list_unified_dataset_bindings(
+        company_id=str(user.get("company_id") or ""),
+        binding_scope=binding_scope,
+        binding_code=binding_code,
+        status=status,
+    )
+    return {
+        "success": True,
+        "binding_scope": binding_scope,
+        "binding_code": binding_code,
+        "count": len(bindings),
+        "bindings": bindings,
+    }
+
+
+def _dataset_binding_touch_usage(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
+    binding_scope = _normalize_binding_scope(arguments.get("binding_scope"))
+    binding_code = _as_text(arguments.get("binding_code"))
+    if not binding_code:
+        return {"success": False, "error": "binding_code 不能为空"}
+
+    role_code = _as_text(arguments.get("role_code"))
+    data_source_id = _as_text(arguments.get("data_source_id"))
+    resource_key = _as_text(arguments.get("resource_key"))
+
+    conn_manager = auth_db.get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    UPDATE dataset_bindings
+                    SET usage_count = COALESCE(usage_count, 0) + 1,
+                        last_used_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND binding_scope = %s
+                      AND binding_code = %s
+                      AND status = 'active'
+                """
+                params: list[Any] = [company_id, binding_scope, binding_code]
+                if role_code:
+                    sql += " AND role_code = %s"
+                    params.append(role_code)
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                sql += """
+                    RETURNING id, company_id, binding_scope, binding_code, binding_name,
+                              data_source_id, resource_key, role_code, is_required, priority,
+                              usage_count, last_used_at, updated_at
+                """
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall() or []
+                conn.commit()
+        return {"success": True, "updated_count": len(rows), "bindings": [dict(r) for r in rows]}
+    except Exception as exc:
+        return {"success": False, "error": f"更新绑定使用统计失败: {exc}"}
 
 
 def _scheme_delete(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1354,6 +1744,24 @@ def _plan_create(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not item:
         return {"success": False, "error": "创建运行计划失败"}
+    dataset_bindings = _extract_run_plan_dataset_bindings(
+        arguments,
+        fallback_name=_as_text(item.get("plan_name") or plan_name),
+    )
+    if dataset_bindings is not None:
+        replace_result = _replace_dataset_bindings_for_scope(
+            company_id=company_id,
+            binding_scope="execution_run_plan",
+            binding_code=_as_text(item.get("plan_code")),
+            binding_name=_as_text(item.get("plan_name") or plan_name),
+            bindings=dataset_bindings,
+        )
+        if not bool(replace_result.get("success")):
+            return {
+                "success": False,
+                "error": "运行计划已创建，但写入 dataset_bindings 失败",
+                "run_plan": item,
+            }
     return {"success": True, "run_plan": item}
 
 
@@ -1391,6 +1799,24 @@ def _plan_update(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not item:
         return {"success": False, "error": "运行计划不存在或更新失败"}
+    dataset_bindings = _extract_run_plan_dataset_bindings(
+        arguments,
+        fallback_name=_as_text(item.get("plan_name") or arguments.get("plan_name") or "运行计划"),
+    )
+    if dataset_bindings is not None:
+        replace_result = _replace_dataset_bindings_for_scope(
+            company_id=company_id,
+            binding_scope="execution_run_plan",
+            binding_code=_as_text(item.get("plan_code")),
+            binding_name=_as_text(item.get("plan_name") or arguments.get("plan_name") or "运行计划"),
+            bindings=dataset_bindings,
+        )
+        if not bool(replace_result.get("success")):
+            return {
+                "success": False,
+                "error": "运行计划已更新，但写入 dataset_bindings 失败",
+                "run_plan": item,
+            }
     return {"success": True, "run_plan": item}
 
 
@@ -1401,25 +1827,36 @@ def _plan_delete(arguments: dict[str, Any]) -> dict[str, Any]:
     plan_code = _as_text(arguments.get("plan_code"))
     if not plan_id and not plan_code:
         return {"success": False, "error": "plan_id 或 plan_code 不能为空"}
-    if not plan_id:
+    plan = None
+    if plan_id:
+        plan = auth_db.get_execution_run_plan(company_id=company_id, plan_id=plan_id)
+    elif plan_code:
         plan = auth_db.get_execution_run_plan(company_id=company_id, plan_code=plan_code)
-        if not plan:
-            return {"success": False, "error": "运行计划不存在或删除失败"}
-        plan_id = _as_text(plan.get("id"))
+        if plan:
+            plan_id = _as_text(plan.get("id"))
+    if not plan_id or not plan:
+        return {"success": False, "error": "运行计划不存在或删除失败"}
     item = auth_db.delete_execution_run_plan(
         company_id=company_id,
         plan_id=plan_id,
     )
-    if not item and plan_id:
-        plan = auth_db.get_execution_run_plan(company_id=company_id, plan_code=plan_id)
-        if plan:
-            resolved_plan_id = _as_text(plan.get("id"))
-            item = auth_db.delete_execution_run_plan(
-                company_id=company_id,
-                plan_id=resolved_plan_id,
-            )
     if not item:
         return {"success": False, "error": "运行计划不存在或删除失败"}
+    binding_code = _as_text(plan.get("plan_code"))
+    if binding_code:
+        replace_result = _replace_dataset_bindings_for_scope(
+            company_id=company_id,
+            binding_scope="execution_run_plan",
+            binding_code=binding_code,
+            binding_name=_as_text(plan.get("plan_name") or binding_code),
+            bindings=[],
+        )
+        if not bool(replace_result.get("success")):
+            return {
+                "success": False,
+                "error": "运行计划已删除，但停用 dataset_bindings 失败",
+                "run_plan": item,
+            }
     return {"success": True, "run_plan": item, "message": "运行计划已删除"}
 
 

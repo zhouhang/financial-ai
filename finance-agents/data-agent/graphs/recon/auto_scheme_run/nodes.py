@@ -94,59 +94,119 @@ def _build_plan_binding_from_source(source: dict[str, Any], date_field: str) -> 
     }
 
 
-def _infer_plan_bindings_from_scheme(
-    *,
-    run_plan: dict[str, Any],
-    scheme: dict[str, Any],
-) -> list[dict[str, Any]]:
+def _infer_binding_side(role_code: str, mapping_config: dict[str, Any]) -> str:
+    side = str(mapping_config.get("side") or "").strip().lower()
+    if side in {"left", "right"}:
+        return side
+    normalized_role = str(role_code or "").strip().lower()
+    if normalized_role.startswith("left"):
+        return "left"
+    if normalized_role.startswith("right"):
+        return "right"
+    return ""
+
+
+def _resolve_time_semantics(run_plan: dict[str, Any]) -> tuple[str, str]:
     plan_meta = _safe_dict(
         run_plan.get("plan_meta_json")
         or run_plan.get("plan_meta")
         or run_plan.get("meta")
     )
-    scheme_meta = _safe_dict(
-        scheme.get("scheme_meta_json")
-        or scheme.get("scheme_meta")
-        or scheme.get("meta")
+    left = str(plan_meta.get("left_time_semantic") or "").strip()
+    right = str(plan_meta.get("right_time_semantic") or "").strip()
+    return left, right
+
+
+def _normalize_plan_binding(item: dict[str, Any]) -> dict[str, Any] | None:
+    source_id = _get_binding_source_id(item)
+    table_name = str(item.get("table_name") or "").strip()
+    if not source_id or not table_name:
+        return None
+    return {
+        "data_source_id": source_id,
+        "table_name": table_name,
+        "resource_key": _get_binding_resource_key(item),
+        "required": _get_binding_required(item),
+        "query": _safe_dict(item.get("query")),
+        "dataset_source_type": str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+        "role_code": str(item.get("role_code") or "").strip(),
+        "dataset_code": str(item.get("dataset_code") or "").strip(),
+    }
+
+
+def _build_plan_binding_from_dataset_binding(
+    *,
+    binding: dict[str, Any],
+    left_time_semantic: str,
+    right_time_semantic: str,
+) -> dict[str, Any] | None:
+    source_id = str(binding.get("data_source_id") or "").strip()
+    resource_key = str(binding.get("resource_key") or "").strip()
+    if not source_id or not resource_key:
+        return None
+
+    mapping_config = _safe_dict(binding.get("mapping_config"))
+    filter_config = _safe_dict(binding.get("filter_config"))
+    query = _safe_dict(filter_config.get("query") or filter_config)
+    if not str(query.get("resource_key") or "").strip():
+        query["resource_key"] = resource_key
+
+    role_code = str(binding.get("role_code") or "").strip()
+    side = _infer_binding_side(role_code, mapping_config)
+    if not str(query.get("date_field") or "").strip():
+        if side == "left" and left_time_semantic:
+            query["date_field"] = left_time_semantic
+        elif side == "right" and right_time_semantic:
+            query["date_field"] = right_time_semantic
+
+    table_name = str(
+        mapping_config.get("table_name")
+        or mapping_config.get("dataset_code")
+        or resource_key
+    ).strip()
+    if not table_name:
+        return None
+
+    return {
+        "data_source_id": source_id,
+        "table_name": table_name,
+        "resource_key": resource_key,
+        "required": bool(binding.get("is_required", True)),
+        "query": query,
+        "dataset_source_type": str(mapping_config.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+        "role_code": role_code,
+        "dataset_code": str(mapping_config.get("dataset_code") or resource_key).strip() or resource_key,
+    }
+
+
+async def _list_dataset_bindings_by_scope(
+    *,
+    auth_token: str,
+    binding_scope: str,
+    binding_code: str,
+) -> list[dict[str, Any]]:
+    if not auth_token or not binding_scope or not binding_code:
+        return []
+    result = await call_mcp_tool(
+        "execution_dataset_binding_list",
+        {
+            "auth_token": auth_token,
+            "binding_scope": binding_scope,
+            "binding_code": binding_code,
+            "status": "active",
+        },
     )
-    left_time_semantic = str(
-        plan_meta.get("left_time_semantic")
-        or scheme_meta.get("left_time_semantic")
-        or ""
-    ).strip()
-    right_time_semantic = str(
-        plan_meta.get("right_time_semantic")
-        or scheme_meta.get("right_time_semantic")
-        or ""
-    ).strip()
-
-    bindings: list[dict[str, Any]] = []
-    for source in _safe_list(scheme_meta.get("left_sources")):
-        source_dict = _safe_dict(source)
-        binding = _build_plan_binding_from_source(source_dict, left_time_semantic)
-        if binding:
-            bindings.append(binding)
-    for source in _safe_list(scheme_meta.get("right_sources")):
-        source_dict = _safe_dict(source)
-        binding = _build_plan_binding_from_source(source_dict, right_time_semantic)
-        if binding:
-            bindings.append(binding)
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in bindings:
-        key = "::".join(
-            [
-                str(item.get("data_source_id") or ""),
-                str(item.get("table_name") or ""),
-                str(item.get("resource_key") or ""),
-            ]
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(item)
-    return deduped
+    if bool(result.get("success")):
+        return [v for v in _safe_list(result.get("bindings")) if isinstance(v, dict)]
+    if _is_unknown_tool_error(result.get("error")):
+        return []
+    logger.warning(
+        "[auto_scheme_run] execution_dataset_binding_list failed scope=%s code=%s err=%s",
+        binding_scope,
+        binding_code,
+        str(result.get("error") or ""),
+    )
+    return []
 
 
 def _build_recon_inputs_from_ready_snapshots(
@@ -472,27 +532,129 @@ def validate_scheme_rules_node(state: AgentState) -> dict[str, Any]:
     return {"recon_ctx": ctx}
 
 
-def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
+async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
+    auth_token = str(state.get("auth_token") or "")
     run_plan = _safe_dict(ctx.get("run_plan"))
-    bindings = [v for v in _safe_list(run_plan.get("input_bindings_json")) if isinstance(v, dict)]
-    if not bindings:
-        bindings = [
-            v for v in _safe_list(
-                _safe_dict(
-                    run_plan.get("plan_meta_json")
-                    or run_plan.get("plan_meta")
-                    or run_plan.get("meta")
-                ).get("input_bindings")
-            )
-            if isinstance(v, dict)
-        ]
-    if not bindings:
-        bindings = _infer_plan_bindings_from_scheme(
-            run_plan=run_plan,
-            scheme=_safe_dict(ctx.get("scheme")),
+    run_plan_code = str(run_plan.get("plan_code") or ctx.get("run_plan_code") or "").strip()
+    scheme_code = str(run_plan.get("scheme_code") or ctx.get("scheme_code") or "").strip()
+    left_time_semantic, right_time_semantic = _resolve_time_semantics(run_plan)
+
+    bindings: list[dict[str, Any]] = []
+    binding_source = ""
+
+    if run_plan_code:
+        plan_scope_rows = await _list_dataset_bindings_by_scope(
+            auth_token=auth_token,
+            binding_scope="execution_run_plan",
+            binding_code=run_plan_code,
         )
-    ctx["plan_input_bindings"] = bindings
+        for row in plan_scope_rows:
+            normalized = _build_plan_binding_from_dataset_binding(
+                binding=row,
+                left_time_semantic=left_time_semantic,
+                right_time_semantic=right_time_semantic,
+            )
+            if normalized is not None:
+                bindings.append(normalized)
+        if bindings:
+            binding_source = "dataset_bindings:execution_run_plan"
+        else:
+            legacy_task_scope_rows = await _list_dataset_bindings_by_scope(
+                auth_token=auth_token,
+                binding_scope="recon_task",
+                binding_code=run_plan_code,
+            )
+            for row in legacy_task_scope_rows:
+                normalized = _build_plan_binding_from_dataset_binding(
+                    binding=row,
+                    left_time_semantic=left_time_semantic,
+                    right_time_semantic=right_time_semantic,
+                )
+                if normalized is not None:
+                    bindings.append(normalized)
+            if bindings:
+                binding_source = "dataset_bindings:recon_task"
+
+    if not bindings and scheme_code:
+        scheme_scope_rows = await _list_dataset_bindings_by_scope(
+            auth_token=auth_token,
+            binding_scope="execution_scheme",
+            binding_code=scheme_code,
+        )
+        for row in scheme_scope_rows:
+            normalized = _build_plan_binding_from_dataset_binding(
+                binding=row,
+                left_time_semantic=left_time_semantic,
+                right_time_semantic=right_time_semantic,
+            )
+            if normalized is not None:
+                bindings.append(normalized)
+        if bindings:
+            binding_source = "dataset_bindings:execution_scheme"
+        else:
+            legacy_scheme_scope_rows = await _list_dataset_bindings_by_scope(
+                auth_token=auth_token,
+                binding_scope="recon_scheme",
+                binding_code=scheme_code,
+            )
+            for row in legacy_scheme_scope_rows:
+                normalized = _build_plan_binding_from_dataset_binding(
+                    binding=row,
+                    left_time_semantic=left_time_semantic,
+                    right_time_semantic=right_time_semantic,
+                )
+                if normalized is not None:
+                    bindings.append(normalized)
+            if bindings:
+                binding_source = "dataset_bindings:recon_scheme"
+
+    if not bindings:
+        legacy_raw = [v for v in _safe_list(run_plan.get("input_bindings_json")) if isinstance(v, dict)]
+        if not legacy_raw:
+            legacy_raw = [
+                v
+                for v in _safe_list(
+                    _safe_dict(
+                        run_plan.get("plan_meta_json")
+                        or run_plan.get("plan_meta")
+                        or run_plan.get("meta")
+                    ).get("input_bindings")
+                )
+                if isinstance(v, dict)
+            ]
+        for row in legacy_raw:
+            normalized = _normalize_plan_binding(row)
+            if normalized is not None:
+                bindings.append(normalized)
+        if bindings:
+            binding_source = "run_plan_legacy_input_bindings"
+
+    if not bindings:
+        ctx["failed_stage"] = "config"
+        ctx["failed_reason"] = "未配置可执行的数据集绑定（dataset_bindings）"
+        ctx["plan_input_bindings"] = []
+        ctx["plan_input_source"] = ""
+        return {"recon_ctx": ctx}
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in bindings:
+        dedupe_key = "::".join(
+            [
+                str(item.get("data_source_id") or ""),
+                str(item.get("table_name") or ""),
+                str(item.get("resource_key") or ""),
+                str(item.get("role_code") or ""),
+            ]
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped.append(item)
+
+    ctx["plan_input_bindings"] = deduped
+    ctx["plan_input_source"] = binding_source
     return {"recon_ctx": ctx}
 
 
@@ -724,6 +886,43 @@ async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     )
     if run:
         ctx["execution_run_record"] = run
+    if normalized_status == "success":
+        usage_updates: list[dict[str, Any]] = []
+        run_plan_code = str(ctx.get("run_plan_code") or "").strip()
+        scheme_code = str(ctx.get("scheme_code") or "").strip()
+        plan_input_source = str(ctx.get("plan_input_source") or "").strip()
+        scopes_to_touch: list[tuple[str, str]] = []
+        if plan_input_source.startswith("dataset_bindings:"):
+            scope = plan_input_source.split(":", 1)[1]
+            if scope in {"execution_run_plan", "recon_task"} and run_plan_code:
+                scopes_to_touch.append((scope, run_plan_code))
+            elif scope in {"execution_scheme", "recon_scheme"} and scheme_code:
+                scopes_to_touch.append((scope, scheme_code))
+        else:
+            if run_plan_code:
+                scopes_to_touch.append(("execution_run_plan", run_plan_code))
+            if scheme_code:
+                scopes_to_touch.append(("execution_scheme", scheme_code))
+
+        for binding_scope, binding_code in scopes_to_touch:
+            touch_result = await call_mcp_tool(
+                "execution_dataset_binding_touch_usage",
+                {
+                    "auth_token": auth_token,
+                    "binding_scope": binding_scope,
+                    "binding_code": binding_code,
+                },
+            )
+            usage_updates.append(
+                {
+                    "binding_scope": binding_scope,
+                    "binding_code": binding_code,
+                    "success": bool(touch_result.get("success")),
+                    "updated_count": int(touch_result.get("updated_count") or 0),
+                    "error": str(touch_result.get("error") or ""),
+                }
+            )
+        ctx["binding_usage_updates"] = usage_updates
     return {"recon_ctx": ctx}
 
 

@@ -16,7 +16,7 @@ from connectors.base import BaseDataSourceConnector
 logger = logging.getLogger(__name__)
 
 _DATASET_CODE_PATTERN = re.compile(r"[^a-z0-9_]+")
-_PG_SYSTEM_SCHEMAS = {"pg_catalog", "information_schema"}
+_POSTGRES_DISCOVER_RELKINDS = ("r", "v", "m", "f", "p")
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 
 
@@ -41,11 +41,47 @@ def _sanitize_dataset_code(*parts: str) -> str:
     return text[:120]
 
 
+def _split_identifier_text(raw: str) -> list[str]:
+    parts = re.split(r"[\n,]+", str(raw or ""))
+    return [part.strip() for part in parts if part and part.strip()]
+
+
 def _to_int(value: Any, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_target_resource_keys(value: Any) -> list[str]:
+    raw_items: list[str] = []
+    if isinstance(value, str):
+        raw_items.extend(_split_identifier_text(value))
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                raw_items.extend(_split_identifier_text(item))
+            else:
+                text = str(item or "").strip()
+                if text:
+                    raw_items.append(text)
+    else:
+        text = str(value or "").strip()
+        if text:
+            raw_items.append(text)
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in raw_items:
+        text = item.strip().strip("`").strip('"').strip("'")
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(text)
+    return normalized
 
 
 def _compact_error_text(value: Any) -> str:
@@ -68,6 +104,45 @@ def _friendly_database_error(exc: Exception) -> str:
     return detail or "数据库连接失败"
 
 
+def _is_hologres_source(provider_code: Any, db_type: Any) -> bool:
+    normalized_provider = str(provider_code or "").strip().lower()
+    normalized_db_type = str(db_type or "").strip().lower()
+    return normalized_provider in {"hologres", "holo"} or normalized_db_type in {"hologres", "holo"}
+
+
+def _is_hologres_worker_info_permission_error(exc: Exception) -> bool:
+    detail = _compact_error_text(exc).lower()
+    return "hg_get_worker_info" in detail and (
+        "must be superuser" in detail or "insufficientprivilege" in detail or "permission denied" in detail
+    )
+
+
+def _parse_requested_objects(resource_keys: list[str]) -> list[dict[str, str]]:
+    parsed: list[dict[str, str]] = []
+    for resource_key in resource_keys:
+        text = str(resource_key or "").strip()
+        if not text:
+            continue
+        if "." in text:
+            schema_name, table_name = text.split(".", 1)
+            parsed.append(
+                {
+                    "schema_name": schema_name.strip(),
+                    "table_name": table_name.strip(),
+                    "resource_key": f"{schema_name.strip()}.{table_name.strip()}".strip("."),
+                }
+            )
+        else:
+            parsed.append(
+                {
+                    "schema_name": "",
+                    "table_name": text,
+                    "resource_key": text,
+                }
+            )
+    return parsed
+
+
 def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
     cursor_candidates = {
         "updated_at",
@@ -82,6 +157,26 @@ def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
         if column_name in cursor_candidates:
             return {"mode": "incremental", "cursor_field": column_name}
     return {"mode": "full"}
+
+
+def _postgres_relkind_to_dataset_kind(relkind: str) -> str:
+    normalized = str(relkind or "").strip().lower()
+    if normalized in {"v", "m"}:
+        return "view"
+    return "table"
+
+
+def _postgres_relkind_to_object_type(relkind: str) -> str:
+    normalized = str(relkind or "").strip().lower()
+    if normalized == "v":
+        return "view"
+    if normalized == "m":
+        return "materialized_view"
+    if normalized == "f":
+        return "foreign_table"
+    if normalized == "p":
+        return "partitioned_table"
+    return "table"
 
 
 class DatabaseConnector(BaseDataSourceConnector):
@@ -255,14 +350,32 @@ class DatabaseConnector(BaseDataSourceConnector):
 
         schema_whitelist = self._extract_schema_whitelist(arguments, cfg)
         limit = max(1, min(_to_int(arguments.get("limit"), 300), 1000))
+        offset = max(0, _to_int(arguments.get("offset"), 0))
+        target_resource_keys = _normalize_target_resource_keys(arguments.get("target_resource_keys"))
 
         try:
             if db_type == "postgresql":
-                datasets = self._discover_postgresql(cfg, schema_whitelist=schema_whitelist, limit=limit)
+                discover_payload = self._discover_postgresql(
+                    cfg,
+                    schema_whitelist=schema_whitelist,
+                    limit=limit,
+                    offset=offset,
+                    target_resource_keys=target_resource_keys,
+                )
             elif db_type == "mysql":
-                datasets = self._discover_mysql(cfg, limit=limit)
+                discover_payload = self._discover_mysql(
+                    cfg,
+                    limit=limit,
+                    offset=offset,
+                    target_resource_keys=target_resource_keys,
+                )
             elif db_type == "sqlite":
-                datasets = self._discover_sqlite(cfg, limit=limit)
+                discover_payload = self._discover_sqlite(
+                    cfg,
+                    limit=limit,
+                    offset=offset,
+                    target_resource_keys=target_resource_keys,
+                )
             else:
                 return {"success": False, "error": f"暂不支持的 db_type: {db_type}"}
         except Exception as exc:
@@ -278,21 +391,39 @@ class DatabaseConnector(BaseDataSourceConnector):
                 "message": detail,
             }
 
+        datasets = [item for item in discover_payload.get("datasets") or [] if isinstance(item, dict)]
+        scan_summary = (
+            discover_payload.get("scan_summary")
+            if isinstance(discover_payload.get("scan_summary"), dict)
+            else {}
+        )
+        message = str(discover_payload.get("message") or "").strip()
+        if not message:
+            if scan_summary.get("mode") == "targeted":
+                requested_count = int(scan_summary.get("requested_count") or len(target_resource_keys))
+                message = f"已更新 {len(datasets)} / {requested_count} 个指定对象"
+            else:
+                scanned_count = int(scan_summary.get("scanned_count") or len(datasets))
+                total_count = int(scan_summary.get("total_count") or scanned_count)
+                message = f"本次扫描 {scanned_count} / {total_count} 个数据库对象"
+
         return {
             "success": True,
             "source_id": self.ctx.source_id,
             "provider_code": self.ctx.provider_code,
             "datasets": datasets,
             "dataset_count": len(datasets),
-            "message": f"已发现 {len(datasets)} 个数据库对象",
+            "scan_summary": scan_summary,
+            "message": message,
         }
 
     def preview(self, arguments: dict[str, Any]) -> dict[str, Any]:
         cfg = self._resolved_connection_config()
         db_type = _normalize_db_type(cfg.get("db_type"))
+        is_hologres = _is_hologres_source(self.ctx.provider_code, cfg.get("db_type"))
         resource_key = str(arguments.get("resource_key") or "").strip()
         dataset = arguments.get("dataset") if isinstance(arguments.get("dataset"), dict) else {}
-        extract_config = dataset.get("extract_config") if isinstance(dataset, dict) else {}
+        extract_config = dataset.get("extract_config") if isinstance(dataset.get("extract_config"), dict) else {}
         limit = max(1, min(_to_int(arguments.get("limit"), 10), 200))
 
         schema_name = str(arguments.get("schema") or extract_config.get("schema") or "").strip()
@@ -328,6 +459,16 @@ class DatabaseConnector(BaseDataSourceConnector):
                     "rows": [],
                 }
         except Exception as exc:
+            if is_hologres and _is_hologres_worker_info_permission_error(exc):
+                logger.warning("hologres preview skipped due to insufficient privilege: %s", exc)
+                return {
+                    "success": True,
+                    "source_id": self.ctx.source_id,
+                    "provider_code": self.ctx.provider_code,
+                    "rows": [],
+                    "count": 0,
+                    "message": "当前 Hologres 账号无权读取样例数据，已跳过样例预览",
+                }
             logger.error("database preview failed: %s", exc, exc_info=True)
             return {
                 "success": False,
@@ -351,38 +492,117 @@ class DatabaseConnector(BaseDataSourceConnector):
         *,
         schema_whitelist: list[str],
         limit: int,
-    ) -> list[dict[str, Any]]:
+        offset: int,
+        target_resource_keys: list[str],
+    ) -> dict[str, Any]:
         conn = self._connect_postgresql(cfg)
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                table_sql = """
-                    SELECT table_schema, table_name, table_type
-                    FROM information_schema.tables
-                    WHERE table_type IN ('BASE TABLE', 'VIEW')
-                      AND table_schema <> ALL(%s)
+                requested_objects = _parse_requested_objects(target_resource_keys)
+                count_sql = """
+                    SELECT COUNT(*) AS total_count
+                    FROM pg_class AS c
+                    JOIN pg_namespace AS n
+                      ON n.oid = c.relnamespace
+                    WHERE n.nspname <> %s
+                      AND n.nspname NOT LIKE %s
+                      AND c.relkind = ANY(%s)
                 """
-                params: list[Any] = [list(_PG_SYSTEM_SCHEMAS)]
+                count_params: list[Any] = ["information_schema", "pg_%", list(_POSTGRES_DISCOVER_RELKINDS)]
                 if schema_whitelist:
-                    table_sql += " AND table_schema = ANY(%s)"
+                    count_sql += " AND n.nspname = ANY(%s)"
+                    count_params.append(schema_whitelist)
+                if requested_objects:
+                    requested_clauses: list[str] = []
+                    for item in requested_objects:
+                        schema_name = str(item.get("schema_name") or "").strip()
+                        table_name = str(item.get("table_name") or "").strip()
+                        if schema_name:
+                            requested_clauses.append("(n.nspname = %s AND c.relname = %s)")
+                            count_params.extend([schema_name, table_name])
+                        else:
+                            requested_clauses.append("(c.relname = %s)")
+                            count_params.append(table_name)
+                    count_sql += f" AND ({' OR '.join(requested_clauses)})"
+                cur.execute(count_sql, tuple(count_params))
+                count_row = cur.fetchone() or {}
+                total_count = int(count_row.get("total_count") or 0)
+
+                table_sql = """
+                    SELECT n.nspname AS table_schema,
+                           c.relname AS table_name,
+                           c.relkind AS relkind
+                    FROM pg_class AS c
+                    JOIN pg_namespace AS n
+                      ON n.oid = c.relnamespace
+                    WHERE n.nspname <> %s
+                      AND n.nspname NOT LIKE %s
+                      AND c.relkind = ANY(%s)
+                """
+                params: list[Any] = ["information_schema", "pg_%", list(_POSTGRES_DISCOVER_RELKINDS)]
+                if schema_whitelist:
+                    table_sql += " AND n.nspname = ANY(%s)"
                     params.append(schema_whitelist)
-                table_sql += " ORDER BY table_schema, table_name LIMIT %s"
-                params.append(limit)
+                if requested_objects:
+                    requested_clauses = []
+                    for item in requested_objects:
+                        schema_name = str(item.get("schema_name") or "").strip()
+                        table_name = str(item.get("table_name") or "").strip()
+                        if schema_name:
+                            requested_clauses.append("(n.nspname = %s AND c.relname = %s)")
+                            params.extend([schema_name, table_name])
+                        else:
+                            requested_clauses.append("(c.relname = %s)")
+                            params.append(table_name)
+                    table_sql += f" AND ({' OR '.join(requested_clauses)}) ORDER BY n.nspname, c.relname"
+                else:
+                    table_sql += " ORDER BY n.nspname, c.relname LIMIT %s OFFSET %s"
+                    params.extend([limit, offset])
                 cur.execute(table_sql, tuple(params))
                 table_rows = [dict(row) for row in (cur.fetchall() or [])]
 
                 if not table_rows:
-                    return []
+                    scan_summary: dict[str, Any]
+                    if requested_objects:
+                        scan_summary = {
+                            "mode": "targeted",
+                            "requested_count": len(requested_objects),
+                            "matched_count": 0,
+                            "missing_targets": [str(item.get("resource_key") or "") for item in requested_objects],
+                            "scanned_count": 0,
+                            "total_count": len(requested_objects),
+                            "has_more": False,
+                            "next_offset": None,
+                            "offset": 0,
+                            "requested_limit": len(requested_objects),
+                        }
+                    else:
+                        next_offset = offset + len(table_rows)
+                        scan_summary = {
+                            "mode": "batch",
+                            "scanned_count": 0,
+                            "total_count": total_count,
+                            "offset": offset,
+                            "requested_limit": limit,
+                            "has_more": next_offset < total_count,
+                            "next_offset": next_offset if next_offset < total_count else None,
+                        }
+                    return {
+                        "datasets": [],
+                        "scan_summary": scan_summary,
+                    }
+
+                selected_schemas = sorted({str(row.get("table_schema") or "") for row in table_rows if str(row.get("table_schema") or "")})
+                selected_tables = sorted({str(row.get("table_name") or "") for row in table_rows if str(row.get("table_name") or "")})
 
                 column_sql = """
                     SELECT table_schema, table_name, column_name, data_type, is_nullable,
                            ordinal_position
                     FROM information_schema.columns
-                    WHERE table_schema <> ALL(%s)
+                    WHERE table_schema = ANY(%s)
+                      AND table_name = ANY(%s)
                 """
-                column_params: list[Any] = [list(_PG_SYSTEM_SCHEMAS)]
-                if schema_whitelist:
-                    column_sql += " AND table_schema = ANY(%s)"
-                    column_params.append(schema_whitelist)
+                column_params: list[Any] = [selected_schemas, selected_tables]
                 column_sql += " ORDER BY table_schema, table_name, ordinal_position"
                 cur.execute(column_sql, tuple(column_params))
                 column_rows = [dict(row) for row in (cur.fetchall() or [])]
@@ -395,12 +615,10 @@ class DatabaseConnector(BaseDataSourceConnector):
                      AND tc.table_schema = kcu.table_schema
                      AND tc.table_name = kcu.table_name
                     WHERE tc.constraint_type = 'PRIMARY KEY'
-                      AND kcu.table_schema <> ALL(%s)
+                      AND kcu.table_schema = ANY(%s)
+                      AND kcu.table_name = ANY(%s)
                 """
-                pk_params: list[Any] = [list(_PG_SYSTEM_SCHEMAS)]
-                if schema_whitelist:
-                    pk_sql += " AND kcu.table_schema = ANY(%s)"
-                    pk_params.append(schema_whitelist)
+                pk_params: list[Any] = [selected_schemas, selected_tables]
                 pk_sql += " ORDER BY kcu.table_schema, kcu.table_name, kcu.ordinal_position"
                 cur.execute(pk_sql, tuple(pk_params))
                 pk_rows = [dict(row) for row in (cur.fetchall() or [])]
@@ -428,7 +646,9 @@ class DatabaseConnector(BaseDataSourceConnector):
             schema_name = str(table_row.get("table_schema") or "")
             table_name = str(table_row.get("table_name") or "")
             key = (schema_name, table_name)
-            object_kind = "view" if str(table_row.get("table_type") or "").upper() == "VIEW" else "table"
+            relkind = str(table_row.get("relkind") or "")
+            dataset_kind = _postgres_relkind_to_dataset_kind(relkind)
+            object_kind = _postgres_relkind_to_object_type(relkind)
             columns = columns_by_key.get(key, [])
             primary_keys = primary_keys_by_key.get(key, [])
             resource_key = f"{schema_name}.{table_name}"
@@ -437,7 +657,7 @@ class DatabaseConnector(BaseDataSourceConnector):
                     "dataset_code": _sanitize_dataset_code(schema_name, table_name),
                     "dataset_name": resource_key,
                     "resource_key": resource_key,
-                    "dataset_kind": object_kind,
+                    "dataset_kind": dataset_kind,
                     "origin_type": "discovered",
                     "extract_config": {
                         "db_type": "postgresql",
@@ -454,7 +674,52 @@ class DatabaseConnector(BaseDataSourceConnector):
                     "meta": {"discovered_by": "database_connector"},
                 }
             )
-        return datasets
+        if requested_objects:
+            matched_resource_keys = {str(item.get("resource_key") or "").lower() for item in datasets}
+            matched_table_names = {
+                str(item.get("extract_config", {}).get("table") or "").lower()
+                for item in datasets
+                if isinstance(item.get("extract_config"), dict)
+            }
+            missing_targets: list[str] = []
+            for requested in requested_objects:
+                requested_resource_key = str(requested.get("resource_key") or "").strip()
+                requested_table_name = str(requested.get("table_name") or "").strip().lower()
+                if "." in requested_resource_key:
+                    if requested_resource_key.lower() not in matched_resource_keys:
+                        missing_targets.append(requested_resource_key)
+                elif requested_table_name and requested_table_name not in matched_table_names:
+                    missing_targets.append(requested_resource_key)
+            scan_summary = {
+                "mode": "targeted",
+                "requested_count": len(requested_objects),
+                "matched_count": len(datasets),
+                "missing_targets": missing_targets,
+                "scanned_count": len(datasets),
+                "total_count": len(requested_objects),
+                "has_more": False,
+                "next_offset": None,
+                "offset": 0,
+                "requested_limit": len(requested_objects),
+            }
+            message = f"已更新 {len(datasets)} / {len(requested_objects)} 个指定对象"
+        else:
+            next_offset = offset + len(datasets)
+            scan_summary = {
+                "mode": "batch",
+                "scanned_count": len(datasets),
+                "total_count": total_count,
+                "offset": offset,
+                "requested_limit": limit,
+                "has_more": next_offset < total_count,
+                "next_offset": next_offset if next_offset < total_count else None,
+            }
+            message = f"本次扫描 {len(datasets)} / {total_count} 个数据库对象"
+        return {
+            "datasets": datasets,
+            "scan_summary": scan_summary,
+            "message": message,
+        }
 
     def _preview_postgresql(
         self,
@@ -516,48 +781,121 @@ class DatabaseConnector(BaseDataSourceConnector):
         finally:
             conn.close()
 
-    def _discover_mysql(self, cfg: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    def _discover_mysql(
+        self,
+        cfg: dict[str, Any],
+        *,
+        limit: int,
+        offset: int,
+        target_resource_keys: list[str],
+    ) -> dict[str, Any]:
         conn = self._connect_mysql(cfg)
         db_name = str(cfg.get("database") or "")
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                requested_objects = _parse_requested_objects(target_resource_keys)
+                count_sql = """
+                    SELECT COUNT(*) AS total_count
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_type IN ('BASE TABLE', 'VIEW')
+                """
+                count_params: list[Any] = [db_name]
+                if requested_objects:
+                    requested_clauses: list[str] = []
+                    for item in requested_objects:
+                        schema_name = str(item.get("schema_name") or "").strip()
+                        table_name = str(item.get("table_name") or "").strip()
+                        if schema_name:
+                            requested_clauses.append("(table_schema = %s AND table_name = %s)")
+                            count_params.extend([schema_name, table_name])
+                        else:
+                            requested_clauses.append("(table_name = %s)")
+                            count_params.append(table_name)
+                    count_sql += f" AND ({' OR '.join(requested_clauses)})"
+                cur.execute(count_sql, tuple(count_params))
+                count_row = cur.fetchone() or {}
+                total_count = int(count_row.get("total_count") or 0)
+
+                table_sql = """
                     SELECT table_schema, table_name, table_type
                     FROM information_schema.tables
                     WHERE table_schema = %s
                       AND table_type IN ('BASE TABLE', 'VIEW')
-                    ORDER BY table_name
-                    LIMIT %s
-                    """,
-                    (db_name, limit),
-                )
+                """
+                table_params: list[Any] = [db_name]
+                if requested_objects:
+                    requested_clauses = []
+                    for item in requested_objects:
+                        schema_name = str(item.get("schema_name") or "").strip()
+                        table_name = str(item.get("table_name") or "").strip()
+                        if schema_name:
+                            requested_clauses.append("(table_schema = %s AND table_name = %s)")
+                            table_params.extend([schema_name, table_name])
+                        else:
+                            requested_clauses.append("(table_name = %s)")
+                            table_params.append(table_name)
+                    table_sql += f" AND ({' OR '.join(requested_clauses)})"
+                    table_sql += " ORDER BY table_schema, table_name"
+                else:
+                    table_sql += " ORDER BY table_name LIMIT %s OFFSET %s"
+                    table_params.extend([limit, offset])
+                cur.execute(table_sql, tuple(table_params))
                 table_rows = list(cur.fetchall() or [])
 
                 if not table_rows:
-                    return []
+                    scan_summary: dict[str, Any]
+                    if requested_objects:
+                        scan_summary = {
+                            "mode": "targeted",
+                            "requested_count": len(requested_objects),
+                            "matched_count": 0,
+                            "missing_targets": [str(item.get("resource_key") or "") for item in requested_objects],
+                            "scanned_count": 0,
+                            "total_count": len(requested_objects),
+                            "has_more": False,
+                            "next_offset": None,
+                            "offset": 0,
+                            "requested_limit": len(requested_objects),
+                        }
+                    else:
+                        next_offset = offset
+                        scan_summary = {
+                            "mode": "batch",
+                            "scanned_count": 0,
+                            "total_count": total_count,
+                            "offset": offset,
+                            "requested_limit": limit,
+                            "has_more": next_offset < total_count,
+                            "next_offset": next_offset if next_offset < total_count else None,
+                        }
+                    return {"datasets": [], "scan_summary": scan_summary}
 
+                selected_table_names = sorted({str(row.get("table_name") or "") for row in table_rows if str(row.get("table_name") or "")})
+                selected_table_placeholders = ", ".join(["%s"] * len(selected_table_names))
                 cur.execute(
-                    """
+                    f"""
                     SELECT table_schema, table_name, column_name, data_type, is_nullable,
                            ordinal_position
                     FROM information_schema.columns
                     WHERE table_schema = %s
+                      AND table_name IN ({selected_table_placeholders})
                     ORDER BY table_name, ordinal_position
                     """,
-                    (db_name,),
+                    (db_name, *selected_table_names),
                 )
                 column_rows = list(cur.fetchall() or [])
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT table_schema, table_name, column_name, ordinal_position
                     FROM information_schema.key_column_usage
                     WHERE table_schema = %s
+                      AND table_name IN ({selected_table_placeholders})
                       AND constraint_name = 'PRIMARY'
                     ORDER BY table_name, ordinal_position
                     """,
-                    (db_name,),
+                    (db_name, *selected_table_names),
                 )
                 pk_rows = list(cur.fetchall() or [])
         finally:
@@ -610,24 +948,101 @@ class DatabaseConnector(BaseDataSourceConnector):
                     "meta": {"discovered_by": "database_connector"},
                 }
             )
-        return datasets
+        if requested_objects:
+            matched_resource_keys = {str(item.get("resource_key") or "").lower() for item in datasets}
+            matched_table_names = {
+                str(item.get("extract_config", {}).get("table") or "").lower()
+                for item in datasets
+                if isinstance(item.get("extract_config"), dict)
+            }
+            missing_targets: list[str] = []
+            for requested in requested_objects:
+                requested_resource_key = str(requested.get("resource_key") or "").strip()
+                requested_table_name = str(requested.get("table_name") or "").strip().lower()
+                if "." in requested_resource_key:
+                    if requested_resource_key.lower() not in matched_resource_keys:
+                        missing_targets.append(requested_resource_key)
+                elif requested_table_name and requested_table_name not in matched_table_names:
+                    missing_targets.append(requested_resource_key)
+            scan_summary = {
+                "mode": "targeted",
+                "requested_count": len(requested_objects),
+                "matched_count": len(datasets),
+                "missing_targets": missing_targets,
+                "scanned_count": len(datasets),
+                "total_count": len(requested_objects),
+                "has_more": False,
+                "next_offset": None,
+                "offset": 0,
+                "requested_limit": len(requested_objects),
+            }
+            message = f"已更新 {len(datasets)} / {len(requested_objects)} 个指定对象"
+        else:
+            next_offset = offset + len(datasets)
+            scan_summary = {
+                "mode": "batch",
+                "scanned_count": len(datasets),
+                "total_count": total_count,
+                "offset": offset,
+                "requested_limit": limit,
+                "has_more": next_offset < total_count,
+                "next_offset": next_offset if next_offset < total_count else None,
+            }
+            message = f"本次扫描 {len(datasets)} / {total_count} 个数据库对象"
+        return {
+            "datasets": datasets,
+            "scan_summary": scan_summary,
+            "message": message,
+        }
 
-    def _discover_sqlite(self, cfg: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    def _discover_sqlite(
+        self,
+        cfg: dict[str, Any],
+        *,
+        limit: int,
+        offset: int,
+        target_resource_keys: list[str],
+    ) -> dict[str, Any]:
         conn = self._connect_sqlite(cfg)
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()
-            cur.execute(
-                """
+            requested_objects = _parse_requested_objects(target_resource_keys)
+            count_sql = """
+                SELECT COUNT(*) AS total_count
+                FROM sqlite_master
+                WHERE type IN ('table', 'view')
+                  AND name NOT LIKE 'sqlite_%'
+            """
+            count_params: list[Any] = []
+            if requested_objects:
+                requested_names = [str(item.get("table_name") or "") for item in requested_objects if str(item.get("table_name") or "")]
+                if requested_names:
+                    placeholders = ", ".join("?" for _ in requested_names)
+                    count_sql += f" AND name IN ({placeholders})"
+                    count_params.extend(requested_names)
+            cur.execute(count_sql, tuple(count_params))
+            count_row = cur.fetchone() or {"total_count": 0}
+            total_count = int(count_row["total_count"] or 0)
+
+            table_sql = """
                 SELECT name, type
                 FROM sqlite_master
                 WHERE type IN ('table', 'view')
                   AND name NOT LIKE 'sqlite_%'
-                ORDER BY name
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            """
+            table_params: list[Any] = []
+            if requested_objects:
+                requested_names = [str(item.get("table_name") or "") for item in requested_objects if str(item.get("table_name") or "")]
+                if requested_names:
+                    placeholders = ", ".join("?" for _ in requested_names)
+                    table_sql += f" AND name IN ({placeholders})"
+                    table_params.extend(requested_names)
+                table_sql += " ORDER BY name"
+            else:
+                table_sql += " ORDER BY name LIMIT ? OFFSET ?"
+                table_params.extend([limit, offset])
+            cur.execute(table_sql, tuple(table_params))
             objects = cur.fetchall() or []
 
             datasets: list[dict[str, Any]] = []
@@ -667,6 +1082,42 @@ class DatabaseConnector(BaseDataSourceConnector):
                         "meta": {"discovered_by": "database_connector"},
                     }
                 )
-            return datasets
+            if requested_objects:
+                matched_names = {str(item.get("resource_key") or "").lower() for item in datasets}
+                missing_targets = [
+                    str(item.get("resource_key") or "")
+                    for item in requested_objects
+                    if str(item.get("resource_key") or "").lower() not in matched_names
+                ]
+                scan_summary = {
+                    "mode": "targeted",
+                    "requested_count": len(requested_objects),
+                    "matched_count": len(datasets),
+                    "missing_targets": missing_targets,
+                    "scanned_count": len(datasets),
+                    "total_count": len(requested_objects),
+                    "has_more": False,
+                    "next_offset": None,
+                    "offset": 0,
+                    "requested_limit": len(requested_objects),
+                }
+                message = f"已更新 {len(datasets)} / {len(requested_objects)} 个指定对象"
+            else:
+                next_offset = offset + len(datasets)
+                scan_summary = {
+                    "mode": "batch",
+                    "scanned_count": len(datasets),
+                    "total_count": total_count,
+                    "offset": offset,
+                    "requested_limit": limit,
+                    "has_more": next_offset < total_count,
+                    "next_offset": next_offset if next_offset < total_count else None,
+                }
+                message = f"本次扫描 {len(datasets)} / {total_count} 个数据库对象"
+            return {
+                "datasets": datasets,
+                "scan_summary": scan_summary,
+                "message": message,
+            }
         finally:
             conn.close()

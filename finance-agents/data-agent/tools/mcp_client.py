@@ -49,6 +49,10 @@ def _get_result_wait_timeout(tool_name: str) -> float:
 
     proc/recon 属于长任务，60 秒对真实文件偏紧，容易误判为失败。
     """
+    if tool_name == "data_source_discover_datasets":
+        return 300.0
+    if tool_name == "data_source_refresh_dataset_semantic_profile":
+        return 90.0
     if tool_name == "proc_execute":
         return 180.0
     if tool_name == "recon_execute":
@@ -1796,6 +1800,24 @@ def _mock_build_dataset(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now_iso()
+    extract_payload = dict(extract_config or {})
+    schema_name = str(extract_payload.get("schema") or "").strip()
+    object_name = (
+        str(extract_payload.get("table") or "").strip()
+        or str(extract_payload.get("endpoint") or "").strip().strip("/")
+    )
+    object_type = "table" if dataset_kind == "table" else ("api_endpoint" if dataset_kind == "api_endpoint" else dataset_kind)
+    search_text = " ".join(
+        item
+        for item in [
+            dataset_code,
+            dataset_name,
+            resource_key,
+            schema_name,
+            object_name,
+        ]
+        if str(item or "").strip()
+    )
     return {
         "id": _mock_dataset_id(source_id, dataset_code),
         "data_source_id": source_id,
@@ -1804,11 +1826,22 @@ def _mock_build_dataset(
         "resource_key": resource_key,
         "dataset_kind": dataset_kind,
         "origin_type": origin_type,
-        "extract_config": dict(extract_config or {}),
+        "extract_config": extract_payload,
         "schema_summary": dict(schema_summary or {}),
         "sync_strategy": dict(sync_strategy or {"mode": "manual"}),
         "status": status,
         "enabled": enabled,
+        "publish_status": "published" if status == "active" else "unpublished",
+        "business_domain": "finance",
+        "business_object_type": "",
+        "grain": "",
+        "verified_status": "unverified",
+        "schema_name": schema_name,
+        "object_name": object_name,
+        "object_type": object_type,
+        "usage_count": 0,
+        "last_used_at": "",
+        "search_text": search_text,
         "health_status": health_status,
         "last_checked_at": now,
         "last_sync_at": None,
@@ -2538,6 +2571,9 @@ def _mock_discover_data_source_datasets(
     openapi_url: str = "",
     openapi_spec: Any = None,
     manual_endpoints: list[dict[str, Any]] | None = None,
+    limit: int = 500,
+    offset: int = 0,
+    target_resource_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     user_key = _auth_user_key(auth_token)
     source = _mock_seed_data_sources(user_key).get(source_id)
@@ -2582,12 +2618,32 @@ def _mock_discover_data_source_datasets(
         if extra_rows:
             discovered_rows.extend(extra_rows)
 
-    datasets = discovered_rows
+    requested_targets = {
+        str(item or "").strip().lower()
+        for item in (target_resource_keys or [])
+        if str(item or "").strip()
+    }
+    if requested_targets:
+        discovered_rows = [
+            row
+            for row in discovered_rows
+            if str(row.get("resource_key") or "").strip().lower() in requested_targets
+            or str(row.get("dataset_name") or "").strip().lower() in requested_targets
+            or str(row.get("dataset_code") or "").strip().lower() in requested_targets
+        ]
+    total_count = len(discovered_rows)
+    if requested_targets:
+        batch_rows = discovered_rows
+    else:
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = max(1, min(int(limit or 500), 2000))
+        batch_rows = discovered_rows[safe_offset:safe_offset + safe_limit]
+    datasets = batch_rows
     persisted_count = 0
     if persist:
         dataset_map, _ = _mock_ensure_data_source_context(user_key)
         source_dataset_map = dataset_map.setdefault(source_id, {})
-        for row in discovered_rows:
+        for row in batch_rows:
             row = dict(row)
             row["updated_at"] = _now_iso()
             source_dataset_map[str(row["id"])] = row
@@ -2599,9 +2655,47 @@ def _mock_discover_data_source_datasets(
         source_id=source_id,
         event_type="datasets_discovered",
         event_level="info",
-        event_message=f"发现 {len(discovered_rows)} 个数据集（mock）",
-        event_payload={"persist": persist, "discover_mode": normalized_discover_mode or "auto"},
+        event_message=f"发现 {len(batch_rows)} 个数据集（mock）",
+        event_payload={
+            "persist": persist,
+            "discover_mode": normalized_discover_mode or "auto",
+            "offset": offset,
+            "limit": limit,
+            "target_resource_keys": list(target_resource_keys or []),
+        },
     )
+    if requested_targets:
+        matched = {
+            str(row.get("resource_key") or "").strip().lower()
+            for row in batch_rows
+        }
+        scan_summary = {
+            "mode": "targeted",
+            "requested_count": len(requested_targets),
+            "matched_count": len(batch_rows),
+            "missing_targets": [
+                item for item in (target_resource_keys or []) if str(item).strip().lower() not in matched
+            ],
+            "scanned_count": len(batch_rows),
+            "total_count": len(requested_targets),
+            "has_more": False,
+            "next_offset": None,
+            "offset": 0,
+            "requested_limit": len(requested_targets),
+        }
+        message = f"已更新 {len(batch_rows)} / {len(requested_targets)} 个指定对象"
+    else:
+        next_offset = offset + len(batch_rows)
+        scan_summary = {
+            "mode": "batch",
+            "scanned_count": len(batch_rows),
+            "total_count": total_count,
+            "offset": max(0, int(offset or 0)),
+            "requested_limit": max(1, min(int(limit or 500), 2000)),
+            "has_more": next_offset < total_count,
+            "next_offset": next_offset if next_offset < total_count else None,
+        }
+        message = f"本次扫描 {len(batch_rows)} / {total_count} 个数据集"
     return {
         "success": True,
         "mode": "mock",
@@ -2611,7 +2705,8 @@ def _mock_discover_data_source_datasets(
         "dataset_count": len(datasets),
         "persist": persist,
         "persisted_count": persisted_count,
-        "message": f"发现 {len(discovered_rows)} 个数据集",
+        "scan_summary": scan_summary,
+        "message": message,
     }
 
 
@@ -2622,6 +2717,17 @@ def _mock_list_data_source_datasets(
     status: str = "",
     include_deleted: bool = False,
     limit: int = 500,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "",
+    include_heavy: bool = False,
 ) -> dict[str, Any]:
     user_key = _auth_user_key(auth_token)
     source_map = _mock_seed_data_sources(user_key)
@@ -2641,12 +2747,82 @@ def _mock_list_data_source_datasets(
         all_rows = [row for row in all_rows if str(row.get("status") or "").lower() == normalized_status]
     if not include_deleted:
         all_rows = [row for row in all_rows if str(row.get("status") or "").lower() != "deleted"]
+    normalized_keyword = str(keyword or "").strip().lower()
+    normalized_schema_name = str(schema_name or "").strip().lower()
+    normalized_object_type = str(object_type or "").strip().lower()
+    normalized_publish_status = str(publish_status or "").strip().lower()
+    normalized_business_object_type = str(business_object_type or "").strip().lower()
+    normalized_verified_status = str(verified_status or "").strip().lower()
 
-    limited = all_rows[: max(1, min(limit, 2000))]
+    def _matches(row: dict[str, Any]) -> bool:
+        if only_published and str(row.get("publish_status") or "").lower() != "published":
+            return False
+        if normalized_publish_status and str(row.get("publish_status") or "").lower() != normalized_publish_status:
+            return False
+        if normalized_schema_name and str(row.get("schema_name") or "").lower() != normalized_schema_name:
+            return False
+        if normalized_object_type and str(row.get("object_type") or "").lower() != normalized_object_type:
+            return False
+        if normalized_business_object_type and (
+            str(row.get("business_object_type") or "").lower() != normalized_business_object_type
+        ):
+            return False
+        if normalized_verified_status and str(row.get("verified_status") or "").lower() != normalized_verified_status:
+            return False
+        if normalized_keyword:
+            haystack = " ".join(
+                [
+                    str(row.get("dataset_name") or ""),
+                    str(row.get("dataset_code") or ""),
+                    str(row.get("resource_key") or ""),
+                    str(row.get("search_text") or ""),
+                ]
+            ).lower()
+            if normalized_keyword not in haystack:
+                return False
+        return True
+
+    filtered = [row for row in all_rows if _matches(row)]
+    normalized_sort_by = str(sort_by or "").strip().lower()
+    if not normalized_sort_by:
+        normalized_sort_by = "-updated_at"
+    reverse = normalized_sort_by.startswith("-")
+    sort_field = normalized_sort_by[1:] if reverse else normalized_sort_by
+    if sort_field not in {"updated_at", "dataset_name", "usage_count", "last_used_at"}:
+        sort_field = "updated_at"
+        reverse = True
+    filtered.sort(key=lambda row: str(row.get(sort_field) or ""), reverse=reverse)
+
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(int(page_size or limit or 50), 200))
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    limited = filtered[start:end]
+    if not include_heavy:
+        limited = [
+            {
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "extract_config",
+                    "schema_summary",
+                    "sync_strategy",
+                    "meta",
+                    "field_label_map",
+                    "semantic_fields",
+                    "low_confidence_fields",
+                }
+            }
+            for row in limited
+        ]
     return {
         "success": True,
         "mode": "mock",
         "count": len(limited),
+        "total": len(filtered),
+        "page": safe_page,
+        "page_size": safe_page_size,
         "datasets": limited,
     }
 
@@ -2669,7 +2845,7 @@ def _mock_get_data_source_dataset(
             if dataset_id in rows:
                 target = rows[dataset_id]
                 break
-    else:
+    if not target:
         if not source_id:
             return {"success": False, "mode": "mock", "error": "bad_request", "message": "缺少 dataset_id 或 source_id"}
         rows = list(dataset_map.get(source_id, {}).values())
@@ -3420,7 +3596,9 @@ async def data_source_discover_datasets(
     *,
     persist: bool = True,
     limit: int = 500,
+    offset: int = 0,
     schema_whitelist: list[str] | None = None,
+    target_resource_keys: list[str] | None = None,
     discover_mode: str = "",
     openapi_url: str = "",
     openapi_spec: Any = None,
@@ -3440,6 +3618,9 @@ async def data_source_discover_datasets(
             auth_token,
             source_id,
             persist=persist,
+            limit=limit,
+            offset=offset,
+            target_resource_keys=target_resource_keys,
             discover_mode=discover_mode,
             openapi_url=openapi_url,
             openapi_spec=openapi_spec,
@@ -3451,10 +3632,13 @@ async def data_source_discover_datasets(
         "source_id": source_id,
         "persist": bool(persist),
         "limit": max(1, min(limit, 2000)),
+        "offset": max(0, int(offset or 0)),
         "mode": normalized_mode,
     }
     if schema_whitelist:
         args["schema_whitelist"] = [str(item).strip() for item in schema_whitelist if str(item).strip()]
+    if target_resource_keys:
+        args["target_resource_keys"] = [str(item).strip() for item in target_resource_keys if str(item).strip()]
     if discover_mode:
         args["discover_mode"] = discover_mode
     if openapi_url:
@@ -3474,6 +3658,9 @@ async def data_source_discover_datasets(
             auth_token,
             source_id,
             persist=persist,
+            limit=limit,
+            offset=offset,
+            target_resource_keys=target_resource_keys,
             discover_mode=discover_mode,
             openapi_url=openapi_url,
             openapi_spec=openapi_spec,
@@ -3489,6 +3676,17 @@ async def data_source_list_datasets(
     status: str = "",
     include_deleted: bool = False,
     limit: int = 500,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "",
+    include_heavy: bool = False,
     mode: str = "",
 ) -> dict[str, Any]:
     if not auth_token:
@@ -3502,12 +3700,34 @@ async def data_source_list_datasets(
             status=status,
             include_deleted=include_deleted,
             limit=limit,
+            keyword=keyword,
+            schema_name=schema_name,
+            object_type=object_type,
+            publish_status=publish_status,
+            business_object_type=business_object_type,
+            verified_status=verified_status,
+            only_published=only_published,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            include_heavy=include_heavy,
         )
 
     args: dict[str, Any] = {
         "auth_token": auth_token,
         "include_deleted": bool(include_deleted),
         "limit": max(1, min(limit, 2000)),
+        "keyword": keyword,
+        "schema_name": schema_name,
+        "object_type": object_type,
+        "publish_status": publish_status,
+        "business_object_type": business_object_type,
+        "verified_status": verified_status,
+        "only_published": bool(only_published),
+        "page": max(1, int(page or 1)),
+        "page_size": max(1, min(int(page_size or 50), 200)),
+        "sort_by": sort_by,
+        "include_heavy": bool(include_heavy),
         "mode": normalized_mode,
     }
     if source_id:
@@ -3522,6 +3742,17 @@ async def data_source_list_datasets(
             status=status,
             include_deleted=include_deleted,
             limit=limit,
+            keyword=keyword,
+            schema_name=schema_name,
+            object_type=object_type,
+            publish_status=publish_status,
+            business_object_type=business_object_type,
+            verified_status=verified_status,
+            only_published=only_published,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            include_heavy=include_heavy,
         )
     return _attach_mode(result, normalized_mode)
 
@@ -3713,6 +3944,170 @@ def _mock_apply_dataset_semantic_profile(
     }
 
 
+def _mock_update_dataset_publish_status(
+    auth_token: str,
+    *,
+    dataset_id: str = "",
+    source_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    publish_status: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = _mock_get_data_source_dataset(
+        auth_token,
+        dataset_id=dataset_id,
+        source_id=source_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+    )
+    if not result.get("success"):
+        return result
+    target = result.get("dataset")
+    if not isinstance(target, dict):
+        return {"success": False, "mode": "mock", "error": "not_found", "message": "数据集不存在"}
+
+    patch = dict(payload or {})
+    target["publish_status"] = publish_status
+    for key in (
+        "schema_name",
+        "object_name",
+        "object_type",
+        "business_domain",
+        "business_object_type",
+        "grain",
+        "verified_status",
+        "search_text",
+        "last_used_at",
+    ):
+        if key in patch and patch.get(key) is not None:
+            target[key] = patch.get(key)
+    if patch.get("usage_count") is not None:
+        try:
+            target["usage_count"] = max(0, int(patch.get("usage_count") or 0))
+        except Exception:
+            target["usage_count"] = 0
+    meta = dict(target.get("meta") or {})
+    catalog_profile = dict(meta.get("catalog_profile") or {})
+    catalog_profile.update(
+        {
+            "publish_status": publish_status,
+            "schema_name": str(target.get("schema_name") or ""),
+            "object_name": str(target.get("object_name") or ""),
+            "object_type": str(target.get("object_type") or ""),
+            "business_domain": str(target.get("business_domain") or ""),
+            "business_object_type": str(target.get("business_object_type") or ""),
+            "grain": str(target.get("grain") or ""),
+            "verified_status": str(target.get("verified_status") or "unverified"),
+            "usage_count": int(target.get("usage_count") or 0),
+            "last_used_at": str(target.get("last_used_at") or ""),
+            "search_text": str(target.get("search_text") or ""),
+            "updated_at": _now_iso(),
+        }
+    )
+    meta["catalog_profile"] = catalog_profile
+    target["meta"] = meta
+    target["updated_at"] = _now_iso()
+    message = "数据集已发布" if publish_status == "published" else "数据集已取消发布"
+    return {"success": True, "mode": "mock", "dataset": target, "message": message}
+
+
+def _mock_list_dataset_candidates(
+    auth_token: str,
+    *,
+    binding_scope: str = "scheme",
+    scene_type: str = "recon",
+    role_code: str = "",
+    keyword: str = "",
+    filters: dict[str, Any] | None = None,
+    page: int = 1,
+    page_size: int = 30,
+) -> dict[str, Any]:
+    listing = _mock_list_data_source_datasets(
+        auth_token,
+        source_id=str((filters or {}).get("source_id") or ""),
+        status=str((filters or {}).get("status") or ""),
+        include_deleted=False,
+        keyword=keyword,
+        schema_name=str((filters or {}).get("schema_name") or ""),
+        object_type=str((filters or {}).get("object_type") or ""),
+        publish_status="published",
+        business_object_type=str((filters or {}).get("business_object_type") or ""),
+        verified_status=str((filters or {}).get("verified_status") or ""),
+        only_published=True,
+        page=1,
+        page_size=2000,
+        sort_by="-updated_at",
+        include_heavy=True,
+    )
+    if not listing.get("success"):
+        return listing
+    rows = [item for item in listing.get("datasets") or [] if isinstance(item, dict)]
+    required_fields = [item for item in (filters or {}).get("required_fields") or [] if isinstance(item, str)]
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("status") or "").lower() != "active":
+            continue
+        if not bool(row.get("enabled", True)):
+            continue
+        verified = str(row.get("verified_status") or "unverified").lower()
+        if verified not in {"verified", "unverified"}:
+            continue
+        score = 45.0 + 20.0
+        reasons = ["已发布", "可用状态"]
+        if verified == "verified":
+            score += 20.0
+            reasons.append("已验证")
+        else:
+            score += 8.0
+            reasons.append("未验证")
+        if required_fields:
+            schema_fields = {
+                str(item).lower()
+                for item in (row.get("schema_summary", {}).get("fields") or [])
+                if str(item).strip()
+            }
+            expected = {item.lower() for item in required_fields}
+            covered = len([item for item in expected if item in schema_fields])
+            coverage = covered / max(1, len(expected))
+            score += coverage * 15.0
+            reasons.append(f"字段覆盖率 {int(round(coverage * 100))}%")
+        if role_code:
+            score += 2.0
+        candidates.append(
+            {
+                **row,
+                "score": round(score, 2),
+                "reason": "；".join(reasons[:4]),
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            int(item.get("usage_count") or 0),
+            str(item.get("updated_at") or ""),
+        ),
+        reverse=True,
+    )
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(int(page_size or 30), 200))
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    paged = candidates[start:end]
+    return {
+        "success": True,
+        "mode": "mock",
+        "binding_scope": binding_scope,
+        "scene_type": scene_type,
+        "role_code": role_code,
+        "count": len(paged),
+        "total": len(candidates),
+        "page": safe_page,
+        "page_size": safe_page_size,
+        "candidates": paged,
+    }
+
+
 async def data_source_refresh_dataset_semantic_profile(
     auth_token: str,
     *,
@@ -3868,6 +4263,178 @@ async def data_source_update_dataset_semantic_profile(
             fields=fields,
             status=status,
             mode="mock",
+        )
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_publish_dataset(
+    auth_token: str,
+    *,
+    dataset_id: str = "",
+    source_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    payload: dict[str, Any] | None = None,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not dataset_id and not source_id:
+        return {"success": False, "error": "dataset_id 或 source_id 至少提供一个"}
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_update_dataset_publish_status(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            publish_status="published",
+            payload=payload,
+        )
+    args: dict[str, Any] = {"auth_token": auth_token, "mode": normalized_mode}
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if source_id:
+        args["source_id"] = source_id
+    if dataset_code:
+        args["dataset_code"] = dataset_code
+    if resource_key:
+        args["resource_key"] = resource_key
+    if isinstance(payload, dict) and payload:
+        args.update(payload)
+    result = await call_mcp_tool("data_source_publish_dataset", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_update_dataset_publish_status(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            publish_status="published",
+            payload=payload,
+        )
+    if not result.get("success"):
+        logger.warning(
+            "data_source_publish_dataset failed: source_id=%s dataset_id=%s dataset_code=%s resource_key=%s error=%s message=%s",
+            source_id,
+            dataset_id,
+            dataset_code,
+            resource_key,
+            result.get("error"),
+            result.get("message"),
+        )
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_unpublish_dataset(
+    auth_token: str,
+    *,
+    dataset_id: str = "",
+    source_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    payload: dict[str, Any] | None = None,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not dataset_id and not source_id:
+        return {"success": False, "error": "dataset_id 或 source_id 至少提供一个"}
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_update_dataset_publish_status(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            publish_status="unpublished",
+            payload=payload,
+        )
+    args: dict[str, Any] = {"auth_token": auth_token, "mode": normalized_mode}
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if source_id:
+        args["source_id"] = source_id
+    if dataset_code:
+        args["dataset_code"] = dataset_code
+    if resource_key:
+        args["resource_key"] = resource_key
+    if isinstance(payload, dict) and payload:
+        args.update(payload)
+    result = await call_mcp_tool("data_source_unpublish_dataset", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_update_dataset_publish_status(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            publish_status="unpublished",
+            payload=payload,
+        )
+    if not result.get("success"):
+        logger.warning(
+            "data_source_unpublish_dataset failed: source_id=%s dataset_id=%s dataset_code=%s resource_key=%s error=%s message=%s",
+            source_id,
+            dataset_id,
+            dataset_code,
+            resource_key,
+            result.get("error"),
+            result.get("message"),
+        )
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_list_dataset_candidates(
+    auth_token: str,
+    *,
+    binding_scope: str = "scheme",
+    scene_type: str = "recon",
+    role_code: str = "",
+    keyword: str = "",
+    filters: dict[str, Any] | None = None,
+    page: int = 1,
+    page_size: int = 30,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return _mock_list_dataset_candidates(
+            auth_token,
+            binding_scope=binding_scope,
+            scene_type=scene_type,
+            role_code=role_code,
+            keyword=keyword,
+            filters=filters,
+            page=page,
+            page_size=page_size,
+        )
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "binding_scope": binding_scope,
+        "scene_type": scene_type,
+        "role_code": role_code,
+        "keyword": keyword,
+        "filters": dict(filters or {}),
+        "page": max(1, int(page or 1)),
+        "page_size": max(1, min(int(page_size or 30), 200)),
+        "mode": normalized_mode,
+    }
+    result = await call_mcp_tool("data_source_list_dataset_candidates", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_list_dataset_candidates(
+            auth_token,
+            binding_scope=binding_scope,
+            scene_type=scene_type,
+            role_code=role_code,
+            keyword=keyword,
+            filters=filters,
+            page=page,
+            page_size=page_size,
         )
     return _attach_mode(result, normalized_mode)
 

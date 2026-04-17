@@ -70,6 +70,17 @@ def _is_run_plan_execution_success(ctx: dict[str, Any], run_record: dict[str, An
     return exec_status in _RUN_SUCCESS_STATUSES and not failed_reason
 
 
+def _classify_execution_failure(failed_stage: str) -> str:
+    normalized = str(failed_stage or "").strip().lower()
+    if normalized in {"collect", "validate_dataset"}:
+        return "collect_failed"
+    if normalized in {"config"}:
+        return "config_failed"
+    if normalized:
+        return "recon_failed"
+    return "unknown_failed"
+
+
 def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -328,6 +339,7 @@ async def execute_run_plan_run(
         "success": success,
         "error": "" if success else (failed_reason or str(ctx.get("exec_error") or "执行失败")),
         "failed_stage": failed_stage,
+        "failure_type": "" if success else _classify_execution_failure(failed_stage),
         "run_plan_code": run_plan_code,
         "scheme_code": str(ctx.get("scheme_code") or ""),
         "biz_date": str(ctx.get("biz_date") or biz_date),

@@ -1,0 +1,8 @@
+{
+  "owner_user_id": "finance-cron:00000000-0000-0000-0000-000000000001",
+  "module": "recon",
+  "rule_code": "dataset_recon_pw_1776211560472_f84ec0b3",
+  "rule_id": "recon_pw_1776211560472",
+  "file_name": "PW 实模验收 1776211560472_核对结果_20260417_093013.xlsx",
+  "created_at": "2026-04-17T01:30:13.450371+00:00"
+}

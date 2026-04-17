@@ -9,9 +9,11 @@ Phase-1 goals:
 
 from __future__ import annotations
 
+import inspect
 import hashlib
 import json
 import logging
+import os
 import re
 import tempfile
 import uuid
@@ -21,6 +23,8 @@ from typing import Any
 
 import pandas as pd
 import psycopg2.extras
+import requests
+from dotenv import dotenv_values
 from mcp import Tool
 
 from auth import db as auth_db
@@ -56,11 +60,72 @@ DATASET_ORIGIN_TYPES = {"fixed", "discovered", "imported_openapi", "manual"}
 AUTO_DISCOVER_DATASET_LIMIT = 300
 AUTO_SAMPLE_DATASET_LIMIT = 20
 AUTO_SAMPLE_ROW_LIMIT = 10
-SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "manual_updated"}
+SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "llm_generated", "manual_updated"}
 SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
 SEMANTIC_SAMPLE_ROW_LIMIT = 10
+PUBLISH_STATUS_VALUES = {"published", "unpublished", "draft", "archived"}
+VERIFIED_STATUS_VALUES = {"verified", "unverified", "rejected", "unknown"}
+DATASET_CANDIDATE_SCENES = {"recon", "proc", "insight"}
+DATASET_CANDIDATE_ROLES = {"left", "right", "source", "target"}
+DATASET_CANDIDATE_BATCH_SIZE = 200
+DATASET_CANDIDATE_MAX_SCAN_PAGES = 200
+_SEMANTIC_ENV_CACHE: dict[str, str] | None = None
+
+
+def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
+    provider_code = str((source_row or {}).get("provider_code") or "").strip().lower()
+    return provider_code in {"hologres", "holo"}
+
+
+_CANDIDATE_CONTRACT_LIBRARY: dict[str, dict[str, Any]] = {
+    "business_order": {
+        "label": "业务订单",
+        "hint_aliases": ("业务订单", "订单", "销售订单", "采购订单", "出库单"),
+        "business_object_types": ("business_order", "sales_order", "order", "purchase_order"),
+        "grains": ("order",),
+        "required_field_alias_groups": (
+            ("订单号", "订单编号", "商户订单号", "order_id", "orderid", "biz_order_no"),
+            ("订单金额", "实付金额", "金额", "order_amount", "pay_amount", "amount", "trade_amount"),
+            ("业务日期", "订单时间", "下单时间", "创建时间", "biz_date", "order_date", "created_at"),
+        ),
+    },
+    "payment_bill": {
+        "label": "支付账单",
+        "hint_aliases": ("支付", "流水", "银行", "交易单", "收款", "到账"),
+        "business_object_types": ("payment_bill", "bank_statement", "statement", "payment_statement"),
+        "grains": ("payment", "trade"),
+        "required_field_alias_groups": (
+            ("支付单号", "交易单号", "流水号", "payment_id", "pay_no", "trade_no", "transaction_id"),
+            ("支付金额", "流水金额", "到账金额", "pay_amount", "trade_amount", "bank_amount", "amount"),
+            ("支付时间", "交易时间", "到账时间", "pay_time", "trade_time", "transaction_time", "bank_time"),
+        ),
+    },
+    "platform_order": {
+        "label": "平台订单",
+        "hint_aliases": ("平台订单", "店铺订单", "电商订单", "淘宝订单", "抖店订单"),
+        "business_object_types": ("platform_order", "shop_order", "trade_order"),
+        "grains": ("order",),
+        "required_field_alias_groups": (
+            ("平台订单号", "店铺订单号", "trade_order_id", "platform_order_id", "tid"),
+            ("订单金额", "支付金额", "实付金额", "order_amount", "pay_amount", "amount"),
+            ("下单时间", "订单时间", "创建时间", "order_time", "created_at", "pay_time"),
+        ),
+    },
+    "settlement_bill": {
+        "label": "结算单",
+        "hint_aliases": ("结算", "结算单", "结算账单", "结算明细"),
+        "business_object_types": ("settlement_bill", "settlement_statement", "settlement"),
+        "grains": ("settlement", "daily_summary"),
+        "required_field_alias_groups": (
+            ("结算单号", "结算编号", "settlement_id", "settle_no"),
+            ("结算金额", "应结金额", "settlement_amount", "settle_amount", "amount"),
+            ("结算时间", "结算日期", "settlement_time", "settle_date", "biz_date"),
+        ),
+    },
+}
 
 _FIELD_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+_FIELD_CAMEL_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
 _SEMANTIC_ROLE_HINTS: dict[str, tuple[tuple[str, ...], str, str, str]] = {
     "order_no": (("order", "id"), "identifier", "订单号", "订单唯一编号"),
     "trade_no": (("trade", "id"), "identifier", "交易号", "交易流水编号"),
@@ -91,6 +156,116 @@ _BUSINESS_NAME_HINTS: list[tuple[tuple[str, ...], str]] = [
     (("stock",), "库存明细"),
     (("invoice",), "发票明细"),
 ]
+_SEMANTIC_FIELD_SOURCE_VALUES = {"rule_fallback", "llm_generated", "manual_confirmed", "manual_updated"}
+_FIELD_TOKEN_LABELS: dict[str, str] = {
+    "account": "账户",
+    "actual": "实付",
+    "alipay": "支付宝",
+    "api": "接口",
+    "bank": "银行",
+    "base": "基础",
+    "batch": "批次",
+    "biz": "业务",
+    "buyer": "买家",
+    "cash": "现金",
+    "channel": "渠道",
+    "code": "编码",
+    "company": "公司",
+    "coupon": "优惠券",
+    "create": "创建",
+    "created": "创建",
+    "crm": "CRM",
+    "customer": "客户",
+    "date": "日期",
+    "discount": "优惠",
+    "fee": "费用",
+    "goods": "商品",
+    "id": "ID",
+    "invoice": "发票",
+    "item": "明细",
+    "jd": "京东",
+    "merchant": "商户",
+    "money": "金额",
+    "name": "名称",
+    "no": "编号",
+    "number": "编号",
+    "open": "开放",
+    "openid": "OpenID",
+    "order": "订单",
+    "paid": "已付",
+    "pay": "支付",
+    "payment": "支付",
+    "pdd": "拼多多",
+    "platform": "平台",
+    "price": "价格",
+    "product": "商品",
+    "qty": "数量",
+    "quantity": "数量",
+    "receivable": "应收",
+    "record": "记录",
+    "refund": "退款",
+    "seller": "卖家",
+    "settle": "结算",
+    "settlement": "结算",
+    "shop": "店铺",
+    "sku": "SKU",
+    "source": "来源",
+    "status": "状态",
+    "submit": "提交",
+    "success": "成功",
+    "target": "目标",
+    "tax": "税费",
+    "time": "时间",
+    "total": "总",
+    "trade": "交易",
+    "transaction": "交易",
+    "txn": "交易",
+    "type": "类型",
+    "uid": "用户ID",
+    "unionid": "UnionID",
+    "update": "更新",
+    "updated": "更新",
+    "user": "用户",
+    "wechat": "微信",
+    "weixin": "微信",
+    "wx": "微信",
+}
+_FIELD_SUFFIX_LABELS: dict[str, str] = {
+    "amount": "金额",
+    "amout": "金额",
+    "amt": "金额",
+    "code": "编码",
+    "count": "数量",
+    "date": "日期",
+    "fee": "费用",
+    "id": "ID",
+    "money": "金额",
+    "name": "名称",
+    "no": "编号",
+    "num": "数量",
+    "number": "编号",
+    "order": "订单号",
+    "price": "价格",
+    "qty": "数量",
+    "quantity": "数量",
+    "sn": "序号",
+    "status": "状态",
+    "time": "时间",
+    "type": "类型",
+}
+_FIELD_COMPOUND_SUFFIX_LABELS: dict[str, str] = {
+    "created_at": "创建时间",
+    "order_code": "订单编码",
+    "order_id": "订单ID",
+    "order_no": "订单号",
+    "paid_at": "支付时间",
+    "pay_time": "支付时间",
+    "refund_at": "退款时间",
+    "trade_code": "交易编码",
+    "trade_id": "交易ID",
+    "trade_no": "交易号",
+    "updated_at": "更新时间",
+}
 
 
 def _safe_text(value: Any) -> str:
@@ -104,8 +279,151 @@ def _normalize_semantic_status(value: Any, *, default: str = "generated_basic") 
     return status
 
 
+def _normalize_semantic_field_source(value: Any, *, default: str = "rule_fallback") -> str:
+    source = _safe_text(value).lower() or default
+    if source not in _SEMANTIC_FIELD_SOURCE_VALUES:
+        return default
+    return source
+
+
+def _is_enabled_flag(value: Any, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_effective_llm_api_key(value: Any) -> bool:
+    api_key = _safe_text(value)
+    if not api_key:
+        return False
+    lowered = api_key.lower()
+    placeholder_markers = (
+        "your-key",
+        "your-qwen-key",
+        "your-openai-key",
+        "sk-your",
+        "replace-me",
+        "placeholder",
+        "demo-key",
+        "example-key",
+    )
+    return not any(marker in lowered for marker in placeholder_markers)
+
+
+def _load_semantic_env_values() -> dict[str, str]:
+    global _SEMANTIC_ENV_CACHE
+    if _SEMANTIC_ENV_CACHE is not None:
+        return _SEMANTIC_ENV_CACHE
+
+    merged: dict[str, str] = {}
+    project_root = Path(__file__).resolve().parents[2]
+    candidate_paths = (
+        project_root / ".env",
+        project_root / "finance-mcp" / ".env",
+        project_root / "finance-agents" / "data-agent" / ".env",
+    )
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            for key, value in dotenv_values(path).items():
+                normalized_key = _safe_text(key)
+                normalized_value = _safe_text(value)
+                if normalized_key and normalized_value and normalized_key not in merged:
+                    merged[normalized_key] = normalized_value
+        except Exception as exc:
+            logger.warning("load semantic env file failed: path=%s error=%s", path, exc)
+    _SEMANTIC_ENV_CACHE = merged
+    return merged
+
+
+def _get_semantic_env(name: str, default: Any = "") -> Any:
+    runtime_value = _safe_text(os.getenv(name))
+    if runtime_value:
+        return runtime_value
+    file_value = _safe_text(_load_semantic_env_values().get(name))
+    if file_value:
+        return file_value
+    return default
+
+
+def _get_semantic_llm_config() -> dict[str, Any] | None:
+    if not _is_enabled_flag(_get_semantic_env("DATASET_SEMANTIC_ENABLE_LLM", None), default=True):
+        return None
+
+    provider = _safe_text(_get_semantic_env("LLM_PROVIDER", "openai")).lower() or "openai"
+    provider_map = {
+        "openai": {
+            "api_key": _get_semantic_env("OPENAI_API_KEY"),
+            "base_url": _get_semantic_env("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            "model": _get_semantic_env("OPENAI_MODEL", "gpt-4o"),
+        },
+        "qwen": {
+            "api_key": _get_semantic_env("QWEN_API_KEY"),
+            "base_url": _get_semantic_env("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "model": _get_semantic_env("QWEN_MODEL", "qwen-plus"),
+        },
+        "deepseek": {
+            "api_key": _get_semantic_env("DEEPSEEK_API_KEY"),
+            "base_url": _get_semantic_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+            "model": _get_semantic_env("DEEPSEEK_MODEL", "deepseek-chat"),
+        },
+    }
+    ordered_names = [provider, "qwen", "openai", "deepseek"]
+    seen: set[str] = set()
+    for name in ordered_names:
+        if name in seen or name not in provider_map:
+            continue
+        seen.add(name)
+        config = provider_map[name]
+        if _is_effective_llm_api_key(config["api_key"]):
+            try:
+                timeout = max(5.0, float(_get_semantic_env("DATASET_SEMANTIC_LLM_TIMEOUT_SECONDS", "45")))
+            except (TypeError, ValueError):
+                timeout = 45.0
+            return {
+                "provider": name,
+                "api_key": _safe_text(config["api_key"]),
+                "base_url": _safe_text(config["base_url"]).rstrip("/"),
+                "model": _safe_text(config["model"]),
+                "timeout": timeout,
+            }
+    return None
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw = _safe_text(text)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        try:
+            parsed = json.loads(fenced_match.group(1))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 def _tokenize_identifier(value: Any) -> list[str]:
-    text = _safe_text(value).lower()
+    text = _FIELD_CAMEL_BOUNDARY.sub(r"\1_\2", _safe_text(value)).lower()
     if not text:
         return []
     tokens = [token for token in _FIELD_TOKEN_SPLIT.split(text) if token]
@@ -186,6 +504,40 @@ def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any]
     return "业务数据集"
 
 
+def _combine_field_label(prefix_label: str, suffix_label: str) -> str:
+    if not prefix_label:
+        return suffix_label
+    if suffix_label == "订单号":
+        return f"{prefix_label}号" if prefix_label.endswith("订单") else f"{prefix_label}{suffix_label}"
+    if suffix_label in {"订单ID", "订单编码"}:
+        return f"{prefix_label}{suffix_label[2:]}" if prefix_label.endswith("订单") else f"{prefix_label}{suffix_label}"
+    if suffix_label.startswith(prefix_label):
+        return suffix_label
+    return f"{prefix_label}{suffix_label}"
+
+
+def _translate_field_tokens(tokens: list[str]) -> str:
+    labels: list[str] = []
+    for token in tokens:
+        labels.append(_FIELD_TOKEN_LABELS.get(token) or token.upper())
+    return "".join(labels)
+
+
+def _infer_field_display_name(field_name: str) -> str:
+    tokens = _tokenize_identifier(field_name)
+    if not tokens:
+        return field_name
+    if len(tokens) >= 2:
+        compound_suffix = f"{tokens[-2]}_{tokens[-1]}"
+        compound_label = _FIELD_COMPOUND_SUFFIX_LABELS.get(compound_suffix)
+        if compound_label:
+            return _combine_field_label(_translate_field_tokens(tokens[:-2]), compound_label)
+    suffix_label = _FIELD_SUFFIX_LABELS.get(tokens[-1])
+    if suffix_label:
+        return _combine_field_label(_translate_field_tokens(tokens[:-1]), suffix_label)
+    return _translate_field_tokens(tokens) or field_name
+
+
 def _guess_field_semantic(
     field_name: str,
     data_type: str,
@@ -194,17 +546,30 @@ def _guess_field_semantic(
 ) -> dict[str, Any]:
     tokens = _tokenize_identifier(field_name)
     token_set = set(tokens)
-    default_label = field_name
+    inferred_label = _infer_field_display_name(field_name)
+    default_label = inferred_label or field_name
     semantic_type = "unknown"
     business_role = "unknown"
     description = ""
     confidence = 0.55
+    semantic_source = "rule_fallback"
 
     for _, (hints, semantic, label, desc) in _SEMANTIC_ROLE_HINTS.items():
         if all(h in token_set for h in hints):
             semantic_type = semantic
-            business_role = "_".join(hints)
-            default_label = label
+            if semantic == "identifier":
+                business_role = "identifier"
+            elif semantic == "datetime":
+                business_role = "time"
+            elif semantic == "amount":
+                business_role = "amount"
+            elif semantic == "status":
+                business_role = "status"
+            elif semantic == "dimension" and "name" in token_set:
+                business_role = "name"
+            else:
+                business_role = "_".join(hints)
+            default_label = inferred_label or label
             description = desc
             confidence = 0.88 if has_sample_rows else 0.72
             break
@@ -214,27 +579,39 @@ def _guess_field_semantic(
         if "time" in token_set or "date" in token_set or lowered_type in {"date", "datetime", "timestamp"}:
             semantic_type = "datetime"
             business_role = "time"
-            default_label = "时间"
-            description = "时间字段"
+            default_label = inferred_label or "时间"
+            description = f"{default_label}字段"
             confidence = 0.76 if has_sample_rows else 0.68
         elif any(token in token_set for token in {"amount", "amt", "money", "price", "fee", "balance"}):
             semantic_type = "amount"
             business_role = "amount"
-            default_label = "金额"
-            description = "金额字段"
+            default_label = inferred_label or "金额"
+            description = f"{default_label}字段"
             confidence = 0.8 if has_sample_rows else 0.7
         elif any(token in token_set for token in {"id", "no", "code", "uid", "sn"}):
             semantic_type = "identifier"
             business_role = "identifier"
-            default_label = "标识"
-            description = "业务标识字段"
+            default_label = inferred_label or "标识"
+            description = f"{default_label}，用于唯一定位业务记录"
             confidence = 0.74 if has_sample_rows else 0.66
         elif any(token in token_set for token in {"status", "state", "flag"}):
             semantic_type = "status"
             business_role = "status"
-            default_label = "状态"
-            description = "状态字段"
+            default_label = inferred_label or "状态"
+            description = f"{default_label}字段"
             confidence = 0.72 if has_sample_rows else 0.64
+        elif "type" in token_set:
+            semantic_type = "enum"
+            business_role = "type"
+            default_label = inferred_label or "类型"
+            description = f"{default_label}字段"
+            confidence = 0.68 if has_sample_rows else 0.62
+        elif "name" in token_set:
+            semantic_type = "text"
+            business_role = "name"
+            default_label = inferred_label or "名称"
+            description = f"{default_label}字段"
+            confidence = 0.66 if has_sample_rows else 0.6
 
     if not has_sample_rows:
         confidence = min(confidence, 0.74)
@@ -246,10 +623,17 @@ def _guess_field_semantic(
         "business_role": business_role,
         "description": description,
         "confidence": round(float(confidence), 4),
+        "source": semantic_source,
     }
 
 
-def _collect_sample_values(sample_rows: list[dict[str, Any]], field_name: str, *, max_values: int = 3) -> list[str]:
+def _collect_sample_values(
+    sample_rows: list[dict[str, Any]],
+    field_name: str,
+    *,
+    max_values: int = 3,
+    max_length: int = 40,
+) -> list[str]:
     values: list[str] = []
     for row in sample_rows:
         if not isinstance(row, dict) or field_name not in row:
@@ -257,7 +641,7 @@ def _collect_sample_values(sample_rows: list[dict[str, Any]], field_name: str, *
         value = row.get(field_name)
         if value is None:
             continue
-        normalized = _truncate_text(value, limit=40)
+        normalized = _truncate_text(value, limit=max_length)
         if not normalized:
             continue
         if normalized in values:
@@ -268,12 +652,315 @@ def _collect_sample_values(sample_rows: list[dict[str, Any]], field_name: str, *
     return values
 
 
+def _coerce_confidence(value: Any, *, default: float = 0.82) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = default
+    return round(max(0.0, min(confidence, 1.0)), 4)
+
+
+def _build_semantic_llm_request_fields(
+    *,
+    columns: list[dict[str, Any]],
+    sample_rows: list[dict[str, Any]],
+    include_samples: bool,
+) -> list[dict[str, Any]]:
+    request_fields: list[dict[str, Any]] = []
+    for column in columns:
+        raw_name = _safe_text(column.get("name"))
+        if not raw_name:
+            continue
+        request_field = {
+            "raw_name": raw_name,
+            "data_type": _safe_text(column.get("data_type")) or "unknown",
+            "nullable": bool(column.get("nullable", True)),
+        }
+        if include_samples:
+            request_field["sample_values"] = _collect_sample_values(
+                sample_rows,
+                raw_name,
+                max_values=2,
+                max_length=24,
+            )
+        request_fields.append(request_field)
+    return request_fields
+
+
+def _semantic_llm_completion_url(base_url: str) -> str:
+    normalized = _safe_text(base_url).rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return f"{normalized}/chat/completions"
+
+
+def _semantic_llm_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(_safe_text(item.get("text")))
+            else:
+                parts.append(_safe_text(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        return _safe_text(content.get("text"))
+    return _safe_text(content)
+
+
+def _call_semantic_llm(
+    *,
+    llm_config: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    url = _semantic_llm_completion_url(_safe_text(llm_config.get("base_url")))
+    headers = {
+        "Authorization": f"Bearer {_safe_text(llm_config.get('api_key'))}",
+        "Content-Type": "application/json",
+    }
+    request_body = {
+        "model": _safe_text(llm_config.get("model")),
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是金融数据语义治理助手。"
+                    "请根据输入的数据集信息返回一个 JSON 对象，不要输出 Markdown、解释或额外文本。"
+                    "字段 raw_name 必须与输入完全一致；display_name 必须尽量输出自然中文；"
+                    "key_fields 只能填写真实存在的技术字段名；如果拿不准就保守输出。"
+                    "请优先输出贴近业务的中文，不要机械复述英文字段名，也不要只输出“标识”“编码”这类过泛词。"
+                    "description 保持简洁，尽量一句话说清字段含义。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": _json_safe(
+                    {
+                        "task": (
+                            "为当前数据集生成发布前语义建议。"
+                            "请输出 business_name、business_description、key_fields、fields。"
+                            "fields 中每个元素包含 raw_name、display_name、semantic_type、business_role、"
+                            "description、confidence、is_unique_identifier。"
+                            "对于 *_id、*_code、*_no、*_amount、*_order 等字段，请结合前缀和上下文补全自然中文。"
+                        ),
+                        "dataset": payload,
+                    }
+                ),
+            },
+        ],
+    }
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=request_body,
+            timeout=float(llm_config.get("timeout") or 45),
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+        choices = response_payload.get("choices") or []
+        if not choices:
+            logger.warning(
+                "semantic llm response missing choices: provider=%s model=%s",
+                llm_config.get("provider"),
+                llm_config.get("model"),
+            )
+            return None
+        message = dict(choices[0].get("message") or {})
+        parsed = _extract_json_object(_semantic_llm_content_text(message.get("content")))
+        if not parsed:
+            logger.warning(
+                "semantic llm response missing json payload: provider=%s model=%s",
+                llm_config.get("provider"),
+                llm_config.get("model"),
+            )
+        return parsed
+    except Exception as exc:
+        logger.warning(
+            "semantic llm request failed: provider=%s model=%s error=%s",
+            llm_config.get("provider"),
+            llm_config.get("model"),
+            exc,
+        )
+        return None
+
+
+def _build_llm_semantic_profile(
+    *,
+    dataset_row: dict[str, Any],
+    source_row: dict[str, Any] | None,
+    sample_rows: list[dict[str, Any]],
+    columns: list[dict[str, Any]],
+    base_profile: dict[str, Any],
+    llm_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not columns:
+        return None
+
+    base_fields = [
+        dict(item)
+        for item in base_profile.get("fields") or []
+        if isinstance(item, dict) and _safe_text(item.get("raw_name"))
+    ]
+    base_fields_by_name = {
+        _safe_text(item.get("raw_name")): dict(item)
+        for item in base_fields
+        if _safe_text(item.get("raw_name"))
+    }
+
+    def build_payload(*, include_samples: bool, request_mode: str) -> dict[str, Any]:
+        return {
+            "request_mode": request_mode,
+            "source": {
+                "name": _safe_text((source_row or {}).get("name")),
+                "source_kind": _safe_text((source_row or {}).get("source_kind")),
+                "provider_code": _safe_text((source_row or {}).get("provider_code")),
+            },
+            "dataset": {
+                "dataset_name": _safe_text(dataset_row.get("dataset_name")),
+                "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                "resource_key": _safe_text(dataset_row.get("resource_key")),
+                "dataset_kind": _safe_text(dataset_row.get("dataset_kind")),
+            },
+            "fields": _build_semantic_llm_request_fields(
+                columns=columns,
+                sample_rows=sample_rows,
+                include_samples=include_samples,
+            ),
+        }
+
+    llm_response = _call_semantic_llm(
+        llm_config=llm_config,
+        payload=build_payload(include_samples=True, request_mode="standard"),
+    )
+    if not llm_response:
+        return None
+
+    llm_fields_by_name: dict[str, dict[str, Any]] = {}
+    llm_unique_field_names: list[str] = []
+    for item in llm_response.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_text(item.get("raw_name") or item.get("field_name") or item.get("name"))
+        if not raw_name or raw_name in llm_fields_by_name or raw_name not in base_fields_by_name:
+            continue
+        fallback_field = dict(base_fields_by_name[raw_name])
+        llm_field = {
+            **fallback_field,
+            "display_name": _safe_text(item.get("display_name") or item.get("display_name_zh") or item.get("label"))
+            or _safe_text(fallback_field.get("display_name"))
+            or raw_name,
+            "semantic_type": _safe_text(item.get("semantic_type") or item.get("type")).lower()
+            or _safe_text(fallback_field.get("semantic_type"))
+            or "unknown",
+            "business_role": _safe_text(item.get("business_role") or item.get("role")).lower()
+            or _safe_text(fallback_field.get("business_role"))
+            or "unknown",
+            "description": _safe_text(item.get("description")) or _safe_text(fallback_field.get("description")),
+            "confidence": _coerce_confidence(
+                item.get("confidence"),
+                default=max(float(fallback_field.get("confidence") or 0.0), 0.86 if sample_rows else 0.8),
+            ),
+            "source": "llm_generated",
+        }
+        llm_fields_by_name[raw_name] = llm_field
+        if _is_enabled_flag(item.get("is_unique_identifier"), default=False):
+            llm_unique_field_names.append(raw_name)
+
+    candidate_key_fields: list[str] = []
+    seen_key_fields: set[str] = set()
+    llm_key_field_count = 0
+
+    def add_key_field(raw_name: Any) -> bool:
+        normalized = _safe_text(raw_name)
+        if (
+            not normalized
+            or normalized in seen_key_fields
+            or normalized not in base_fields_by_name
+        ):
+            return False
+        seen_key_fields.add(normalized)
+        candidate_key_fields.append(normalized)
+        return True
+
+    for raw_name in llm_response.get("key_fields") or []:
+        if add_key_field(raw_name):
+            llm_key_field_count += 1
+    for raw_name in llm_unique_field_names:
+        if add_key_field(raw_name):
+            llm_key_field_count += 1
+    if not candidate_key_fields:
+        for raw_name in base_profile.get("key_fields") or []:
+            add_key_field(raw_name)
+
+    merged_fields: list[dict[str, Any]] = []
+    for base_field in base_fields:
+        raw_name = _safe_text(base_field.get("raw_name"))
+        merged_field = dict(llm_fields_by_name.get(raw_name) or base_field)
+        merged_field["source"] = _normalize_semantic_field_source(
+            merged_field.get("source"),
+            default="llm_generated" if raw_name in llm_fields_by_name else "rule_fallback",
+        )
+        merged_fields.append(merged_field)
+
+    merged_field_label_map = {
+        _safe_text(item.get("raw_name")): _safe_text(item.get("display_name")) or _safe_text(item.get("raw_name"))
+        for item in merged_fields
+        if _safe_text(item.get("raw_name"))
+    }
+    low_confidence_fields = [
+        _safe_text(item.get("raw_name"))
+        for item in merged_fields
+        if _safe_text(item.get("raw_name"))
+        and float(item.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD
+        and not bool(item.get("confirmed_by_user"))
+    ]
+
+    business_name = _safe_text(llm_response.get("business_name")) or _safe_text(base_profile.get("business_name"))
+    business_description = _safe_text(llm_response.get("business_description")) or _safe_text(
+        base_profile.get("business_description")
+    )
+    llm_used = (
+        bool(llm_fields_by_name)
+        or bool(_safe_text(llm_response.get("business_name")))
+        or bool(_safe_text(llm_response.get("business_description")))
+        or llm_key_field_count > 0
+    )
+    if not llm_used:
+        return None
+
+    return {
+        **dict(base_profile),
+        "status": "llm_generated",
+        "business_name": business_name,
+        "business_description": business_description,
+        "key_fields": candidate_key_fields[:6],
+        "field_label_map": merged_field_label_map,
+        "fields": merged_fields,
+        "low_confidence_fields": low_confidence_fields,
+        "semantic_generator": {
+            "mode": "llm_cached",
+            "provider": _safe_text(llm_config.get("provider")),
+            "model": _safe_text(llm_config.get("model")),
+            "llm_enabled": True,
+            "field_source_default": "rule_fallback",
+            "llm_field_count": len(llm_fields_by_name),
+            "fallback_field_count": max(0, len(merged_fields) - len(llm_fields_by_name)),
+        },
+        "updated_at": _now_iso(),
+    }
+
+
 def _build_semantic_profile(
     *,
     dataset_row: dict[str, Any],
     source_row: dict[str, Any] | None,
     sample_rows: list[dict[str, Any]],
     status: str,
+    allow_llm: bool = False,
 ) -> dict[str, Any]:
     columns = _extract_dataset_columns(dataset_row, sample_rows)
     has_sample_rows = bool(sample_rows)
@@ -302,27 +989,24 @@ def _build_semantic_profile(
             low_confidence_fields.append(name)
 
     key_fields: list[str] = []
-    preferred_roles = {"order_id", "trade_id", "biz_date", "amount", "identifier", "time"}
     for field in field_items:
-        role = _safe_text(field.get("business_role"))
-        if role in preferred_roles:
-            label = _safe_text(field.get("display_name")) or _safe_text(field.get("raw_name"))
-            if label and label not in key_fields:
-                key_fields.append(label)
+        role = _safe_text(field.get("business_role")).lower()
+        raw_name = _safe_text(field.get("raw_name"))
+        if role == "identifier" and raw_name and raw_name not in key_fields:
+            key_fields.append(raw_name)
         if len(key_fields) >= 6:
             break
-    if not key_fields:
-        for field in field_items[:6]:
-            label = _safe_text(field.get("display_name")) or _safe_text(field.get("raw_name"))
-            if label:
-                key_fields.append(label)
 
     business_name = _guess_business_name(dataset_row, source_row=source_row)
     business_description = (
         f"{business_name}，用于{_safe_text((source_row or {}).get('source_kind')) or '数据源'}侧的数据采集与分析。"
     )
     if key_fields:
-        business_description = f"{business_name}，关键字段包含：{', '.join(key_fields[:6])}。"
+        key_field_labels = [
+            f"{field_label_map.get(raw_name) or raw_name}({raw_name})"
+            for raw_name in key_fields[:6]
+        ]
+        business_description = f"{business_name}，唯一标识字段候选包含：{', '.join(key_field_labels)}。"
 
     schema_summary = dict(dataset_row.get("schema_summary") or {})
     generated_from = {
@@ -338,7 +1022,7 @@ def _build_semantic_profile(
         status,
         default="generated_with_samples" if has_sample_rows else "generated_basic",
     )
-    return {
+    base_profile = {
         "version": 1,
         "status": semantic_status,
         "business_name": business_name,
@@ -348,8 +1032,32 @@ def _build_semantic_profile(
         "fields": field_items,
         "low_confidence_fields": low_confidence_fields,
         "generated_from": generated_from,
+        "semantic_generator": {
+            "mode": "rules_cached",
+            "llm_enabled": False,
+            "field_source_default": "rule_fallback",
+        },
         "updated_at": _now_iso(),
     }
+    llm_config = _get_semantic_llm_config() if allow_llm else None
+    if llm_config:
+        llm_profile = _build_llm_semantic_profile(
+            dataset_row=dataset_row,
+            source_row=source_row,
+            sample_rows=sample_rows,
+            columns=columns,
+            base_profile=base_profile,
+            llm_config=llm_config,
+        )
+        if llm_profile:
+            return llm_profile
+        base_profile["semantic_generator"] = {
+            **dict(base_profile.get("semantic_generator") or {}),
+            "llm_enabled": True,
+            "provider": _safe_text(llm_config.get("provider")),
+            "model": _safe_text(llm_config.get("model")),
+        }
+    return base_profile
 
 
 def _extract_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
@@ -358,6 +1066,52 @@ def _extract_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(semantic_profile, dict):
         return {}
     return semantic_profile
+
+
+def _semantic_profile_has_manual_field_overrides(profile: dict[str, Any]) -> bool:
+    manual_overrides = profile.get("manual_overrides")
+    if isinstance(manual_overrides, dict) and any(bool(value) for value in manual_overrides.values()):
+        return True
+
+    for item in profile.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        if bool(item.get("confirmed_by_user")):
+            return True
+        source = _normalize_semantic_field_source(item.get("source"), default="rule_fallback")
+        if source in {"manual_confirmed", "manual_updated"}:
+            return True
+    return False
+
+
+def _derive_semantic_pending_fields(profile: dict[str, Any]) -> list[str]:
+    pending_fields: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw_name: Any) -> None:
+        name = _safe_text(raw_name)
+        if not name or name in seen:
+            return
+        seen.add(name)
+        pending_fields.append(name)
+
+    for raw_name in profile.get("low_confidence_fields") or []:
+        add(raw_name)
+
+    for item in profile.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_text(item.get("raw_name") or item.get("name"))
+        if not raw_name or bool(item.get("confirmed_by_user")):
+            continue
+        try:
+            confidence = float(item.get("confidence"))
+        except Exception:
+            continue
+        if confidence < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD:
+            add(raw_name)
+
+    return pending_fields
 
 
 def _flatten_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
@@ -372,7 +1126,9 @@ def _flatten_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
             "field_label_map": {},
             "semantic_fields": [],
             "low_confidence_fields": [],
+            "semantic_pending_count": 0,
         }
+    low_confidence_fields = _derive_semantic_pending_fields(profile)
     return {
         "semantic_status": _normalize_semantic_status(
             profile.get("status"),
@@ -384,7 +1140,8 @@ def _flatten_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
         "key_fields": [str(item) for item in profile.get("key_fields") or [] if _safe_text(item)],
         "field_label_map": dict(profile.get("field_label_map") or {}),
         "semantic_fields": [item for item in profile.get("fields") or [] if isinstance(item, dict)],
-        "low_confidence_fields": [str(item) for item in profile.get("low_confidence_fields") or [] if _safe_text(item)],
+        "low_confidence_fields": low_confidence_fields,
+        "semantic_pending_count": len(low_confidence_fields),
     }
 
 
@@ -444,6 +1201,38 @@ def _normalize_status(value: Any, *, default: str = "active") -> str:
     if status not in {"active", "disabled", "deleted"}:
         raise ValueError(f"不支持的 status: {status}")
     return status
+
+
+def _normalize_publish_status(value: Any, *, default: str = "unpublished") -> str:
+    status = str(value or "").strip().lower() or default
+    if status not in PUBLISH_STATUS_VALUES:
+        return default
+    return status
+
+
+def _normalize_verified_status(value: Any, *, default: str = "unverified") -> str:
+    status = str(value or "").strip().lower() or default
+    if status not in VERIFIED_STATUS_VALUES:
+        return default
+    return status
+
+
+def _normalize_scene_type(value: Any) -> str:
+    scene_type = str(value or "").strip().lower()
+    if not scene_type:
+        return ""
+    if scene_type in DATASET_CANDIDATE_SCENES:
+        return scene_type
+    return ""
+
+
+def _normalize_role_code(value: Any) -> str:
+    role_code = str(value or "").strip().lower()
+    if not role_code:
+        return ""
+    if role_code in DATASET_CANDIDATE_ROLES:
+        return role_code
+    return ""
 
 
 def _normalize_bool(value: Any, *, default: bool = True) -> bool:
@@ -647,6 +1436,10 @@ def _merge_existing_semantic_profile(
         existing_profile.get("status"),
         default="generated_basic",
     )
+    generated_status = _normalize_semantic_status(
+        generated_profile.get("status"),
+        default="generated_basic",
+    )
     valid_field_names = {
         _safe_text(item.get("raw_name"))
         for item in generated_profile.get("fields") or []
@@ -677,7 +1470,10 @@ def _merge_existing_semantic_profile(
         if _safe_text(item.get("raw_name"))
     }
 
-    preserve_manual_profile = existing_status == "manual_updated"
+    preserve_manual_profile = (
+        existing_status == "manual_updated" and _semantic_profile_has_manual_field_overrides(existing_profile)
+    )
+    preserve_cached_llm_profile = existing_status == "llm_generated" and generated_status != "llm_generated"
     if preserve_manual_profile:
         business_name = _safe_text(existing_profile.get("business_name"))
         if business_name:
@@ -693,22 +1489,57 @@ def _merge_existing_semantic_profile(
         if key_fields:
             merged_profile["key_fields"] = key_fields
         merged_profile["status"] = "manual_updated"
+    elif preserve_cached_llm_profile:
+        business_name = _safe_text(existing_profile.get("business_name"))
+        if business_name:
+            merged_profile["business_name"] = business_name
+        business_description = _safe_text(existing_profile.get("business_description"))
+        if business_description:
+            merged_profile["business_description"] = business_description
+        key_fields = [
+            _safe_text(item)
+            for item in existing_profile.get("key_fields") or []
+            if _safe_text(item)
+        ]
+        if key_fields:
+            merged_profile["key_fields"] = key_fields
+        merged_profile["status"] = "llm_generated"
+        if isinstance(existing_profile.get("semantic_generator"), dict):
+            merged_profile["semantic_generator"] = dict(existing_profile.get("semantic_generator") or {})
 
     for raw_name in valid_field_names:
         existing_field = existing_fields_by_name.get(raw_name)
         existing_label = _safe_text(existing_field_label_map.get(raw_name))
-        preserve_field = preserve_manual_profile or bool(existing_field and existing_field.get("confirmed_by_user"))
-        if not preserve_field and not existing_label:
+        generated_field = dict(generated_fields_by_name.get(raw_name) or {"raw_name": raw_name})
+        existing_source = _normalize_semantic_field_source(
+            (existing_field or {}).get("source"),
+            default="rule_fallback",
+        )
+        generated_source = _normalize_semantic_field_source(
+            generated_field.get("source"),
+            default="rule_fallback",
+        )
+        preserve_field = (
+            bool(existing_field and existing_field.get("confirmed_by_user"))
+            or existing_source in {"manual_confirmed", "manual_updated"}
+            or (existing_source == "llm_generated" and generated_source != "llm_generated")
+        )
+        if not preserve_field and not (
+            preserve_cached_llm_profile and existing_source == "llm_generated"
+        ):
             continue
 
-        generated_field = dict(generated_fields_by_name.get(raw_name) or {"raw_name": raw_name})
         if existing_label:
             generated_field["display_name"] = existing_label
             next_field_label_map[raw_name] = existing_label
-        for key in ("semantic_type", "business_role", "description"):
+        for key in ("semantic_type", "business_role", "description", "source"):
             value = _safe_text((existing_field or {}).get(key))
             if value:
-                generated_field[key] = value
+                generated_field[key] = (
+                    _normalize_semantic_field_source(value)
+                    if key == "source"
+                    else value
+                )
         if existing_field is not None and existing_field.get("confidence") is not None:
             try:
                 generated_field["confidence"] = round(
@@ -718,9 +1549,14 @@ def _merge_existing_semantic_profile(
             except (TypeError, ValueError):
                 pass
         if existing_field is not None:
-            generated_field["confirmed_by_user"] = bool(existing_field.get("confirmed_by_user", preserve_manual_profile))
+            generated_field["confirmed_by_user"] = bool(existing_field.get("confirmed_by_user", False))
+            generated_field["source"] = _normalize_semantic_field_source(
+                existing_field.get("source"),
+                default="manual_confirmed" if generated_field.get("confirmed_by_user") else generated_source,
+            )
         elif existing_label:
-            generated_field["confirmed_by_user"] = preserve_manual_profile
+            generated_field["confirmed_by_user"] = False
+            generated_field["source"] = generated_source
         generated_fields_by_name[raw_name] = generated_field
 
     merged_fields = [
@@ -747,6 +1583,7 @@ def _refresh_dataset_semantic_profile(
     source_row: dict[str, Any] | None,
     sample_rows: list[dict[str, Any]] | None = None,
     status: str = "",
+    allow_llm: bool = False,
 ) -> dict[str, Any] | None:
     rows = [row for row in (sample_rows or []) if isinstance(row, dict)]
     semantic_profile = _build_semantic_profile(
@@ -754,6 +1591,7 @@ def _refresh_dataset_semantic_profile(
         source_row=source_row,
         sample_rows=rows,
         status=status or ("generated_with_samples" if rows else "generated_basic"),
+        allow_llm=allow_llm,
     )
     semantic_profile = _merge_existing_semantic_profile(
         generated_profile=semantic_profile,
@@ -773,10 +1611,12 @@ def _resolve_dataset_row(
 ) -> dict[str, Any] | None:
     dataset_id = _dataset_id_from_args(arguments)
     if dataset_id:
-        return auth_db.get_unified_data_source_dataset_by_id(
+        dataset_row = auth_db.get_unified_data_source_dataset_by_id(
             company_id=company_id,
             dataset_id=dataset_id,
         )
+        if dataset_row:
+            return dataset_row
 
     source_id = _source_id_from_args(arguments)
     if not source_id:
@@ -859,7 +1699,11 @@ def _normalize_manual_semantic_patch(
                     "description": _safe_text(item.get("description")),
                     "confidence": round(max(0.0, min(confidence, 1.0)), 4),
                     "sample_values": [str(v) for v in item.get("sample_values") or [] if _safe_text(v)],
-                    "confirmed_by_user": bool(item.get("confirmed_by_user", True)),
+                    "confirmed_by_user": bool(item.get("confirmed_by_user", False)),
+                    "source": _normalize_semantic_field_source(
+                        item.get("source"),
+                        default="manual_confirmed" if bool(item.get("confirmed_by_user", False)) else "rule_fallback",
+                    ),
                 }
             )
         normalized["fields"] = cleaned_fields
@@ -922,6 +1766,9 @@ async def _refresh_dataset_samples(
     if source_kind != "database" or not auth_token:
         return 0
     source_id = str(source_row.get("id") or "")
+    if _is_hologres_source(source_row):
+        logger.info("skip auto sample refresh for hologres source: source_id=%s", source_id)
+        return 0
     dataset_rows = auth_db.list_unified_data_source_datasets(
         company_id=company_id,
         data_source_id=source_id,
@@ -984,22 +1831,6 @@ async def _refresh_dataset_samples(
             items=items,
         )
         auth_db.mark_unified_dataset_snapshot_published(snapshot_id=str(snapshot["id"]))
-        try:
-            refreshed_dataset_row = _refresh_dataset_semantic_profile(
-                dataset_row=dataset_row,
-                source_row=source_row,
-                sample_rows=rows,
-                status="generated_with_samples",
-            )
-            if refreshed_dataset_row:
-                dataset_row = refreshed_dataset_row
-        except Exception as exc:
-            logger.warning(
-                "refresh semantic profile after sample snapshot failed: source_id=%s dataset_code=%s error=%s",
-                source_id,
-                dataset_row.get("dataset_code"),
-                exc,
-            )
         sampled += 1
 
     if sampled:
@@ -1155,64 +1986,260 @@ def _sanitize_dataset_code(value: Any) -> str:
     return cleaned[:128]
 
 
-def _build_dataset_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
-    extract_config = dict(dataset_row.get("extract_config") or {})
-    schema_summary = dict(dataset_row.get("schema_summary") or {})
-    sync_strategy = dict(dataset_row.get("sync_strategy") or {})
+def _extract_catalog_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
     meta = dict(dataset_row.get("meta") or {})
-    dataset_code = str(dataset_row.get("dataset_code") or "")
+    profile = meta.get("catalog_profile")
+    if isinstance(profile, dict):
+        return dict(profile)
+    return {}
+
+
+def _guess_schema_object_names(dataset_row: dict[str, Any]) -> tuple[str, str]:
+    extract_config = dict(dataset_row.get("extract_config") or {})
+    schema_name = _safe_text(dataset_row.get("schema_name")) or _safe_text(extract_config.get("schema"))
+    object_name = (
+        _safe_text(dataset_row.get("object_name"))
+        or _safe_text(extract_config.get("table"))
+        or _safe_text(extract_config.get("endpoint"))
+    )
+    if schema_name and object_name:
+        return schema_name, object_name
+    resource_key = _safe_text(dataset_row.get("resource_key"))
+    if "." in resource_key and not schema_name:
+        schema, name = resource_key.split(".", 1)
+        return schema_name or _safe_text(schema), object_name or _safe_text(name)
+    return schema_name, object_name
+
+
+def _extract_dataset_field_names(dataset_row: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    schema_summary = dict(dataset_row.get("schema_summary") or {})
+    columns = schema_summary.get("columns")
+    if isinstance(columns, list):
+        for item in columns:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_text(item.get("name") or item.get("column_name"))
+            if name and name not in names:
+                names.append(name)
+    fields = schema_summary.get("fields")
+    if isinstance(fields, list):
+        for item in fields:
+            name = _safe_text(item)
+            if name and name not in names:
+                names.append(name)
+    semantic_profile = _extract_semantic_profile(dataset_row)
+    for item in semantic_profile.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_text(item.get("raw_name"))
+        if raw_name and raw_name not in names:
+            names.append(raw_name)
+    return names
+
+
+def _build_dataset_search_text(dataset_row: dict[str, Any], *, semantic_flat: dict[str, Any]) -> str:
+    catalog_profile = _extract_catalog_profile(dataset_row)
+    schema_name, object_name = _guess_schema_object_names(dataset_row)
+    field_names = _extract_dataset_field_names(dataset_row)
+    parts = [
+        _safe_text(dataset_row.get("dataset_code")),
+        _safe_text(dataset_row.get("dataset_name")),
+        _safe_text(dataset_row.get("resource_key")),
+        _safe_text(dataset_row.get("object_type")),
+        _safe_text(schema_name),
+        _safe_text(object_name),
+        _safe_text(catalog_profile.get("business_domain")),
+        _safe_text(catalog_profile.get("business_object_type")),
+        _safe_text(catalog_profile.get("grain")),
+        _safe_text(catalog_profile.get("search_text")),
+        _safe_text(semantic_flat.get("business_name")),
+        _safe_text(semantic_flat.get("business_description")),
+    ]
+    parts.extend(field_names[:100])
+    token_text = " ".join(part for part in parts if part)
+    return re.sub(r"\s+", " ", token_text).strip()
+
+
+def _build_dataset_base_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
+    dataset_code = _safe_text(dataset_row.get("dataset_code"))
     semantic_flat = _flatten_semantic_profile(dataset_row)
+    catalog_profile = _extract_catalog_profile(dataset_row)
+    schema_name_guess, object_name_guess = _guess_schema_object_names(dataset_row)
+    publish_status = _normalize_publish_status(
+        dataset_row.get("publish_status")
+        or catalog_profile.get("publish_status")
+        or catalog_profile.get("status"),
+        default="unpublished",
+    )
+    verified_status = _normalize_verified_status(
+        dataset_row.get("verified_status") or catalog_profile.get("verified_status"),
+        default="unverified",
+    )
+    object_type = (
+        _safe_text(dataset_row.get("object_type"))
+        or _safe_text(catalog_profile.get("object_type"))
+        or _safe_text(dataset_row.get("dataset_kind"))
+        or "table"
+    )
+    usage_count_value = (
+        dataset_row.get("usage_count")
+        if dataset_row.get("usage_count") is not None
+        else catalog_profile.get("usage_count")
+    )
+    try:
+        usage_count = max(0, int(usage_count_value or 0))
+    except Exception:
+        usage_count = 0
+    last_used_at = dataset_row.get("last_used_at") or catalog_profile.get("last_used_at")
+    schema_name = _safe_text(dataset_row.get("schema_name")) or _safe_text(catalog_profile.get("schema_name")) or schema_name_guess
+    object_name = _safe_text(dataset_row.get("object_name")) or _safe_text(catalog_profile.get("object_name")) or object_name_guess
+    search_text = _safe_text(dataset_row.get("search_text")) or _safe_text(catalog_profile.get("search_text"))
+    if not search_text:
+        search_text = _build_dataset_search_text(dataset_row, semantic_flat=semantic_flat)
+    source_context = {
+        "id": _safe_text(dataset_row.get("data_source_id") or dataset_row.get("source_id")),
+        "name": _safe_text(dataset_row.get("source_name"))
+        or _safe_text(dataset_row.get("data_source_name"))
+        or _safe_text(dataset_row.get("data_source_id") or dataset_row.get("source_id")),
+        "source_kind": _safe_text(dataset_row.get("source_kind")),
+        "provider_code": _safe_text(dataset_row.get("provider_code")),
+    }
     return {
-        "id": str(dataset_row.get("id") or ""),
-        "data_source_id": str(dataset_row.get("data_source_id") or ""),
+        "id": _safe_text(dataset_row.get("id")),
+        "data_source_id": _safe_text(dataset_row.get("data_source_id")),
+        "source_name": _safe_text(dataset_row.get("source_name")) or _safe_text(dataset_row.get("data_source_name")),
+        "data_source_name": _safe_text(dataset_row.get("data_source_name")) or _safe_text(dataset_row.get("source_name")),
+        "source_kind": _safe_text(dataset_row.get("source_kind")),
+        "provider_code": _safe_text(dataset_row.get("provider_code")),
         "dataset_code": dataset_code,
-        "dataset_name": str(dataset_row.get("dataset_name") or dataset_code),
-        "resource_key": str(dataset_row.get("resource_key") or "default"),
-        "dataset_kind": str(dataset_row.get("dataset_kind") or "table"),
-        "origin_type": str(dataset_row.get("origin_type") or "manual"),
-        "status": str(dataset_row.get("status") or "active"),
+        "dataset_name": _safe_text(dataset_row.get("dataset_name")) or dataset_code,
+        "resource_key": _safe_text(dataset_row.get("resource_key")) or "default",
+        "dataset_kind": _safe_text(dataset_row.get("dataset_kind")) or "table",
+        "origin_type": _safe_text(dataset_row.get("origin_type")) or "manual",
+        "status": _safe_text(dataset_row.get("status")) or "active",
         "enabled": bool(dataset_row.get("is_enabled", True)),
         "health_status": _normalize_health_status(dataset_row.get("health_status")),
         "last_checked_at": dataset_row.get("last_checked_at"),
         "last_sync_at": dataset_row.get("last_sync_at"),
-        "last_error_message": str(dataset_row.get("last_error_message") or ""),
-        "extract_config": extract_config,
-        "schema_summary": schema_summary,
-        "sync_strategy": sync_strategy,
-        "metadata": meta,
+        "last_error_message": _safe_text(dataset_row.get("last_error_message")),
+        "publish_status": publish_status,
+        "business_domain": _safe_text(dataset_row.get("business_domain")) or _safe_text(catalog_profile.get("business_domain")),
+        "business_object_type": _safe_text(dataset_row.get("business_object_type"))
+        or _safe_text(catalog_profile.get("business_object_type")),
+        "grain": _safe_text(dataset_row.get("grain")) or _safe_text(catalog_profile.get("grain")),
+        "verified_status": verified_status,
+        "schema_name": schema_name,
+        "object_name": object_name,
+        "object_type": object_type,
+        "usage_count": usage_count,
+        "last_used_at": last_used_at,
+        "search_text": search_text,
         "semantic_status": semantic_flat["semantic_status"],
         "semantic_updated_at": semantic_flat["semantic_updated_at"],
-        "business_name": semantic_flat["business_name"] or str(dataset_row.get("dataset_name") or dataset_code),
+        "business_name": semantic_flat["business_name"] or (_safe_text(dataset_row.get("dataset_name")) or dataset_code),
         "business_description": semantic_flat["business_description"],
         "key_fields": semantic_flat["key_fields"],
-        "field_label_map": semantic_flat["field_label_map"],
-        "semantic_fields": semantic_flat["semantic_fields"],
-        "low_confidence_fields": semantic_flat["low_confidence_fields"],
+        "semantic_pending_count": semantic_flat["semantic_pending_count"],
+        "source": source_context,
         "created_at": dataset_row.get("created_at"),
         "updated_at": dataset_row.get("updated_at"),
     }
 
 
+def _build_dataset_view(dataset_row: dict[str, Any], *, include_heavy: bool = True) -> dict[str, Any]:
+    base = _build_dataset_base_view(dataset_row)
+    if not include_heavy:
+        return base
+    semantic_flat = _flatten_semantic_profile(dataset_row)
+    return {
+        **base,
+        "extract_config": dict(dataset_row.get("extract_config") or {}),
+        "schema_summary": dict(dataset_row.get("schema_summary") or {}),
+        "sync_strategy": dict(dataset_row.get("sync_strategy") or {}),
+        "metadata": dict(dataset_row.get("meta") or {}),
+        "field_label_map": semantic_flat["field_label_map"],
+        "semantic_fields": semantic_flat["semantic_fields"],
+        "low_confidence_fields": semantic_flat["low_confidence_fields"],
+    }
+
+
+def _enrich_dataset_rows_with_source_context(*, company_id: str, dataset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_ids = {
+        _safe_text(row.get("data_source_id"))
+        for row in dataset_rows
+        if isinstance(row, dict) and _safe_text(row.get("data_source_id"))
+    }
+    if not source_ids:
+        return dataset_rows
+
+    try:
+        source_rows = auth_db.list_unified_data_sources(company_id=company_id, include_deleted=False)
+    except Exception as exc:
+        logger.warning("list dataset candidates source enrichment skipped: company_id=%s error=%s", company_id, exc)
+        return dataset_rows
+    source_map = {
+        _safe_text(item.get("id")): item
+        for item in source_rows
+        if isinstance(item, dict) and _safe_text(item.get("id")) in source_ids
+    }
+    if not source_map:
+        return dataset_rows
+
+    enriched_rows: list[dict[str, Any]] = []
+    for row in dataset_rows:
+        if not isinstance(row, dict):
+            continue
+        enriched = dict(row)
+        source_row = source_map.get(_safe_text(enriched.get("data_source_id")))
+        if source_row:
+            source_name = _safe_text(source_row.get("name"))
+            enriched["source_name"] = _safe_text(enriched.get("source_name")) or source_name
+            enriched["data_source_name"] = _safe_text(enriched.get("data_source_name")) or source_name
+            enriched["source_kind"] = _safe_text(enriched.get("source_kind")) or _safe_text(source_row.get("source_kind"))
+            enriched["provider_code"] = _safe_text(enriched.get("provider_code")) or _safe_text(source_row.get("provider_code"))
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
 def _summarize_datasets(dataset_rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_status: dict[str, int] = {}
     by_health: dict[str, int] = {}
+    by_publish_status: dict[str, int] = {}
+    by_verified_status: dict[str, int] = {}
     enabled_count = 0
     active_count = 0
+    published_count = 0
     for row in dataset_rows:
         status = str(row.get("status") or "active")
         health_status = _normalize_health_status(row.get("health_status"))
+        publish_status = _normalize_publish_status(
+            row.get("publish_status") or _extract_catalog_profile(row).get("publish_status"),
+            default="unpublished",
+        )
+        verified_status = _normalize_verified_status(
+            row.get("verified_status") or _extract_catalog_profile(row).get("verified_status"),
+            default="unverified",
+        )
         by_status[status] = by_status.get(status, 0) + 1
         by_health[health_status] = by_health.get(health_status, 0) + 1
+        by_publish_status[publish_status] = by_publish_status.get(publish_status, 0) + 1
+        by_verified_status[verified_status] = by_verified_status.get(verified_status, 0) + 1
         if bool(row.get("is_enabled", True)):
             enabled_count += 1
         if status == "active":
             active_count += 1
+        if publish_status == "published":
+            published_count += 1
     return {
         "total": len(dataset_rows),
         "active_count": active_count,
         "enabled_count": enabled_count,
+        "published_count": published_count,
         "by_status": by_status,
         "by_health_status": by_health,
+        "by_publish_status": by_publish_status,
+        "by_verified_status": by_verified_status,
         "last_sync_at": _pick_latest_iso([row.get("last_sync_at") for row in dataset_rows]),
         "last_checked_at": _pick_latest_iso([row.get("last_checked_at") for row in dataset_rows]),
     }
@@ -1267,6 +2294,510 @@ def _build_health_summary(source_row: dict[str, Any], dataset_rows: list[dict[st
             "last_sync_at": dataset_summary.get("last_sync_at"),
         },
     }
+
+
+def _list_datasets_with_compat(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    status: str | None = None,
+    include_deleted: bool = False,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "",
+    lightweight: bool = False,
+) -> list[dict[str, Any]]:
+    # 兼容不同版本 db.py：如果新签名存在就透传，不存在则回退到基础查询+内存过滤。
+    fn = auth_db.list_unified_data_source_datasets
+    signature = inspect.signature(fn)
+    params = signature.parameters
+    requested: dict[str, Any] = {
+        "company_id": company_id,
+        "data_source_id": data_source_id,
+        "status": status,
+        "include_deleted": include_deleted,
+        "keyword": keyword,
+        "schema_name": schema_name,
+        "object_type": object_type,
+        "publish_status": publish_status,
+        "business_object_type": business_object_type,
+        "verified_status": verified_status,
+        "only_published": only_published,
+        "limit": max(500, min(page * page_size + page_size, 2000)),
+        "page": page,
+        "page_size": page_size,
+        "sort_by": sort_by,
+        "lightweight": lightweight,
+    }
+    kwargs = {key: value for key, value in requested.items() if key in params and value is not None}
+    rows = fn(**kwargs)
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _query_datasets_with_compat(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    status: str | None = None,
+    include_deleted: bool = False,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "",
+    lightweight: bool = False,
+) -> dict[str, Any] | None:
+    query_fn = getattr(auth_db, "query_unified_data_source_datasets", None)
+    if not callable(query_fn):
+        return None
+
+    signature = inspect.signature(query_fn)
+    params = signature.parameters
+    requested: dict[str, Any] = {
+        "company_id": company_id,
+        "data_source_id": data_source_id,
+        "status": status,
+        "include_deleted": include_deleted,
+        "keyword": keyword,
+        "schema_name": schema_name,
+        "object_type": object_type,
+        "publish_status": publish_status,
+        "business_object_type": business_object_type,
+        "verified_status": verified_status,
+        "only_published": only_published,
+        "page": page,
+        "page_size": page_size,
+        "sort_by": sort_by,
+        "lightweight": lightweight,
+        "limit": max(500, min(page * page_size + page_size, 2000)),
+    }
+    kwargs = {key: value for key, value in requested.items() if key in params and value is not None}
+    result = query_fn(**kwargs)
+    if not isinstance(result, dict):
+        return None
+    items = [dict(row) for row in (result.get("items") or []) if isinstance(row, dict)]
+    return {
+        "items": items,
+        "total": int(result.get("total") or len(items)),
+        "page": int(result.get("page") or page),
+        "page_size": int(result.get("page_size") or page_size),
+    }
+
+
+def _contains_tokens(value: str, keyword: str) -> bool:
+    normalized = value.lower()
+    tokens = [token for token in _tokenize_identifier(keyword) if token]
+    if not tokens:
+        return True
+    return all(token in normalized for token in tokens)
+
+
+def _normalize_candidate_token(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if not text:
+        return ""
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+
+def _extract_dataset_field_tokens(dataset_row: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+
+    def add(value: Any) -> None:
+        normalized = _normalize_candidate_token(value)
+        if normalized:
+            tokens.add(normalized)
+
+    for name in _extract_dataset_field_names(dataset_row):
+        add(name)
+
+    semantic_profile = _extract_semantic_profile(dataset_row)
+    field_label_map = dict(semantic_profile.get("field_label_map") or {})
+    for raw_name, display_name in field_label_map.items():
+        add(raw_name)
+        add(display_name)
+    for item in semantic_profile.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        add(item.get("raw_name"))
+        add(item.get("display_name"))
+        add(item.get("name"))
+        add(item.get("semantic_role"))
+        add(item.get("description"))
+    for item in semantic_profile.get("key_fields") or []:
+        add(item)
+
+    return tokens
+
+
+def _field_alias_group_matches(field_tokens: set[str], aliases: tuple[str, ...] | list[str]) -> bool:
+    normalized_aliases = [_normalize_candidate_token(item) for item in aliases if _normalize_candidate_token(item)]
+    if not normalized_aliases:
+        return False
+    for alias in normalized_aliases:
+        for token in field_tokens:
+            if token == alias:
+                return True
+            if len(alias) >= 4 and alias in token:
+                return True
+            if len(token) >= 4 and token in alias:
+                return True
+    return False
+
+
+def _dataset_alias_group_coverage(
+    dataset_row: dict[str, Any],
+    alias_groups: list[tuple[str, ...]] | tuple[tuple[str, ...], ...],
+) -> float:
+    groups = [tuple(group) for group in alias_groups if group]
+    if not groups:
+        return 1.0
+    field_tokens = _extract_dataset_field_tokens(dataset_row)
+    if not field_tokens:
+        return 0.0
+    matched = len([group for group in groups if _field_alias_group_matches(field_tokens, group)])
+    return matched / max(1, len(groups))
+
+
+def _normalize_candidate_string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_text(item).lower() for item in value if _safe_text(item)]
+    text = _safe_text(value).lower()
+    return [text] if text else []
+
+
+def _resolve_dataset_candidate_contract(
+    *,
+    scene_type: str,
+    role_code: str,
+    filters: dict[str, Any] | None,
+) -> dict[str, Any]:
+    flt = dict(filters or {})
+    explicit_object_types = _normalize_candidate_string_list(
+        flt.get("business_object_types") or flt.get("business_object_type")
+    )
+    explicit_grains = _normalize_candidate_string_list(flt.get("grains") or flt.get("grain"))
+    explicit_required_fields = [
+        _safe_text(item)
+        for item in (flt.get("required_fields") or [])
+        if _safe_text(item)
+    ]
+    explicit_alias_groups = [
+        tuple(_safe_text(alias) for alias in group if _safe_text(alias))
+        for group in (flt.get("required_field_alias_groups") or [])
+        if isinstance(group, (list, tuple))
+    ]
+    strict_contract = _normalize_bool(flt.get("strict_contract"), default=False)
+
+    if explicit_object_types or explicit_grains or explicit_required_fields or explicit_alias_groups:
+        alias_groups = explicit_alias_groups or [tuple([field]) for field in explicit_required_fields]
+        return {
+            "label": _safe_text(flt.get("contract_label")) or "显式契约",
+            "business_object_types": explicit_object_types,
+            "grains": explicit_grains,
+            "required_field_alias_groups": alias_groups,
+            "strict": strict_contract,
+        }
+
+    if scene_type not in {"recon", "proc"}:
+        return {}
+
+    hint_texts = [
+        _safe_text(item)
+        for item in (flt.get("hints") or [])
+        if _safe_text(item)
+    ]
+    if not hint_texts:
+        return {}
+
+    normalized_hint_text = " ".join(_normalize_candidate_token(item) for item in hint_texts if item)
+    if not normalized_hint_text:
+        return {}
+
+    best_name = ""
+    best_score = 0
+    for contract_name, contract in _CANDIDATE_CONTRACT_LIBRARY.items():
+        score = 0
+        for alias in contract.get("hint_aliases") or ():
+            normalized_alias = _normalize_candidate_token(alias)
+            if normalized_alias and normalized_alias in normalized_hint_text:
+                score += 1
+        if role_code in {"left", "right"} and contract_name in {"business_order", "payment_bill", "platform_order"}:
+            score += 1
+        if score > best_score:
+            best_name = contract_name
+            best_score = score
+
+    if not best_name:
+        return {}
+
+    contract = dict(_CANDIDATE_CONTRACT_LIBRARY[best_name])
+    return {
+        "label": _safe_text(contract.get("label") or best_name),
+        "business_object_types": [item.lower() for item in contract.get("business_object_types") or () if _safe_text(item)],
+        "grains": [item.lower() for item in contract.get("grains") or () if _safe_text(item)],
+        "required_field_alias_groups": [
+            tuple(_safe_text(alias) for alias in group if _safe_text(alias))
+            for group in contract.get("required_field_alias_groups") or ()
+            if group
+        ],
+        "strict": strict_contract,
+    }
+
+
+def _dataset_matches_filters(
+    dataset_row: dict[str, Any],
+    *,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+) -> bool:
+    view = _build_dataset_base_view(dataset_row)
+    if only_published and view.get("publish_status") != "published":
+        return False
+    if publish_status and _safe_text(view.get("publish_status")).lower() != publish_status:
+        return False
+    if schema_name and _safe_text(view.get("schema_name")).lower() != schema_name:
+        return False
+    if object_type and _safe_text(view.get("object_type")).lower() != object_type:
+        return False
+    if business_object_type and _safe_text(view.get("business_object_type")).lower() != business_object_type:
+        return False
+    if verified_status and _safe_text(view.get("verified_status")).lower() != verified_status:
+        return False
+    if keyword:
+        search_text = _safe_text(view.get("search_text"))
+        if not _contains_tokens(search_text, keyword):
+            return False
+    return True
+
+
+def _sort_datasets(dataset_rows: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
+    normalized = _safe_text(sort_by).lower()
+    if not normalized:
+        normalized = "-updated_at"
+    reverse = normalized.startswith("-") or normalized.endswith(":desc") or normalized.endswith("_desc")
+    field = normalized[1:] if normalized.startswith("-") else normalized
+    field = field.replace(":desc", "").replace(":asc", "").replace("_desc", "").replace("_asc", "")
+    if field not in {
+        "updated_at",
+        "created_at",
+        "dataset_name",
+        "business_name",
+        "usage_count",
+        "last_used_at",
+        "last_sync_at",
+        "publish_status",
+        "verified_status",
+    }:
+        field = "updated_at"
+        reverse = True
+
+    def _sort_key(row: dict[str, Any]) -> Any:
+        view = _build_dataset_base_view(row)
+        value = view.get(field)
+        if field in {"updated_at", "created_at", "last_used_at", "last_sync_at"}:
+            parsed = _parse_datetime(value)
+            return parsed or datetime.fromtimestamp(0, timezone.utc)
+        if field == "usage_count":
+            try:
+                return int(value or 0)
+            except Exception:
+                return 0
+        return _safe_text(value).lower()
+
+    return sorted(dataset_rows, key=_sort_key, reverse=reverse)
+
+
+def _paginate_rows(rows: list[dict[str, Any]], *, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
+    total = len(rows)
+    start = max(0, (page - 1) * page_size)
+    end = start + page_size
+    return rows[start:end], total
+
+
+def _dataset_field_coverage(dataset_row: dict[str, Any], required_fields: list[str]) -> float:
+    required = {_safe_text(item).lower() for item in required_fields if _safe_text(item)}
+    if not required:
+        return 1.0
+    actual = {_safe_text(item).lower() for item in _extract_dataset_field_names(dataset_row)}
+    if not actual:
+        return 0.0
+    matched = len([item for item in required if item in actual])
+    return matched / max(1, len(required))
+
+
+def _score_dataset_candidate(
+    dataset_row: dict[str, Any],
+    *,
+    role_code: str = "",
+    filters: dict[str, Any] | None = None,
+) -> tuple[float, str]:
+    view = _build_dataset_base_view(dataset_row)
+    flt = dict(filters or {})
+    score = 0.0
+    reasons: list[str] = []
+    if view.get("publish_status") == "published":
+        score += 45.0
+        reasons.append("已发布")
+    if view.get("status") == "active" and bool(view.get("enabled")):
+        score += 20.0
+        reasons.append("可用状态")
+    if view.get("verified_status") == "verified":
+        score += 20.0
+        reasons.append("已验证")
+    elif view.get("verified_status") == "unverified":
+        score += 8.0
+        reasons.append("未验证")
+    usage_count = int(view.get("usage_count") or 0)
+    if usage_count > 0:
+        score += min(10.0, usage_count / 5.0)
+        reasons.append("历史复用")
+    expected_object_types = _normalize_candidate_string_list(
+        flt.get("business_object_types") or flt.get("business_object_type")
+    )
+    actual_business_object_type = _safe_text(view.get("business_object_type")).lower()
+    if expected_object_types:
+        if actual_business_object_type in expected_object_types:
+            score += 10.0
+            reasons.append("业务类型匹配")
+        else:
+            score -= 8.0
+    expected_grains = _normalize_candidate_string_list(flt.get("grains") or flt.get("grain"))
+    actual_grain = _safe_text(view.get("grain")).lower()
+    if expected_grains:
+        if actual_grain in expected_grains:
+            score += 6.0
+            reasons.append("粒度匹配")
+        else:
+            score -= 4.0
+    required_fields = [item for item in flt.get("required_fields") or [] if isinstance(item, str)]
+    required_field_alias_groups = [
+        tuple(_safe_text(alias) for alias in group if _safe_text(alias))
+        for group in (flt.get("required_field_alias_groups") or [])
+        if isinstance(group, (list, tuple))
+    ]
+    coverage_scores: list[float] = []
+    if required_fields:
+        coverage_scores.append(_dataset_field_coverage(dataset_row, required_fields))
+    if required_field_alias_groups:
+        coverage_scores.append(_dataset_alias_group_coverage(dataset_row, required_field_alias_groups))
+    coverage = max(coverage_scores) if coverage_scores else 1.0
+    if required_fields or required_field_alias_groups:
+        score += coverage * 15.0
+        reasons.append(f"字段覆盖率 {int(round(coverage * 100))}%")
+    if role_code in {"left", "right"}:
+        score += 2.0
+    if not reasons:
+        reasons.append("基础匹配")
+    return round(score, 2), "；".join(reasons[:4])
+
+
+def _build_catalog_patch(arguments: dict[str, Any], *, publish_status_default: str) -> dict[str, Any]:
+    patch = dict(arguments.get("catalog_profile") or {})
+    direct_fields = {
+        "schema_name",
+        "object_name",
+        "object_type",
+        "publish_status",
+        "business_domain",
+        "business_object_type",
+        "grain",
+        "verified_status",
+        "usage_count",
+        "last_used_at",
+        "search_text",
+    }
+    for key in direct_fields:
+        if arguments.get(key) is not None:
+            patch[key] = arguments.get(key)
+    patch["publish_status"] = _normalize_publish_status(patch.get("publish_status"), default=publish_status_default)
+    patch["verified_status"] = _normalize_verified_status(patch.get("verified_status"), default="unverified")
+    patch["schema_name"] = _safe_text(patch.get("schema_name"))
+    patch["object_name"] = _safe_text(patch.get("object_name"))
+    patch["object_type"] = _safe_text(patch.get("object_type"))
+    patch["business_domain"] = _safe_text(patch.get("business_domain"))
+    patch["business_object_type"] = _safe_text(patch.get("business_object_type"))
+    patch["grain"] = _safe_text(patch.get("grain"))
+    patch["search_text"] = _safe_text(patch.get("search_text"))
+    patch["last_used_at"] = _safe_text(patch.get("last_used_at"))
+    if patch.get("usage_count") is not None:
+        try:
+            patch["usage_count"] = max(0, int(patch["usage_count"]))
+        except Exception:
+            patch["usage_count"] = 0
+    patch["updated_at"] = _now_iso()
+    return patch
+
+
+def _upsert_dataset_with_profile(dataset_row: dict[str, Any], *, catalog_patch: dict[str, Any]) -> dict[str, Any] | None:
+    meta = dict(dataset_row.get("meta") or {})
+    current_catalog_profile = _extract_catalog_profile(dataset_row)
+    next_catalog_profile = {**current_catalog_profile, **catalog_patch}
+    semantic_profile = _extract_semantic_profile(dataset_row)
+    if semantic_profile:
+        if catalog_patch.get("publish_status"):
+            semantic_profile["publish_status"] = catalog_patch.get("publish_status")
+        if catalog_patch.get("verified_status"):
+            semantic_profile["verified_status"] = catalog_patch.get("verified_status")
+    meta["catalog_profile"] = next_catalog_profile
+    if semantic_profile:
+        meta["semantic_profile"] = semantic_profile
+
+    kwargs: dict[str, Any] = {
+        "company_id": _safe_text(dataset_row.get("company_id")),
+        "data_source_id": _safe_text(dataset_row.get("data_source_id")),
+        "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+        "dataset_name": _safe_text(dataset_row.get("dataset_name")),
+        "resource_key": _safe_text(dataset_row.get("resource_key")) or "default",
+        "dataset_kind": _safe_text(dataset_row.get("dataset_kind")) or "table",
+        "origin_type": _safe_text(dataset_row.get("origin_type")) or "manual",
+        "extract_config": dict(dataset_row.get("extract_config") or {}),
+        "schema_summary": dict(dataset_row.get("schema_summary") or {}),
+        "sync_strategy": dict(dataset_row.get("sync_strategy") or {}),
+        "status": _safe_text(dataset_row.get("status")) or "active",
+        "is_enabled": bool(dataset_row.get("is_enabled", True)),
+        "health_status": _normalize_health_status(dataset_row.get("health_status")),
+        "last_checked_at": dataset_row.get("last_checked_at"),
+        "last_sync_at": dataset_row.get("last_sync_at"),
+        "last_error_message": _safe_text(dataset_row.get("last_error_message")),
+        "meta": meta,
+    }
+    optional_top_level = {
+        "schema_name": catalog_patch.get("schema_name"),
+        "object_name": catalog_patch.get("object_name"),
+        "object_type": catalog_patch.get("object_type"),
+        "publish_status": catalog_patch.get("publish_status"),
+        "business_domain": catalog_patch.get("business_domain"),
+        "business_object_type": catalog_patch.get("business_object_type"),
+        "grain": catalog_patch.get("grain"),
+        "verified_status": catalog_patch.get("verified_status"),
+        "usage_count": catalog_patch.get("usage_count"),
+        "last_used_at": catalog_patch.get("last_used_at"),
+        "search_text": catalog_patch.get("search_text"),
+    }
+    supported = set(inspect.signature(auth_db.upsert_unified_data_source_dataset).parameters)
+    for key, value in optional_top_level.items():
+        if key in supported and value not in (None, ""):
+            kwargs[key] = value
+    return auth_db.upsert_unified_data_source_dataset(**kwargs)
 
 
 def _load_source_datasets(company_id: str, source_id: str) -> list[dict[str, Any]]:
@@ -1386,11 +2917,60 @@ def _build_data_source_view(
         "published_snapshot_at": (published_snapshot or {}).get("published_at"),
         "created_at": source_row.get("created_at"),
         "updated_at": source_row.get("updated_at"),
+        "discover_summary": dict(meta.get("discover_summary") or {}),
         "metadata": meta,
     }
     if include_dataset_details:
         result["datasets"] = [_build_dataset_view(row) for row in dataset_rows]
     return result
+
+
+def _update_source_meta(source_row: dict[str, Any], *, meta_updates: dict[str, Any]) -> dict[str, Any] | None:
+    meta = dict(source_row.get("meta") or {})
+    meta.update(meta_updates)
+    return auth_db.upsert_unified_data_source(
+        company_id=str(source_row.get("company_id") or ""),
+        code=str(source_row.get("code") or ""),
+        name=str(source_row.get("name") or ""),
+        source_kind=str(source_row.get("source_kind") or ""),
+        domain_type=str(source_row.get("domain_type") or ""),
+        provider_code=str(source_row.get("provider_code") or ""),
+        execution_mode=str(source_row.get("execution_mode") or "deterministic"),
+        description=str(source_row.get("description") or ""),
+        status=str(source_row.get("status") or "active"),
+        is_enabled=bool(source_row.get("is_enabled", True)),
+        health_status=str(source_row.get("health_status") or "unknown"),
+        last_checked_at=source_row.get("last_checked_at"),
+        last_error_message=str(source_row.get("last_error_message") or ""),
+        meta=meta,
+    )
+
+
+def _build_discover_summary(
+    *,
+    dataset_summary: dict[str, Any],
+    scan_summary: dict[str, Any] | None,
+    status: str,
+    error_message: str = "",
+) -> dict[str, Any]:
+    scan = dict(scan_summary or {})
+    return {
+        "discovered_count": int(dataset_summary.get("total") or 0),
+        "enabled_count": int(dataset_summary.get("enabled_count") or 0),
+        "last_discover_at": datetime.now(timezone.utc).isoformat(),
+        "last_discover_status": status,
+        "last_discover_error": error_message or None,
+        "scan_mode": str(scan.get("mode") or "batch"),
+        "scanned_count": int(scan.get("scanned_count") or 0),
+        "total_count": int(scan.get("total_count") or 0),
+        "offset": int(scan.get("offset") or 0),
+        "requested_limit": int(scan.get("requested_limit") or 0),
+        "has_more": bool(scan.get("has_more")),
+        "next_offset": int(scan.get("next_offset")) if scan.get("next_offset") is not None else None,
+        "requested_count": int(scan.get("requested_count") or 0),
+        "matched_count": int(scan.get("matched_count") or 0),
+        "missing_targets": [str(item) for item in (scan.get("missing_targets") or []) if str(item).strip()],
+    }
 
 
 def _upsert_source_configs(company_id: str, source_id: str, arguments: dict[str, Any]) -> None:
@@ -1644,6 +3224,17 @@ def create_tools() -> list[Tool]:
                     "status": {"type": "string"},
                     "include_deleted": {"type": "boolean"},
                     "limit": {"type": "integer"},
+                    "keyword": {"type": "string"},
+                    "schema_name": {"type": "string"},
+                    "object_type": {"type": "string"},
+                    "publish_status": {"type": "string"},
+                    "business_object_type": {"type": "string"},
+                    "verified_status": {"type": "string"},
+                    "only_published": {"type": "boolean"},
+                    "page": {"type": "integer"},
+                    "page_size": {"type": "integer"},
+                    "sort_by": {"type": "string"},
+                    "include_heavy": {"type": "boolean"},
                 },
                 "required": ["auth_token"],
             },
@@ -1737,6 +3328,73 @@ def create_tools() -> list[Tool]:
                     "field_label_map": {"type": "object"},
                     "fields": {"type": "array", "items": {"type": "object"}},
                     "status": {"type": "string"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="data_source_publish_dataset",
+            description="发布数据集并维护目录业务字段。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **dataset_id_schema,
+                    **source_id_schema,
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "schema_name": {"type": "string"},
+                    "object_name": {"type": "string"},
+                    "object_type": {"type": "string"},
+                    "business_domain": {"type": "string"},
+                    "business_object_type": {"type": "string"},
+                    "grain": {"type": "string"},
+                    "verified_status": {"type": "string"},
+                    "search_text": {"type": "string"},
+                    "usage_count": {"type": "integer"},
+                    "last_used_at": {"type": "string"},
+                    "business_name": {"type": "string"},
+                    "business_description": {"type": "string"},
+                    "key_fields": {"type": "array", "items": {"type": "string"}},
+                    "field_label_map": {"type": "object"},
+                    "fields": {"type": "array", "items": {"type": "object"}},
+                    "status": {"type": "string"},
+                    "catalog_profile": {"type": "object"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="data_source_unpublish_dataset",
+            description="取消发布数据集。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **dataset_id_schema,
+                    **source_id_schema,
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "catalog_profile": {"type": "object"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="data_source_list_dataset_candidates",
+            description="按场景查询可选数据集候选。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "binding_scope": {"type": "string"},
+                    "scene_type": {"type": "string"},
+                    "role_code": {"type": "string"},
+                    "keyword": {"type": "string"},
+                    "filters": {"type": "object"},
+                    "page": {"type": "integer"},
+                    "page_size": {"type": "integer"},
                 },
                 "required": ["auth_token"],
             },
@@ -2025,6 +3683,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_refresh_dataset_semantic_profile(arguments)
         if name == "data_source_update_dataset_semantic_profile":
             return await _handle_data_source_update_dataset_semantic_profile(arguments)
+        if name == "data_source_publish_dataset":
+            return await _handle_data_source_publish_dataset(arguments)
+        if name == "data_source_unpublish_dataset":
+            return await _handle_data_source_unpublish_dataset(arguments)
+        if name == "data_source_list_dataset_candidates":
+            return await _handle_data_source_list_dataset_candidates(arguments)
         if name == "data_source_import_openapi":
             return await _handle_data_source_import_openapi(arguments)
         if name == "data_source_preflight_rule_binding":
@@ -2163,26 +3827,41 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
     )
     connector = build_connector(runtime_source)
     discover_result = connector.discover_datasets(arguments)
+    discover_scan_summary = (
+        discover_result.get("scan_summary")
+        if isinstance(discover_result.get("scan_summary"), dict)
+        else {}
+    )
     if not bool(discover_result.get("success")):
         message = str(discover_result.get("message") or discover_result.get("error") or "发现数据集失败")
-        auth_db.update_unified_data_source_health(
+        updated_source = auth_db.update_unified_data_source_health(
             data_source_id=source_id,
             health_status="error",
             last_error_message=message,
+        ) or source_row
+        existing_datasets = _load_source_datasets(company_id, source_id)
+        discover_summary = _build_discover_summary(
+            dataset_summary=_summarize_datasets(existing_datasets),
+            scan_summary=discover_scan_summary,
+            status="error",
+            error_message=message,
         )
+        _update_source_meta(updated_source, meta_updates={"discover_summary": discover_summary})
         auth_db.create_unified_data_source_event(
             company_id=company_id,
             data_source_id=source_id,
             event_type="dataset_discover_failed",
             event_level="error",
             event_message=message,
-            event_payload={"arguments": arguments},
+            event_payload={"arguments": arguments, "scan_summary": discover_scan_summary},
         )
         return {
             "success": False,
             "source_id": source_id,
             "datasets": [],
             "dataset_count": 0,
+            "scan_summary": discover_scan_summary,
+            "discover_summary": discover_summary,
             "error": str(discover_result.get("error") or "discover_failed"),
             "message": message,
         }
@@ -2193,6 +3872,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
         for index, item in enumerate(discovered_raw)
     ]
     persist = _normalize_bool(arguments.get("persist"), default=True)
+    dataset_rows: list[dict[str, Any]] = []
     persisted_rows: list[dict[str, Any]] = []
     persist_errors: list[str] = []
     if persist:
@@ -2217,27 +3897,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                 meta=item["meta"],
             )
             if upserted:
-                try:
-                    semantic_sample_rows = _load_dataset_sample_rows_from_published_snapshot(
-                        data_source_id=source_id,
-                        resource_key=_safe_text(upserted.get("resource_key")) or "default",
-                        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
-                    )
-                    refreshed = _refresh_dataset_semantic_profile(
-                        dataset_row=upserted,
-                        source_row=source_row,
-                        sample_rows=semantic_sample_rows,
-                        status="generated_with_samples" if semantic_sample_rows else "generated_basic",
-                    )
-                    persisted_rows.append(refreshed or upserted)
-                except Exception as exc:
-                    logger.warning(
-                        "generate semantic profile during discover failed: source_id=%s dataset_code=%s error=%s",
-                        source_id,
-                        item["dataset_code"],
-                        exc,
-                    )
-                    persisted_rows.append(upserted)
+                persisted_rows.append(upserted)
             else:
                 persist_errors.append(item["dataset_code"])
 
@@ -2251,21 +3911,14 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                     "id": "",
                     "data_source_id": source_id,
                     **item,
-                    "meta": {
-                        **dict(item.get("meta") or {}),
-                        "semantic_profile": _build_semantic_profile(
-                            dataset_row=item,
-                            source_row=source_row,
-                            sample_rows=[],
-                            status="generated_basic",
-                        ),
-                    },
+                    "meta": dict(item.get("meta") or {}),
                     "created_at": None,
                     "updated_at": None,
                 }
             )
             for item in normalized
         ]
+        dataset_rows = normalized
     dataset_summary = _summarize_datasets(
         [
             {
@@ -2279,11 +3932,18 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
         ]
     )
 
-    auth_db.update_unified_data_source_health(
+    updated_source = auth_db.update_unified_data_source_health(
         data_source_id=source_id,
         health_status="healthy" if not persist_errors else "warning",
         last_error_message="" if not persist_errors else f"部分数据集写入失败: {', '.join(persist_errors[:5])}",
+    ) or source_row
+    discover_summary = _build_discover_summary(
+        dataset_summary=dataset_summary,
+        scan_summary=discover_scan_summary,
+        status="success" if not persist_errors else "warning",
+        error_message="" if not persist_errors else f"部分数据集写入失败: {', '.join(persist_errors[:5])}",
     )
+    refreshed_source = _update_source_meta(updated_source, meta_updates={"discover_summary": discover_summary}) or updated_source
     auth_db.create_unified_data_source_event(
         company_id=company_id,
         data_source_id=source_id,
@@ -2295,6 +3955,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
             "dataset_count": len(normalized),
             "persisted_count": len(persisted_rows),
             "persist_errors": persist_errors,
+            "scan_summary": discover_scan_summary,
         },
     )
     sampled_count = 0
@@ -2318,9 +3979,12 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
         "persisted_count": len(persisted_rows),
         "persist_error_count": len(persist_errors),
         "sampled_dataset_count": sampled_count,
+        "scan_summary": discover_scan_summary,
+        "discover_summary": discover_summary,
         "datasets": datasets,
         "dataset_summary": dataset_summary,
-        "message": f"发现 {len(normalized)} 个数据集",
+        "source": _build_data_source_view(refreshed_source, datasets=dataset_rows),
+        "message": str(discover_result.get("message") or f"发现 {len(normalized)} 个数据集"),
     }
 
 
@@ -2330,30 +3994,96 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
     source_id = _source_id_from_args(arguments) or None
     status = str(arguments.get("status") or "").strip().lower() or None
     include_deleted = _normalize_bool(arguments.get("include_deleted"), default=False)
-    limit = max(1, min(int(arguments.get("limit") or 500), 2000))
+    keyword = _safe_text(arguments.get("keyword")).lower()
+    schema_name = _safe_text(arguments.get("schema_name")).lower()
+    object_type = _safe_text(arguments.get("object_type")).lower()
+    publish_status = _safe_text(arguments.get("publish_status")).lower()
+    business_object_type = _safe_text(arguments.get("business_object_type")).lower()
+    verified_status = _safe_text(arguments.get("verified_status")).lower()
+    only_published = _normalize_bool(arguments.get("only_published"), default=False)
+    page = max(1, int(arguments.get("page") or 1))
+    page_size = max(1, min(int(arguments.get("page_size") or arguments.get("limit") or 50), 200))
+    sort_by = _safe_text(arguments.get("sort_by"))
+    include_heavy = _normalize_bool(arguments.get("include_heavy"), default=False)
 
     source_row = None
     if source_id:
         source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
         if not source_row:
             return {"success": False, "error": "数据源不存在"}
-    rows = auth_db.list_unified_data_source_datasets(
+
+    query_result = _query_datasets_with_compat(
         company_id=company_id,
         data_source_id=source_id,
         status=status,
         include_deleted=include_deleted,
-        limit=limit,
+        keyword=keyword,
+        schema_name=schema_name,
+        object_type=object_type,
+        publish_status=publish_status,
+        business_object_type=business_object_type,
+        verified_status=verified_status,
+        only_published=only_published,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        lightweight=not include_heavy,
     )
-    datasets = [_build_dataset_view(row) for row in rows]
+    if query_result is not None:
+        filtered_rows = list(query_result.get("items") or [])
+        paged_rows = filtered_rows
+        total = int(query_result.get("total") or len(filtered_rows))
+        result_page = int(query_result.get("page") or page)
+        result_page_size = int(query_result.get("page_size") or page_size)
+    else:
+        rows = _list_datasets_with_compat(
+            company_id=company_id,
+            data_source_id=source_id,
+            status=status,
+            include_deleted=include_deleted,
+            keyword=keyword,
+            schema_name=schema_name,
+            object_type=object_type,
+            publish_status=publish_status,
+            business_object_type=business_object_type,
+            verified_status=verified_status,
+            only_published=only_published,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            lightweight=not include_heavy,
+        )
+        filtered_rows = [
+            row
+            for row in rows
+            if _dataset_matches_filters(
+                row,
+                keyword=keyword,
+                schema_name=schema_name,
+                object_type=object_type,
+                publish_status=publish_status,
+                business_object_type=business_object_type,
+                verified_status=verified_status,
+                only_published=only_published,
+            )
+        ]
+        sorted_rows = _sort_datasets(filtered_rows, sort_by=sort_by)
+        paged_rows, total = _paginate_rows(sorted_rows, page=page, page_size=page_size)
+        result_page = page
+        result_page_size = page_size
+    datasets = [_build_dataset_view(row, include_heavy=include_heavy) for row in paged_rows]
     result: dict[str, Any] = {
         "success": True,
         "count": len(datasets),
+        "total": total,
+        "page": result_page,
+        "page_size": result_page_size,
         "datasets": datasets,
-        "dataset_summary": _summarize_datasets(rows),
+        "dataset_summary": _summarize_datasets(filtered_rows),
     }
     if source_row:
         result["source_summary"] = _build_source_summary(source_row)
-        result["health_summary"] = _build_health_summary(source_row, rows)
+        result["health_summary"] = _build_health_summary(source_row, filtered_rows)
     return result
 
 
@@ -2396,39 +4126,46 @@ async def _handle_data_source_upsert_dataset(arguments: dict[str, Any]) -> dict[
     status = _normalize_status(arguments.get("status"), default="active" if enabled else "disabled")
     health_status = _normalize_health_status(arguments.get("health_status"), default="unknown")
 
-    row = auth_db.upsert_unified_data_source_dataset(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_code=dataset_code,
-        dataset_name=dataset_name,
-        resource_key=resource_key,
-        dataset_kind=str(arguments.get("dataset_kind") or "table"),
-        origin_type=_normalize_dataset_origin_type(arguments.get("origin_type"), default="manual"),
-        extract_config=dict(arguments.get("extract_config") or {}),
-        schema_summary=dict(arguments.get("schema_summary") or {}),
-        sync_strategy=dict(arguments.get("sync_strategy") or {}),
-        status=status,
-        is_enabled=enabled,
-        health_status=health_status,
-        last_checked_at=arguments.get("last_checked_at"),
-        last_sync_at=arguments.get("last_sync_at"),
-        last_error_message=str(arguments.get("last_error_message") or ""),
-        meta=dict(arguments.get("meta") or {}),
-    )
+    upsert_kwargs: dict[str, Any] = {
+        "company_id": company_id,
+        "data_source_id": source_id,
+        "dataset_code": dataset_code,
+        "dataset_name": dataset_name,
+        "resource_key": resource_key,
+        "dataset_kind": str(arguments.get("dataset_kind") or "table"),
+        "origin_type": _normalize_dataset_origin_type(arguments.get("origin_type"), default="manual"),
+        "extract_config": dict(arguments.get("extract_config") or {}),
+        "schema_summary": dict(arguments.get("schema_summary") or {}),
+        "sync_strategy": dict(arguments.get("sync_strategy") or {}),
+        "status": status,
+        "is_enabled": enabled,
+        "health_status": health_status,
+        "last_checked_at": arguments.get("last_checked_at"),
+        "last_sync_at": arguments.get("last_sync_at"),
+        "last_error_message": str(arguments.get("last_error_message") or ""),
+        "meta": dict(arguments.get("meta") or {}),
+    }
+    optional_top_level_fields = {
+        "schema_name": arguments.get("schema_name"),
+        "object_name": arguments.get("object_name"),
+        "object_type": arguments.get("object_type"),
+        "publish_status": arguments.get("publish_status"),
+        "business_domain": arguments.get("business_domain"),
+        "business_object_type": arguments.get("business_object_type"),
+        "grain": arguments.get("grain"),
+        "verified_status": arguments.get("verified_status"),
+        "usage_count": arguments.get("usage_count"),
+        "last_used_at": arguments.get("last_used_at"),
+        "search_text": arguments.get("search_text"),
+    }
+    supported = set(inspect.signature(auth_db.upsert_unified_data_source_dataset).parameters)
+    for key, value in optional_top_level_fields.items():
+        if key in supported and value not in (None, ""):
+            upsert_kwargs[key] = value
+
+    row = auth_db.upsert_unified_data_source_dataset(**upsert_kwargs)
     if not row:
         return {"success": False, "error": "写入数据集失败"}
-
-    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
-        data_source_id=source_id,
-        resource_key=resource_key,
-        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
-    )
-    row = _refresh_dataset_semantic_profile(
-        dataset_row=row,
-        source_row=source_row,
-        sample_rows=sample_rows,
-        status="generated_with_samples" if sample_rows else "generated_basic",
-    ) or row
 
     auth_db.create_unified_data_source_event(
         company_id=company_id,
@@ -2539,6 +4276,7 @@ async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[s
         source_row=source_row,
         sample_rows=sample_rows,
         status="generated_with_samples" if sample_rows else "generated_basic",
+        allow_llm=True,
     )
     if not refreshed:
         return {"success": False, "error": "刷新语义层失败"}
@@ -2570,6 +4308,14 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
     company_id = str(user["company_id"])
     dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
     if not dataset_row:
+        logger.warning(
+            "update semantic dataset not found: company_id=%s source_id=%s dataset_id=%s dataset_code=%s resource_key=%s",
+            company_id,
+            _source_id_from_args(arguments),
+            _dataset_id_from_args(arguments),
+            _sanitize_dataset_code(arguments.get("dataset_code")),
+            _safe_text(arguments.get("resource_key")),
+        )
         return {"success": False, "error": "数据集不存在"}
 
     source_id = _safe_text(dataset_row.get("data_source_id"))
@@ -2672,6 +4418,300 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
         "success": True,
         "dataset": _build_dataset_view(updated),
         "message": "数据集语义层已更新",
+    }
+
+
+async def _handle_data_source_publish_dataset(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        logger.warning(
+            "publish dataset not found: company_id=%s source_id=%s dataset_id=%s dataset_code=%s resource_key=%s",
+            company_id,
+            _source_id_from_args(arguments),
+            _dataset_id_from_args(arguments),
+            _sanitize_dataset_code(arguments.get("dataset_code")),
+            _safe_text(arguments.get("resource_key")),
+        )
+        return {"success": False, "error": "数据集不存在"}
+
+    semantic_fields = (
+        "semantic_profile",
+        "business_name",
+        "business_description",
+        "key_fields",
+        "field_label_map",
+        "fields",
+        "status",
+    )
+    should_update_semantic = any(
+        key in arguments and arguments.get(key) not in (None, "", [], {})
+        for key in semantic_fields
+    )
+    if should_update_semantic:
+        semantic_result = await _handle_data_source_update_dataset_semantic_profile(arguments)
+        if not semantic_result.get("success"):
+            return semantic_result
+        dataset_row = dict(semantic_result.get("dataset") or dataset_row)
+        dataset_row = _resolve_dataset_row(
+            company_id=company_id,
+            arguments={"dataset_id": _safe_text(dataset_row.get("id"))},
+        ) or dataset_row
+
+    catalog_patch = _build_catalog_patch(arguments, publish_status_default="published")
+    catalog_patch["publish_status"] = "published"
+    updated = _upsert_dataset_with_profile(dataset_row, catalog_patch=catalog_patch)
+    if not updated:
+        return {"success": False, "error": "发布数据集失败"}
+
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=_safe_text(updated.get("data_source_id")),
+        event_type="dataset_published",
+        event_level="info",
+        event_message=f"发布数据集：{_safe_text(updated.get('dataset_name')) or _safe_text(updated.get('dataset_code'))}",
+        event_payload={
+            "dataset_id": _safe_text(updated.get("id")),
+            "dataset_code": _safe_text(updated.get("dataset_code")),
+            "publish_status": "published",
+        },
+    )
+    return {
+        "success": True,
+        "dataset": _build_dataset_view(updated),
+        "message": "数据集已发布",
+    }
+
+
+async def _handle_data_source_unpublish_dataset(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        logger.warning(
+            "unpublish dataset not found: company_id=%s source_id=%s dataset_id=%s dataset_code=%s resource_key=%s",
+            company_id,
+            _source_id_from_args(arguments),
+            _dataset_id_from_args(arguments),
+            _sanitize_dataset_code(arguments.get("dataset_code")),
+            _safe_text(arguments.get("resource_key")),
+        )
+        return {"success": False, "error": "数据集不存在"}
+
+    catalog_patch = _build_catalog_patch(arguments, publish_status_default="unpublished")
+    catalog_patch["publish_status"] = "unpublished"
+    updated = _upsert_dataset_with_profile(dataset_row, catalog_patch=catalog_patch)
+    if not updated:
+        return {"success": False, "error": "取消发布失败"}
+
+    reason = _safe_text(arguments.get("reason")) or "手动取消发布"
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=_safe_text(updated.get("data_source_id")),
+        event_type="dataset_unpublished",
+        event_level="warn",
+        event_message=f"取消发布数据集：{_safe_text(updated.get('dataset_name')) or _safe_text(updated.get('dataset_code'))}",
+        event_payload={
+            "dataset_id": _safe_text(updated.get("id")),
+            "dataset_code": _safe_text(updated.get("dataset_code")),
+            "publish_status": "unpublished",
+            "reason": reason,
+        },
+    )
+    return {
+        "success": True,
+        "dataset": _build_dataset_view(updated),
+        "message": "数据集已取消发布",
+    }
+
+
+async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    binding_scope = _safe_text(arguments.get("binding_scope")).lower() or "scheme"
+    scene_type = _normalize_scene_type(arguments.get("scene_type")) or "recon"
+    role_code = _normalize_role_code(arguments.get("role_code"))
+    keyword = _safe_text(arguments.get("keyword")).lower()
+    filters = dict(arguments.get("filters") or {})
+    page = max(1, int(arguments.get("page") or 1))
+    page_size = max(1, min(int(arguments.get("page_size") or 30), 200))
+
+    source_id = _safe_text(filters.get("source_id") or filters.get("data_source_id")) or None
+    requested_status = _safe_text(filters.get("status")).lower() or "active"
+    only_published = _normalize_bool(filters.get("only_published"), default=True)
+    query_kwargs = {
+        "company_id": company_id,
+        "data_source_id": source_id,
+        "status": requested_status,
+        "include_deleted": False,
+        "keyword": keyword,
+        "schema_name": _safe_text(filters.get("schema_name")).lower(),
+        "object_type": _safe_text(filters.get("object_type")).lower(),
+        "publish_status": _safe_text(filters.get("publish_status")).lower(),
+        "business_object_type": _safe_text(filters.get("business_object_type")).lower(),
+        "verified_status": _safe_text(filters.get("verified_status")).lower(),
+        "only_published": only_published,
+        "sort_by": "last_used_desc",
+        "lightweight": False,
+    }
+    rows: list[dict[str, Any]] = []
+    seen_dataset_ids: set[str] = set()
+    scan_page_size = max(DATASET_CANDIDATE_BATCH_SIZE, page_size)
+    query_result = _query_datasets_with_compat(
+        **query_kwargs,
+        page=1,
+        page_size=scan_page_size,
+    )
+    if query_result is not None:
+        total = int(query_result.get("total") or 0)
+        for item in (query_result.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            dataset_id = _safe_text(item.get("id"))
+            if dataset_id and dataset_id in seen_dataset_ids:
+                continue
+            if dataset_id:
+                seen_dataset_ids.add(dataset_id)
+            rows.append(dict(item))
+        current_page = 1
+        max_pages = max(1, min(DATASET_CANDIDATE_MAX_SCAN_PAGES, (total + scan_page_size - 1) // scan_page_size))
+        while total and current_page < max_pages:
+            current_page += 1
+            batch_result = _query_datasets_with_compat(
+                **query_kwargs,
+                page=current_page,
+                page_size=scan_page_size,
+            )
+            if not batch_result:
+                break
+            batch_items = [dict(item) for item in (batch_result.get("items") or []) if isinstance(item, dict)]
+            if not batch_items:
+                break
+            for item in batch_items:
+                dataset_id = _safe_text(item.get("id"))
+                if dataset_id and dataset_id in seen_dataset_ids:
+                    continue
+                if dataset_id:
+                    seen_dataset_ids.add(dataset_id)
+                rows.append(item)
+            if current_page * scan_page_size >= total:
+                break
+    else:
+        rows = _list_datasets_with_compat(
+            company_id=company_id,
+            data_source_id=source_id,
+            status=requested_status,
+            include_deleted=False,
+            keyword=keyword,
+            schema_name=_safe_text(filters.get("schema_name")).lower(),
+            object_type=_safe_text(filters.get("object_type")).lower(),
+            publish_status=_safe_text(filters.get("publish_status")).lower(),
+            business_object_type=_safe_text(filters.get("business_object_type")).lower(),
+            verified_status=_safe_text(filters.get("verified_status")).lower(),
+            only_published=only_published,
+            page=1,
+            page_size=max(2000, page_size),
+        )
+
+    rows = _enrich_dataset_rows_with_source_context(company_id=company_id, dataset_rows=rows)
+
+    allowed_source_ids = {
+        _safe_text(item)
+        for item in (filters.get("source_ids") or filters.get("data_source_ids") or [])
+        if _safe_text(item)
+    }
+    allowed_dataset_ids = {_safe_text(item) for item in (filters.get("dataset_ids") or []) if _safe_text(item)}
+    excluded_dataset_ids = {_safe_text(item) for item in (filters.get("exclude_dataset_ids") or []) if _safe_text(item)}
+    required_fields = [item for item in filters.get("required_fields") or [] if isinstance(item, str)]
+    candidate_contract = _resolve_dataset_candidate_contract(
+        scene_type=scene_type,
+        role_code=role_code,
+        filters=filters,
+    )
+    contract_score_filters = {
+        **filters,
+        "business_object_types": candidate_contract.get("business_object_types") or filters.get("business_object_types"),
+        "grains": candidate_contract.get("grains") or filters.get("grains"),
+        "required_field_alias_groups": candidate_contract.get("required_field_alias_groups")
+        or filters.get("required_field_alias_groups"),
+        "required_fields": required_fields,
+    }
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        view = _build_dataset_base_view(row)
+        dataset_id = _safe_text(view.get("id"))
+        if allowed_source_ids and _safe_text(view.get("data_source_id")) not in allowed_source_ids:
+            continue
+        if allowed_dataset_ids and dataset_id not in allowed_dataset_ids:
+            continue
+        if dataset_id in excluded_dataset_ids:
+            continue
+        if view.get("publish_status") != "published":
+            continue
+        if view.get("status") != "active":
+            continue
+        if not bool(view.get("enabled")):
+            continue
+        if _safe_text(view.get("verified_status")) not in {"verified", "unverified"}:
+            continue
+        if keyword and not _contains_tokens(_safe_text(view.get("search_text")), keyword):
+            continue
+        contract_coverage = _dataset_alias_group_coverage(
+            row,
+            candidate_contract.get("required_field_alias_groups") or (),
+        )
+        contract_object_types = [item.lower() for item in candidate_contract.get("business_object_types") or [] if _safe_text(item)]
+        contract_grains = [item.lower() for item in candidate_contract.get("grains") or [] if _safe_text(item)]
+        object_type_matches = (
+            not contract_object_types
+            or _safe_text(view.get("business_object_type")).lower() in contract_object_types
+        )
+        grain_matches = not contract_grains or _safe_text(view.get("grain")).lower() in contract_grains
+        if candidate_contract.get("strict") and candidate_contract:
+            required_alias_groups = candidate_contract.get("required_field_alias_groups") or ()
+            if required_alias_groups and contract_coverage < 0.34:
+                continue
+            if contract_object_types and not object_type_matches:
+                continue
+            if contract_grains and not grain_matches:
+                continue
+        score, reason = _score_dataset_candidate(
+            row,
+            role_code=role_code,
+            filters=contract_score_filters,
+        )
+        candidates.append(
+            {
+                **_build_dataset_view(row, include_heavy=False),
+                "score": score,
+                "reason": reason,
+                "contract_label": candidate_contract.get("label") or "",
+                "contract_field_coverage": round(contract_coverage, 4),
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -int(item.get("usage_count") or 0),
+            -(
+                (_parse_datetime(item.get("updated_at")) or datetime.fromtimestamp(0, timezone.utc)).timestamp()
+            ),
+        ),
+    )
+    paged_candidates, total = _paginate_rows(candidates, page=page, page_size=page_size)
+    return {
+        "success": True,
+        "binding_scope": binding_scope,
+        "scene_type": scene_type,
+        "role_code": role_code,
+        "count": len(paged_candidates),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "candidates": paged_candidates,
     }
 
 
@@ -3338,7 +5378,7 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
         health_status="healthy",
         last_error_message="",
     )
-    updated_dataset_row = _update_dataset_health_by_resource(
+    _update_dataset_health_by_resource(
         company_id=company_id,
         source_id=source_id,
         resource_key=resource_key,
@@ -3346,21 +5386,6 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
         last_error_message="",
         last_sync_at=_now_iso(),
     )
-    if updated_dataset_row:
-        try:
-            _refresh_dataset_semantic_profile(
-                dataset_row=updated_dataset_row,
-                source_row=source_row,
-                sample_rows=rows[:SEMANTIC_SAMPLE_ROW_LIMIT],
-                status="generated_with_samples" if rows else "generated_basic",
-            )
-        except Exception as exc:
-            logger.warning(
-                "refresh semantic profile after sync publish failed: source_id=%s resource_key=%s error=%s",
-                source_id,
-                resource_key,
-                exc,
-            )
     return {
         "success": True,
         "source_id": source_id,
