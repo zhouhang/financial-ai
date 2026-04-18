@@ -984,8 +984,11 @@ export default function SchemeWizardTargetProcStep({
               onChange={(event) => onProcDraftChange(event.target.value)}
               rows={14}
               className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 text-sm leading-7 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="AI 生成后，可在这里继续调整数据整理配置。"
+              placeholder="如需改动说明，请修改后重新点击 AI 生成整理配置。"
             />
+            <p className="mt-2 text-xs leading-5 text-text-muted">
+              手动修改这里的说明后，需要重新点击“AI生成整理配置”，系统不会直接把文字改写成可执行 JSON。
+            </p>
           </label>
         </>
       ) : null}

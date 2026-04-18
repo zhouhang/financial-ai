@@ -38,7 +38,12 @@ from .executor import (
     SingleShotSchemeDesignExecutor,
     SchemeDesignExecutor,
 )
-from .rule_text_renderer import render_proc_rule_summary, render_recon_rule_summary
+from .rule_text_renderer import (
+    render_proc_draft_text,
+    render_proc_rule_summary,
+    render_recon_draft_text,
+    render_recon_rule_summary,
+)
 from .semantic_utils import ensure_dataset_semantic_context, infer_raw_field_names
 from .session_store import InMemorySchemeDesignSessionStore
 
@@ -288,12 +293,91 @@ def _normalize_existing_rule_json(raw: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _force_recon_table_names(rule_json: dict[str, Any]) -> dict[str, Any]:
+    """Patch every rule item's source/target file identification to use
+    the canonical left_recon_ready / right_recon_ready table names so that
+    an existing rule from another scheme connects to the current proc output."""
+    import copy
+    patched = copy.deepcopy(rule_json)
+    for rule_item in list(patched.get("rules") or []):
+        if not isinstance(rule_item, dict):
+            continue
+        for file_key, table_name in (("source_file", "left_recon_ready"), ("target_file", "right_recon_ready")):
+            file_cfg = rule_item.get(file_key)
+            if not isinstance(file_cfg, dict):
+                file_cfg = {}
+                rule_item[file_key] = file_cfg
+            ident = file_cfg.get("identification")
+            if not isinstance(ident, dict):
+                ident = {}
+                file_cfg["identification"] = ident
+            ident["match_by"] = "table_name"
+            ident["match_value"] = table_name
+    return patched
+
+
 def _summarize_proc_rule(rule_json: dict[str, Any]) -> str:
     return render_proc_rule_summary(rule_json)
 
 
 def _summarize_recon_rule(rule_json: dict[str, Any]) -> str:
     return render_recon_rule_summary(rule_json)
+
+
+def _collect_display_maps(
+    datasets: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    field_label_map: dict[str, str] = {}
+    table_label_map: dict[str, str] = {}
+    for item in datasets:
+        if not isinstance(item, dict):
+            continue
+        normalized = ensure_dataset_semantic_context(dict(item))
+        table_name = str(normalized.get("table_name") or "").strip()
+        business_name = str(normalized.get("business_name") or "").strip()
+        if table_name and business_name:
+            table_label_map[table_name] = business_name
+        raw_map = normalized.get("field_label_map") if isinstance(normalized.get("field_label_map"), dict) else {}
+        for raw_name, display_name in raw_map.items():
+            raw = str(raw_name or "").strip()
+            if not raw:
+                continue
+            display = str(display_name or "").strip() or raw
+            field_label_map.setdefault(raw, display)
+    return field_label_map, table_label_map
+
+
+def _collect_proc_display_maps(session: SchemeDesignSession) -> tuple[dict[str, str], dict[str, str]]:
+    datasets = [
+        *(item for item in session.target_step.left_datasets if isinstance(item, dict)),
+        *(item for item in session.target_step.right_datasets if isinstance(item, dict)),
+        *(item for item in session.sample_datasets if isinstance(item, dict)),
+    ]
+    return _collect_display_maps(datasets)
+
+
+def _collect_recon_display_maps(session: SchemeDesignSession) -> tuple[dict[str, str], dict[str, str]]:
+    datasets = [item for item in session.sample_datasets if isinstance(item, dict)]
+    return _collect_display_maps(datasets)
+
+
+def _render_proc_draft_text_for_session(session: SchemeDesignSession, rule_json: dict[str, Any]) -> str:
+    field_label_map, table_label_map = _collect_proc_display_maps(session)
+    return render_proc_draft_text(
+        rule_json,
+        goal_hint=session.biz_goal,
+        field_label_map=field_label_map,
+        table_label_map=table_label_map,
+    )
+
+
+def _render_recon_draft_text_for_session(session: SchemeDesignSession, rule_json: dict[str, Any]) -> str:
+    field_label_map, _ = _collect_recon_display_maps(session)
+    return render_recon_draft_text(
+        rule_json,
+        goal_hint=session.biz_goal,
+        field_label_map=field_label_map,
+    )
 
 
 def _build_rule_step_state(
@@ -903,12 +987,13 @@ class SchemeDesignService:
         normalized_rule = compatibility.get("normalized_rule") if isinstance(compatibility.get("normalized_rule"), dict) else rule_json
         session.drafts.proc_draft_json = dict(normalized_rule)
         session.sample_datasets = [dict(item) for item in target_sample_datasets]
+        draft_text = _render_proc_draft_text_for_session(session, dict(normalized_rule)) or _summarize_proc_rule(normalized_rule)
         session.proc_step = _build_rule_step_state(
             mode="existing",
             rule_json=dict(normalized_rule),
             summary_builder=_summarize_proc_rule,
             selected_rule_code=(payload.rule_code or "").strip(),
-            draft_text=_summarize_proc_rule(normalized_rule),
+            draft_text=draft_text,
             compatibility_result=compatibility if isinstance(compatibility, dict) else {},
             validation_result={"success": bool(compatibility.get("success"))},
             status="compatible" if compatibility.get("compatible") else "incompatible",
@@ -982,13 +1067,17 @@ class SchemeDesignService:
             },
         )
         normalized_rule = compatibility.get("normalized_rule") if isinstance(compatibility.get("normalized_rule"), dict) else rule_json
+        # Force source/target table names to canonical left/right_recon_ready so the
+        # rule connects to this session's proc output regardless of its origin.
+        normalized_rule = _force_recon_table_names(dict(normalized_rule))
         session.drafts.recon_draft_json = dict(normalized_rule)
+        draft_text = _render_recon_draft_text_for_session(session, dict(normalized_rule)) or _summarize_recon_rule(normalized_rule)
         session.recon_step = _build_rule_step_state(
             mode="existing",
             rule_json=dict(normalized_rule),
             summary_builder=_summarize_recon_rule,
             selected_rule_code=(payload.rule_code or "").strip(),
-            draft_text=_summarize_recon_rule(normalized_rule),
+            draft_text=draft_text,
             compatibility_result=compatibility if isinstance(compatibility, dict) else {},
             validation_result={"success": bool(compatibility.get("success"))},
             status="compatible" if compatibility.get("compatible") else "incompatible",

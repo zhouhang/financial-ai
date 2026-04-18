@@ -257,9 +257,11 @@ async def stream_generate_proc_step(
     if session is None:
         raise HTTPException(status_code=404, detail="design session 不存在")
 
+    _MAX_POLL_ROUNDS = 150  # 150 × 0.8 s ≈ 120 s hard timeout
+
     async def event_generator():
         last_signature: tuple[str, str, str] | None = None
-        while True:
+        for _ in range(_MAX_POLL_ROUNDS):
             current_session = await service.get_session(auth_token, session_id)
             if current_session is None:
                 yield _sse_message("error", {"stage": "proc", "message": "design session 不存在"})
@@ -282,6 +284,7 @@ async def stream_generate_proc_step(
                 yield _sse_message("completed", payload)
                 return
             await asyncio.sleep(0.8)
+        yield _sse_message("error", {"stage": "proc", "message": "生成超时，请稍后重试"})
 
     return StreamingResponse(
         event_generator(),
@@ -356,9 +359,11 @@ async def stream_generate_recon_step(
     if session is None:
         raise HTTPException(status_code=404, detail="design session 不存在")
 
+    _MAX_POLL_ROUNDS = 150  # 150 × 0.8 s ≈ 120 s hard timeout
+
     async def event_generator():
         last_signature: tuple[str, str, str] | None = None
-        while True:
+        for _ in range(_MAX_POLL_ROUNDS):
             current_session = await service.get_session(auth_token, session_id)
             if current_session is None:
                 yield _sse_message("error", {"stage": "recon", "message": "design session 不存在"})
@@ -381,6 +386,7 @@ async def stream_generate_recon_step(
                 yield _sse_message("completed", payload)
                 return
             await asyncio.sleep(0.8)
+        yield _sse_message("error", {"stage": "recon", "message": "生成超时，请稍后重试"})
 
     return StreamingResponse(
         event_generator(),

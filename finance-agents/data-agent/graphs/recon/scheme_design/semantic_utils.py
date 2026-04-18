@@ -192,6 +192,15 @@ def format_table_display(table_name: str, table_label_map: dict[str, str] | None
     return raw
 
 
+def format_table_label(table_name: str, table_label_map: dict[str, str] | None) -> str:
+    """Return only the business label for prose/draft_text — never expose raw DB table name."""
+    raw = str(table_name or "").strip()
+    if not raw:
+        return ""
+    label = str((table_label_map or {}).get(raw) or "").strip()
+    return label if (label and label != raw) else raw
+
+
 def build_prompt_dataset_payload(dataset: dict[str, Any]) -> dict[str, Any]:
     resolved = ensure_dataset_semantic_context(dataset)
     field_label_map = _normalize_string_map(resolved.get("field_label_map"))

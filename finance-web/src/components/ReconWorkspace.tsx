@@ -90,6 +90,7 @@ interface SchemeSourceDraft {
   technicalName?: string;
   fieldLabelMap?: Record<string, string>;
   keyFields?: string[];
+  schemaSummary?: Record<string, unknown>;
   sourceId?: string;
   sourceName?: string;
   sourceKind: SupportedSourceKind;
@@ -1062,6 +1063,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
       fieldLabelMap:
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
+      schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -1085,6 +1087,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
       fieldLabelMap:
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
+      schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -1180,6 +1183,8 @@ function resolveSampleOriginMeta(
 function buildRunPlanBinding(
   source: SchemeSourceDraft,
   dateField: string,
+  side: 'left' | 'right',
+  index: number,
 ): Record<string, unknown> | null {
   const sourceId = toText(source.sourceId).trim();
   const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
@@ -1198,6 +1203,8 @@ function buildRunPlanBinding(
     table_name: tableName,
     resource_key: tableName,
     dataset_source_type: 'snapshot',
+    role_code: `${side}_${index + 1}`,
+    side,
     query,
   };
 }
@@ -1209,13 +1216,20 @@ function buildRunPlanBindings(
 ): Array<Record<string, unknown>> {
   if (!schemeMeta) return [];
   const bindings = [
-    ...schemeMeta.leftSources.map((source) => buildRunPlanBinding(source, leftTimeSemantic)),
-    ...schemeMeta.rightSources.map((source) => buildRunPlanBinding(source, rightTimeSemantic)),
+    ...schemeMeta.leftSources.map((source, index) => buildRunPlanBinding(source, leftTimeSemantic, 'left', index)),
+    ...schemeMeta.rightSources.map((source, index) => buildRunPlanBinding(source, rightTimeSemantic, 'right', index)),
   ].filter(Boolean) as Array<Record<string, unknown>>;
 
   const seen = new Set<string>();
   return bindings.filter((item) => {
-    const key = `${toText(item.data_source_id)}::${toText(item.table_name)}::${toText(item.resource_key)}`;
+    const query = asRecord(item.query);
+    const key = [
+      toText(item.data_source_id),
+      toText(item.table_name),
+      toText(item.resource_key),
+      toText(item.side),
+      toText(query.date_field),
+    ].join('::');
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1530,6 +1544,48 @@ function getDefaultDateFieldBySourceKind(sourceKind: SupportedSourceKind): strin
   return 'happened_at';
 }
 
+function extractSchemaFieldNames(schemaSummary: Record<string, unknown> | undefined): string[] {
+  const summary = asRecord(schemaSummary);
+  const columns = asList(summary.columns);
+  if (columns.length > 0) {
+    return columns
+      .map((item) => {
+        const column = asRecord(item);
+        return toText(column.name, toText(column.column_name)).trim();
+      })
+      .filter(Boolean);
+  }
+  return Object.keys(summary).filter((key) => key !== 'columns');
+}
+
+function scoreDateFieldCandidate(rawName: string, label: string): number {
+  const raw = rawName.trim().toLowerCase();
+  if (!raw) return Number.NEGATIVE_INFINITY;
+
+  let score = 0;
+  if (/(biz_date|business_date|accounting_date|trade_time|trade_date|payment_time|pay_time|gmt_payment|gmt_create|created_at|updated_at|occurred_at|happened_at|booked_at|settle_date|settle_time|posting_date|entry_date)/.test(raw)) {
+    score += 12;
+  }
+  if (/(date|time|day|dt|gmt|created|updated|trade|payment|pay|settle|account|book|occur|happen|posting|entry)/.test(raw)) {
+    score += 6;
+  }
+  if (/(日期|时间|时刻|账期|交易|支付|付款|入账|到账|创建|更新|结算|记账|发生|下单|业务)/.test(label || rawName)) {
+    score += 8;
+  }
+  if (/(id|code|amount|amt|fee|price|status|name|type|order|key|remark|desc|flag)/.test(raw)) {
+    score -= 6;
+  }
+  return score;
+}
+
+function buildDateFieldLabel(rawName: string, label: string): string {
+  const normalizedLabel = label.trim();
+  if (normalizedLabel && normalizedLabel !== rawName) {
+    return `${normalizedLabel} (${rawName})`;
+  }
+  return rawName;
+}
+
 function resolveSourceFieldProfile(source: SchemeSourceOption): SourceFieldProfile {
   if (source.sourceKind === 'platform_oauth') {
     return {
@@ -1559,19 +1615,48 @@ function inferTimeOptionsFromSources(
   sources: SchemeSourceDraft[],
   fallbackValue = '',
 ): Array<{ value: string; label: string }> {
-  const optionMap = new Map<string, string>();
+  const optionMap = new Map<string, { value: string; label: string; score: number }>();
   sources.forEach((source) => {
-    const sourceKind = source.sourceKind || 'platform_oauth';
-    const field = getDefaultDateFieldBySourceKind(sourceKind);
-    if (!field) return;
-    if (!optionMap.has(field)) {
-      optionMap.set(field, field);
-    }
+    const fieldLabelMap = normalizeFieldLabelMap(source.fieldLabelMap) || {};
+    const rawNames = Array.from(
+      new Set<string>([
+        ...extractSchemaFieldNames(source.schemaSummary),
+        ...Object.keys(fieldLabelMap),
+      ]),
+    );
+    rawNames.forEach((rawName) => {
+      const normalizedRawName = rawName.trim();
+      if (!normalizedRawName) return;
+      const label = toText(fieldLabelMap[normalizedRawName], normalizedRawName);
+      const score = scoreDateFieldCandidate(normalizedRawName, label);
+      if (score <= 0) return;
+      const current = optionMap.get(normalizedRawName);
+      if (!current || score > current.score) {
+        optionMap.set(normalizedRawName, {
+          value: normalizedRawName,
+          label: buildDateFieldLabel(normalizedRawName, label),
+          score,
+        });
+      }
+    });
   });
-  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
-    optionMap.set(fallbackValue.trim(), fallbackValue.trim());
+  if (optionMap.size === 0) {
+    sources.forEach((source) => {
+      const field = getDefaultDateFieldBySourceKind(source.sourceKind || 'platform_oauth');
+      if (!field || optionMap.has(field)) return;
+      optionMap.set(field, { value: field, label: field, score: 1 });
+    });
   }
-  return Array.from(optionMap.entries()).map(([value, label]) => ({ value, label }));
+  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
+    optionMap.set(fallbackValue.trim(), {
+      value: fallbackValue.trim(),
+      label: fallbackValue.trim(),
+      score: 999,
+    });
+  }
+  return Array.from(optionMap.values())
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
+    .map(({ value, label }) => ({ value, label }));
 }
 
 function buildProcSourceAlias(side: 'left' | 'right', index: number): string {
@@ -3840,6 +3925,7 @@ options.push({
         dataset_kind: item.datasetKind,
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
+        schema_summary: item.schemaSummary,
       }));
       const rightDatasetBindings = selectedRightSources.map((item, index) => ({
         side: 'right',
@@ -3857,6 +3943,7 @@ options.push({
         dataset_kind: item.datasetKind,
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
+        schema_summary: item.schemaSummary,
       }));
       const datasetBindingsJson = [
         ...leftDatasetBindings.map((item, index) => ({
