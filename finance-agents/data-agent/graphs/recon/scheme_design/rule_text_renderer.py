@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .semantic_utils import format_field_display, format_table_display
+from .semantic_utils import format_field_display, format_table_display, format_table_label
 
 
 _PROC_TARGET_LABELS = {
@@ -53,7 +53,12 @@ def _stringify_formula(expr: Any, *, max_length: int = 48) -> str:
     return text if len(text) <= max_length else f"{text[:max_length]}..."
 
 
-def _describe_proc_value(value: Any, *, field_label_map: dict[str, str] | None = None) -> str:
+def _describe_proc_value(
+    value: Any,
+    *,
+    field_label_map: dict[str, str] | None = None,
+    table_label_map: dict[str, str] | None = None,
+) -> str:
     if not isinstance(value, dict):
         return "未知表达式"
     value_type = str(value.get("type") or "").strip()
@@ -62,20 +67,33 @@ def _describe_proc_value(value: Any, *, field_label_map: dict[str, str] | None =
         if isinstance(source, dict):
             alias = str(source.get("alias") or "").strip()
             field = str(source.get("field") or "").strip()
-            if alias and field:
-                return f"{alias}.{format_field_display(field, field_label_map)}"
             if field:
-                return format_field_display(field, field_label_map)
+                field_display = format_field_display(field, field_label_map)
+                if alias:
+                    table_label = format_table_label(alias, table_label_map)
+                    # 只在 alias 有业务名翻译时才展示表前缀，否则省略
+                    if table_label != alias:
+                        return f"{table_label}.{field_display}"
+                return field_display
         return "源字段"
     if value_type == "formula":
-        return f"公式 {_stringify_formula(value.get('expr'))}"
+        expr = value.get("expr")
+        # 字符串字面量显示为"固定值"而非"公式"
+        if isinstance(expr, str) and expr:
+            return f"固定值：{expr}"
+        return f"公式 {_stringify_formula(expr)}"
     if value_type == "template_source":
         source = value.get("source")
         if isinstance(source, dict):
             alias = str(source.get("alias") or "").strip()
             field = str(source.get("field") or "").strip()
-            if alias and field:
-                return f"模板 {alias}.{format_field_display(field, field_label_map)}"
+            if field:
+                field_display = format_field_display(field, field_label_map)
+                if alias:
+                    table_display = format_table_display(alias, table_label_map)
+                    if table_display != alias:
+                        return f"模板 {table_display}.{field_display}"
+                return f"模板 {field_display}"
         return "模板字段"
     if value_type == "function":
         func_name = str(value.get("name") or value.get("function") or "").strip()
@@ -93,6 +111,7 @@ def _render_proc_mapping_summary(
     mappings: list[dict[str, Any]],
     *,
     field_label_map: dict[str, str] | None = None,
+    table_label_map: dict[str, str] | None = None,
     limit: int = 8,
 ) -> str:
     rendered: list[str] = []
@@ -104,7 +123,7 @@ def _render_proc_mapping_summary(
             continue
         rendered.append(
             f"{format_field_display(target_field, field_label_map)} ← "
-            f"{_describe_proc_value(mapping.get('value'), field_label_map=field_label_map)}"
+            f"{_describe_proc_value(mapping.get('value'), field_label_map=field_label_map, table_label_map=table_label_map)}"
         )
         if len(rendered) >= limit:
             break
@@ -230,7 +249,7 @@ def render_proc_rule_summary(
         sources = "、".join(side_sources.get(target_table) or [])
         if sources:
             display_sources = "、".join(
-                format_table_display(source, table_label_map) for source in side_sources.get(target_table) or []
+                format_table_label(source, table_label_map) for source in side_sources.get(target_table) or []
             )
             parts.append(f"{_target_label(target_table)}来自 {display_sources or sources}")
     return "；".join(parts) + "。" if parts else "输出左右两份可对账数据。"
@@ -276,11 +295,11 @@ def render_proc_draft_text(
             if columns:
                 lines.append(
                     "步骤"
-                    f"{index}：定义{target_label} `{target_table}`，输出字段："
+                    f"{index}：定义{target_label}，输出字段："
                     f"{'、'.join(format_field_display(column, field_label_map) for column in columns)}。"
                 )
             else:
-                lines.append(f"步骤{index}：定义{target_label} `{target_table}` 的输出结构。")
+                lines.append(f"步骤{index}：定义{target_label}的输出结构。")
             continue
         if action == "write_dataset":
             sources = [
@@ -289,10 +308,10 @@ def render_proc_draft_text(
                 if isinstance(source, dict) and str(source.get("table") or source.get("alias") or "").strip()
             ]
             source_text = "、".join(
-                format_table_display(source, table_label_map) for source in sources
+                format_table_label(source, table_label_map) for source in sources
             ) if sources else "当前数据集"
             line_parts = [
-                f"步骤{index}：将 {source_text} 整理后写入{target_label} `{target_table}`。"
+                f"步骤{index}：将 {source_text} 整理后写入{target_label}。"
             ]
             match_summary = _render_proc_match_summary(step.get("match"), field_label_map=field_label_map)
             if match_summary:
@@ -312,6 +331,7 @@ def render_proc_draft_text(
             mapping_summary = _render_proc_mapping_summary(
                 [item for item in list(step.get("mappings") or []) if isinstance(item, dict)],
                 field_label_map=field_label_map,
+                table_label_map=table_label_map,
             )
             if mapping_summary:
                 line_parts.append(mapping_summary)
@@ -333,10 +353,14 @@ def _render_key_mapping_summary(
         source_field = str(mapping.get("source_field") or "").strip()
         target_field = str(mapping.get("target_field") or "").strip()
         if source_field and target_field:
-            rendered.append(
-                f"{format_field_display(source_field, field_label_map)} = "
-                f"{format_field_display(target_field, field_label_map)}"
-            )
+            # fold biz_key = biz_key into a human-readable shorthand
+            if source_field == "biz_key" and target_field == "biz_key":
+                rendered.append("业务主键")
+            else:
+                rendered.append(
+                    f"{format_field_display(source_field, field_label_map)} = "
+                    f"{format_field_display(target_field, field_label_map)}"
+                )
     return "；".join(rendered[:6])
 
 
@@ -419,7 +443,7 @@ def render_recon_draft_text(
     description = _normalize_goal_text(goal_hint, str(rule_json.get("description") or ""))
     if description:
         lines.append(f"目标：{description}")
-    lines.append("输入：左侧整理结果表 `left_recon_ready` 与右侧整理结果表 `right_recon_ready`。")
+    lines.append("输入：左侧整理后数据与右侧整理后数据。")
 
     mapping_summary = _render_key_mapping_summary(
         [item for item in list(key_columns.get("mappings") or []) if isinstance(item, dict)],
@@ -427,7 +451,8 @@ def render_recon_draft_text(
     )
     if mapping_summary:
         match_type = str(key_columns.get("match_type") or "exact").strip()
-        lines.append(f"1. 匹配规则：按 {mapping_summary} 做 {match_type} 匹配。")
+        match_type_display = {"exact": "精确"}.get(match_type, match_type)
+        lines.append(f"1. 匹配规则：按 {mapping_summary} 做{match_type_display}匹配。")
 
     compare_summary = _render_compare_columns_summary(
         [item for item in list(compare_columns.get("columns") or []) if isinstance(item, dict)],

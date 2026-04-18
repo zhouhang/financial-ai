@@ -317,8 +317,11 @@ export default function SchemeWizardReconStep({
               onChange={(event) => onReconDraftChange(event.target.value)}
               rows={12}
               className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 font-mono text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="AI 生成后，可继续调整 recon 配置。"
+              placeholder="如需改动说明，请修改后重新点击 AI 生成对账逻辑。"
             />
+            <p className="mt-2 text-xs leading-5 text-text-muted">
+              手动修改这里的说明后，需要重新点击“AI生成对账逻辑”，系统不会直接把文字改写成可执行 JSON。
+            </p>
           </label>
         </>
       ) : null}

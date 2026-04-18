@@ -60,7 +60,10 @@ type CenterModalState =
 type SchemeWizardStep = 1 | 2 | 3 | 4;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ConfigMode = 'ai' | 'existing';
-type SupportedSourceKind = Extract<DataSourceKind, 'platform_oauth' | 'database' | 'api'>;
+type SupportedSourceKind = Extract<
+  DataSourceKind,
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+>;
 
 interface SchemeSourceOption {
   id: string;
@@ -80,14 +83,6 @@ interface SchemeSourceOption {
   schemaSummary?: Record<string, unknown>;
 }
 
-interface SchemeSourceRecord {
-  id: string;
-  name: string;
-  sourceKind: SupportedSourceKind;
-  providerCode: string;
-  description?: string;
-}
-
 interface SchemeSourceDraft {
   id: string;
   name: string;
@@ -95,6 +90,7 @@ interface SchemeSourceDraft {
   technicalName?: string;
   fieldLabelMap?: Record<string, string>;
   keyFields?: string[];
+  schemaSummary?: Record<string, unknown>;
   sourceId?: string;
   sourceName?: string;
   sourceKind: SupportedSourceKind;
@@ -107,8 +103,6 @@ interface SchemeSourceDraft {
 interface SchemeDraft {
   name: string;
   businessGoal: string;
-  leftSourceIds: string[];
-  rightSourceIds: string[];
   leftDescription: string;
   rightDescription: string;
   procConfigMode: ConfigMode;
@@ -156,7 +150,7 @@ interface RuleGenerationProgress {
 }
 
 interface CompatibilityCheckResult {
-  status: 'idle' | 'passed' | 'failed';
+  status: 'idle' | 'passed' | 'failed' | 'warning';
   message: string;
   details: string[];
 }
@@ -270,7 +264,6 @@ interface SchemeMetaSummary {
   rightTimeSemantic: string;
 }
 
-const SUPPORTED_SOURCE_KINDS: SupportedSourceKind[] = ['platform_oauth', 'database', 'api'];
 const SCHEME_LIST_TEMPLATE =
   'minmax(0,1.6fr) minmax(220px,1fr) minmax(220px,1fr) minmax(268px,auto)';
 const TASK_LIST_TEMPLATE =
@@ -307,8 +300,6 @@ const SCHEME_WIZARD_STEPS: Array<{ id: SchemeWizardStep; title: string; descript
 const EMPTY_SCHEME_DRAFT: SchemeDraft = {
   name: '',
   businessGoal: '',
-  leftSourceIds: [],
-  rightSourceIds: [],
   leftDescription: '',
   rightDescription: '',
   procConfigMode: 'ai',
@@ -946,84 +937,6 @@ function emptyCompatibilityResult(): CompatibilityCheckResult {
   };
 }
 
-function normalizeSourceRecord(raw: unknown): SchemeSourceRecord | null {
-  const value = asRecord(raw);
-  const id = toText(value.id).trim();
-  const sourceKind = toText(value.source_kind).trim() as SupportedSourceKind;
-  if (!id || !SUPPORTED_SOURCE_KINDS.includes(sourceKind)) {
-    return null;
-  }
-
-  return {
-    id,
-    name: toText(value.name, id).trim() || id,
-    sourceKind,
-    providerCode: toText(value.provider_code, 'unknown').trim() || 'unknown',
-    description: toText(value.description).trim(),
-  };
-}
-
-function normalizeSourceDatasetOption(
-  raw: unknown,
-  source: SchemeSourceRecord,
-): SchemeSourceOption | null {
-  const value = asRecord(raw);
-  if (!value) return null;
-  const semanticProfile = asRecord(value.semantic_profile);
-
-  const datasetId = toText(value.id, toText(value.dataset_id)).trim();
-  const datasetCode = toText(value.dataset_code, toText(value.code)).trim();
-  const datasetName = toText(value.dataset_name, toText(value.name, datasetCode || datasetId)).trim();
-  if (!datasetId && !datasetCode && !datasetName) {
-    return null;
-  }
-
-  const enabled = typeof value.is_enabled === 'boolean'
-    ? value.is_enabled
-    : typeof value.enabled === 'boolean'
-    ? value.enabled
-    : true;
-  if (!enabled) {
-    return null;
-  }
-
-  const businessName = toText(
-    value.business_name,
-    toText(value.display_name, toText(semanticProfile.business_name)),
-  ).trim();
-  const technicalName = toText(
-    value.technical_name,
-    toText(value.resource_key, toText(value.table_name, datasetCode || datasetName || datasetId)),
-  ).trim();
-  const fieldLabelMap =
-    normalizeFieldLabelMap(value.field_label_map)
-    || normalizeFieldLabelMap(semanticProfile.field_label_map)
-    || normalizeFieldLabelMap(semanticProfile.fields_map);
-  const explicitKeyFields = normalizeStringList(value.key_fields);
-  const keyFields =
-    explicitKeyFields.length > 0
-      ? explicitKeyFields
-      : normalizeStringList(semanticProfile.key_fields);
-
-  return {
-    id: datasetId || datasetCode || `${source.id}-${datasetName}`,
-    name: datasetName || datasetCode || datasetId,
-    businessName: businessName || undefined,
-    technicalName: technicalName || undefined,
-    keyFields: keyFields.length > 0 ? keyFields : undefined,
-    fieldLabelMap,
-    sourceId: source.id,
-    sourceName: source.name,
-    sourceKind: source.sourceKind,
-    providerCode: source.providerCode,
-    description: source.description,
-    datasetCode: datasetCode || datasetId || datasetName,
-    resourceKey: toText(value.resource_key).trim(),
-    datasetKind: toText(value.dataset_kind).trim(),
-    schemaSummary: asRecord(value.schema_summary),
-  };
-}
-
 function mapScheme(item: unknown): ReconSchemeListItem {
   const raw = asRecord(item);
   const enabled = toBool(raw.is_enabled, true);
@@ -1132,43 +1045,54 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
 
 function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
-  const leftSources = asList(schemeMeta.left_sources).map((raw) => {
+  const datasetBindings = asRecord(schemeMeta.dataset_bindings);
+  const leftBindingRows = asList(datasetBindings.left);
+  const rightBindingRows = asList(datasetBindings.right);
+  const leftRows = leftBindingRows.length > 0 ? leftBindingRows : asList(schemeMeta.left_sources);
+  const rightRows = rightBindingRows.length > 0 ? rightBindingRows : asList(schemeMeta.right_sources);
+  const leftSources = leftRows.map((raw) => {
     const value = asRecord(raw);
     const semanticProfile = asRecord(value.semantic_profile);
+    const sourceRecord = asRecord(value.source);
     const explicitKeyFields = normalizeStringList(value.key_fields);
     return {
-      id: toText(value.id),
+      id: toText(value.dataset_id, toText(value.id)),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
       businessName: toText(value.business_name, toText(value.display_name, toText(semanticProfile.business_name))),
       technicalName: toText(value.technical_name, toText(value.resource_key, toText(value.table_name))),
       fieldLabelMap:
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
-      sourceId: toText(value.source_id, toText(value.data_source_id)),
-      sourceName: toText(value.source_name),
-      sourceKind: (toText(value.source_kind) as SupportedSourceKind) || 'platform_oauth',
-      providerCode: toText(value.provider_code),
+      schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
+      sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
+      sourceKind:
+        (toText(value.source_kind, toText(sourceRecord.source_kind)) as SupportedSourceKind) || 'platform_oauth',
+      providerCode: toText(value.provider_code, toText(sourceRecord.provider_code)),
       datasetCode: toText(value.dataset_code),
       resourceKey: toText(value.resource_key),
       datasetKind: toText(value.dataset_kind),
     };
   });
-  const rightSources = asList(schemeMeta.right_sources).map((raw) => {
+  const rightSources = rightRows.map((raw) => {
     const value = asRecord(raw);
     const semanticProfile = asRecord(value.semantic_profile);
+    const sourceRecord = asRecord(value.source);
     const explicitKeyFields = normalizeStringList(value.key_fields);
     return {
-      id: toText(value.id),
+      id: toText(value.dataset_id, toText(value.id)),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
       businessName: toText(value.business_name, toText(value.display_name, toText(semanticProfile.business_name))),
       technicalName: toText(value.technical_name, toText(value.resource_key, toText(value.table_name))),
       fieldLabelMap:
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
-      sourceId: toText(value.source_id, toText(value.data_source_id)),
-      sourceName: toText(value.source_name),
-      sourceKind: (toText(value.source_kind) as SupportedSourceKind) || 'platform_oauth',
-      providerCode: toText(value.provider_code),
+      schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
+      sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
+      sourceKind:
+        (toText(value.source_kind, toText(sourceRecord.source_kind)) as SupportedSourceKind) || 'platform_oauth',
+      providerCode: toText(value.provider_code, toText(sourceRecord.provider_code)),
       datasetCode: toText(value.dataset_code),
       resourceKey: toText(value.resource_key),
       datasetKind: toText(value.dataset_kind),
@@ -1259,6 +1183,8 @@ function resolveSampleOriginMeta(
 function buildRunPlanBinding(
   source: SchemeSourceDraft,
   dateField: string,
+  side: 'left' | 'right',
+  index: number,
 ): Record<string, unknown> | null {
   const sourceId = toText(source.sourceId).trim();
   const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
@@ -1277,6 +1203,8 @@ function buildRunPlanBinding(
     table_name: tableName,
     resource_key: tableName,
     dataset_source_type: 'snapshot',
+    role_code: `${side}_${index + 1}`,
+    side,
     query,
   };
 }
@@ -1288,13 +1216,20 @@ function buildRunPlanBindings(
 ): Array<Record<string, unknown>> {
   if (!schemeMeta) return [];
   const bindings = [
-    ...schemeMeta.leftSources.map((source) => buildRunPlanBinding(source, leftTimeSemantic)),
-    ...schemeMeta.rightSources.map((source) => buildRunPlanBinding(source, rightTimeSemantic)),
+    ...schemeMeta.leftSources.map((source, index) => buildRunPlanBinding(source, leftTimeSemantic, 'left', index)),
+    ...schemeMeta.rightSources.map((source, index) => buildRunPlanBinding(source, rightTimeSemantic, 'right', index)),
   ].filter(Boolean) as Array<Record<string, unknown>>;
 
   const seen = new Set<string>();
   return bindings.filter((item) => {
-    const key = `${toText(item.data_source_id)}::${toText(item.table_name)}::${toText(item.resource_key)}`;
+    const query = asRecord(item.query);
+    const key = [
+      toText(item.data_source_id),
+      toText(item.table_name),
+      toText(item.resource_key),
+      toText(item.side),
+      toText(query.date_field),
+    ].join('::');
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1609,6 +1544,48 @@ function getDefaultDateFieldBySourceKind(sourceKind: SupportedSourceKind): strin
   return 'happened_at';
 }
 
+function extractSchemaFieldNames(schemaSummary: Record<string, unknown> | undefined): string[] {
+  const summary = asRecord(schemaSummary);
+  const columns = asList(summary.columns);
+  if (columns.length > 0) {
+    return columns
+      .map((item) => {
+        const column = asRecord(item);
+        return toText(column.name, toText(column.column_name)).trim();
+      })
+      .filter(Boolean);
+  }
+  return Object.keys(summary).filter((key) => key !== 'columns');
+}
+
+function scoreDateFieldCandidate(rawName: string, label: string): number {
+  const raw = rawName.trim().toLowerCase();
+  if (!raw) return Number.NEGATIVE_INFINITY;
+
+  let score = 0;
+  if (/(biz_date|business_date|accounting_date|trade_time|trade_date|payment_time|pay_time|gmt_payment|gmt_create|created_at|updated_at|occurred_at|happened_at|booked_at|settle_date|settle_time|posting_date|entry_date)/.test(raw)) {
+    score += 12;
+  }
+  if (/(date|time|day|dt|gmt|created|updated|trade|payment|pay|settle|account|book|occur|happen|posting|entry)/.test(raw)) {
+    score += 6;
+  }
+  if (/(日期|时间|时刻|账期|交易|支付|付款|入账|到账|创建|更新|结算|记账|发生|下单|业务)/.test(label || rawName)) {
+    score += 8;
+  }
+  if (/(id|code|amount|amt|fee|price|status|name|type|order|key|remark|desc|flag)/.test(raw)) {
+    score -= 6;
+  }
+  return score;
+}
+
+function buildDateFieldLabel(rawName: string, label: string): string {
+  const normalizedLabel = label.trim();
+  if (normalizedLabel && normalizedLabel !== rawName) {
+    return `${normalizedLabel} (${rawName})`;
+  }
+  return rawName;
+}
+
 function resolveSourceFieldProfile(source: SchemeSourceOption): SourceFieldProfile {
   if (source.sourceKind === 'platform_oauth') {
     return {
@@ -1638,19 +1615,48 @@ function inferTimeOptionsFromSources(
   sources: SchemeSourceDraft[],
   fallbackValue = '',
 ): Array<{ value: string; label: string }> {
-  const optionMap = new Map<string, string>();
+  const optionMap = new Map<string, { value: string; label: string; score: number }>();
   sources.forEach((source) => {
-    const sourceKind = source.sourceKind || 'platform_oauth';
-    const field = getDefaultDateFieldBySourceKind(sourceKind);
-    if (!field) return;
-    if (!optionMap.has(field)) {
-      optionMap.set(field, field);
-    }
+    const fieldLabelMap = normalizeFieldLabelMap(source.fieldLabelMap) || {};
+    const rawNames = Array.from(
+      new Set<string>([
+        ...extractSchemaFieldNames(source.schemaSummary),
+        ...Object.keys(fieldLabelMap),
+      ]),
+    );
+    rawNames.forEach((rawName) => {
+      const normalizedRawName = rawName.trim();
+      if (!normalizedRawName) return;
+      const label = toText(fieldLabelMap[normalizedRawName], normalizedRawName);
+      const score = scoreDateFieldCandidate(normalizedRawName, label);
+      if (score <= 0) return;
+      const current = optionMap.get(normalizedRawName);
+      if (!current || score > current.score) {
+        optionMap.set(normalizedRawName, {
+          value: normalizedRawName,
+          label: buildDateFieldLabel(normalizedRawName, label),
+          score,
+        });
+      }
+    });
   });
-  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
-    optionMap.set(fallbackValue.trim(), fallbackValue.trim());
+  if (optionMap.size === 0) {
+    sources.forEach((source) => {
+      const field = getDefaultDateFieldBySourceKind(source.sourceKind || 'platform_oauth');
+      if (!field || optionMap.has(field)) return;
+      optionMap.set(field, { value: field, label: field, score: 1 });
+    });
   }
-  return Array.from(optionMap.entries()).map(([value, label]) => ({ value, label }));
+  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
+    optionMap.set(fallbackValue.trim(), {
+      value: fallbackValue.trim(),
+      label: fallbackValue.trim(),
+      score: 999,
+    });
+  }
+  return Array.from(optionMap.values())
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
+    .map(({ value, label }) => ({ value, label }));
 }
 
 function buildProcSourceAlias(side: 'left' | 'right', index: number): string {
@@ -1948,11 +1954,11 @@ export default function ReconWorkspace({
   const [tasks, setTasks] = useState<ReconTaskListItem[]>([]);
   const [runs, setRuns] = useState<ReconCenterRunItem[]>([]);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
-  const [availableSources, setAvailableSources] = useState<SchemeSourceOption[]>([]);
+  const [selectedLeftSources, setSelectedLeftSources] = useState<SchemeSourceOption[]>([]);
+  const [selectedRightSources, setSelectedRightSources] = useState<SchemeSourceOption[]>([]);
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
   const [availableProcRules, setAvailableProcRules] = useState<UserTaskRule[]>([]);
   const [loadingCenter, setLoadingCenter] = useState(false);
-  const [loadingSources, setLoadingSources] = useState(false);
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [loadingExceptionsRunId, setLoadingExceptionsRunId] = useState<string | null>(null);
   const [centerError, setCenterError] = useState<string | null>(null);
@@ -1968,7 +1974,6 @@ export default function ReconWorkspace({
     }>;
   } | null>(null);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
-  const [sourceLoadError, setSourceLoadError] = useState('');
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
@@ -1997,10 +2002,6 @@ export default function ReconWorkspace({
   } | null>(null);
   const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  const sourceById = useMemo(
-    () => new Map(availableSources.map((item) => [item.id, item])),
-    [availableSources],
-  );
   const channelById = useMemo(
     () => new Map(availableChannels.map((item) => [item.id, item])),
     [availableChannels],
@@ -2030,14 +2031,6 @@ export default function ReconWorkspace({
     [selectedPlanSchemeMeta],
   );
 
-  const selectedLeftSources = useMemo(
-    () => schemeDraft.leftSourceIds.map((id) => sourceById.get(id)).filter(Boolean) as SchemeSourceOption[],
-    [schemeDraft.leftSourceIds, sourceById],
-  );
-  const selectedRightSources = useMemo(
-    () => schemeDraft.rightSourceIds.map((id) => sourceById.get(id)).filter(Boolean) as SchemeSourceOption[],
-    [schemeDraft.rightSourceIds, sourceById],
-  );
   const existingProcOptions = useMemo<ExistingConfigOption[]>(() => {
     const options: ExistingConfigOption[] = [];
     const seen = new Set<string>();
@@ -2319,87 +2312,6 @@ options.push({
     [authToken],
   );
 
-  const loadSourceOptions = useCallback(async () => {
-    if (!authToken) {
-      setAvailableSources([]);
-      setSourceLoadError('请先登录并完成数据连接后，再新建对账方案。');
-      return;
-    }
-
-    setLoadingSources(true);
-    setSourceLoadError('');
-
-    try {
-      const response = await fetch('/api/data-sources', {
-        headers: { Authorization: `Bearer ${authToken}` },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '加载数据源失败'));
-      }
-
-      const rows = Array.isArray(data?.sources)
-        ? data.sources
-        : Array.isArray(data?.data_sources)
-        ? data.data_sources
-        : Array.isArray(data?.items)
-        ? data.items
-        : [];
-      const sourceRecords = rows
-        .map((item: unknown) => normalizeSourceRecord(item))
-        .filter(Boolean) as SchemeSourceRecord[];
-      if (sourceRecords.length === 0) {
-        setAvailableSources([]);
-        setSourceLoadError('当前没有可用数据源，请先到数据连接中完成接入。');
-        return;
-      }
-
-      const datasetGroups = await Promise.all(
-        sourceRecords.map(async (source) => {
-          let datasets: SchemeSourceOption[] = [];
-          try {
-            const datasetResponse = await fetch(`/api/data-sources/${source.id}/datasets`, {
-              headers: { Authorization: `Bearer ${authToken}` },
-            });
-            if (datasetResponse.status !== 404 && datasetResponse.status !== 405 && datasetResponse.status !== 501) {
-              const datasetData = await datasetResponse.json().catch(() => ({}));
-              if (!datasetResponse.ok) {
-                throw new Error(String(datasetData?.detail || datasetData?.message || '加载数据集失败'));
-              }
-              const datasetRows = Array.isArray(datasetData?.datasets)
-                ? datasetData.datasets
-                : Array.isArray(datasetData?.data?.datasets)
-                ? datasetData.data.datasets
-                : Array.isArray(datasetData?.items)
-                ? datasetData.items
-                : [];
-              datasets = datasetRows
-                .map((item: unknown) => normalizeSourceDatasetOption(item, source))
-                .filter(Boolean) as SchemeSourceOption[];
-            }
-          } catch {
-            datasets = [];
-          }
-          return datasets;
-        }),
-      );
-
-      const normalized = datasetGroups.flat().filter((item) => item && item.name) as SchemeSourceOption[];
-      if (normalized.length === 0) {
-        setAvailableSources([]);
-        setSourceLoadError('当前没有可选数据集，请先到数据连接中完成数据集发现或创建。');
-        return;
-      }
-
-      setAvailableSources(normalized);
-    } catch (error) {
-      setAvailableSources([]);
-      setSourceLoadError(error instanceof Error ? error.message : '加载数据源失败');
-    } finally {
-      setLoadingSources(false);
-    }
-  }, [authToken]);
-
   const loadChannelOptions = useCallback(async () => {
     if (!authToken) {
       setAvailableChannels([]);
@@ -2494,10 +2406,9 @@ options.push({
   useEffect(() => {
     if (mode !== 'center') return;
     void loadCenterData();
-    void loadSourceOptions();
     void loadChannelOptions();
     void loadProcRuleOptions();
-  }, [loadCenterData, loadChannelOptions, loadProcRuleOptions, loadSourceOptions, mode]);
+  }, [loadCenterData, loadChannelOptions, loadProcRuleOptions, mode]);
 
   useEffect(() => {
     if (modalState?.kind !== 'run-exceptions') return;
@@ -2509,6 +2420,8 @@ options.push({
   const resetSchemeWizard = useCallback(() => {
     setSchemeWizardStep(1);
     setSchemeDraft(createEmptySchemeDraft());
+    setSelectedLeftSources([]);
+    setSelectedRightSources([]);
     setDesignSessionId('');
     setWizardJsonPanel(null);
     setProcTrialPreview(null);
@@ -2521,9 +2434,8 @@ options.push({
     setModalError(null);
     resetSchemeWizard();
     setModalState({ kind: 'create-scheme' });
-    void loadSourceOptions();
     void loadProcRuleOptions();
-  }, [loadProcRuleOptions, loadSourceOptions, resetSchemeWizard]);
+  }, [loadProcRuleOptions, resetSchemeWizard]);
 
   const openCreatePlanModal = useCallback(
     (scheme: ReconSchemeListItem | null = null) => {
@@ -2622,38 +2534,44 @@ options.push({
     [],
   );
 
-  const changeSchemeSources = useCallback((side: 'left' | 'right', sourceIds: string[]) => {
-    setSchemeDraft((prev) => {
-      const key = side === 'left' ? 'leftSourceIds' : 'rightSourceIds';
-      if (sameStringSet(prev[key], sourceIds)) {
-        return prev;
-      }
-      return {
-        ...prev,
-        [key]: sourceIds,
-        procDraft: '',
-        procRuleJson: null,
-        procTrialStatus: 'idle',
-        procTrialSummary: '',
-        matchKey: '',
-        leftAmountField: '',
-        rightAmountField: '',
-        tolerance: '',
-        leftTimeSemantic: '',
-        rightTimeSemantic: '',
-        reconDraft: '',
-        reconRuleJson: null,
-        reconTrialStatus: 'idle',
-        reconTrialSummary: '',
-      };
-    });
+  const changeSchemeSources = useCallback((side: 'left' | 'right', sources: SchemeSourceOption[]) => {
+    const current = side === 'left' ? selectedLeftSources : selectedRightSources;
+    const currentIds = current.map((item) => item.id);
+    const nextIds = sources.map((item) => item.id);
+    if (sameStringSet(currentIds, nextIds)) {
+      return;
+    }
+
+    if (side === 'left') {
+      setSelectedLeftSources(sources);
+    } else {
+      setSelectedRightSources(sources);
+    }
+
+    setSchemeDraft((prev) => ({
+      ...prev,
+      procDraft: '',
+      procRuleJson: null,
+      procTrialStatus: 'idle',
+      procTrialSummary: '',
+      matchKey: '',
+      leftAmountField: '',
+      rightAmountField: '',
+      tolerance: '',
+      leftTimeSemantic: '',
+      rightTimeSemantic: '',
+      reconDraft: '',
+      reconRuleJson: null,
+      reconTrialStatus: 'idle',
+      reconTrialSummary: '',
+    }));
     setDesignSessionId('');
     setWizardJsonPanel(null);
     setProcTrialPreview(null);
     setReconTrialPreview(null);
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
-  }, []);
+  }, [selectedLeftSources, selectedRightSources]);
 
   useEffect(() => {
     if (modalState?.kind !== 'create-plan') return;
@@ -2789,7 +2707,7 @@ options.push({
       sessionId: string,
       stage: 'proc' | 'recon',
       instructionText: string,
-    ) => {
+    ): Promise<Record<string, unknown>> => {
       let finalSession: Record<string, unknown> | null = null;
 
       const response = await consumeReconAutoSse(
@@ -3991,6 +3909,70 @@ options.push({
       const reconRuleName =
         selectedReconOption?.name
         || toText(asRecord(reconRuleJson).rule_name, buildDefaultReconRuleName(schemeDraft.name));
+      const leftDatasetBindings = selectedLeftSources.map((item, index) => ({
+        side: 'left',
+        slot_key: `left_${index + 1}`,
+        dataset_id: item.id,
+        dataset_name: item.name,
+        business_name: item.businessName || item.name,
+        technical_name: item.technicalName || item.resourceKey || item.datasetCode || item.name,
+        data_source_id: item.sourceId,
+        data_source_name: item.sourceName,
+        source_kind: item.sourceKind,
+        provider_code: item.providerCode,
+        dataset_code: item.datasetCode || item.id,
+        resource_key: item.resourceKey || item.datasetCode || item.name,
+        dataset_kind: item.datasetKind,
+        key_fields: item.keyFields,
+        field_label_map: item.fieldLabelMap,
+        schema_summary: item.schemaSummary,
+      }));
+      const rightDatasetBindings = selectedRightSources.map((item, index) => ({
+        side: 'right',
+        slot_key: `right_${index + 1}`,
+        dataset_id: item.id,
+        dataset_name: item.name,
+        business_name: item.businessName || item.name,
+        technical_name: item.technicalName || item.resourceKey || item.datasetCode || item.name,
+        data_source_id: item.sourceId,
+        data_source_name: item.sourceName,
+        source_kind: item.sourceKind,
+        provider_code: item.providerCode,
+        dataset_code: item.datasetCode || item.id,
+        resource_key: item.resourceKey || item.datasetCode || item.name,
+        dataset_kind: item.datasetKind,
+        key_fields: item.keyFields,
+        field_label_map: item.fieldLabelMap,
+        schema_summary: item.schemaSummary,
+      }));
+      const datasetBindingsJson = [
+        ...leftDatasetBindings.map((item, index) => ({
+          role_code: `left_${index + 1}`,
+          data_source_id: item.data_source_id,
+          resource_key: item.resource_key,
+          binding_name: item.business_name || item.dataset_name || item.resource_key,
+          is_required: true,
+          priority: 10 + index,
+          query: {},
+          side: 'left',
+          dataset_code: item.dataset_code,
+          table_name: item.resource_key,
+          dataset_source_type: 'snapshot',
+        })),
+        ...rightDatasetBindings.map((item, index) => ({
+          role_code: `right_${index + 1}`,
+          data_source_id: item.data_source_id,
+          resource_key: item.resource_key,
+          binding_name: item.business_name || item.dataset_name || item.resource_key,
+          is_required: true,
+          priority: 100 + index,
+          query: {},
+          side: 'right',
+          dataset_code: item.dataset_code,
+          table_name: item.resource_key,
+          dataset_source_type: 'snapshot',
+        })),
+      ];
       const response = await fetchReconAutoApi('/schemes', {
         method: 'POST',
         headers: {
@@ -4003,40 +3985,40 @@ options.push({
           file_rule_code: '',
           proc_rule_code: selectedProcOption?.ruleCode || '',
           recon_rule_code: selectedReconOption?.ruleCode || '',
+          dataset_bindings_json: datasetBindingsJson,
           scheme_meta_json: {
             business_goal: schemeDraft.businessGoal.trim(),
-            left_sources: selectedLeftSources.map((item) => ({
-              id: item.id,
-              name: item.name,
-              business_name: item.businessName,
-              technical_name: item.technicalName,
-              source_id: item.sourceId,
-              source_name: item.sourceName,
-              source_kind: item.sourceKind,
-              provider_code: item.providerCode,
-              dataset_code: item.datasetCode,
-              resource_key: item.resourceKey,
-              dataset_kind: item.datasetKind,
-              key_fields: item.keyFields,
-              field_label_map: item.fieldLabelMap,
-            })),
-            right_sources: selectedRightSources.map((item) => ({
-              id: item.id,
-              name: item.name,
-              business_name: item.businessName,
-              technical_name: item.technicalName,
-              source_id: item.sourceId,
-              source_name: item.sourceName,
-              source_kind: item.sourceKind,
-              provider_code: item.providerCode,
-              dataset_code: item.datasetCode,
-              resource_key: item.resourceKey,
-              dataset_kind: item.datasetKind,
-              key_fields: item.keyFields,
-              field_label_map: item.fieldLabelMap,
-            })),
+            dataset_bindings: {
+              version: 'v1',
+              left: leftDatasetBindings,
+              right: rightDatasetBindings,
+            },
+            source_summary: {
+              left: leftDatasetBindings.map((item) => ({
+                slot_key: item.slot_key,
+                business_name: item.business_name,
+                technical_name: item.technical_name,
+                data_source_name: item.data_source_name,
+              })),
+              right: rightDatasetBindings.map((item) => ({
+                slot_key: item.slot_key,
+                business_name: item.business_name,
+                technical_name: item.technical_name,
+                data_source_name: item.data_source_name,
+              })),
+            },
             left_description: schemeDraft.leftDescription.trim(),
             right_description: schemeDraft.rightDescription.trim(),
+            validation_summary: {
+              proc: {
+                status: schemeDraft.procTrialStatus,
+                summary: schemeDraft.procTrialSummary.trim(),
+              },
+              recon: {
+                status: schemeDraft.reconTrialStatus,
+                summary: schemeDraft.reconTrialSummary.trim(),
+              },
+            },
             proc_trial_status: schemeDraft.procTrialStatus,
             proc_trial_summary: schemeDraft.procTrialSummary.trim(),
             recon_trial_status: schemeDraft.reconTrialStatus,
@@ -4854,6 +4836,7 @@ options.push({
         <div className="space-y-5">
           <SchemeWizardTargetProcStep
             step={schemeWizardStep as 1 | 2}
+            authToken={authToken}
             schemeDraft={{
               name: schemeDraft.name,
               businessGoal: schemeDraft.businessGoal,
@@ -4865,9 +4848,6 @@ options.push({
               procTrialStatus: schemeDraft.procTrialStatus,
               procTrialSummary: schemeDraft.procTrialSummary,
             }}
-            availableSources={availableSources}
-            loadingSources={loadingSources}
-            sourceLoadError={sourceLoadError}
             selectedLeftSources={selectedLeftSources}
             selectedRightSources={selectedRightSources}
             existingProcOptions={existingProcOptions}
@@ -4879,7 +4859,7 @@ options.push({
                 side === 'left' ? { leftDescription: value } : { rightDescription: value },
               )
             }
-            onChangeSourceSelection={changeSchemeSources}
+            onChangeSourceSelection={(side, sources) => changeSchemeSources(side, sources)}
             onProcConfigModeChange={(mode) => {
               setSchemeDraft((prev) => ({
                 ...prev,

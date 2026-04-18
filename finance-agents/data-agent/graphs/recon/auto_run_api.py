@@ -148,6 +148,7 @@ class ExecutionSchemeCreateRequest(BaseModel):
     proc_rule_code: str = ""
     recon_rule_code: str = ""
     scheme_meta_json: dict[str, Any] = Field(default_factory=dict)
+    dataset_bindings_json: list[dict[str, Any]] = Field(default_factory=list)
     is_enabled: bool = True
 
 
@@ -159,6 +160,7 @@ class ExecutionSchemeUpdateRequest(BaseModel):
     proc_rule_code: Optional[str] = None
     recon_rule_code: Optional[str] = None
     scheme_meta_json: Optional[dict[str, Any]] = None
+    dataset_bindings_json: Optional[list[dict[str, Any]]] = None
     is_enabled: Optional[bool] = None
 
 
@@ -235,6 +237,135 @@ def _resolve_retry_run_context(run: dict[str, Any], reason: str) -> tuple[str, s
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _extract_source_bindings_from_scheme_meta(
+    *,
+    scheme_meta_json: dict[str, Any],
+    side: str,
+    default_priority_start: int,
+) -> list[dict[str, Any]]:
+    dataset_bindings = _safe_dict(scheme_meta_json.get("dataset_bindings"))
+    source_items = dataset_bindings.get(side)
+    if not isinstance(source_items, list):
+        source_items = scheme_meta_json.get(f"{side}_sources")
+    if not isinstance(source_items, list):
+        return []
+
+    query_date_field = str(scheme_meta_json.get(f"{side}_time_semantic") or "").strip()
+    bindings: list[dict[str, Any]] = []
+    priority = default_priority_start
+    for idx, raw in enumerate(source_items, start=1):
+        item = _safe_dict(raw)
+        source_id = str(item.get("source_id") or item.get("data_source_id") or "").strip()
+        resource_key = str(item.get("resource_key") or item.get("dataset_code") or item.get("name") or "").strip()
+        if not source_id or not resource_key:
+            continue
+        dataset_code = str(item.get("dataset_code") or "").strip()
+        table_name = str(item.get("table_name") or resource_key).strip()
+        binding_name = (
+            str(item.get("business_name") or item.get("name") or dataset_code or table_name).strip() or table_name
+        )
+        query = _safe_dict(item.get("query"))
+        if query_date_field and not str(query.get("date_field") or "").strip():
+            query["date_field"] = query_date_field
+
+        bindings.append(
+            {
+                "role_code": f"{side}_{idx}",
+                "data_source_id": source_id,
+                "resource_key": resource_key,
+                "binding_name": binding_name,
+                "is_required": bool(item.get("required", True)),
+                "priority": priority,
+                "filter_config": {"query": query},
+                "mapping_config": {
+                    "side": side,
+                    "dataset_code": dataset_code or resource_key,
+                    "table_name": table_name,
+                    "dataset_source_type": str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+                },
+            }
+        )
+        priority += 1
+    return bindings
+
+
+def _normalize_explicit_scheme_binding(raw: Any, *, index: int) -> dict[str, Any] | None:
+    item = _safe_dict(raw)
+    source_id = str(item.get("data_source_id") or item.get("source_id") or "").strip()
+    resource_key = str(item.get("resource_key") or item.get("dataset_code") or item.get("table_name") or "").strip()
+    if not source_id or not resource_key:
+        return None
+
+    query = _safe_dict(item.get("query"))
+    filter_config = _safe_dict(item.get("filter_config"))
+    if query:
+        filter_config = {**filter_config, "query": query}
+    mapping_config = _safe_dict(item.get("mapping_config"))
+    for key in ("table_name", "dataset_code", "dataset_source_type", "side"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            mapping_config[key] = value
+
+    role_code = str(item.get("role_code") or item.get("role") or f"source_{index}").strip()
+    if not role_code:
+        role_code = f"source_{index}"
+    try:
+        priority = int(item.get("priority") or index)
+    except (TypeError, ValueError):
+        priority = index
+    return {
+        "role_code": role_code,
+        "data_source_id": source_id,
+        "resource_key": resource_key,
+        "binding_name": str(item.get("binding_name") or item.get("name") or resource_key).strip() or resource_key,
+        "is_required": bool(item.get("is_required", item.get("required", True))),
+        "priority": priority,
+        "filter_config": filter_config,
+        "mapping_config": mapping_config,
+    }
+
+
+def _extract_scheme_dataset_bindings(
+    payload: dict[str, Any],
+    *,
+    allow_empty_explicit: bool,
+) -> tuple[list[dict[str, Any]], bool]:
+    scheme_meta_json = _safe_dict(payload.get("scheme_meta_json"))
+    explicit = payload.get("dataset_bindings_json")
+    if isinstance(explicit, list) and (allow_empty_explicit or len(explicit) > 0):
+        normalized = [
+            binding
+            for idx, item in enumerate(explicit, start=1)
+            for binding in [_normalize_explicit_scheme_binding(item, index=idx)]
+            if binding is not None
+        ]
+        return normalized, True
+
+    dataset_bindings = _safe_dict(scheme_meta_json.get("dataset_bindings"))
+    has_dataset_binding_groups = isinstance(dataset_bindings.get("left"), list) or isinstance(
+        dataset_bindings.get("right"),
+        list,
+    )
+    has_side_sources = isinstance(scheme_meta_json.get("left_sources"), list) or isinstance(
+        scheme_meta_json.get("right_sources"),
+        list,
+    )
+    if not has_dataset_binding_groups and not has_side_sources:
+        return [], False
+
+    left_bindings = _extract_source_bindings_from_scheme_meta(
+        scheme_meta_json=scheme_meta_json,
+        side="left",
+        default_priority_start=10,
+    )
+    right_bindings = _extract_source_bindings_from_scheme_meta(
+        scheme_meta_json=scheme_meta_json,
+        side="right",
+        default_priority_start=100,
+    )
+    return left_bindings + right_bindings, True
 
 
 @router.get("/schemes")
@@ -332,6 +463,12 @@ async def create_execution_scheme_api(
     payload["proc_rule_code"] = proc_rule_code
     payload["recon_rule_code"] = recon_rule_code
     payload["scheme_meta_json"] = scheme_meta_json
+    dataset_bindings_json, bindings_provided = _extract_scheme_dataset_bindings(
+        payload,
+        allow_empty_explicit=False,
+    )
+    if bindings_provided:
+        payload["dataset_bindings_json"] = dataset_bindings_json
 
     result = await execution_scheme_create(auth_token, payload)
     if not result.get("success"):
@@ -348,7 +485,14 @@ async def update_execution_scheme_api(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await execution_scheme_update(auth_token, scheme_id, body.model_dump(exclude_none=True))
+    payload = body.model_dump(exclude_none=True)
+    dataset_bindings_json, bindings_provided = _extract_scheme_dataset_bindings(
+        payload,
+        allow_empty_explicit=True,
+    )
+    if bindings_provided:
+        payload["dataset_bindings_json"] = dataset_bindings_json
+    result = await execution_scheme_update(auth_token, scheme_id, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "更新对账方案失败"))
     return result

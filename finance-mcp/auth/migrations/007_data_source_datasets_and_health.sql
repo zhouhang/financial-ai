@@ -76,6 +76,21 @@ CREATE TABLE IF NOT EXISTS public.data_source_datasets (
     )
 );
 
+ALTER TABLE IF EXISTS public.data_source_datasets
+    ADD COLUMN IF NOT EXISTS origin_type character varying(30) DEFAULT 'manual'::character varying NOT NULL,
+    ADD COLUMN IF NOT EXISTS extract_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    ADD COLUMN IF NOT EXISTS schema_summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    ADD COLUMN IF NOT EXISTS sync_strategy jsonb DEFAULT '{}'::jsonb NOT NULL,
+    ADD COLUMN IF NOT EXISTS status character varying(20) DEFAULT 'active'::character varying NOT NULL,
+    ADD COLUMN IF NOT EXISTS is_enabled boolean DEFAULT true NOT NULL,
+    ADD COLUMN IF NOT EXISTS health_status character varying(20) DEFAULT 'unknown'::character varying NOT NULL,
+    ADD COLUMN IF NOT EXISTS last_checked_at timestamp with time zone,
+    ADD COLUMN IF NOT EXISTS last_sync_at timestamp with time zone,
+    ADD COLUMN IF NOT EXISTS last_error_message text DEFAULT ''::text NOT NULL,
+    ADD COLUMN IF NOT EXISTS meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP;
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_source_datasets_company_id_fkey') THEN

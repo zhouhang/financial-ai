@@ -40,6 +40,7 @@ from graphs.main_graph import create_app
 from utils.db import ensure_tables
 from tools.mcp_client import (
     auth_login as mcp_auth_login,
+    auth_me as mcp_auth_me,
     auth_register as mcp_auth_register,
     list_company as mcp_list_company,
     list_departments as mcp_list_departments,
@@ -1296,6 +1297,32 @@ async def auth_login(username: str = Form(...), password: str = Form(...)):
         raise
     except Exception as e:
         logger.error(f"登录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/auth/me")
+async def auth_me(authorization: Optional[str] = Header(None)):
+    """获取当前登录用户信息。"""
+    auth_token = authorization.replace("Bearer ", "") if authorization and authorization.startswith("Bearer ") else (authorization or "")
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+
+    try:
+        result = await mcp_auth_me(auth_token)
+        if not result.get("success"):
+            raise HTTPException(status_code=401, detail=result.get("error", "认证已失效"))
+
+        user = result.get("user") if isinstance(result.get("user"), dict) else {}
+        role = str(user.get("role") or "").strip().lower()
+        return {
+            **result,
+            "role": role,
+            "user_role": role,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取当前用户失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

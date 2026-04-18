@@ -23,6 +23,7 @@ from tools.mcp_client import (
     data_source_discover_datasets,
     data_source_get,
     data_source_get_dataset,
+    data_source_list_dataset_candidates,
     data_source_get_published_snapshot,
     data_source_get_sync_job,
     data_source_handle_callback,
@@ -33,9 +34,11 @@ from tools.mcp_client import (
     data_source_list_sync_jobs,
     data_source_refresh_dataset_semantic_profile,
     data_source_preflight_rule_binding,
+    data_source_publish_dataset,
     data_source_preview,
     data_source_test,
     data_source_trigger_sync,
+    data_source_unpublish_dataset,
     data_source_upsert_dataset,
     data_source_update_dataset_semantic_profile,
     data_source_update,
@@ -472,6 +475,9 @@ class DataSourceDatasetListResponse(BaseModel):
     mode: str = "mock"
     source_id: str = ""
     count: int = 0
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     dataset_summary: dict[str, Any] = Field(default_factory=dict)
     source_summary: dict[str, Any] = Field(default_factory=dict)
@@ -495,6 +501,17 @@ class DataSourceDatasetUpsertRequest(BaseModel):
     resource_key: str = ""
     dataset_kind: str = "table"
     origin_type: str = "manual"
+    schema_name: str = ""
+    object_name: str = ""
+    object_type: str = ""
+    publish_status: str = ""
+    business_domain: str = ""
+    business_object_type: str = ""
+    grain: str = ""
+    verified_status: str = ""
+    usage_count: int | None = None
+    last_used_at: str = ""
+    search_text: str = ""
     extract_config: dict[str, Any] = Field(default_factory=dict)
     schema_summary: dict[str, Any] = Field(default_factory=dict)
     sync_strategy: dict[str, Any] = Field(default_factory=dict)
@@ -513,12 +530,47 @@ class DataSourceDatasetDisableRequest(BaseModel):
     mode: str = ""
 
 
+class DataSourceDatasetPublishRequest(BaseModel):
+    dataset_code: str = ""
+    resource_key: str = ""
+    business_name: str = ""
+    business_description: str = ""
+    key_fields: list[str] = Field(default_factory=list)
+    field_label_map: dict[str, Any] = Field(default_factory=dict)
+    fields: list[dict[str, Any]] = Field(default_factory=list)
+    status: str = ""
+    schema_name: str = ""
+    object_name: str = ""
+    object_type: str = ""
+    business_domain: str = ""
+    business_object_type: str = ""
+    grain: str = ""
+    verified_status: str = ""
+    search_text: str = ""
+    usage_count: int | None = None
+    last_used_at: str = ""
+    catalog_profile: dict[str, Any] = Field(default_factory=dict)
+    mode: str = ""
+
+
+class DataSourceDatasetUnpublishRequest(BaseModel):
+    dataset_code: str = ""
+    resource_key: str = ""
+    reason: str = ""
+    catalog_profile: dict[str, Any] = Field(default_factory=dict)
+    mode: str = ""
+
+
 class DataSourceDatasetSemanticRefreshRequest(BaseModel):
+    dataset_code: str = ""
+    resource_key: str = ""
     sample_limit: int = 10
     mode: str = ""
 
 
 class DataSourceDatasetSemanticUpdateRequest(BaseModel):
+    dataset_code: str = ""
+    resource_key: str = ""
     semantic_profile: dict[str, Any] = Field(default_factory=dict)
     business_name: str = ""
     business_description: str = ""
@@ -538,10 +590,37 @@ class DataSourceDatasetUpsertResponse(BaseModel):
     message: str = ""
 
 
+class DataSourceDatasetCandidatesRequest(BaseModel):
+    binding_scope: str = "scheme"
+    scene_type: str = "recon"
+    role_code: str = ""
+    keyword: str = ""
+    filters: dict[str, Any] = Field(default_factory=dict)
+    page: int = 1
+    page_size: int = 30
+    mode: str = ""
+
+
+class DataSourceDatasetCandidatesResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    binding_scope: str = "scheme"
+    scene_type: str = "recon"
+    role_code: str = ""
+    count: int = 0
+    total: int = 0
+    page: int = 1
+    page_size: int = 30
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    message: str = ""
+
+
 class DataSourceDiscoverRequest(BaseModel):
     persist: bool = True
     limit: int = 500
+    offset: int = 0
     schema_whitelist: list[str] = Field(default_factory=list)
+    target_resource_keys: list[str] = Field(default_factory=list)
     discover_mode: str = ""
     document_input_mode: str = ""
     document_url: str = ""
@@ -564,6 +643,8 @@ class DataSourceDiscoverResponse(BaseModel):
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     persist: bool = True
     persisted_count: int = 0
+    scan_summary: dict[str, Any] = Field(default_factory=dict)
+    discover_summary: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
 
 
@@ -628,6 +709,43 @@ async def list_data_sources(
         mode=str(result.get("mode") or mode or "mock"),
         count=int(result.get("count") or len(result.get("sources") or [])),
         sources=result.get("sources") or [],
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.post("/data-sources/dataset-candidates", response_model=DataSourceDatasetCandidatesResponse)
+async def list_dataset_candidates(
+    body: DataSourceDatasetCandidatesRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_list_dataset_candidates(
+        auth_token,
+        binding_scope=body.binding_scope,
+        scene_type=body.scene_type,
+        role_code=body.role_code,
+        keyword=body.keyword,
+        filters=body.filters,
+        page=body.page,
+        page_size=body.page_size,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "获取候选数据集失败"))
+    return DataSourceDatasetCandidatesResponse(
+        success=True,
+        mode=str(result.get("mode") or body.mode or "mock"),
+        binding_scope=str(result.get("binding_scope") or body.binding_scope),
+        scene_type=str(result.get("scene_type") or body.scene_type),
+        role_code=str(result.get("role_code") or body.role_code),
+        count=int(result.get("count") or len(result.get("candidates") or [])),
+        total=int(result.get("total") or result.get("count") or len(result.get("candidates") or [])),
+        page=int(result.get("page") or body.page),
+        page_size=int(result.get("page_size") or body.page_size),
+        candidates=result.get("candidates") or [],
         message=str(result.get("message") or ""),
     )
 
@@ -979,7 +1097,18 @@ async def list_data_source_datasets(
     source_id: str,
     status: str = Query("", description="可选：按状态过滤"),
     include_deleted: bool = Query(False, description="是否包含 deleted"),
-    limit: int = Query(500, ge=1, le=2000, description="返回条数"),
+    keyword: str = Query("", description="关键词搜索"),
+    schema_name: str = Query("", description="按 schema 名称过滤"),
+    object_type: str = Query("", description="按对象类型过滤"),
+    publish_status: str = Query("", description="按发布状态过滤"),
+    business_object_type: str = Query("", description="按业务对象类型过滤"),
+    verified_status: str = Query("", description="按验证状态过滤"),
+    only_published: bool = Query(False, description="仅返回已发布数据集"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(50, ge=1, le=200, description="每页数量"),
+    sort_by: str = Query("-updated_at", description="排序字段，支持 -updated_at"),
+    include_heavy: bool = Query(False, description="是否返回 schema_summary 等重字段"),
+    limit: int = Query(500, ge=1, le=2000, description="兼容旧参数：返回条数"),
     mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
     authorization: Optional[str] = Header(None),
 ):
@@ -992,6 +1121,17 @@ async def list_data_source_datasets(
         source_id=source_id,
         status=status,
         include_deleted=include_deleted,
+        keyword=keyword,
+        schema_name=schema_name,
+        object_type=object_type,
+        publish_status=publish_status,
+        business_object_type=business_object_type,
+        verified_status=verified_status,
+        only_published=only_published,
+        page=page,
+        page_size=page_size if page_size else limit,
+        sort_by=sort_by,
+        include_heavy=include_heavy,
         limit=limit,
         mode=mode,
     )
@@ -1002,6 +1142,9 @@ async def list_data_source_datasets(
         mode=str(result.get("mode") or mode or "mock"),
         source_id=source_id,
         count=int(result.get("count") or len(result.get("datasets") or [])),
+        total=int(result.get("total") or result.get("count") or len(result.get("datasets") or [])),
+        page=int(result.get("page") or page),
+        page_size=int(result.get("page_size") or page_size),
         datasets=result.get("datasets") or [],
         dataset_summary=result.get("dataset_summary") or {},
         source_summary=result.get("source_summary") or {},
@@ -1098,6 +1241,72 @@ async def disable_data_source_dataset(
     )
 
 
+@router.post("/data-sources/{source_id}/datasets/{dataset_id}/publish", response_model=DataSourceDatasetUpsertResponse)
+async def publish_data_source_dataset(
+    source_id: str,
+    dataset_id: str,
+    body: DataSourceDatasetPublishRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    payload = body.model_dump(exclude_none=True, exclude={"mode", "dataset_code", "resource_key"})
+    result = await data_source_publish_dataset(
+        auth_token,
+        dataset_id=dataset_id,
+        source_id=source_id,
+        dataset_code=body.dataset_code,
+        resource_key=body.resource_key,
+        payload=payload,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "发布数据集失败"))
+    return DataSourceDatasetUpsertResponse(
+        success=True,
+        mode=str(result.get("mode") or body.mode or "mock"),
+        source_id=source_id,
+        dataset=result.get("dataset"),
+        source_summary=result.get("source_summary") or {},
+        message=str(result.get("message") or "数据集已发布"),
+    )
+
+
+@router.post("/data-sources/{source_id}/datasets/{dataset_id}/unpublish", response_model=DataSourceDatasetUpsertResponse)
+async def unpublish_data_source_dataset(
+    source_id: str,
+    dataset_id: str,
+    body: DataSourceDatasetUnpublishRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    payload = body.model_dump(exclude_none=True, exclude={"mode", "dataset_code", "resource_key"})
+    result = await data_source_unpublish_dataset(
+        auth_token,
+        dataset_id=dataset_id,
+        source_id=source_id,
+        dataset_code=body.dataset_code,
+        resource_key=body.resource_key,
+        payload=payload,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "取消发布失败"))
+    return DataSourceDatasetUpsertResponse(
+        success=True,
+        mode=str(result.get("mode") or body.mode or "mock"),
+        source_id=source_id,
+        dataset=result.get("dataset"),
+        source_summary=result.get("source_summary") or {},
+        message=str(result.get("message") or "数据集已取消发布"),
+    )
+
+
 @router.post("/data-sources/{source_id}/datasets/{dataset_id}/semantic-profile", response_model=DataSourceDatasetUpsertResponse)
 async def refresh_data_source_dataset_semantic_profile(
     source_id: str,
@@ -1113,6 +1322,8 @@ async def refresh_data_source_dataset_semantic_profile(
         auth_token,
         dataset_id=dataset_id,
         source_id=source_id,
+        dataset_code=body.dataset_code,
+        resource_key=body.resource_key,
         sample_limit=body.sample_limit,
         mode=body.mode,
     )
@@ -1143,6 +1354,8 @@ async def update_data_source_dataset_semantic_profile(
         auth_token,
         dataset_id=dataset_id,
         source_id=source_id,
+        dataset_code=body.dataset_code,
+        resource_key=body.resource_key,
         semantic_profile=body.semantic_profile,
         business_name=body.business_name,
         business_description=body.business_description,
@@ -1190,7 +1403,9 @@ async def discover_data_source_datasets(
         source_id,
         persist=body.persist,
         limit=body.limit,
+        offset=body.offset,
         schema_whitelist=body.schema_whitelist,
+        target_resource_keys=body.target_resource_keys,
         discover_mode=str(discover_inputs.get("discover_mode") or body.discover_mode),
         openapi_url=str(discover_inputs.get("openapi_url") or body.openapi_url),
         openapi_spec=discover_inputs.get("openapi_spec"),
@@ -1210,6 +1425,8 @@ async def discover_data_source_datasets(
         dataset_count=int(result.get("dataset_count") or len(result.get("datasets") or [])),
         persist=bool(result.get("persist", body.persist)),
         persisted_count=int(result.get("persisted_count") or 0),
+        scan_summary=result.get("scan_summary") or {},
+        discover_summary=result.get("discover_summary") or {},
         message=str(result.get("message") or ""),
     )
 

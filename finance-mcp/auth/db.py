@@ -44,6 +44,32 @@ _UNIFIED_DATA_SOURCE_HEALTH_COLUMNS = (
     "last_error_message",
 )
 
+_UNIFIED_DATASET_CATALOG_COLUMNS = (
+    "schema_name",
+    "object_name",
+    "object_type",
+    "publish_status",
+    "business_domain",
+    "business_object_type",
+    "grain",
+    "verified_status",
+    "usage_count",
+    "last_used_at",
+    "search_text",
+)
+
+_UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
+    id, company_id, data_source_id, dataset_code, dataset_name,
+    resource_key, dataset_kind, origin_type,
+    schema_name, object_name, object_type,
+    publish_status, business_domain, business_object_type, grain,
+    verified_status, usage_count, last_used_at, search_text,
+    extract_config, schema_summary, sync_strategy,
+    status, is_enabled, health_status,
+    last_checked_at, last_sync_at, last_error_message, meta,
+    created_at, updated_at
+""".strip()
+
 
 def _serialize_datetimes(d: dict) -> dict:
     """将字典中所有 datetime 对象转为 ISO 格式字符串（原地修改并返回）"""
@@ -52,6 +78,26 @@ def _serialize_datetimes(d: dict) -> dict:
         if isinstance(v, (datetime, date)):
             d[k] = v.isoformat()
     return d
+
+
+def _json_safe_value(value: Any) -> Any:
+    """将 JSON 不可序列化对象转换为可安全写入 jsonb 的值。"""
+    from datetime import date, datetime
+    import uuid
+
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    return value
+
+
+def _json_safe_payload(payload: Any) -> Any:
+    return _json_safe_value(payload)
 
 
 def _normalize_record(row: dict, decrypt_fields: list[str] | None = None) -> dict:
@@ -94,6 +140,71 @@ def _open_json_payload(value: str | None) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {"value": parsed}
     except Exception:
         return {"raw": raw}
+
+
+def _normalize_catalog_status(
+    value: str | None,
+    *,
+    allowed: tuple[str, ...],
+    default: str,
+) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in allowed else default
+
+
+def _infer_schema_and_object_name(resource_key: str, dataset_name: str, dataset_code: str) -> tuple[str | None, str | None]:
+    for candidate in (resource_key, dataset_name, dataset_code):
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if "." in text:
+            schema_name, object_name = text.split(".", 1)
+            return schema_name.strip() or None, object_name.strip() or None
+        return None, text
+    return None, None
+
+
+def _infer_object_type(dataset_kind: str, schema_summary: dict[str, Any] | None) -> str:
+    schema_summary = schema_summary or {}
+    object_type = str(schema_summary.get("object_type") or "").strip().lower()
+    if object_type:
+        return object_type
+    normalized_kind = str(dataset_kind or "").strip().lower()
+    if normalized_kind in {"table", "view", "foreign_table", "api", "api_endpoint", "file"}:
+        return "api" if normalized_kind == "api_endpoint" else normalized_kind
+    return "table"
+
+
+def _build_dataset_search_text(
+    *,
+    dataset_name: str,
+    dataset_code: str,
+    resource_key: str,
+    schema_name: str | None,
+    object_name: str | None,
+    object_type: str,
+    business_domain: str | None,
+    business_object_type: str | None,
+    grain: str | None,
+    meta: dict[str, Any] | None,
+) -> str:
+    meta = meta or {}
+    semantic_profile = meta.get("semantic_profile") if isinstance(meta.get("semantic_profile"), dict) else {}
+    terms = [
+        dataset_name,
+        dataset_code,
+        resource_key,
+        schema_name or "",
+        object_name or "",
+        object_type,
+        business_domain or "",
+        business_object_type or "",
+        grain or "",
+        str(semantic_profile.get("business_name") or ""),
+        str(semantic_profile.get("tech_name") or ""),
+        " ".join(str(item) for item in (semantic_profile.get("key_fields") or []) if str(item).strip()),
+    ]
+    return " ".join(part.strip() for part in terms if str(part).strip())
 
 
 def _get_db_config() -> dict:
@@ -204,6 +315,11 @@ def ensure_unified_data_source_schema() -> list[str]:
         for column_name in _UNIFIED_DATA_SOURCE_HEALTH_COLUMNS
         if not _column_exists("data_sources", column_name)
     ) if _table_exists("data_sources") else list(_UNIFIED_DATA_SOURCE_HEALTH_COLUMNS)
+    missing_dataset_catalog_columns = sorted(
+        column_name
+        for column_name in _UNIFIED_DATASET_CATALOG_COLUMNS
+        if not _column_exists("data_source_datasets", column_name)
+    ) if _table_exists("data_source_datasets") else list(_UNIFIED_DATASET_CATALOG_COLUMNS)
     datasets_table_missing = not _table_exists("data_source_datasets")
 
     applied: list[str] = []
@@ -213,6 +329,9 @@ def ensure_unified_data_source_schema() -> list[str]:
     if missing_base_tables or missing_health_columns or datasets_table_missing:
         _execute_sql_script(_migration_path("007_data_source_datasets_and_health.sql"))
         applied.append("007_data_source_datasets_and_health.sql")
+    if missing_dataset_catalog_columns:
+        _execute_sql_script(_migration_path("013_data_source_dataset_catalog_fields.sql"))
+        applied.append("013_data_source_dataset_catalog_fields.sql")
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -222,11 +341,22 @@ def ensure_unified_data_source_schema() -> list[str]:
         for column_name in _UNIFIED_DATA_SOURCE_HEALTH_COLUMNS
         if not _column_exists("data_sources", column_name)
     )
-    if remaining_missing_tables or remaining_missing_health_columns or not _table_exists("data_source_datasets"):
+    remaining_missing_dataset_catalog_columns = sorted(
+        column_name
+        for column_name in _UNIFIED_DATASET_CATALOG_COLUMNS
+        if not _column_exists("data_source_datasets", column_name)
+    ) if _table_exists("data_source_datasets") else list(_UNIFIED_DATASET_CATALOG_COLUMNS)
+    if (
+        remaining_missing_tables
+        or remaining_missing_health_columns
+        or remaining_missing_dataset_catalog_columns
+        or not _table_exists("data_source_datasets")
+    ):
         raise RuntimeError(
             "统一数据源 schema 仍不完整: "
             f"missing_tables={remaining_missing_tables}, "
             f"missing_health_columns={remaining_missing_health_columns}, "
+            f"missing_dataset_catalog_columns={remaining_missing_dataset_catalog_columns}, "
             f"missing_data_source_datasets={not _table_exists('data_source_datasets')}"
         )
 
@@ -3427,23 +3557,90 @@ def upsert_unified_data_source_dataset(
     last_sync_at: str | None = None,
     last_error_message: str = "",
     meta: dict | None = None,
+    schema_name: str | None = None,
+    object_name: str | None = None,
+    object_type: str | None = None,
+    publish_status: str = "unpublished",
+    business_domain: str | None = None,
+    business_object_type: str | None = None,
+    grain: str | None = None,
+    verified_status: str = "unverified",
+    usage_count: int = 0,
+    last_used_at: str | None = None,
+    search_text: str | None = None,
 ) -> dict | None:
     """创建或更新数据源下的数据集目录项。"""
     conn_manager = get_conn()
+    extract_config = dict(extract_config or {})
+    schema_summary = dict(schema_summary or {})
+    sync_strategy = dict(sync_strategy or {})
+    meta = dict(meta or {})
+    resolved_schema_name, resolved_object_name = _infer_schema_and_object_name(resource_key, dataset_name, dataset_code)
+    resolved_schema_name = (
+        str(schema_name or "").strip()
+        or str(extract_config.get("schema") or "").strip()
+        or str(schema_summary.get("schema") or "").strip()
+        or (resolved_schema_name or "")
+    )
+    resolved_object_name = (
+        str(object_name or "").strip()
+        or str(extract_config.get("table") or "").strip()
+        or str(extract_config.get("object_name") or "").strip()
+        or str(schema_summary.get("table") or "").strip()
+        or str(schema_summary.get("object_name") or "").strip()
+        or (resolved_object_name or "")
+        or str(dataset_code or "").strip()
+    )
+    resolved_object_type = (
+        str(object_type or "").strip().lower()
+        or str(extract_config.get("object_type") or "").strip().lower()
+        or _infer_object_type(dataset_kind, schema_summary)
+    )
+    resolved_business_domain = str(business_domain or "").strip()
+    resolved_business_object_type = str(business_object_type or "").strip()
+    resolved_grain = str(grain or "").strip()
+    resolved_publish_status = _normalize_catalog_status(
+        publish_status,
+        allowed=("unpublished", "published", "deprecated"),
+        default="unpublished",
+    )
+    resolved_verified_status = _normalize_catalog_status(
+        verified_status,
+        allowed=("unverified", "verified", "rejected"),
+        default="unverified",
+    )
+    resolved_search_text = str(search_text or "").strip() or _build_dataset_search_text(
+        dataset_name=dataset_name,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+        schema_name=resolved_schema_name,
+        object_name=resolved_object_name,
+        object_type=resolved_object_type,
+        business_domain=resolved_business_domain,
+        business_object_type=resolved_business_object_type,
+        grain=resolved_grain,
+        meta=meta,
+    ).lower()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO data_source_datasets (
                         company_id, data_source_id, dataset_code, dataset_name,
                         resource_key, dataset_kind, origin_type,
+                        schema_name, object_name, object_type,
+                        publish_status, business_domain, business_object_type, grain,
+                        verified_status, usage_count, last_used_at, search_text,
                         extract_config, schema_summary, sync_strategy,
                         status, is_enabled, health_status,
                         last_checked_at, last_sync_at, last_error_message, meta
                     ) VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
                         %s::jsonb, %s::jsonb, %s::jsonb,
                         %s, %s, %s,
                         %s, %s, %s, %s::jsonb
@@ -3454,6 +3651,17 @@ def upsert_unified_data_source_dataset(
                         resource_key = EXCLUDED.resource_key,
                         dataset_kind = EXCLUDED.dataset_kind,
                         origin_type = EXCLUDED.origin_type,
+                        schema_name = EXCLUDED.schema_name,
+                        object_name = EXCLUDED.object_name,
+                        object_type = EXCLUDED.object_type,
+                        publish_status = EXCLUDED.publish_status,
+                        business_domain = EXCLUDED.business_domain,
+                        business_object_type = EXCLUDED.business_object_type,
+                        grain = EXCLUDED.grain,
+                        verified_status = EXCLUDED.verified_status,
+                        usage_count = GREATEST(data_source_datasets.usage_count, EXCLUDED.usage_count),
+                        last_used_at = COALESCE(EXCLUDED.last_used_at, data_source_datasets.last_used_at),
+                        search_text = EXCLUDED.search_text,
                         extract_config = EXCLUDED.extract_config,
                         schema_summary = EXCLUDED.schema_summary,
                         sync_strategy = EXCLUDED.sync_strategy,
@@ -3465,12 +3673,7 @@ def upsert_unified_data_source_dataset(
                         last_error_message = EXCLUDED.last_error_message,
                         meta = EXCLUDED.meta,
                         updated_at = CURRENT_TIMESTAMP
-                    RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
-                              resource_key, dataset_kind, origin_type,
-                              extract_config, schema_summary, sync_strategy,
-                              status, is_enabled, health_status,
-                              last_checked_at, last_sync_at, last_error_message, meta,
-                              created_at, updated_at
+                    RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                     """,
                     (
                         company_id,
@@ -3480,16 +3683,27 @@ def upsert_unified_data_source_dataset(
                         resource_key,
                         dataset_kind,
                         origin_type,
-                        psycopg2.extras.Json(extract_config or {}),
-                        psycopg2.extras.Json(schema_summary or {}),
-                        psycopg2.extras.Json(sync_strategy or {}),
+                        resolved_schema_name,
+                        resolved_object_name,
+                        resolved_object_type,
+                        resolved_publish_status,
+                        resolved_business_domain,
+                        resolved_business_object_type,
+                        resolved_grain,
+                        resolved_verified_status,
+                        max(0, int(usage_count or 0)),
+                        last_used_at,
+                        resolved_search_text,
+                        psycopg2.extras.Json(extract_config),
+                        psycopg2.extras.Json(schema_summary),
+                        psycopg2.extras.Json(sync_strategy),
                         status,
                         is_enabled,
                         health_status,
                         last_checked_at,
                         last_sync_at,
                         last_error_message,
-                        psycopg2.extras.Json(meta or {}),
+                        psycopg2.extras.Json(meta),
                     ),
                 )
                 row = cur.fetchone()
@@ -3513,13 +3727,8 @@ def get_unified_data_source_dataset_by_id(
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, dataset_code, dataset_name,
-                           resource_key, dataset_kind, origin_type,
-                           extract_config, schema_summary, sync_strategy,
-                           status, is_enabled, health_status,
-                           last_checked_at, last_sync_at, last_error_message, meta,
-                           created_at, updated_at
+                    f"""
+                    SELECT {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                     FROM data_source_datasets
                     WHERE company_id = %s
                       AND id = %s
@@ -3546,13 +3755,8 @@ def get_unified_data_source_dataset_by_source_resource(
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                sql = """
-                    SELECT id, company_id, data_source_id, dataset_code, dataset_name,
-                           resource_key, dataset_kind, origin_type,
-                           extract_config, schema_summary, sync_strategy,
-                           status, is_enabled, health_status,
-                           last_checked_at, last_sync_at, last_error_message, meta,
-                           created_at, updated_at
+                sql = f"""
+                    SELECT {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                     FROM data_source_datasets
                     WHERE company_id = %s
                       AND data_source_id = %s
@@ -3562,6 +3766,8 @@ def get_unified_data_source_dataset_by_source_resource(
                 if status:
                     sql += " AND status = %s"
                     params.append(status)
+                else:
+                    sql += " AND status <> 'deleted'"
                 sql += " ORDER BY updated_at DESC, created_at DESC LIMIT 1"
                 cur.execute(sql, tuple(params))
                 row = cur.fetchone()
@@ -3573,26 +3779,49 @@ def get_unified_data_source_dataset_by_source_resource(
         return None
 
 
-def list_unified_data_source_datasets(
+def query_unified_data_source_datasets(
     *,
     company_id: str,
     data_source_id: str | None = None,
     status: str | None = None,
     include_deleted: bool = False,
     limit: int = 500,
-) -> list[dict]:
-    """查询数据源下的数据集目录列表。"""
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 500,
+    sort_by: str = "updated_at_desc",
+    lightweight: bool = False,
+) -> dict[str, Any]:
+    """查询数据源下的数据集目录列表，支持海量目录筛选和分页。"""
     conn_manager = get_conn()
+    page_size = max(1, min(int(page_size or 50), 200))
+    page = max(1, int(page or 1))
+    offset = (page - 1) * page_size
+    if limit:
+        page_size = min(page_size, max(1, min(int(limit), 2000)))
+    select_columns = _UNIFIED_DATASET_SELECT_COLUMNS_SQL
+    if lightweight:
+        select_columns = """
+            id, company_id, data_source_id, dataset_code, dataset_name,
+            resource_key, dataset_kind, origin_type,
+            schema_name, object_name, object_type,
+            publish_status, business_domain, business_object_type, grain,
+            verified_status, usage_count, last_used_at, search_text,
+            status, is_enabled, health_status,
+            last_checked_at, last_sync_at, last_error_message, meta,
+            created_at, updated_at
+        """.strip()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                sql = """
-                    SELECT id, company_id, data_source_id, dataset_code, dataset_name,
-                           resource_key, dataset_kind, origin_type,
-                           extract_config, schema_summary, sync_strategy,
-                           status, is_enabled, health_status,
-                           last_checked_at, last_sync_at, last_error_message, meta,
-                           created_at, updated_at
+                sql = f"""
+                    SELECT {select_columns}
                     FROM data_source_datasets
                     WHERE company_id = %s
                 """
@@ -3605,16 +3834,120 @@ def list_unified_data_source_datasets(
                     params.append(status)
                 elif not include_deleted:
                     sql += " AND status <> 'deleted'"
-                sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s"
-                params.append(max(1, min(limit, 2000)))
+                if only_published:
+                    sql += " AND publish_status = 'published'"
+                elif publish_status:
+                    sql += " AND publish_status = %s"
+                    params.append(publish_status)
+                if schema_name:
+                    sql += " AND schema_name = %s"
+                    params.append(schema_name)
+                if object_type:
+                    sql += " AND object_type = %s"
+                    params.append(object_type)
+                if business_object_type:
+                    sql += " AND business_object_type = %s"
+                    params.append(business_object_type)
+                if verified_status:
+                    sql += " AND verified_status = %s"
+                    params.append(verified_status)
+                if keyword:
+                    keyword_pattern = f"%{keyword.strip().lower()}%"
+                    sql += """
+                        AND (
+                            lower(search_text) LIKE %s
+                            OR lower(dataset_name) LIKE %s
+                            OR lower(dataset_code) LIKE %s
+                            OR lower(resource_key) LIKE %s
+                            OR lower(object_name) LIKE %s
+                        )
+                    """
+                    params.extend(
+                        [
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                        ]
+                    )
+
+                count_sql = f"SELECT count(1) AS total FROM ({sql}) q"
+                cur.execute(count_sql, tuple(params))
+                total_row = cur.fetchone() or {}
+                total = int(total_row.get("total") or 0)
+
+                sort_mapping = {
+                    "updated_at_desc": "updated_at DESC, created_at DESC",
+                    "updated_desc": "updated_at DESC, created_at DESC",
+                    "updated_at_asc": "updated_at ASC, created_at ASC",
+                    "updated_asc": "updated_at ASC, created_at ASC",
+                    "last_sync_desc": "last_sync_at DESC NULLS LAST, updated_at DESC",
+                    "last_used_desc": "usage_count DESC, last_used_at DESC NULLS LAST, updated_at DESC",
+                    "usage_desc": "usage_count DESC, last_used_at DESC NULLS LAST, updated_at DESC",
+                    "name_asc": "COALESCE(NULLIF(lower(object_name), ''), lower(dataset_name)) ASC, updated_at DESC",
+                    "name_desc": "COALESCE(NULLIF(lower(object_name), ''), lower(dataset_name)) DESC, updated_at DESC",
+                    "schema_object_asc": "lower(schema_name) ASC, lower(object_name) ASC, updated_at DESC",
+                }
+                normalized_sort_by = str(sort_by or "").strip().lower()
+                sql += f" ORDER BY {sort_mapping.get(normalized_sort_by, sort_mapping['updated_at_desc'])} LIMIT %s OFFSET %s"
+                params.extend([page_size, offset])
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
-                return [_normalize_record(dict(row)) for row in rows]
+                items = [_normalize_record(dict(row)) for row in rows]
+                return {
+                    "items": items,
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                }
     except Exception as e:
         logger.error(
-            f"查询 data_source_datasets 列表失败 (company_id={company_id}, data_source_id={data_source_id}, status={status}): {e}"
+            "查询 data_source_datasets 列表失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, status={status}, "
+            f"publish_status={publish_status}, keyword={keyword!r}): {e}"
         )
-        return []
+        return {"items": [], "total": 0, "page": page, "page_size": page_size}
+
+
+def list_unified_data_source_datasets(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    status: str | None = None,
+    include_deleted: bool = False,
+    limit: int = 500,
+    keyword: str = "",
+    schema_name: str = "",
+    object_type: str = "",
+    publish_status: str = "",
+    business_object_type: str = "",
+    verified_status: str = "",
+    only_published: bool = False,
+    page: int = 1,
+    page_size: int = 500,
+    sort_by: str = "updated_at_desc",
+    lightweight: bool = False,
+) -> list[dict]:
+    result = query_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        status=status,
+        include_deleted=include_deleted,
+        limit=limit,
+        keyword=keyword,
+        schema_name=schema_name,
+        object_type=object_type,
+        publish_status=publish_status,
+        business_object_type=business_object_type,
+        verified_status=verified_status,
+        only_published=only_published,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        lightweight=lightweight,
+    )
+    return list(result.get("items") or [])
 
 
 def update_unified_data_source_dataset_status(
@@ -3630,34 +3963,24 @@ def update_unified_data_source_dataset_status(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if is_enabled is None:
                     cur.execute(
-                        """
+                        f"""
                         UPDATE data_source_datasets
                         SET status = %s,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
-                        RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
-                                  resource_key, dataset_kind, origin_type,
-                                  extract_config, schema_summary, sync_strategy,
-                                  status, is_enabled, health_status,
-                                  last_checked_at, last_sync_at, last_error_message, meta,
-                                  created_at, updated_at
+                        RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                         """,
                         (status, dataset_id),
                     )
                 else:
                     cur.execute(
-                        """
+                        f"""
                         UPDATE data_source_datasets
                         SET status = %s,
                             is_enabled = %s,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
-                        RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
-                                  resource_key, dataset_kind, origin_type,
-                                  extract_config, schema_summary, sync_strategy,
-                                  status, is_enabled, health_status,
-                                  last_checked_at, last_sync_at, last_error_message, meta,
-                                  created_at, updated_at
+                        RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                         """,
                         (status, is_enabled, dataset_id),
                     )
@@ -3684,7 +4007,7 @@ def update_unified_data_source_dataset_health(
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE data_source_datasets
                     SET health_status = %s,
                         last_checked_at = %s,
@@ -3692,12 +4015,7 @@ def update_unified_data_source_dataset_health(
                         last_error_message = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
-                    RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
-                              resource_key, dataset_kind, origin_type,
-                              extract_config, schema_summary, sync_strategy,
-                              status, is_enabled, health_status,
-                              last_checked_at, last_sync_at, last_error_message, meta,
-                              created_at, updated_at
+                    RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                     """,
                     (health_status, checked_at, last_sync_at, last_error_message, dataset_id),
                 )
@@ -3722,17 +4040,12 @@ def update_unified_data_source_dataset_meta(
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE data_source_datasets
                     SET meta = %s::jsonb,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
-                    RETURNING id, company_id, data_source_id, dataset_code, dataset_name,
-                              resource_key, dataset_kind, origin_type,
-                              extract_config, schema_summary, sync_strategy,
-                              status, is_enabled, health_status,
-                              last_checked_at, last_sync_at, last_error_message, meta,
-                              created_at, updated_at
+                    RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
                     """,
                     (psycopg2.extras.Json(meta or {}), dataset_id),
                 )
@@ -3741,6 +4054,134 @@ def update_unified_data_source_dataset_meta(
                 return _normalize_record(dict(row)) if row else None
     except Exception as e:
         logger.error(f"更新 data_source_datasets meta 失败 (id={dataset_id}): {e}")
+        return None
+
+
+def update_unified_data_source_dataset_catalog(
+    *,
+    dataset_id: str,
+    publish_status: str | None = None,
+    business_domain: str | None = None,
+    business_object_type: str | None = None,
+    grain: str | None = None,
+    verified_status: str | None = None,
+    schema_name: str | None = None,
+    object_name: str | None = None,
+    object_type: str | None = None,
+    search_text: str | None = None,
+    meta: dict | None = None,
+) -> dict | None:
+    """更新数据集目录业务化字段。"""
+    updates: list[str] = []
+    params: list[Any] = []
+    normalized_publish_status = None
+    normalized_verified_status = None
+    if publish_status is not None:
+        normalized_publish_status = _normalize_catalog_status(
+            publish_status,
+            allowed=("unpublished", "published", "deprecated"),
+            default="unpublished",
+        )
+        updates.append("publish_status = %s")
+        params.append(normalized_publish_status)
+    if business_domain is not None:
+        updates.append("business_domain = %s")
+        params.append(str(business_domain or "").strip())
+    if business_object_type is not None:
+        updates.append("business_object_type = %s")
+        params.append(str(business_object_type or "").strip())
+    if grain is not None:
+        updates.append("grain = %s")
+        params.append(str(grain or "").strip())
+    if verified_status is not None:
+        normalized_verified_status = _normalize_catalog_status(
+            verified_status,
+            allowed=("unverified", "verified", "rejected"),
+            default="unverified",
+        )
+        updates.append("verified_status = %s")
+        params.append(normalized_verified_status)
+    if schema_name is not None:
+        updates.append("schema_name = %s")
+        params.append(str(schema_name or "").strip())
+    if object_name is not None:
+        updates.append("object_name = %s")
+        params.append(str(object_name or "").strip())
+    if object_type is not None:
+        updates.append("object_type = %s")
+        params.append(str(object_type or "").strip().lower() or "unknown")
+    if search_text is not None:
+        updates.append("search_text = %s")
+        params.append(str(search_text or "").strip())
+    if meta is not None:
+        updates.append("meta = %s::jsonb")
+        params.append(psycopg2.extras.Json(meta))
+    if not updates:
+        return None
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                params.append(dataset_id)
+                cur.execute(
+                    f"""
+                    UPDATE data_source_datasets
+                    SET {", ".join(updates)},
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
+                    """,
+                    tuple(params),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 data_source_datasets 目录字段失败 (id={dataset_id}): {e}")
+        return None
+
+
+def touch_unified_data_source_dataset_usage(
+    *,
+    company_id: str,
+    data_source_id: str,
+    resource_key: str,
+    increment_by: int = 1,
+) -> dict | None:
+    """更新数据集最近使用时间与使用次数。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    WITH target AS (
+                        SELECT id
+                        FROM data_source_datasets
+                        WHERE company_id = %s
+                          AND data_source_id = %s
+                          AND resource_key = %s
+                          AND status <> 'deleted'
+                        ORDER BY updated_at DESC, created_at DESC
+                        LIMIT 1
+                    )
+                    UPDATE data_source_datasets
+                    SET usage_count = usage_count + %s,
+                        last_used_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = (SELECT id FROM target)
+                    RETURNING {_UNIFIED_DATASET_SELECT_COLUMNS_SQL}
+                    """,
+                    (company_id, data_source_id, resource_key, max(1, int(increment_by or 1))),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"更新 data_source_datasets 使用统计失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}): {e}"
+        )
         return None
 
 
@@ -4720,7 +5161,7 @@ def append_unified_dataset_snapshot_items(
         with conn_manager as conn:
             with conn.cursor() as cur:
                 for item in items:
-                    payload = item.get("item_payload") if isinstance(item.get("item_payload"), dict) else {}
+                    payload = _json_safe_payload(item.get("item_payload")) if isinstance(item.get("item_payload"), dict) else {}
                     cur.execute(
                         """
                         INSERT INTO dataset_snapshot_items (
@@ -5074,6 +5515,191 @@ def list_unified_dataset_bindings(
             f"查询 dataset_bindings 列表失败 (company_id={company_id}, binding_scope={binding_scope}, binding_code={binding_code}, status={status}): {e}"
         )
         return []
+
+
+def replace_unified_dataset_bindings(
+    *,
+    company_id: str,
+    binding_scope: str,
+    binding_code: str,
+    binding_name: str = "",
+    bindings: list[dict[str, Any]] | None = None,
+) -> list[dict]:
+    """覆盖写入数据集绑定关系，并禁用旧绑定。"""
+    normalized_bindings = [dict(item) for item in (bindings or []) if isinstance(item, dict)]
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE dataset_bindings
+                    SET status = 'disabled',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND binding_scope = %s
+                      AND binding_code = %s
+                    """,
+                    (company_id, binding_scope, binding_code),
+                )
+                rows: list[dict] = []
+                for index, binding in enumerate(normalized_bindings):
+                    cur.execute(
+                        """
+                        INSERT INTO dataset_bindings (
+                            company_id, binding_scope, binding_code, binding_name,
+                            data_source_id, resource_key, role_code, is_required, priority,
+                            filter_config, mapping_config, status
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
+                            %s::jsonb, %s::jsonb, 'active'
+                        )
+                        ON CONFLICT (company_id, binding_scope, binding_code, role_code, data_source_id, resource_key)
+                        DO UPDATE SET
+                            binding_name = EXCLUDED.binding_name,
+                            is_required = EXCLUDED.is_required,
+                            priority = EXCLUDED.priority,
+                            filter_config = EXCLUDED.filter_config,
+                            mapping_config = EXCLUDED.mapping_config,
+                            status = 'active',
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING id, company_id, binding_scope, binding_code, binding_name,
+                                  data_source_id, resource_key, role_code, is_required, priority,
+                                  filter_config, mapping_config, status, created_at, updated_at
+                        """,
+                        (
+                            company_id,
+                            binding_scope,
+                            binding_code,
+                            str(binding.get("binding_name") or binding_name or "").strip(),
+                            str(binding.get("data_source_id") or "").strip(),
+                            str(binding.get("resource_key") or "default").strip() or "default",
+                            str(binding.get("role_code") or "source").strip() or "source",
+                            bool(binding.get("is_required", True)),
+                            int(binding.get("priority") or ((index + 1) * 10)),
+                            psycopg2.extras.Json(dict(binding.get("filter_config") or {})),
+                            psycopg2.extras.Json(dict(binding.get("mapping_config") or {})),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        rows.append(_normalize_record(dict(row)))
+                conn.commit()
+                return rows
+    except Exception as e:
+        logger.error(
+            f"覆盖写入 dataset_bindings 失败 (company_id={company_id}, binding_scope={binding_scope}, binding_code={binding_code}): {e}"
+        )
+        return []
+
+
+def disable_stale_unified_dataset_bindings(
+    *,
+    company_id: str,
+    binding_scope: str,
+    binding_code: str,
+    keep_bindings: list[dict[str, Any]] | None = None,
+    disabled_status: str = "disabled",
+) -> int:
+    """禁用不在 keep_bindings 内的旧绑定。"""
+    normalized = [dict(item) for item in (keep_bindings or []) if isinstance(item, dict)]
+    keep_keys: list[tuple[str, str, str]] = []
+    for item in normalized:
+        keep_keys.append(
+            (
+                str(item.get("role_code") or "source").strip() or "source",
+                str(item.get("data_source_id") or "").strip(),
+                str(item.get("resource_key") or "default").strip() or "default",
+            )
+        )
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    UPDATE dataset_bindings
+                    SET status = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND binding_scope = %s
+                      AND binding_code = %s
+                      AND status <> 'deleted'
+                """
+                params: list[Any] = [disabled_status, company_id, binding_scope, binding_code]
+                if keep_keys:
+                    predicates: list[str] = []
+                    for role_code, data_source_id, resource_key in keep_keys:
+                        predicates.append("(role_code = %s AND data_source_id = %s AND resource_key = %s)")
+                        params.extend([role_code, data_source_id, resource_key])
+                    sql += f" AND NOT ({' OR '.join(predicates)})"
+                cur.execute(sql, tuple(params))
+                changed = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+                conn.commit()
+                return changed
+    except Exception as e:
+        logger.error(
+            f"禁用陈旧 dataset_bindings 失败 (company_id={company_id}, binding_scope={binding_scope}, binding_code={binding_code}): {e}"
+        )
+        return 0
+
+
+def touch_unified_dataset_usage_by_binding(
+    *,
+    company_id: str,
+    binding_scope: str,
+    binding_code: str,
+    binding_status: str | None = "active",
+    increment_by: int = 1,
+    used_at: str | None = None,
+) -> int:
+    """按绑定关系批量回写 usage_count/last_used_at。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    WITH target_datasets AS (
+                        SELECT DISTINCT ON (b.role_code, b.data_source_id, b.resource_key)
+                               d.id AS dataset_id
+                        FROM dataset_bindings b
+                        JOIN LATERAL (
+                            SELECT d0.id
+                            FROM data_source_datasets d0
+                            WHERE d0.company_id = b.company_id
+                              AND d0.data_source_id = b.data_source_id
+                              AND d0.resource_key = b.resource_key
+                              AND d0.status <> 'deleted'
+                            ORDER BY d0.updated_at DESC, d0.created_at DESC
+                            LIMIT 1
+                        ) d ON true
+                        WHERE b.company_id = %s
+                          AND b.binding_scope = %s
+                          AND b.binding_code = %s
+                """
+                params: list[Any] = [company_id, binding_scope, binding_code]
+                if binding_status:
+                    sql += " AND b.status = %s"
+                    params.append(binding_status)
+                sql += """
+                    )
+                    UPDATE data_source_datasets x
+                    SET usage_count = GREATEST(0, x.usage_count + %s),
+                        last_used_at = COALESCE(%s::timestamptz, CURRENT_TIMESTAMP),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE x.id IN (SELECT dataset_id FROM target_datasets)
+                """
+                params.extend([max(1, int(increment_by or 1)), used_at])
+                cur.execute(sql, tuple(params))
+                changed = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+                conn.commit()
+                return changed
+    except Exception as e:
+        logger.error(
+            f"批量回写 data_source_datasets 使用统计失败 (company_id={company_id}, binding_scope={binding_scope}, binding_code={binding_code}): {e}"
+        )
+        return 0
 
 
 def create_unified_data_source_event(
