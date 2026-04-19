@@ -74,43 +74,61 @@ def _build_anomaly_summary(
 ) -> str:
     """Build a finance-friendly one-line summary for an anomaly item.
 
-    Uses actual dataset business names when available instead of generic 左侧/右侧.
+    For matched_with_diff: shows each compare field with left/right values and diff.
+    For source_only/target_only: shows the key field value from the side that exists.
     """
     src = str(left_name or "左侧数据").strip()
     tgt = str(right_name or "右侧数据").strip()
+    atype = str(anomaly_type or "").strip()
 
     _type_labels: dict[str, str] = {
         "source_only": f"仅 {src} 存在（{tgt} 缺失）",
         "target_only": f"仅 {tgt} 存在（{src} 缺失）",
-        "matched_with_diff": f"{src} 与 {tgt} 存在差异",
-        "value_mismatch": f"{src} 与 {tgt} 存在差异",
+        "matched_with_diff": f"{src} 与 {tgt} 金额差异",
+        "value_mismatch": f"{src} 与 {tgt} 金额差异",
         "unknown": "未知异常",
     }
-    label = _type_labels.get(str(anomaly_type or "").strip()) or _label_anomaly_type(anomaly_type)
+    label = _type_labels.get(atype) or _label_anomaly_type(anomaly_type)
 
-    # 附加具体匹配键值，便于财务人员定位记录
-    join_key = item.get("join_key") or []
-    if isinstance(join_key, list) and join_key:
-        key_pairs = []
-        for k in join_key[:2]:
-            if isinstance(k, dict):
-                field = str(k.get("field") or k.get("source_field") or "")
-                value = k.get("value") or k.get("source_value") or ""
-                if field and value is not None and value != "":
-                    key_pairs.append(f"{field}={value}")
-        if key_pairs:
-            return f"{label}（{' / '.join(key_pairs)}）"
+    # ── 主键定位信息（所有类型都附加，便于财务定位记录）─────────────────────────
+    join_key = [k for k in _safe_list(item.get("join_key")) if isinstance(k, dict)]
+    key_parts: list[str] = []
+    for k in join_key[:2]:
+        field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "")
+        # source_only 取 source_value，target_only 取 target_value，其余取 source_value
+        if atype == "target_only":
+            value = k.get("target_value") or k.get("value") or ""
+        else:
+            value = k.get("source_value") or k.get("value") or ""
+        if field and value is not None and str(value).strip():
+            key_parts.append(f"{field}={value}")
 
-    # 附加差异字段值
-    compare_values = item.get("compare_values") or []
-    if isinstance(compare_values, list) and compare_values:
-        first = compare_values[0] if isinstance(compare_values[0], dict) else {}
-        name = str(first.get("name") or first.get("field") or "")
-        left_val = first.get("source_value") or first.get("left_value")
-        right_val = first.get("target_value") or first.get("right_value")
-        if name and left_val is not None and right_val is not None:
-            return f"{label}（{name}：{src} {left_val} / {tgt} {right_val}）"
+    # ── 差异明细（matched_with_diff / value_mismatch 专用）───────────────────────
+    compare_values = [c for c in _safe_list(item.get("compare_values")) if isinstance(c, dict)]
+    diff_parts: list[str] = []
+    if atype in {"matched_with_diff", "value_mismatch"} and compare_values:
+        for cv in compare_values[:3]:
+            name = str(cv.get("name") or cv.get("source_field") or "").strip()
+            left_val = cv.get("source_value")
+            right_val = cv.get("target_value")
+            diff_val = cv.get("diff_value")
+            if not name or left_val is None or right_val is None:
+                continue
+            diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
+            part = f"{name}：{src} {left_val} / {tgt} {right_val}"
+            if diff_str:
+                part += f"（{diff_str}）"
+            diff_parts.append(part)
 
+    # ── 拼装最终摘要 ────────────────────────────────────────────────────────────
+    parts: list[str] = []
+    if key_parts:
+        parts.append("、".join(key_parts))
+    if diff_parts:
+        parts.append("；".join(diff_parts))
+
+    if parts:
+        return f"{label}：{'  '.join(parts)}"
     return label
 
 
