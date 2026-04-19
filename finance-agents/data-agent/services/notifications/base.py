@@ -106,6 +106,7 @@ class NotificationAdapter(ABC):
         *,
         title: str,
         content: str,
+        todo_title: str = "",
         assignee_user_id: str = "",
         mobile: str = "",
         keyword: str = "",

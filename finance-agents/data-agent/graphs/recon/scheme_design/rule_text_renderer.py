@@ -18,6 +18,28 @@ _RECON_OUTPUT_LABELS = {
     "matched_with_diff": "差异记录",
 }
 
+_FILTER_OPERATOR_LABELS: dict[str, str] = {
+    "=": "等于",
+    "==": "等于",
+    "!=": "不等于",
+    "<>": "不等于",
+    ">": "大于",
+    ">=": "大于等于",
+    "<": "小于",
+    "<=": "小于等于",
+    "in": "在范围内",
+    "not_in": "不在范围内",
+    "in_list": "在列表中",
+    "not_in_list": "不在列表中",
+    "is_null": "为空",
+    "is_not_null": "不为空",
+    "contains": "包含",
+    "not_contains": "不包含",
+    "starts_with": "以…开头",
+    "ends_with": "以…结尾",
+    "between": "介于",
+}
+
 _META_GOAL_MARKERS = (
     "json 单次生成器",
     "单次生成器",
@@ -171,16 +193,17 @@ def _render_proc_filter_summary(
         if not column or not operator:
             continue
         column_text = format_field_display(column, field_label_map)
+        operator_label = _FILTER_OPERATOR_LABELS.get(operator, operator)
         if "value" in condition:
             rendered.append(
-                f"{column_text} {operator} {json.dumps(condition.get('value'), ensure_ascii=False)}"
+                f"{column_text} {operator_label} {json.dumps(condition.get('value'), ensure_ascii=False)}"
             )
         elif condition.get("values") is not None:
             rendered.append(
-                f"{column_text} {operator} {json.dumps(condition.get('values'), ensure_ascii=False)}"
+                f"{column_text} {operator_label} {json.dumps(condition.get('values'), ensure_ascii=False)}"
             )
         else:
-            rendered.append(f"{column_text} {operator}")
+            rendered.append(f"{column_text} {operator_label}")
     if not rendered:
         return ""
     logic = str(filter_value.get("logic") or "and").strip().lower()
@@ -337,7 +360,7 @@ def render_proc_draft_text(
                 line_parts.append(mapping_summary)
             lines.append(" ".join(line_parts).strip())
             continue
-        lines.append(f"步骤{index}：执行 `{action or 'unknown'}`，目标表为 `{target_table or '未命名结果表'}`。")
+        lines.append(f"步骤{index}：对{_target_label(target_table)}执行数据处理操作。")
     return "\n".join(lines).strip()
 
 

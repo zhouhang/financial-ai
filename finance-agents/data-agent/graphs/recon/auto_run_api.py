@@ -11,6 +11,7 @@ from graphs.recon.auto_run_service import (
     execute_run_plan_run,
     execute_auto_task_run,
     send_exception_reminder,
+    send_execution_run_exception_reminder,
     sync_execution_run_exception_reminder,
     sync_exception_reminder,
 )
@@ -761,6 +762,29 @@ async def sync_execution_run_exception_api(
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "同步待办状态失败"))
+    return result
+
+
+@router.post("/run-exceptions/{exception_id}/remind")
+async def remind_execution_run_exception_api(
+    exception_id: str,
+    body: ExceptionRemindRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await send_execution_run_exception_reminder(
+        auth_token=auth_token,
+        exception_id=exception_id,
+        provider=body.provider,
+        channel_code=body.channel_code,
+        due_time=body.due_time,
+        title=body.title,
+        content=body.content,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "催办发送失败"))
     return result
 
 
