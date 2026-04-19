@@ -383,6 +383,7 @@ class DingTalkDwsAdapter(NotificationAdapter):
         *,
         title: str,
         content: str,
+        todo_title: str = "",
         assignee_user_id: str = "",
         mobile: str = "",
         keyword: str = "",
@@ -412,7 +413,7 @@ class DingTalkDwsAdapter(NotificationAdapter):
         )
         todo_result = self.create_todo(
             assignee_user_id=assignee.user_id,
-            title=title,
+            title=todo_title or title,
             content=content,
             due_time=due_time,
             source_id=source_id,

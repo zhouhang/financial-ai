@@ -375,20 +375,62 @@ def _merge_feedback(existing: dict[str, Any], patch: dict[str, Any]) -> dict[str
     return {**_safe_dict(existing), **_safe_dict(patch)}
 
 
-def _compose_reminder_text(task: dict[str, Any], run: dict[str, Any], exception: dict[str, Any]) -> tuple[str, str]:
-    task_name = str(task.get("task_name") or task.get("name") or "自动对账任务")
-    biz_date = str(run.get("biz_date") or "")
-    title = f"{task_name} 异常催办"
-    content = "\n".join(
-        [
-            f"任务：{task_name}",
-            f"业务日期：{biz_date}" if biz_date else "业务日期：未提供",
-            f"异常类型：{_label_anomaly_type(exception.get('anomaly_type') or '未知')}",
-            f"异常摘要：{str(exception.get('summary') or '详见对账结果')}",
-            "请处理完成后在钉钉待办中标记完成，并同步给财务复核。",
-        ]
-    )
-    return title, content
+def _extract_todo_key_hint(exception: dict[str, Any]) -> str:
+    """Extract a short key identifier from the exception for use in the todo title."""
+    atype = str(exception.get("anomaly_type") or "").strip()
+    detail = _safe_dict(exception.get("detail_json"))
+    join_key = [k for k in _safe_list(detail.get("join_key") or exception.get("join_key")) if isinstance(k, dict)]
+    if join_key:
+        parts: list[str] = []
+        for k in join_key[:2]:
+            field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "").strip()
+            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value") or ""
+            val_str = str(value).strip()
+            if field and val_str and val_str not in {"None", "null", ""}:
+                parts.append(f"{field}={val_str}")
+        if parts:
+            return "、".join(parts)
+    # Fallback: extract from summary text (after first ：, before double-space)
+    summary = str(exception.get("summary") or "")
+    if "：" in summary:
+        after_colon = summary.split("：", 1)[1].strip()
+        key_part = after_colon.split("  ")[0].strip()
+        if key_part and len(key_part) <= 60:
+            return key_part
+    return ""
+
+
+def _compose_reminder_text(
+    task: dict[str, Any],
+    run: dict[str, Any],
+    exception: dict[str, Any],
+    *,
+    left_name: str = "",
+    right_name: str = "",
+) -> tuple[str, str, str]:
+    """Return (todo_title, bot_message_title, bot_message_content)."""
+    task_name = str(task.get("task_name") or task.get("name") or task.get("plan_name") or "对账异常催办")
+    run_ctx = run.get("run_context_json") if isinstance(run.get("run_context_json"), dict) else {}
+    biz_date = str(run.get("biz_date") or run_ctx.get("biz_date") or "")
+    anomaly_label = _label_anomaly_type(exception.get("anomaly_type") or "未知", left_name=left_name, right_name=right_name)
+    summary = str(exception.get("summary") or "详见对账结果")
+
+    key_hint = _extract_todo_key_hint(exception)
+    if key_hint:
+        todo_title = f"【对账异常】{anomaly_label} | {key_hint}"
+    else:
+        todo_title = f"【对账异常】{anomaly_label}"
+    if biz_date:
+        todo_title += f" | {biz_date}"
+
+    bot_title = f"{task_name} 对账异常催办"
+    lines = [f"任务：{task_name}"]
+    if biz_date:
+        lines.append(f"业务日期：{biz_date}")
+    lines.append(f"异常类型：{anomaly_label}")
+    lines.append(f"异常详情：{summary}")
+    lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
+    return todo_title, bot_title, "\n".join(lines)
 
 
 async def execute_run_plan_run(
@@ -723,6 +765,32 @@ async def send_exception_reminder(
     task_result = await recon_auto_task_get(auth_token, str(exception.get("auto_task_id") or ""))
     task = _safe_dict(task_result.get("task"))
 
+    # For plan-based runs: fetch execution_run for biz_date and scheme_code
+    exec_run: dict[str, Any] = {}
+    left_name = right_name = ""
+    exec_run_id = str(exception.get("run_id") or "")
+    if exec_run_id and not run:
+        exec_run_result = await execution_run_get(auth_token, exec_run_id)
+        exec_run = _safe_dict(exec_run_result.get("run"))
+    if not run:
+        run = exec_run
+    # Resolve dataset names from scheme_meta_json (most reliable source)
+    scheme_code = str(exec_run.get("scheme_code") or run.get("scheme_code") or exception.get("scheme_code") or "")
+    if scheme_code:
+        scheme_result = await execution_scheme_get(auth_token, scheme_code=scheme_code)
+        scheme = _safe_dict(scheme_result.get("scheme"))
+        meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
+        def _first_name(sources: list) -> str:
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                name = str(src.get("dataset_name") or src.get("business_name") or src.get("display_name") or "").strip()
+                if name:
+                    return name
+            return ""
+        left_name = _first_name(_safe_list(meta.get("left_sources")))
+        right_name = _first_name(_safe_list(meta.get("right_sources")))
+
     owner_name = str(exception.get("owner_name") or "").strip()
     owner_identifier = str(exception.get("owner_identifier") or "").strip()
     if not owner_name and not owner_identifier:
@@ -754,10 +822,11 @@ async def send_exception_reminder(
         )
         return {"success": False, "error": "责任人未能解析为可触达用户", "exception": exception}
 
-    reminder_title, reminder_content = _compose_reminder_text(task, run, exception)
+    todo_title, reminder_title, reminder_content = _compose_reminder_text(task, run, exception, left_name=left_name, right_name=right_name)
     reminder = adapter.send_reminder(
         title=title or reminder_title,
         content=content or reminder_content,
+        todo_title=todo_title if not title else "",
         assignee_user_id=resolved.user_id,
         due_time=due_time,
         source_id=exception_id,

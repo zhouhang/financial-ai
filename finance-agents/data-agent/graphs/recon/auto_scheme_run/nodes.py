@@ -1146,13 +1146,44 @@ def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str,
     return owner_name, owner_identifier, owner_contact_json, owner_available
 
 
+def _extract_todo_key_hint(exception: dict[str, Any]) -> str:
+    """Extract a short key identifier from the exception for use in the todo title.
+
+    Priority: join_key fields → first ：-separated segment of summary.
+    Returns a compact string like "order_no=ORD-001" or empty string.
+    """
+    atype = str(exception.get("anomaly_type") or "").strip()
+    detail = _safe_dict(exception.get("detail_json"))
+    join_key = [k for k in _safe_list(detail.get("join_key") or exception.get("join_key")) if isinstance(k, dict)]
+    if join_key:
+        parts: list[str] = []
+        for k in join_key[:2]:
+            field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "").strip()
+            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value") or ""
+            val_str = str(value).strip()
+            if field and val_str and val_str not in {"None", "null", ""}:
+                parts.append(f"{field}={val_str}")
+        if parts:
+            return "、".join(parts)
+
+    # Fallback: extract from summary text (after first ：, before double-space)
+    summary = str(exception.get("summary") or "")
+    if "：" in summary:
+        after_colon = summary.split("：", 1)[1].strip()
+        key_part = after_colon.split("  ")[0].strip()  # double-space separates key from diff detail
+        if key_part and len(key_part) <= 60:
+            return key_part
+    return ""
+
+
 def _compose_execution_exception_reminder_text(
     *,
     run_plan: dict[str, Any],
     scheme: dict[str, Any],
     biz_date: str,
     exception: dict[str, Any],
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
+    """Return (todo_title, bot_message_title, bot_message_content)."""
     plan_name = str(
         run_plan.get("plan_name")
         or run_plan.get("name")
@@ -1161,17 +1192,45 @@ def _compose_execution_exception_reminder_text(
         or "自动对账任务"
     ).strip()
     scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
-    title = f"{plan_name} 异常催办"
+
+    # Extract dataset names from scheme_meta_json for user-friendly labels
+    meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
+    def _first_ds_name(sources: list) -> str:
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            name = str(src.get("dataset_name") or src.get("business_name") or src.get("display_name") or "").strip()
+            if name:
+                return name
+        return ""
+    left_name = _first_ds_name(_safe_list(meta.get("left_sources")))
+    right_name = _first_ds_name(_safe_list(meta.get("right_sources")))
+
+    anomaly_type = str(exception.get("anomaly_type") or "unknown").strip()
+    anomaly_label = _label_anomaly_type(anomaly_type, left_name=left_name, right_name=right_name)
+    summary = str(exception.get("summary") or "详见对账结果")
+
+    # Todo title: include key field so finance staff can identify the record directly
+    key_hint = _extract_todo_key_hint(exception)
+    if key_hint:
+        todo_title = f"【对账异常】{anomaly_label} | {key_hint}"
+    else:
+        todo_title = f"【对账异常】{anomaly_label}"
+    if biz_date:
+        todo_title += f" | {biz_date}"
+
+    # Bot message
+    bot_title = f"{plan_name} 对账异常催办"
     lines = [
         f"任务：{plan_name}",
-        f"业务日期：{biz_date}" if biz_date else "业务日期：未提供",
+        f"业务日期：{biz_date}" if biz_date else "",
         f"对账方案：{scheme_name}" if scheme_name else "",
-        f"异常类型：{_label_anomaly_type(exception.get('anomaly_type') or '未知')}",
-        f"异常摘要：{str(exception.get('summary') or '详见对账结果')}",
-        "请尽快处理，并在待办中标记完成后同步给财务复核。",
+        f"异常类型：{anomaly_label}",
+        f"异常详情：{summary}",
+        "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
     ]
-    content = "\n".join(line for line in lines if line)
-    return title, content
+    bot_content = "\n".join(line for line in lines if line)
+    return todo_title, bot_title, bot_content
 
 
 def _resolve_exception_mobile(exception: dict[str, Any]) -> str:
@@ -1318,15 +1377,16 @@ async def _send_execution_run_exception_reminder(
             "exception": updated,
         }
 
-    title, content = _compose_execution_exception_reminder_text(
+    todo_title, bot_title, bot_content = _compose_execution_exception_reminder_text(
         run_plan=run_plan,
         scheme=scheme,
         biz_date=biz_date,
         exception=exception,
     )
     reminder = adapter.send_reminder(
-        title=title,
-        content=content,
+        title=bot_title,
+        content=bot_content,
+        todo_title=todo_title,
         assignee_user_id=str(resolved_user.user_id or ""),
         source_id=exception_id,
     )
