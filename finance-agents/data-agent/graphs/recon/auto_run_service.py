@@ -23,6 +23,9 @@ from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
     execution_run_exception_get,
     execution_run_exception_update,
+    execution_run_get,
+    execution_run_plan_get,
+    execution_scheme_get,
     data_source_get_published_snapshot,
     get_file_validation_rule,
     recon_auto_run_create,
@@ -39,6 +42,70 @@ from tools.mcp_client import (
 logger = logging.getLogger(__name__)
 _BIZ_DATE_PLACEHOLDER = re.compile(r"\{\{\s*biz_date\s*\}\}")
 _RUN_SUCCESS_STATUSES = {"success", "partial_success", "skipped"}
+
+_ANOMALY_TYPE_LABELS: dict[str, str] = {
+    "source_only": "仅左侧数据存在（右侧缺失）",
+    "target_only": "仅右侧数据存在（左侧缺失）",
+    "matched_with_diff": "金额或字段存在差异",
+    "value_mismatch": "金额或字段存在差异",
+    "unknown": "未知异常",
+}
+
+
+def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
+    atype = str(anomaly_type or "").strip()
+    src = str(left_name or "").strip()
+    tgt = str(right_name or "").strip()
+    if src and tgt:
+        dynamic: dict[str, str] = {
+            "source_only": f"仅 {src} 存在（{tgt} 缺失）",
+            "target_only": f"仅 {tgt} 存在（{src} 缺失）",
+            "matched_with_diff": f"{src} 与 {tgt} 存在差异",
+            "value_mismatch": f"{src} 与 {tgt} 存在差异",
+            "unknown": "未知异常",
+        }
+        return dynamic.get(atype, str(anomaly_type or "未知异常"))
+    return _ANOMALY_TYPE_LABELS.get(atype, str(anomaly_type or "未知异常"))
+
+
+def _build_anomaly_summary(
+    anomaly_type: str,
+    item: dict[str, Any],
+    *,
+    left_name: str = "",
+    right_name: str = "",
+) -> str:
+    """Build a finance-friendly one-line summary for an anomaly item."""
+    src = str(left_name or "源数据").strip()
+    tgt = str(right_name or "目标数据").strip()
+    _type_labels: dict[str, str] = {
+        "source_only": f"仅 {src} 存在（{tgt} 缺失）",
+        "target_only": f"仅 {tgt} 存在（{src} 缺失）",
+        "matched_with_diff": f"{src} 与 {tgt} 存在差异",
+        "value_mismatch": f"{src} 与 {tgt} 存在差异",
+        "unknown": "未知异常",
+    }
+    label = _type_labels.get(str(anomaly_type or "").strip(), _label_anomaly_type(anomaly_type))
+    join_key = item.get("join_key") or []
+    if isinstance(join_key, list) and join_key:
+        key_pairs = []
+        for k in join_key[:2]:
+            if isinstance(k, dict):
+                field = str(k.get("field") or k.get("source_field") or "")
+                value = k.get("value") or k.get("source_value") or ""
+                if field and value is not None and value != "":
+                    key_pairs.append(f"{field}={value}")
+        if key_pairs:
+            return f"{label}（{' / '.join(key_pairs)}）"
+    compare_values = item.get("compare_values") or []
+    if isinstance(compare_values, list) and compare_values:
+        first = compare_values[0] if isinstance(compare_values[0], dict) else {}
+        name = str(first.get("name") or first.get("field") or "")
+        left_val = first.get("source_value") or first.get("left_value")
+        right_val = first.get("target_value") or first.get("right_value")
+        if name and left_val is not None and right_val is not None:
+            return f"{label}（{name}：{src} {left_val} / {tgt} {right_val}）"
+    return label
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -262,7 +329,7 @@ def _build_exception_payloads(task: dict[str, Any], run: dict[str, Any], anomaly
                 "auto_run_id": auto_run_id,
                 "anomaly_key": str(item.get("item_id") or item.get("anomaly_key") or ""),
                 "anomaly_type": str(item.get("anomaly_type") or "unknown"),
-                "summary": str(item.get("summary") or ""),
+                "summary": str(item.get("summary") or "") or _build_anomaly_summary(str(item.get("anomaly_type") or "unknown"), item),
                 "detail_json": item,
                 "owner_name": str(owner.get("name") or ""),
                 "owner_identifier": str(owner.get("identifier") or ""),
@@ -300,8 +367,8 @@ def _compose_reminder_text(task: dict[str, Any], run: dict[str, Any], exception:
         [
             f"任务：{task_name}",
             f"业务日期：{biz_date}" if biz_date else "业务日期：未提供",
-            f"异常类型：{str(exception.get('anomaly_type') or '未知')}",
-            f"异常摘要：{str(exception.get('summary') or '')}",
+            f"异常类型：{_label_anomaly_type(exception.get('anomaly_type') or '未知')}",
+            f"异常摘要：{str(exception.get('summary') or '详见对账结果')}",
             "请处理完成后在钉钉待办中标记完成，并同步给财务复核。",
         ]
     )
@@ -893,5 +960,210 @@ async def sync_execution_run_exception_reminder(
             "status": status.value,
             "is_terminal": bool(sync_result.is_terminal),
             "polls": int(sync_result.polls),
+        },
+    }
+
+
+async def send_execution_run_exception_reminder(
+    *,
+    auth_token: str,
+    exception_id: str,
+    provider: str = "",
+    channel_code: str = "",
+    due_time: str = "",
+    title: str = "",
+    content: str = "",
+) -> dict[str, Any]:
+    """手动对 execution_run_exceptions 单条异常补发钉钉催办通知。
+
+    流程：
+    1. 取异常记录，拿到 run_id / owner 信息
+    2. 取关联 execution_run，拿到 plan_code / scheme_code / biz_date
+    3. 取 execution_run_plan，拿到 channel_config_id / owner_mapping_json（作为兜底）
+    4. 取 execution_scheme，拿到 scheme_name（用于通知文案）
+    5. 解析责任人，发送钉钉催办 + 创建待办
+    6. 更新 reminder_status = 'sent'
+    """
+    exception_result = await execution_run_exception_get(auth_token, exception_id)
+    if not exception_result.get("success"):
+        return {"success": False, "error": exception_result.get("error", "异常处理项不存在")}
+
+    exception = _safe_dict(exception_result.get("exception"))
+
+    # ── 1. 解析 owner（异常记录自身携带的优先）─────────────────────────────────
+    owner_name = str(exception.get("owner_name") or "").strip()
+    owner_identifier = str(exception.get("owner_identifier") or "").strip()
+    feedback_json = _safe_dict(exception.get("feedback_json"))
+    owner_contact_json = _safe_dict(exception.get("owner_contact_json"))
+
+    # ── 2. 从关联 execution_run 补全上下文 ────────────────────────────────────
+    run_id = str(exception.get("run_id") or "").strip()
+    run: dict[str, Any] = {}
+    plan_code = ""
+    scheme_code = str(exception.get("scheme_code") or "").strip()
+    biz_date = ""
+
+    if run_id:
+        run_result = await execution_run_get(auth_token, run_id)
+        if run_result.get("success"):
+            run = _safe_dict(run_result.get("run"))
+            plan_code = str(run.get("plan_code") or "").strip()
+            if not scheme_code:
+                scheme_code = str(run.get("scheme_code") or "").strip()
+            run_ctx = _safe_dict(run.get("run_context_json"))
+            biz_date = str(run_ctx.get("biz_date") or run.get("biz_date") or "").strip()
+
+    # ── 3. 从 execution_run_plan 补 channel_config_id / owner ─────────────────
+    run_plan: dict[str, Any] = {}
+    channel_config_id = str(feedback_json.get("channel_config_id") or "").strip()
+
+    if plan_code:
+        plan_result = await execution_run_plan_get(auth_token, plan_code=plan_code)
+        if plan_result.get("success"):
+            run_plan = _safe_dict(plan_result.get("run_plan"))
+            if not channel_config_id:
+                channel_config_id = str(run_plan.get("channel_config_id") or "").strip()
+            # 如果异常记录本身没有 owner，从 run_plan.owner_mapping_json.default_owner 补
+            if not owner_name and not owner_identifier:
+                owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+                default_owner = _safe_dict(owner_mapping.get("default_owner"))
+                owner_name = str(default_owner.get("name") or default_owner.get("display_name") or "").strip()
+                owner_identifier = str(
+                    default_owner.get("identifier") or default_owner.get("owner_identifier") or ""
+                ).strip()
+
+    if not owner_name and not owner_identifier:
+        return {"success": False, "error": "异常未配置责任人，且运行计划未设置默认负责人，无法催办", "exception": exception}
+
+    # ── 4. 取 scheme 名称用于文案 ─────────────────────────────────────────────
+    scheme: dict[str, Any] = {}
+    if scheme_code:
+        scheme_result = await execution_scheme_get(auth_token, scheme_code=scheme_code)
+        if scheme_result.get("success"):
+            scheme = _safe_dict(scheme_result.get("scheme"))
+
+    # ── 5. 构造通知适配器 ──────────────────────────────────────────────────────
+    adapter = None
+    if channel_config_id:
+        channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+        if channel_config is not None:
+            adapter = get_notification_adapter(
+                provider=str(getattr(channel_config, "provider", "") or provider or ""),
+                channel_config=channel_config,
+            )
+
+    if adapter is None:
+        adapter = get_notification_adapter(
+            provider=provider or "",
+            company_id=str(exception.get("company_id") or ""),
+            channel_code=channel_code or None,
+        )
+
+    # ── 6. 解析责任人 ─────────────────────────────────────────────────────────
+    resolved = None
+    if owner_identifier:
+        resolved_result = adapter.resolve_user(user_id=owner_identifier)
+        if resolved_result.success:
+            resolved = resolved_result.resolved_user or (resolved_result.users[0] if resolved_result.users else None)
+    if resolved is None and owner_name:
+        resolved_result = adapter.resolve_user(keyword=owner_name)
+        if resolved_result.success:
+            resolved = resolved_result.resolved_user or (resolved_result.users[0] if resolved_result.users else None)
+
+    if resolved is None:
+        await execution_run_exception_update(
+            auth_token,
+            exception_id,
+            {
+                "reminder_status": "owner_unresolved",
+                "latest_feedback": "责任人未能解析为可触达用户",
+            },
+        )
+        return {"success": False, "error": "责任人未能解析为可触达用户", "exception": exception}
+
+    # ── 7. 组装通知文案 ───────────────────────────────────────────────────────
+    plan_name = str(
+        run_plan.get("plan_name")
+        or run_plan.get("name")
+        or scheme.get("scheme_name")
+        or scheme.get("name")
+        or "对账异常催办"
+    ).strip()
+    scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
+
+    if not title:
+        title = f"{plan_name} 异常催办"
+    if not content:
+        lines = [
+            f"任务：{plan_name}",
+            f"业务日期：{biz_date}" if biz_date else "",
+            f"对账方案：{scheme_name}" if scheme_name else "",
+            f"异常类型：{_label_anomaly_type(exception.get('anomaly_type') or exception.get('exception_type') or '未知')}",
+            f"异常摘要：{str(exception.get('summary') or '详见对账结果')}",
+            "请尽快处理，并在待办中标记完成后同步给财务复核。",
+        ]
+        content = "\n".join(line for line in lines if line)
+
+    # ── 8. 发送催办 ───────────────────────────────────────────────────────────
+    reminder = adapter.send_reminder(
+        title=title,
+        content=content,
+        assignee_user_id=resolved.user_id,
+        due_time=due_time,
+        source_id=exception_id,
+    )
+
+    if not reminder.success:
+        await execution_run_exception_update(
+            auth_token,
+            exception_id,
+            {
+                "owner_name": resolved.display_name or owner_name,
+                "owner_identifier": resolved.user_id,
+                "owner_contact_json": {
+                    "provider": adapter.provider,
+                    "display_name": resolved.display_name,
+                    "mobile": resolved.mobile,
+                },
+                "reminder_status": "send_failed",
+                "latest_feedback": reminder.message,
+            },
+        )
+        return {"success": False, "error": reminder.message, "exception": exception}
+
+    # ── 9. 更新异常记录 ────────────────────────────────────────────────────────
+    next_feedback = _merge_feedback(
+        feedback_json,
+        {
+            "provider": adapter.provider,
+            "channel_config_id": channel_config_id,
+            "todo_id": reminder.todo_result.todo.todo_id if reminder.todo_result and reminder.todo_result.todo else "",
+            "message_id": reminder.bot_result.message_id if reminder.bot_result else "",
+            "last_reminded_at": datetime.now().isoformat(),
+        },
+    )
+    update_result = await execution_run_exception_update(
+        auth_token,
+        exception_id,
+        {
+            "owner_name": resolved.display_name or owner_name,
+            "owner_identifier": resolved.user_id,
+            "owner_contact_json": {
+                "provider": adapter.provider,
+                "display_name": resolved.display_name,
+                "mobile": resolved.mobile,
+            },
+            "reminder_status": "sent",
+            "latest_feedback": "已手动发送催办消息并创建待办",
+            "feedback_json": next_feedback,
+        },
+    )
+    return {
+        "success": True,
+        "exception": _safe_dict(update_result.get("exception")) or exception,
+        "reminder": {
+            "provider": adapter.provider,
+            "todo_id": next_feedback.get("todo_id"),
+            "message_id": next_feedback.get("message_id"),
         },
     }

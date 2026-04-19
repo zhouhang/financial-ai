@@ -1,0 +1,8 @@
+{
+  "owner_user_id": "finance-cron:00000000-0000-0000-0000-000000000001",
+  "module": "recon",
+  "rule_code": "dataset_recon_1_b56c083e",
+  "rule_id": "测试1",
+  "file_name": "测试1_核对结果_20260419_094705.xlsx",
+  "created_at": "2026-04-19T01:47:05.250699+00:00"
+}

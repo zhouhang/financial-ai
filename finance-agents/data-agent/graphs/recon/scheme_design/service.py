@@ -765,7 +765,7 @@ class SchemeDesignService:
                 session_id=session_id,
                 stage="proc",
                 phase="generating_rule",
-                message="正在根据目标、描述和样例生成数据整理 JSON",
+                message="正在根据目标、描述和样例生成数据整理配置",
             )
             turn_result = await self._executor.run_turn(
                 session=working_session,
@@ -780,7 +780,7 @@ class SchemeDesignService:
                 session_id=session_id,
                 stage="proc",
                 phase="validating_rule",
-                message="正在校验 proc JSON 是否符合当前规则引擎",
+                message="正在校验数据整理配置是否可执行",
             )
             await self._update_generation_progress(
                 auth_token=auth_token,
@@ -880,7 +880,7 @@ class SchemeDesignService:
                 session_id=session_id,
                 stage="recon",
                 phase="generating_rule",
-                message="正在根据整理结果样例生成数据对账 JSON",
+                message="正在根据整理结果样例生成数据对账配置",
             )
             turn_result = await self._executor.run_turn(
                 session=working_session,
@@ -895,7 +895,7 @@ class SchemeDesignService:
                 session_id=session_id,
                 stage="recon",
                 phase="validating_rule",
-                message="正在校验 recon JSON 是否符合当前规则引擎",
+                message="正在校验对账配置是否可执行",
             )
             await self._update_generation_progress(
                 auth_token=auth_token,
