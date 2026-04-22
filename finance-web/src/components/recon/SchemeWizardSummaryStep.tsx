@@ -6,6 +6,8 @@ interface SchemeWizardSummaryStepProps {
   businessGoal: string;
   leftSources: string[];
   rightSources: string[];
+  leftOutputFields: string[];
+  rightOutputFields: string[];
   procDisplayName: string;
   reconDisplayName: string;
   procHasConfig: boolean;
@@ -70,6 +72,8 @@ export default function SchemeWizardSummaryStep({
   businessGoal,
   leftSources,
   rightSources,
+  leftOutputFields,
+  rightOutputFields,
   procDisplayName,
   reconDisplayName,
   procHasConfig,
@@ -101,9 +105,11 @@ export default function SchemeWizardSummaryStep({
 
       <div className="rounded-3xl border border-border bg-surface-secondary p-4">
         <p className="text-sm font-semibold text-text-primary">数据准备</p>
-        <div className="mt-4 grid gap-4 lg:grid-cols-3">
+        <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
           <SummaryCard title="左侧数据" value={leftSources.join('、') || '--'} />
+          <SummaryCard title="左侧输出字段" value={leftOutputFields.join('、') || '--'} />
           <SummaryCard title="右侧数据" value={rightSources.join('、') || '--'} />
+          <SummaryCard title="右侧输出字段" value={rightOutputFields.join('、') || '--'} />
           <SummaryCard title="数据整理配置" value={procDisplayName} />
         </div>
       </div>

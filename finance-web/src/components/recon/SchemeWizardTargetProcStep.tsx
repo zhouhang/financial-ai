@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, Sparkles } from 'lucide-react';
 import type { DataSourceKind } from '../../types';
+import SchemeWizardOutputFieldEditor from './SchemeWizardOutputFieldEditor';
+import type { OutputFieldDraft } from './schemeWizardState';
 
 export type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type SupportedSourceKind = Extract<
@@ -77,9 +79,12 @@ export interface SchemeWizardTargetProcStepProps {
   schemeDraft: SchemeDraftLite;
   selectedLeftSources: SchemeSourceOption[];
   selectedRightSources: SchemeSourceOption[];
+  leftOutputFields: OutputFieldDraft[];
+  rightOutputFields: OutputFieldDraft[];
   existingProcOptions: ExistingConfigOption[];
   procCompatibility: CompatibilityCheckResult;
   onChangeSourceSelection: (side: 'left' | 'right', sources: SchemeSourceOption[]) => void;
+  onChangeOutputFields: (side: 'left' | 'right', fields: OutputFieldDraft[]) => void;
   onProcConfigModeChange: (mode: 'ai' | 'existing') => void;
   onSelectExistingProcConfig: (configId: string) => void;
   isGeneratingProc?: boolean;
@@ -936,9 +941,12 @@ export default function SchemeWizardTargetProcStep({
   schemeDraft,
   selectedLeftSources,
   selectedRightSources,
+  leftOutputFields,
+  rightOutputFields,
   existingProcOptions,
   procCompatibility,
   onChangeSourceSelection,
+  onChangeOutputFields,
   onProcConfigModeChange,
   onSelectExistingProcConfig,
   isGeneratingProc = false,
@@ -1010,10 +1018,30 @@ export default function SchemeWizardTargetProcStep({
             当前版本先保留这块展示位。后续会在这里提供筛选条件、行处理和字段级操作的可视化配置。
           </p>
         </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <SchemeWizardOutputFieldEditor
+            authToken={authToken}
+            title="左侧输出字段"
+            sources={selectedLeftSources}
+            fields={leftOutputFields}
+            onChange={(fields) => onChangeOutputFields('left', fields)}
+          />
+          <SchemeWizardOutputFieldEditor
+            authToken={authToken}
+            title="右侧输出字段"
+            sources={selectedRightSources}
+            fields={rightOutputFields}
+            onChange={(fields) => onChangeOutputFields('right', fields)}
+          />
+        </div>
       </div>
 
       <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-        <p className="text-sm font-semibold text-text-primary">配置方式</p>
+        <p className="text-sm font-semibold text-text-primary">兼容执行配置</p>
+        <p className="mt-1 text-xs leading-5 text-text-secondary">
+          上面的输出字段会作为目标结构提示参与生成。当前版本的生成与试跑，仍通过下面这套兼容入口执行。
+        </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             type="button"

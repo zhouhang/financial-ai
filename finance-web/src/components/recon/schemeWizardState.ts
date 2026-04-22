@@ -31,6 +31,26 @@ export interface SchemeSourceSelection {
   schemaSummary?: Record<string, unknown>;
 }
 
+export type OutputFieldValueMode = 'source_field' | 'fixed_value' | 'formula' | 'concat';
+
+export interface OutputFieldConcatPart {
+  id: string;
+  datasetId: string;
+  fieldName: string;
+}
+
+export interface OutputFieldDraft {
+  id: string;
+  outputName: string;
+  valueMode: OutputFieldValueMode;
+  sourceDatasetId: string;
+  sourceField: string;
+  fixedValue: string;
+  formula: string;
+  concatDelimiter: string;
+  concatParts: OutputFieldConcatPart[];
+}
+
 export interface SchemeDraft {
   name: string;
   businessGoal: string;
@@ -65,6 +85,8 @@ export interface SchemeWizardIntentDraft {
 export interface SchemeWizardPreparationDraft {
   leftSources: SchemeSourceSelection[];
   rightSources: SchemeSourceSelection[];
+  leftOutputFields: OutputFieldDraft[];
+  rightOutputFields: OutputFieldDraft[];
   leftDescription: string;
   rightDescription: string;
   procConfigMode: ConfigMode;
@@ -113,6 +135,113 @@ interface ProcDraftEditOptions {
   preserveReferencePreview?: boolean;
 }
 
+function buildDraftId(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function resolveDatasetLabelMap(
+  sources: SchemeSourceSelection[],
+): Map<string, { datasetName: string; fieldLabelMap: Record<string, string> }> {
+  return new Map(
+    sources.map((source) => [
+      source.id,
+      {
+        datasetName: source.businessName?.trim() || source.name,
+        fieldLabelMap: source.fieldLabelMap || {},
+      },
+    ]),
+  );
+}
+
+function formatFieldReference(
+  datasetId: string,
+  fieldName: string,
+  sourceMap: Map<string, { datasetName: string; fieldLabelMap: Record<string, string> }>,
+): string {
+  if (!datasetId || !fieldName) return '待补充';
+  const source = sourceMap.get(datasetId);
+  const datasetName = source?.datasetName || '数据集';
+  const displayName = source?.fieldLabelMap?.[fieldName]?.trim();
+  return displayName && displayName !== fieldName
+    ? `${datasetName}.${displayName}(${fieldName})`
+    : `${datasetName}.${fieldName}`;
+}
+
+function renderOutputFieldSummary(
+  fields: OutputFieldDraft[],
+  sources: SchemeSourceSelection[],
+): string {
+  if (fields.length === 0) return '';
+  const sourceMap = resolveDatasetLabelMap(sources);
+  const lines = fields.map((field, index) => {
+    const outputName = field.outputName.trim() || `字段${index + 1}`;
+    if (field.valueMode === 'source_field') {
+      return `${outputName}：取自 ${formatFieldReference(field.sourceDatasetId, field.sourceField, sourceMap)}`;
+    }
+    if (field.valueMode === 'fixed_value') {
+      return `${outputName}：固定值 ${field.fixedValue.trim() || '--'}`;
+    }
+    if (field.valueMode === 'formula') {
+      return `${outputName}：按公式 ${field.formula.trim() || '--'} 计算`;
+    }
+    const concatParts = field.concatParts
+      .map((part) => formatFieldReference(part.datasetId, part.fieldName, sourceMap))
+      .filter((item) => item !== '待补充');
+    const concatText = concatParts.length > 0 ? concatParts.join('、') : '待补充字段';
+    const delimiterText = field.concatDelimiter.trim() ? `，连接符为“${field.concatDelimiter.trim()}”` : '';
+    return `${outputName}：由 ${concatText} 拼接${delimiterText}`;
+  });
+  return lines.join('\n');
+}
+
+function sanitizeOutputFieldDrafts(
+  fields: OutputFieldDraft[],
+  allowedDatasetIds: Set<string>,
+): OutputFieldDraft[] {
+  return fields.map((field) => {
+    const sourceDatasetId = allowedDatasetIds.has(field.sourceDatasetId) ? field.sourceDatasetId : '';
+    const concatParts = field.concatParts.filter((part) => allowedDatasetIds.has(part.datasetId));
+    return {
+      ...field,
+      sourceDatasetId,
+      sourceField: sourceDatasetId ? field.sourceField : '',
+      concatParts,
+    };
+  });
+}
+
+function buildPreparationWithRenderedDescriptions(
+  preparation: SchemeWizardPreparationDraft,
+): SchemeWizardPreparationDraft {
+  return {
+    ...preparation,
+    leftDescription: renderOutputFieldSummary(preparation.leftOutputFields, preparation.leftSources),
+    rightDescription: renderOutputFieldSummary(preparation.rightOutputFields, preparation.rightSources),
+  };
+}
+
+export function createOutputFieldConcatPart(): OutputFieldConcatPart {
+  return {
+    id: buildDraftId('concat'),
+    datasetId: '',
+    fieldName: '',
+  };
+}
+
+export function createOutputFieldDraft(seedName = ''): OutputFieldDraft {
+  return {
+    id: buildDraftId('field'),
+    outputName: seedName,
+    valueMode: 'source_field',
+    sourceDatasetId: '',
+    sourceField: '',
+    fixedValue: '',
+    formula: '',
+    concatDelimiter: '',
+    concatParts: [],
+  };
+}
+
 export function createEmptyCompatibilityState(): CompatibilityCheckResult {
   return {
     status: 'idle',
@@ -145,6 +274,8 @@ export function createEmptySchemeWizardDraftState(): SchemeWizardDraftState {
     preparation: {
       leftSources: [],
       rightSources: [],
+      leftOutputFields: [],
+      rightOutputFields: [],
       leftDescription: '',
       rightDescription: '',
       procConfigMode: 'ai',
@@ -168,14 +299,15 @@ export function createEmptySchemeWizardDraftState(): SchemeWizardDraftState {
 }
 
 export function buildLegacySchemeDraftSnapshot(state: SchemeWizardDraftState): SchemeDraft {
+  const preparation = buildPreparationWithRenderedDescriptions(state.preparation);
   return {
     name: state.intent.name,
     businessGoal: state.intent.businessGoal,
-    leftDescription: state.preparation.leftDescription,
-    rightDescription: state.preparation.rightDescription,
-    procConfigMode: state.preparation.procConfigMode,
-    selectedProcConfigId: state.preparation.selectedProcConfigId,
-    procDraft: state.preparation.procDraft,
+    leftDescription: preparation.leftDescription,
+    rightDescription: preparation.rightDescription,
+    procConfigMode: preparation.procConfigMode,
+    selectedProcConfigId: preparation.selectedProcConfigId,
+    procDraft: preparation.procDraft,
     procRuleJson: state.derived.procRuleJson,
     procTrialStatus: state.derived.procTrialStatus,
     procTrialSummary: state.derived.procTrialSummary,
@@ -205,14 +337,14 @@ export function applyLegacySchemeDraftSnapshot(
       name: nextDraft.name,
       businessGoal: nextDraft.businessGoal,
     },
-    preparation: {
+    preparation: buildPreparationWithRenderedDescriptions({
       ...state.preparation,
       leftDescription: nextDraft.leftDescription,
       rightDescription: nextDraft.rightDescription,
       procConfigMode: nextDraft.procConfigMode,
       selectedProcConfigId: nextDraft.selectedProcConfigId,
       procDraft: nextDraft.procDraft,
-    },
+    }),
     reconciliation: {
       ...state.reconciliation,
       reconConfigMode: nextDraft.reconConfigMode,
@@ -258,10 +390,63 @@ export function updatePreparationDraft(
 ): SchemeWizardDraftState {
   return {
     ...state,
-    preparation: {
+    preparation: buildPreparationWithRenderedDescriptions({
       ...state.preparation,
       ...patch,
-    },
+    }),
+    derived: createEmptySchemeWizardDerivedState(),
+  };
+}
+
+export function applyPreparationSources(
+  state: SchemeWizardDraftState,
+  side: 'left' | 'right',
+  sources: SchemeSourceSelection[],
+): SchemeWizardDraftState {
+  const leftSources = side === 'left' ? sources : state.preparation.leftSources;
+  const rightSources = side === 'right' ? sources : state.preparation.rightSources;
+  const leftOutputFields = sanitizeOutputFieldDrafts(
+    state.preparation.leftOutputFields,
+    new Set(leftSources.map((source) => source.id)),
+  );
+  const rightOutputFields = sanitizeOutputFieldDrafts(
+    state.preparation.rightOutputFields,
+    new Set(rightSources.map((source) => source.id)),
+  );
+  return {
+    ...state,
+    preparation: buildPreparationWithRenderedDescriptions({
+      ...state.preparation,
+      leftSources,
+      rightSources,
+      leftOutputFields,
+      rightOutputFields,
+    }),
+    derived: createEmptySchemeWizardDerivedState(),
+  };
+}
+
+export function applyPreparationOutputFields(
+  state: SchemeWizardDraftState,
+  side: 'left' | 'right',
+  fields: OutputFieldDraft[],
+): SchemeWizardDraftState {
+  const allowedDatasetIds = new Set(
+    (side === 'left' ? state.preparation.leftSources : state.preparation.rightSources).map((source) => source.id),
+  );
+  return {
+    ...state,
+    preparation: buildPreparationWithRenderedDescriptions({
+      ...state.preparation,
+      leftOutputFields:
+        side === 'left'
+          ? sanitizeOutputFieldDrafts(fields, allowedDatasetIds)
+          : state.preparation.leftOutputFields,
+      rightOutputFields:
+        side === 'right'
+          ? sanitizeOutputFieldDrafts(fields, allowedDatasetIds)
+          : state.preparation.rightOutputFields,
+    }),
     derived: createEmptySchemeWizardDerivedState(),
   };
 }
@@ -510,22 +695,25 @@ export function updateDerivedDraft(
 }
 
 export function buildSchemeCreatePayloadDraft(state: SchemeWizardDraftState) {
+  const preparation = buildPreparationWithRenderedDescriptions(state.preparation);
   return {
     scheme_name: state.intent.name.trim(),
     description: state.intent.businessGoal.trim(),
-    left_sources: state.preparation.leftSources,
-    right_sources: state.preparation.rightSources,
+    left_sources: preparation.leftSources,
+    right_sources: preparation.rightSources,
     proc_rule_json: state.derived.procRuleJson,
     recon_rule_json: state.derived.reconRuleJson,
     scheme_meta_json: {
       business_goal: state.intent.businessGoal.trim(),
-      left_description: state.preparation.leftDescription.trim(),
-      right_description: state.preparation.rightDescription.trim(),
+      left_description: preparation.leftDescription.trim(),
+      right_description: preparation.rightDescription.trim(),
+      left_output_fields: preparation.leftOutputFields,
+      right_output_fields: preparation.rightOutputFields,
       proc_trial_status: state.derived.procTrialStatus,
       proc_trial_summary: state.derived.procTrialSummary.trim(),
       recon_trial_status: state.derived.reconTrialStatus,
       recon_trial_summary: state.derived.reconTrialSummary.trim(),
-      proc_draft_text: state.preparation.procDraft.trim(),
+      proc_draft_text: preparation.procDraft.trim(),
       recon_draft_text: state.reconciliation.reconDraft.trim(),
       recon_rule_name: state.reconciliation.reconRuleName.trim(),
       match_key: state.reconciliation.matchKey.trim(),

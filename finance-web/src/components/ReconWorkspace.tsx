@@ -28,6 +28,8 @@ import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
 import SchemeWizardSummaryStep from './recon/SchemeWizardSummaryStep';
 import {
+  applyPreparationOutputFields,
+  applyPreparationSources,
   applyLegacySchemeDraftSnapshot,
   applyExistingProcConfig,
   applyExistingReconConfig,
@@ -41,7 +43,6 @@ import {
   updateDerivedDraft,
   updateIntentDraft,
   applyProcDraftEdit,
-  updatePreparationDraft,
   updateReconciliationDraft,
   type SchemeWizardDraftState,
 } from './recon/schemeWizardState';
@@ -921,6 +922,8 @@ function emptyCompatibilityResult(): CompatibilityCheckResult {
 const PROC_REFERENCE_VALIDATION = '以下展示的是上一次试跑的数据样例，仅供参考。';
 const PROC_REFERENCE_EDIT_SUMMARY =
   '已保留上一次试跑结果的数据样例供参考。当前整理说明已修改，请重新点击“AI生成整理配置”并重新试跑。';
+const PREPARATION_REFERENCE_EDIT_SUMMARY =
+  '已保留上一次试跑结果的数据样例供参考。当前数据准备已修改，请重新生成整理配置并重新试跑。';
 
 function markProcTrialPreviewAsReference(
   preview: ProcTrialPreview | null,
@@ -1699,6 +1702,8 @@ export default function ReconWorkspace({
   const schemeDraft = useMemo<SchemeDraft>(() => buildLegacySchemeDraftSnapshot(wizardDraftState), [wizardDraftState]);
   const selectedLeftSources = wizardDraftState.preparation.leftSources as SchemeSourceOption[];
   const selectedRightSources = wizardDraftState.preparation.rightSources as SchemeSourceOption[];
+  const leftOutputFields = wizardDraftState.preparation.leftOutputFields;
+  const rightOutputFields = wizardDraftState.preparation.rightOutputFields;
   const procCompatibilityState = wizardDraftState.derived.procCompatibility as CompatibilityCheckResult;
   const reconCompatibilityState = wizardDraftState.derived.reconCompatibility as CompatibilityCheckResult;
   const setSchemeDraft = useCallback((updater: SetStateAction<SchemeDraft>) => {
@@ -2245,6 +2250,44 @@ options.push({
     [setProcCompatibility, setReconCompatibility],
   );
 
+  const handlePreparationDraftChange = useCallback(
+    (updater: (prev: SchemeWizardDraftState) => SchemeWizardDraftState) => {
+      const hasExistingPreview = Boolean(procTrialPreview);
+      setWizardDraftState((prev) => {
+        const next = updater(prev);
+        if (!hasExistingPreview) {
+          return next;
+        }
+        return updateDerivedDraft(next, {
+          procTrialStatus: 'needs_adjustment',
+          procTrialSummary: PREPARATION_REFERENCE_EDIT_SUMMARY,
+          procPreviewState: 'reference',
+          reconTrialStatus: 'idle',
+          reconTrialSummary: '',
+          reconPreviewState: 'empty',
+        });
+      });
+      setDesignSessionId('');
+      setWizardJsonPanel(null);
+      if (hasExistingPreview) {
+        setProcTrialPreview((prev) =>
+          markProcTrialPreviewAsReference(prev, PREPARATION_REFERENCE_EDIT_SUMMARY),
+        );
+        setProcCompatibility({
+          status: 'warning',
+          message: '数据准备已修改，下面保留的是上一次试跑结果，仅供参考。请重新生成整理配置后再试跑。',
+          details: [],
+        });
+      } else {
+        setProcTrialPreview(null);
+        setProcCompatibility(emptyCompatibilityResult());
+      }
+      setReconTrialPreview(null);
+      setReconCompatibility(emptyCompatibilityResult());
+    },
+    [procTrialPreview, setProcCompatibility, setReconCompatibility],
+  );
+
   const changeSchemeSources = useCallback((side: 'left' | 'right', sources: SchemeSourceOption[]) => {
     const current = side === 'left' ? selectedLeftSources : selectedRightSources;
     const currentIds = current.map((item) => item.id);
@@ -2253,16 +2296,8 @@ options.push({
       return;
     }
 
-    setWizardDraftState((prev) =>
-      updatePreparationDraft(prev, side === 'left' ? { leftSources: sources } : { rightSources: sources }),
-    );
-    setDesignSessionId('');
-    setWizardJsonPanel(null);
-    setProcTrialPreview(null);
-    setReconTrialPreview(null);
-    setProcCompatibility(emptyCompatibilityResult());
-    setReconCompatibility(emptyCompatibilityResult());
-  }, [selectedLeftSources, selectedRightSources, setProcCompatibility, setReconCompatibility]);
+    handlePreparationDraftChange((prev) => applyPreparationSources(prev, side, sources));
+  }, [handlePreparationDraftChange, selectedLeftSources, selectedRightSources]);
 
   useEffect(() => {
     if (modalState?.kind !== 'create-plan') return;
@@ -4148,9 +4183,14 @@ options.push({
             }}
             selectedLeftSources={selectedLeftSources}
             selectedRightSources={selectedRightSources}
+            leftOutputFields={leftOutputFields}
+            rightOutputFields={rightOutputFields}
             existingProcOptions={existingProcOptions}
             procCompatibility={procCompatibilityState}
             onChangeSourceSelection={(side, sources) => changeSchemeSources(side, sources)}
+            onChangeOutputFields={(side, fields) =>
+              handlePreparationDraftChange((prev) => applyPreparationOutputFields(prev, side, fields))
+            }
             onProcConfigModeChange={(mode) => {
               setWizardDraftState((prev) => switchProcConfigMode(prev, mode));
               setProcTrialPreview(null);
@@ -4272,6 +4312,8 @@ options.push({
         businessGoal={schemeDraft.businessGoal}
         leftSources={selectedLeftSources.map((item) => resolveDatasetDisplayName(item))}
         rightSources={selectedRightSources.map((item) => resolveDatasetDisplayName(item))}
+        leftOutputFields={leftOutputFields.map((item) => item.outputName.trim()).filter(Boolean)}
+        rightOutputFields={rightOutputFields.map((item) => item.outputName.trim()).filter(Boolean)}
         procDisplayName={procDisplayName}
         reconDisplayName={reconDisplayName}
         procHasConfig={Boolean(schemeDraft.procRuleJson)}
