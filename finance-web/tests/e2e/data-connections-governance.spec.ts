@@ -84,7 +84,7 @@ test('数据库连接页显示统一治理入口且操作列默认可见', async
   await expect(page.getByRole('button', { name: '保存发布信息' })).toBeVisible();
 });
 
-test('新增对账方案可看到已发布数据集候选且 dark mode 确定按钮非白色', async ({ page }) => {
+test('新增对账方案第二步会展示新数据整理结构并在选数后自动推荐字段', async ({ page }) => {
   await loginAsAdmin(page, 'dark');
   await openReconCenter(page);
 
@@ -92,7 +92,14 @@ test('新增对账方案可看到已发布数据集候选且 dark mode 确定按
   await expect(page.getByText('按四步完成方案设计与试跑确认')).toBeVisible();
 
   await page.getByLabel('方案名称').fill(`PW 发布候选校验 ${Date.now()}`);
-  await page.getByLabel('对账目标').fill('确认已发布数据集能够出现在左右侧原始数据候选中。');
+  await page.getByLabel('对账目的').fill('确认已发布数据集能够出现在左右侧原始数据候选中。');
+  await page.getByRole('button', { name: '下一步' }).click();
+
+  await expect(page.getByText('第二步：选择数据集并配置输出字段')).toBeVisible();
+  await expect(page.getByText('1. 选择左右原始数据集')).toBeVisible();
+  await expect(page.getByText('2. 调整左右输出字段')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'AI生成整理配置' })).toHaveCount(0);
+  await expect(page.getByText('选完数据集后会自动推荐字段')).toBeVisible();
 
   const leftCard = page.getByText('左侧原始数据').locator('xpath=ancestor::div[contains(@class,"rounded-3xl")][1]');
   const dropdownButton = leftCard.getByRole('button').first();
@@ -104,12 +111,19 @@ test('新增对账方案可看到已发布数据集候选且 dark mode 确定按
     .last();
   await expect(dropdownPanel).toBeVisible();
 
-  const searchInput = dropdownPanel.getByPlaceholder('搜索业务名称/技术名/数据源，不输入则展示已发布候选');
+  const searchInput = dropdownPanel.getByPlaceholder('搜索数据集…');
   await searchInput.fill('支付宝');
 
   await expect(dropdownPanel.getByText('支付宝订单数据')).toBeVisible();
+  await dropdownPanel.locator('input[type="radio"]').first().check();
 
   const confirmButton = dropdownPanel.getByRole('button', { name: '确定' });
   const backgroundColor = await confirmButton.evaluate((element) => window.getComputedStyle(element).backgroundColor);
   expect(backgroundColor).not.toBe('rgb(255, 255, 255)');
+  await confirmButton.click();
+
+  const leftOutputCard = page.getByText('左侧输出字段').locator('xpath=ancestor::div[contains(@class,"rounded-3xl")][1]');
+  await expect(leftOutputCard.locator('input[value="业务单号"]').first()).toBeVisible();
+  await expect(leftOutputCard.getByText(/已配 \d+ 个字段/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '试跑验证' })).toBeVisible();
 });

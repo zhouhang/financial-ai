@@ -214,7 +214,23 @@ interface EditableDatasetSemantic {
   verifiedStatus: string;
   publishStatus: string;
   uniqueIdentifierRawNames: string[];
+  collectionDateField: string;
+  collectionScheduleFrequency: string;
+  collectionScheduleTime: string;
   fieldRows: EditableDatasetSemanticFieldRow[];
+}
+
+interface DatasetCollectionDetailDialogState {
+  sourceId: string;
+  sourceName: string;
+  datasetId: string;
+  datasetName: string;
+  resourceKey: string;
+  loading: boolean;
+  error: string;
+  actionError: string;
+  lastLoadedAt: string;
+  detail: Record<string, unknown> | null;
 }
 
 interface EditableDatasetSemanticFieldRow {
@@ -277,6 +293,30 @@ function asStringRecord(value: unknown): Record<string, string> | undefined {
     .filter(([key, item]) => key.trim().length > 0 && item.length > 0);
   if (entries.length === 0) return undefined;
   return Object.fromEntries(entries);
+}
+
+function buildSampleTableColumns(rows: Record<string, unknown>[], maxColumns = 12): string[] {
+  const columns: string[] = [];
+  const seen = new Set<string>();
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (seen.has(key) || columns.length >= maxColumns) return;
+      seen.add(key);
+      columns.push(key);
+    });
+  });
+  return columns;
+}
+
+function formatSampleCellValue(value: unknown): string {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'string') return value.trim() || '-';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function normalizeDiscoverSummary(raw: unknown): DataSourceListItem['discover_summary'] | undefined {
@@ -998,6 +1038,8 @@ function buildEditableDatasetSemanticState(
   dataset: DataSourceDatasetSummary,
 ): EditableDatasetSemantic {
   const semantic = readDatasetSemanticInfo(dataset);
+  const collectionConfig = asRecord(dataset.collection_config) ?? asRecord(asRecord(dataset.meta)?.collection_config) ?? {};
+  const collectionSchedule = asRecord(collectionConfig.schedule) ?? {};
   const { schemaName, objectName } = parseSchemaAndObjectName(dataset);
   const fieldRows = buildEditableDatasetSemanticFieldRows(dataset);
   const uniqueIdentifierRawNames = buildUniqueIdentifierRawNames(
@@ -1021,6 +1063,9 @@ function buildEditableDatasetSemanticState(
     verifiedStatus: readDatasetVerifiedStatus(dataset),
     publishStatus: readDatasetPublishStatus(dataset),
     uniqueIdentifierRawNames,
+    collectionDateField: asString(collectionConfig.date_field) ?? '',
+    collectionScheduleFrequency: asString(collectionSchedule.frequency) ?? 'daily',
+    collectionScheduleTime: asString(collectionSchedule.time) ?? '08:30',
     fieldRows,
   };
 }
@@ -1348,6 +1393,7 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
       ? value.semantic_fields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
       : undefined,
     low_confidence_fields: asStringArray(value.low_confidence_fields),
+    collection_config: asRecord(value.collection_config) ?? undefined,
     origin_type: asString(value.origin_type),
     dataset_kind: asString(value.dataset_kind),
     resource_key: asString(value.resource_key),
@@ -1791,6 +1837,7 @@ export default function DataConnectionsPanel({
   const [datasetSemanticError, setDatasetSemanticError] = useState('');
   const [datasetSemanticNotice, setDatasetSemanticNotice] = useState('');
   const [refreshingDatasetSemantic, setRefreshingDatasetSemantic] = useState(false);
+  const [collectionDetailDialog, setCollectionDetailDialog] = useState<DatasetCollectionDetailDialogState | null>(null);
   const [datasetViewTabsBySource, setDatasetViewTabsBySource] = useState<Record<string, DatasetViewTab>>({});
   const [physicalCatalogFiltersBySource, setPhysicalCatalogFiltersBySource] = useState<
     Record<string, PhysicalCatalogFilterState>
@@ -3710,6 +3757,161 @@ export default function DataConnectionsPanel({
     [authToken, draftSourceIdSet, refreshDatasetSemanticSuggestions, requestDatasetDetail, updateDatasetInState],
   );
 
+  const openDatasetCollectionDetail = useCallback(
+    async (source: DataSourceListItem, dataset: DataSourceDatasetSummary) => {
+      const baseState: DatasetCollectionDetailDialogState = {
+        sourceId: source.id,
+        sourceName: source.name || source.id,
+        datasetId: dataset.id,
+        datasetName: dataset.business_name || dataset.dataset_name || dataset.dataset_code,
+        resourceKey: dataset.resource_key || dataset.dataset_code,
+        loading: true,
+        error: '',
+        actionError: '',
+        lastLoadedAt: '',
+        detail: null,
+      };
+      setCollectionDetailDialog(baseState);
+      if (!authToken || draftSourceIdSet.has(source.id)) {
+        setCollectionDetailDialog({
+          ...baseState,
+          loading: false,
+          error: '当前环境未连接后端采集详情接口。',
+        });
+        return;
+      }
+      try {
+        const params = new URLSearchParams({
+          resource_key: dataset.resource_key || dataset.dataset_code,
+          limit: '10',
+          sample_limit: '10',
+        });
+        const response = await fetch(
+          `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/collection-detail?${params.toString()}`,
+          { headers: authHeaders },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '获取采集详情失败'));
+        }
+        setCollectionDetailDialog({
+          ...baseState,
+          loading: false,
+          detail: asRecord(data) ?? {},
+          lastLoadedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        setCollectionDetailDialog({
+          ...baseState,
+          loading: false,
+          error: error instanceof Error ? error.message : '获取采集详情失败',
+        });
+      }
+    },
+    [authHeaders, authToken, draftSourceIdSet],
+  );
+
+  const retryCollectionDetailDataset = useCallback(async () => {
+    if (!collectionDetailDialog || !authToken || draftSourceIdSet.has(collectionDetailDialog.sourceId)) return;
+    const source = remoteSources.find((item) => item.id === collectionDetailDialog.sourceId);
+    const dataset = source?.datasets?.find((item) => item.id === collectionDetailDialog.datasetId) ?? {
+      id: collectionDetailDialog.datasetId,
+      dataset_code: collectionDetailDialog.resourceKey,
+      dataset_name: collectionDetailDialog.datasetName,
+      resource_key: collectionDetailDialog.resourceKey,
+    } as DataSourceDatasetSummary;
+    setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: true, actionError: '' } : prev));
+    try {
+      const response = await fetch(
+        `/api/data-sources/${collectionDetailDialog.sourceId}/datasets/${encodeURIComponent(collectionDetailDialog.datasetId)}/collection`,
+        {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          resource_key: collectionDetailDialog.resourceKey,
+          params: {
+            resource_key: collectionDetailDialog.resourceKey,
+            query: { resource_key: collectionDetailDialog.resourceKey },
+          },
+        }),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '立即采集失败'));
+      }
+      if (source) {
+        await openDatasetCollectionDetail(source, dataset);
+      } else {
+        setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false } : prev));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '立即采集失败';
+      if (source) {
+        await openDatasetCollectionDetail(source, dataset);
+        setCollectionDetailDialog((prev) => (prev ? { ...prev, actionError: message } : prev));
+      } else {
+        setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false, actionError: message } : prev));
+      }
+    }
+  }, [authHeaders, authToken, collectionDetailDialog, draftSourceIdSet, openDatasetCollectionDetail, remoteSources]);
+
+  const refreshCollectionDetailDialog = useCallback(async () => {
+    if (!collectionDetailDialog || !authToken || draftSourceIdSet.has(collectionDetailDialog.sourceId)) return;
+    const params = new URLSearchParams({
+      resource_key: collectionDetailDialog.resourceKey,
+      limit: '10',
+      sample_limit: '10',
+    });
+    try {
+      const response = await fetch(
+        `/api/data-sources/${collectionDetailDialog.sourceId}/datasets/${encodeURIComponent(collectionDetailDialog.datasetId)}/collection-detail?${params.toString()}`,
+        { headers: authHeaders },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '刷新采集详情失败'));
+      }
+      setCollectionDetailDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              error: '',
+              detail: asRecord(data) ?? {},
+              lastLoadedAt: new Date().toISOString(),
+            }
+          : prev,
+      );
+    } catch (error) {
+      setCollectionDetailDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              actionError: error instanceof Error ? error.message : '刷新采集详情失败',
+            }
+          : prev,
+      );
+    }
+  }, [authHeaders, authToken, collectionDetailDialog, draftSourceIdSet]);
+
+  const collectionDetailHasRunningJob = useMemo(() => {
+    const jobs = Array.isArray(collectionDetailDialog?.detail?.jobs) ? collectionDetailDialog.detail.jobs : [];
+    return jobs.some((job) => {
+      const status = asString(asRecord(job)?.status) || asString(asRecord(job)?.job_status) || '';
+      return status.toLowerCase() === 'running';
+    });
+  }, [collectionDetailDialog?.detail]);
+
+  useEffect(() => {
+    if (!collectionDetailDialog || !collectionDetailHasRunningJob) return undefined;
+    const timer = window.setInterval(() => {
+      void refreshCollectionDetailDialog();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [collectionDetailDialog, collectionDetailHasRunningJob, refreshCollectionDetailDialog]);
+
   const refreshEditingDatasetSemantic = useCallback(async () => {
     if (!editingDatasetSemantic) return;
     await refreshDatasetSemanticSuggestions(
@@ -3790,6 +3992,26 @@ export default function DataConnectionsPanel({
     });
   }, []);
 
+  const setEditingDatasetCollectionDateField = useCallback((rawName: string) => {
+    setEditingDatasetSemantic((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        collectionDateField: rawName,
+        fieldRows: prev.fieldRows.map((row) => {
+          if (row.rawName !== rawName) return row;
+          return {
+            ...row,
+            semanticType: row.semanticType.trim() || 'datetime',
+            businessRole: row.businessRole.trim() || 'time_field',
+            confirmedByUser: true,
+            pending: false,
+          };
+        }),
+      };
+    });
+  }, []);
+
   const acceptAllEditingDatasetSemanticSuggestions = useCallback(() => {
     setEditingDatasetSemantic((prev) => {
       if (!prev) return prev;
@@ -3860,6 +4082,15 @@ export default function DataConnectionsPanel({
       tech_name: editingDatasetSemantic.resourceKey || editingDatasetSemantic.datasetName,
       updated_at: updatedAt,
     };
+    const collectionConfig = {
+      mode: editingDatasetSemantic.collectionDateField.trim() ? 'date_field' : 'manual',
+      date_field: editingDatasetSemantic.collectionDateField.trim(),
+      schedule: {
+        enabled: true,
+        frequency: editingDatasetSemantic.collectionScheduleFrequency || 'daily',
+        time: editingDatasetSemantic.collectionScheduleTime || '08:30',
+      },
+    };
 
     const applyLocalUpdate = (notice: string) => {
       updateDatasetInState(
@@ -3880,9 +4111,11 @@ export default function DataConnectionsPanel({
           semantic_pending_count: pendingFieldNames.length,
           semantic_status: 'manual_updated',
           semantic_updated_at: updatedAt,
+          collection_config: collectionConfig,
           meta: {
             ...(dataset.meta || {}),
             semantic_profile: semanticProfile,
+            collection_config: collectionConfig,
           },
         }),
       );
@@ -3896,6 +4129,9 @@ export default function DataConnectionsPanel({
               verifiedStatus,
               publishStatus: 'published',
               uniqueIdentifierRawNames: keyFields,
+              collectionDateField: collectionConfig.date_field,
+              collectionScheduleFrequency: collectionConfig.schedule.frequency,
+              collectionScheduleTime: collectionConfig.schedule.time,
               fieldRows: prev.fieldRows.map((row) => ({
                 ...row,
                 displayName: fieldLabelMap[row.rawName] || row.displayName,
@@ -3939,6 +4175,7 @@ export default function DataConnectionsPanel({
             business_object_type: businessObjectType,
             grain,
             verified_status: verifiedStatus,
+            collection_config: collectionConfig,
           }),
         },
       );
@@ -5424,6 +5661,13 @@ export default function DataConnectionsPanel({
                                 <div className="text-right text-xs text-text-secondary">
                                   <p>最近使用：{formatTime(lastUsedAt)}</p>
                                   <p>最近同步：{formatTime(dataset.last_sync_at)}</p>
+                                  <button
+                                    type="button"
+                                    onClick={() => void openDatasetCollectionDetail(activeSource, dataset)}
+                                    className="mt-2 inline-flex items-center justify-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs whitespace-nowrap text-blue-700 transition-colors hover:bg-blue-100"
+                                  >
+                                    采集详情
+                                  </button>
                                 </div>
                               </div>
 
@@ -5980,7 +6224,7 @@ export default function DataConnectionsPanel({
                     <span className="text-sm font-medium text-text-primary">唯一标识字段</span>
                   </div>
                   <p className="mt-1 text-xs text-text-secondary">
-                    用于唯一定位一条业务记录。界面展示中文名，保存时使用技术字段名，避免后续整理和对账规则引用不稳定。
+                    用于数据采集幂等：系统会用唯一标识判断同一条源数据，重复采集时更新同一条记录而不是新增重复数据。
                   </p>
                   {editingUniqueIdentifierRows.length > 0 ? (
                     <div className="mt-3 flex flex-wrap gap-2">
@@ -6000,8 +6244,77 @@ export default function DataConnectionsPanel({
                     </div>
                   )}
                   <p className="mt-3 text-xs text-text-muted">
-                    需要调整时，不编辑中文文本，直接在字段行里切换“作为唯一标识”。
+                    需要调整时，直接在字段行里切换“作为唯一标识”。
                   </p>
+                </div>
+
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="h-4 w-4 text-text-secondary" />
+                    <span className="text-sm font-medium text-text-primary">采集配置</span>
+                  </div>
+                  <p className="mt-1 text-xs text-text-secondary">
+                    优先选择更新时间字段，确保能采集到新增和更新的数据；没有更新时间字段时选择创建时间字段，至少能采集到新创建的数据。
+                  </p>
+                  <p className="mt-1 text-xs text-blue-700">
+                    发布后系统会按采集计划独立采集数据，写入数据资产层，供对账和后续 AI 数据统计使用。
+                  </p>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="text-xs text-text-muted">采集时间字段</span>
+                      <div className="relative mt-2">
+                        <select
+                          value={editingDatasetSemantic.collectionDateField}
+                          onChange={(event) => setEditingDatasetCollectionDateField(event.target.value)}
+                          className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        >
+                          <option value="">暂不设置</option>
+                          {editingSemanticFieldRows.map((row) => (
+                            <option key={`collection-date-${row.rawName}`} value={row.rawName}>
+                              {(row.displayName || row.rawName) === row.rawName
+                                ? row.rawName
+                                : `${row.displayName || row.rawName}（${row.rawName}）`}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
+                          <ChevronDown className="h-4 w-4" />
+                        </span>
+                      </div>
+                    </label>
+                    <label className="block">
+                      <span className="text-xs text-text-muted">频率</span>
+                      <div className="relative mt-2">
+                        <select
+                          value={editingDatasetSemantic.collectionScheduleFrequency}
+                          onChange={(event) =>
+                            setEditingDatasetSemantic((prev) =>
+                              prev ? { ...prev, collectionScheduleFrequency: event.target.value } : prev,
+                            )
+                          }
+                          className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        >
+                          <option value="daily">每日</option>
+                        </select>
+                        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
+                          <ChevronDown className="h-4 w-4" />
+                        </span>
+                      </div>
+                    </label>
+                    <label className="block">
+                      <span className="text-xs text-text-muted">执行时间</span>
+                      <input
+                        type="time"
+                        value={editingDatasetSemantic.collectionScheduleTime}
+                        onChange={(event) =>
+                          setEditingDatasetSemantic((prev) =>
+                            prev ? { ...prev, collectionScheduleTime: event.target.value } : prev,
+                          )
+                        }
+                        className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                      />
+                    </label>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
@@ -6141,6 +6454,195 @@ export default function DataConnectionsPanel({
                   {editingDatasetSemantic.publishStatus === 'published' ? '保存发布信息' : '确认发布'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {collectionDetailDialog && (
+        <div className="fixed inset-0 z-40 bg-black/35" onClick={() => setCollectionDetailDialog(null)}>
+          <div
+            className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="border-b border-border px-5 py-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h4 className="text-base font-semibold text-text-primary">采集详情</h4>
+                  <p className="mt-1 truncate text-sm text-text-primary">{collectionDetailDialog.datasetName}</p>
+                  <p className="mt-1 truncate text-xs text-text-secondary">
+                    {collectionDetailDialog.sourceName} · {collectionDetailDialog.resourceKey}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCollectionDetailDialog(null)}
+                  className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-5">
+              {collectionDetailDialog.loading ? (
+                <div className="flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载采集详情。
+                </div>
+              ) : collectionDetailDialog.error ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {collectionDetailDialog.error}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {collectionDetailDialog.actionError && (
+                    <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                      {collectionDetailDialog.actionError}
+                    </div>
+                  )}
+                  {(() => {
+                    const detail = collectionDetailDialog.detail ?? {};
+                    const jobs = Array.isArray(detail.jobs)
+                      ? detail.jobs.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+                      : [];
+                    const rows = Array.isArray(detail.rows)
+                      ? detail.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+                      : [];
+                    const completedJobs = jobs.filter((job) => {
+                      const status = (asString(job.status) || asString(job.job_status) || '').toLowerCase();
+                      return status === 'success' || status === 'succeeded' || status === 'completed';
+                    });
+                    const latestJob = jobs[0] ?? {};
+                    const collectedCount = jobs.reduce((total, job) => {
+                      const metrics = asRecord(job.metrics) ?? {};
+                      return total + (asNumber(metrics.collection_upserted) ?? asNumber(metrics.row_count) ?? asNumber(metrics.rows) ?? 0);
+                    }, 0);
+                    return (
+                      <>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                            <p className="text-xs text-text-muted">采集任务</p>
+                            <p className="mt-2 text-lg font-semibold text-text-primary">
+                              {jobs.length} 次
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                            <p className="text-xs text-text-muted">采集记录数</p>
+                            <p className="mt-2 text-lg font-semibold text-text-primary">
+                              {collectedCount || rows.length}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                            <p className="text-xs text-text-muted">最近采集</p>
+                            <p className="mt-2 text-sm font-medium text-text-primary">
+                              {formatTime(asString(latestJob.completed_at) || asString(latestJob.created_at))}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-medium text-text-primary">最近采集任务</p>
+                              <p className="mt-1 text-xs text-text-secondary">
+                                展示该数据集最近的采集成功、失败和原因。成功 {completedJobs.length} 次。
+                                {collectionDetailDialog.lastLoadedAt ? ` 最近刷新：${formatTime(collectionDetailDialog.lastLoadedAt)}` : ''}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void refreshCollectionDetailDialog()}
+                                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                              >
+                                <RefreshCw className="h-4 w-4" />
+                                刷新
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void retryCollectionDetailDataset()}
+                                className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                              >
+                                <RefreshCw className="h-4 w-4" />
+                                立即采集
+                              </button>
+                            </div>
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {jobs.length === 0 ? (
+                              <p className="rounded-xl border border-dashed border-border px-3 py-2 text-sm text-text-secondary">
+                                暂无采集任务。
+                              </p>
+                            ) : (
+                              jobs.map((job) => {
+                                const status = asString(job.status) || asString(job.job_status) || 'unknown';
+                                const metrics = asRecord(job.metrics) ?? {};
+                                const rowCount = asNumber(metrics.collection_upserted) ?? asNumber(metrics.row_count) ?? '';
+                                return (
+                                  <div key={asString(job.id) || JSON.stringify(job)} className="rounded-xl border border-border bg-surface px-3 py-2">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(status)}`}>
+                                        {status}
+                                      </span>
+                                      <span className="text-xs text-text-muted">
+                                        {formatTime(asString(job.completed_at) || asString(job.created_at))}
+                                      </span>
+                                    </div>
+                                    <p className="mt-1 text-xs text-text-secondary">
+                                      {rowCount !== '' ? `采集 ${rowCount} 条` : '未返回采集行数'}
+                                    </p>
+                                    {asString(job.error_message) && (
+                                      <p className="mt-1 text-xs text-red-600">失败原因：{asString(job.error_message)}</p>
+                                    )}
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                          <p className="text-sm font-medium text-text-primary">最新 10 条数据</p>
+                          <div className="mt-3 max-h-80 overflow-auto rounded-xl border border-border bg-surface">
+                            {rows.length === 0 ? (
+                              <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>
+                            ) : (() => {
+                              const sampleRows = rows.slice(0, 10).map((row) => asRecord(row) ?? {});
+                              const columns = buildSampleTableColumns(sampleRows);
+                              if (columns.length === 0) {
+                                return <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>;
+                              }
+                              return (
+                                <table className="min-w-full divide-y divide-border text-left text-xs">
+                                  <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                                    <tr>
+                                      {columns.map((column) => (
+                                        <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">
+                                          {column}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-border text-text-primary">
+                                    {sampleRows.map((row, rowIndex) => (
+                                      <tr key={`collection-sample-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                        {columns.map((column) => (
+                                          <td key={`${rowIndex}-${column}`} className="max-w-56 truncate px-3 py-2" title={formatSampleCellValue(row[column])}>
+                                            {formatSampleCellValue(row[column])}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           </div>
         </div>

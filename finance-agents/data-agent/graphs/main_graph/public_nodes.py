@@ -15,6 +15,10 @@ from langchain_core.messages import AIMessage
 
 from config import UPLOAD_DIR
 from models import AgentState, ProcAgentPhase
+from utils.file_intake import (
+    build_upload_name_maps as shared_build_upload_name_maps,
+    prepare_logical_upload_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,35 +94,7 @@ def _build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[
         display_name_to_ref: 用户原始文件名/存储文件名 -> /uploads/... 引用
         ref_to_display_name: /uploads.../绝对路径/存储文件名 -> 用户原始文件名
     """
-    display_name_to_ref: dict[str, str] = {}
-    ref_to_display_name: dict[str, str] = {}
-
-    for item in raw_files:
-        original_filename = ""
-        if isinstance(item, dict):
-            fp = item.get("file_path") or item.get("path") or ""
-            original_filename = (item.get("original_filename") or item.get("name") or "").strip()
-        else:
-            fp = str(item)
-        if not fp:
-            continue
-        try:
-            upload_ref = _to_upload_ref(fp)
-            abs_path = _to_abs_path(upload_ref)
-        except ValueError:
-            continue
-
-        stored_name = os.path.basename(abs_path)
-        display_name = original_filename or stored_name
-
-        display_name_to_ref[display_name] = upload_ref
-        display_name_to_ref[stored_name] = upload_ref
-
-        ref_to_display_name[upload_ref] = display_name
-        ref_to_display_name[abs_path] = display_name
-        ref_to_display_name[stored_name] = display_name
-
-    return display_name_to_ref, ref_to_display_name
+    return shared_build_upload_name_maps(raw_files)
 
 
 def _read_header(file_path: str, ignore_whitespace: bool = True) -> list[str]:
@@ -184,6 +160,75 @@ def _format_required_columns(schema: dict[str, Any] | None) -> str:
 
 def _format_file_list(items: list[str]) -> str:
     return "、".join(str(item) for item in items if str(item).strip())
+
+
+def _format_prefilter_target(item: dict[str, Any]) -> str:
+    workbook_name = (
+        str(item.get("workbook_display_name") or item.get("workbook_original_filename") or "").strip()
+    )
+    sheet_name = str(item.get("sheet_name") or "").strip()
+    if workbook_name and sheet_name:
+        return f"{workbook_name} / {sheet_name}"
+    return str(item.get("display_name") or workbook_name or "未命名文件").strip()
+
+
+def _build_prefilter_summary_text(
+    prefilter_summary: list[dict[str, Any]],
+    *,
+    include_kept: bool = False,
+) -> str:
+    if not prefilter_summary:
+        return ""
+
+    has_multi_sheet = any(item.get("is_logical_split") for item in prefilter_summary)
+    dropped_items = [item for item in prefilter_summary if item.get("status") == "dropped"]
+    kept_items = [item for item in prefilter_summary if item.get("status") == "kept"]
+    if not dropped_items and (not include_kept or not has_multi_sheet):
+        return ""
+
+    sections: list[str] = []
+    if include_kept and kept_items:
+        kept_lines = []
+        for item in kept_items:
+            target = _format_prefilter_target(item)
+            candidates = [str(name) for name in item.get("candidate_table_names") or [] if str(name).strip()]
+            if candidates:
+                kept_lines.append(f"- {target} -> 进入正式校验（候选：{', '.join(candidates)}）")
+            else:
+                kept_lines.append(f"- {target} -> 进入正式校验")
+        sections.append("纳入正式校验的文件 / sheet：\n" + "\n".join(kept_lines))
+
+    if dropped_items:
+        dropped_lines = []
+        for item in dropped_items:
+            target = _format_prefilter_target(item)
+            reason = str(item.get("reason") or item.get("reason_code") or "已过滤").strip()
+            dropped_lines.append(f"- {target} -> 已过滤（{reason}）")
+        sections.append("预筛选已过滤的文件 / sheet：\n" + "\n".join(dropped_lines))
+
+    if not sections:
+        return ""
+    return "\n\n".join(sections)
+
+
+def _build_candidate_mapping_text(candidate_mappings: dict[str, Any]) -> str:
+    if not isinstance(candidate_mappings, dict) or not candidate_mappings:
+        return ""
+
+    lines: list[str] = []
+    for file_name, candidates in sorted(candidate_mappings.items()):
+        if not isinstance(candidates, list):
+            continue
+        table_names = [
+            str(item.get("table_name") or "").strip()
+            for item in candidates
+            if isinstance(item, dict) and str(item.get("table_name") or "").strip()
+        ]
+        if table_names:
+            lines.append(f"- {file_name} -> {', '.join(table_names)}")
+    if not lines:
+        return ""
+    return "存在映射歧义的文件 / sheet：\n" + "\n".join(lines)
 
 
 async def _load_rule_from_pg(rule_code: str, auth_token: str) -> dict[str, Any] | None:
@@ -397,28 +442,53 @@ async def check_file_node(state: AgentState) -> dict:
                 "proc_ctx": ctx,
             }
 
-    # ── 3. 读取各文件列名，构建 tool 参数 ────────────────────────────────
-    files_with_columns: list[dict] = []
-    for entry in uploaded_file_entries:
-        fp = entry["abs_path"]
-        display_name = entry["display_name"]
-        try:
-            columns = _read_header(fp, ignore_whitespace=True)
-            files_with_columns.append({
-                "file_name": display_name,
-                "columns": columns,
-            })
-            logger.info(
-                f"[public_nodes] 读取列名成功: {display_name}, 共 {len(columns)} 列"
-            )
-        except Exception as e:
-            reason = f"读取文件「{display_name}」表头失败：{e}"
-            msg = f"文件校验失败：\n\n{reason}"
-            ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
-            return {
-                "messages": [AIMessage(content=msg)],
-                "proc_ctx": ctx,
-            }
+    # ── 3. 预处理上传文件：多 sheet 拆分 + sheet 级预筛选 ─────────────────
+    try:
+        intake_result = prepare_logical_upload_files(raw_files, file_rule=file_rule)
+    except Exception as e:
+        reason = f"拆分或预处理上传文件失败：{e}"
+        msg = f"文件校验失败：\n\n{reason}"
+        ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": reason})
+        return {
+            "messages": [AIMessage(content=msg)],
+            "proc_ctx": ctx,
+        }
+
+    logical_uploaded_files: list[dict[str, Any]] = list(intake_result.get("logical_uploaded_files") or [])
+    files_with_columns: list[dict[str, Any]] = list(intake_result.get("files_with_columns") or [])
+    prefilter_summary: list[dict[str, Any]] = list(intake_result.get("prefilter_summary") or [])
+
+    logger.info(
+        "[public_nodes] 预处理上传文件完成: kept=%s dropped=%s logical_files=%s",
+        intake_result.get("kept_count", 0),
+        intake_result.get("dropped_count", 0),
+        [item.get("display_name") for item in logical_uploaded_files],
+    )
+
+    prefilter_summary_text = _build_prefilter_summary_text(prefilter_summary, include_kept=True)
+
+    if not files_with_columns:
+        reason = "上传文件拆分后没有可参与正式校验的文件 / sheet，请检查表头、数据行或规则要求。"
+        sections = [
+            "文件校验失败：",
+            "",
+            reason,
+        ]
+        if prefilter_summary_text:
+            sections.extend(["", prefilter_summary_text])
+        requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
+        sections.extend(["", requirement_text])
+        msg = "\n".join(sections)
+        ctx.update({
+            "phase": ProcAgentPhase.FILE_CHECK_FAILED.value,
+            "error": reason,
+            "logical_uploaded_files": logical_uploaded_files,
+            "sheet_prefilter_summary": prefilter_summary,
+        })
+        return {
+            "messages": [AIMessage(content=msg)],
+            "proc_ctx": ctx,
+        }
 
     # ── 4. 调用 MCP tool validate_files 执行全量列名精确匹配 ──────────────────
     from tools.mcp_client import validate_files as mcp_validate_files
@@ -451,10 +521,8 @@ async def check_file_node(state: AgentState) -> dict:
         matched_results = validate_result.get("matched_results", [])
         missing_tables = validate_result.get("missing_tables", [])
         unmatched_files = validate_result.get("unmatched_files", [])
-        schema_map = _get_table_schema_map(file_rule)
-        expected_schema_count = len(schema_map)
+        candidate_mappings = validate_result.get("candidate_mappings", {})
         uploaded_count = len(files_with_columns)
-        is_file_count_mismatch = expected_schema_count > 0 and uploaded_count != expected_schema_count
 
         matched_lines: list[str] = []
         if matched_results:
@@ -465,18 +533,25 @@ async def check_file_node(state: AgentState) -> dict:
                     matched_lines.append(f"- {file_name} -> {table_name}")
 
         unmatched_lines = [f"- {file_name}" for file_name in unmatched_files]
-        upload_summary = (
-            f"本次共上传 {uploaded_count} 个文件；当前规则需要 {expected_schema_count} 类文件。"
-        )
+        upload_summary = f"本次参与正式校验的文件 / sheet 共 {uploaded_count} 个。"
+        candidate_mapping_text = _build_candidate_mapping_text(candidate_mappings)
 
-        if is_file_count_mismatch:
-            requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
-            msg = (
-                "文件校验失败：\n\n"
-                f"当前上传了 {uploaded_count} 个文件，但「{rule_display_name}」规则要求上传 {expected_schema_count} 个文件。\n\n"
-                f"{requirement_text}\n\n"
-                "请按规则要求上传正确数量的文件后重试。"
-            )
+        if candidate_mapping_text:
+            sections = [
+                "文件校验失败：",
+                "",
+                upload_summary,
+                "",
+                candidate_mapping_text,
+            ]
+            if prefilter_summary_text:
+                sections.extend(["", prefilter_summary_text])
+            sections.extend([
+                "",
+                "这些文件 / sheet 的表头可以匹配多个 schema，当前无法唯一确定对应关系。",
+                "请收紧规则 required_columns，或去掉结构过于相似的冗余 sheet 后重试。",
+            ])
+            msg = "\n".join(sections)
         elif unmatched_files or missing_tables:
             requirement_text = _build_file_rule_requirements_text(rule_display_name, file_rule)
             detail_lines = []
@@ -496,6 +571,8 @@ async def check_file_node(state: AgentState) -> dict:
                 sections.extend(["", "已识别的文件：", "\n".join(matched_lines)])
             if unmatched_lines:
                 sections.extend(["", "未识别的文件：", "\n".join(unmatched_lines)])
+            if prefilter_summary_text:
+                sections.extend(["", prefilter_summary_text])
             sections.extend([
                 "",
                 "发现以下问题：",
@@ -507,8 +584,16 @@ async def check_file_node(state: AgentState) -> dict:
                 "\n".join(sections)
             )
         else:
-            msg = f"文件校验失败：\n\n{error_msg}"
-        ctx.update({"phase": ProcAgentPhase.FILE_CHECK_FAILED.value, "error": error_msg})
+            sections = ["文件校验失败：", "", error_msg]
+            if prefilter_summary_text:
+                sections.extend(["", prefilter_summary_text])
+            msg = "\n".join(sections)
+        ctx.update({
+            "phase": ProcAgentPhase.FILE_CHECK_FAILED.value,
+            "error": error_msg,
+            "logical_uploaded_files": logical_uploaded_files,
+            "sheet_prefilter_summary": prefilter_summary,
+        })
         return {
             "messages": [AIMessage(content=msg)],
             "proc_ctx": ctx,
@@ -546,6 +631,9 @@ async def check_file_node(state: AgentState) -> dict:
         summary_parts.append("✅ **已匹配：**\n" + "\n".join(match_lines))
     if unmatch_lines:
         summary_parts.append("⚠️ **未匹配：**\n" + "\n".join(unmatch_lines))
+    dropped_prefilter_text = _build_prefilter_summary_text(prefilter_summary, include_kept=False)
+    if dropped_prefilter_text:
+        summary_parts.append("🧹 **预筛选已过滤：**\n" + dropped_prefilter_text.replace("\n\n", "\n"))
 
     file_match_summary = (
         "\n\n**文件识别结果：**\n" + "\n\n".join(summary_parts)
@@ -557,6 +645,8 @@ async def check_file_node(state: AgentState) -> dict:
     ctx.update({
         "phase": ProcAgentPhase.EXECUTING.value,
         "file_match_results": matched_results,   # [{file_name, table_id, table_name}]
+        "logical_uploaded_files": logical_uploaded_files,
+        "sheet_prefilter_summary": prefilter_summary,
     })
     return {
         "messages": [AIMessage(content=completion_msg)] if completion_msg else [],

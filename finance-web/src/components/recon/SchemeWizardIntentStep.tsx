@@ -14,7 +14,7 @@ export default function SchemeWizardIntentStep({
   return (
     <div className="space-y-5">
       <div className="rounded-3xl border border-border bg-surface-secondary p-5">
-        <p className="text-sm font-semibold text-text-primary">先补充方案目标，再进入数据准备</p>
+        <p className="text-sm font-semibold text-text-primary">先补充方案目标，再进入数据整理</p>
         <p className="mt-2 text-sm leading-6 text-text-secondary">
           填写方案名称和对账目的后，系统再带你配置左右数据与后续试跑。
         </p>

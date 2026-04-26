@@ -37,8 +37,11 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const callbacksRef = useRef(options);
-  const sendMessageRef = useRef<SendMessageFn | null>(null);
-  callbacksRef.current = options;
+  const connectRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    callbacksRef.current = options;
+  }, [options]);
 
   const sendMessage = useCallback(
     (
@@ -91,8 +94,6 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     },
     []
   );
-  sendMessageRef.current = sendMessage;
-
   const connect = useCallback(() => {
     // 如果已有 OPEN 或 CONNECTING 状态的连接，不重复创建
     const current = wsRef.current;
@@ -109,8 +110,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       if (wsRef.current === ws) {
         setStatus('connected');
         reconnectAttemptsRef.current = 0;
-        const send = sendMessageRef.current;
-        if (send) callbacksRef.current.onConnect?.(send);
+        callbacksRef.current.onConnect?.(sendMessage);
       }
     };
 
@@ -138,7 +138,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
         );
         reconnectAttemptsRef.current++;
         reconnectTimerRef.current = window.setTimeout(() => {
-          connect();
+          connectRef.current?.();
         }, delay);
       }
     };
@@ -146,7 +146,11 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     ws.onerror = () => {
       ws.close();
     };
-  }, [autoReconnect]);
+  }, [autoReconnect, sendMessage]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -160,8 +164,11 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   }, []);
 
   useEffect(() => {
-    connect();
-    return () => disconnect();
+    const connectTimer = window.setTimeout(() => connect(), 0);
+    return () => {
+      clearTimeout(connectTimer);
+      disconnect();
+    };
   }, [connect, disconnect]);
 
   return { status, sendMessage, connect, disconnect };

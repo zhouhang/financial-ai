@@ -154,7 +154,7 @@ async def proc_task_execute_node(state: AgentState) -> dict:
     # ── 准备 proc_execute 参数 ───────────────────────────────────────────────
     # file_match_results 格式: [{file_name, table_id, table_name}]
     # 需要补充 file_path（从 uploaded_files 或 state 中获取）
-    uploaded_files_raw: list = list(state.get("uploaded_files") or [])
+    uploaded_files_raw: list = list(ctx.get("logical_uploaded_files") or state.get("uploaded_files") or [])
 
     # 构建 file_name -> file_path 映射，兼容原始文件名与存储文件名
     file_path_map, _ = _build_upload_name_maps(uploaded_files_raw)

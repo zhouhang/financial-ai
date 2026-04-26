@@ -179,7 +179,7 @@ export default function ReconAutoRunsPanel({
                           className="inline-flex items-center gap-1 rounded-lg border border-sky-200 px-2.5 py-1.5 text-xs text-sky-700 transition-colors hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           <RefreshCw className={cn('h-3.5 w-3.5', verifyRunId === run.id && 'animate-spin')} />
-                          {verifyRunId === run.id ? '验证中...' : '重新验证'}
+                          {verifyRunId === run.id ? '验证中...' : '重新对账验证'}
                         </button>
                       </div>
                     </td>

@@ -109,6 +109,36 @@ class ReconTrialRequest(BaseModel):
     validated_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class DatasetFieldPreviewRequest(BaseModel):
+    source_id: str = ""
+    resource_key: str = ""
+    dataset_id: str = ""
+
+
+@router.post("/dataset-fields")
+async def get_dataset_field_preview(
+    body: DatasetFieldPreviewRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Return field list with Chinese display names — used for dataset picker tooltip."""
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    if not body.source_id and not body.dataset_id:
+        raise HTTPException(status_code=400, detail="source_id 或 dataset_id 至少提供一个")
+    service = get_scheme_design_service()
+    try:
+        result = await service.get_dataset_field_preview(
+            auth_token=auth_token,
+            source_id=body.source_id,
+            resource_key=body.resource_key,
+            dataset_id=body.dataset_id,
+        )
+    except ValueError as exc:
+        raise _translate_service_error(exc) from exc
+    return result
+
+
 @router.post("/start")
 async def start_design_session(
     body: StartDesignSessionRequest,

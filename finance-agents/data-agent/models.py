@@ -250,8 +250,8 @@ class SchemeDesignSession(BaseModel):
     source_description: str = ""
     sample_files: list[str] = Field(default_factory=list)
     sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
-    skill_hints: list[str] = Field(default_factory=lambda: ["proc-config", "recon-config"])
-    executor_name: str = "fallback-no-deepagent"
+    skill_hints: list[str] = Field(default_factory=list)
+    executor_name: str = "single-shot-json-generator"
     messages: list[SchemeDesignMessage] = Field(default_factory=list)
     drafts: SchemeDesignDraftState = Field(default_factory=SchemeDesignDraftState)
     target_step: SchemeDesignTargetState = Field(default_factory=SchemeDesignTargetState)

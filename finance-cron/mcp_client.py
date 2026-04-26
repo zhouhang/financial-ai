@@ -257,3 +257,38 @@ async def execution_scheduler_get_slot_run(
             "schedule_slot": schedule_slot,
         },
     )
+
+
+async def data_source_scheduler_list_collection_plans(
+    auth_token: str,
+    *,
+    company_id: str = "",
+    limit: int = 500,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"auth_token": auth_token, "limit": limit}
+    if company_id:
+        payload["company_id"] = company_id
+    return await call_mcp_tool("data_source_scheduler_list_collection_plans", payload)
+
+
+async def data_source_trigger_dataset_collection(
+    auth_token: str,
+    *,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+    trigger_mode: str = "schedule",
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "dataset_id": dataset_id,
+        "resource_key": resource_key,
+        "biz_date": biz_date,
+        "trigger_mode": trigger_mode,
+    }
+    if params:
+        payload["params"] = params
+    return await call_mcp_tool("data_source_trigger_dataset_collection", payload)

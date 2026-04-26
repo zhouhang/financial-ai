@@ -42,4 +42,16 @@
 4. `function`
 5. `context`
 
+标准输出字段约束（极重要）：
+
+1. `biz_key`、`amount`、`biz_date`、`source_name` 是 proc 步骤的标准输出字段，只能出现在 `target_field`，永远不能作为 `source.field`（源字段）。
+2. `biz_key` 必须从源表的实际主键字段（如 `order_id`、`ledger_id`）映射而来，形如 `{"target_field": "biz_key", "value": {"type": "source", "source": {"alias": "...", "field": "actual_key_field"}}}`。
+3. `source_name` 必须使用 `formula` 类型输出数据来源的业务名称字符串（中文固定值），禁止映射到源表任何数据库字段。
+
+数据集元数据约束（极重要）：
+
+1. 输入 payload 中的 `source_table_identifier` 是本数据集的执行层标识符（即源表名），不是表里的数据列。
+2. 禁止把 `source_table_identifier` 的值或 `table_name` 这个字符串作为 `source.field` 使用。
+3. `sources[].table` 应引用 `source_table_identifier` 的值（如 `alipay_orders`），而非字面量 `"table_name"` 或 `"source_table_identifier"`。
+
 如果需求超出能力，不要自造 DSL，直接写入 `unsupported_points`。

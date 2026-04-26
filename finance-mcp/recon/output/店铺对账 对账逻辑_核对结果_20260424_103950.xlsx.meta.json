@@ -1,0 +1,8 @@
+{
+  "owner_user_id": "finance-cron:00000000-0000-0000-0000-000000000001",
+  "module": "recon",
+  "rule_code": "dataset_recon_f52e5465",
+  "rule_id": "wizard_recon_411077",
+  "file_name": "店铺对账 对账逻辑_核对结果_20260424_103950.xlsx",
+  "created_at": "2026-04-24T02:39:50.033642+00:00"
+}

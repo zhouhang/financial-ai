@@ -806,6 +806,79 @@ def _format_trial_errors(errors: list[Any]) -> list[dict[str, Any]]:
     return formatted
 
 
+def _extract_dataset_semantic_profile(item: dict[str, Any]) -> dict[str, Any]:
+    direct_profile = _safe_dict(item.get("semantic_profile"))
+    if direct_profile:
+        return direct_profile
+    for container_key in ("meta", "metadata", "dataset_meta"):
+        container = _safe_dict(item.get(container_key))
+        profile = _safe_dict(container.get("semantic_profile"))
+        if profile:
+            return profile
+    return {}
+
+
+def _normalize_label_map(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_name, display_name in raw.items():
+        key = _as_text(raw_name).strip()
+        if not key:
+            continue
+        display = _as_text(display_name).strip() or key
+        normalized[key] = display
+    return normalized
+
+
+def _build_dataset_field_label_map(item: dict[str, Any]) -> dict[str, str]:
+    profile = _extract_dataset_semantic_profile(item)
+    field_label_map: dict[str, str] = {}
+    field_label_map.update(_normalize_label_map(profile.get("field_label_map")))
+    field_label_map.update(_normalize_label_map(item.get("field_label_map")))
+
+    candidate_fields: list[dict[str, Any]] = []
+    for key in ("fields", "semantic_fields"):
+        candidate_fields.extend(
+            field
+            for field in _safe_list(item.get(key))
+            if isinstance(field, dict)
+        )
+    candidate_fields.extend(
+        field
+        for field in _safe_list(profile.get("fields"))
+        if isinstance(field, dict)
+    )
+    for field in candidate_fields:
+        raw_name = _as_text(
+            field.get("raw_name")
+            or field.get("field_name")
+            or field.get("name")
+            or field.get("key")
+        ).strip()
+        if not raw_name:
+            continue
+        display_name = _as_text(
+            field.get("display_name")
+            or field.get("display_name_zh")
+            or field.get("label")
+            or field_label_map.get(raw_name)
+        ).strip()
+        if display_name:
+            field_label_map[raw_name] = display_name
+        else:
+            field_label_map.setdefault(raw_name, raw_name)
+
+    for row in _safe_list(item.get("sample_rows"))[:3]:
+        if not isinstance(row, dict):
+            continue
+        for key in row.keys():
+            raw_name = _as_text(key).strip()
+            if raw_name:
+                field_label_map.setdefault(raw_name, raw_name)
+    return field_label_map
+
+
 def _build_proc_trial_inputs(
     *,
     uploaded_files: list[dict[str, Any]],
@@ -877,14 +950,24 @@ def _build_proc_trial_inputs(
                     "table_name": table_name,
                 }
             )
+            field_label_map = _build_dataset_field_label_map(item)
+            display_name = _as_text(
+                item.get("business_name")
+                or item.get("display_name")
+                or item.get("dataset_name")
+                or table_name
+            )
             source_samples.append(
                 {
                     "side": _infer_preview_side(item.get("side") or table_name),
                     "table_name": table_name,
-                    "display_name": _as_text(item.get("display_name") or item.get("dataset_name") or table_name),
+                    "display_name": display_name,
                     "source_id": _as_text(item.get("source_id") or item.get("source_key") or table_name),
                     "sample_origin": _resolve_sample_origin(item.get("sample_origin"), fallback="sample_rows"),
                     **({"snapshot_id": snapshot_id} if snapshot_id else {}),
+                    "field_label_map": field_label_map,
+                    "columns_label_map": field_label_map,
+                    "column_display_map": field_label_map,
                     "rows": _rows_to_preview_rows(sample_rows),
                 }
             )
@@ -1236,7 +1319,7 @@ def _normalize_dataset_binding_item(
             "query": query,
         }
     mapping_config = _safe_dict(item.get("mapping_config"))
-    for key in ("table_name", "dataset_code", "dataset_source_type", "side"):
+    for key in ("table_name", "dataset_code", "dataset_source_type", "side", "source_kind", "provider_code"):
         value = item.get(key)
         if value is None:
             continue
@@ -1406,7 +1489,7 @@ def _extract_run_plan_dataset_bindings(
             "query": _safe_dict(item.get("query")),
             "table_name": _as_text(item.get("table_name") or resource_key),
             "dataset_code": _as_text(item.get("dataset_code") or resource_key),
-            "dataset_source_type": _as_text(item.get("dataset_source_type") or "snapshot"),
+            "dataset_source_type": _as_text(item.get("dataset_source_type") or "collection_records"),
         }
         binding = _normalize_dataset_binding_item(
             normalized_item,
@@ -2151,11 +2234,17 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             "errors": missing_source_bindings,
             "normalized_rule": normalized_rule,
         }
-    expected_targets = {
+    requested_expected_targets = {
+        _as_text(item)
+        for item in _safe_list(arguments.get("expected_targets"))
+        if _as_text(item)
+    }
+    expected_targets = requested_expected_targets or {
         _as_text(_safe_dict(step).get("target_table"))
         for step in _safe_list(normalized_rule.get("steps"))
         if _as_text(_safe_dict(step).get("target_table"))
     }
+    require_both_sides = bool(arguments.get("require_both_sides", True))
     temp_input_dir: str | None = None
     temp_output_dir: str | None = None
     source_samples: list[dict[str, Any]] = []
@@ -2233,15 +2322,34 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             item.get("target_table") == "right_recon_ready" and bool(item.get("rows"))
             for item in output_samples
         )
-        ready_for_confirm = has_left_output and has_right_output and has_left_preview_rows and has_right_preview_rows
+        if require_both_sides:
+            ready_for_confirm = (
+                has_left_output
+                and has_right_output
+                and has_left_preview_rows
+                and has_right_preview_rows
+            )
+        else:
+            ready_for_confirm = bool(expected_targets) and expected_targets.issubset(output_targets)
+            if ready_for_confirm:
+                ready_for_confirm = all(
+                    any(item.get("target_table") == target and bool(item.get("rows")) for item in output_samples)
+                    for target in expected_targets
+                )
         warnings = [*input_warnings, *output_warnings]
         if expected_targets and not expected_targets.issubset(output_targets):
             missing_targets = sorted(expected_targets - output_targets)
             warnings.append(f"试跑未生成预期输出：{', '.join(missing_targets)}")
-        if not has_left_preview_rows or not has_right_preview_rows:
-            warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
-        if not ready_for_confirm:
-            warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
+        if require_both_sides:
+            if not has_left_preview_rows or not has_right_preview_rows:
+                warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
+            if not ready_for_confirm:
+                warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
+        elif expected_targets and not ready_for_confirm:
+            warnings.append(
+                "试跑未生成指定目标表的可展示抽样结果："
+                + ", ".join(sorted(expected_targets))
+            )
 
         return {
             "success": True,
@@ -2274,6 +2382,8 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                 "step_nodes": len(_safe_list(normalized_rule.get("steps"))),
                 "output_tables": len(output_targets),
             },
+            "expected_targets": sorted(expected_targets),
+            "require_both_sides": require_both_sides,
             "normalized_rule": normalized_rule,
             "source_samples": source_samples,
             "output_samples": output_samples,

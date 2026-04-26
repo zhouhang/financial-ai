@@ -23,16 +23,18 @@
 
 重点理解：
 
-1. `left_sources` / `right_sources` 是当前用户已经选定的数据集，字段里会带 `table_name`、`dataset_name`、`schema_summary`、`sample_rows`。
+1. `left_sources` / `right_sources` 是当前用户已经选定的数据集，字段里会带 `source_table_identifier`（源表执行标识）、`dataset_name`、`schema_summary`、`sample_rows`。
    - 还会带 `business_name`、`field_label_map`、`fields`、`field_display_pairs`、`sample_rows_with_display_fields`。
+   - **重要**：`source_table_identifier` 是整张表的执行层标识符（如 `alipay_orders`），不是表中的数据列，禁止在 `source.field` 中使用它。
 2. `sample_datasets` 是左右两侧样本数据的合集，通常与 `left_sources` / `right_sources` 对应。
 3. 若上一轮有试跑失败，优先阅读 `previous_trial_feedback` 和 `previous_validation_errors`，再修订草稿。
 
 字段使用约束：
 
 1. `business_name` 和 `display_with_raw` 只用于帮助理解业务语义。
-2. `effective_rule_json` 中字段引用必须使用原始字段名 `raw_name`。
+2. `effective_rule_json` 中字段引用必须使用原始字段名 `raw_name`（来自 `schema_summary` 或 `sample_rows` 的列名）。
 3. 禁止把中文显示名写入 `mappings/match/filter/aggregate` 的字段路径。
+4. `biz_key`、`amount`、`biz_date`、`source_name` 是标准输出字段，只能作为 `target_field`，禁止作为 `source.field`。
 
 生成说明时必须覆盖：
 

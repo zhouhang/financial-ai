@@ -242,7 +242,7 @@ export default function ChatArea({
     if ((!text && activeStagedFiles.length === 0 && !canStartReconFromDataSource) || isLoading || isUploading) return;
 
     let attachments: MessageAttachment[] | undefined;
-    let uploadedList: UploadedFile[] = [];
+    const uploadedList: UploadedFile[] = [];
 
     // 有暂存文件时先上传
     if (activeStagedFiles.length > 0) {

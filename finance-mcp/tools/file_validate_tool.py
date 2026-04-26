@@ -282,49 +282,8 @@ def validate_files_against_rules(
             "error": "校验规则中 table_schemas 为空，无法进行校验"
         }
 
-    # ── 文件数量校验 ──────────────────────────────────────────────────────────────────────
-    file_count_config = config.get("file_count", {})
-    min_files = file_count_config.get("min", 1)
-    max_files = file_count_config.get("max", 0)  # 0 表示不限制
-    allow_multiple = file_count_config.get("allow_multiple", True)
-
     total_uploaded = len(uploaded_files)
-
-    # 检查最小文件数量
-    if total_uploaded < min_files:
-        logger.warning(
-            f"[文件校验] 文件数量不足: 上传 {total_uploaded} 个，最少需要 {min_files} 个"
-        )
-        return {
-            "success": False,
-            "error": f"文件数量不足，至少需要上传 {min_files} 个文件，当前上传 {total_uploaded} 个。"
-        }
-
-    # 检查最大文件数量（max > 0 时有效）
-    if max_files > 0 and total_uploaded > max_files:
-        logger.warning(
-            f"[文件校验] 文件数量超限: 上传 {total_uploaded} 个，最多允许 {max_files} 个"
-        )
-        return {
-            "success": False,
-            "error": f"文件数量超过限制，最多允许上传 {max_files} 个文件，当前上传 {total_uploaded} 个。"
-        }
-
-    # 检查是否允许多文件
-    if not allow_multiple and total_uploaded > 1:
-        logger.warning(
-            f"[文件校验] 不允许多文件上传: 尝试上传 {total_uploaded} 个文件"
-        )
-        return {
-            "success": False,
-            "error": "当前规则不允许上传多个文件，请只上传一个文件。"
-        }
-
-    logger.info(
-        f"[文件校验] 文件数量校验通过: 上传 {total_uploaded} 个文件 "
-        f"(要求: 最少 {min_files}, 最多 {max_files if max_files > 0 else '无限制'}, "
-        f"多文件允许: {allow_multiple})"
-    )
+    logger.info(f"[文件校验] 开始 schema 匹配: 上传 {total_uploaded} 个文件")
 
     # ── 逐文件匹配 ────────────────────────────────────────────────────────
     # file_to_tables_map: file_name -> List[matched_table_info] (记录每个文件匹配到的所有规则)
@@ -551,12 +510,11 @@ async def _handle_validate_files(arguments: dict) -> dict:
 
     # ── 执行校验 ──────────────────────────────────────────────────────────
     try:
-        # 调试日志：输出 validation_config 和 file_count 配置
+        # 调试日志：输出 validation_config 与上传文件数量
         config = validation_rules.get("validation_config", {})
-        file_count_config = config.get("file_count", {})
         logger.info(
             f"[文件校验] 规则配置: rule_code={rule_code}, "
-            f"file_count={file_count_config}, "
+            f"validation_config={config}, "
             f"uploaded_files_count={len(uploaded_files)}"
         )
         result = validate_files_against_rules(uploaded_files, validation_rules)

@@ -11,17 +11,14 @@ MCP SSE 协议说明：
 from __future__ import annotations
 
 import asyncio
-import csv
 import hashlib
 import json
 import logging
 import os
 import re
-import tempfile
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
 
@@ -31,19 +28,15 @@ from config import FINANCE_MCP_BASE_URL
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
-_RESULT_WAIT_TIMEOUT = 60.0  # 等待 SSE 结果超时秒数
+_HTTP_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+_SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=None)
+_RESULT_WAIT_TIMEOUT = 180.0  # 等待 SSE 结果超时秒数
 _PLATFORM_CONNECTION_MODE = os.getenv("PLATFORM_CONNECTION_MODE", "mock").strip().lower() or "mock"
 _DATA_SOURCE_CONNECTION_MODE = (
     os.getenv("DATA_SOURCE_CONNECTION_MODE")
     or os.getenv("DATA_SOURCE_MODE")
     or "real"
 ).strip().lower() or "real"
-_MOCK_SNAPSHOT_EXPORT_ROOT = (
-    Path(__file__).resolve().parents[3] / "finance-mcp" / "uploads" / "mock_snapshot_exports"
-)
-
-
 def _get_result_wait_timeout(tool_name: str) -> float:
     """按工具类型返回结果等待超时。
 
@@ -54,9 +47,9 @@ def _get_result_wait_timeout(tool_name: str) -> float:
     if tool_name == "data_source_refresh_dataset_semantic_profile":
         return 90.0
     if tool_name == "proc_execute":
-        return 180.0
+        return 600.0
     if tool_name == "recon_execute":
-        return 300.0
+        return 600.0
     return _RESULT_WAIT_TIMEOUT
 
 # ===========================================================================
@@ -86,7 +79,7 @@ class _McpSession:
 
             try:
                 logger.info("建立 MCP SSE 长连接...")
-                self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+                self._client = httpx.AsyncClient(timeout=_SSE_TIMEOUT)
                 session_ready = asyncio.get_running_loop().create_future()
                 self._sse_task = asyncio.create_task(
                     self._sse_listener(session_ready)
@@ -146,7 +139,7 @@ class _McpSession:
                 "clientInfo": {"name": "data-agent", "version": "1.0"},
             },
         }
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as c:
             r = await c.post(
                 f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                 json=init_body,
@@ -164,7 +157,7 @@ class _McpSession:
         
         # 发送 notifications/initialized
         notif_body = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as c:
             await c.post(
                 f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                 json=notif_body,
@@ -270,7 +263,7 @@ class _McpSession:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as post_client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as post_client:
                 resp = await post_client.post(
                     f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                     json=request_body,
@@ -1618,7 +1611,7 @@ _DETERMINISTIC_SOURCE_KINDS: set[str] = {"platform_oauth", "database", "api", "f
 _MOCK_DATA_SOURCES_BY_USER: dict[str, dict[str, dict[str, Any]]] = {}
 _MOCK_DATA_SOURCE_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 _MOCK_SYNC_JOBS_BY_USER: dict[str, dict[str, dict[str, Any]]] = {}
-_MOCK_PUBLISHED_SNAPSHOTS_BY_USER: dict[str, dict[str, dict[str, Any]]] = {}
+_MOCK_COLLECTION_RECORDS_BY_USER: dict[str, dict[str, list[dict[str, Any]]]] = {}
 _MOCK_DATA_SOURCE_DATASETS_BY_USER: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
 _MOCK_DATA_SOURCE_EVENTS_BY_USER: dict[str, list[dict[str, Any]]] = {}
 
@@ -1655,7 +1648,7 @@ def _compute_source_capabilities(source_kind: str) -> list[str]:
             "test",
             "sync",
             "preview",
-            "published_snapshot",
+            "collection_records",
             "discover_datasets",
             "list_datasets",
             "list_events",
@@ -1774,7 +1767,7 @@ def _mock_seed_data_sources(user_key: str) -> dict[str, dict[str, Any]]:
     source_map = {item["id"]: item for item in seeded}
     _MOCK_DATA_SOURCES_BY_USER[user_key] = source_map
     _MOCK_SYNC_JOBS_BY_USER[user_key] = {}
-    _MOCK_PUBLISHED_SNAPSHOTS_BY_USER[user_key] = {}
+    _MOCK_COLLECTION_RECORDS_BY_USER[user_key] = {}
     return source_map
 
 
@@ -2034,12 +2027,10 @@ def _mock_get_data_source(auth_token: str, source_id: str) -> dict[str, Any]:
     source = source_map.get(source_id)
     if not source:
         return {"success": False, "mode": "mock", "error": "not_found", "message": "数据源不存在"}
-    published = _MOCK_PUBLISHED_SNAPSHOTS_BY_USER.get(user_key, {}).get(source_id)
     return {
         "success": True,
         "mode": "mock",
         "source": source,
-        "published_snapshot": published,
     }
 
 
@@ -2285,6 +2276,79 @@ def _mock_handle_data_source_callback(
     }
 
 
+def _mock_collection_record_key(source_id: str, dataset_id: str, resource_key: str) -> str:
+    return f"{source_id}|{dataset_id}|{resource_key or 'default'}"
+
+
+def _mock_rows_to_collection_records(
+    *,
+    source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    biz_date: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    now = _now_iso()
+    records: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        payload = dict(row)
+        item_key = str(payload.get("biz_key") or payload.get("id") or payload.get("record_id") or index + 1)
+        records.append(
+            {
+                "id": f"mock-record-{hashlib.sha1(f'{source_id}:{dataset_id}:{item_key}'.encode('utf-8')).hexdigest()[:16]}",
+                "source_id": source_id,
+                "data_source_id": source_id,
+                "dataset_id": dataset_id,
+                "dataset_code": dataset_code,
+                "resource_key": resource_key or "default",
+                "biz_date": biz_date,
+                "item_key": item_key,
+                "item_key_values": {"mock_key": item_key},
+                "item_hash": hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+                "payload": payload,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    return records
+
+
+def _mock_list_collection_records(
+    auth_token: str,
+    source_id: str,
+    *,
+    dataset_id: str = "",
+    resource_key: str = "",
+    biz_date: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    user_key = _auth_user_key(auth_token)
+    records_by_key = _MOCK_COLLECTION_RECORDS_BY_USER.setdefault(user_key, {})
+    if not dataset_id:
+        dataset_map, _ = _mock_ensure_data_source_context(user_key)
+        first_dataset = next(iter(dataset_map.setdefault(source_id, {}).values()), {})
+        dataset_id = str(first_dataset.get("id") or "")
+        resource_key = resource_key or str(first_dataset.get("resource_key") or "default")
+    key = _mock_collection_record_key(source_id, dataset_id, resource_key or "default")
+    records = list(records_by_key.get(key) or [])
+    if biz_date:
+        records = [item for item in records if str(item.get("biz_date") or "") == biz_date]
+    sliced = records[: max(1, min(limit, 1000))]
+    return {
+        "success": True,
+        "mode": "mock",
+        "source_id": source_id,
+        "dataset_id": dataset_id,
+        "resource_key": resource_key or "default",
+        "records": sliced,
+        "rows": [dict(item.get("payload") or {}) for item in sliced],
+        "count": len(sliced),
+        "record_count": len(records),
+        "stats": {"record_count": len(records)},
+    }
+
+
 def _mock_trigger_sync(
     auth_token: str,
     source_id: str,
@@ -2312,80 +2376,46 @@ def _mock_trigger_sync(
         }
 
     jobs = _MOCK_SYNC_JOBS_BY_USER.setdefault(user_key, {})
-    snapshots = _MOCK_PUBLISHED_SNAPSHOTS_BY_USER.setdefault(user_key, {})
+    collection_records = _MOCK_COLLECTION_RECORDS_BY_USER.setdefault(user_key, {})
     payload_params = dict(params or {})
-    resolved_idempotency_key = str(idempotency_key or "").strip() or hashlib.sha1(
-        json.dumps(
-            {
-                "source_id": source_id,
-                "window_start": window_start or "",
-                "window_end": window_end or "",
-                "params": payload_params,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
-
-    existing_job = next(
-        (
-            item
-            for item in jobs.values()
-            if str(item.get("source_id") or "") == source_id
-            and str(item.get("idempotency_key") or "") == resolved_idempotency_key
-        ),
-        None,
-    )
-    if existing_job:
-        return {
-            "success": True,
-            "mode": "mock",
-            "source_id": source_id,
-            "job": existing_job,
-            "reused": True,
-            "published_snapshot": snapshots.get(source_id),
-        }
 
     sync_job_id = f"sync_{uuid.uuid4()}"
-    snapshot_id = f"snapshot_{uuid.uuid4()}"
     now = _now_iso()
-    existing_snapshot = snapshots.get(source_id)
-    version = int(existing_snapshot.get("version") or 0) + 1 if existing_snapshot else 1
-    row_count = 120 + (abs(hash(source_id + now)) % 40)
     source_datasets = list(dataset_map.setdefault(source_id, {}).values())
     first_dataset = source_datasets[0] if source_datasets else None
+    dataset_id = str(payload_params.get("dataset_id") or (first_dataset or {}).get("id") or "")
     dataset_code = str((first_dataset or {}).get("dataset_code") or f"{source_kind}_dataset")
-
-    snapshot = {
-        "snapshot_id": snapshot_id,
-        "source_id": source_id,
-        "dataset_code": dataset_code,
-        "status": "published",
-        "version": version,
-        "row_count": row_count,
-        "published_at": now,
-        "window_start": window_start or "",
-        "window_end": window_end or "",
-    }
-    snapshots[source_id] = snapshot
+    resource_key = str(payload_params.get("resource_key") or (first_dataset or {}).get("resource_key") or "default")
+    biz_date = str(payload_params.get("biz_date") or window_start or now[:10])[:10]
+    preview_rows = [row for row in _mock_preview_data_source(auth_token, source_id, limit=10).get("rows") or [] if isinstance(row, dict)]
+    records = _mock_rows_to_collection_records(
+        source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        rows=preview_rows,
+    )
+    collection_records[_mock_collection_record_key(source_id, dataset_id, resource_key)] = records
 
     job = {
         "sync_job_id": sync_job_id,
         "source_id": source_id,
         "status": "success",
-        "idempotency_key": resolved_idempotency_key,
+        "idempotency_key": str(idempotency_key or ""),
         "window_start": window_start or "",
         "window_end": window_end or "",
         "params": payload_params,
+        "inserted_count": len(records),
+        "updated_count": 0,
+        "record_count": len(records),
         "started_at": now,
         "finished_at": now,
-        "published_snapshot_id": snapshot_id,
     }
     jobs[sync_job_id] = job
 
     source["last_sync_at"] = now
     source["last_sync_job_id"] = sync_job_id
-    source["published_snapshot_id"] = snapshot_id
     source["updated_at"] = now
     source["health_status"] = "healthy"
     if first_dataset:
@@ -2401,14 +2431,14 @@ def _mock_trigger_sync(
         event_type="sync_completed",
         event_level="info",
         event_message="同步任务执行成功（mock）",
-        event_payload={"snapshot_id": snapshot_id, "dataset_code": dataset_code},
+        event_payload={"dataset_id": dataset_id, "dataset_code": dataset_code, "record_count": len(records)},
     )
     return {
         "success": True,
         "mode": "mock",
         "source_id": source_id,
         "job": job,
-        "published_snapshot": snapshot,
+        "collection_summary": {"inserted": len(records), "updated": 0, "total": len(records)},
         "reused": False,
     }
 
@@ -2458,107 +2488,6 @@ def _mock_preview_data_source(auth_token: str, source_id: str, limit: int = 20) 
         "source_id": source_id,
         "rows": rows,
         "count": len(rows),
-    }
-
-
-def _mock_get_published_snapshot(auth_token: str, source_id: str) -> dict[str, Any]:
-    user_key = _auth_user_key(auth_token)
-    snapshot = _MOCK_PUBLISHED_SNAPSHOTS_BY_USER.setdefault(user_key, {}).get(source_id)
-    if not snapshot:
-        return {
-            "success": True,
-            "mode": "mock",
-            "source_id": source_id,
-            "published_snapshot": None,
-            "message": "暂无已发布快照",
-        }
-    return {
-        "success": True,
-        "mode": "mock",
-        "source_id": source_id,
-        "published_snapshot": snapshot,
-    }
-
-
-def _mock_list_published_snapshot_rows(auth_token: str, source_id: str, limit: int = 3) -> dict[str, Any]:
-    snapshot_result = _mock_get_published_snapshot(auth_token, source_id)
-    if not snapshot_result.get("published_snapshot"):
-        return {
-            **snapshot_result,
-            "rows": [],
-            "count": 0,
-        }
-    preview_result = _mock_preview_data_source(auth_token, source_id, limit=limit)
-    rows = [row for row in preview_result.get("rows") or [] if isinstance(row, dict)]
-    return {
-        "success": True,
-        "mode": "mock",
-        "source_id": source_id,
-        "resource_key": "default",
-        "snapshot_id": str(snapshot_result.get("published_snapshot", {}).get("snapshot_id") or ""),
-        "published_snapshot": snapshot_result.get("published_snapshot"),
-        "rows": rows,
-        "count": len(rows),
-    }
-
-
-def _mock_export_published_snapshot(
-    auth_token: str,
-    source_id: str,
-    *,
-    table_name: str = "",
-    resource_key: str = "",
-    query: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    user_key = _auth_user_key(auth_token)
-    source = _mock_seed_data_sources(user_key).get(source_id)
-    snapshot = _MOCK_PUBLISHED_SNAPSHOTS_BY_USER.setdefault(user_key, {}).get(source_id)
-    if not source or not snapshot:
-        return {
-            "success": False,
-            "mode": "mock",
-            "source_id": source_id,
-            "error": "暂无已发布快照，无法导出",
-        }
-
-    resolved_table_name = table_name or resource_key or str(snapshot.get("dataset_code") or "") or source_id
-    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
-    biz_date = str(
-        filters.get("biz_date")
-        or filters.get("accounting_date")
-        or filters.get("event_time")
-        or datetime.now(timezone.utc).date().isoformat()
-    )
-    source_name = str(source.get("name") or source_id)
-    rows = [
-        {
-            "biz_key": f"{source_id[-6:]}_{index + 1}",
-            "amount": round(100 + index * 1.23, 2),
-            "biz_date": biz_date,
-            "source_name": source_name,
-        }
-        for index in range(3)
-    ]
-    _MOCK_SNAPSHOT_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix="mock_snapshot_export_", dir=str(_MOCK_SNAPSHOT_EXPORT_ROOT)))
-    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", resolved_table_name).strip("_") or "dataset"
-    output_path = temp_dir / f"{safe_name}.csv"
-    with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["biz_key", "amount", "biz_date", "source_name"])
-        writer.writeheader()
-        writer.writerows(rows)
-    return {
-        "success": True,
-        "mode": "mock",
-        "source_id": source_id,
-        "resource_key": resource_key,
-        "snapshot_id": str(snapshot.get("snapshot_id") or ""),
-        "table_name": resolved_table_name,
-        "file_path": str(output_path),
-        "row_count": len(rows),
-        "query": query or {},
-        "published_snapshot": snapshot,
-        "message": "已导出 mock 已发布快照",
     }
 
 
@@ -3059,7 +2988,7 @@ def _mock_preflight_rule_binding(
                         append_issue(
                             "dataset_stale",
                             "warn",
-                            f"数据集 {first_dataset.get('dataset_name') or first_dataset.get('dataset_code')} 最近快照时间过旧",
+                            f"数据集 {first_dataset.get('dataset_name') or first_dataset.get('dataset_code')} 最近采集时间过旧",
                         )
                 except Exception:
                     append_issue("dataset_sync_time_invalid", "warn", "数据集最近同步时间格式无效")
@@ -3413,6 +3342,65 @@ async def data_source_trigger_sync(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_trigger_dataset_collection(
+    auth_token: str,
+    source_id: str,
+    *,
+    dataset_id: str = "",
+    resource_key: str = "",
+    biz_date: str = "",
+    params: dict[str, Any] | None = None,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+    if not dataset_id and not resource_key:
+        return {"success": False, "error": "dataset_id 或 resource_key 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock" or _is_mock_source_id(source_id):
+        trigger_result = _mock_trigger_sync(
+            auth_token,
+            source_id,
+            params={
+                **dict(params or {}),
+                "dataset_id": dataset_id,
+                "resource_key": resource_key,
+                "biz_date": biz_date,
+            },
+        )
+        return _attach_mode(trigger_result, "mock")
+    payload: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        payload["dataset_id"] = dataset_id
+    if resource_key:
+        payload["resource_key"] = resource_key
+    if biz_date:
+        payload["biz_date"] = biz_date
+    if params:
+        payload["params"] = params
+    result = await call_mcp_tool("data_source_trigger_dataset_collection", payload)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        trigger_result = _mock_trigger_sync(
+            auth_token,
+            source_id,
+            params={
+                **dict(params or {}),
+                "dataset_id": dataset_id,
+                "resource_key": resource_key,
+                "biz_date": biz_date,
+            },
+        )
+        return _attach_mode(trigger_result, "mock")
+    return _attach_mode(result, normalized_mode)
+
+
 async def data_source_get_sync_job(
     auth_token: str,
     sync_job_id: str,
@@ -3425,6 +3413,15 @@ async def data_source_get_sync_job(
         return {"success": False, "error": "sync_job_id 不能为空"}
 
     normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock" or _is_mock_source_id(source_id):
+        return _mock_list_collection_records(
+            auth_token,
+            source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            biz_date=biz_date,
+            limit=limit,
+        )
     if normalized_mode == "mock":
         return _mock_get_sync_job(auth_token, sync_job_id)
 
@@ -3460,10 +3457,55 @@ async def data_source_list_sync_jobs(
     return _attach_mode(result, normalized_mode)
 
 
-async def data_source_preview(
+async def data_source_get_dataset_collection_detail(
     auth_token: str,
     source_id: str,
     *,
+    dataset_id: str = "",
+    resource_key: str = "",
+    limit: int = 10,
+    sample_limit: int = 10,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "limit": max(1, min(limit, 50)),
+        "sample_limit": max(1, min(sample_limit, 50)),
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if resource_key:
+        args["resource_key"] = resource_key
+    result = await call_mcp_tool("data_source_get_dataset_collection_detail", args)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return {
+            "success": True,
+            "source_id": source_id,
+            "resource_key": resource_key,
+            "jobs": [],
+            "rows": [],
+            "count": 0,
+            "row_count": 0,
+            "message": "当前环境尚未接入采集详情",
+        }
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_list_collection_records(
+    auth_token: str,
+    source_id: str,
+    *,
+    dataset_id: str = "",
+    resource_key: str = "",
+    biz_date: str = "",
     limit: int = 20,
     mode: str = "",
 ) -> dict[str, Any]:
@@ -3472,92 +3514,41 @@ async def data_source_preview(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
-    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
-    if normalized_mode == "mock":
-        return _mock_preview_data_source(auth_token, source_id, limit=limit)
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "limit": max(1, min(limit, 1000)),
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if resource_key:
+        args["resource_key"] = resource_key
+    if biz_date:
+        args["biz_date"] = biz_date
 
-    result = await call_mcp_tool(
-        "data_source_preview",
-        {
-            "auth_token": auth_token,
-            "source_id": source_id,
-            "limit": max(1, min(limit, 100)),
-            "mode": normalized_mode,
-        },
-    )
+    result = await call_mcp_tool("data_source_list_collection_records", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
-        return _mock_preview_data_source(auth_token, source_id, limit=limit)
+        return _mock_list_collection_records(
+            auth_token,
+            source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            biz_date=biz_date,
+            limit=limit,
+        )
     return _attach_mode(result, normalized_mode)
 
 
-async def data_source_get_published_snapshot(
+async def data_source_export_collection_records(
     auth_token: str,
     source_id: str,
     *,
-    mode: str = "",
-    resource_key: str = "",
-) -> dict[str, Any]:
-    if not auth_token:
-        return {"success": False, "error": "未提供认证 token，请先登录"}
-    if not source_id:
-        return {"success": False, "error": "source_id 不能为空"}
-
-    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
-    if normalized_mode == "mock":
-        return _mock_get_published_snapshot(auth_token, source_id)
-
-    result = await call_mcp_tool(
-        "data_source_get_published_snapshot",
-        {
-            "auth_token": auth_token,
-            "source_id": source_id,
-            "mode": normalized_mode,
-            **({"resource_key": resource_key} if resource_key else {}),
-        },
-    )
-    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
-        return _mock_get_published_snapshot(auth_token, source_id)
-    return _attach_mode(result, normalized_mode)
-
-
-async def data_source_list_published_snapshot_rows(
-    auth_token: str,
-    source_id: str,
-    *,
-    resource_key: str = "",
-    limit: int = 3,
-    mode: str = "",
-) -> dict[str, Any]:
-    if not auth_token:
-        return {"success": False, "error": "未提供认证 token，请先登录"}
-    if not source_id:
-        return {"success": False, "error": "source_id 不能为空"}
-
-    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
-    if normalized_mode == "mock":
-        return _mock_list_published_snapshot_rows(auth_token, source_id, limit=limit)
-
-    result = await call_mcp_tool(
-        "data_source_list_published_snapshot_rows",
-        {
-            "auth_token": auth_token,
-            "source_id": source_id,
-            "mode": normalized_mode,
-            "limit": max(1, min(limit, 100)),
-            **({"resource_key": resource_key} if resource_key else {}),
-        },
-    )
-    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
-        return _mock_list_published_snapshot_rows(auth_token, source_id, limit=limit)
-    return _attach_mode(result, normalized_mode)
-
-
-async def data_source_export_published_snapshot(
-    auth_token: str,
-    source_id: str,
-    *,
+    dataset_id: str = "",
     table_name: str = "",
     resource_key: str = "",
+    biz_date: str = "",
     query: dict[str, Any] | None = None,
     mode: str = "",
 ) -> dict[str, Any]:
@@ -3566,27 +3557,54 @@ async def data_source_export_published_snapshot(
     if not source_id:
         return {"success": False, "error": "source_id 不能为空"}
 
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    args: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        args["dataset_id"] = dataset_id
+    if table_name:
+        args["table_name"] = table_name
+    if resource_key:
+        args["resource_key"] = resource_key
+    if biz_date:
+        args["biz_date"] = biz_date
+    if isinstance(query, dict) and query:
+        args["query"] = query
+    result = await call_mcp_tool("data_source_export_collection_records", args)
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_preview(
+    auth_token: str,
+    source_id: str,
+    *,
+    limit: int = 20,
+    mode: str = "",
+    resource_key: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
     normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
     if normalized_mode == "mock":
-        return _mock_export_published_snapshot(
-            auth_token,
-            source_id,
-            table_name=table_name,
-            resource_key=resource_key,
-            query=query,
-        )
+        return _mock_preview_data_source(auth_token, source_id, limit=limit)
 
-    result = await call_mcp_tool(
-        "data_source_export_published_snapshot",
-        {
-            "auth_token": auth_token,
-            "source_id": source_id,
-            "mode": normalized_mode,
-            **({"resource_key": resource_key} if resource_key else {}),
-            **({"table_name": table_name} if table_name else {}),
-            **({"query": query} if isinstance(query, dict) and query else {}),
-        },
-    )
+    payload = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "limit": max(1, min(limit, 100)),
+        "mode": normalized_mode,
+    }
+    if resource_key:
+        payload["resource_key"] = resource_key
+    result = await call_mcp_tool("data_source_preview", payload)
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return _mock_preview_data_source(auth_token, source_id, limit=limit)
     return _attach_mode(result, normalized_mode)
 
 

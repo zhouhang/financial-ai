@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from config import (
@@ -406,18 +407,32 @@ class DingTalkDwsAdapter(NotificationAdapter):
             )
 
         assignee = resolved.resolved_user
-        bot_result = self.send_bot_message(
-            content=content,
-            to_user_id=assignee.user_id,
-            title=title,
-        )
+
+        # Default due time: today 18:00 CST so DingTalk sends a reminder
+        effective_due = due_time or _default_due_time()
+
+        # Create todo first so we can include the task link in the bot message
         todo_result = self.create_todo(
             assignee_user_id=assignee.user_id,
             title=todo_title or title,
             content=content,
-            due_time=due_time,
+            due_time=effective_due,
             source_id=source_id,
         )
+
+        # Append todo reference so the user can find it in the DingTalk todo list
+        bot_content = content
+        if todo_result.success and todo_result.todo and todo_result.todo.title:
+            bot_content = f"{content}\n\n📋 已创建待办：**{todo_result.todo.title}**\n请在钉钉「待办」中搜索上方标题并处理。"
+
+        bot_result = self.send_bot_message(
+            content=bot_content,
+            to_user_id=assignee.user_id,
+            title=title,
+        )
+
+        # Send DING strong notification so the user gets a real push alert
+        self._send_ding(user_id=assignee.user_id, content=title or content)
 
         overall_success = bot_result.success and todo_result.success
         message_parts = []
@@ -442,6 +457,23 @@ class DingTalkDwsAdapter(NotificationAdapter):
             todo_result=todo_result,
             assignee_user_id=assignee.user_id,
         )
+
+    def _send_ding(self, *, user_id: str, content: str) -> None:
+        """Send a DING strong-notification (app push) so the user gets a real alert."""
+        if not user_id or not content:
+            return
+        args = [
+            "ding", "message", "send",
+            "--users", user_id,
+            "--type", "app",
+            "--content", content,
+        ]
+        if self._robot_code:
+            args.extend(["--robot-code", self._robot_code])
+        try:
+            self._run(args)
+        except Exception:
+            pass  # DING is best-effort; don't fail the whole reminder
 
     def sync_todo_status(
         self,
@@ -689,6 +721,16 @@ def _map_list_status(status: str) -> str | None:
     if normalized in {UnifiedTodoStatus.OPEN, UnifiedTodoStatus.IN_PROGRESS}:
         return "false"
     return None
+
+
+def _default_due_time() -> str:
+    """Return today 18:00 CST as ISO-8601, so DingTalk sends a reminder."""
+    cst = timezone(timedelta(hours=8))
+    now = datetime.now(cst)
+    due = now.replace(hour=18, minute=0, second=0, microsecond=0)
+    if due <= now:
+        due = due + timedelta(days=1)
+    return due.strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
 def _format_due_time(raw_due_time: Any) -> str:

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import {
   Cpu,
   Database,
@@ -129,26 +129,17 @@ export default function Sidebar({
 }: SidebarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<UserTask[]>([]);
-  const [isProcMenuExpanded, setIsProcMenuExpanded] = useState(false);
-  const [isReconMenuExpanded, setIsReconMenuExpanded] = useState(false);
-  const [expandedConnectionGroups, setExpandedConnectionGroups] = useState<DataConnectionView[]>([
+  const [manualProcMenuExpanded, setManualProcMenuExpanded] = useState<boolean | null>(null);
+  const [manualReconMenuExpanded, setManualReconMenuExpanded] = useState<boolean | null>(null);
+  const [userConnectionGroups, setUserConnectionGroups] = useState<DataConnectionView[]>([
     selectedDataConnectionView,
   ]);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
-  const previousSelectedProcRuleCodeRef = useRef<string | null>(null);
-  const previousReconAutoOpenKeyRef = useRef<string | null>(null);
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
   const displayName = typeof currentUser?.username === 'string' && currentUser.username
     ? currentUser.username
     : '用户';
-
-  useEffect(() => {
-    if (authToken) return;
-    setTasks([]);
-    setIsProcMenuExpanded(false);
-    setIsReconMenuExpanded(false);
-  }, [authToken]);
 
   useEffect(() => {
     if (!isProfileMenuOpen) return;
@@ -194,12 +185,6 @@ export default function Sidebar({
     fetchTasks();
   }, [authToken, selectedRuleCode, rulesVersion]);
 
-  useEffect(() => {
-    setExpandedConnectionGroups((prev) =>
-      prev.includes(selectedDataConnectionView) ? prev : [...prev, selectedDataConnectionView],
-    );
-  }, [selectedDataConnectionView]);
-
   const normalizeRuleFromTask = (task: UserTask, rule: UserTaskRule): UserTaskRule => {
     return {
       ...rule,
@@ -217,18 +202,17 @@ export default function Sidebar({
   };
 
   const toggleConnectionGroup = (view: DataConnectionView) => {
-    setExpandedConnectionGroups((prev) =>
+    setUserConnectionGroups((prev) =>
       prev.includes(view) ? prev.filter((item) => item !== view) : [...prev, view],
     );
     onSelectDataConnectionView?.(view);
   };
 
-  const isConnectionGroupExpanded = (view: DataConnectionView) => expandedConnectionGroups.includes(view);
-
   const dataSourceGroupPreview = `${SOURCE_TYPE_CARDS.length} 个数据源`;
   const collaborationGroupPreview = COLLABORATION_CHANNEL_CARDS.map((card) => card.title).join('、');
-  const procTasks = tasks.filter((task) => task.task_type === 'proc');
-  const reconTasks = tasks.filter((task) => task.task_type === 'recon');
+  const visibleTasks = authToken ? tasks : [];
+  const procTasks = visibleTasks.filter((task) => task.task_type === 'proc');
+  const reconTasks = visibleTasks.filter((task) => task.task_type === 'recon');
   const procRules = procTasks.flatMap((task) =>
     (task.rules || []).map((rule) => normalizeRuleFromTask(task, rule)),
   );
@@ -249,20 +233,14 @@ export default function Sidebar({
   const reconAutoOpenKey = selectedReconEntry === 'center'
     ? 'center'
     : selectedReconRule?.rule_code || null;
-
-  useEffect(() => {
-    if (selectedProcRuleCode && previousSelectedProcRuleCodeRef.current !== selectedProcRuleCode) {
-      setIsProcMenuExpanded(true);
-    }
-    previousSelectedProcRuleCodeRef.current = selectedProcRuleCode;
-  }, [selectedProcRuleCode]);
-
-  useEffect(() => {
-    if (reconAutoOpenKey && previousReconAutoOpenKeyRef.current !== reconAutoOpenKey) {
-      setIsReconMenuExpanded(true);
-    }
-    previousReconAutoOpenKeyRef.current = reconAutoOpenKey;
-  }, [reconAutoOpenKey]);
+  const isProcMenuExpanded = Boolean(authToken) && (manualProcMenuExpanded ?? Boolean(selectedProcRuleCode));
+  const isReconMenuExpanded = Boolean(authToken) && (manualReconMenuExpanded ?? Boolean(reconAutoOpenKey));
+  const expandedConnectionGroups = useMemo(() => {
+    const groups = new Set<DataConnectionView>(userConnectionGroups);
+    groups.add(selectedDataConnectionView);
+    return Array.from(groups);
+  }, [selectedDataConnectionView, userConnectionGroups]);
+  const isConnectionGroupExpanded = (view: DataConnectionView) => expandedConnectionGroups.includes(view);
 
   const handleOpenProcUpload = () => {
     if (uploadProcRules[0]) {
@@ -395,7 +373,7 @@ export default function Sidebar({
             >
               <button
                 type="button"
-                onClick={() => setIsProcMenuExpanded((prev) => !prev)}
+                onClick={() => setManualProcMenuExpanded((prev) => !(prev ?? Boolean(selectedProcRuleCode)))}
                 className={`w-full flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left transition-all duration-200 ${
                   isProcMenuExpanded
                     ? 'bg-surface-elevated text-text-primary shadow-sm ring-1 ring-white/80'
@@ -438,7 +416,7 @@ export default function Sidebar({
             >
               <button
                 type="button"
-                onClick={() => setIsReconMenuExpanded((prev) => !prev)}
+                onClick={() => setManualReconMenuExpanded((prev) => !(prev ?? Boolean(reconAutoOpenKey)))}
                 className={`w-full flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left transition-all duration-200 ${
                   isReconMenuExpanded
                     ? 'bg-surface-elevated text-text-primary shadow-sm ring-1 ring-white/80'

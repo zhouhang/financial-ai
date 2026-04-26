@@ -7,34 +7,41 @@
 
 ### Workflow
 
-- [ ] **FLOW-01**: 用户可以在固定 4 步向导中创建对账方案，第一步只填写方案名称和对账目的
-- [ ] **FLOW-02**: 用户可以在第四步查看左右数据准备、对账规则和校验状态摘要后保存方案
+- [x] **FLOW-01**: 用户可以在固定 4 步向导中创建对账方案，第一步只填写方案名称和对账目的
+- [x] **FLOW-02**: 用户可以在第四步查看左右数据准备、对账规则和校验状态摘要后保存方案
 
 ### Dataset Preparation
 
-- [ ] **DATA-01**: 用户可以在第二步分别选择左侧数据集和右侧数据集作为方案输入
-- [ ] **DATA-02**: 用户可以分别管理左侧输出表和右侧输出表的输出字段列表，包括新增、删除和调整顺序
-- [ ] **DATA-03**: 用户可以为每个输出字段自定义输出字段名
-- [ ] **DATA-04**: 用户可以为每个输出字段配置取值方式，包括源字段映射、固定值、简单公式和多字段拼接
-- [ ] **DATA-05**: 用户可以在第二步看到“筛选数据 / 行数据操作”区域作为后续能力预留，即使 v1 暂不支持实际编辑
+- [x] **DATA-01**: 用户可以在第二步分别选择左侧数据集和右侧数据集作为方案输入
+- [x] **DATA-02**: 用户可以分别管理左侧输出表和右侧输出表的输出字段列表，包括新增、删除和调整顺序
+- [x] **DATA-03**: 用户可以为每个输出字段自定义输出字段名
+- [x] **DATA-04**: 用户可以为每个输出字段配置取值方式，包括源字段映射、固定值、简单公式和多字段拼接
+- [x] **DATA-05**: 用户可以在第二步看到“筛选数据 / 行数据操作”区域作为后续能力预留，即使 v1 暂不支持实际编辑
 
 ### Proc Trial
 
-- [ ] **PROC-01**: 用户可以让 AI 基于所选数据集推荐一版左右输出字段配置
-- [ ] **PROC-02**: 用户可以手动修改 AI 推荐的字段配置，并保留修改结果作为后续试跑与保存依据
-- [ ] **PROC-03**: 用户可以基于最新一次字段配置试跑 `proc`，并查看对应的左右侧输出样例数据，不混入旧结果
-- [ ] **PROC-04**: 用户可以获得左右输出字段尽量对齐的提示，帮助后续 AI 生成更可靠的对账规则
+- [x] **PROC-01**: 用户可以让 AI 基于所选数据集推荐一版左右输出字段配置
+- [x] **PROC-02**: 用户可以手动修改 AI 推荐的字段配置，并保留修改结果作为后续试跑与保存依据
+- [x] **PROC-03**: 用户可以基于最新一次字段配置试跑 `proc`，并查看对应的左右侧输出样例数据，不混入旧结果
+- [x] **PROC-04**: 用户可以获得左右输出字段尽量对齐的提示，帮助后续 AI 生成更可靠的对账规则
 
 ### Reconciliation Rules
 
-- [ ] **RECN-01**: 用户可以让 AI 基于第二步输出结构生成一版对账规则草稿
-- [ ] **RECN-02**: 用户可以手动修改匹配字段、对比字段、时间字段等核心对账规则内容
-- [ ] **RECN-03**: 用户可以基于最新一次对账规则试跑 `recon`，并查看对应的试跑结果与异常样例，不混入旧结果
+- [x] **RECN-01**: 用户可以让 AI 基于第二步输出结构生成一版对账规则草稿
+- [x] **RECN-02**: 用户可以手动修改匹配字段、对比字段、时间字段等核心对账规则内容
+- [x] **RECN-03**: 用户可以基于最新一次对账规则试跑 `recon`，并查看对应的试跑结果与异常样例，不混入旧结果
 
 ### Controls
 
-- [ ] **CTRL-01**: 用户可以在高级视图中查看生成的 `proc json` 和 `recon json`，但默认编辑界面不是 JSON
-- [ ] **CTRL-02**: 用户只有在 `proc` 与 `recon` 都试跑成功后才能保存方案
+- [x] **CTRL-01**: 用户可以在高级视图中查看生成的 `proc json` 和 `recon json`，但默认编辑界面不是 JSON
+- [x] **CTRL-02**: 用户只有在 `proc` 与 `recon` 都试跑成功后才能保存方案
+
+### File Intake
+
+- [x] **FILE-01**: 文件型 `proc` / `recon` 可以把单个 Excel 多 sheet 工作簿在正式文件校验前拆成多个 sheet 级逻辑文件，并继续走现有规则执行链路
+- [x] **FILE-02**: 系统会在 sheet 拆分后执行预筛选，过滤空白 sheet、说明 sheet 和明显不可能命中任何 schema 的 sheet，且不会让这些 sheet 参与正式 schema 唯一映射与后续执行
+- [x] **FILE-03**: 当多个 sheet 仍然可能命中同一组 schema 时，系统会保留正式歧义判断并向上层返回候选映射提示，而不是静默误配
+- [x] **FILE-04**: 拆分后的逻辑文件命名必须唯一、稳定、可追溯到原工作簿与 sheet，且不要求修改现有 `proc DSL` / `recon DSL`
 
 ## v2 Requirements
 
@@ -60,28 +67,32 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FLOW-01 | Phase 1 | Pending |
-| FLOW-02 | Phase 5 | Pending |
-| DATA-01 | Phase 2 | Pending |
-| DATA-02 | Phase 2 | Pending |
-| DATA-03 | Phase 2 | Pending |
-| DATA-04 | Phase 2 | Pending |
-| DATA-05 | Phase 2 | Pending |
-| PROC-01 | Phase 3 | Pending |
-| PROC-02 | Phase 3 | Pending |
-| PROC-03 | Phase 3 | Pending |
-| PROC-04 | Phase 3 | Pending |
-| RECN-01 | Phase 4 | Pending |
-| RECN-02 | Phase 4 | Pending |
-| RECN-03 | Phase 4 | Pending |
-| CTRL-01 | Phase 5 | Pending |
-| CTRL-02 | Phase 5 | Pending |
+| FLOW-01 | Phase 1 | Completed |
+| FLOW-02 | Phase 5 | Completed |
+| DATA-01 | Phase 2 | Completed |
+| DATA-02 | Phase 2 | Completed |
+| DATA-03 | Phase 2 | Completed |
+| DATA-04 | Phase 2 | Completed |
+| DATA-05 | Phase 2 | Completed |
+| PROC-01 | Phase 3 | Completed |
+| PROC-02 | Phase 3 | Completed |
+| PROC-03 | Phase 3 | Completed |
+| PROC-04 | Phase 3 | Completed |
+| RECN-01 | Phase 4 | Completed |
+| RECN-02 | Phase 4 | Completed |
+| RECN-03 | Phase 4 | Completed |
+| CTRL-01 | Phase 5 | Completed |
+| CTRL-02 | Phase 5 | Completed |
+| FILE-01 | Phase 6 | Completed |
+| FILE-02 | Phase 6 | Completed |
+| FILE-03 | Phase 6 | Completed |
+| FILE-04 | Phase 6 | Completed |
 
 **Coverage:**
-- v1 requirements: 16 total
-- Mapped to phases: 16
+- v1 requirements: 20 total
+- Mapped to phases: 20
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-22*
-*Last updated: 2026-04-22 after initial definition*
+*Last updated: 2026-04-23 after completing Phase 6 multi-sheet upload intake*

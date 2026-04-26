@@ -20,6 +20,10 @@ VALID_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
 VALID_FIELD_WRITE_MODES = {"overwrite", "increment"}
 
 
+class _FastPathNotSupported(RuntimeError):
+    """Raised when a step cannot be executed by the vectorized fast path."""
+
+
 @dataclass
 class TableSchemaState:
     name: str
@@ -310,6 +314,20 @@ class StepsProcRuntime:
         bindings = filter_def.get("bindings") or {}
         expr = str(filter_def.get("expr") or "").strip()
         source_df = alias_frames[primary_alias]
+
+        fast_mask = self._try_build_filter_mask_fast(
+            expr=expr,
+            bindings=bindings,
+            base_alias=primary_alias,
+            base_df=source_df,
+            alias_frames=alias_frames,
+            alias_tables=alias_tables,
+            target_table=target_table,
+        )
+        if fast_mask is not None:
+            alias_frames[primary_alias] = source_df[fast_mask].reset_index(drop=True)
+            return
+
         mask = []
         for _, row in source_df.iterrows():
             row_contexts = {primary_alias: row.to_dict()}
@@ -414,6 +432,19 @@ class StepsProcRuntime:
         if len(base_aliases) != 1:
             raise ValueError("无 match 的 write_dataset 仅支持单一基础 alias")
         base_alias = base_aliases[0]
+
+        fast_df = self._try_apply_standard_mappings_fast(
+            mappings=mappings,
+            base_alias=base_alias,
+            target_df=target_df,
+            alias_frames=alias_frames,
+            alias_tables=alias_tables,
+            target_table=target_table,
+            row_write_mode=row_write_mode,
+        )
+        if fast_df is not None:
+            return fast_df
+
         for _, source_row in alias_frames[base_alias].iterrows():
             row_contexts = {base_alias: source_row.to_dict()}
             row_values = self._evaluate_mappings_to_dict(
@@ -443,6 +474,312 @@ class StepsProcRuntime:
                 target_table,
             )
         return target_df
+
+    def _try_build_filter_mask_fast(
+        self,
+        *,
+        expr: str,
+        bindings: dict[str, Any],
+        base_alias: str,
+        base_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+    ) -> pd.Series | None:
+        if base_df.empty:
+            return pd.Series(dtype=bool)
+        try:
+            env = {
+                name: self._ensure_series(
+                    self._evaluate_value_spec_series(
+                        spec,
+                        base_alias=base_alias,
+                        base_df=base_df,
+                        alias_frames=alias_frames,
+                        alias_tables=alias_tables,
+                        target_table=target_table,
+                        contexts={},
+                    ),
+                    index=base_df.index,
+                )
+                for name, spec in bindings.items()
+            }
+        except _FastPathNotSupported:
+            return None
+        return self._evaluate_formula_to_mask(expr, env, index=base_df.index)
+
+    def _try_apply_standard_mappings_fast(
+        self,
+        *,
+        mappings: list[dict[str, Any]],
+        base_alias: str,
+        target_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        row_write_mode: str,
+    ) -> pd.DataFrame | None:
+        if not target_df.empty:
+            return None
+        if row_write_mode not in {"upsert", "insert_if_missing"}:
+            return None
+        if any(str(mapping.get("field_write_mode") or "overwrite") != "overwrite" for mapping in mappings):
+            return None
+
+        base_df = alias_frames.get(base_alias)
+        if base_df is None:
+            return None
+        if base_df.empty:
+            return target_df
+
+        try:
+            result_df = self._build_result_frame_fast(
+                mappings=mappings,
+                base_alias=base_alias,
+                base_df=base_df,
+                alias_frames=alias_frames,
+                alias_tables=alias_tables,
+                target_table=target_table,
+            )
+        except _FastPathNotSupported:
+            return None
+
+        primary_key = list(self.schemas.get(target_table, TableSchemaState(target_table)).primary_key)
+        if primary_key and all(field in result_df.columns for field in primary_key):
+            result_df = result_df.drop_duplicates(subset=primary_key, keep="last").reset_index(drop=True)
+        self._invalidate_row_index_cache(target_table)
+        return result_df
+
+    def _build_result_frame_fast(
+        self,
+        *,
+        mappings: list[dict[str, Any]],
+        base_alias: str,
+        base_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+    ) -> pd.DataFrame:
+        schema = self.schemas.get(target_table)
+        if schema and schema.column_order:
+            result_df = pd.DataFrame(
+                {
+                    column: [schema.defaults.get(column)] * len(base_df)
+                    for column in schema.column_order
+                },
+                index=base_df.index,
+            )
+        else:
+            result_df = pd.DataFrame(index=base_df.index)
+
+        for mapping in mappings:
+            target_field = mapping.get("target_field")
+            if not target_field:
+                raise _FastPathNotSupported("fast path 暂不支持 target_field_template")
+            values = self._evaluate_mapping_series(
+                mapping,
+                base_alias=base_alias,
+                base_df=base_df,
+                alias_frames=alias_frames,
+                alias_tables=alias_tables,
+                target_table=target_table,
+                contexts={},
+            )
+            result_df[str(target_field)] = values
+
+        result_df = result_df.reset_index(drop=True)
+        return self._align_columns(target_table, result_df)
+
+    def _evaluate_mapping_series(
+        self,
+        mapping: dict[str, Any],
+        *,
+        base_alias: str,
+        base_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        contexts: dict[str, Any],
+    ) -> pd.Series:
+        values = self._evaluate_value_spec_series(
+            mapping.get("value") or {},
+            base_alias=base_alias,
+            base_df=base_df,
+            alias_frames=alias_frames,
+            alias_tables=alias_tables,
+            target_table=target_table,
+            contexts=contexts,
+            bindings_override=mapping.get("bindings") or {},
+        )
+        return self._ensure_series(values, index=base_df.index)
+
+    def _evaluate_value_spec_series(
+        self,
+        spec: dict[str, Any],
+        *,
+        base_alias: str,
+        base_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        contexts: dict[str, Any],
+        bindings_override: dict[str, Any] | None = None,
+    ) -> pd.Series | Any:
+        spec_type = str(spec.get("type") or "").strip()
+        if not spec_type:
+            return spec
+
+        if spec_type == "source":
+            source = spec.get("source") or {}
+            alias = str(source.get("alias") or "").strip()
+            field = str(source.get("field") or "").strip()
+            if alias != base_alias or alias_tables.get(alias) == target_table:
+                raise _FastPathNotSupported(f"fast path 暂不支持直接读取 alias={alias}")
+            if field not in base_df.columns:
+                series = pd.Series([None] * len(base_df), index=base_df.index)
+            else:
+                series = base_df[field].reset_index(drop=True)
+                series.index = base_df.index
+            if "default" in spec:
+                default = spec.get("default")
+                return series.where(~series.apply(_is_nullish), default)
+            return series
+
+        if spec_type == "context":
+            return contexts.get(spec.get("name"))
+
+        if spec_type == "lookup":
+            return self._evaluate_lookup_series(
+                spec,
+                base_alias=base_alias,
+                base_df=base_df,
+                alias_frames=alias_frames,
+                alias_tables=alias_tables,
+                target_table=target_table,
+                contexts=contexts,
+            )
+
+        if spec_type == "formula":
+            bindings = bindings_override or spec.get("bindings") or {}
+            env = {
+                name: self._ensure_series(
+                    self._evaluate_value_spec_series(
+                        value,
+                        base_alias=base_alias,
+                        base_df=base_df,
+                        alias_frames=alias_frames,
+                        alias_tables=alias_tables,
+                        target_table=target_table,
+                        contexts=contexts,
+                    ),
+                    index=base_df.index,
+                )
+                for name, value in bindings.items()
+            }
+            expr = str(spec.get("expr") or spec.get("formula") or "").strip()
+            return self._evaluate_formula_to_series(expr, env, index=base_df.index)
+
+        raise _FastPathNotSupported(f"fast path 暂不支持 value.type={spec_type}")
+
+    def _evaluate_lookup_series(
+        self,
+        node: dict[str, Any],
+        *,
+        base_alias: str,
+        base_df: pd.DataFrame,
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+        target_table: str,
+        contexts: dict[str, Any],
+    ) -> pd.Series:
+        source_alias = str(node.get("source_alias") or "").strip()
+        keys = list(node.get("keys") or [])
+        value_field = str(node.get("value_field") or "").strip()
+        default = node.get("default")
+
+        if source_alias not in alias_frames or not value_field or not keys:
+            raise _FastPathNotSupported("lookup 配置不完整")
+
+        lookup_fields: list[str] = []
+        key_series_list: list[pd.Series] = []
+        for idx, item in enumerate(keys):
+            lookup_field = str(item.get("lookup_field") or "").strip()
+            input_spec = item.get("input")
+            if not lookup_field or not isinstance(input_spec, dict) or not input_spec:
+                raise _FastPathNotSupported(f"lookup.keys[{idx}] 配置不完整")
+            lookup_fields.append(lookup_field)
+            key_series_list.append(
+                self._ensure_series(
+                    self._evaluate_value_spec_series(
+                        input_spec,
+                        base_alias=base_alias,
+                        base_df=base_df,
+                        alias_frames=alias_frames,
+                        alias_tables=alias_tables,
+                        target_table=target_table,
+                        contexts=contexts,
+                    ),
+                    index=base_df.index,
+                )
+            )
+
+        index = self._get_lookup_index(source_alias, tuple(lookup_fields))
+        values: list[Any] = []
+        for row_idx in range(len(base_df)):
+            key = tuple(_normalize_key(series.iat[row_idx]) for series in key_series_list)
+            matched_row = index.get(key)
+            if matched_row is None:
+                values.append(default if "default" in node else None)
+                continue
+            value = matched_row.get(value_field)
+            if _is_nullish(value) and "default" in node:
+                value = default
+            values.append(value)
+        return pd.Series(values, index=base_df.index)
+
+    def _evaluate_formula_to_series(
+        self,
+        expr: str,
+        env: dict[str, pd.Series],
+        *,
+        index: pd.Index,
+    ) -> pd.Series:
+        values: list[Any] = []
+        for row_idx in range(len(index)):
+            row_env = {
+                name: _normalize_formula_value(series.iat[row_idx])
+                for name, series in env.items()
+            }
+            values.append(_evaluate_formula_expression(expr, row_env))
+        return pd.Series(values, index=index)
+
+    def _evaluate_formula_to_mask(
+        self,
+        expr: str,
+        env: dict[str, pd.Series],
+        *,
+        index: pd.Index,
+    ) -> pd.Series:
+        values: list[bool] = []
+        for row_idx in range(len(index)):
+            row_env = {
+                name: _normalize_formula_value(series.iat[row_idx])
+                for name, series in env.items()
+            }
+            values.append(bool(_evaluate_formula_expression(expr, row_env)))
+        return pd.Series(values, index=index, dtype=bool)
+
+    def _ensure_series(
+        self,
+        value: pd.Series | Any,
+        *,
+        index: pd.Index,
+    ) -> pd.Series:
+        if isinstance(value, pd.Series):
+            series = value.reset_index(drop=True)
+            series.index = index
+            return series
+        return pd.Series([value] * len(index), index=index)
 
     def _apply_dynamic_mappings(
         self,

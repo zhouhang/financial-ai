@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useId } from 'react';
 import {
   Bot,
   ChevronDown,
@@ -302,7 +302,8 @@ function extractTablesFromMarkdown(content: string): { table: ParsedTable; befor
 }
 
 function TableRenderer({ table, beforeContent }: { table: ParsedTable; beforeContent?: string }) {
-  const tableId = useMemo(() => `msg-table-${Math.random().toString(36).slice(2, 9)}`, []);
+  const reactId = useId();
+  const tableId = `msg-table-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const { preferences, isLoaded, setViewMode, toggleColumnVisibility, setColumnWidth } = useTablePreferences(tableId);
 
   if (table.isColumnTable && table.headers[0] === '列名' && table.rows.length > 0) {

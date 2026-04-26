@@ -9,71 +9,18 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 import json
-from pathlib import Path
 from typing import Any
 
-from config import UPLOAD_DIR
 from tools.mcp_client import execute_recon
+from utils.file_intake import build_upload_name_maps as shared_build_upload_name_maps
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_upload_ref(file_path: str) -> str:
-    """Normalize uploaded file path to /uploads/... ref when possible."""
-    path_str = str(file_path or "").strip()
-    if not path_str:
-        return ""
-    if path_str.startswith("/uploads/"):
-        return path_str
-    if path_str.startswith("uploads/"):
-        return f"/{path_str}"
-
-    upload_root = Path(UPLOAD_DIR).resolve()
-    path_obj = Path(path_str)
-    try:
-        if path_obj.is_absolute():
-            rel = path_obj.resolve().relative_to(upload_root)
-            return f"/uploads/{rel.as_posix()}"
-    except Exception:
-        return path_str
-    return path_str
-
-
 def build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[str, str]]:
     """Build filename <-> upload ref maps without depending on graph-private helpers."""
-    display_name_to_ref: dict[str, str] = {}
-    ref_to_display_name: dict[str, str] = {}
-
-    for item in raw_files:
-        if isinstance(item, dict):
-            file_path = str(item.get("file_path") or item.get("path") or "").strip()
-            original_filename = str(item.get("original_filename") or item.get("name") or "").strip()
-        else:
-            file_path = str(item or "").strip()
-            original_filename = ""
-
-        if not file_path:
-            continue
-
-        upload_ref = _normalize_upload_ref(file_path)
-        stored_name = os.path.basename(upload_ref or file_path)
-        display_name = original_filename or stored_name
-
-        if display_name:
-            display_name_to_ref[display_name] = upload_ref or file_path
-        if stored_name:
-            display_name_to_ref[stored_name] = upload_ref or file_path
-
-        if upload_ref:
-            ref_to_display_name[upload_ref] = display_name
-        ref_to_display_name[file_path] = display_name
-        if stored_name:
-            ref_to_display_name[stored_name] = display_name
-
-    return display_name_to_ref, ref_to_display_name
+    return shared_build_upload_name_maps(raw_files)
 
 
 def _to_int(value: Any) -> int:
@@ -795,14 +742,15 @@ def resolve_recon_inputs(
     """
     raw_inputs = list(ctx.get("recon_inputs") or [])
     recon_inputs = normalize_recon_inputs(raw_inputs)
+    logical_uploaded_files = list(ctx.get("logical_uploaded_files") or state.get("uploaded_files") or [])
     if recon_inputs:
         # 仅用于展示文件名映射，dataset 模式通常为空。
-        _, ref_to_display_name = build_upload_name_maps(list(state.get("uploaded_files") or []))
+        _, ref_to_display_name = build_upload_name_maps(logical_uploaded_files)
         return recon_inputs, ref_to_display_name, None
 
     return build_recon_inputs_from_file_matches(
         file_match_results=list(ctx.get("file_match_results") or []),
-        uploaded_files_raw=list(state.get("uploaded_files") or []),
+        uploaded_files_raw=logical_uploaded_files,
     )
 
 

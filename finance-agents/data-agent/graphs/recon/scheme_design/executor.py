@@ -9,6 +9,7 @@ import asyncio
 import copy
 import importlib.util
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,12 +19,13 @@ from typing import Any, Protocol
 
 from config import PROJECT_ROOT
 from models import SchemeDesignSession
-from skills.deep_agent_runner import DeepAgentSkillRunner, SkillGenerationResult, get_skill_runner
 from utils.llm import get_llm
 
 from .rule_text_renderer import render_proc_draft_text, render_recon_draft_text
-from .semantic_utils import ensure_dataset_semantic_context
+from .semantic_utils import ensure_dataset_semantic_context, infer_authoritative_raw_field_names
 from .single_shot_generator import SingleShotGenerationResult, SingleShotRuleGenerator
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_RECON_OUTPUT_SHEETS = {
     "summary": "核对汇总",
@@ -145,7 +147,7 @@ class FallbackSchemeDesignExecutor:
 
         return SchemeDesignExecutorResult(
             assistant_message=assistant_message,
-            loaded_skills=["proc-config", "recon-config"],
+            loaded_skills=[],
             open_questions=open_questions,
             proc_draft_json=proc_draft,
             recon_draft_json=recon_draft,
@@ -262,10 +264,12 @@ class FallbackSchemeDesignExecutor:
             "7. create_schema 的 schema.columns 必须是数组，列对象仅使用 name/data_type/nullable/default/precision/scale。\n"
             "8. mappings 仅使用 target_field 或 target_field_template，value.type 仅使用 source/formula/template_source/function/context/lookup。\n"
             "9. 需要的 DSL 节点只允许使用 schema.columns/schema.primary_key/sources/match/aggregate/filter/reference_filter/mappings/dynamic_mappings/depends_on。\n"
-            "10. target_table 必须明确，供后续 recon 绑定；不要输出 proc_rule_json 外层包裹。\n\n"
+            "10. target_table 必须明确，供后续 recon 绑定；不要输出 proc_rule_json 外层包裹。\n"
+            "11. sources[].table 必须使用数据集的 source_table_identifier 值（如 alipay_orders），禁止写字面量 table_name 或 source_table_identifier。\n"
+            "12. biz_key/amount/biz_date/source_name 是标准输出字段，只能出现在 target_field，禁止用作 source.field。\n"
+            "13. source_name 必须用 formula 类型输出固定中文字符串，禁止映射到源表任何列。\n\n"
             f"方案名称：{session.scheme_name or '未命名方案'}\n"
             f"业务目标：{session.biz_goal or '未提供'}\n"
-            f"数据源描述：{session.source_description or '未提供'}\n"
             f"用户补充：{user_message or '无'}\n"
             f"样本数据集：\n{self._summarize_dataset_inputs(session)}\n"
         )
@@ -286,7 +290,6 @@ class FallbackSchemeDesignExecutor:
             "8. 仅输出当前 recon 规则 JSON，不要输出额外说明，不要输出外层包裹。\n\n"
             f"方案名称：{session.scheme_name or '未命名方案'}\n"
             f"业务目标：{session.biz_goal or '未提供'}\n"
-            f"数据源描述：{session.source_description or '未提供'}\n"
             f"用户补充：{user_message or '无'}\n"
             f"样本数据集：\n{self._summarize_dataset_inputs(session)}\n"
         )
@@ -307,17 +310,21 @@ class FallbackSchemeDesignExecutor:
 
     def _build_dataset_prompt_payload(self, dataset: dict[str, Any], *, index: int) -> dict[str, Any]:
         resolved = ensure_dataset_semantic_context(dict(dataset))
-        schema_summary = resolved.get("schema_summary") if isinstance(resolved.get("schema_summary"), dict) else {}
         sample_rows = [row for row in list(resolved.get("sample_rows") or []) if isinstance(row, dict)][:3]
         field_label_map = (
             resolved.get("field_label_map") if isinstance(resolved.get("field_label_map"), dict) else {}
         )
+        # Use only fields that appear in actual sample rows when available, so the AI
+        # cannot reference stale schema columns absent from the published snapshot.
+        if sample_rows:
+            raw_field_names = list(dict.fromkeys(
+                str(k).strip() for row in sample_rows for k in row.keys() if str(k).strip()
+            ))
+        else:
+            raw_field_names = infer_authoritative_raw_field_names(resolved)
         display_pairs: list[dict[str, str]] = []
-        for raw_name, display_name in field_label_map.items():
-            raw = str(raw_name or "").strip()
-            display = str(display_name or "").strip()
-            if not raw:
-                continue
+        for raw in raw_field_names:
+            display = str(field_label_map.get(raw) or "").strip()
             display_pairs.append(
                 {
                     "raw_name": raw,
@@ -327,7 +334,7 @@ class FallbackSchemeDesignExecutor:
             )
         return {
             "side": str(resolved.get("side") or "").strip(),
-            "table_name": str(resolved.get("table_name") or "").strip(),
+            "source_table_identifier": str(resolved.get("table_name") or "").strip(),
             "dataset_name": str(
                 resolved.get("dataset_name")
                 or resolved.get("table_name")
@@ -338,10 +345,8 @@ class FallbackSchemeDesignExecutor:
             "source_kind": str(resolved.get("source_kind") or "").strip(),
             "provider_code": str(resolved.get("provider_code") or "").strip(),
             "description": str(resolved.get("description") or "").strip(),
-            "schema_summary": schema_summary,
             "sample_rows": sample_rows,
             "field_label_map": field_label_map,
-            "fields": resolved.get("fields") if isinstance(resolved.get("fields"), list) else [],
             "field_display_pairs": display_pairs,
         }
 
@@ -359,6 +364,13 @@ class FallbackSchemeDesignExecutor:
             questions.append("请确认对账主键、金额字段和容差。")
         return questions
 
+    _READY_FIELD_LABELS: dict[str, str] = {
+        "biz_key": "业务主键",
+        "amount": "金额",
+        "biz_date": "业务日期",
+        "source_name": "来源标识",
+    }
+
     def _collect_display_maps(
         self,
         datasets: list[dict[str, Any]],
@@ -369,10 +381,12 @@ class FallbackSchemeDesignExecutor:
             if not isinstance(item, dict):
                 continue
             normalized = ensure_dataset_semantic_context(dict(item))
-            table_name = str(normalized.get("table_name") or "").strip()
             business_name = str(normalized.get("business_name") or "").strip()
-            if table_name and business_name:
-                table_label_map[table_name] = business_name
+            if business_name:
+                for id_key in ("table_name", "resource_key", "dataset_code", "dataset_name", "source_id", "source_key"):
+                    id_val = str(normalized.get(id_key) or "").strip()
+                    if id_val and id_val != business_name:
+                        table_label_map.setdefault(id_val, business_name)
             raw_map = (
                 normalized.get("field_label_map")
                 if isinstance(normalized.get("field_label_map"), dict)
@@ -398,14 +412,20 @@ class FallbackSchemeDesignExecutor:
             *(item for item in session.target_step.right_datasets if isinstance(item, dict)),
             *(item for item in session.sample_datasets if isinstance(item, dict)),
         ]
-        return self._collect_display_maps(datasets)
+        field_label_map, table_label_map = self._collect_display_maps(datasets)
+        for raw, label in self._READY_FIELD_LABELS.items():
+            field_label_map.setdefault(raw, label)
+        return field_label_map, table_label_map
 
     def _collect_recon_display_maps(
         self,
         session: SchemeDesignSession,
     ) -> tuple[dict[str, str], dict[str, str]]:
         datasets = [item for item in session.sample_datasets if isinstance(item, dict)]
-        return self._collect_display_maps(datasets)
+        field_label_map, table_label_map = self._collect_display_maps(datasets)
+        for raw, label in self._READY_FIELD_LABELS.items():
+            field_label_map.setdefault(raw, label)
+        return field_label_map, table_label_map
 
     def _safe_proc_summary(self, rule: dict[str, Any] | None) -> str | None:
         if not isinstance(rule, dict) or not rule:
@@ -445,16 +465,120 @@ class FallbackSchemeDesignExecutor:
         tolerance = first_column.get("tolerance", 0.01)
         return f"按 {key_name} 做精确匹配，比对金额字段 {amount_name}，容差 {tolerance}。"
 
+    def _coerce_proc_step_shape_and_action(self, step: dict[str, Any]) -> None:
+        for action_key in ("create_schema", "write_dataset"):
+            nested = step.get(action_key)
+            if not isinstance(nested, dict):
+                continue
+            normalized_nested = copy.deepcopy(nested)
+            for passthrough_key in ("step_id", "target_table", "depends_on"):
+                if passthrough_key not in normalized_nested and passthrough_key in step:
+                    normalized_nested[passthrough_key] = copy.deepcopy(step.get(passthrough_key))
+            normalized_nested.setdefault("action", action_key)
+            step.clear()
+            step.update(normalized_nested)
+            return
+
+        action = str(step.get("action") or "").strip()
+        if action in {"create_schema", "write_dataset"}:
+            return
+
+        candidate_action = str(
+            step.get("step_action")
+            or step.get("operation")
+            or step.get("op")
+            or step.get("step_type")
+            or step.get("type")
+            or step.get("kind")
+            or ""
+        ).strip()
+        if candidate_action in {"create_schema", "write_dataset"}:
+            step["action"] = candidate_action
+            return
+
+        if isinstance(step.get("schema"), dict):
+            step["action"] = "create_schema"
+            return
+
+        if any(
+            key in step
+            for key in (
+                "sources",
+                "mappings",
+                "dynamic_mappings",
+                "match",
+                "aggregate",
+                "filter",
+                "reference_filter",
+                "row_write_mode",
+            )
+        ):
+            step["action"] = "write_dataset"
+
+    def _coerce_proc_step_target_table(
+        self,
+        *,
+        step: dict[str, Any],
+        step_index: int,
+        left_datasets: list[dict[str, Any]],
+        right_datasets: list[dict[str, Any]],
+    ) -> None:
+        target_table = str(step.get("target_table") or "").strip()
+        if target_table in {"left_recon_ready", "right_recon_ready"}:
+            return
+
+        hint_tokens = " ".join(
+            str(value or "").strip().lower()
+            for value in (
+                step.get("target_table"),
+                step.get("step_id"),
+                step.get("name"),
+                step.get("title"),
+                step.get("description"),
+                step.get("alias"),
+            )
+            if str(value or "").strip()
+        )
+        if hint_tokens:
+            if any(token in hint_tokens for token in ("right", "右")):
+                step["target_table"] = "right_recon_ready"
+                return
+            if any(token in hint_tokens for token in ("left", "左")):
+                step["target_table"] = "left_recon_ready"
+                return
+
+        source_matches_left = False
+        source_matches_right = False
+        for source in list(step.get("sources") or []):
+            if not isinstance(source, dict):
+                continue
+            if self._match_dataset_table(dataset_pool=left_datasets, source=source):
+                source_matches_left = True
+            if self._match_dataset_table(dataset_pool=right_datasets, source=source):
+                source_matches_right = True
+        if source_matches_left and not source_matches_right:
+            step["target_table"] = "left_recon_ready"
+            return
+        if source_matches_right and not source_matches_left:
+            step["target_table"] = "right_recon_ready"
+            return
+
+        step["target_table"] = "left_recon_ready" if step_index < 2 else "right_recon_ready"
+
     def _prepare_proc_draft_for_validation(
         self,
         session: SchemeDesignSession,
         rule: dict[str, Any],
     ) -> dict[str, Any]:
+        if not isinstance(rule, dict):
+            raise ValueError("proc 草稿不是 JSON 对象")
         normalized_rule = copy.deepcopy(rule)
         self._ensure_proc_dsl_constraints(normalized_rule)
         steps = normalized_rule.get("steps")
         if not isinstance(steps, list):
-            return normalized_rule
+            steps = []
+        steps = [copy.deepcopy(step) for step in steps if isinstance(step, dict)]
+        normalized_rule["steps"] = steps
 
         left_datasets = [
             item for item in session.target_step.left_datasets
@@ -475,9 +599,16 @@ class FallbackSchemeDesignExecutor:
             },
         }
 
-        for step in steps:
+        for step_index, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
+            self._coerce_proc_step_shape_and_action(step)
+            self._coerce_proc_step_target_table(
+                step=step,
+                step_index=step_index,
+                left_datasets=left_datasets,
+                right_datasets=right_datasets,
+            )
             target_table = str(step.get("target_table") or "").strip()
             if target_table not in {"left_recon_ready", "right_recon_ready"}:
                 continue
@@ -497,8 +628,64 @@ class FallbackSchemeDesignExecutor:
                 side=side,
             )
 
+        self._ensure_required_proc_steps(
+            normalized_rule,
+            source_profiles_by_side=source_profiles_by_side,
+        )
         self._validate_proc_source_tables(normalized_rule, session=session)
+        self._fix_formula_exprs(normalized_rule)
         return normalized_rule
+
+    def _fix_formula_exprs(self, rule: dict[str, Any]) -> None:
+        """Fix formula expr values that are bare unquoted strings.
+
+        The LLM sometimes outputs `"expr": "业务订单数据"` (no quotes) for
+        source_name constants.  Python's ast.parse then sees a bare Name node
+        which is rejected by the runtime.  We detect and wrap such values in
+        JSON string literals so they evaluate to the intended string constant.
+        """
+        import ast as _ast
+
+        def _fix_expr(expr: str) -> str:
+            text = expr.strip()
+            if not text:
+                return expr
+            # Already a properly quoted string literal — leave it alone.
+            if (text.startswith("'") and text.endswith("'")) or (
+                text.startswith('"') and text.endswith('"')
+            ):
+                return expr
+            # Contains formula-specific syntax — don't touch.
+            if any(c in text for c in ("(", ")", "{", "}", "+", "*", "?", ":", "<", ">")):
+                return expr
+            try:
+                tree = _ast.parse(text, mode="eval")
+                if isinstance(tree.body, _ast.Name):
+                    # Bare identifier (e.g. 业务订单数据) → quote it.
+                    return json.dumps(text, ensure_ascii=False)
+            except SyntaxError:
+                # Unparseable as Python → likely Chinese with spaces → quote it.
+                return json.dumps(text, ensure_ascii=False)
+            return expr
+
+        steps = rule.get("steps")
+        if not isinstance(steps, list):
+            return
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            for mapping in list(step.get("mappings") or []):
+                if not isinstance(mapping, dict):
+                    continue
+                value = mapping.get("value")
+                if not isinstance(value, dict) or value.get("type") != "formula":
+                    continue
+                expr = value.get("expr")
+                if not isinstance(expr, str):
+                    continue
+                fixed = _fix_expr(expr)
+                if fixed != expr:
+                    value["expr"] = fixed
 
     def _ensure_proc_dsl_constraints(self, rule: dict[str, Any]) -> None:
         raw_constraints = rule.get("dsl_constraints")
@@ -508,6 +695,9 @@ class FallbackSchemeDesignExecutor:
         rule["dsl_constraints"] = normalized
 
     def _normalize_proc_schema_step(self, step: dict[str, Any]) -> None:
+        target_table = str(step.get("target_table") or "").strip()
+        if target_table:
+            step["step_id"] = f"create_{target_table}"
         schema = step.get("schema")
         if not isinstance(schema, dict):
             schema = {}
@@ -600,6 +790,9 @@ class FallbackSchemeDesignExecutor:
         profile_map: dict[str, dict[str, Any]],
         side: str,
     ) -> None:
+        target_table = str(step.get("target_table") or "").strip()
+        if target_table:
+            step["step_id"] = f"{side}_write_recon_ready"
         sources = step.get("sources")
         if not isinstance(sources, list) or not sources:
             sources = [
@@ -615,6 +808,8 @@ class FallbackSchemeDesignExecutor:
         allowed_tables = [table_name for table_name in profile_map.keys() if table_name]
         unassigned_tables = list(allowed_tables)
         normalized_sources: list[dict[str, Any]] = []
+        table_alias_map: dict[str, str] = {}
+        alias_profile_map: dict[str, dict[str, Any]] = {}
         for index, source in enumerate(list(step.get("sources") or []), start=1):
             if not isinstance(source, dict):
                 continue
@@ -638,14 +833,387 @@ class FallbackSchemeDesignExecutor:
                 or (profile_map.get(str(normalized_source.get("table") or "").strip()) or {}).get("alias")
                 or f"{side}_source_{index}"
             ).strip()
+            normalized_table = str(normalized_source.get("table") or "").strip()
+            normalized_alias = str(normalized_source.get("alias") or "").strip()
+            if normalized_table and normalized_alias:
+                table_alias_map.setdefault(normalized_table, normalized_alias)
+                matched_profile = profile_map.get(normalized_table)
+                if matched_profile:
+                    alias_profile_map[normalized_alias] = matched_profile
             normalized_sources.append(normalized_source)
         step["sources"] = normalized_sources
 
         row_write_mode = str(step.get("row_write_mode") or "").strip()
         if row_write_mode not in {"upsert", "insert_if_missing", "update_only"}:
             step["row_write_mode"] = "upsert"
+        create_step_id = f"create_{target_table}" if target_table else ""
+        if create_step_id:
+            depends_on = [
+                str(item).strip()
+                for item in list(step.get("depends_on") or [])
+                if str(item).strip()
+            ]
+            if create_step_id not in depends_on:
+                step["depends_on"] = [create_step_id, *depends_on]
 
+        self._normalize_proc_mapping_entries(
+            step=step,
+            alias_profile_map=alias_profile_map,
+            table_alias_map=table_alias_map,
+        )
+        self._sanitize_proc_source_bindings(step=step, profile_map=profile_map)
         self._ensure_proc_standard_mappings(step, profile_map=profile_map)
+
+    def _normalize_proc_mapping_entries(
+        self,
+        *,
+        step: dict[str, Any],
+        alias_profile_map: dict[str, dict[str, Any]],
+        table_alias_map: dict[str, str],
+    ) -> None:
+        mappings = [item for item in list(step.get("mappings") or []) if isinstance(item, dict)]
+        sources = [item for item in list(step.get("sources") or []) if isinstance(item, dict)]
+        sole_alias = (
+            str(sources[0].get("alias") or "").strip()
+            if len(sources) == 1 and isinstance(sources[0], dict)
+            else ""
+        )
+
+        normalized_mappings: list[dict[str, Any]] = []
+        for raw_mapping in mappings:
+            mapping = copy.deepcopy(raw_mapping)
+            self._normalize_proc_mapping_value(
+                mapping,
+                table_alias_map=table_alias_map,
+                sole_alias=sole_alias,
+            )
+            self._coerce_proc_mapping_target(
+                mapping,
+                alias_profile_map=alias_profile_map,
+                sole_alias=sole_alias,
+            )
+            if not str(mapping.get("target_field") or "").strip() and not str(
+                mapping.get("target_field_template") or ""
+            ).strip():
+                continue
+            normalized_mappings.append(mapping)
+        step["mappings"] = normalized_mappings
+
+    def _normalize_proc_mapping_value(
+        self,
+        mapping: dict[str, Any],
+        *,
+        table_alias_map: dict[str, str],
+        sole_alias: str,
+    ) -> None:
+        value = mapping.get("value")
+        if not isinstance(value, dict):
+            if isinstance(mapping.get("source"), dict):
+                value = {
+                    "type": "source",
+                    "source": copy.deepcopy(mapping.get("source")),
+                }
+            else:
+                source_field = str(
+                    mapping.get("source_field")
+                    or mapping.get("sourceField")
+                    or ""
+                ).strip()
+                source_alias = str(
+                    mapping.get("source_alias")
+                    or mapping.get("sourceAlias")
+                    or mapping.get("alias")
+                    or ""
+                ).strip()
+                source_table = str(
+                    mapping.get("source_table")
+                    or mapping.get("sourceTable")
+                    or ""
+                ).strip()
+                if source_field:
+                    normalized_source: dict[str, Any] = {"field": source_field}
+                    resolved_alias = source_alias or table_alias_map.get(source_table, "") or sole_alias
+                    if resolved_alias:
+                        normalized_source["alias"] = resolved_alias
+                    elif source_table:
+                        normalized_source["table"] = source_table
+                    value = {"type": "source", "source": normalized_source}
+
+        if not isinstance(value, dict):
+            return
+
+        if not str(value.get("type") or "").strip():
+            if isinstance(value.get("source"), dict):
+                value["type"] = "source"
+            elif isinstance(value.get("expr"), str):
+                value["type"] = "formula"
+
+        source = value.get("source")
+        if isinstance(source, dict):
+            source_alias = str(source.get("alias") or "").strip()
+            source_table = str(source.get("table") or "").strip()
+            if not source_alias:
+                resolved_alias = table_alias_map.get(source_table, "") or sole_alias
+                if resolved_alias:
+                    source["alias"] = resolved_alias
+
+        mapping["value"] = value
+
+    def _coerce_proc_mapping_target(
+        self,
+        mapping: dict[str, Any],
+        *,
+        alias_profile_map: dict[str, dict[str, Any]],
+        sole_alias: str,
+    ) -> None:
+        target_template = str(
+            mapping.get("target_field_template")
+            or mapping.get("targetFieldTemplate")
+            or ""
+        ).strip()
+        if target_template:
+            mapping["target_field_template"] = target_template
+
+        target_field = self._normalize_proc_target_field_name(mapping.get("target_field"))
+        if not target_field and not target_template:
+            for candidate_key in (
+                "target",
+                "target_name",
+                "targetName",
+                "targetField",
+                "output_field",
+                "outputField",
+                "output_name",
+                "outputName",
+                "target_column",
+                "targetColumn",
+                "column_name",
+                "columnName",
+                "name",
+            ):
+                target_field = self._normalize_proc_target_field_name(mapping.get(candidate_key))
+                if target_field:
+                    break
+        if not target_field and not target_template:
+            target_field = self._infer_proc_mapping_target_field(
+                mapping,
+                alias_profile_map=alias_profile_map,
+                sole_alias=sole_alias,
+            )
+        if target_field:
+            mapping["target_field"] = target_field
+
+    def _normalize_proc_target_field_name(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        compact = re.sub(r"[\s\-]+", "_", text).strip("_").lower()
+        alias_map = {
+            "biz_key": "biz_key",
+            "bizkey": "biz_key",
+            "business_key": "biz_key",
+            "business_id": "biz_key",
+            "match_key": "biz_key",
+            "key": "biz_key",
+            "业务主键": "biz_key",
+            "主键": "biz_key",
+            "金额": "amount",
+            "amount": "amount",
+            "amt": "amount",
+            "业务日期": "biz_date",
+            "日期": "biz_date",
+            "时间": "biz_date",
+            "biz_date": "biz_date",
+            "bizdate": "biz_date",
+            "来源标识": "source_name",
+            "来源": "source_name",
+            "来源名称": "source_name",
+            "source_name": "source_name",
+            "sourcename": "source_name",
+        }
+        return alias_map.get(compact, text)
+
+    def _infer_proc_mapping_target_field(
+        self,
+        mapping: dict[str, Any],
+        *,
+        alias_profile_map: dict[str, dict[str, Any]],
+        sole_alias: str,
+    ) -> str:
+        value = mapping.get("value")
+        refs = self._collect_source_references(value if isinstance(value, dict) else mapping, sole_alias=sole_alias)
+        for alias, field_name in refs:
+            resolved_alias = alias or sole_alias
+            profile = alias_profile_map.get(resolved_alias) or {}
+            if not profile or not field_name:
+                continue
+            if field_name == str(profile.get("key_field") or "").strip():
+                return "biz_key"
+            if field_name == str(profile.get("amount_field") or "").strip():
+                return "amount"
+            if field_name == str(profile.get("date_field") or "").strip():
+                return "biz_date"
+            if field_name == str(profile.get("source_name_field") or "").strip():
+                return "source_name"
+        return ""
+
+    def _ensure_required_proc_steps(
+        self,
+        rule: dict[str, Any],
+        *,
+        source_profiles_by_side: dict[str, dict[str, dict[str, Any]]],
+    ) -> None:
+        steps = rule.get("steps")
+        if not isinstance(steps, list):
+            steps = []
+            rule["steps"] = steps
+
+        keyed_steps: dict[tuple[str, str], dict[str, Any]] = {}
+        extras: list[dict[str, Any]] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            action = str(step.get("action") or "").strip()
+            target_table = str(step.get("target_table") or "").strip()
+            key = (target_table, action)
+            if action in {"create_schema", "write_dataset"} and target_table in {"left_recon_ready", "right_recon_ready"}:
+                keyed_steps.setdefault(key, step)
+            else:
+                extras.append(step)
+
+        ordered_steps: list[dict[str, Any]] = []
+        for side, target_table in (("left", "left_recon_ready"), ("right", "right_recon_ready")):
+            create_key = (target_table, "create_schema")
+            write_key = (target_table, "write_dataset")
+            create_step = keyed_steps.get(create_key)
+            if not isinstance(create_step, dict):
+                create_step = self._build_create_schema_step(target_table)
+            else:
+                create_step["step_id"] = f"create_{target_table}"
+            write_step = keyed_steps.get(write_key)
+            if not isinstance(write_step, dict):
+                write_step = self._build_write_dataset_step(
+                    side,
+                    target_table,
+                    list(source_profiles_by_side.get(side, {}).values()),
+                )
+            else:
+                write_step["step_id"] = f"{side}_write_recon_ready"
+                write_step.setdefault("target_table", target_table)
+                write_step.setdefault("action", "write_dataset")
+                depends_on = [
+                    str(item).strip()
+                    for item in list(write_step.get("depends_on") or [])
+                    if str(item).strip()
+                ]
+                create_step_id = str(create_step.get("step_id") or f"create_{target_table}").strip()
+                if create_step_id and create_step_id not in depends_on:
+                    write_step["depends_on"] = [create_step_id, *depends_on]
+            ordered_steps.extend([create_step, write_step])
+
+        ordered_steps.extend(extras)
+        rule["steps"] = ordered_steps
+
+    def _sanitize_proc_source_bindings(
+        self,
+        *,
+        step: dict[str, Any],
+        profile_map: dict[str, dict[str, Any]],
+    ) -> None:
+        sources = [item for item in list(step.get("sources") or []) if isinstance(item, dict)]
+        alias_field_map: dict[str, set[str]] = {}
+        for source in sources:
+            alias = str(source.get("alias") or "").strip()
+            table_name = str(source.get("table") or "").strip()
+            if not alias or not table_name:
+                continue
+            profile = profile_map.get(table_name) or {}
+            alias_field_map[alias] = {
+                str(field).strip()
+                for field in list(profile.get("available_fields") or [])
+                if str(field).strip()
+            }
+
+        sole_alias = next(iter(alias_field_map.keys()), "") if len(alias_field_map) == 1 else ""
+        mappings = [item for item in list(step.get("mappings") or []) if isinstance(item, dict)]
+        step["mappings"] = [
+            mapping
+            for mapping in mappings
+            if not self._mapping_has_invalid_source_field(
+                mapping,
+                alias_field_map=alias_field_map,
+                sole_alias=sole_alias,
+            )
+        ]
+
+        match = step.get("match")
+        if not isinstance(match, dict):
+            return
+        sanitized_match_sources: list[dict[str, Any]] = []
+        for item in list(match.get("sources") or []):
+            if not isinstance(item, dict):
+                continue
+            alias = str(item.get("alias") or sole_alias).strip()
+            known_fields = alias_field_map.get(alias) or set()
+            keys: list[dict[str, Any]] = []
+            for key_item in list(item.get("keys") or []):
+                if not isinstance(key_item, dict):
+                    continue
+                field_name = str(key_item.get("field") or "").strip()
+                if known_fields and field_name and field_name not in known_fields:
+                    continue
+                keys.append(copy.deepcopy(key_item))
+            if not keys:
+                continue
+            normalized_item = copy.deepcopy(item)
+            normalized_item["keys"] = keys
+            sanitized_match_sources.append(normalized_item)
+        if sanitized_match_sources:
+            match["sources"] = sanitized_match_sources
+        else:
+            match.pop("sources", None)
+
+    def _mapping_has_invalid_source_field(
+        self,
+        mapping: dict[str, Any],
+        *,
+        alias_field_map: dict[str, set[str]],
+        sole_alias: str,
+    ) -> bool:
+        for alias, field_name in self._collect_source_references(mapping, sole_alias=sole_alias):
+            if not field_name:
+                continue
+            if alias and alias not in alias_field_map:
+                return True
+            known_fields = alias_field_map.get(alias) or set()
+            if known_fields and field_name not in known_fields:
+                return True
+        return False
+
+    def _collect_source_references(
+        self,
+        value: Any,
+        *,
+        sole_alias: str,
+    ) -> list[tuple[str, str]]:
+        refs: list[tuple[str, str]] = []
+        if isinstance(value, dict):
+            source = value.get("source")
+            if isinstance(source, dict):
+                refs.append(
+                    (
+                        str(source.get("alias") or sole_alias).strip(),
+                        str(source.get("field") or "").strip(),
+                    )
+                )
+            for key, nested in value.items():
+                if key == "source":
+                    continue
+                refs.extend(self._collect_source_references(nested, sole_alias=sole_alias))
+        elif isinstance(value, list):
+            for item in value:
+                refs.extend(self._collect_source_references(item, sole_alias=sole_alias))
+        return refs
 
     def _ensure_proc_standard_mappings(
         self,
@@ -1016,32 +1584,7 @@ class FallbackSchemeDesignExecutor:
         }
 
     def _extract_dataset_field_names(self, dataset: dict[str, Any]) -> list[str]:
-        field_names: list[str] = []
-        schema_summary = dataset.get("schema_summary")
-        if isinstance(schema_summary, dict):
-            columns = schema_summary.get("columns")
-            if isinstance(columns, list):
-                for column in columns:
-                    if not isinstance(column, dict):
-                        continue
-                    field_name = str(column.get("name") or column.get("column_name") or "").strip()
-                    if field_name and field_name not in field_names:
-                        field_names.append(field_name)
-            else:
-                for key in schema_summary.keys():
-                    field_name = str(key).strip()
-                    if field_name and field_name != "columns" and field_name not in field_names:
-                        field_names.append(field_name)
-        if field_names:
-            return field_names
-
-        sample_rows = [row for row in list(dataset.get("sample_rows") or []) if isinstance(row, dict)]
-        for row in sample_rows[:3]:
-            for key in row.keys():
-                field_name = str(key).strip()
-                if field_name and field_name not in field_names:
-                    field_names.append(field_name)
-        return field_names
+        return infer_authoritative_raw_field_names(dataset)
 
     def _pick_preferred_field(
         self,
@@ -1116,9 +1659,10 @@ class FallbackSchemeDesignExecutor:
                     "total_amount",
                 ],
                 regex_candidates=[
-                    r"(amount|amt|price|money|fee|balance)$",
+                    r"(^amt_|_amt_|amount|price|money|fee|balance)",
                     r"(金额|应收|应付|实收|实付)",
                 ],
+                allow_any_fallback=False,
             )
             date_field = self._pick_preferred_field(
                 field_names,
@@ -1126,6 +1670,12 @@ class FallbackSchemeDesignExecutor:
                     "biz_date",
                     "trade_date",
                     "order_date",
+                    "pay_date",
+                    "paid_date",
+                    "pay_time",
+                    "paid_time",
+                    "settle_date",
+                    "settle_time",
                     "cycdate",
                     "created_at",
                     "created_time",
@@ -1134,9 +1684,11 @@ class FallbackSchemeDesignExecutor:
                 ],
                 regex_candidates=[
                     r"(biz_)?date$",
+                    r"(pay|paid|settle).*(date|time)$",
                     r"(created|updated|trade|order).*(date|time)$",
                     r"(日期|时间|账期)",
                 ],
+                allow_any_fallback=False,
             )
             source_name_field = self._pick_preferred_field(
                 field_names,
@@ -1159,12 +1711,14 @@ class FallbackSchemeDesignExecutor:
                 {
                     "alias": f"{side}_source_{index}",
                     "table_name": table_name,
+                    "available_fields": field_names,
                     "key_field": key_field,
                     "amount_field": amount_field,
                     "date_field": date_field,
                     "source_name_field": source_name_field,
                     "source_name_literal": str(
-                        dataset.get("dataset_name")
+                        dataset.get("business_name")
+                        or dataset.get("dataset_name")
                         or dataset.get("resource_key")
                         or dataset.get("dataset_code")
                         or table_name
@@ -1181,6 +1735,7 @@ class FallbackSchemeDesignExecutor:
             {
                 "alias": f"{side}_source_1",
                 "table_name": fallback_table,
+                "available_fields": [],
                 "key_field": "",
                 "amount_field": "",
                 "date_field": "",
@@ -1322,10 +1877,7 @@ class FallbackSchemeDesignExecutor:
                 return self._require_proc_targets(normalized_rule)
             return self._require_proc_targets(parsed)
 
-        errors = validation.get("validation_errors") or []
-        first_error = errors[0] if isinstance(errors, list) and errors else {}
-        path = str(first_error.get("path") or "$").strip()
-        message = str(first_error.get("message") or "unknown").strip()
+        path, message = self._extract_validation_error_details(validation)
         raise ValueError(f"proc 草稿不符合 steps DSL: {path} {message}".strip())
 
     def _normalize_recon_draft(self, parsed: dict[str, Any]) -> dict[str, Any]:
@@ -1340,11 +1892,40 @@ class FallbackSchemeDesignExecutor:
                 return self._require_recon_tables(normalized_rule)
             return self._require_recon_tables(parsed)
 
-        errors = validation.get("validation_errors") or []
-        first_error = errors[0] if isinstance(errors, list) and errors else {}
-        path = str(first_error.get("path") or "$").strip()
-        message = str(first_error.get("message") or "unknown").strip()
+        path, message = self._extract_validation_error_details(validation)
         raise ValueError(f"recon 草稿不符合引擎定义: {path} {message}".strip())
+
+    def _extract_validation_error_details(self, validation: Any) -> tuple[str, str]:
+        if not isinstance(validation, dict):
+            message = str(validation).strip()
+            return "$", message or "unknown"
+
+        errors = validation.get("validation_errors")
+        if isinstance(errors, dict):
+            errors = [errors]
+        elif isinstance(errors, str):
+            errors = [errors]
+
+        if isinstance(errors, list) and errors:
+            return self._coerce_validation_error(errors[0])
+
+        message = str(validation.get("error") or "unknown").strip()
+        return "$", message or "unknown"
+
+    def _coerce_validation_error(self, error: Any) -> tuple[str, str]:
+        if isinstance(error, dict):
+            path = str(error.get("path") or "$").strip()
+            message = str(error.get("message") or "unknown").strip()
+            return path or "$", message or "unknown"
+
+        text = str(error).strip()
+        if not text:
+            return "$", "unknown"
+
+        head, sep, tail = text.partition(" ")
+        if sep and (head.startswith("$") or "." in head):
+            return head.strip() or "$", tail.strip() or text
+        return "$", text
 
     def _require_proc_targets(self, rule: dict[str, Any]) -> dict[str, Any]:
         steps = rule.get("steps")
@@ -1483,13 +2064,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                 proc_draft = self._normalize_proc_draft(
                     self._prepare_proc_draft_for_validation(session, proc_result.effective_rule_json)
                 )
-                proc_field_labels, proc_table_labels = self._collect_proc_display_maps(session)
-                proc_draft_text = render_proc_draft_text(
-                    proc_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=proc_field_labels,
-                    table_label_map=proc_table_labels,
-                )
+                proc_draft_text = proc_result.draft_text or None
                 notes = self._format_generation_notes("数据整理", proc_result)
                 if notes:
                     generation_notes.append(notes)
@@ -1499,6 +2074,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                     "details": proc_result.change_summary or proc_result.assumptions,
                 }
             except Exception as exc:  # noqa: BLE001
+                logger.warning("[scheme_design][proc] single-shot executor fallback: %s", exc)
                 llm_errors.append(f"proc 生成失败：{exc}")
                 proc_draft = self._build_proc_draft(session)
                 proc_field_labels, proc_table_labels = self._collect_proc_display_maps(session)
@@ -1510,7 +2086,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                 )
                 proc_generation_meta = {
                     "used_fallback": True,
-                    "message": "AI 生成失败，已回退为兜底规则，请重点检查后再试跑。",
+                    "message": "AI 生成失败，请检查后重新点击AI生成整理配置。",
                     "details": [str(exc).strip() or exc.__class__.__name__],
                 }
         else:
@@ -1523,12 +2099,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                     user_message=text,
                 )
                 recon_draft = self._normalize_recon_draft(recon_result.effective_rule_json)
-                recon_field_labels, _ = self._collect_recon_display_maps(session)
-                recon_draft_text = render_recon_draft_text(
-                    recon_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=recon_field_labels,
-                )
+                recon_draft_text = recon_result.draft_text or None
                 notes = self._format_generation_notes("对账逻辑", recon_result)
                 if notes:
                     generation_notes.append(notes)
@@ -1538,6 +2109,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                     "details": recon_result.change_summary or recon_result.assumptions,
                 }
             except Exception as exc:  # noqa: BLE001
+                logger.warning("[scheme_design][recon] single-shot executor fallback: %s", exc)
                 llm_errors.append(f"recon 生成失败：{exc}")
                 recon_draft = self._build_recon_draft(session)
                 recon_field_labels, _ = self._collect_recon_display_maps(session)
@@ -1548,7 +2120,7 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                 )
                 recon_generation_meta = {
                     "used_fallback": True,
-                    "message": "AI 生成失败，已回退为兜底规则，请重点检查后再试跑。",
+                    "message": "AI 生成失败，请检查后重新点击AI生成对账逻辑。",
                     "details": [str(exc).strip() or exc.__class__.__name__],
                 }
         else:
@@ -1601,137 +2173,6 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
         if not sections:
             return ""
         return f"{title} 生成提示：" + " | ".join(sections)
-
-
-class DeepAgentSchemeDesignExecutor(FallbackSchemeDesignExecutor):
-    """Executor that defers generation to the DeepAgent skill runner."""
-
-    name = "deep-agent-skills"
-
-    def __init__(self, runner: DeepAgentSkillRunner | None = None) -> None:
-        super().__init__()
-        self._skill_runner = runner or get_skill_runner()
-
-    async def run_turn(
-        self,
-        *,
-        session: SchemeDesignSession,
-        user_message: str,
-        is_resume: bool = False,
-    ) -> SchemeDesignExecutorResult:
-        text = (user_message or "").strip()
-        normalized = text.lower()
-        focus = self._infer_focus(text, normalized)
-        should_build_proc = focus in {"proc", "both"} and (
-            focus == "proc" or not session.drafts.proc_draft_json
-        )
-        should_build_recon = focus in {"recon", "both"} and (
-            focus == "recon" or not session.drafts.recon_draft_json
-        )
-
-        proc_draft: dict[str, Any] | None = None
-        recon_draft: dict[str, Any] | None = None
-        proc_draft_text: str | None = None
-        recon_draft_text: str | None = None
-        llm_errors: list[str] = []
-        skill_notes: list[str] = []
-
-        if should_build_proc:
-            try:
-                proc_result = await self._skill_runner.generate_proc_draft(session=session, user_message=text)
-                proc_draft = self._normalize_proc_draft(
-                    self._prepare_proc_draft_for_validation(session, proc_result.effective_rule_json)
-                )
-                proc_field_labels, proc_table_labels = self._collect_proc_display_maps(session)
-                proc_draft_text = render_proc_draft_text(
-                    proc_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=proc_field_labels,
-                    table_label_map=proc_table_labels,
-                )
-                notes = self._format_skill_notes("数据整理", proc_result)
-                if notes:
-                    skill_notes.append(notes)
-            except Exception as exc:  # noqa: BLE001
-                llm_errors.append(f"proc 生成失败：{exc}")
-                proc_draft = self._build_proc_draft(session)
-                proc_field_labels, proc_table_labels = self._collect_proc_display_maps(session)
-                proc_draft_text = render_proc_draft_text(
-                    proc_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=proc_field_labels,
-                    table_label_map=proc_table_labels,
-                )
-
-        if should_build_recon:
-            try:
-                recon_result = await self._skill_runner.generate_recon_draft(session=session, user_message=text)
-                recon_draft = self._normalize_recon_draft(recon_result.effective_rule_json)
-                recon_field_labels, _ = self._collect_recon_display_maps(session)
-                recon_draft_text = render_recon_draft_text(
-                    recon_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=recon_field_labels,
-                )
-                notes = self._format_skill_notes("对账逻辑", recon_result)
-                if notes:
-                    skill_notes.append(notes)
-            except Exception as exc:  # noqa: BLE001
-                llm_errors.append(f"recon 生成失败：{exc}")
-                recon_draft = self._build_recon_draft(session)
-                recon_field_labels, _ = self._collect_recon_display_maps(session)
-                recon_draft_text = render_recon_draft_text(
-                    recon_draft,
-                    goal_hint=session.biz_goal,
-                    field_label_map=recon_field_labels,
-                )
-
-        open_questions = self._build_open_questions(session)
-        phase = "恢复会话" if is_resume else "处理消息"
-        if llm_errors:
-            assistant_message = (
-                f"[{phase}] 已尝试使用 DeepAgent skill 生成配置，但存在回退："
-                + "；".join(llm_errors)
-                + "。当前已返回可继续编辑的 JSON 草稿。"
-            )
-        else:
-            assistant_message = (
-                f"[{phase}] 已根据当前目标、数据集描述和样例数据生成最新草稿。"
-                " 你可以直接继续试跑验证或补充约束后重新生成。"
-            )
-        if skill_notes:
-            assistant_message += "\n" + "\n".join(skill_notes)
-
-        return SchemeDesignExecutorResult(
-            assistant_message=assistant_message,
-            loaded_skills=["proc-config", "recon-config"],
-            open_questions=open_questions,
-            proc_draft_json=proc_draft,
-            recon_draft_json=recon_draft,
-            proc_draft_text=proc_draft_text,
-            recon_draft_text=recon_draft_text,
-            pending_interrupt={
-                "type": "design_review",
-                "message": "请确认当前草稿方向，或继续补充约束。",
-            },
-        )
-
-    def _format_skill_notes(self, title: str, result: SkillGenerationResult) -> str:
-        sections: list[str] = []
-        if result.provider:
-            sections.append(f"生成 provider：{result.provider}")
-        if result.provider_fallback_errors:
-            sections.append(f"前序 provider 回退：{'；'.join(result.provider_fallback_errors)}")
-        if result.assumptions:
-            sections.append(f"假设：{'；'.join(result.assumptions)}")
-        if result.change_summary:
-            sections.append(f"调整摘要：{'；'.join(result.change_summary)}")
-        if result.unsupported_points:
-            sections.append(f"暂不支持：{'；'.join(result.unsupported_points)}")
-        if not sections:
-            return ""
-        return f"{title} Skill 提示：" + " | ".join(sections)
-
 
 @lru_cache(maxsize=1)
 def _load_finance_mcp_rule_schema_module() -> Any:

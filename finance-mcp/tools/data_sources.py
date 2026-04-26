@@ -3,12 +3,13 @@
 Phase-1 goals:
 - Persist data sources / configs / sync jobs in PostgreSQL
 - Keep `platform_*` tools intact and reuse them for OAuth platforms
-- Support publish-only snapshot semantics for deterministic syncs
+- Support published datasets and asset-layer collection records for deterministic syncs
 - Reserve browser / desktop_cli for future agent-assisted execution
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import hashlib
 import json
@@ -21,8 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import psycopg2.extras
+import pandas as pd
 import requests
 from dotenv import dotenv_values
 from mcp import Tool
@@ -34,6 +35,7 @@ from security_utils import UPLOAD_ROOT
 from tools.platform_connections import handle_tool_call as handle_platform_tool_call
 
 logger = logging.getLogger("tools.data_sources")
+CONNECTOR_SYNC_TIMEOUT_SECONDS = int(os.getenv("CONNECTOR_SYNC_TIMEOUT_SECONDS", "180"))
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -1173,6 +1175,19 @@ def _require_user(auth_token: str) -> dict[str, Any]:
     return user
 
 
+def _require_scheduler_user(auth_token: str) -> dict[str, Any]:
+    token = str(auth_token or "").strip()
+    if not token:
+        raise ValueError("未提供认证 token")
+    user = get_user_from_token(token)
+    if not user:
+        raise ValueError("token 无效或已过期")
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"system", "scheduler"}:
+        raise ValueError("当前 token 无权限执行调度器内部调用")
+    return user
+
+
 def _normalize_source_kind(value: Any) -> str:
     source_kind = str(value or "").strip().lower()
     if source_kind not in SOURCE_KINDS:
@@ -1275,19 +1290,132 @@ def _window_from_args(arguments: dict[str, Any]) -> tuple[str | None, str | None
     return window_start, window_end
 
 
-def _compute_idempotency_key(source_id: str, arguments: dict[str, Any]) -> str:
-    explicit = str(arguments.get("idempotency_key") or "").strip()
+def _collection_biz_date_from_args(arguments: dict[str, Any]) -> str:
+    explicit = str(arguments.get("biz_date") or "").strip()
     if explicit:
         return explicit
-    window_start, window_end = _window_from_args(arguments)
-    scope_payload = {
-        "source_id": source_id,
-        "resource_key": _resource_key_from_args(arguments),
-        "window_start": window_start or "",
-        "window_end": window_end or "",
-        "params": arguments.get("params") or {},
+    params = arguments.get("params") or {}
+    if isinstance(params, dict):
+        return str(params.get("biz_date") or "").strip()
+    return ""
+
+
+def _dataset_collection_config(dataset_row: dict[str, Any] | None) -> dict[str, Any]:
+    if not dataset_row:
+        return {}
+    profile = _extract_catalog_profile(dataset_row)
+    config = profile.get("collection_config")
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def _dataset_collection_key_fields(dataset_row: dict[str, Any] | None) -> list[str]:
+    if not dataset_row:
+        return []
+
+    candidates: list[Any] = []
+    semantic_profile = _extract_semantic_profile(dataset_row)
+    if isinstance(semantic_profile.get("key_fields"), list):
+        candidates.extend(semantic_profile.get("key_fields") or [])
+
+    for container_key in ("key_fields", "collection_key_fields", "primary_key_fields"):
+        value = dataset_row.get(container_key)
+        if isinstance(value, list):
+            candidates.extend(value)
+
+    for container_key in ("meta", "schema_summary", "extract_config", "sync_strategy"):
+        container = dataset_row.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in ("key_fields", "collection_key_fields", "primary_key_fields"):
+            value = container.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+
+    fields: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        field = _safe_text(item)
+        if not field or field in seen:
+            continue
+        seen.add(field)
+        fields.append(field)
+    return fields
+
+
+def _collection_context_from_args(arguments: dict[str, Any]) -> dict[str, Any]:
+    params = arguments.get("params") if isinstance(arguments.get("params"), dict) else {}
+    dataset_id = _safe_text(params.get("dataset_id") or arguments.get("dataset_id"))
+    if not dataset_id:
+        return {}
+    return {
+        "dataset_id": dataset_id,
+        "dataset_code": _safe_text(params.get("dataset_code") or arguments.get("dataset_code")),
+        "biz_date": _safe_text(params.get("biz_date") or arguments.get("biz_date")),
+        "key_fields": [
+            _safe_text(item)
+            for item in params.get("key_fields") or arguments.get("key_fields") or []
+            if _safe_text(item)
+        ],
     }
-    return _hash_payload(scope_payload)
+
+
+def _collection_key_value_is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _build_collection_records(
+    *,
+    rows: list[dict[str, Any]],
+    key_fields: list[str],
+) -> list[dict[str, Any]]:
+    if not key_fields:
+        raise ValueError("数据集缺少 key_fields，无法生成采集记录唯一标识")
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        key_values = {field: row.get(field) for field in key_fields}
+        if all(_collection_key_value_is_empty(value) for value in key_values.values()):
+            raise ValueError(f"第 {index + 1} 行 key_fields 值全为空，采集失败")
+        item_key = _hash_payload({"key_fields": key_fields, "values": key_values})
+        if item_key in seen:
+            continue
+        seen.add(item_key)
+        records.append(
+            {
+                "item_key": item_key,
+                "item_key_values": key_values,
+                "item_hash": _hash_payload(row),
+                "payload": row,
+            }
+        )
+    return records
+
+
+def _collection_schedule_time(config: dict[str, Any]) -> str:
+    schedule = config.get("schedule") if isinstance(config.get("schedule"), dict) else {}
+    return _safe_text(
+        schedule.get("time")
+        or schedule.get("time_of_day")
+        or config.get("schedule_time")
+        or config.get("time")
+    )
+
+
+def _collection_date_field(config: dict[str, Any]) -> str:
+    return _safe_text(
+        config.get("date_field")
+        or config.get("collection_date_field")
+        or config.get("physical_date_field")
+    )
+
+
+def _collection_display_date_field(config: dict[str, Any]) -> str:
+    return _safe_text(
+        config.get("display_date_field")
+        or config.get("date_field_label")
+        or config.get("collection_date_field_label")
+    )
 
 
 def _generate_source_code(source_kind: str, provider_code: str, name: str) -> str:
@@ -1353,58 +1481,87 @@ def _query_source_any_company(source_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _list_snapshot_rows(snapshot_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    conn_manager = auth_db.get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT item_key, item_payload, item_hash, created_at
-                    FROM dataset_snapshot_items
-                    WHERE snapshot_id = %s
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (snapshot_id, max(1, min(limit, 100))),
-                )
-                rows = cur.fetchall()
-                return [auth_db._normalize_record(dict(row)) for row in rows]
-    except Exception as exc:
-        logger.error("list snapshot rows failed: %s", exc, exc_info=True)
-        return []
-
-
-def _extract_sample_payload_rows(snapshot_rows: list[dict[str, Any]], *, limit: int = SEMANTIC_SAMPLE_ROW_LIMIT) -> list[dict[str, Any]]:
+def _extract_collection_payload_rows(records: list[dict[str, Any]], *, limit: int = SEMANTIC_SAMPLE_ROW_LIMIT) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for item in snapshot_rows:
-        payload = item.get("item_payload")
+    for item in records:
+        payload = item.get("payload") or item.get("item_payload") or item.get("record_payload")
         if not isinstance(payload, dict):
             continue
-        rows.append(payload)
+        rows.append(dict(payload))
         if len(rows) >= max(1, min(limit, 100)):
             break
     return rows
 
 
-def _load_dataset_sample_rows_from_published_snapshot(
+def _load_dataset_sample_rows_from_collection_records(
     *,
+    company_id: str,
     data_source_id: str,
+    dataset_id: str = "",
+    dataset_code: str = "",
     resource_key: str,
     limit: int = SEMANTIC_SAMPLE_ROW_LIMIT,
 ) -> list[dict[str, Any]]:
-    snapshot = auth_db.get_unified_published_dataset_snapshot(
+    records = auth_db.list_dataset_collection_records(
+        company_id=company_id,
         data_source_id=data_source_id,
+        dataset_id=_safe_text(dataset_id) or None,
+        dataset_code=_safe_text(dataset_code) or None,
         resource_key=resource_key or "default",
-    )
-    if not snapshot:
-        return []
-    snapshot_rows = auth_db.list_unified_dataset_snapshot_items(
-        snapshot_id=str(snapshot.get("id") or ""),
         limit=max(1, min(limit, 100)),
         offset=0,
     )
-    return _extract_sample_payload_rows(snapshot_rows, limit=limit)
+    return _extract_collection_payload_rows(records, limit=limit)
+
+
+def _collection_record_filter_matches(row_value: Any, expected_value: Any) -> bool:
+    actual = str(row_value or "").strip()
+    expected = str(expected_value or "").strip()
+    if not expected:
+        return actual == expected
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expected):
+        return actual.startswith(expected)
+    return actual == expected
+
+
+def _export_collection_records_to_excel(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    biz_date: str = "",
+    table_name: str,
+    query: dict[str, Any] | None = None,
+) -> tuple[str, int]:
+    records = auth_db.list_dataset_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=_safe_text(dataset_id) or None,
+        dataset_code=_safe_text(dataset_code) or None,
+        resource_key=_safe_text(resource_key) or None,
+        biz_date=_safe_text(biz_date) or None,
+        limit=None,
+        offset=0,
+    )
+    payload_rows = _extract_collection_payload_rows(records, limit=max(len(records), 1))
+    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
+    if filters:
+        payload_rows = [
+            row for row in payload_rows
+            if all(_collection_record_filter_matches(row.get(key), value) for key, value in filters.items())
+        ]
+
+    export_root = UPLOAD_ROOT / "collection_record_exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="collection_records_export_", dir=str(export_root)))
+    safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in table_name).strip("_") or "dataset"
+    output_path = temp_dir / f"{safe_name}.xlsx"
+    df = pd.DataFrame(payload_rows)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return str(output_path), len(payload_rows)
 
 
 def _persist_dataset_semantic_profile(
@@ -1713,35 +1870,6 @@ def _normalize_manual_semantic_patch(
         normalized["status"] = _normalize_semantic_status(status, default="manual_updated")
     return normalized
 
-def _export_snapshot_rows_to_excel(
-    *,
-    snapshot_id: str,
-    table_name: str,
-    query: dict[str, Any] | None = None,
-) -> tuple[str, int]:
-    rows = auth_db.list_unified_dataset_snapshot_items(snapshot_id=snapshot_id, limit=None, offset=0)
-    payload_rows = [
-        dict(item.get("item_payload") or {})
-        for item in rows
-        if isinstance(item, dict) and isinstance(item.get("item_payload"), dict)
-    ]
-    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
-    if filters:
-        payload_rows = [
-            row for row in payload_rows
-            if all(str(row.get(key, "")) == str(value) for key, value in filters.items())
-        ]
-    export_root = UPLOAD_ROOT / "published_snapshot_exports"
-    export_root.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix="published_snapshot_export_", dir=str(export_root)))
-    safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in table_name).strip("_") or "dataset"
-    output_path = temp_dir / f"{safe_name}.xlsx"
-    df = pd.DataFrame(payload_rows)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    return str(output_path), len(payload_rows)
-
-
 def _load_source_configs(source_id: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for config_type in CONFIG_TYPES:
@@ -1754,101 +1882,6 @@ def _load_source_configs(source_id: str) -> dict[str, dict[str, Any]]:
     return result
 
 
-async def _refresh_dataset_samples(
-    *,
-    auth_token: str,
-    company_id: str,
-    source_row: dict[str, Any],
-    mode: str = "",
-    reason: str = "",
-) -> int:
-    source_kind = str(source_row.get("source_kind") or "")
-    if source_kind != "database" or not auth_token:
-        return 0
-    source_id = str(source_row.get("id") or "")
-    if _is_hologres_source(source_row):
-        logger.info("skip auto sample refresh for hologres source: source_id=%s", source_id)
-        return 0
-    dataset_rows = auth_db.list_unified_data_source_datasets(
-        company_id=company_id,
-        data_source_id=source_id,
-        status=None,
-        include_deleted=False,
-        limit=AUTO_SAMPLE_DATASET_LIMIT,
-    )
-    if not dataset_rows:
-        return 0
-
-    runtime_source = _load_runtime_source(source_row, include_secret=True)
-    connector = build_connector(runtime_source)
-    sampled = 0
-    for dataset_row in dataset_rows[:AUTO_SAMPLE_DATASET_LIMIT]:
-        resource_key = str(dataset_row.get("resource_key") or "")
-        preview_result = connector.preview(
-            {
-                "resource_key": resource_key,
-                "dataset_code": str(dataset_row.get("dataset_code") or ""),
-                "limit": AUTO_SAMPLE_ROW_LIMIT,
-                "dataset": {
-                    "dataset_code": dataset_row.get("dataset_code"),
-                    "resource_key": resource_key,
-                    "extract_config": dataset_row.get("extract_config"),
-                },
-            }
-        )
-        rows = [row for row in preview_result.get("rows") or [] if isinstance(row, dict)]
-        if not rows:
-            continue
-
-        snapshot = auth_db.create_unified_dataset_snapshot(
-            company_id=company_id,
-            data_source_id=source_id,
-            resource_key=resource_key or "default",
-            snapshot_name=f"auto_sample_{dataset_row.get('dataset_code')}",
-            record_count=len(rows),
-            meta={
-                "dataset_code": dataset_row.get("dataset_code"),
-                "refresh_reason": reason or "auto_refresh",
-                "mode": mode,
-            },
-        )
-        if not snapshot:
-            continue
-
-        items = []
-        for index, row in enumerate(rows):
-            items.append(
-                {
-                    "item_key": str(index + 1),
-                    "item_payload": row,
-                    "item_hash": _hash_payload(row),
-                }
-            )
-        auth_db.append_unified_dataset_snapshot_items(
-            company_id=company_id,
-            data_source_id=source_id,
-            snapshot_id=str(snapshot["id"]),
-            items=items,
-        )
-        auth_db.mark_unified_dataset_snapshot_published(snapshot_id=str(snapshot["id"]))
-        sampled += 1
-
-    if sampled:
-        auth_db.create_unified_data_source_event(
-            company_id=company_id,
-            data_source_id=source_id,
-            event_type="dataset_samples_refreshed",
-            event_level="info",
-            event_message=f"采集 {sampled} 个数据集的样例数据",
-            event_payload={
-                "sampled_dataset_count": sampled,
-                "row_limit": AUTO_SAMPLE_ROW_LIMIT,
-                "reason": reason or "auto_refresh",
-            },
-        )
-    return sampled
-
-
 async def _auto_refresh_datasets_and_samples(
     *,
     auth_token: str,
@@ -1857,7 +1890,7 @@ async def _auto_refresh_datasets_and_samples(
     mode: str = "",
     reason: str = "",
 ) -> dict[str, int]:
-    summary = {"discovered": 0, "sampled": 0}
+    summary = {"discovered": 0}
     source_kind = str(source_row.get("source_kind") or "")
     if source_kind != "database" or not auth_token:
         return summary
@@ -1876,14 +1909,6 @@ async def _auto_refresh_datasets_and_samples(
             return summary
         summary["discovered"] = int(discover_result.get("dataset_count") or 0)
 
-        sampled = await _refresh_dataset_samples(
-            auth_token=auth_token,
-            company_id=company_id,
-            source_row=source_row,
-            mode=mode,
-            reason=reason or "auto_refresh",
-        )
-        summary["sampled"] = sampled
         return summary
     except Exception as exc:
         logger.error("auto refresh datasets and samples failed: %s", exc, exc_info=True)
@@ -2158,6 +2183,7 @@ def _build_dataset_view(dataset_row: dict[str, Any], *, include_heavy: bool = Tr
         "schema_summary": dict(dataset_row.get("schema_summary") or {}),
         "sync_strategy": dict(dataset_row.get("sync_strategy") or {}),
         "metadata": dict(dataset_row.get("meta") or {}),
+        "collection_config": dict(_extract_catalog_profile(dataset_row).get("collection_config") or {}),
         "field_label_map": semantic_flat["field_label_map"],
         "semantic_fields": semantic_flat["semantic_fields"],
         "low_confidence_fields": semantic_flat["low_confidence_fields"],
@@ -2728,6 +2754,8 @@ def _build_catalog_patch(arguments: dict[str, Any], *, publish_status_default: s
     for key in direct_fields:
         if arguments.get(key) is not None:
             patch[key] = arguments.get(key)
+    if isinstance(arguments.get("collection_config"), dict):
+        patch["collection_config"] = dict(arguments.get("collection_config") or {})
     patch["publish_status"] = _normalize_publish_status(patch.get("publish_status"), default=publish_status_default)
     patch["verified_status"] = _normalize_verified_status(patch.get("verified_status"), default="unverified")
     patch["schema_name"] = _safe_text(patch.get("schema_name"))
@@ -2882,10 +2910,6 @@ def _build_data_source_view(
         limit=1,
     )
     latest_job = latest_jobs[0] if latest_jobs else None
-    published_snapshot = auth_db.get_unified_published_dataset_snapshot(
-        data_source_id=source_id,
-        resource_key="default",
-    )
     meta = dict(source_row.get("meta") or {})
     result = {
         "id": str(source_row.get("id") or ""),
@@ -2913,8 +2937,6 @@ def _build_data_source_view(
         "last_sync_at": (latest_job or {}).get("completed_at") or (latest_job or {}).get("updated_at"),
         "last_sync_job_id": str((latest_job or {}).get("id") or ""),
         "last_sync_status": str((latest_job or {}).get("job_status") or ""),
-        "published_snapshot_id": str((published_snapshot or {}).get("id") or ""),
-        "published_snapshot_at": (published_snapshot or {}).get("published_at"),
         "created_at": source_row.get("created_at"),
         "updated_at": source_row.get("updated_at"),
         "discover_summary": dict(meta.get("discover_summary") or {}),
@@ -3020,6 +3042,7 @@ def _sync_rows_from_payload(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _build_raw_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for index, row in enumerate(rows):
         source_record_key = str(
             row.get("id")
@@ -3030,6 +3053,10 @@ def _build_raw_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             or index + 1
         )
         payload_hash = _hash_payload(row)
+        dedupe_key = (source_record_key, payload_hash)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         records.append(
             {
                 "source_record_key": source_record_key,
@@ -3043,6 +3070,7 @@ def _build_raw_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _build_snapshot_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for index, row in enumerate(rows):
         item_key = str(
             row.get("id")
@@ -3053,6 +3081,10 @@ def _build_snapshot_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             or index + 1
         )
         item_hash = _hash_payload(row)
+        dedupe_key = (item_key, item_hash)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         items.append(
             {
                 "item_key": item_key,
@@ -3122,7 +3154,18 @@ async def _run_connector_sync(
         }
 
     connector = build_connector(source)
-    result = connector.trigger_sync(arguments)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(connector.trigger_sync, arguments),
+            timeout=max(1, CONNECTOR_SYNC_TIMEOUT_SECONDS),
+        )
+    except TimeoutError:
+        return {
+            "success": False,
+            "healthy": False,
+            "error": "采集查询超时或任务中断，请重新采集",
+            "message": "采集查询超时或任务中断，请重新采集",
+        }
     params = arguments.get("params") or {}
     if not _sync_rows_from_payload(result) and isinstance(params, dict) and isinstance(params.get("rows"), list):
         result = {
@@ -3142,19 +3185,6 @@ def _attach_aliases_to_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
         "source_id": str(job.get("data_source_id") or ""),
         "status": str(job.get("job_status") or ""),
         "finished_at": job.get("completed_at"),
-    }
-
-
-def _attach_aliases_to_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not snapshot:
-        return None
-    return {
-        **snapshot,
-        "snapshot_id": str(snapshot.get("id") or ""),
-        "source_id": str(snapshot.get("data_source_id") or ""),
-        "status": str(snapshot.get("snapshot_status") or ""),
-        "version": int(snapshot.get("snapshot_version") or 0),
-        "row_count": int(snapshot.get("record_count") or 0),
     }
 
 
@@ -3580,6 +3610,40 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_scheduler_list_collection_plans",
+            description="列出启用了自动采集计划的已发布数据集，供 finance-cron 调度使用。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="data_source_trigger_dataset_collection",
+            description="按已发布数据集触发一次独立采集任务。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "dataset_id": {"type": "string"},
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "biz_date": {"type": "string"},
+                    "trigger_mode": {"type": "string"},
+                    "window_start": {"type": "string"},
+                    "window_end": {"type": "string"},
+                    "window": {"type": "object"},
+                    "params": {"type": "object"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_get_sync_job",
             description="查询单个同步任务。",
             inputSchema={
@@ -3606,6 +3670,59 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_get_dataset_collection_detail",
+            description="获取某个已发布数据集的采集详情、最近采集任务和最新样本行。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "dataset_id": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "sample_limit": {"type": "integer"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
+            name="data_source_list_collection_records",
+            description="读取数据资产层 dataset_collection_records 采集记录。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "dataset_id": {"type": "string"},
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "biz_date": {"type": "string"},
+                    "item_key": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
+            name="data_source_export_collection_records",
+            description="将数据资产层 dataset_collection_records 导出为临时 Excel 文件，供 proc/recon 运行时复用。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "dataset_id": {"type": "string"},
+                    "dataset_code": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "biz_date": {"type": "string"},
+                    "table_name": {"type": "string"},
+                    "query": {"type": "object"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_preview",
             description="预览数据源数据样例。",
             inputSchema={
@@ -3614,48 +3731,6 @@ def create_tools() -> list[Tool]:
                     "auth_token": {"type": "string"},
                     **source_id_schema,
                     "limit": {"type": "integer"},
-                },
-                "required": ["auth_token", "source_id"],
-            },
-        ),
-        Tool(
-            name="data_source_get_published_snapshot",
-            description="获取数据源当前已发布快照。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string"},
-                    **source_id_schema,
-                    "resource_key": {"type": "string"},
-                },
-                "required": ["auth_token", "source_id"],
-            },
-        ),
-        Tool(
-            name="data_source_list_published_snapshot_rows",
-            description="读取数据源当前已发布快照的前 N 行样本，供方案设计和试跑优先使用真实采集数据。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string"},
-                    **source_id_schema,
-                    "resource_key": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-                "required": ["auth_token", "source_id"],
-            },
-        ),
-        Tool(
-            name="data_source_export_published_snapshot",
-            description="将数据源当前已发布快照导出为临时 Excel 文件，供 proc/recon 运行时复用。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string"},
-                    **source_id_schema,
-                    "resource_key": {"type": "string"},
-                    "table_name": {"type": "string"},
-                    "query": {"type": "object"},
                 },
                 "required": ["auth_token", "source_id"],
             },
@@ -3711,18 +3786,22 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_callback(arguments)
         if name == "data_source_trigger_sync":
             return await _handle_data_source_trigger_sync(arguments)
+        if name == "data_source_scheduler_list_collection_plans":
+            return await _handle_data_source_scheduler_list_collection_plans(arguments)
+        if name == "data_source_trigger_dataset_collection":
+            return await _handle_data_source_trigger_dataset_collection(arguments)
         if name == "data_source_get_sync_job":
             return await _handle_data_source_get_sync_job(arguments)
         if name == "data_source_list_sync_jobs":
             return await _handle_data_source_list_sync_jobs(arguments)
+        if name == "data_source_get_dataset_collection_detail":
+            return await _handle_data_source_get_dataset_collection_detail(arguments)
+        if name == "data_source_list_collection_records":
+            return await _handle_data_source_list_collection_records(arguments)
+        if name == "data_source_export_collection_records":
+            return await _handle_data_source_export_collection_records(arguments)
         if name == "data_source_preview":
             return await _handle_data_source_preview(arguments)
-        if name == "data_source_get_published_snapshot":
-            return await _handle_data_source_get_published_snapshot(arguments)
-        if name == "data_source_list_published_snapshot_rows":
-            return await _handle_data_source_list_published_snapshot_rows(arguments)
-        if name == "data_source_export_published_snapshot":
-            return await _handle_data_source_export_published_snapshot(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except Exception as exc:
         logger.error("data_source tool error: %s", exc, exc_info=True)
@@ -3799,17 +3878,12 @@ async def _handle_data_source_get(arguments: dict[str, Any]) -> dict[str, Any]:
         datasets=dataset_rows,
         include_dataset_details=include_datasets,
     )
-    snapshot = auth_db.get_unified_published_dataset_snapshot(
-        data_source_id=source_id,
-        resource_key=_resource_key_from_args(arguments),
-    )
     return {
         "success": True,
         "source": source_view,
         "source_summary": dict(source_view.get("source_summary") or {}),
         "dataset_summary": dict(source_view.get("dataset_summary") or {}),
         "health_summary": dict(source_view.get("health_summary") or {}),
-        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
     }
 
 
@@ -3958,19 +4032,6 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
             "scan_summary": discover_scan_summary,
         },
     )
-    sampled_count = 0
-    auth_token = str(arguments.get("auth_token") or "").strip()
-    if persist and auth_token:
-        try:
-            sampled_count = await _refresh_dataset_samples(
-                auth_token=auth_token,
-                company_id=company_id,
-                source_row=source_row,
-                mode=str(arguments.get("mode") or ""),
-                reason="discover",
-            )
-        except Exception as exc:
-            logger.error("refresh dataset samples after discover failed: %s", exc, exc_info=True)
     return {
         "success": True,
         "source_id": source_id,
@@ -3978,7 +4039,6 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
         "dataset_count": len(datasets),
         "persisted_count": len(persisted_rows),
         "persist_error_count": len(persist_errors),
-        "sampled_dataset_count": sampled_count,
         "scan_summary": discover_scan_summary,
         "discover_summary": discover_summary,
         "datasets": datasets,
@@ -4085,6 +4145,58 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
         result["source_summary"] = _build_source_summary(source_row)
         result["health_summary"] = _build_health_summary(source_row, filtered_rows)
     return result
+
+
+async def _handle_data_source_scheduler_list_collection_plans(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_scheduler_user(arguments.get("auth_token", ""))
+    company_filter = _safe_text(arguments.get("company_id"))
+    limit = max(1, min(int(arguments.get("limit") or 500), 1000))
+    company_ids = [company_filter or _safe_text(user.get("company_id"))]
+    if not company_ids[0]:
+        company_ids = [_safe_text(row.get("id")) for row in auth_db.list_companies() if _safe_text(row.get("id"))]
+
+    plans: list[dict[str, Any]] = []
+    for company_id in company_ids:
+        rows = _list_datasets_with_compat(
+            company_id=company_id,
+            status="active",
+            include_deleted=False,
+            only_published=True,
+            page=1,
+            page_size=limit,
+            lightweight=False,
+        )
+        for row in rows:
+            config = _dataset_collection_config(row)
+            schedule_time = _collection_schedule_time(config)
+            if not schedule_time:
+                continue
+            date_field = _collection_date_field(config)
+            if not date_field:
+                continue
+            source_id = _safe_text(row.get("data_source_id"))
+            source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+            if not source_row:
+                continue
+            if str(source_row.get("status") or "") != "active" or not bool(source_row.get("is_enabled", True)):
+                continue
+            dataset_view = _build_dataset_view(row, include_heavy=False)
+            plans.append(
+                {
+                    "company_id": company_id,
+                    "source_id": source_id,
+                    "dataset_id": _safe_text(row.get("id")),
+                    "dataset_code": _safe_text(row.get("dataset_code")),
+                    "dataset_name": dataset_view.get("business_name") or row.get("dataset_name"),
+                    "resource_key": _safe_text(row.get("resource_key")) or "default",
+                    "schedule_type": "daily",
+                    "schedule_expr": schedule_time,
+                    "date_field": date_field,
+                    "display_date_field": _collection_display_date_field(config),
+                    "collection_config": config,
+                }
+            )
+    return {"success": True, "collection_plans": plans, "count": len(plans)}
 
 
 async def _handle_data_source_get_dataset(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -4238,12 +4350,15 @@ async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[s
 
     sample_limit = max(1, min(int(arguments.get("sample_limit") or SEMANTIC_SAMPLE_ROW_LIMIT), 100))
     resource_key = _safe_text(dataset_row.get("resource_key")) or "default"
-    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+    sample_rows = _load_dataset_sample_rows_from_collection_records(
+        company_id=company_id,
         data_source_id=source_id,
+        dataset_id=_safe_text(dataset_row.get("id")),
+        dataset_code=_safe_text(dataset_row.get("dataset_code")),
         resource_key=resource_key,
         limit=sample_limit,
     )
-    sample_source = "published_snapshot" if sample_rows else "none"
+    sample_source = "collection_records" if sample_rows else "none"
 
     if not sample_rows and str(source_row.get("source_kind") or "") not in AGENT_ASSISTED_KINDS:
         try:
@@ -4323,8 +4438,11 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
 
-    sample_rows = _load_dataset_sample_rows_from_published_snapshot(
+    sample_rows = _load_dataset_sample_rows_from_collection_records(
+        company_id=company_id,
         data_source_id=source_id,
+        dataset_id=_safe_text(dataset_row.get("id")),
+        dataset_code=_safe_text(dataset_row.get("dataset_code")),
         resource_key=_safe_text(dataset_row.get("resource_key")) or "default",
         limit=SEMANTIC_SAMPLE_ROW_LIMIT,
     )
@@ -4682,9 +4800,12 @@ async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any])
             role_code=role_code,
             filters=contract_score_filters,
         )
+        semantic_flat = _flatten_semantic_profile(row)
         candidates.append(
             {
                 **_build_dataset_view(row, include_heavy=False),
+                "field_label_map": semantic_flat["field_label_map"],
+                "semantic_fields": semantic_flat["semantic_fields"],
                 "score": score,
                 "reason": reason,
                 "contract_label": candidate_contract.get("label") or "",
@@ -5099,6 +5220,216 @@ async def _handle_data_source_callback(arguments: dict[str, Any]) -> dict[str, A
     }
 
 
+def _fail_sync_job(
+    *,
+    company_id: str,
+    source_id: str,
+    resource_key: str,
+    job_id: str,
+    attempt_id: str,
+    checkpoint_before: dict[str, Any],
+    message: str,
+) -> None:
+    auth_db.update_unified_sync_job_attempt(
+        attempt_id=attempt_id,
+        attempt_status="failed",
+        error_message=message,
+        metrics={},
+        checkpoint_after=checkpoint_before,
+    )
+    auth_db.update_unified_sync_job_status(
+        sync_job_id=job_id,
+        job_status="failed",
+        error_message=message,
+        checkpoint_after=checkpoint_before,
+        finish_job=True,
+    )
+    auth_db.update_unified_data_source_health(
+        data_source_id=source_id,
+        health_status="error",
+        last_error_message=message,
+    )
+    _update_dataset_health_by_resource(
+        company_id=company_id,
+        source_id=source_id,
+        resource_key=resource_key,
+        health_status="error",
+        last_error_message=message,
+    )
+
+
+async def _execute_sync_job(
+    *,
+    company_id: str,
+    source_id: str,
+    resource_key: str,
+    runtime_source: dict[str, Any],
+    arguments: dict[str, Any],
+    job: dict[str, Any],
+    attempt: dict[str, Any],
+    checkpoint_before: dict[str, Any],
+    window_start: str | None,
+    window_end: str | None,
+) -> dict[str, Any]:
+    job_id = _safe_text(job.get("id"))
+    attempt_id = _safe_text(attempt.get("id"))
+    try:
+        result = await _run_connector_sync(runtime_source, arguments)
+        rows = _sync_rows_from_payload(result)
+        collection_context = _collection_context_from_args(arguments)
+        collection_summary: dict[str, Any] = {}
+        collection_records: list[dict[str, Any]] = []
+        if collection_context:
+            collection_records = _build_collection_records(
+                rows=rows,
+                key_fields=list(collection_context.get("key_fields") or []),
+            )
+        data_hash = _hash_payload(rows)
+        healthy = bool(result.get("healthy", result.get("success", False)))
+        if not bool(result.get("success")) or not healthy:
+            message = str(result.get("error") or result.get("message") or "同步失败")
+            auth_db.update_unified_sync_job_attempt(
+                attempt_id=attempt_id,
+                attempt_status="failed",
+                error_message=message,
+                metrics={"row_count": len(rows), "data_hash": data_hash, "collection_upserted": 0},
+                checkpoint_after=checkpoint_before,
+            )
+            auth_db.update_unified_sync_job_status(
+                sync_job_id=job_id,
+                job_status="failed",
+                error_message=message,
+                checkpoint_after=checkpoint_before,
+                finish_job=True,
+            )
+            auth_db.create_unified_data_source_event(
+                company_id=company_id,
+                data_source_id=source_id,
+                sync_job_id=job_id,
+                event_type="sync_failed",
+                event_level="error",
+                event_message=message,
+                event_payload={"rows": len(rows), "resource_key": resource_key},
+            )
+            auth_db.update_unified_data_source_health(
+                data_source_id=source_id,
+                health_status="error",
+                last_error_message=message,
+            )
+            _update_dataset_health_by_resource(
+                company_id=company_id,
+                source_id=source_id,
+                resource_key=resource_key,
+                health_status="error",
+                last_error_message=message,
+            )
+            return {
+                "success": False,
+                "source_id": source_id,
+                "job": _attach_aliases_to_job(auth_db.get_unified_sync_job_by_id(job_id)),
+                "reused": False,
+                "error": message,
+                "message": message,
+            }
+
+        if collection_context:
+            collection_summary = auth_db.upsert_dataset_collection_records(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=str(collection_context.get("dataset_id") or ""),
+                dataset_code=str(collection_context.get("dataset_code") or ""),
+                resource_key=resource_key,
+                biz_date=str(collection_context.get("biz_date") or ""),
+                sync_job_id=job_id,
+                records=collection_records,
+            )
+            collection_summary.update(
+                {
+                    "dataset_id": str(collection_context.get("dataset_id") or ""),
+                    "dataset_code": str(collection_context.get("dataset_code") or ""),
+                    "biz_date": str(collection_context.get("biz_date") or ""),
+                    "key_fields": list(collection_context.get("key_fields") or []),
+                    "record_count": collection_summary.get("upserted_count", 0),
+                }
+            )
+        checkpoint_after = _build_checkpoint_after(
+            checkpoint_before,
+            window_start=window_start,
+            window_end=window_end,
+            rows_count=int(collection_summary.get("upserted_count") or len(rows)),
+            result=result,
+        )
+        auth_db.update_unified_sync_job_attempt(
+            attempt_id=attempt_id,
+            attempt_status="success",
+            error_message="",
+            metrics={
+                "row_count": len(rows),
+                "data_hash": data_hash,
+                "collection_input": int(collection_summary.get("input_count") or 0),
+                "collection_upserted": int(collection_summary.get("upserted_count") or 0),
+                "collection_inserted": int(collection_summary.get("inserted_count") or 0),
+                "collection_updated": int(collection_summary.get("updated_count") or 0),
+                "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
+            },
+            checkpoint_after=checkpoint_after,
+        )
+        updated_job = auth_db.update_unified_sync_job_status(
+            sync_job_id=job_id,
+            job_status="success",
+            error_message="",
+            checkpoint_after=checkpoint_after,
+            finish_job=True,
+        )
+        auth_db.create_unified_data_source_event(
+            company_id=company_id,
+            data_source_id=source_id,
+            sync_job_id=job_id,
+            event_type="sync_succeeded",
+            event_level="info",
+            event_message=str(result.get("message") or "同步成功"),
+            event_payload={
+                "rows": len(rows),
+                "resource_key": resource_key,
+                "collection_summary": collection_summary,
+            },
+        )
+        auth_db.update_unified_data_source_health(
+            data_source_id=source_id,
+            health_status="healthy",
+            last_error_message="",
+        )
+        _update_dataset_health_by_resource(
+            company_id=company_id,
+            source_id=source_id,
+            resource_key=resource_key,
+            health_status="healthy",
+            last_error_message="",
+            last_sync_at=_now_iso(),
+        )
+        return {
+            "success": True,
+            "source_id": source_id,
+            "job": _attach_aliases_to_job(updated_job),
+            "collection_summary": collection_summary,
+            "reused": False,
+            "message": "同步成功并写入采集记录",
+        }
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc) or "采集任务执行异常"
+        logger.error("数据集采集任务执行失败: job_id=%s error=%s", job_id, message, exc_info=True)
+        _fail_sync_job(
+            company_id=company_id,
+            source_id=source_id,
+            resource_key=resource_key,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            checkpoint_before=checkpoint_before,
+            message=message,
+        )
+        return {"success": False, "source_id": source_id, "error": message}
+
+
 async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -5132,43 +5463,13 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
 
     resource_key = _resource_key_from_args(arguments)
     window_start, window_end = _window_from_args(arguments)
-    idempotency_key = _compute_idempotency_key(source_id, arguments)
-    existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
-        company_id=company_id,
-        data_source_id=source_id,
-        idempotency_key=idempotency_key,
-    )
-    if existing_job:
-        auth_db.update_unified_data_source_health(
-            data_source_id=source_id,
-            health_status="healthy",
-            last_error_message="",
-        )
-        return {
-            "success": True,
-            "source_id": source_id,
-            "job": _attach_aliases_to_job(existing_job),
-            "published_snapshot": _attach_aliases_to_snapshot(
-                auth_db.get_unified_published_dataset_snapshot(
-                    data_source_id=source_id,
-                    resource_key=resource_key,
-                )
-            ),
-            "reused": True,
-            "message": "命中幂等键，返回已有同步任务",
-        }
-
-    checkpoint_before_row = auth_db.get_unified_sync_checkpoint(
-        data_source_id=source_id,
-        resource_key=resource_key,
-    )
-    checkpoint_before = dict((checkpoint_before_row or {}).get("checkpoint_value") or {})
+    checkpoint_before: dict[str, Any] = {}
     job = auth_db.create_unified_sync_job(
         company_id=company_id,
         data_source_id=source_id,
-        trigger_mode="manual",
+        trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
         resource_key=resource_key,
-        idempotency_key=idempotency_key,
+        idempotency_key=_safe_text(arguments.get("idempotency_key")),
         window_start=window_start,
         window_end=window_end,
         request_payload=dict(arguments.get("params") or {}),
@@ -5186,213 +5487,84 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
     if not attempt:
         return {"success": False, "error": "创建同步任务尝试失败"}
 
-    batch = auth_db.create_unified_raw_ingestion_batch(
-        company_id=company_id,
-        data_source_id=source_id,
-        sync_job_id=str(job["id"]),
-        sync_job_attempt_id=str(attempt["id"]),
-        resource_key=resource_key,
-        meta={"source_kind": runtime_source["source_kind"], "provider_code": runtime_source["provider_code"]},
-    )
-    if not batch:
-        auth_db.update_unified_sync_job_attempt(
-            attempt_id=str(attempt["id"]),
-            attempt_status="failed",
-            error_message="创建原始批次失败",
-            metrics={},
-            checkpoint_after=checkpoint_before,
-        )
-        auth_db.update_unified_sync_job_status(
-            sync_job_id=str(job["id"]),
-            job_status="failed",
-            error_message="创建原始批次失败",
-            checkpoint_after=checkpoint_before,
-            finish_job=True,
-        )
-        auth_db.update_unified_data_source_health(
-            data_source_id=source_id,
-            health_status="error",
-            last_error_message="创建原始批次失败",
-        )
-        return {"success": False, "error": "创建原始批次失败"}
-
-    result = await _run_connector_sync(runtime_source, arguments)
-    rows = _sync_rows_from_payload(result)
-    raw_records = _build_raw_records(rows)
-    raw_inserted = auth_db.append_unified_raw_ingestion_records(
-        company_id=company_id,
-        data_source_id=source_id,
-        batch_id=str(batch["id"]),
-        records=raw_records,
-    )
-    data_hash = _hash_payload(rows)
-    auth_db.update_unified_raw_ingestion_batch_status(
-        batch_id=str(batch["id"]),
-        batch_status="loaded" if result.get("success") else "failed",
-        data_hash=data_hash,
-        meta={"row_count": len(rows)},
-    )
-
-    snapshot = auth_db.create_unified_dataset_snapshot(
-        company_id=company_id,
-        data_source_id=source_id,
-        resource_key=resource_key,
-        sync_job_id=str(job["id"]),
-        sync_job_attempt_id=str(attempt["id"]),
-        snapshot_name=f"{runtime_source['name']}_{resource_key}_{_now_iso()}",
-        snapshot_status="candidate",
-        record_count=0,
-        data_hash=data_hash,
-        schema_hash=_hash_payload(sorted({key for row in rows for key in row.keys()})),
-        window_start=window_start,
-        window_end=window_end,
-        meta={"connector_message": result.get("message", ""), "raw_inserted": raw_inserted},
-    )
-    if not snapshot:
-        auth_db.update_unified_sync_job_attempt(
-            attempt_id=str(attempt["id"]),
-            attempt_status="failed",
-            error_message="创建数据快照失败",
-            metrics={"raw_inserted": raw_inserted},
-            checkpoint_after=checkpoint_before,
-        )
-        auth_db.update_unified_sync_job_status(
-            sync_job_id=str(job["id"]),
-            job_status="failed",
-            error_message="创建数据快照失败",
-            checkpoint_after=checkpoint_before,
-            finish_job=True,
-        )
-        auth_db.update_unified_data_source_health(
-            data_source_id=source_id,
-            health_status="error",
-            last_error_message="创建数据快照失败",
-        )
-        return {"success": False, "error": "创建数据快照失败"}
-
-    snapshot_inserted = auth_db.append_unified_dataset_snapshot_items(
-        company_id=company_id,
-        data_source_id=source_id,
-        snapshot_id=str(snapshot["id"]),
-        items=_build_snapshot_items(rows),
-    )
-    healthy = bool(result.get("healthy", result.get("success", False)))
-    checkpoint_after = _build_checkpoint_after(
-        checkpoint_before,
-        window_start=window_start,
-        window_end=window_end,
-        rows_count=snapshot_inserted,
-        result=result,
-    )
-
-    if not bool(result.get("success")) or not healthy:
-        message = str(result.get("error") or result.get("message") or "同步失败")
-        auth_db.update_unified_sync_job_attempt(
-            attempt_id=str(attempt["id"]),
-            attempt_status="failed",
-            error_message=message,
-            metrics={"raw_inserted": raw_inserted, "snapshot_inserted": snapshot_inserted},
-            checkpoint_after=checkpoint_before,
-        )
-        auth_db.update_unified_sync_job_status(
-            sync_job_id=str(job["id"]),
-            job_status="failed",
-            error_message=message,
-            checkpoint_after=checkpoint_before,
-            finish_job=True,
-        )
-        auth_db.create_unified_data_source_event(
-            company_id=company_id,
-            data_source_id=source_id,
-            sync_job_id=str(job["id"]),
-            event_type="sync_failed",
-            event_level="error",
-            event_message=message,
-            event_payload={"rows": len(rows), "resource_key": resource_key},
-        )
-        auth_db.update_unified_data_source_health(
-            data_source_id=source_id,
-            health_status="error",
-            last_error_message=message,
-        )
-        _update_dataset_health_by_resource(
-            company_id=company_id,
-            source_id=source_id,
-            resource_key=resource_key,
-            health_status="error",
-            last_error_message=message,
-        )
+    execute_kwargs = {
+        "company_id": company_id,
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "runtime_source": runtime_source,
+        "arguments": dict(arguments),
+        "job": job,
+        "attempt": attempt,
+        "checkpoint_before": checkpoint_before,
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+    if _normalize_bool(arguments.get("background"), default=False):
+        asyncio.create_task(_execute_sync_job(**execute_kwargs))
         return {
-            "success": False,
+            "success": True,
             "source_id": source_id,
-            "job": _attach_aliases_to_job(auth_db.get_unified_sync_job_by_id(str(job["id"]))),
-            "published_snapshot": _attach_aliases_to_snapshot(
-                auth_db.get_unified_published_dataset_snapshot(data_source_id=source_id, resource_key=resource_key)
-            ),
+            "job": _attach_aliases_to_job(auth_db.get_unified_sync_job_by_id(str(job["id"])) or job),
             "reused": False,
-            "message": message,
+            "queued": True,
+            "message": "采集任务已创建，正在后台执行",
         }
 
-    published_snapshot = auth_db.mark_unified_dataset_snapshot_published(
-        snapshot_id=str(snapshot["id"]),
-        published_by_job_id=str(job["id"]),
-    )
-    auth_db.upsert_unified_sync_checkpoint(
-        company_id=company_id,
-        data_source_id=source_id,
-        resource_key=resource_key,
-        checkpoint_value=checkpoint_after,
-        updated_by_job_id=str(job["id"]),
-    )
-    auth_db.update_unified_sync_job_attempt(
-        attempt_id=str(attempt["id"]),
-        attempt_status="success",
-        error_message="",
-        metrics={"raw_inserted": raw_inserted, "snapshot_inserted": snapshot_inserted},
-        checkpoint_after=checkpoint_after,
-    )
-    updated_job = auth_db.update_unified_sync_job_status(
-        sync_job_id=str(job["id"]),
-        job_status="success",
-        error_message="",
-        checkpoint_after=checkpoint_after,
-        active_snapshot_id=str((published_snapshot or {}).get("id") or ""),
-        published_snapshot_id=str((published_snapshot or {}).get("id") or ""),
-        finish_job=True,
-    )
-    auth_db.create_unified_data_source_event(
-        company_id=company_id,
-        data_source_id=source_id,
-        sync_job_id=str(job["id"]),
-        event_type="sync_succeeded",
-        event_level="info",
-        event_message=str(result.get("message") or "同步成功"),
-        event_payload={
-            "rows": len(rows),
+    return await _execute_sync_job(**execute_kwargs)
+
+
+async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        return {"success": False, "error": "发布数据集不存在"}
+
+    resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+    biz_date = _collection_biz_date_from_args(arguments)
+    config = _dataset_collection_config(dataset_row)
+    key_fields = _dataset_collection_key_fields(dataset_row)
+    if not key_fields:
+        return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
+    params = dict(arguments.get("params") or {})
+    query = dict(params.get("query") or {})
+    query.update(
+        {
             "resource_key": resource_key,
-            "published_snapshot_id": str((published_snapshot or {}).get("id") or ""),
-        },
+            "date_field": _collection_date_field(config),
+        }
     )
-    auth_db.update_unified_data_source_health(
-        data_source_id=source_id,
-        health_status="healthy",
-        last_error_message="",
+    params.update(
+        {
+            "biz_date": biz_date,
+            "resource_key": resource_key,
+            "dataset_id": _safe_text(dataset_row.get("id")),
+            "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+            "collection_config": config,
+            "date_field": _collection_date_field(config),
+            "key_fields": key_fields,
+            "query": query,
+        }
     )
-    _update_dataset_health_by_resource(
-        company_id=company_id,
-        source_id=source_id,
-        resource_key=resource_key,
-        health_status="healthy",
-        last_error_message="",
-        last_sync_at=_now_iso(),
-    )
-    return {
-        "success": True,
+
+    payload = {
+        **arguments,
         "source_id": source_id,
-        "job": _attach_aliases_to_job(updated_job),
-        "published_snapshot": _attach_aliases_to_snapshot(published_snapshot),
-        "reused": False,
-        "message": "同步成功并发布新快照",
+        "resource_key": resource_key,
+        "idempotency_key": "",
+        "background": False,
+        "params": params,
+    }
+    result = await _handle_data_source_trigger_sync(payload)
+    if isinstance(result.get("job"), dict):
+        result["job"]["collection_scope"] = "dataset"
+    return {
+        **result,
+        "dataset_id": _safe_text(dataset_row.get("id")),
+        "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+        "resource_key": resource_key,
+        "biz_date": biz_date,
     }
 
 
@@ -5402,19 +5574,9 @@ async def _handle_data_source_get_sync_job(arguments: dict[str, Any]) -> dict[st
     job = auth_db.get_unified_sync_job_by_id(str(arguments.get("sync_job_id") or ""))
     if not job or str(job.get("company_id") or "") != company_id:
         return {"success": False, "error": "同步任务不存在"}
-    published_snapshot = None
-    published_snapshot_id = str(job.get("published_snapshot_id") or "")
-    if published_snapshot_id:
-        snapshots = auth_db.list_unified_dataset_snapshots(
-            company_id=company_id,
-            data_source_id=str(job.get("data_source_id") or ""),
-            limit=20,
-        )
-        published_snapshot = next((item for item in snapshots if str(item.get("id") or "") == published_snapshot_id), None)
     return {
         "success": True,
         "job": _attach_aliases_to_job(job),
-        "published_snapshot": _attach_aliases_to_snapshot(published_snapshot),
     }
 
 
@@ -5437,6 +5599,169 @@ async def _handle_data_source_list_sync_jobs(arguments: dict[str, Any]) -> dict[
     }
 
 
+async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    resource_key = _resource_key_from_args(arguments)
+    if dataset_row:
+        resource_key = _safe_text(dataset_row.get("resource_key")) or resource_key
+    if not resource_key:
+        return {"success": False, "error": "缺少 resource_key"}
+
+    limit = max(1, min(int(arguments.get("limit") or 10), 50))
+    sample_limit = max(1, min(int(arguments.get("sample_limit") or 10), 50))
+    jobs = [
+        job
+        for job in auth_db.list_unified_sync_jobs(
+            company_id=company_id,
+            data_source_id=source_id,
+            limit=100,
+        )
+        if _safe_text(job.get("resource_key")) == resource_key
+    ][:limit]
+    stats = auth_db.get_dataset_collection_record_stats(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
+        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")) or None,
+        resource_key=resource_key,
+    )
+    collection_records = auth_db.list_dataset_collection_records(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
+        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")) or None,
+        resource_key=resource_key,
+        limit=sample_limit,
+        offset=0,
+    )
+    sample_rows = [
+        dict(item.get("payload") or {})
+        for item in collection_records
+        if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+    ]
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "dataset": _build_dataset_view(dataset_row) if dataset_row else None,
+        "collection_stats": stats,
+        "collection_records": collection_records,
+        "jobs": [_attach_aliases_to_job(job) for job in jobs],
+        "rows": sample_rows,
+        "count": len(jobs),
+        "row_count": len(sample_rows),
+        "message": "已获取采集详情",
+    }
+
+
+async def _handle_data_source_list_collection_records(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    dataset_id = _safe_text((dataset_row or {}).get("id")) or _dataset_id_from_args(arguments) or None
+    dataset_code = _safe_text((dataset_row or {}).get("dataset_code")) or _sanitize_dataset_code(arguments.get("dataset_code")) or None
+    resource_key = _resource_key_from_args(arguments)
+    if dataset_row:
+        resource_key = _safe_text(dataset_row.get("resource_key")) or resource_key
+
+    limit = max(1, min(int(arguments.get("limit") or 100), 1000))
+    offset = max(0, int(arguments.get("offset") or 0))
+    records = auth_db.list_dataset_collection_records(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key or None,
+        biz_date=_safe_text(arguments.get("biz_date")) or None,
+        item_key=_safe_text(arguments.get("item_key")) or None,
+        limit=limit,
+        offset=offset,
+    )
+    stats = auth_db.get_dataset_collection_record_stats(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key or None,
+        biz_date=_safe_text(arguments.get("biz_date")) or None,
+    )
+    return {
+        "success": True,
+        "source_id": source_id,
+        "dataset_id": dataset_id or "",
+        "dataset_code": dataset_code or "",
+        "resource_key": resource_key or "",
+        "records": records,
+        "stats": stats,
+        "count": len(records),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+async def _handle_data_source_export_collection_records(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    dataset_id = _safe_text((dataset_row or {}).get("id")) or _dataset_id_from_args(arguments)
+    dataset_code = _safe_text((dataset_row or {}).get("dataset_code")) or _sanitize_dataset_code(arguments.get("dataset_code"))
+    resource_key = _resource_key_from_args(arguments)
+    if dataset_row:
+        resource_key = _safe_text(dataset_row.get("resource_key")) or resource_key
+
+    query = arguments.get("query") if isinstance(arguments.get("query"), dict) else {}
+    table_name = _safe_text(
+        arguments.get("table_name")
+        or (dataset_row or {}).get("business_name")
+        or (dataset_row or {}).get("dataset_name")
+        or dataset_code
+        or resource_key
+        or source_id
+    )
+    biz_date = _safe_text(arguments.get("biz_date") or query.get("biz_date"))
+    file_path, row_count = _export_collection_records_to_excel(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        table_name=table_name,
+        query=query,
+    )
+    return {
+        "success": True,
+        "source_id": source_id,
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "resource_key": resource_key,
+        "biz_date": biz_date,
+        "table_name": table_name,
+        "file_path": file_path,
+        "row_count": row_count,
+        "query": query,
+        "message": "已导出采集记录",
+    }
+
+
 async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -5446,23 +5771,22 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
 
-    published_snapshot = auth_db.get_unified_published_dataset_snapshot(
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    collection_rows = _load_dataset_sample_rows_from_collection_records(
+        company_id=company_id,
         data_source_id=source_id,
-        resource_key=_resource_key_from_args(arguments),
+        dataset_id=_safe_text((dataset_row or {}).get("id")),
+        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")),
+        resource_key=_safe_text((dataset_row or {}).get("resource_key")) or _resource_key_from_args(arguments),
+        limit=limit,
     )
-    if published_snapshot:
-        rows = _list_snapshot_rows(str(published_snapshot["id"]), limit=limit)
-        preview_rows = []
-        for row in rows:
-            payload = row.get("item_payload")
-            if isinstance(payload, dict):
-                preview_rows.append(payload)
+    if collection_rows:
         return {
             "success": True,
             "source_id": source_id,
-            "count": len(preview_rows),
-            "rows": preview_rows,
-            "message": "已返回已发布快照样例",
+            "count": len(collection_rows),
+            "rows": collection_rows,
+            "message": "已返回采集记录样例",
         }
 
     runtime_source = _load_runtime_source(source_row, include_secret=True)
@@ -5507,123 +5831,4 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
         "count": len(rows[: max(1, min(limit, 100))]),
         "rows": rows[: max(1, min(limit, 100))],
         "message": str(result.get("message") or ""),
-    }
-
-
-async def _handle_data_source_get_published_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
-    source_id = _source_id_from_args(arguments)
-    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
-    if not source_row:
-        return {"success": False, "error": "数据源不存在"}
-    snapshot = auth_db.get_unified_published_dataset_snapshot(
-        data_source_id=source_id,
-        resource_key=_resource_key_from_args(arguments),
-    )
-    if not snapshot:
-        return {
-            "success": True,
-            "source_id": source_id,
-            "published_snapshot": None,
-            "message": "暂无已发布快照",
-        }
-    return {
-        "success": True,
-        "source_id": source_id,
-        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
-    }
-
-
-async def _handle_data_source_list_published_snapshot_rows(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
-    source_id = _source_id_from_args(arguments)
-    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
-    if not source_row:
-        return {"success": False, "error": "数据源不存在"}
-
-    resource_key = _resource_key_from_args(arguments)
-    snapshot = auth_db.get_unified_published_dataset_snapshot(
-        data_source_id=source_id,
-        resource_key=resource_key,
-    )
-    if not snapshot:
-        return {
-            "success": True,
-            "source_id": source_id,
-            "resource_key": resource_key,
-            "published_snapshot": None,
-            "rows": [],
-            "count": 0,
-            "message": "暂无已发布快照",
-        }
-
-    limit = max(1, min(int(arguments.get("limit") or 3), 100))
-    snapshot_rows = auth_db.list_unified_dataset_snapshot_items(
-        snapshot_id=str(snapshot.get("id") or ""),
-        limit=limit,
-        offset=0,
-    )
-    rows = [
-        dict(item.get("item_payload") or {})
-        for item in snapshot_rows
-        if isinstance(item, dict) and isinstance(item.get("item_payload"), dict)
-    ]
-    return {
-        "success": True,
-        "source_id": source_id,
-        "resource_key": resource_key,
-        "snapshot_id": str(snapshot.get("id") or ""),
-        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
-        "rows": rows,
-        "count": len(rows),
-        "message": "已读取已发布快照样本",
-    }
-
-
-async def _handle_data_source_export_published_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
-    source_id = _source_id_from_args(arguments)
-    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
-    if not source_row:
-        return {"success": False, "error": "数据源不存在"}
-
-    resource_key = _resource_key_from_args(arguments)
-    snapshot = auth_db.get_unified_published_dataset_snapshot(
-        data_source_id=source_id,
-        resource_key=resource_key,
-    )
-    if not snapshot:
-        return {
-            "success": False,
-            "error": "暂无已发布快照，无法导出",
-            "source_id": source_id,
-        }
-
-    table_name = str(
-        arguments.get("table_name")
-        or snapshot.get("resource_key")
-        or snapshot.get("dataset_code")
-        or resource_key
-        or source_id
-    ).strip()
-    query = arguments.get("query") if isinstance(arguments.get("query"), dict) else {}
-    file_path, row_count = _export_snapshot_rows_to_excel(
-        snapshot_id=str(snapshot.get("id") or ""),
-        table_name=table_name,
-        query=query,
-    )
-    return {
-        "success": True,
-        "source_id": source_id,
-        "resource_key": resource_key,
-        "snapshot_id": str(snapshot.get("id") or ""),
-        "table_name": table_name,
-        "file_path": file_path,
-        "row_count": row_count,
-        "query": query,
-        "published_snapshot": _attach_aliases_to_snapshot(snapshot),
-        "message": "已导出已发布快照",
     }

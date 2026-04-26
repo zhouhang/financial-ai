@@ -1,10 +1,44 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, Sparkles } from 'lucide-react';
 import type { DataSourceKind } from '../../types';
+import { extractCollectionDetailSampleRows } from './datasetPreview';
 import SchemeWizardOutputFieldEditor from './SchemeWizardOutputFieldEditor';
 import type { OutputFieldDraft } from './schemeWizardState';
 
 export type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
+export type ProcBuildMode = 'simple_mapping' | 'ai_complex_rule';
+export type AiProcSide = 'left' | 'right';
+export type AiProcGenerationStatus = 'idle' | 'generating' | 'needs_user_input' | 'succeeded' | 'failed';
+export type RuleGenerationNodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'needs_user_input';
+
+export interface RuleGenerationNodeTrace {
+  code: string;
+  name: string;
+  status: RuleGenerationNodeStatus;
+  message: string;
+  attempt: number;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  summary?: Record<string, unknown>;
+  errors?: Array<Record<string, unknown>>;
+  warnings?: string[];
+}
+
+export type AiProcQuestionCandidate = string | {
+  rawName?: string;
+  displayName?: string;
+  sourceTable?: string;
+};
+
+export interface AiProcQuestion {
+  id: string;
+  question: string;
+  role?: string;
+  mention?: string;
+  candidates?: AiProcQuestionCandidate[];
+  evidence?: string[];
+}
 type SupportedSourceKind = Extract<
   DataSourceKind,
   'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
@@ -15,9 +49,6 @@ export interface SchemeDraftLite {
   businessGoal: string;
   leftDescription: string;
   rightDescription: string;
-  procConfigMode: 'ai' | 'existing';
-  selectedProcConfigId: string;
-  procDraft: string;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
 }
@@ -44,11 +75,20 @@ export interface ProcSampleRow {
   [key: string]: string | number | null;
 }
 
+type PreviewColumnOriginTone = 'sky' | 'emerald' | 'amber' | 'violet';
+
+interface PreviewColumnHintMeta {
+  badge?: string;
+  helper?: string;
+  tone?: PreviewColumnOriginTone;
+}
+
 export interface ProcSampleGroup {
   title: string;
   originLabel?: string;
   originHint?: string;
   fieldLabelMap?: Record<string, string>;
+  columnHints?: Record<string, PreviewColumnHintMeta>;
   showRawFieldName?: boolean;
   rows: ProcSampleRow[];
 }
@@ -63,15 +103,26 @@ export interface ProcTrialPreview {
   validations?: string[];
 }
 
-export interface ExistingConfigOption {
-  id: string;
-  name: string;
-}
-
 export interface CompatibilityCheckResult {
   status: 'idle' | 'passed' | 'failed' | 'warning';
   message: string;
   details: string[];
+}
+
+export interface AiProcSideDraft {
+  ruleDraft: string;
+  status: AiProcGenerationStatus;
+  summary: string;
+  error: string;
+  nodeTraces: RuleGenerationNodeTrace[];
+  questions: AiProcQuestion[];
+  assumptions: Array<Record<string, unknown>>;
+  validations: Array<Record<string, unknown>>;
+  warnings: string[];
+  procRuleJson?: Record<string, unknown>;
+  procSteps?: Array<Record<string, unknown>>;
+  outputRows: ProcSampleRow[];
+  outputFieldLabelMap: Record<string, string>;
 }
 
 export interface SchemeWizardTargetProcStepProps {
@@ -81,20 +132,17 @@ export interface SchemeWizardTargetProcStepProps {
   selectedRightSources: SchemeSourceOption[];
   leftOutputFields: OutputFieldDraft[];
   rightOutputFields: OutputFieldDraft[];
-  existingProcOptions: ExistingConfigOption[];
+  procBuildMode?: ProcBuildMode;
+  aiProcSideDrafts?: Partial<Record<AiProcSide, AiProcSideDraft>>;
   procCompatibility: CompatibilityCheckResult;
+  onChangeProcBuildMode?: (mode: ProcBuildMode) => void;
+  onChangeAiProcRuleDraft?: (side: AiProcSide, value: string) => void;
+  onGenerateAiProcOutput?: (side: AiProcSide) => void;
   onChangeSourceSelection: (side: 'left' | 'right', sources: SchemeSourceOption[]) => void;
   onChangeOutputFields: (side: 'left' | 'right', fields: OutputFieldDraft[]) => void;
-  onProcConfigModeChange: (mode: 'ai' | 'existing') => void;
-  onSelectExistingProcConfig: (configId: string) => void;
-  isGeneratingProc?: boolean;
-  generationSkill?: string;
-  generationPhase?: string;
-  generationMessage?: string;
+  onRecommendOutputFields: (side: 'left' | 'right') => void;
   isTrialingProc?: boolean;
-  onGenerateProc: () => void;
   onTrialProc: () => void;
-  onProcDraftChange: (value: string) => void;
   onViewProcJson: () => void;
   procJsonPreview?: string;
   procTrialPreview?: ProcTrialPreview;
@@ -141,23 +189,15 @@ function resolveDatasetTechnicalName(source: SchemeSourceOption): string {
     || formatSourceLabel(source);
 }
 
-function formatGenerationPhase(phase: string) {
-  if (phase === 'preparing_context') return '准备样例';
-  if (phase === 'generating_rule') return '生成规则';
-  if (phase === 'validating_rule') return '校验 JSON';
-  if (phase === 'rendering_draft_text') return '整理说明';
-  if (phase === 'completed') return '生成完成';
-  if (phase === 'failed') return '生成失败';
-  return '处理中';
-}
-
 function RowTable({
   rows,
   fieldLabelMap,
+  columnHints,
   showRawFieldName = true,
 }: {
   rows: ProcSampleRow[];
   fieldLabelMap?: Record<string, string>;
+  columnHints?: Record<string, PreviewColumnHintMeta>;
   showRawFieldName?: boolean;
 }) {
   if (!rows || rows.length === 0) {
@@ -168,22 +208,54 @@ function RowTable({
     );
   }
 
-  const columns = Object.keys(rows[0] || {});
+  const columns = buildSampleColumns(rows);
 
   return (
     <div className="overflow-x-auto rounded-2xl border border-border bg-surface">
-      <table className="w-full min-w-[520px] border-collapse text-xs">
+      <table className="w-max min-w-full border-collapse text-xs">
         <thead>
           <tr className="border-b border-border-subtle text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
             {columns.map((col) => {
               const label = fieldLabelMap?.[col]?.trim();
               const hasAlias = showRawFieldName && Boolean(label && label !== col);
+              const columnHint = columnHints?.[col];
               return (
                 <th key={col} className="px-4 py-2 text-left font-semibold">
-                  <span className="block max-w-[220px] truncate">{label || col}</span>
+                  <span className="block whitespace-nowrap">{label || col}</span>
                   {hasAlias ? (
-                    <span className="mt-0.5 block max-w-[220px] truncate text-[10px] font-normal normal-case tracking-normal text-text-muted">
+                    <span className="mt-0.5 block whitespace-nowrap text-[10px] font-normal normal-case tracking-normal text-text-muted">
                       {col}
+                    </span>
+                  ) : null}
+                  {columnHint?.badge ? (
+                    <span
+                      className={cn(
+                        'mt-1 inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal',
+                        columnHint.tone === 'sky' && 'border-sky-200 bg-sky-50 text-sky-700',
+                        columnHint.tone === 'emerald' && 'border-emerald-200 bg-emerald-50 text-emerald-700',
+                        columnHint.tone === 'amber' && 'border-amber-200 bg-amber-50 text-amber-700',
+                        columnHint.tone === 'violet' && 'border-violet-200 bg-violet-50 text-violet-700',
+                        !columnHint.tone && 'border-border bg-surface-secondary text-text-secondary',
+                      )}
+                    >
+                      {columnHint.badge}
+                    </span>
+                  ) : null}
+                  {columnHint?.helper ? (
+                    <span
+                      className={cn(
+                        'mt-1 max-w-[260px] text-[10px] font-normal normal-case leading-4 tracking-normal',
+                        columnHint.tone && !columnHint.badge
+                          ? 'inline-flex rounded-full border px-2 py-0.5 text-left'
+                          : false,
+                        columnHint.tone === 'sky' && !columnHint.badge && 'border-sky-200 bg-sky-50 text-sky-700',
+                        columnHint.tone === 'emerald' && !columnHint.badge && 'border-emerald-200 bg-emerald-50 text-emerald-700',
+                        columnHint.tone === 'amber' && !columnHint.badge && 'border-amber-200 bg-amber-50 text-amber-700',
+                        columnHint.tone === 'violet' && !columnHint.badge && 'border-violet-200 bg-violet-50 text-violet-700',
+                        (!columnHint.tone || columnHint.badge) && 'block whitespace-normal text-text-secondary',
+                      )}
+                    >
+                      {columnHint.helper}
                     </span>
                   ) : null}
                 </th>
@@ -199,7 +271,7 @@ function RowTable({
             >
               {columns.map((col) => (
                 <td key={`${col}-${index}`} className="px-4 py-2 align-top">
-                  <span className="block max-w-[220px] truncate">
+                  <span className="block max-w-[260px] truncate" title={row[col] === null || row[col] === undefined ? '--' : String(row[col])}>
                     {row[col] === null || row[col] === undefined ? '--' : String(row[col])}
                   </span>
                 </td>
@@ -229,6 +301,7 @@ function SampleGroup({ group }: { group: ProcSampleGroup }) {
       <RowTable
         rows={group.rows}
         fieldLabelMap={group.fieldLabelMap}
+        columnHints={group.columnHints}
         showRawFieldName={group.showRawFieldName}
       />
     </div>
@@ -351,7 +424,15 @@ function normalizeCandidateDataset(
   ).trim();
   const fieldLabelMap =
     normalizeFieldLabelMap(value.field_label_map)
+    || normalizeFieldLabelMap(value.fieldLabelMap)
     || normalizeFieldLabelMap(semanticProfile.field_label_map);
+  const schemaSummary = asRecord(value.schema_summary);
+  const semanticFields = asList(value.semantic_fields);
+  const normalizedSchemaSummary = Object.keys(schemaSummary).length > 0
+    ? schemaSummary
+    : semanticFields.length > 0
+    ? { fields: semanticFields }
+    : schemaSummary;
   const explicitKeyFields = normalizeStringList(value.key_fields);
   const keyFields =
     explicitKeyFields.length > 0
@@ -372,12 +453,80 @@ function normalizeCandidateDataset(
     datasetCode: datasetCode || datasetId || datasetName,
     resourceKey: toText(value.resource_key).trim(),
     datasetKind: toText(value.dataset_kind).trim(),
-    schemaSummary: asRecord(value.schema_summary),
+    schemaSummary: normalizedSchemaSummary,
   };
+}
+
+function formatSampleCellValue(value: unknown): string {
+  if (value === null || value === undefined) return '--';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildSampleColumns(rows: Record<string, unknown>[], maxColumns?: number): string[] {
+  const columns: string[] = [];
+  rows.forEach((row) => {
+    Object.keys(row).forEach((column) => {
+      if (!columns.includes(column)) columns.push(column);
+    });
+  });
+  return typeof maxColumns === 'number' ? columns.slice(0, maxColumns) : columns;
+}
+
+function buildDatasetFieldItems(source: SchemeSourceOption, rows: Record<string, unknown>[] = []): FieldItem[] {
+  const fromLabels = Object.entries(source.fieldLabelMap || {}).map(([raw, display]) => ({
+    raw_name: raw,
+    display_name: display || raw,
+  }));
+  if (fromLabels.length > 0) return fromLabels;
+
+  const fromRows = buildSampleColumns(rows).map((column) => ({
+    raw_name: column,
+    display_name: column,
+  }));
+  if (fromRows.length > 0) return fromRows;
+
+  return (source.keyFields || []).map((field) => ({ raw_name: field, display_name: field }));
+}
+
+function mergeDatasetDisplayColumns(fields: FieldItem[], rows: Record<string, unknown>[]): string[] {
+  const columns: string[] = [];
+  const append = (column: string) => {
+    const normalized = column.trim();
+    if (normalized && !columns.includes(normalized)) columns.push(normalized);
+  };
+  fields.forEach((field) => append(field.raw_name));
+  buildSampleColumns(rows).forEach(append);
+  return columns;
 }
 
 type FieldItem = { raw_name: string; display_name: string };
 type PopupPos = { top: number; left: number; maxWidth: number };
+
+function mergeFieldItems(primary: FieldItem[], fallback: FieldItem[]): FieldItem[] {
+  const labelByRawName = new Map<string, string>();
+  [...fallback, ...primary].forEach((field) => {
+    const rawName = field.raw_name.trim();
+    const displayName = field.display_name.trim() || rawName;
+    if (rawName) labelByRawName.set(rawName, displayName);
+  });
+
+  const merged: FieldItem[] = [];
+  const append = (field: FieldItem) => {
+    const rawName = field.raw_name.trim();
+    if (!rawName || merged.some((item) => item.raw_name === rawName)) return;
+    merged.push({ raw_name: rawName, display_name: labelByRawName.get(rawName) || rawName });
+  };
+  primary.forEach(append);
+  fallback.forEach(append);
+  return merged;
+}
 
 function useFieldPreview(authToken?: string | null) {
   const [popupDatasetId, setPopupDatasetId] = useState<string | null>(null);
@@ -387,15 +536,11 @@ function useFieldPreview(authToken?: string | null) {
 
   const fetchFieldPreview = useCallback(
     async (dataset: SchemeSourceOption) => {
-      if (dataset.fieldLabelMap && Object.keys(dataset.fieldLabelMap).length > 0) {
-        const fields: FieldItem[] = Object.entries(dataset.fieldLabelMap).map(([raw, display]) => ({
-          raw_name: raw,
-          display_name: display,
-        }));
-        setFieldCache((prev) => ({ ...prev, [dataset.id]: fields }));
+      const localFields = buildDatasetFieldItems(dataset);
+      if (!authToken || !dataset.sourceId) {
+        setFieldCache((prev) => ({ ...prev, [dataset.id]: localFields }));
         return;
       }
-      if (!authToken || !dataset.sourceId) return;
       setFetchingFields(dataset.id);
       try {
         const response = await fetch('/api/recon/schemes/design/dataset-fields', {
@@ -407,12 +552,13 @@ function useFieldPreview(authToken?: string | null) {
           }),
         });
         const data = await response.json().catch(() => ({}));
+        const remoteFields = response.ok && Array.isArray(data.fields) ? (data.fields as FieldItem[]) : [];
         setFieldCache((prev) => ({
           ...prev,
-          [dataset.id]: response.ok && Array.isArray(data.fields) ? (data.fields as FieldItem[]) : [],
+          [dataset.id]: mergeFieldItems(remoteFields, localFields),
         }));
       } catch {
-        setFieldCache((prev) => ({ ...prev, [dataset.id]: [] }));
+        setFieldCache((prev) => ({ ...prev, [dataset.id]: localFields }));
       } finally {
         setFetchingFields(null);
       }
@@ -450,59 +596,6 @@ function useFieldPreview(authToken?: string | null) {
   const closePopup = useCallback(() => setPopupDatasetId(null), []);
 
   return { popupDatasetId, popupPos, fieldCache, fetchingFields, openPopup, closePopup };
-}
-
-function SourcesPreviewCard({
-  label,
-  sources,
-  authToken,
-}: {
-  label: string;
-  sources: SchemeSourceOption[];
-  authToken?: string | null;
-}) {
-  const { popupDatasetId, popupPos, fieldCache, fetchingFields, openPopup, closePopup } =
-    useFieldPreview(authToken);
-
-  return (
-    <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-      <p className="text-[11px] font-semibold tracking-[0.14em] text-text-muted">{label}</p>
-      {sources.length === 0 ? (
-        <p className="mt-2 text-sm leading-6 text-text-secondary">--</p>
-      ) : (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {sources.map((src) => (
-            <button
-              key={src.id}
-              type="button"
-              onClick={(e) => openPopup(src, e.currentTarget)}
-              className={cn(
-                'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition',
-                popupDatasetId === src.id
-                  ? 'border-sky-300 bg-sky-100 text-sky-800'
-                  : 'border-border bg-surface-secondary text-text-primary hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700',
-              )}
-            >
-              {resolveDatasetDisplayName(src)}
-              <span className="text-[10px] opacity-50">字段</span>
-            </button>
-          ))}
-        </div>
-      )}
-      {popupDatasetId ? (() => {
-        const pd = sources.find((s) => s.id === popupDatasetId);
-        return (
-          <FieldPreviewPopup
-            datasetName={pd ? resolveDatasetDisplayName(pd) : ''}
-            fields={fieldCache[popupDatasetId] ?? []}
-            loading={fetchingFields === popupDatasetId}
-            pos={popupPos}
-            onClose={closePopup}
-          />
-        );
-      })() : null}
-    </div>
-  );
 }
 
 function FieldPreviewPopup({
@@ -569,6 +662,703 @@ function FieldPreviewPopup({
   );
 }
 
+function ProcBuildModeSelector({
+  value,
+  onChange,
+}: {
+  value: ProcBuildMode;
+  onChange: (mode: ProcBuildMode) => void;
+}) {
+  const modes: Array<{
+    value: ProcBuildMode;
+    title: string;
+    badge: string;
+    description: string;
+    points: string[];
+  }> = [
+    {
+      value: 'simple_mapping',
+      title: '简单字段映射',
+      badge: '当前可用',
+      description: '适合左右单表字段整理、固定值、公式和拼接输出。',
+      points: ['选择左右原始数据集', '调整输出字段', '试跑生成 proc JSON'],
+    },
+    {
+      value: 'ai_complex_rule',
+      title: 'AI复杂规则',
+      badge: '入口已预留',
+      description: '适合风险资产这类多表、多步骤、完整性检核和条件计算规则。',
+      points: ['输入自然语言规则', 'AI 生成 proc JSON', '静态校验、样例执行和断言验证'],
+    },
+  ];
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {modes.map((mode) => {
+        const active = value === mode.value;
+        return (
+          <button
+            key={mode.value}
+            type="button"
+            onClick={() => onChange(mode.value)}
+            className={cn(
+              'rounded-3xl border bg-surface p-4 text-left transition',
+              active
+                ? 'border-sky-300 shadow-[0_18px_45px_rgba(14,165,233,0.12)] ring-2 ring-sky-100'
+                : 'border-border hover:border-sky-200 hover:shadow-sm',
+            )}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-text-primary">{mode.title}</p>
+                <p className="mt-1 text-xs leading-5 text-text-secondary">{mode.description}</p>
+              </div>
+              <span
+                className={cn(
+                  'rounded-full border px-2.5 py-1 text-xs font-medium',
+                  active
+                    ? 'border-sky-200 bg-sky-50 text-sky-700'
+                    : 'border-border bg-surface-secondary text-text-secondary',
+                )}
+              >
+                {mode.badge}
+              </span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {mode.points.map((point) => (
+                <span
+                  key={point}
+                  className="rounded-full border border-border bg-surface-secondary px-2.5 py-1 text-[11px] text-text-secondary"
+                >
+                  {point}
+                </span>
+              ))}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+interface DatasetPreviewState {
+  loading: boolean;
+  error: string;
+  rows: Record<string, unknown>[];
+}
+
+function DatasetStructureCard({
+  authToken,
+  source,
+}: {
+  authToken?: string | null;
+  source: SchemeSourceOption;
+}) {
+  const [preview, setPreview] = useState<DatasetPreviewState>({ loading: false, error: '', rows: [] });
+  const [fieldItems, setFieldItems] = useState<FieldItem[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchPreview() {
+      if (!authToken || !source.sourceId) {
+        setPreview({ loading: false, error: authToken ? '' : '请先登录后查看样例数据。', rows: [] });
+        return;
+      }
+      setPreview({ loading: true, error: '', rows: [] });
+      try {
+        const params = new URLSearchParams({
+          resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+          limit: '1',
+          sample_limit: '5',
+        });
+        const response = await fetch(
+          `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
+          { headers: { Authorization: `Bearer ${authToken}` } },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data.detail || data.message || '样例数据加载失败'));
+        }
+        const rows = extractCollectionDetailSampleRows(data, 5);
+        if (!cancelled) {
+          setPreview({ loading: false, error: '', rows });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPreview({
+            loading: false,
+            error: error instanceof Error ? error.message : '样例数据加载失败',
+            rows: [],
+          });
+        }
+      }
+    }
+
+    void fetchPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, source.datasetCode, source.id, source.name, source.resourceKey, source.sourceId, source.technicalName]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchFieldLabels() {
+      const localFields = buildDatasetFieldItems(source);
+      if (!authToken || !source.sourceId) {
+        setFieldItems(localFields.length > 0 ? localFields : null);
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/recon/schemes/design/dataset-fields', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            source_id: source.sourceId,
+            resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+            dataset_id: source.id,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        const fields = response.ok && Array.isArray(data.fields)
+          ? (data.fields as FieldItem[])
+              .map((field) => ({
+                raw_name: toText(field.raw_name).trim(),
+                display_name: toText(field.display_name, toText(field.raw_name)).trim(),
+              }))
+              .filter((field) => field.raw_name)
+          : [];
+        if (!cancelled) {
+          const mergedFields = mergeFieldItems(fields, localFields);
+          setFieldItems(mergedFields.length > 0 ? mergedFields : null);
+        }
+      } catch {
+        if (!cancelled) {
+          setFieldItems(localFields.length > 0 ? localFields : null);
+        }
+      }
+    }
+
+    void fetchFieldLabels();
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, source.datasetCode, source.id, source.name, source.resourceKey, source.sourceId, source.technicalName]);
+
+  const fields = (fieldItems && fieldItems.length > 0) ? fieldItems : buildDatasetFieldItems(source, preview.rows);
+  const fieldByRawName = useMemo(
+    () => new Map(fields.map((field) => [field.raw_name, field])),
+    [fields],
+  );
+  const displayColumns = mergeDatasetDisplayColumns(fields, preview.rows);
+
+  return (
+    <div className="rounded-3xl border border-border bg-white/80 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-text-primary">{resolveDatasetDisplayName(source)}</p>
+          <p className="mt-1 text-xs leading-5 text-text-secondary">{resolveDatasetTechnicalName(source)}</p>
+        </div>
+        <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
+          {source.sourceKind}
+        </span>
+      </div>
+
+      <div className="mt-4 rounded-2xl border border-border bg-surface px-3 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">表结构和样例 5 条数据</p>
+            <p className="mt-1 text-[11px] text-text-muted">列名优先显示中文名称，下方显示原始字段名。</p>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-text-muted">
+            {fields.length > 0 ? <span>{fields.length} 字段</span> : null}
+            {preview.loading ? <span className="text-sky-700">加载中...</span> : null}
+          </div>
+        </div>
+        <div className="mt-3 max-h-72 overflow-auto rounded-xl border border-border bg-white">
+          {preview.loading ? (
+            <p className="px-3 py-3 text-sm text-text-secondary">正在加载样例数据...</p>
+          ) : preview.error ? (
+            <p className="px-3 py-3 text-sm text-amber-700">{preview.error}</p>
+          ) : displayColumns.length === 0 ? (
+            <p className="px-3 py-3 text-sm text-text-secondary">暂无字段结构和样例数据。后续可通过数据采集或样例执行补充。</p>
+          ) : (
+            <table className="w-max min-w-full divide-y divide-border text-left text-xs">
+              <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                <tr>
+                  {displayColumns.map((column) => {
+                    const field = fieldByRawName.get(column);
+                    const displayName = field?.display_name || column;
+                    return (
+                      <th key={column} className="whitespace-nowrap px-3 py-2 font-medium align-bottom">
+                        <span className="block whitespace-nowrap text-text-primary">{displayName}</span>
+                        <span className="mt-0.5 block whitespace-nowrap text-[10px] font-normal text-text-muted">
+                          {column}
+                        </span>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border text-text-primary">
+                {preview.rows.length > 0 ? (
+                  preview.rows.map((row, rowIndex) => (
+                    <tr key={`ai-dataset-sample-${source.id}-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                      {displayColumns.map((column) => (
+                        <td
+                          key={`${rowIndex}-${column}`}
+                          className="max-w-64 truncate px-3 py-2"
+                          title={formatSampleCellValue(row[column])}
+                        >
+                          {formatSampleCellValue(row[column])}
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={displayColumns.length} className="px-3 py-4 text-center text-sm text-text-secondary">
+                      暂无样例数据，已先展示字段结构。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AiSideConfigurationPanel({
+  side,
+  active,
+  authToken,
+  schemeDraft,
+  selectedSources,
+  sideDraft,
+  onChangeSourceSelection,
+  onChangeRuleDraft,
+  onGenerateOutput,
+  onSwitchSide,
+}: {
+  side: AiProcSide;
+  active: boolean;
+  authToken?: string | null;
+  schemeDraft: SchemeDraftLite;
+  selectedSources: SchemeSourceOption[];
+  sideDraft: AiProcSideDraft;
+  onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
+  onChangeRuleDraft: (side: AiProcSide, value: string) => void;
+  onGenerateOutput: (side: AiProcSide) => void;
+  onSwitchSide: (side: AiProcSide) => void;
+}) {
+  const isLeft = side === 'left';
+  const sideLabel = isLeft ? '左侧' : '右侧';
+  const nextSideLabel = isLeft ? '右侧' : '左侧';
+  const targetTable = isLeft ? 'left_recon_ready' : 'right_recon_ready';
+  const isGenerating = sideDraft.status === 'generating';
+  const hasGeneratedOutput = sideDraft.status === 'succeeded' && sideDraft.outputRows.length > 0;
+  const statusLabel =
+    sideDraft.status === 'succeeded'
+      ? '已生成'
+      : sideDraft.status === 'failed'
+      ? '生成失败'
+      : sideDraft.status === 'needs_user_input'
+      ? '需补充'
+      : sideDraft.status === 'generating'
+      ? '生成中'
+      : '待生成';
+
+  if (!active) return null;
+
+  return (
+    <div className="space-y-5">
+      <RemoteDatasetSelector
+        side={side}
+        title={`选择${sideLabel}数据集`}
+        description={`可选择 1 个或多个${sideLabel}原始数据集。AI 只负责把这些数据整理成 ${targetTable}。`}
+        authToken={authToken}
+        businessGoal={schemeDraft.businessGoal}
+        sideDescription={isLeft ? schemeDraft.leftDescription : schemeDraft.rightDescription}
+        selectedSources={selectedSources}
+        onConfirmSelection={(sources) => onChangeSourceSelection(side, sources)}
+        allowMultiple
+      />
+
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-text-primary">{sideLabel}数据集样例</p>
+            <p className="mt-1 text-xs leading-5 text-text-secondary">
+              每个数据集用样例表展示字段和最新 5 条数据，作为 AI 对话的固定上下文。
+            </p>
+          </div>
+          <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
+            {selectedSources.length} 个数据集
+          </span>
+        </div>
+        {selectedSources.length > 0 ? (
+          selectedSources.map((source) => (
+            <DatasetStructureCard key={source.id} authToken={authToken} source={source} />
+          ))
+        ) : (
+          <div className="rounded-3xl border border-dashed border-border bg-white/70 px-5 py-8 text-center text-sm text-text-secondary">
+            先选择{sideLabel}数据集，下面会展示字段和样例数据。
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-3xl border border-border bg-white/85 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border-subtle pb-3">
+          <div>
+            <p className="text-sm font-semibold text-text-primary">{sideLabel} AI 对话</p>
+            <p className="mt-1 text-xs leading-5 text-text-secondary">
+              描述这一侧如何整理。系统会完成规则理解、生成、校验、样例执行和断言验证。
+            </p>
+          </div>
+          <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700">
+            输出：{targetTable}
+          </span>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <div className="max-w-[88%] rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm leading-6 text-text-secondary">
+            你可以直接描述{sideLabel}数据整理规则。我会只处理当前这一侧的数据，生成整理后的输出表。
+          </div>
+        </div>
+
+        <RuleGenerationInlineProgress traces={sideDraft.nodeTraces} status={sideDraft.status} />
+        <RuleGenerationFeedback sideDraft={sideDraft} />
+
+        <label className="mt-4 block">
+          <span className="text-xs font-semibold tracking-[0.14em] text-text-muted">输入{sideLabel}整理规则</span>
+          <textarea
+            rows={5}
+            value={sideDraft.ruleDraft}
+            onChange={(event) => onChangeRuleDraft(side, event.target.value)}
+            placeholder={
+              isLeft
+                ? '例如：把这些左侧表按客户编码合并，过滤作废记录，统一输出客户、单据号、日期、金额。'
+                : '例如：把这些右侧表按订单号汇总，金额统一为本位币，输出订单号、日期、金额和来源系统。'
+            }
+            className="mt-3 w-full resize-none rounded-2xl border border-border bg-surface px-4 py-3 text-sm leading-6 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+          />
+        </label>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onGenerateOutput(side)}
+            disabled={isGenerating || !sideDraft.ruleDraft.trim() || selectedSources.length === 0}
+            className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isGenerating ? 'AI生成中...' : 'AI生成输出数据'}
+          </button>
+          <button
+            type="button"
+            onClick={() => onSwitchSide(isLeft ? 'right' : 'left')}
+            className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+          >
+            配置{nextSideLabel}数据
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-border bg-white/85 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-text-primary">{sideLabel}输出数据预览</p>
+            <p className="mt-1 text-xs leading-5 text-text-secondary">
+              执行成功后，这里展示整理后的字段、样例数据、校验状态和 JSON 入口。
+            </p>
+          </div>
+          <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+            {statusLabel}
+          </span>
+        </div>
+        <div className="mt-4 overflow-auto rounded-2xl border border-border bg-surface">
+          {hasGeneratedOutput ? (
+            <RowTable
+              rows={sideDraft.outputRows}
+              fieldLabelMap={sideDraft.outputFieldLabelMap}
+              showRawFieldName
+            />
+          ) : (
+            <div className="rounded-2xl border border-dashed border-border bg-surface px-4 py-8 text-center text-sm text-text-secondary">
+              完成{sideLabel} AI 生成和样例执行后，将展示 {targetTable} 的 5 条输出样例。
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RuleGenerationInlineProgress({
+  traces,
+  status,
+}: {
+  traces: RuleGenerationNodeTrace[];
+  status: AiProcSideDraft['status'];
+}) {
+  const items = traces.length > 0 ? traces : DEFAULT_RULE_GENERATION_NODES;
+  const hasStarted = items.some((trace) => trace.status !== 'pending');
+  if (!hasStarted && status === 'idle') return null;
+
+  const activeTrace = resolveActiveRuleGenerationTrace(items);
+  const failed = activeTrace?.status === 'failed' || status === 'failed';
+  const needsInput = activeTrace?.status === 'needs_user_input' || status === 'needs_user_input';
+  const succeeded = status === 'succeeded';
+  const title = failed
+    ? '执行失败'
+    : needsInput
+    ? '需要补充规则口径'
+    : succeeded
+    ? '执行完成'
+    : 'AI正在生成输出数据';
+
+  const statusTone = failed
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : needsInput
+    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : succeeded
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-sky-100 bg-sky-50/70 text-sky-800';
+
+  return (
+    <div className={cn('mt-4 rounded-2xl border px-4 py-3', statusTone)}>
+      <div className="flex items-start gap-3">
+        {!failed && !needsInput && !succeeded ? (
+          <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
+        ) : (
+          <span className={cn('mt-1 h-2.5 w-2.5 shrink-0 rounded-full', failed ? 'bg-red-500' : needsInput ? 'bg-amber-500' : 'bg-emerald-500')} />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-text-primary">{title}</p>
+          <p className="mt-1 text-xs leading-5 text-text-secondary">
+            {activeTrace?.name || '等待开始'}
+          </p>
+        </div>
+      </div>
+      {activeTrace?.message ? (
+        <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-secondary">{activeTrace.message}</p>
+      ) : null}
+      {activeTrace && activeTrace.attempt > 1 ? (
+        <p className="mt-1 text-[11px] text-amber-700">正在第 {activeTrace.attempt} 次尝试修复。</p>
+      ) : null}
+    </div>
+  );
+}
+
+function RuleGenerationFeedback({ sideDraft }: { sideDraft: AiProcSideDraft }) {
+  const hasQuestions = sideDraft.questions.length > 0;
+  const hasError = sideDraft.status === 'failed' && Boolean(sideDraft.error || sideDraft.summary);
+  if (sideDraft.status === 'idle' || (!hasQuestions && !hasError)) {
+    return null;
+  }
+  const tone = sideDraft.status === 'failed'
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : sideDraft.status === 'needs_user_input'
+    ? 'border-amber-200 bg-amber-50 text-amber-800'
+    : sideDraft.status === 'succeeded'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-sky-100 bg-sky-50 text-sky-800';
+  return (
+    <div className={cn('mt-3 rounded-2xl border px-4 py-3 text-sm leading-6', tone)}>
+      {hasError ? <p>{sideDraft.error || sideDraft.summary}</p> : null}
+      {hasQuestions ? (
+        <div className="space-y-2">
+          {sideDraft.questions.map((question) => (
+            <div key={question.id} className="rounded-xl border border-amber-200 bg-white/75 p-3 text-xs leading-5 text-amber-800">
+              <p className="font-semibold">{question.question}</p>
+              {question.candidates?.length ? (
+                <p className="mt-1">候选：{question.candidates.map(formatQuestionCandidate).join(' / ')}</p>
+              ) : null}
+              <p className="mt-1 text-[11px] text-amber-700/80">请修改上方完整规则描述后重新生成。</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function resolveActiveRuleGenerationTrace(items: RuleGenerationNodeTrace[]) {
+  return (
+    items.find((trace) => trace.status === 'running')
+    || items.find((trace) => trace.status === 'needs_user_input')
+    || items.find((trace) => trace.status === 'failed')
+    || [...items].reverse().find((trace) => trace.status === 'completed')
+    || items.find((trace) => trace.status === 'pending')
+  );
+}
+
+function formatQuestionCandidate(candidate: AiProcQuestionCandidate): string {
+  if (typeof candidate === 'string') return candidate;
+  const rawName = String(candidate.rawName || '').trim();
+  const displayName = String(candidate.displayName || rawName).trim();
+  return displayName || rawName;
+}
+
+const DEFAULT_RULE_GENERATION_NODES: RuleGenerationNodeTrace[] = [
+  ['prepare_context', '准备上下文'],
+  ['understand_rule', '理解业务规则'],
+  ['field_binding', '绑定规则字段'],
+  ['semantic_resolution', '自动消除歧义'],
+  ['ambiguity_gate', '判断是否需要补充'],
+  ['generate_or_repair_json', '生成规则'],
+  ['lint_json', '校验规则'],
+  ['build_sample_inputs', '读取真实样例数据'],
+  ['run_sample', '样例执行'],
+  ['assert_output', '校验输出结果'],
+  ['result', '生成结果'],
+].map(([code, name]) => ({ code, name, status: 'pending', message: '', attempt: 1 }));
+
+function createEmptyAiProcSideDraft(): AiProcSideDraft {
+  return {
+    ruleDraft: '',
+    status: 'idle',
+    summary: '',
+    error: '',
+    nodeTraces: DEFAULT_RULE_GENERATION_NODES.map((node) => ({ ...node })),
+    questions: [],
+    assumptions: [],
+    validations: [],
+    warnings: [],
+    outputRows: [],
+    outputFieldLabelMap: {},
+  };
+}
+
+function normalizeAiProcSideDrafts(
+  drafts?: Partial<Record<AiProcSide, AiProcSideDraft>>,
+): Record<AiProcSide, AiProcSideDraft> {
+  return {
+    left: drafts?.left || createEmptyAiProcSideDraft(),
+    right: drafts?.right || createEmptyAiProcSideDraft(),
+  };
+}
+
+function AiComplexRuleWorkspace({
+  authToken,
+  schemeDraft,
+  selectedLeftSources,
+  selectedRightSources,
+  aiProcSideDrafts,
+  onChangeSourceSelection,
+  onChangeRuleDraft,
+  onGenerateOutput,
+}: {
+  authToken?: string | null;
+  schemeDraft: SchemeDraftLite;
+  selectedLeftSources: SchemeSourceOption[];
+  selectedRightSources: SchemeSourceOption[];
+  aiProcSideDrafts: Record<AiProcSide, AiProcSideDraft>;
+  onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
+  onChangeRuleDraft: (side: AiProcSide, value: string) => void;
+  onGenerateOutput: (side: AiProcSide) => void;
+}) {
+  const [activeSide, setActiveSide] = useState<'left' | 'right'>('left');
+  const leftReady = selectedLeftSources.length > 0;
+  const rightReady = selectedRightSources.length > 0;
+
+  return (
+    <div className="rounded-3xl border border-sky-100 bg-[linear-gradient(135deg,rgba(240,249,255,0.95),rgba(255,255,255,0.9))] p-5 shadow-[0_18px_55px_rgba(14,165,233,0.10)]">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-medium text-sky-700">
+            <Sparkles className="h-3.5 w-3.5" />
+            AI复杂规则分步配置
+          </div>
+          <p className="mt-3 text-sm font-semibold text-text-primary">先配置左侧数据，再配置右侧数据</p>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-text-secondary">
+            每一侧都可以选择多个数据集，查看字段样例表，再通过一个 AI 对话完成规则理解、生成、校验、样例执行和断言验证。
+            两侧都完成后再进入第三步配置对账逻辑。
+          </p>
+        </div>
+        <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+          当前为 UI 预览
+        </span>
+      </div>
+
+      <div className="mt-5 rounded-2xl border border-border bg-white/75 p-2">
+        <div className="grid gap-2 md:grid-cols-2">
+          {(['left', 'right'] as const).map((side) => {
+            const active = activeSide === side;
+            const label = side === 'left' ? '左侧数据配置' : '右侧数据配置';
+            const count = side === 'left' ? selectedLeftSources.length : selectedRightSources.length;
+            const ready = side === 'left' ? leftReady : rightReady;
+            return (
+              <button
+                key={side}
+                type="button"
+                onClick={() => setActiveSide(side)}
+                className={cn(
+                  'rounded-xl border px-4 py-3 text-left transition',
+                  active
+                    ? 'border-sky-300 bg-sky-50 text-sky-800'
+                    : 'border-transparent bg-surface text-text-secondary hover:border-sky-100 hover:text-sky-700',
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold">{label}</span>
+                  <span
+                    className={cn(
+                      'rounded-full border px-2.5 py-1 text-xs font-medium',
+                      ready
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        : 'border-border bg-white text-text-muted',
+                    )}
+                  >
+                    {ready ? `${count} 个数据集` : '待选择'}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs leading-5">
+                  {side === 'left'
+                    ? '生成 left_recon_ready，后续作为对账左侧输入。'
+                    : '生成 right_recon_ready，后续作为对账右侧输入。'}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <AiSideConfigurationPanel
+          side="left"
+          active={activeSide === 'left'}
+          authToken={authToken}
+          schemeDraft={schemeDraft}
+          selectedSources={selectedLeftSources}
+          sideDraft={aiProcSideDrafts.left}
+          onChangeSourceSelection={onChangeSourceSelection}
+          onChangeRuleDraft={onChangeRuleDraft}
+          onGenerateOutput={onGenerateOutput}
+          onSwitchSide={setActiveSide}
+        />
+        <AiSideConfigurationPanel
+          side="right"
+          active={activeSide === 'right'}
+          authToken={authToken}
+          schemeDraft={schemeDraft}
+          selectedSources={selectedRightSources}
+          sideDraft={aiProcSideDrafts.right}
+          onChangeSourceSelection={onChangeSourceSelection}
+          onChangeRuleDraft={onChangeRuleDraft}
+          onGenerateOutput={onGenerateOutput}
+          onSwitchSide={setActiveSide}
+        />
+      </div>
+    </div>
+  );
+}
+
 function RemoteDatasetSelector({
   side,
   title,
@@ -578,6 +1368,7 @@ function RemoteDatasetSelector({
   sideDescription,
   selectedSources,
   onConfirmSelection,
+  allowMultiple = false,
 }: {
   side: 'left' | 'right';
   title: string;
@@ -587,6 +1378,7 @@ function RemoteDatasetSelector({
   sideDescription: string;
   selectedSources: SchemeSourceOption[];
   onConfirmSelection: (sources: SchemeSourceOption[]) => void;
+  allowMultiple?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
@@ -607,7 +1399,11 @@ function RemoteDatasetSelector({
     [resultSources],
   );
   const draftIds = useMemo(() => draftSources.map((item) => item.id), [draftSources]);
-  const displayText = selectedNames.length > 0 ? selectedNames.join('、') : '点击搜索并选择数据集';
+  const displayText = selectedNames.length > 0
+    ? allowMultiple
+      ? `已选择 ${selectedNames.length} 个数据集`
+      : selectedNames[0]
+    : '点击搜索并选择数据集';
 
   const fetchCandidates = useCallback(
     async (query: string) => {
@@ -688,14 +1484,14 @@ function RemoteDatasetSelector({
   const toggleSource = (source: SchemeSourceOption) => {
     setDraftSources((prev) => {
       if (prev.some((item) => item.id === source.id)) {
-        return prev.filter((item) => item.id !== source.id);
+        return allowMultiple ? prev.filter((item) => item.id !== source.id) : [];
       }
-      return [...prev, source];
+      return allowMultiple ? [...prev, source] : [source];
     });
   };
 
   const handleConfirm = () => {
-    onConfirmSelection(draftSources);
+    onConfirmSelection(allowMultiple ? draftSources : draftSources.slice(0, 1));
     setOpen(false);
     closePopup();
   };
@@ -708,7 +1504,7 @@ function RemoteDatasetSelector({
           <p className="mt-1 text-xs leading-5 text-text-secondary">{description}</p>
         </div>
         <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
-          已选 {selectedSources.length}
+          已选 {allowMultiple ? selectedSources.length : Math.min(selectedSources.length, 1)}
         </span>
       </div>
 
@@ -744,14 +1540,26 @@ function RemoteDatasetSelector({
                 className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
                 placeholder="搜索数据集…"
               />
-              <div className="mt-2 flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleConfirm}
-                  className="rounded-xl bg-sky-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-sky-500"
-                >
-                  确定（{draftSources.length}）
-                </button>
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <span className="text-[11px] text-text-muted">
+                  {allowMultiple ? '可选择多个数据集，作为当前侧 AI 整理上下文。' : '当前版本每侧先选择 1 个数据集。'}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDraftSources([])}
+                    className="rounded-xl border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary transition hover:border-sky-200 hover:text-sky-700"
+                  >
+                    清空
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirm}
+                    className="rounded-xl bg-sky-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-sky-500"
+                  >
+                    确定
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -788,10 +1596,11 @@ function RemoteDatasetSelector({
                         onClick={(e) => openPopup(dataset, e.currentTarget)}
                       >
                         <input
-                          type="checkbox"
+                          type={allowMultiple ? 'checkbox' : 'radio'}
                           checked={checked}
                           onChange={() => toggleSource(resolved)}
                           onClick={(e) => e.stopPropagation()}
+                          name={`dataset-selector-${side}`}
                           className="h-4 w-4 shrink-0 rounded border-border text-sky-600 focus:ring-sky-200"
                         />
                         <div className="min-w-0 flex-1">
@@ -912,7 +1721,7 @@ function ProcTrialPreviewPanel({
               />
               <PreviewSectionBlock
                 title="整理后左侧输出"
-                description="根据当前数据整理配置生成的左侧标准化结果。"
+                description="根据当前数据整理规则生成的左侧标准化结果。"
                 groups={preview.leftOutputSamples}
               />
             </div>
@@ -925,7 +1734,7 @@ function ProcTrialPreviewPanel({
               />
               <PreviewSectionBlock
                 title="整理后右侧输出"
-                description="根据当前数据整理配置生成的右侧标准化结果。"
+                description="根据当前数据整理规则生成的右侧标准化结果。"
                 groups={preview.rightOutputSamples}
               />
             </div>
@@ -943,26 +1752,24 @@ export default function SchemeWizardTargetProcStep({
   selectedRightSources,
   leftOutputFields,
   rightOutputFields,
-  existingProcOptions,
+  procBuildMode = 'simple_mapping',
+  aiProcSideDrafts,
   procCompatibility,
+  onChangeProcBuildMode = () => undefined,
+  onChangeAiProcRuleDraft = () => undefined,
+  onGenerateAiProcOutput = () => undefined,
   onChangeSourceSelection,
   onChangeOutputFields,
-  onProcConfigModeChange,
-  onSelectExistingProcConfig,
-  isGeneratingProc = false,
-  generationSkill = '整理配置生成器',
-  generationPhase = 'generating_rule',
-  generationMessage = '正在分析左右数据集结构与描述，并生成数据整理 JSON。',
+  onRecommendOutputFields,
   isTrialingProc = false,
-  onGenerateProc,
   onTrialProc,
-  onProcDraftChange,
   onViewProcJson,
   procJsonPreview,
   procTrialPreview,
 }: SchemeWizardTargetProcStepProps) {
   const previewAnchorRef = useRef<HTMLDivElement | null>(null);
   const scrollToPreviewPendingRef = useRef(false);
+  const normalizedAiProcSideDrafts = normalizeAiProcSideDrafts(aiProcSideDrafts);
   const showCompatibility =
     procCompatibility.status !== 'idle' ||
     procCompatibility.details.length > 0 ||
@@ -981,254 +1788,163 @@ export default function SchemeWizardTargetProcStep({
     onTrialProc();
   };
 
+  const trialMeta = trialStatusMeta(procTrialPreview?.status || schemeDraft.procTrialStatus);
+  const compactStatusText = (
+    procTrialPreview?.summary
+    || schemeDraft.procTrialSummary
+    || (showCompatibility ? procCompatibility.message : '')
+  ).trim();
+  const compactDetailsText = procCompatibility.details.join('；').trim();
+  const isSimpleBuildMode = procBuildMode === 'simple_mapping';
+
   return (
     <div className="space-y-5">
       <div className="rounded-3xl border border-border bg-surface-secondary p-5">
-        <p className="text-sm font-semibold text-text-primary">先选择左右原始数据</p>
+        <p className="text-sm font-semibold text-text-primary">第二步：选择数据集并配置输出字段</p>
         <p className="mt-2 text-sm leading-6 text-text-secondary">
-          第二步只负责数据准备。先选中左右侧原始数据，再生成和试跑当前的数据整理配置。
+          当前版本先聚焦最短路径：每侧选 1 个原始数据集，系统会自动推荐一版输出字段，你调整后直接试跑。
         </p>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <RemoteDatasetSelector
-            side="left"
-            title="左侧原始数据"
-            description="按关键字远程搜索候选数据集，可多选并确认。"
-            authToken={authToken}
-            businessGoal={schemeDraft.businessGoal}
-            sideDescription={schemeDraft.leftDescription}
-            selectedSources={selectedLeftSources}
-            onConfirmSelection={(sources) => onChangeSourceSelection('left', sources)}
-          />
-          <RemoteDatasetSelector
-            side="right"
-            title="右侧原始数据"
-            description="按关键字远程搜索候选数据集，可多选并确认。"
-            authToken={authToken}
-            businessGoal={schemeDraft.businessGoal}
-            sideDescription={schemeDraft.rightDescription}
-            selectedSources={selectedRightSources}
-            onConfirmSelection={(sources) => onChangeSourceSelection('right', sources)}
-          />
-        </div>
-
-        <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface px-4 py-3">
-          <p className="text-xs font-medium text-text-secondary">筛选数据 / 行数据操作（后续支持）</p>
-          <p className="mt-2 text-sm leading-6 text-text-secondary">
-            当前版本先保留这块展示位。后续会在这里提供筛选条件、行处理和字段级操作的可视化配置。
-          </p>
-        </div>
-
-        <div className="mt-4 grid gap-4 xl:grid-cols-2">
-          <SchemeWizardOutputFieldEditor
-            authToken={authToken}
-            title="左侧输出字段"
-            sources={selectedLeftSources}
-            fields={leftOutputFields}
-            onChange={(fields) => onChangeOutputFields('left', fields)}
-          />
-          <SchemeWizardOutputFieldEditor
-            authToken={authToken}
-            title="右侧输出字段"
-            sources={selectedRightSources}
-            fields={rightOutputFields}
-            onChange={(fields) => onChangeOutputFields('right', fields)}
-          />
-        </div>
-      </div>
-
-      <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-        <p className="text-sm font-semibold text-text-primary">兼容执行配置</p>
-        <p className="mt-1 text-xs leading-5 text-text-secondary">
-          上面的输出字段会作为目标结构提示参与生成。当前版本的生成与试跑，仍通过下面这套兼容入口执行。
-        </p>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onProcConfigModeChange('ai')}
-            className={cn(
-              'rounded-xl border px-3 py-1.5 text-sm font-medium transition',
-              schemeDraft.procConfigMode === 'ai'
-                ? 'border-sky-200 bg-sky-50 text-sky-700'
-                : 'border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
-            )}
-          >
-            AI生成配置
-          </button>
-          <button
-            type="button"
-            onClick={() => onProcConfigModeChange('existing')}
-            className={cn(
-              'rounded-xl border px-3 py-1.5 text-sm font-medium transition',
-              schemeDraft.procConfigMode === 'existing'
-                ? 'border-sky-200 bg-sky-50 text-sky-700'
-                : 'border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
-            )}
-          >
-            选择已有配置
-          </button>
-        </div>
-
-        {schemeDraft.procConfigMode === 'existing' ? (
-          <label className="mt-4 block">
-            <span className="text-xs font-medium text-text-secondary">已有数据整理配置</span>
-            <select
-              value={schemeDraft.selectedProcConfigId}
-              onChange={(event) => onSelectExistingProcConfig(event.target.value)}
-              className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-            >
-              <option value="">请选择一条已有配置</option>
-              {existingProcOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-
-        {showCompatibility ? (
-          <div
-            className={cn(
-              'mt-4 rounded-2xl border px-4 py-3 text-sm',
-              procCompatibility.status === 'passed'
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                : procCompatibility.status === 'warning'
-                ? 'border-amber-200 bg-amber-50 text-amber-700'
-                : procCompatibility.status === 'failed'
-                ? 'border-amber-200 bg-amber-50 text-amber-700'
-                : 'border-border bg-surface text-text-secondary',
-            )}
-          >
-            <p>{procCompatibility.message}</p>
-            {procCompatibility.details.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {procCompatibility.details.map((detail) => (
-                  <span
-                    key={detail}
-                    className="rounded-full border border-current/15 bg-white/70 px-2.5 py-1 text-xs"
-                  >
-                    {detail}
-                  </span>
-                ))}
-              </div>
-            ) : null}
+        <div className="mt-5">
+          <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">选择数据整理方式</p>
+          <div className="mt-3">
+            <ProcBuildModeSelector value={procBuildMode} onChange={onChangeProcBuildMode} />
           </div>
-        ) : null}
+        </div>
+
+        {isSimpleBuildMode ? (
+          <>
+            <div className="mt-5">
+              <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">1. 选择左右原始数据集</p>
+              <div className="mt-3 grid gap-4 md:grid-cols-2">
+                <RemoteDatasetSelector
+                  side="left"
+                  title="左侧原始数据"
+                  description="按关键字远程搜索候选数据集，当前版本每侧先选择 1 个。"
+                  authToken={authToken}
+                  businessGoal={schemeDraft.businessGoal}
+                  sideDescription={schemeDraft.leftDescription}
+                  selectedSources={selectedLeftSources}
+                  onConfirmSelection={(sources) => onChangeSourceSelection('left', sources)}
+                />
+                <RemoteDatasetSelector
+                  side="right"
+                  title="右侧原始数据"
+                  description="按关键字远程搜索候选数据集，当前版本每侧先选择 1 个。"
+                  authToken={authToken}
+                  businessGoal={schemeDraft.businessGoal}
+                  sideDescription={schemeDraft.rightDescription}
+                  selectedSources={selectedRightSources}
+                  onConfirmSelection={(sources) => onChangeSourceSelection('right', sources)}
+                />
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">2. 调整左右输出字段</p>
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-700">
+                  选完数据集后会自动推荐字段
+                </span>
+              </div>
+              <div className="mt-3 grid gap-4 xl:grid-cols-2">
+                <SchemeWizardOutputFieldEditor
+                  authToken={authToken}
+                  title="左侧输出字段"
+                  sources={selectedLeftSources}
+                  fields={leftOutputFields}
+                  onChange={(fields) => onChangeOutputFields('left', fields)}
+                  onRecommend={() => onRecommendOutputFields('left')}
+                />
+                <SchemeWizardOutputFieldEditor
+                  authToken={authToken}
+                  title="右侧输出字段"
+                  sources={selectedRightSources}
+                  fields={rightOutputFields}
+                  onChange={(fields) => onChangeOutputFields('right', fields)}
+                  onRecommend={() => onRecommendOutputFields('right')}
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="mt-5">
+            <AiComplexRuleWorkspace
+              authToken={authToken}
+              schemeDraft={schemeDraft}
+              selectedLeftSources={selectedLeftSources}
+              selectedRightSources={selectedRightSources}
+              aiProcSideDrafts={normalizedAiProcSideDrafts}
+              onChangeSourceSelection={onChangeSourceSelection}
+              onChangeRuleDraft={onChangeAiProcRuleDraft}
+              onGenerateOutput={onGenerateAiProcOutput}
+            />
+          </div>
+        )}
       </div>
 
-      {schemeDraft.procConfigMode === 'ai' ? (
+      {isSimpleBuildMode ? (
         <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-sky-600" />
-            <p className="text-sm font-semibold text-text-primary">数据整理</p>
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <SourcesPreviewCard label="左侧数据" sources={selectedLeftSources} authToken={authToken} />
-            <SourcesPreviewCard label="右侧数据" sources={selectedRightSources} authToken={authToken} />
-          </div>
-        </div>
-      ) : null}
-
-      {isTrialingProc ? (
-        <div className="flex items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50/60 px-5 py-4">
-          <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-          <span className="text-sm font-medium text-sky-700">AI 正在试跑数据整理，请稍候…</span>
-        </div>
-      ) : null}
-
-      {schemeDraft.procConfigMode === 'ai' ? (
-        <>
           <div className="flex flex-wrap items-center gap-3">
-            {isGeneratingProc ? (
-              <div className="w-full rounded-2xl border border-sky-200 bg-sky-50/70 px-4 py-3 text-sky-700">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-                  AI 正在生成整理配置，请稍候…
-                </div>
-                <div className="mt-2 space-y-1 text-xs leading-6 text-sky-700/90">
-                  <p>
-                    当前生成器：
-                    <span className="ml-1 rounded-full border border-sky-200 bg-white/70 px-2 py-0.5 font-semibold text-sky-700">
-                      {generationSkill}
-                    </span>
-                  </p>
-                  <p>当前阶段：{formatGenerationPhase(generationPhase)}</p>
-                  <p>{generationMessage}</p>
-                </div>
-              </div>
-            ) : (
+            <button
+              type="button"
+              onClick={handleTrialProc}
+              disabled={
+                isTrialingProc
+                || selectedLeftSources.length === 0
+                || selectedRightSources.length === 0
+                || leftOutputFields.length === 0
+                || rightOutputFields.length === 0
+              }
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <CheckCircle2 className={cn('h-4 w-4', isTrialingProc && 'animate-pulse')} />
+              {isTrialingProc ? '试跑中...' : '试跑验证'}
+            </button>
+            {procJsonPreview ? (
               <button
                 type="button"
-                onClick={onGenerateProc}
+                onClick={onViewProcJson}
                 disabled={isTrialingProc}
-                className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Sparkles className="h-4 w-4" />
-                AI生成整理配置
+                查看 JSON
               </button>
-            )}
+            ) : null}
+            <span className={cn('inline-flex rounded-full border px-3 py-1 text-xs font-medium', trialMeta.className)}>
+              {trialMeta.label}
+            </span>
           </div>
 
-          <label className="block">
-            <span className="text-xs font-medium text-text-secondary">数据整理配置</span>
-            <textarea
-              value={schemeDraft.procDraft}
-              onChange={(event) => onProcDraftChange(event.target.value)}
-              rows={14}
-              className="mt-1.5 w-full rounded-2xl border border-border bg-surface px-4 py-3 text-sm leading-7 text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="如需改动说明，请修改后重新点击 AI 生成整理配置。"
-            />
-            <p className="mt-2 text-xs leading-5 text-text-muted">
-              手动修改这里的说明后，需要重新点击“AI生成整理配置”。
-              当前说明不为空时，系统会优先按这份说明生成 JSON；如果说明为空，则会重新生成新的整理说明和 JSON。
-            </p>
-          </label>
-        </>
+          {compactStatusText || compactDetailsText ? (
+            <div
+              className={cn(
+                'mt-3 rounded-2xl border px-4 py-3 text-sm',
+                procCompatibility.status === 'passed'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : procCompatibility.status === 'warning'
+                  ? 'border-amber-200 bg-amber-50 text-amber-700'
+                  : procCompatibility.status === 'failed'
+                  ? 'border-amber-200 bg-amber-50 text-amber-700'
+                  : 'border-border bg-surface text-text-secondary',
+              )}
+            >
+              {compactStatusText ? <p>{compactStatusText}</p> : null}
+              {compactDetailsText ? <p className="mt-1 text-xs leading-5 opacity-90">{compactDetailsText}</p> : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={handleTrialProc}
-          disabled={
-            isTrialingProc
-            || isGeneratingProc
-            || !procJsonPreview
-          }
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <CheckCircle2 className="h-4 w-4" />
-          试跑验证
-        </button>
-        <button
-          type="button"
-          onClick={onViewProcJson}
-          disabled={
-            isTrialingProc
-            || isGeneratingProc
-            || (
-              !procJsonPreview
-              || (
-                !schemeDraft.procDraft.trim()
-                && !(schemeDraft.procConfigMode === 'existing' && schemeDraft.selectedProcConfigId)
-              )
-            )
-          }
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          JSON
-        </button>
-        {procJsonPreview ? <span className="text-xs text-text-secondary">已生成 JSON</span> : null}
-      </div>
-
-      <div ref={previewAnchorRef} className="scroll-mt-24">
-        <ProcTrialPreviewPanel
-          draftStatus={schemeDraft.procTrialStatus}
-          draftSummary={schemeDraft.procTrialSummary}
-          preview={procTrialPreview}
-        />
-      </div>
+      {isSimpleBuildMode ? (
+        <div ref={previewAnchorRef} className="scroll-mt-24">
+          <ProcTrialPreviewPanel
+            draftStatus={schemeDraft.procTrialStatus}
+            draftSummary={schemeDraft.procTrialSummary}
+            preview={procTrialPreview}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

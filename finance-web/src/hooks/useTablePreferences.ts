@@ -1,25 +1,30 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import type { TablePreferences, ViewMode } from '../components/ResponsiveTable/types';
 import { DEFAULT_PREFERENCES } from '../components/ResponsiveTable/types';
 
 const STORAGE_KEY = 'table-preferences';
 
-export function useTablePreferences(tableId: string) {
-  const [preferences, setPreferences] = useState<TablePreferences>(DEFAULT_PREFERENCES);
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(`${STORAGE_KEY}-${tableId}`);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        setPreferences({ ...DEFAULT_PREFERENCES, ...parsed });
-      }
-    } catch (e) {
-      console.warn('Failed to load table preferences:', e);
+function loadPreferences(tableId: string): TablePreferences {
+  try {
+    const stored = localStorage.getItem(`${STORAGE_KEY}-${tableId}`);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return { ...DEFAULT_PREFERENCES, ...parsed };
     }
-    setIsLoaded(true);
-  }, [tableId]);
+  } catch (e) {
+    console.warn('Failed to load table preferences:', e);
+  }
+  return DEFAULT_PREFERENCES;
+}
+
+export function useTablePreferences(tableId: string) {
+  const [loadedTableId, setLoadedTableId] = useState(tableId);
+  const [preferences, setPreferences] = useState<TablePreferences>(() => loadPreferences(tableId));
+
+  if (loadedTableId !== tableId) {
+    setLoadedTableId(tableId);
+    setPreferences(loadPreferences(tableId));
+  }
 
   const savePreferences = useCallback((newPrefs: Partial<TablePreferences>) => {
     setPreferences((prev) => {
@@ -62,7 +67,7 @@ export function useTablePreferences(tableId: string) {
 
   return {
     preferences,
-    isLoaded,
+    isLoaded: true,
     setViewMode,
     toggleColumnVisibility,
     setColumnWidth,

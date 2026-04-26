@@ -242,12 +242,14 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_authorize",
     "data_source_handle_callback",
     "data_source_trigger_sync",
+    "data_source_scheduler_list_collection_plans",
+    "data_source_trigger_dataset_collection",
     "data_source_get_sync_job",
     "data_source_list_sync_jobs",
+    "data_source_get_dataset_collection_detail",
+    "data_source_list_collection_records",
     "data_source_preview",
-    "data_source_get_published_snapshot",
-    "data_source_list_published_snapshot_rows",
-    "data_source_export_published_snapshot",
+    "data_source_export_collection_records",
 }
 
 _RECON_AUTO_TOOL_NAMES = {

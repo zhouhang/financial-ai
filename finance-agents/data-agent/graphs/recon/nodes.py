@@ -341,7 +341,9 @@ def recon_result_node(state: AgentState) -> dict:
         valid_results = [result for result in results if result.get("status", "succeeded") == "succeeded"]
 
         # 构建每个规则的独立显示
-        _, ref_to_display_name = _build_upload_name_maps(list(state.get("uploaded_files") or []))
+        _, ref_to_display_name = _build_upload_name_maps(
+            list(ctx.get("logical_uploaded_files") or state.get("uploaded_files") or [])
+        )
         diff_label = _build_diff_description(ctx)
         show_rule_title = len(valid_results) > 1
         rule_sections = []

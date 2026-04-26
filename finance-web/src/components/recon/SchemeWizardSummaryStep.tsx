@@ -1,3 +1,5 @@
+import type { ReconFieldPairDraft } from './schemeWizardState';
+
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type PreviewState = 'empty' | 'current' | 'reference';
 
@@ -10,6 +12,10 @@ interface SchemeWizardSummaryStepProps {
   rightOutputFields: string[];
   procDisplayName: string;
   reconDisplayName: string;
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
   procHasConfig: boolean;
   reconHasConfig: boolean;
   procTrialStatus: TrialStatus;
@@ -67,6 +73,14 @@ function SummaryCard({
   );
 }
 
+function formatPairSummary(pairs: ReconFieldPairDraft[]): string {
+  const text = pairs
+    .filter((pair) => pair.leftField.trim() && pair.rightField.trim())
+    .map((pair) => `${pair.leftField} ↔ ${pair.rightField}`)
+    .join('、');
+  return text || '--';
+}
+
 export default function SchemeWizardSummaryStep({
   schemeName,
   businessGoal,
@@ -76,6 +90,10 @@ export default function SchemeWizardSummaryStep({
   rightOutputFields,
   procDisplayName,
   reconDisplayName,
+  matchFieldPairs,
+  compareFieldPairs,
+  leftTimeSemantic,
+  rightTimeSemantic,
   procHasConfig,
   reconHasConfig,
   procTrialStatus,
@@ -104,20 +122,24 @@ export default function SchemeWizardSummaryStep({
       </div>
 
       <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-        <p className="text-sm font-semibold text-text-primary">数据准备</p>
+        <p className="text-sm font-semibold text-text-primary">数据整理</p>
         <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+          <SummaryCard title="整理规则" value={procDisplayName} />
           <SummaryCard title="左侧数据" value={leftSources.join('、') || '--'} />
           <SummaryCard title="左侧输出字段" value={leftOutputFields.join('、') || '--'} />
           <SummaryCard title="右侧数据" value={rightSources.join('、') || '--'} />
           <SummaryCard title="右侧输出字段" value={rightOutputFields.join('、') || '--'} />
-          <SummaryCard title="数据整理配置" value={procDisplayName} />
         </div>
       </div>
 
       <div className="rounded-3xl border border-border bg-surface-secondary p-4">
         <p className="text-sm font-semibold text-text-primary">对账规则</p>
-        <div className="mt-4 grid gap-4 lg:grid-cols-1">
+        <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
           <SummaryCard title="当前对账逻辑" value={reconDisplayName} />
+          <SummaryCard title="匹配字段" value={formatPairSummary(matchFieldPairs)} />
+          <SummaryCard title="对比字段" value={formatPairSummary(compareFieldPairs)} />
+          <SummaryCard title="左时间字段" value={leftTimeSemantic || '--'} />
+          <SummaryCard title="右时间字段" value={rightTimeSemantic || '--'} />
         </div>
       </div>
 

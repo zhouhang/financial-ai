@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .semantic_utils import format_field_display, format_table_display, format_table_label
+from .semantic_utils import format_field_display, format_field_label, format_table_display, format_table_label
 
 
 _PROC_TARGET_LABELS = {
@@ -90,19 +90,20 @@ def _describe_proc_value(
             alias = str(source.get("alias") or "").strip()
             field = str(source.get("field") or "").strip()
             if field:
-                field_display = format_field_display(field, field_label_map)
+                field_label = format_field_label(field, field_label_map)
                 if alias:
                     table_label = format_table_label(alias, table_label_map)
                     # 只在 alias 有业务名翻译时才展示表前缀，否则省略
                     if table_label != alias:
-                        return f"{table_label}.{field_display}"
-                return field_display
+                        return f"{table_label}.{field_label}"
+                return field_label
         return "源字段"
     if value_type == "formula":
         expr = value.get("expr")
-        # 字符串字面量显示为"固定值"而非"公式"
+        # 字符串字面量显示为"固定值"，通过 table_label_map 翻译原始表名
         if isinstance(expr, str) and expr:
-            return f"固定值：{expr}"
+            translated = format_table_label(expr, table_label_map)
+            return f"固定值：{translated}"
         return f"公式 {_stringify_formula(expr)}"
     if value_type == "template_source":
         source = value.get("source")
@@ -110,12 +111,12 @@ def _describe_proc_value(
             alias = str(source.get("alias") or "").strip()
             field = str(source.get("field") or "").strip()
             if field:
-                field_display = format_field_display(field, field_label_map)
+                field_label = format_field_label(field, field_label_map)
                 if alias:
-                    table_display = format_table_display(alias, table_label_map)
-                    if table_display != alias:
-                        return f"模板 {table_display}.{field_display}"
-                return f"模板 {field_display}"
+                    table_label = format_table_label(alias, table_label_map)
+                    if table_label != alias:
+                        return f"模板 {table_label}.{field_label}"
+                return f"模板 {field_label}"
         return "模板字段"
     if value_type == "function":
         func_name = str(value.get("name") or value.get("function") or "").strip()
@@ -144,7 +145,7 @@ def _render_proc_mapping_summary(
         if not target_field:
             continue
         rendered.append(
-            f"{format_field_display(target_field, field_label_map)} ← "
+            f"{format_field_label(target_field, field_label_map)} ← "
             f"{_describe_proc_value(mapping.get('value'), field_label_map=field_label_map, table_label_map=table_label_map)}"
         )
         if len(rendered) >= limit:
@@ -152,11 +153,17 @@ def _render_proc_mapping_summary(
     if not rendered:
         return ""
     hidden_count = max(len([item for item in mappings if isinstance(item, dict)]) - len(rendered), 0)
-    suffix = f" 等 {hidden_count + len(rendered)} 个字段" if hidden_count else ""
-    return f"字段写入：{'；'.join(rendered)}{suffix}。"
+    suffix = f"\n  （共 {hidden_count + len(rendered)} 个字段）" if hidden_count else ""
+    field_lines = "\n".join(f"  {r}" for r in rendered)
+    return f"字段写入：\n{field_lines}{suffix}"
 
 
-def _render_proc_match_summary(match: Any, *, field_label_map: dict[str, str] | None = None) -> str:
+def _render_proc_match_summary(
+    match: Any,
+    *,
+    field_label_map: dict[str, str] | None = None,
+    table_label_map: dict[str, str] | None = None,
+) -> str:
     if not isinstance(match, dict):
         return ""
     sources = [item for item in list(match.get("sources") or []) if isinstance(item, dict)]
@@ -168,14 +175,19 @@ def _render_proc_match_summary(match: Any, *, field_label_map: dict[str, str] | 
             field = str(key.get("field") or "").strip()
             target_field = str(key.get("target_field") or "").strip()
             if field and target_field:
-                field_text = format_field_display(field, field_label_map)
-                target_text = format_field_display(target_field, field_label_map)
-                rendered.append(
-                    f"{alias}.{field_text} → {target_text}" if alias else f"{field_text} → {target_text}"
-                )
+                field_text = format_field_label(field, field_label_map)
+                target_text = format_field_label(target_field, field_label_map)
+                if alias:
+                    table_label = format_table_label(alias, table_label_map)
+                    rendered.append(f"{table_label}.{field_text} → {target_text}")
+                else:
+                    rendered.append(f"{field_text} → {target_text}")
     if not rendered:
         return ""
-    return f"对齐键：{'；'.join(rendered[:6])}。"
+    keys = rendered[:6]
+    if len(keys) == 1:
+        return f"对齐键：{keys[0]}"
+    return "对齐键：\n" + "\n".join(f"  {k}" for k in keys)
 
 
 def _render_proc_filter_summary(
@@ -192,7 +204,7 @@ def _render_proc_filter_summary(
         operator = str(condition.get("operator") or "").strip()
         if not column or not operator:
             continue
-        column_text = format_field_display(column, field_label_map)
+        column_text = format_field_label(column, field_label_map)
         operator_label = _FILTER_OPERATOR_LABELS.get(operator, operator)
         if "value" in condition:
             rendered.append(
@@ -219,7 +231,7 @@ def _render_proc_aggregate_summary(
     if not isinstance(aggregate_value, dict):
         return ""
     group_by = [
-        format_field_display(str(item).strip(), field_label_map)
+        format_field_label(str(item).strip(), field_label_map)
         for item in list(aggregate_value.get("group_by") or [])
         if str(item).strip()
     ]
@@ -235,7 +247,7 @@ def _render_proc_aggregate_summary(
             alias = str(item.get("alias") or item.get("name") or "").strip()
             function = str(item.get("function") or "").strip()
             field = str(item.get("field") or item.get("source_field") or item.get("column") or "").strip()
-            field = format_field_display(field, field_label_map)
+            field = format_field_label(field, field_label_map)
             text = f"{function}({field})" if function and field else alias or function or field
             if alias and alias != text:
                 text = f"{alias}={text}"
@@ -278,6 +290,66 @@ def render_proc_rule_summary(
     return "；".join(parts) + "。" if parts else "输出左右两份可对账数据。"
 
 
+def _render_proc_step(
+    step: dict[str, Any],
+    step_num: int,
+    *,
+    field_label_map: dict[str, str] | None = None,
+    extended_table_label_map: dict[str, str] | None = None,
+) -> str:
+    action = str(step.get("action") or "").strip()
+    target_table = str(step.get("target_table") or "").strip()
+    target_label = _target_label(target_table)
+    if action == "create_schema":
+        schema = step.get("schema")
+        columns = []
+        if isinstance(schema, dict):
+            for column in list(schema.get("columns") or []):
+                if not isinstance(column, dict):
+                    continue
+                column_name = str(column.get("name") or "").strip()
+                if column_name:
+                    columns.append(column_name)
+        if columns:
+            return (
+                f"步骤{step_num}：定义{target_label}，输出字段："
+                f"{'、'.join(format_field_label(col, field_label_map) for col in columns)}。"
+            )
+        return f"步骤{step_num}：定义{target_label}的输出结构。"
+    if action == "write_dataset":
+        sources = [
+            str(source.get("table") or source.get("alias") or "").strip()
+            for source in list(step.get("sources") or [])
+            if isinstance(source, dict) and str(source.get("table") or source.get("alias") or "").strip()
+        ]
+        source_text = "、".join(
+            format_table_label(src, extended_table_label_map) for src in sources
+        ) if sources else "当前数据集"
+        line_parts = [f"步骤{step_num}：将 {source_text} 整理后写入{target_label}。"]
+        match_summary = _render_proc_match_summary(
+            step.get("match"),
+            field_label_map=field_label_map,
+            table_label_map=extended_table_label_map,
+        )
+        if match_summary:
+            line_parts.append(match_summary)
+        filter_summary = _render_proc_filter_summary(step.get("filter"), field_label_map=field_label_map)
+        if filter_summary:
+            line_parts.append(filter_summary)
+        aggregate_summary = _render_proc_aggregate_summary(step.get("aggregate"), field_label_map=field_label_map)
+        if aggregate_summary:
+            line_parts.append(aggregate_summary)
+        mapping_summary = _render_proc_mapping_summary(
+            [item for item in list(step.get("mappings") or []) if isinstance(item, dict)],
+            field_label_map=field_label_map,
+            table_label_map=extended_table_label_map,
+        )
+        if mapping_summary:
+            line_parts.append(mapping_summary)
+        return "\n".join(line_parts).strip()
+    return f"步骤{step_num}：对{target_label}执行数据处理操作。"
+
+
 def render_proc_draft_text(
     rule_json: dict[str, Any],
     *,
@@ -288,79 +360,84 @@ def render_proc_draft_text(
     steps = rule_json.get("steps")
     if not isinstance(steps, list) or not steps:
         return ""
+    # Extend table_label_map with alias→business_name derived from proc rule sources
+    extended_table_label_map: dict[str, str] = dict(table_label_map or {})
+    for _step in steps:
+        if not isinstance(_step, dict) or str(_step.get("action") or "") != "write_dataset":
+            continue
+        for _src in list(_step.get("sources") or []):
+            if not isinstance(_src, dict):
+                continue
+            _alias = str(_src.get("alias") or "").strip()
+            _table = str(_src.get("table") or "").strip()
+            if _alias and _table:
+                _label = extended_table_label_map.get(_table)
+                if _label:
+                    extended_table_label_map.setdefault(_alias, _label)
+
     lines: list[str] = ["数据整理配置说明"]
     role_desc = _normalize_goal_text(goal_hint, str(rule_json.get("role_desc") or ""))
     if role_desc:
         lines.append(f"目标：{role_desc}")
-    summary = render_proc_rule_summary(
-        rule_json,
-        field_label_map=field_label_map,
-        table_label_map=table_label_map,
-    )
-    if summary:
-        lines.append(summary)
-    for index, step in enumerate(steps, start=1):
+
+    # Group steps by which side they belong to (left/right/other)
+    left_steps: list[dict[str, Any]] = []
+    right_steps: list[dict[str, Any]] = []
+    other_steps: list[dict[str, Any]] = []
+    for step in steps:
         if not isinstance(step, dict):
             continue
-        action = str(step.get("action") or "").strip()
         target_table = str(step.get("target_table") or "").strip()
-        target_label = _target_label(target_table)
-        if action == "create_schema":
-            schema = step.get("schema")
-            columns = []
-            if isinstance(schema, dict):
-                for column in list(schema.get("columns") or []):
-                    if not isinstance(column, dict):
-                        continue
-                    column_name = str(column.get("name") or "").strip()
-                    if column_name:
-                        columns.append(column_name)
-            if columns:
-                lines.append(
-                    "步骤"
-                    f"{index}：定义{target_label}，输出字段："
-                    f"{'、'.join(format_field_display(column, field_label_map) for column in columns)}。"
-                )
-            else:
-                lines.append(f"步骤{index}：定义{target_label}的输出结构。")
-            continue
-        if action == "write_dataset":
-            sources = [
-                str(source.get("table") or source.get("alias") or "").strip()
-                for source in list(step.get("sources") or [])
-                if isinstance(source, dict) and str(source.get("table") or source.get("alias") or "").strip()
-            ]
-            source_text = "、".join(
-                format_table_label(source, table_label_map) for source in sources
-            ) if sources else "当前数据集"
-            line_parts = [
-                f"步骤{index}：将 {source_text} 整理后写入{target_label}。"
-            ]
-            match_summary = _render_proc_match_summary(step.get("match"), field_label_map=field_label_map)
-            if match_summary:
-                line_parts.append(match_summary)
-            filter_summary = _render_proc_filter_summary(
-                step.get("filter"),
+        if target_table == "left_recon_ready":
+            left_steps.append(step)
+        elif target_table == "right_recon_ready":
+            right_steps.append(step)
+        else:
+            other_steps.append(step)
+
+    # Resolve display name for each side's data source
+    def _side_source_label(side_steps: list[dict[str, Any]]) -> str:
+        for step in side_steps:
+            if str(step.get("action") or "") != "write_dataset":
+                continue
+            for src in list(step.get("sources") or []):
+                if not isinstance(src, dict):
+                    continue
+                table = str(src.get("table") or "").strip()
+                if table:
+                    return format_table_label(table, extended_table_label_map)
+        return ""
+
+    left_label = _side_source_label(left_steps)
+    right_label = _side_source_label(right_steps)
+
+    if left_steps:
+        header = f"【左侧数据整理】{('来自 ' + left_label) if left_label else ''}"
+        lines.append(header)
+        for num, step in enumerate(left_steps, start=1):
+            lines.append(_render_proc_step(
+                step, num,
                 field_label_map=field_label_map,
-            )
-            if filter_summary:
-                line_parts.append(filter_summary)
-            aggregate_summary = _render_proc_aggregate_summary(
-                step.get("aggregate"),
+                extended_table_label_map=extended_table_label_map,
+            ))
+
+    if right_steps:
+        header = f"【右侧数据整理】{('来自 ' + right_label) if right_label else ''}"
+        lines.append(header)
+        for num, step in enumerate(right_steps, start=1):
+            lines.append(_render_proc_step(
+                step, num,
                 field_label_map=field_label_map,
-            )
-            if aggregate_summary:
-                line_parts.append(aggregate_summary)
-            mapping_summary = _render_proc_mapping_summary(
-                [item for item in list(step.get("mappings") or []) if isinstance(item, dict)],
-                field_label_map=field_label_map,
-                table_label_map=table_label_map,
-            )
-            if mapping_summary:
-                line_parts.append(mapping_summary)
-            lines.append(" ".join(line_parts).strip())
-            continue
-        lines.append(f"步骤{index}：对{_target_label(target_table)}执行数据处理操作。")
+                extended_table_label_map=extended_table_label_map,
+            ))
+
+    for num, step in enumerate(other_steps, start=1):
+        lines.append(_render_proc_step(
+            step, num,
+            field_label_map=field_label_map,
+            extended_table_label_map=extended_table_label_map,
+        ))
+
     return "\n".join(lines).strip()
 
 
@@ -381,8 +458,8 @@ def _render_key_mapping_summary(
                 rendered.append("业务主键")
             else:
                 rendered.append(
-                    f"{format_field_display(source_field, field_label_map)} = "
-                    f"{format_field_display(target_field, field_label_map)}"
+                    f"{format_field_label(source_field, field_label_map)} = "
+                    f"{format_field_label(target_field, field_label_map)}"
                 )
     return "；".join(rendered[:6])
 
@@ -401,8 +478,8 @@ def _render_compare_columns_summary(
         tolerance = column.get("tolerance", 0)
         name = str(column.get("name") or "").strip()
         if source_column and target_column:
-            source_text = format_field_display(source_column, field_label_map)
-            target_text = format_field_display(target_column, field_label_map)
+            source_text = format_field_label(source_column, field_label_map)
+            target_text = format_field_label(target_column, field_label_map)
             prefix = f"{name}：" if name else ""
             rendered.append(f"{prefix}{source_text} 对比 {target_text}，容差 {tolerance}")
     return "；".join(rendered[:6])
@@ -493,8 +570,8 @@ def render_recon_draft_text(
             target_field = str(item.get("target_field") or "").strip()
             if source_field and target_field:
                 group_by.append(
-                    f"{format_field_display(source_field, field_label_map)}="
-                    f"{format_field_display(target_field, field_label_map)}"
+                    f"{format_field_label(source_field, field_label_map)}="
+                    f"{format_field_label(target_field, field_label_map)}"
                 )
         aggregation_items = []
         for item in list(aggregation.get("aggregations") or []):
@@ -507,8 +584,8 @@ def render_recon_draft_text(
             if function and source_field and target_field:
                 text = (
                     f"{function}("
-                    f"{format_field_display(source_field, field_label_map)}/"
-                    f"{format_field_display(target_field, field_label_map)})"
+                    f"{format_field_label(source_field, field_label_map)}/"
+                    f"{format_field_label(target_field, field_label_map)})"
                 )
                 if alias:
                     text = f"{alias}={text}"

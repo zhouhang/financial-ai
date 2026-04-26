@@ -19,7 +19,7 @@ from graphs.recon.execution_service import (
 )
 from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from tools.mcp_client import (
-    data_source_export_published_snapshot,
+    data_source_export_collection_records,
     execute_proc_rule,
     execution_scheme_update,
 )
@@ -129,16 +129,18 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         resource_key = str(query.get("resource_key") or "").strip()
         if not source_id or not table_name:
             continue
-        export_result = await data_source_export_published_snapshot(
+        export_result = await data_source_export_collection_records(
             auth_token,
             source_id,
+            dataset_id=str(query.get("dataset_id") or dataset_ref.get("dataset_id") or ""),
             table_name=table_name,
             resource_key=resource_key,
+            biz_date=str(query.get("biz_date") or ctx.get("biz_date") or ""),
             query=query,
         )
         if not bool(export_result.get("success")):
             ctx["prepare_status"] = "error"
-            ctx["prepare_message"] = str(export_result.get("error") or f"导出 {table_name} 快照失败")
+            ctx["prepare_message"] = str(export_result.get("error") or f"导出 {table_name} 采集记录失败")
             ctx["exec_status"] = "error"
             ctx["exec_error"] = ctx["prepare_message"]
             ctx["failed_stage"] = "prepare"
@@ -164,7 +166,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
                 "table_name": table_name,
                 "source_id": source_id,
                 "file_path": file_path,
-                "snapshot_id": str(export_result.get("snapshot_id") or ""),
+                "dataset_id": str(export_result.get("dataset_id") or query.get("dataset_id") or ""),
                 "row_count": export_result.get("row_count"),
             }
         )

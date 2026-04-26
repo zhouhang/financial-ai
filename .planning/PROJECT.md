@@ -16,6 +16,9 @@
 - ✓ 已支持 `proc` 数据整理执行和 `recon` 对账执行，底层已有可运行的规则引擎与输出产物 — existing
 - ✓ 已支持对账方案、运行计划、运行记录和异常结果查看，平台已具备完整的执行链路骨架 — existing
 - ✓ 已形成 React + FastAPI/LangGraph + MCP + PostgreSQL 的多服务架构，现有前后端与调度链路可承载增量重构 — existing
+- ✓ 文件型 `proc` / `recon` 已支持单个 Excel 多 sheet 工作簿自动拆成 sheet 级逻辑文件，并继续复用现有规则执行链路 — Phase 6
+- ✓ 多 sheet 输入已在正式 `file_check` 前执行保守预筛选，说明页、空白页和明显不命中 schema 的 sheet 不再干扰正式匹配 — Phase 6
+- ✓ 拆分后的逻辑文件已具备稳定命名、工作簿 / sheet 溯源与歧义候选透传，`proc` / `recon` 共享同一套 intake 路径 — Phase 6
 
 ### Active
 
@@ -34,6 +37,7 @@
 - 让财务用户直接以 JSON 作为默认编辑面板完成方案配置 — 学习成本高、易出错，不符合本次体验目标
 - 在 v1 中实现完整的行级筛选、行数据操作可视化编辑器 — 当前先保留页面结构，避免范围膨胀影响主流程上线
 - 脱离现有试跑与执行链路另起一套生成或校验机制 — 会增加维护成本，并与既有执行能力脱节
+- 为多 sheet 上传改造现有 `proc DSL` / `recon DSL` 语义或要求规则显式声明 sheet 名称 — 本次改造限定在上传输入层完成兼容
 
 ## Context
 
@@ -43,6 +47,10 @@
 
 本次重构的核心不是让 AI 完全替代人，而是让 AI 先给出一版建议，再让财务围绕样例结果快速校正。也就是说，页面需要围绕“推荐、试跑、修正、再试跑”的闭环来设计，保证最终产物仍然能自然编译到现有 `proc json` 与 `recon json`，并由既有执行引擎消费。
 
+除了方案创建体验，当前又新增了一条共享底层能力需求：文件型 `proc` / `recon` 需要兼容单个 Excel 多 sheet 上传。现状是文件校验入口按“一个上传文件 = 一个可匹配输入”处理，Excel 读取表头时默认只看活动 sheet，这会让多 sheet 工作簿既无法被完整识别，也容易因为额外 sheet 干扰 schema 唯一映射和后续执行。
+
+因此多 sheet 兼容的解法必须落在上传输入层，而不是改写现有 DSL。具体方向是：在正式 `validate_files` 前先把工作簿拆成多个临时逻辑文件，对每个 sheet 做轻量预筛选，只把候选 sheet 送入正式 file_check；随后用稳定且可追溯的命名把 sheet 文件接到现有 `table_name -> file_path` 映射，让 `proc` 和 `recon` 继续按原方式消费。
+
 ## Constraints
 
 - **Tech stack**: 必须基于现有 `finance-web`、`finance-agents/data-agent`、`finance-mcp`、`finance-cron` 演进 — 这是已在线下验证过的主架构，不能为重构交互而推翻
@@ -51,6 +59,9 @@
 - **Workflow shape**: 总体仍保持 4 步新建流程 — 用户已经确认这一操作结构更接近目标心智
 - **Validation gate**: 保存前必须保证 `proc` 试跑成功且 `recon` 试跑成功 — 否则上线后仍会把不可执行配置带入运行链路
 - **Scope control**: v1 只重构创建体验主链路，不同时展开完整筛选编辑器或底层 DSL 改造 — 避免范围失控导致交付延迟
+- **Input-layer only**: 多 sheet 兼容必须在上传输入层解决，不改 `proc DSL` / `recon DSL`、不改现有规则描述方式
+- **Shared path**: 文件型 `proc` 与文件型 `recon` 必须复用同一套拆分、预筛选和命名逻辑，避免后续两套行为漂移
+- **Traceability**: 拆分出的逻辑文件必须能反查原始工作簿和 sheet 名称，便于报错提示、日志定位和人工排查
 
 ## Key Decisions
 
@@ -64,6 +75,10 @@
 | 左右输出字段名尽量对齐 | 有利于第三步 AI 生成更稳定的对账规则，也降低人工理解成本 | — Pending |
 | 保存方案前必须先完成 `proc` 与 `recon` 试跑验证 | 目标不是“生成一份草稿”，而是“产出可执行方案” | — Pending |
 | JSON 只保留为高级视图，不作为默认编辑面板 | 财务用户的主路径应是业务配置，不应被 DSL 细节绑架 | — Pending |
+| 多 sheet 兼容放在上传输入层，不改现有 `proc` / `recon` DSL | 运行时本质上依赖 `table_name -> file_path`，问题在于上传入口无法正确拆分和识别工作簿 | Implemented in Phase 6 |
+| 多 sheet 工作簿先拆 sheet 再做正式 file_check | 如果把全部 sheet 直接当上传文件，会放大宽松 schema 的唯一映射歧义，也会让正式匹配输入掺入噪音 sheet | Implemented in Phase 6 |
+| 预筛选只负责过滤明显无效 sheet，不直接替代正式 schema 匹配 | 需要保留现有 `validate_files` 作为权威匹配器，同时把真正的歧义继续暴露给用户 | Implemented in Phase 6 |
+| 拆分后的逻辑文件名需唯一稳定，并带原工作簿与 sheet 追踪信息 | 既要避免同名 sheet / 多工作簿冲突，也要保证报错、日志和调试能回溯来源 | Implemented in Phase 6 |
 
 ## Evolution
 
@@ -83,4 +98,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-22 after initialization*
+*Last updated: 2026-04-23 after completing multi-sheet upload intake*

@@ -84,43 +84,6 @@ async function openReconCenter(page: Page) {
   await expect(page.getByText('统一查看对账方案、对账任务与运行记录')).toBeVisible();
 }
 
-async function hasAnyDataset(page: Page, authToken: string): Promise<boolean> {
-  return page.evaluate(async ({ token }) => {
-    const headers = { Authorization: `Bearer ${token}` };
-    const sourceResponse = await fetch('/api/data-sources', { headers });
-    if (!sourceResponse.ok) return false;
-    const sourceData = await sourceResponse.json().catch(() => ({}));
-    const sources = Array.isArray(sourceData.sources) ? sourceData.sources : [];
-    for (const source of sources) {
-      const sourceId = String((source as { id?: string }).id || '');
-      if (!sourceId) continue;
-      const datasetResponse = await fetch(`/api/data-sources/${sourceId}/datasets`, { headers });
-      if (!datasetResponse.ok) continue;
-      const datasetData = await datasetResponse.json().catch(() => ({}));
-      const datasets = Array.isArray(datasetData.datasets) ? datasetData.datasets : [];
-      if (datasets.length > 0) return true;
-    }
-    return false;
-  }, { token: authToken });
-}
-
-async function selectDatasetInDropdown(page: Page, sectionTitle: '左侧原始数据' | '右侧原始数据') {
-  const card = page
-    .getByText(sectionTitle)
-    .locator('xpath=ancestor::div[contains(@class,"rounded-3xl")][1]');
-  const dropdownButton = card.getByRole('button').first();
-  await dropdownButton.click();
-
-  const dropdownPanel = page
-    .locator('div.absolute')
-    .filter({ has: page.getByRole('button', { name: '确定' }) })
-    .last();
-  await expect(dropdownPanel).toBeVisible();
-  await dropdownPanel.locator('input[type="checkbox"]').first().check();
-  await dropdownPanel.getByRole('button', { name: '确定' }).click();
-  await expect(dropdownPanel).toHaveCount(0);
-}
-
 test('对账中心顶部三个视图可切换', async ({ page }) => {
   const authSession = await registerAuthSession(page);
   await seedAuthSession(page, authSession);
@@ -160,23 +123,23 @@ test('新增对账方案可完成第一步并进入第二步', async ({ page }) 
   const authSession = await registerAuthSession(page);
   await seedAuthSession(page, authSession);
 
-  const datasetReady = await hasAnyDataset(page, authSession.token);
-  test.skip(!datasetReady, '当前环境无可用数据集，跳过方案向导步骤验证。');
-
   await openReconCenter(page);
   await page.getByRole('button', { name: '新增对账方案' }).click();
   await expect(page.getByText('按四步完成方案设计与试跑确认')).toBeVisible();
 
   await page.getByLabel('方案名称').fill(`PW 关键路径方案 ${Date.now()}`);
-  await page.getByLabel('对账目标').fill('核对左右两侧订单金额与业务主键是否一致。');
-
-  await selectDatasetInDropdown(page, '左侧原始数据');
-  await selectDatasetInDropdown(page, '右侧原始数据');
+  await page.getByLabel('对账目的').fill('核对左右两侧订单金额与业务主键是否一致。');
 
   const nextStepButton = page.getByRole('button', { name: '下一步' });
   await expect(nextStepButton).toBeEnabled();
   await nextStepButton.click();
 
-  await expect(page.getByText('配置方式')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'AI生成整理配置' })).toBeVisible();
+  await expect(page.getByText('第二步：选择数据集并配置输出字段')).toBeVisible();
+  await expect(page.getByText('1. 选择左右原始数据集')).toBeVisible();
+  await expect(page.getByText('2. 调整左右输出字段')).toBeVisible();
+  await expect(page.getByText('选完数据集后会自动推荐字段')).toBeVisible();
+  await expect(page.getByText('左侧输出字段')).toBeVisible();
+  await expect(page.getByText('右侧输出字段')).toBeVisible();
+  await expect(page.getByRole('button', { name: '试跑验证' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'AI生成整理配置' })).toHaveCount(0);
 });

@@ -55,6 +55,7 @@ from tools.mcp_client import (
 
 # 导入 proc 路由
 from graphs.proc.api import router as proc_router
+from graphs.rule_generation.api import router as rule_generation_router
 from graphs.recon.api import router as recon_router
 from graphs.recon.auto_run_api import router as recon_auto_router
 from graphs.recon.scheme_design.api import router as recon_scheme_design_router
@@ -239,10 +240,10 @@ def _build_preflight_issue_message(result: dict[str, Any]) -> str:
             main = f"数据集“{target}”健康状态异常，请先修复后重试"
     elif code == "dataset_stale":
         target = dataset_name or "数据集"
-        main = f"数据集“{target}”最近快照已过旧，请先执行同步后重试"
+        main = f"数据集“{target}”最近采集记录已过旧，请先执行同步后重试"
     elif code == "dataset_sync_time_invalid":
         target = dataset_name or "数据集"
-        main = f"数据集“{target}”最近快照时间异常，请先执行同步后重试"
+        main = f"数据集“{target}”最近采集时间异常，请先执行同步后重试"
     else:
         main = issue_message or "规则绑定的数据源或数据集暂不可用，请先检查后重试"
 
@@ -316,6 +317,7 @@ app = FastAPI(title="Financial Data Agent", version="0.1.0")
 
 # 注册 proc 路由
 app.include_router(proc_router)
+app.include_router(rule_generation_router)
 app.include_router(recon_router)
 app.include_router(recon_auto_router)
 app.include_router(recon_scheme_design_router)

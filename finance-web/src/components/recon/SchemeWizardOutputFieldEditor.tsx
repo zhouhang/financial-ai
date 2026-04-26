@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, Link2, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, Plus, Sparkles, Trash2 } from 'lucide-react';
 import {
-  createOutputFieldConcatPart,
   createOutputFieldDraft,
+  inferOutputFieldSemanticRole,
+  normalizeOutputFieldSemanticRole,
+  resolveOutputFieldSemanticRoleLabel,
   type OutputFieldDraft,
+  type OutputFieldSemanticRole,
   type SchemeSourceSelection,
 } from './schemeWizardState';
 
@@ -18,7 +21,16 @@ interface SchemeWizardOutputFieldEditorProps {
   sources: SchemeSourceSelection[];
   fields: OutputFieldDraft[];
   onChange: (fields: OutputFieldDraft[]) => void;
+  onRecommend?: () => void;
+  recommendDisabled?: boolean;
 }
+
+const OUTPUT_FIELD_ROLE_OPTIONS: OutputFieldSemanticRole[] = [
+  'normal',
+  'match_key',
+  'compare_field',
+  'time_field',
+];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
@@ -63,15 +75,20 @@ function renderFieldOptionLabel(field: FieldItem): string {
     : field.rawName;
 }
 
+
 export default function SchemeWizardOutputFieldEditor({
   authToken,
   title,
   sources,
   fields,
   onChange,
+  onRecommend,
+  recommendDisabled = false,
 }: SchemeWizardOutputFieldEditorProps) {
   const [fieldCache, setFieldCache] = useState<Record<string, FieldItem[]>>({});
   const [loadingIds, setLoadingIds] = useState<string[]>([]);
+  const primarySource = sources[0];
+  const configuredFieldCount = fields.filter((field) => field.outputName.trim()).length;
 
   const loadDatasetFields = useCallback(
     async (source: SchemeSourceSelection) => {
@@ -125,9 +142,9 @@ export default function SchemeWizardOutputFieldEditor({
     });
   }, [fieldCache, loadDatasetFields, sources]);
 
-  const datasetOptions = useMemo(
-    () => sources.map((source) => ({ value: source.id, label: resolveDatasetDisplayName(source) })),
-    [sources],
+  const selectedFieldOptions = useMemo(
+    () => (primarySource ? fieldCache[primarySource.id] || [] : []),
+    [fieldCache, primarySource],
   );
 
   const replaceField = useCallback(
@@ -163,10 +180,45 @@ export default function SchemeWizardOutputFieldEditor({
       ...fields,
       {
         ...createOutputFieldDraft(),
-        sourceDatasetId: sources[0]?.id || '',
+        valueMode: 'source_field',
+        sourceDatasetId: primarySource?.id || '',
       },
     ]);
-  }, [fields, onChange, sources]);
+  }, [fields, onChange, primarySource]);
+
+  useEffect(() => {
+    if (!primarySource) return;
+    const nextSourceId = primarySource.id;
+    const normalizedFields = fields
+      .filter((field) => field.valueMode === 'source_field')
+      .map((field) => ({
+        ...field,
+        valueMode: 'source_field' as const,
+        sourceDatasetId: nextSourceId,
+        sourceField: field.sourceDatasetId === nextSourceId ? field.sourceField : '',
+        fixedValue: '',
+        formula: '',
+        concatDelimiter: '',
+        concatParts: [],
+      }));
+    const needsNormalization =
+      normalizedFields.length !== fields.length
+      || normalizedFields.some((field, index) => {
+        const current = fields[index];
+        return (
+          !current
+          || current.sourceDatasetId !== field.sourceDatasetId
+          || current.sourceField !== field.sourceField
+          || current.fixedValue !== ''
+          || current.formula !== ''
+          || current.concatDelimiter !== ''
+          || current.concatParts.length > 0
+        );
+      });
+    if (!needsNormalization) return;
+
+    onChange(normalizedFields);
+  }, [fields, onChange, primarySource]);
 
   const anyLoading = loadingIds.length > 0;
 
@@ -176,18 +228,32 @@ export default function SchemeWizardOutputFieldEditor({
         <div>
           <p className="text-sm font-semibold text-text-primary">{title}</p>
           <p className="mt-1 text-xs leading-5 text-text-secondary">
-            定义这一侧最终输出表要保留哪些字段，以及每个字段如何取值。
+            选完数据集后，系统会先推荐一版输出字段。你可以继续调整字段名、字段角色和来源字段。
           </p>
         </div>
-        <button
-          type="button"
-          onClick={addField}
-          disabled={sources.length === 0}
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Plus className="h-4 w-4" />
-          新增字段
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
+            已配 {configuredFieldCount} 个字段
+          </span>
+          <button
+            type="button"
+            onClick={onRecommend}
+            disabled={sources.length === 0 || recommendDisabled}
+            className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Sparkles className="h-4 w-4" />
+            智能推荐
+          </button>
+          <button
+            type="button"
+            onClick={addField}
+            disabled={sources.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Plus className="h-4 w-4" />
+            新增字段
+          </button>
+        </div>
       </div>
 
       {sources.length === 0 ? (
@@ -196,292 +262,157 @@ export default function SchemeWizardOutputFieldEditor({
         </div>
       ) : fields.length === 0 ? (
         <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface px-4 py-4">
-          <p className="text-sm text-text-secondary">当前还没有输出字段。</p>
-          <button
-            type="button"
-            onClick={addField}
-            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-          >
-            <Plus className="h-4 w-4" />
-            添加第一个字段
-          </button>
+          <p className="text-sm text-text-secondary">当前还没有输出字段，先试试智能推荐，再按需要微调。</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onRecommend}
+              disabled={recommendDisabled}
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Sparkles className="h-4 w-4" />
+              先推荐一版
+            </button>
+            <button
+              type="button"
+              onClick={addField}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+            >
+              <Plus className="h-4 w-4" />
+              手动添加
+            </button>
+          </div>
         </div>
       ) : (
         <div className="mt-4 space-y-3">
-          {fields.map((field, index) => {
-            const selectedFieldOptions = field.sourceDatasetId ? fieldCache[field.sourceDatasetId] || [] : [];
-            return (
-              <div key={field.id} className="rounded-2xl border border-border bg-surface px-4 py-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <span className="rounded-full border border-border bg-surface-secondary px-2.5 py-1 text-xs font-medium text-text-secondary">
-                    字段 {index + 1}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => moveField(field.id, 'up')}
-                      disabled={index === 0}
-                      className="rounded-lg border border-border p-1.5 text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <ArrowUp className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveField(field.id, 'down')}
-                      disabled={index === fields.length - 1}
-                      className="rounded-lg border border-border p-1.5 text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <ArrowDown className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeField(field.id)}
-                      className="rounded-lg border border-rose-200 p-1.5 text-rose-600 transition hover:bg-rose-50"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
+          {fields.map((field, index) => (
+            <div key={field.id} className="rounded-2xl border border-border bg-surface px-4 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="rounded-full border border-border bg-surface-secondary px-2.5 py-1 text-xs font-medium text-text-secondary">
+                  字段 {index + 1}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => moveField(field.id, 'up')}
+                    disabled={index === 0}
+                    className="rounded-lg border border-border p-1.5 text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveField(field.id, 'down')}
+                    disabled={index === fields.length - 1}
+                    className="rounded-lg border border-border p-1.5 text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ArrowDown className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeField(field.id)}
+                    className="rounded-lg border border-rose-200 p-1.5 text-rose-600 transition hover:bg-rose-50"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
+              </div>
 
-                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_220px]">
-                  <label className="block">
-                    <span className="text-xs font-medium text-text-secondary">输出字段名</span>
-                    <input
-                      value={field.outputName}
-                      onChange={(event) =>
-                        replaceField(field.id, (current) => ({ ...current, outputName: event.target.value }))
-                      }
-                      className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                      placeholder="例如：订单号、业务日期、金额"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-xs font-medium text-text-secondary">取值方式</span>
+              <div className="mt-4 grid gap-3 xl:grid-cols-3">
+                <label className="block">
+                  <span className="text-xs font-medium text-text-secondary">输出字段名</span>
+                  <input
+                    value={field.outputName}
+                    onChange={(event) =>
+                      replaceField(field.id, (current) => ({
+                        ...current,
+                        outputName: event.target.value,
+                        semanticRole:
+                          normalizeOutputFieldSemanticRole(current.semanticRole) === 'normal'
+                            ? inferOutputFieldSemanticRole(event.target.value, current.sourceField)
+                            : current.semanticRole,
+                      }))
+                    }
+                    className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                    placeholder="例如：订单号、业务日期、金额"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-text-secondary">字段角色</span>
+                  <div className="relative mt-1.5">
                     <select
-                      value={field.valueMode}
-                      onChange={(event) => {
-                        const nextMode = event.target.value as OutputFieldDraft['valueMode'];
+                      value={normalizeOutputFieldSemanticRole(field.semanticRole)}
+                      onChange={(event) =>
                         replaceField(field.id, (current) => ({
                           ...current,
-                          valueMode: nextMode,
-                          sourceDatasetId:
-                            nextMode === 'source_field' && !current.sourceDatasetId
-                              ? sources[0]?.id || ''
-                              : current.sourceDatasetId,
-                          sourceField: nextMode === 'source_field' ? current.sourceField : '',
-                          concatParts:
-                            nextMode === 'concat' && current.concatParts.length === 0
-                              ? [{ ...createOutputFieldConcatPart(), datasetId: sources[0]?.id || '' }]
-                              : nextMode === 'concat'
-                              ? current.concatParts
-                              : [],
-                        }));
-                      }}
-                      className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      <option value="source_field">源字段映射</option>
-                      <option value="fixed_value">固定值</option>
-                      <option value="formula">简单公式</option>
-                      <option value="concat">多字段拼接</option>
-                    </select>
-                  </label>
-                </div>
-
-                {field.valueMode === 'source_field' ? (
-                  <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                    <label className="block">
-                      <span className="text-xs font-medium text-text-secondary">来源数据集</span>
-                      <select
-                        value={field.sourceDatasetId}
-                        onChange={(event) =>
-                          replaceField(field.id, (current) => ({
-                            ...current,
-                            sourceDatasetId: event.target.value,
-                            sourceField: '',
-                          }))
-                        }
-                        className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                      >
-                        <option value="">请选择数据集</option>
-                        {datasetOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="block">
-                      <span className="text-xs font-medium text-text-secondary">来源字段</span>
-                      <select
-                        value={field.sourceField}
-                        onChange={(event) =>
-                          replaceField(field.id, (current) => ({ ...current, sourceField: event.target.value }))
-                        }
-                        disabled={!field.sourceDatasetId}
-                        className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <option value="">请选择字段</option>
-                        {selectedFieldOptions.map((option) => (
-                          <option key={option.rawName} value={option.rawName}>
-                            {renderFieldOptionLabel(option)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                ) : null}
-
-                {field.valueMode === 'fixed_value' ? (
-                  <label className="mt-4 block">
-                    <span className="text-xs font-medium text-text-secondary">固定值</span>
-                    <input
-                      value={field.fixedValue}
-                      onChange={(event) =>
-                        replaceField(field.id, (current) => ({ ...current, fixedValue: event.target.value }))
-                      }
-                      className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                      placeholder="例如：支付宝、线上订单"
-                    />
-                  </label>
-                ) : null}
-
-                {field.valueMode === 'formula' ? (
-                  <label className="mt-4 block">
-                    <span className="text-xs font-medium text-text-secondary">公式表达式</span>
-                    <input
-                      value={field.formula}
-                      onChange={(event) =>
-                        replaceField(field.id, (current) => ({ ...current, formula: event.target.value }))
-                      }
-                      className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                      placeholder="例如：round(order_amount, 2)"
-                    />
-                    <p className="mt-2 text-xs leading-5 text-text-muted">
-                      这里保留简单公式入口，后续会直接接入执行与试跑。
-                    </p>
-                  </label>
-                ) : null}
-
-                {field.valueMode === 'concat' ? (
-                  <div className="mt-4 space-y-3">
-                    <div className="grid gap-3 lg:grid-cols-[160px_minmax(0,1fr)]">
-                      <label className="block">
-                        <span className="text-xs font-medium text-text-secondary">连接符</span>
-                        <input
-                          value={field.concatDelimiter}
-                          onChange={(event) =>
-                            replaceField(field.id, (current) => ({
-                              ...current,
-                              concatDelimiter: event.target.value,
-                            }))
-                          }
-                          className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                          placeholder="如：-"
-                        />
-                      </label>
-                      <div className="rounded-xl border border-border bg-surface-secondary px-3 py-3 text-xs leading-5 text-text-secondary">
-                        系统会按当前顺序拼接多个来源字段。
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      {field.concatParts.map((part, partIndex) => {
-                        const partFieldOptions = part.datasetId ? fieldCache[part.datasetId] || [] : [];
-                        return (
-                          <div
-                            key={part.id}
-                            className="grid gap-2 rounded-xl border border-border bg-surface px-3 py-3 lg:grid-cols-[130px_minmax(0,1fr)_40px]"
-                          >
-                            <label className="block">
-                              <span className="text-xs font-medium text-text-secondary">数据集</span>
-                              <select
-                                value={part.datasetId}
-                                onChange={(event) =>
-                                  replaceField(field.id, (current) => ({
-                                    ...current,
-                                    concatParts: current.concatParts.map((item) =>
-                                      item.id === part.id
-                                        ? { ...item, datasetId: event.target.value, fieldName: '' }
-                                        : item,
-                                    ),
-                                  }))
-                                }
-                                className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                              >
-                                <option value="">请选择</option>
-                                {datasetOptions.map((option) => (
-                                  <option key={option.value} value={option.value}>
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="block">
-                              <span className="text-xs font-medium text-text-secondary">字段 {partIndex + 1}</span>
-                              <select
-                                value={part.fieldName}
-                                onChange={(event) =>
-                                  replaceField(field.id, (current) => ({
-                                    ...current,
-                                    concatParts: current.concatParts.map((item) =>
-                                      item.id === part.id ? { ...item, fieldName: event.target.value } : item,
-                                    ),
-                                  }))
-                                }
-                                disabled={!part.datasetId}
-                                className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                <option value="">请选择字段</option>
-                                {partFieldOptions.map((option) => (
-                                  <option key={option.rawName} value={option.rawName}>
-                                    {renderFieldOptionLabel(option)}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                replaceField(field.id, (current) => ({
-                                  ...current,
-                                  concatParts: current.concatParts.filter((item) => item.id !== part.id),
-                                }))
-                              }
-                              className="mt-6 rounded-lg border border-rose-200 p-2 text-rose-600 transition hover:bg-rose-50"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        replaceField(field.id, (current) => ({
-                          ...current,
-                          concatParts: [
-                            ...current.concatParts,
-                            { ...createOutputFieldConcatPart(), datasetId: sources[0]?.id || '' },
-                          ],
+                          semanticRole: normalizeOutputFieldSemanticRole(event.target.value),
                         }))
                       }
-                      className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                      className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
                     >
-                      <Link2 className="h-4 w-4" />
-                      添加拼接字段
-                    </button>
+                      {OUTPUT_FIELD_ROLE_OPTIONS.map((role) => (
+                        <option key={role} value={role}>
+                          {resolveOutputFieldSemanticRoleLabel(role)}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown
+                      className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted"
+                      aria-hidden="true"
+                    />
                   </div>
-                ) : null}
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-text-secondary">来源字段</span>
+                  <div className="relative mt-1.5">
+                    <select
+                      value={field.sourceField}
+                      onChange={(event) =>
+                        replaceField(field.id, (current) => ({
+                          ...current,
+                          semanticRole:
+                            normalizeOutputFieldSemanticRole(current.semanticRole) === 'normal'
+                              ? inferOutputFieldSemanticRole(current.outputName, event.target.value)
+                              : current.semanticRole,
+                          valueMode: 'source_field',
+                          sourceDatasetId: primarySource?.id || '',
+                          sourceField: event.target.value,
+                          fixedValue: '',
+                          formula: '',
+                          concatDelimiter: '',
+                          concatParts: [],
+                        }))
+                      }
+                      disabled={!primarySource}
+                      className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <option value="">{primarySource ? '请选择字段' : '请先选择数据集'}</option>
+                      {primarySource && selectedFieldOptions.length > 0
+                        ? (
+                          <optgroup label={resolveDatasetDisplayName(primarySource)}>
+                            {selectedFieldOptions.map((option) => (
+                              <option key={option.rawName} value={option.rawName}>
+                                {renderFieldOptionLabel(option)}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )
+                        : null}
+                    </select>
+                    <ChevronDown
+                      className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted"
+                      aria-hidden="true"
+                    />
+                  </div>
+                </label>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-text-muted">
-        <span>支持源字段映射、固定值、简单公式和多字段拼接。</span>
+        <span>先标注匹配字段、对比字段、时间字段，再把输出结构试跑通过。</span>
         {anyLoading ? (
           <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-sky-700">
             正在加载字段元数据…
