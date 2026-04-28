@@ -369,31 +369,36 @@ function normalizeOutputFieldDrafts(value: unknown): OutputFieldDraft[] {
   return asList(value)
     .map((item, index) => {
       const record = asRecord(item);
-      const valueMode = toText(record.value_mode, 'source_field');
-      const concatParts = asList(record.concat_parts)
+      const valueMode = toText(record.value_mode ?? record.valueMode, 'source_field');
+      const concatParts = asList(record.concat_parts ?? record.concatParts)
         .map((part, partIndex) => {
           const partRecord = asRecord(part);
           return {
             id: toText(partRecord.id, `concat_${index}_${partIndex}`),
-            datasetId: toText(partRecord.dataset_id),
-            fieldName: toText(partRecord.field_name),
+            datasetId: toText(partRecord.dataset_id ?? partRecord.datasetId),
+            fieldName: toText(partRecord.field_name ?? partRecord.fieldName),
           };
         });
       return {
         id: toText(record.id, `field_${index}`),
-        outputName: toText(record.output_name),
+        outputName: toText(record.output_name ?? record.outputName),
         semanticRole: normalizeOutputFieldSemanticRole(
-          record.semantic_role ?? record.semanticRole ?? inferOutputFieldSemanticRole(toText(record.output_name), toText(record.source_field)),
+          record.semantic_role
+            ?? record.semanticRole
+            ?? inferOutputFieldSemanticRole(
+              toText(record.output_name ?? record.outputName),
+              toText(record.source_field ?? record.sourceField),
+            ),
         ),
         valueMode:
           valueMode === 'fixed_value' || valueMode === 'formula' || valueMode === 'concat'
             ? valueMode
             : 'source_field',
-        sourceDatasetId: toText(record.source_dataset_id),
-        sourceField: toText(record.source_field),
-        fixedValue: toText(record.fixed_value),
+        sourceDatasetId: toText(record.source_dataset_id ?? record.sourceDatasetId),
+        sourceField: toText(record.source_field ?? record.sourceField),
+        fixedValue: toText(record.fixed_value ?? record.fixedValue),
         formula: toText(record.formula),
-        concatDelimiter: toText(record.concat_delimiter),
+        concatDelimiter: toText(record.concat_delimiter ?? record.concatDelimiter),
         concatParts,
       } satisfies OutputFieldDraft;
     })

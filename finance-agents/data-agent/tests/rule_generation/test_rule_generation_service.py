@@ -82,6 +82,37 @@ def _source_payload() -> dict[str, object]:
     }
 
 
+def _trade_order_source_with_member_aliases_payload() -> dict[str, object]:
+    return {
+        "id": "trade_orders",
+        "table_name": "public.ods_yxst_trd_order_di_o",
+        "business_name": "交易订单明细表",
+        "field_label_map": {
+            "root_order_id": "根订单号",
+            "tax_sale_amount": "含税销售金额",
+            "order_finish_time": "订单完成时间",
+            "cust_memer_code": "客户会员编码",
+            "member_code": "会员编码",
+        },
+        "fields": [
+            {"name": "root_order_id", "label": "根订单号", "data_type": "string"},
+            {"name": "tax_sale_amount", "label": "含税销售金额", "data_type": "decimal"},
+            {"name": "order_finish_time", "label": "订单完成时间", "data_type": "date"},
+            {"name": "cust_memer_code", "label": "客户会员编码", "data_type": "string"},
+            {"name": "member_code", "label": "会员编码", "data_type": "string"},
+        ],
+        "sample_rows": [
+            {
+                "root_order_id": "ROOT-001",
+                "tax_sale_amount": 100.0,
+                "order_finish_time": "2026-04-18",
+                "cust_memer_code": "6965404",
+                "member_code": "MEM-001",
+            }
+        ],
+    }
+
+
 def _fp_order_source_payload() -> dict[str, object]:
     return {
         "id": "fp_orders",
@@ -4309,6 +4340,105 @@ def test_normalize_in_predicate_accepts_right_list() -> None:
             {"op": "constant", "value": "CUST_MEMBER_002"},
         ],
     }
+
+
+def test_rule_text_field_coverage_does_not_count_shadowed_short_field() -> None:
+    source = _trade_order_source_with_member_aliases_payload()
+    understanding = normalize_understanding(
+        {
+            "output_mode": "explicit",
+            "source_references": [
+                {
+                    "ref_id": "ref_key",
+                    "semantic_name": "根订单号",
+                    "usage": "match_key",
+                    "table_scope": ["public.ods_yxst_trd_order_di_o"],
+                },
+                {
+                    "ref_id": "ref_amount",
+                    "semantic_name": "含税销售金额",
+                    "usage": "compare_field",
+                    "table_scope": ["public.ods_yxst_trd_order_di_o"],
+                },
+                {
+                    "ref_id": "ref_time",
+                    "semantic_name": "订单完成时间",
+                    "usage": "time_field",
+                    "table_scope": ["public.ods_yxst_trd_order_di_o"],
+                },
+                {
+                    "ref_id": "ref_filter",
+                    "semantic_name": "客户会员编码",
+                    "usage": "filter_field",
+                    "table_scope": ["public.ods_yxst_trd_order_di_o"],
+                },
+            ],
+            "output_specs": [
+                {"output_id": "out_key", "name": "根订单号", "kind": "passthrough", "source_ref_ids": ["ref_key"]},
+                {"output_id": "out_amount", "name": "含税销售金额", "kind": "passthrough", "source_ref_ids": ["ref_amount"]},
+                {"output_id": "out_time", "name": "订单完成时间", "kind": "passthrough", "source_ref_ids": ["ref_time"]},
+            ],
+            "business_rules": [
+                {
+                    "rule_id": "filter_member",
+                    "type": "filter",
+                    "related_ref_ids": ["ref_filter"],
+                    "predicate": {
+                        "op": "eq",
+                        "left": {"op": "ref", "ref_id": "ref_filter"},
+                        "right": {"op": "constant", "value": "6965404"},
+                    },
+                }
+            ],
+        },
+        rule_text=(
+            "根订单号作为匹配字段\n"
+            "含税销售金额作为对比字段\n"
+            "订单完成时间作为时间字段\n"
+            "只取客户会员编码为6965404的数据"
+        ),
+        target_table="right_recon_ready",
+    )
+    field_bindings = [
+        {
+            "intent_id": "ref_key",
+            "usage": "match_key",
+            "status": "bound",
+            "selected_field": {"name": "root_order_id", "label": "根订单号", "table_name": "public.ods_yxst_trd_order_di_o"},
+        },
+        {
+            "intent_id": "ref_amount",
+            "usage": "compare_field",
+            "status": "bound",
+            "selected_field": {"name": "tax_sale_amount", "label": "含税销售金额", "table_name": "public.ods_yxst_trd_order_di_o"},
+        },
+        {
+            "intent_id": "ref_time",
+            "usage": "time_field",
+            "status": "bound",
+            "selected_field": {"name": "order_finish_time", "label": "订单完成时间", "table_name": "public.ods_yxst_trd_order_di_o"},
+        },
+        {
+            "intent_id": "ref_filter",
+            "usage": "filter_field",
+            "status": "bound",
+            "selected_field": {"name": "cust_memer_code", "label": "客户会员编码", "table_name": "public.ods_yxst_trd_order_di_o"},
+        },
+    ]
+
+    result = lint_rule_generation_ir(
+        understanding,
+        field_bindings=field_bindings,
+        rule_text=(
+            "根订单号作为匹配字段\n"
+            "含税销售金额作为对比字段\n"
+            "订单完成时间作为时间字段\n"
+            "只取客户会员编码为6965404的数据"
+        ),
+        source_profiles=[_source_profile(source)],
+    )
+
+    assert result["success"] is True
 
 
 def test_projection_passthrough_ir_is_repaired_to_three_output_fields(

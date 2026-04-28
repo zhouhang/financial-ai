@@ -737,7 +737,7 @@ def _mentioned_source_fields(
     normalized_rule_text = _normalize_match_text(rule_text)
     if not normalized_rule_text:
         return []
-    mentioned: list[dict[str, str]] = []
+    mentioned: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for profile in source_profiles:
         table_name = str(profile.get("table_name") or "").strip()
@@ -752,7 +752,12 @@ def _mentioned_source_fields(
                 continue
             field_label = str(candidate.get("label") or field_name).strip() or field_name
             terms = _candidate_match_terms(field_name, field_label)
-            if not any(term in normalized_rule_text for term in terms):
+            match_spans = [
+                span
+                for term in terms
+                for span in _term_spans(normalized_rule_text, term)
+            ]
+            if not match_spans:
                 continue
             key = (table_name, field_name)
             if key in seen:
@@ -763,8 +768,72 @@ def _mentioned_source_fields(
                 "source_aliases": scope_aliases,
                 "name": field_name,
                 "label": field_label,
+                "_match_spans": match_spans,
             })
-    return mentioned
+    return [
+        {
+            "table_name": item["table_name"],
+            "source_aliases": item["source_aliases"],
+            "name": item["name"],
+            "label": item["label"],
+        }
+        for item in mentioned
+        if not _mentioned_field_is_shadowed(item, mentioned)
+    ]
+
+
+def _term_spans(text: str, term: str) -> list[dict[str, Any]]:
+    if not text or not term:
+        return []
+    spans: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        index = text.find(term, start)
+        if index < 0:
+            return spans
+        spans.append({"start": index, "end": index + len(term), "term": term})
+        start = index + 1
+
+
+def _mentioned_field_is_shadowed(
+    item: dict[str, Any],
+    mentioned: list[dict[str, Any]],
+) -> bool:
+    spans = [
+        span
+        for span in list(item.get("_match_spans") or [])
+        if isinstance(span, dict)
+    ]
+    if not spans:
+        return False
+    other_spans = [
+        span
+        for other in mentioned
+        if other is not item
+        for span in list(other.get("_match_spans") or [])
+        if isinstance(span, dict)
+    ]
+    if not other_spans:
+        return False
+    return all(_span_is_covered_by_longer_span(span, other_spans) for span in spans)
+
+
+def _span_is_covered_by_longer_span(
+    span: dict[str, Any],
+    other_spans: list[dict[str, Any]],
+) -> bool:
+    start = int(span.get("start") or 0)
+    end = int(span.get("end") or 0)
+    term = str(span.get("term") or "")
+    for other in other_spans:
+        other_start = int(other.get("start") or 0)
+        other_end = int(other.get("end") or 0)
+        other_term = str(other.get("term") or "")
+        if len(other_term) <= len(term):
+            continue
+        if other_start <= start and other_end >= end:
+            return True
+    return False
 
 
 def _represented_source_fields(

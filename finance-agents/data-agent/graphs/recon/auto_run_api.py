@@ -18,6 +18,13 @@ from graphs.recon.auto_run_service import (
     sync_execution_run_exception_reminder,
     sync_exception_reminder,
 )
+from graphs.recon.binding_date_fields import (
+    extract_source_items_from_scheme_meta,
+    infer_binding_side,
+    normalize_binding_query_date_field,
+    safe_list,
+    text,
+)
 from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
 from tools.mcp_client import (
     execution_run_exception_get,
@@ -251,20 +258,61 @@ def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+async def _normalize_run_plan_payload_date_fields(
+    auth_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    scheme_code = text(payload.get("scheme_code"))
+    input_bindings = [dict(item) for item in safe_list(payload.get("input_bindings_json")) if isinstance(item, dict)]
+    if not scheme_code or not input_bindings:
+        return payload
+
+    scheme_result = await execution_scheme_get(auth_token, scheme_code=scheme_code)
+    if not scheme_result.get("success"):
+        return payload
+    scheme = _safe_dict(scheme_result.get("scheme"))
+    scheme_meta_json = _safe_dict(scheme.get("scheme_meta_json"))
+    if not scheme_meta_json:
+        return payload
+
+    normalized_bindings: list[dict[str, Any]] = []
+    for raw_binding in input_bindings:
+        binding = dict(raw_binding)
+        side = infer_binding_side(binding)
+        query = _safe_dict(binding.get("query"))
+        if not query:
+            query = _safe_dict(_safe_dict(binding.get("filter_config")).get("query"))
+        if side:
+            query = normalize_binding_query_date_field(
+                scheme_meta=scheme_meta_json,
+                binding=binding,
+                query=query,
+                side=side,
+            )
+        binding["query"] = query
+        normalized_bindings.append(binding)
+
+    payload["input_bindings_json"] = normalized_bindings
+    plan_meta_json = _safe_dict(payload.get("plan_meta_json"))
+    if plan_meta_json:
+        plan_meta_json["input_bindings"] = normalized_bindings
+        payload["plan_meta_json"] = plan_meta_json
+    return payload
+
+
 def _extract_source_bindings_from_scheme_meta(
     *,
     scheme_meta_json: dict[str, Any],
     side: str,
     default_priority_start: int,
 ) -> list[dict[str, Any]]:
-    dataset_bindings = _safe_dict(scheme_meta_json.get("dataset_bindings"))
-    source_items = dataset_bindings.get(side)
-    if not isinstance(source_items, list):
-        source_items = scheme_meta_json.get(f"{side}_sources")
-    if not isinstance(source_items, list):
+    source_items = extract_source_items_from_scheme_meta(
+        scheme_meta=scheme_meta_json,
+        side=side,
+    )
+    if not source_items:
         return []
 
-    query_date_field = str(scheme_meta_json.get(f"{side}_time_semantic") or "").strip()
     bindings: list[dict[str, Any]] = []
     priority = default_priority_start
     for idx, raw in enumerate(source_items, start=1):
@@ -279,8 +327,19 @@ def _extract_source_bindings_from_scheme_meta(
             str(item.get("business_name") or item.get("name") or dataset_code or table_name).strip() or table_name
         )
         query = _safe_dict(item.get("query"))
-        if query_date_field and not str(query.get("date_field") or "").strip():
-            query["date_field"] = query_date_field
+        query = normalize_binding_query_date_field(
+            scheme_meta=scheme_meta_json,
+            binding={
+                "side": side,
+                "data_source_id": source_id,
+                "resource_key": resource_key,
+                "table_name": table_name,
+                "dataset_code": dataset_code,
+                "query": query,
+            },
+            query=query,
+            side=side,
+        )
 
         bindings.append(
             {
@@ -575,7 +634,8 @@ async def create_execution_task_api(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await execution_run_plan_create(auth_token, body.model_dump())
+    payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump())
+    result = await execution_run_plan_create(auth_token, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "创建对账任务失败"))
     return {
@@ -593,7 +653,8 @@ async def update_execution_task_api(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await execution_run_plan_update(auth_token, plan_id, body.model_dump(exclude_none=True))
+    payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump(exclude_none=True))
+    result = await execution_run_plan_update(auth_token, plan_id, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "更新对账任务失败"))
     return {

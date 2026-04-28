@@ -38,6 +38,49 @@ nodes = importlib.import_module("graphs.recon.auto_scheme_run.nodes")
 auto_run_service = importlib.import_module("graphs.recon.auto_run_service")
 
 
+def test_plan_dataset_binding_uses_raw_date_field_from_scheme_meta() -> None:
+    binding = {
+        "role_code": "right_1",
+        "data_source_id": "source-001",
+        "resource_key": "public.ods_yxst_fp_orders_di_o",
+        "filter_config": {"query": {"display_date_field": "订单更新时间"}},
+        "mapping_config": {
+            "table_name": "public.ods_yxst_fp_orders_di_o",
+            "dataset_source_type": "collection_records",
+        },
+    }
+    scheme_meta = {
+        "dataset_bindings": {
+            "right": [
+                {
+                    "dataset_id": "dataset-right",
+                    "data_source_id": "source-001",
+                    "resource_key": "public.ods_yxst_fp_orders_di_o",
+                }
+            ]
+        },
+        "right_output_fields": [
+            {
+                "outputName": "订单更新时间",
+                "sourceField": "updated_at",
+                "semanticRole": "time_field",
+                "sourceDatasetId": "dataset-right",
+            }
+        ],
+    }
+
+    normalized = nodes._build_plan_binding_from_dataset_binding(
+        binding=binding,
+        left_time_semantic="",
+        right_time_semantic="订单更新时间",
+        scheme_meta=scheme_meta,
+    )
+
+    assert normalized is not None
+    assert normalized["query"]["date_field"] == "updated_at"
+    assert normalized["query"]["display_date_field"] == "订单更新时间"
+
+
 def test_check_dataset_ready_schedule_collects_before_recon(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -84,6 +127,7 @@ def test_check_dataset_ready_schedule_collects_before_recon(monkeypatch: pytest.
     assert recon_ctx["missing_bindings"] == []
     assert recon_ctx["ready_collections"][0]["collection_records"]["record_count"] == 2
     assert recon_ctx["collection_attempts"][0]["success"] is True
+    assert recon_ctx["collection_attempts"][0]["error"] == ""
     assert recon_ctx["source_collection_json"]["collection_attempts"][0]["success"] is True
 
 

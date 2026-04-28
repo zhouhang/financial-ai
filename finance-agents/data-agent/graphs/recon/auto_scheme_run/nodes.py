@@ -7,6 +7,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from graphs.recon.binding_date_fields import normalize_binding_query_date_field
 from models import AgentState
 from services.notifications import get_notification_adapter
 from services.notifications.repository import load_company_channel_config_by_id
@@ -382,6 +383,13 @@ def _normalize_plan_binding(
         return None
     role_code = str(item.get("role_code") or "").strip()
     query = _safe_dict(item.get("query"))
+    query = normalize_binding_query_date_field(
+        binding=item,
+        query=query,
+        left_time_semantic=left_time_semantic,
+        right_time_semantic=right_time_semantic,
+        scheme_meta=_safe_dict(scheme_meta),
+    )
     return {
         "data_source_id": source_id,
         "table_name": table_name,
@@ -425,6 +433,22 @@ def _build_plan_binding_from_dataset_binding(
     ).strip()
     if not table_name:
         return None
+    binding_for_query = {
+        **binding,
+        "role_code": role_code,
+        "data_source_id": source_id,
+        "resource_key": resource_key,
+        "table_name": table_name,
+        "mapping_config": mapping_config,
+        "query": query,
+    }
+    query = normalize_binding_query_date_field(
+        binding=binding_for_query,
+        query=query,
+        left_time_semantic=left_time_semantic,
+        right_time_semantic=right_time_semantic,
+        scheme_meta=_safe_dict(scheme_meta),
+    )
 
     return {
         "data_source_id": source_id,
@@ -1015,16 +1039,19 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
                 trigger_mode=collection_trigger_mode,
                 mode="real",
             )
-            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+            collection_success = bool(collect_result.get("success"))
+            collection_error = "" if collection_success else str(
+                collect_result.get("error") or collect_result.get("detail") or "采集失败"
+            )
             collection_attempts.append(
                 {
                     "binding": binding,
-                    "success": bool(collect_result.get("success")),
+                    "success": collection_success,
                     "job": _safe_dict(collect_result.get("job")),
                     "error": collection_error,
                 }
             )
-            if not bool(collect_result.get("success")):
+            if not collection_success:
                 missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
                 continue
         result = await data_source_list_collection_records(
