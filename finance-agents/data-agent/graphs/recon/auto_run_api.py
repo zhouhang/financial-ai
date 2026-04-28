@@ -25,6 +25,11 @@ from graphs.recon.binding_date_fields import (
     safe_list,
     text,
 )
+from services.notifications import get_notification_adapter
+from services.notifications.repository import (
+    load_company_channel_config,
+    load_company_channel_config_by_id,
+)
 from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
 from tools.mcp_client import (
     execution_run_exception_get,
@@ -256,6 +261,112 @@ class ExceptionSyncRequest(BaseModel):
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _extract_owner_contact(owner_payload: dict[str, Any]) -> dict[str, Any]:
+    raw_contact = (
+        owner_payload.get("contact")
+        or owner_payload.get("owner_contact_json")
+        or owner_payload.get("contact_json")
+        or owner_payload.get("contact_info")
+    )
+    return _safe_dict(raw_contact)
+
+
+def _resolve_owner_payload(owner_payload: dict[str, Any], *, adapter: Any) -> dict[str, Any]:
+    normalized = dict(owner_payload or {})
+    owner_name = text(normalized.get("name") or normalized.get("display_name")).strip()
+    owner_identifier = text(normalized.get("identifier") or normalized.get("owner_identifier")).strip()
+    contact = _extract_owner_contact(normalized)
+    mobile = text(contact.get("mobile")).strip()
+
+    if not (owner_name or owner_identifier or mobile):
+        return normalized
+
+    if owner_identifier:
+        normalized["identifier"] = owner_identifier
+        if owner_name:
+            normalized["name"] = owner_name
+        if contact:
+            normalized["contact"] = contact
+        return normalized
+
+    lookup_label = mobile or owner_name
+    resolved = adapter.resolve_user(mobile=mobile) if mobile else adapter.resolve_user(keyword=owner_name)
+    if not resolved.success:
+        raise ValueError(f"责任人“{lookup_label}”解析失败：{resolved.message or '未找到钉钉用户'}")
+    if resolved.resolved_user is None:
+        count = len(resolved.users or [])
+        if count > 1:
+            raise ValueError(f"责任人“{lookup_label}”匹配到 {count} 个钉钉用户，请填写更准确的姓名")
+        raise ValueError(f"责任人“{lookup_label}”未匹配到钉钉用户，请检查后重试")
+
+    resolved_user = resolved.resolved_user
+    normalized["name"] = resolved_user.display_name or owner_name or lookup_label
+    normalized["identifier"] = resolved_user.user_id
+    merged_contact = dict(contact)
+    if resolved_user.mobile and not merged_contact.get("mobile"):
+        merged_contact["mobile"] = resolved_user.mobile
+    if merged_contact:
+        normalized["contact"] = merged_contact
+    return normalized
+
+
+async def _normalize_owner_mapping_identifiers(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    owner_mapping = _safe_dict(payload.get("owner_mapping_json"))
+    if not owner_mapping:
+        return payload
+
+    default_owner = _safe_dict(owner_mapping.get("default_owner"))
+    mappings = safe_list(owner_mapping.get("mappings"))
+    has_owner_payload = bool(default_owner) or any(
+        isinstance(item, dict) and isinstance(item.get("owner"), dict) for item in mappings
+    )
+    if not has_owner_payload:
+        return payload
+
+    user = _get_user_from_token(auth_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="token 无效或已过期，请重新登录")
+    company_id = text(user.get("company_id")).strip()
+    if not company_id:
+        raise HTTPException(status_code=400, detail="当前用户未绑定公司")
+
+    channel_config_id = text(payload.get("channel_config_id")).strip()
+    if channel_config_id:
+        channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+        if channel_config is None or text(getattr(channel_config, "company_id", "")).strip() != company_id:
+            raise HTTPException(status_code=400, detail="所选协作通道不存在或不可用")
+    else:
+        channel_config = load_company_channel_config(company_id=company_id)
+        if channel_config is None:
+            raise HTTPException(status_code=400, detail="请先配置可用的协作通道，再保存责任人")
+
+    adapter = get_notification_adapter(
+        provider=text(getattr(channel_config, "provider", "")).strip(),
+        channel_config=channel_config,
+    )
+
+    try:
+        normalized_mapping = dict(owner_mapping)
+        if default_owner:
+            normalized_mapping["default_owner"] = _resolve_owner_payload(default_owner, adapter=adapter)
+        if mappings:
+            normalized_items: list[dict[str, Any]] = []
+            for item in mappings:
+                if not isinstance(item, dict):
+                    continue
+                normalized_item = dict(item)
+                owner_payload = _safe_dict(item.get("owner"))
+                if owner_payload:
+                    normalized_item["owner"] = _resolve_owner_payload(owner_payload, adapter=adapter)
+                normalized_items.append(normalized_item)
+            normalized_mapping["mappings"] = normalized_items
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload["owner_mapping_json"] = normalized_mapping
+    return payload
 
 
 async def _normalize_run_plan_payload_date_fields(
@@ -635,6 +746,7 @@ async def create_execution_task_api(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump())
+    payload = await _normalize_owner_mapping_identifiers(auth_token, payload)
     result = await execution_run_plan_create(auth_token, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "创建对账任务失败"))
@@ -654,6 +766,7 @@ async def update_execution_task_api(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump(exclude_none=True))
+    payload = await _normalize_owner_mapping_identifiers(auth_token, payload)
     result = await execution_run_plan_update(auth_token, plan_id, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "更新对账任务失败"))
@@ -903,7 +1016,8 @@ async def create_auto_task(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await recon_auto_task_create(auth_token, body.model_dump())
+    payload = await _normalize_owner_mapping_identifiers(auth_token, body.model_dump())
+    result = await recon_auto_task_create(auth_token, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "创建自动任务失败"))
     return result
@@ -918,7 +1032,8 @@ async def update_auto_task(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await recon_auto_task_update(auth_token, auto_task_id, body.model_dump(exclude_none=True))
+    payload = await _normalize_owner_mapping_identifiers(auth_token, body.model_dump(exclude_none=True))
+    result = await recon_auto_task_update(auth_token, auto_task_id, payload)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "更新自动任务失败"))
     return result

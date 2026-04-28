@@ -76,12 +76,24 @@ class DingTalkDwsAdapter(NotificationAdapter):
             return self._user_failure("缺少用户定位条件，必须传 user_id、mobile 或 keyword 之一", code="invalid_input")
 
         if user_id:
-            return self._get_users_by_ids([user_id])
+            # Newer dws versions require interactive PAT permission for
+            # contact.user:get. When callers already provide a DingTalk userId,
+            # use it directly so reminder delivery does not depend on contact
+            # detail lookup.
+            user = NotificationUser(user_id=user_id, display_name=keyword or user_id, mobile=mobile)
+            return UserResolveResult(
+                success=True,
+                provider=self.provider,
+                message="ok",
+                raw={"userId": [user_id], "source": "direct_user_id"},
+                users=[user],
+                resolved_user=user,
+            )
 
         if mobile:
             search = self._run(["contact", "user", "search-mobile", "--mobile", mobile])
         else:
-            search = self._run(["contact", "user", "search", "--keyword", keyword])
+            search = self._run(["contact", "user", "search", "--query", keyword])
         if not self._is_cli_success(search):
             return self._user_failure(self._build_cli_error_message("查询钉钉用户失败", search), code="cli_error", raw=search.payload)
 
@@ -89,7 +101,23 @@ class DingTalkDwsAdapter(NotificationAdapter):
         if not user_ids:
             query_text = mobile or keyword
             return self._user_failure(f"未找到匹配的钉钉用户: {query_text}", code="not_found", raw=search.payload)
-        return self._get_users_by_ids(user_ids)
+        users = [
+            NotificationUser(
+                user_id=item,
+                display_name=keyword or item,
+                mobile=mobile,
+                extra={"source": "search_result"},
+            )
+            for item in user_ids
+        ]
+        return UserResolveResult(
+            success=True,
+            provider=self.provider,
+            message="ok" if len(users) == 1 else f"命中 {len(users)} 个钉钉用户",
+            raw=search.payload,
+            users=users,
+            resolved_user=users[0] if len(users) == 1 else None,
+        )
 
     def send_bot_message(
         self,
