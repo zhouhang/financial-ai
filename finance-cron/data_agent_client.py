@@ -84,4 +84,8 @@ async def trigger_run_plan(
     if response.status_code >= 400:
         detail = body.get("detail") if isinstance(body, dict) else None
         return {"success": False, "error": str(detail or body or response.text)}
-    return body if isinstance(body, dict) else {"success": True, "result": body}
+    if isinstance(body, dict):
+        if "success" not in body and bool(body.get("queued")):
+            return {**body, "success": True}
+        return body
+    return {"success": True, "result": body}

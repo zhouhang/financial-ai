@@ -25,20 +25,29 @@ from .nodes import (
     router_node,
 )
 
-# ── routers.py ──────────────────────────────────────────────────────────────
-from .routers import (
-    # 路由函数
-    route_after_router,
-    # 图构建
-    build_main_graph,
-    create_app,
-)
-
 # ── public_nodes.py ──────────────────────────────────────────────────────────
 from .public_nodes import (
     get_rule_node,
     check_file_node,
 )
+
+
+def route_after_router(*args, **kwargs):
+    from .routers import route_after_router as _route_after_router
+
+    return _route_after_router(*args, **kwargs)
+
+
+def build_main_graph(*args, **kwargs):
+    from .routers import build_main_graph as _build_main_graph
+
+    return _build_main_graph(*args, **kwargs)
+
+
+def create_app(*args, **kwargs):
+    from .routers import create_app as _create_app
+
+    return _create_app(*args, **kwargs)
 
 
 __all__ = [

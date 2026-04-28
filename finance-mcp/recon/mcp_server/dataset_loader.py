@@ -37,7 +37,14 @@ _SOURCE_KEY_HANDLERS: dict[tuple[str, str], SourceKeyHandler] = {}
 _DATASET_REF_ALLOWED_KEYS = {"source_type", "source_key", "query"}
 _DB_QUERY_ALLOWED_KEYS = {"columns", "filters", "order_by", "limit"}
 _API_QUERY_ALLOWED_KEYS = {"filters", "body", "timeout_seconds"}
-_SNAPSHOT_QUERY_ALLOWED_KEYS = {"snapshot_id", "resource_key", "filters", "order_by", "limit"}
+_COLLECTION_RECORDS_QUERY_ALLOWED_KEYS = {
+    "dataset_id",
+    "resource_key",
+    "biz_date",
+    "filters",
+    "order_by",
+    "limit",
+}
 
 
 class DatasetLoadError(RuntimeError):
@@ -52,7 +59,7 @@ def _is_scalar_filter_value(value: Any) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
 
 
-def _apply_snapshot_scalar_filter(df: pd.DataFrame, field_name: str, value: Any) -> pd.DataFrame:
+def _apply_collection_record_scalar_filter(df: pd.DataFrame, field_name: str, value: Any) -> pd.DataFrame:
     if value is None:
         return df[df[field_name].isna()]
 
@@ -471,63 +478,76 @@ def _load_from_api(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
-def _load_from_snapshot(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
-    """Load dataset from published/unified snapshot rows."""
-    source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
-    extra_keys = sorted(set(query.keys()) - _SNAPSHOT_QUERY_ALLOWED_KEYS)
-    if extra_keys:
-        raise DatasetLoadError(
-            f"source_key={source_key} query 含不支持字段。"
-            f"仅支持: {', '.join(sorted(_SNAPSHOT_QUERY_ALLOWED_KEYS))}"
+def _table_columns(table_name: str) -> set[str]:
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
         )
+        return {str(row[0]) for row in cur.fetchall() or []}
+    except Exception as exc:
+        logger.error("[recon][dataset] 查询表字段失败 table=%s", table_name, exc_info=True)
+        raise DatasetLoadError(f"无法读取 {table_name} 表结构") from exc
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        finally:
+            if conn is not None:
+                conn.close()
 
-    snapshot_id = str(query.get("snapshot_id") or "").strip()
+
+def _first_existing_column(columns: set[str], candidates: list[str]) -> str:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return ""
+
+
+def _load_collection_record_rows(
+    *,
+    source_key: str,
+    query: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    columns = _table_columns("dataset_collection_records")
+    if not columns:
+        raise DatasetLoadError("未找到 dataset_collection_records 表，请先完成数据采集能力部署。")
+
+    data_source_col = _first_existing_column(columns, ["data_source_id", "source_id"])
+    payload_col = _first_existing_column(columns, ["record_payload", "payload", "payload_json", "item_payload", "data"])
+    if not data_source_col or not payload_col:
+        raise DatasetLoadError("dataset_collection_records 缺少 data_source_id/source_id 或 payload 字段。")
+
+    dataset_col = _first_existing_column(columns, ["dataset_id", "data_source_dataset_id"])
+    resource_col = _first_existing_column(columns, ["resource_key", "dataset_code"])
+    biz_date_col = _first_existing_column(columns, ["biz_date", "business_date", "data_date"])
+    created_col = _first_existing_column(columns, ["created_at", "collected_at", "updated_at", "id"])
+
+    where_parts = [f"{_safe_identifier(data_source_col)} = %s"]
+    params: list[Any] = [source_key]
+
+    dataset_id = str(query.get("dataset_id") or "").strip()
+    if dataset_id and dataset_col:
+        where_parts.append(f"{_safe_identifier(dataset_col)} = %s")
+        params.append(dataset_id)
+
     resource_key = str(query.get("resource_key") or "default").strip() or "default"
+    if resource_key and resource_col:
+        where_parts.append(f"{_safe_identifier(resource_col)} = %s")
+        params.append(resource_key)
 
-    snapshot = None
-    if snapshot_id:
-        snapshot = auth_db.get_unified_dataset_snapshot_by_id(snapshot_id=snapshot_id)
-        if snapshot and str(snapshot.get("data_source_id") or "") != source_key:
-            raise DatasetLoadError(
-                f"source_key={source_key} 与 snapshot_id={snapshot_id} 不匹配。"
-            )
-    else:
-        snapshot = auth_db.get_unified_published_dataset_snapshot(
-            data_source_id=source_key,
-            resource_key=resource_key,
-        )
-
-    if not snapshot:
-        raise DatasetLoadError(
-            f"source_key={source_key} 未找到可用快照。请先完成数据同步并发布快照。"
-        )
-
-    rows = auth_db.list_unified_dataset_snapshot_items(
-        snapshot_id=str(snapshot.get("id") or ""),
-        limit=None,
-        offset=0,
-    )
-    payload_rows: list[dict[str, Any]] = []
-    for row in rows:
-        payload = row.get("item_payload")
-        if isinstance(payload, dict):
-            payload_rows.append(payload)
-    df = pd.DataFrame(payload_rows)
-
-    filters = query.get("filters")
-    if filters is None:
-        filters = {}
-    if not isinstance(filters, dict):
-        raise DatasetLoadError("snapshot query.filters 必须是对象")
-    for field, value in filters.items():
-        field_name = str(field or "").strip()
-        if not field_name:
-            continue
-        if field_name not in df.columns:
-            raise DatasetLoadError(f"snapshot 数据中不存在过滤字段: {field_name}")
-        if not _is_scalar_filter_value(value):
-            raise DatasetLoadError(f"snapshot query.filters 字段 '{field_name}' 仅支持标量值")
-        df = _apply_snapshot_scalar_filter(df, field_name, value)
+    biz_date = str(query.get("biz_date") or "").strip()
+    if biz_date and biz_date_col:
+        where_parts.append(f"{_safe_identifier(biz_date_col)} = %s")
+        params.append(biz_date)
 
     order_by = query.get("order_by")
     if isinstance(order_by, str):
@@ -535,31 +555,94 @@ def _load_from_snapshot(dataset_ref: dict[str, Any], table_name: str) -> pd.Data
     if order_by is None:
         order_by = []
     if not isinstance(order_by, list):
-        raise DatasetLoadError("snapshot query.order_by 必须是字符串或数组")
-    if order_by:
-        sort_columns: list[str] = []
-        ascending_flags: list[bool] = []
-        for item in order_by:
-            token = str(item or "").strip()
-            if not token:
-                continue
-            parts = token.split()
-            field_name = parts[0]
-            direction = parts[1].upper() if len(parts) > 1 else "ASC"
-            if field_name not in df.columns:
-                raise DatasetLoadError(f"snapshot 数据中不存在排序字段: {field_name}")
-            if direction not in {"ASC", "DESC"}:
-                raise DatasetLoadError(f"snapshot query.order_by 仅支持 ASC/DESC，当前: {direction}")
-            sort_columns.append(field_name)
-            ascending_flags.append(direction == "ASC")
-        if sort_columns:
-            df = df.sort_values(by=sort_columns, ascending=ascending_flags, kind="stable")
+        raise DatasetLoadError("collection_records query.order_by 必须是字符串或数组")
+
+    order_parts: list[str] = []
+    for item in order_by:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        parts = token.split()
+        field_name = parts[0]
+        direction = parts[1].upper() if len(parts) > 1 else "ASC"
+        if field_name not in columns:
+            raise DatasetLoadError(f"collection_records 表中不存在排序字段: {field_name}")
+        if direction not in {"ASC", "DESC"}:
+            raise DatasetLoadError(f"collection_records query.order_by 仅支持 ASC/DESC，当前: {direction}")
+        order_parts.append(f"{_safe_identifier(field_name)} {direction}")
+    if not order_parts and created_col:
+        order_parts.append(f"{_safe_identifier(created_col)} ASC")
 
     limit = query.get("limit")
     if limit is not None:
         if not isinstance(limit, int) or limit <= 0:
-            raise DatasetLoadError("snapshot query.limit 必须是正整数")
-        df = df.head(limit)
+            raise DatasetLoadError("collection_records query.limit 必须是正整数")
+    limit_sql = f" LIMIT {limit}" if isinstance(limit, int) and limit > 0 else ""
+
+    sql = f"SELECT {_safe_identifier(payload_col)} AS payload FROM dataset_collection_records"
+    sql += " WHERE " + " AND ".join(where_parts)
+    if order_parts:
+        sql += " ORDER BY " + ", ".join(order_parts)
+    sql += limit_sql
+
+    conn = None
+    cur = None
+    try:
+        import psycopg2.extras
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        rows = [dict(row) for row in cur.fetchall() or []]
+        return rows, payload_col
+    except Exception as exc:
+        logger.error("[recon][dataset] source_key=%s collection_records 查询失败", source_key, exc_info=True)
+        raise DatasetLoadError("collection_records 查询失败，请检查数据采集记录。") from exc
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+def _load_from_collection_records(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
+    """Load dataset from collected dataset_collection_records rows."""
+    source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
+    extra_keys = sorted(set(query.keys()) - _COLLECTION_RECORDS_QUERY_ALLOWED_KEYS)
+    if extra_keys:
+        raise DatasetLoadError(
+            f"source_key={source_key} query 含不支持字段。"
+            f"仅支持: {', '.join(sorted(_COLLECTION_RECORDS_QUERY_ALLOWED_KEYS))}"
+        )
+
+    rows, payload_col = _load_collection_record_rows(source_key=source_key, query=query)
+    payload_rows: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload") or row.get(payload_col)
+        if isinstance(payload, dict):
+            payload_rows.append(payload)
+
+    if not payload_rows:
+        raise DatasetLoadError(f"source_key={source_key} 暂无采集记录。请先采集数据后再执行对账。")
+
+    df = pd.DataFrame(payload_rows)
+
+    filters = query.get("filters")
+    if filters is None:
+        filters = {}
+    if not isinstance(filters, dict):
+        raise DatasetLoadError("collection_records query.filters 必须是对象")
+    for field, value in filters.items():
+        field_name = str(field or "").strip()
+        if not field_name:
+            continue
+        if field_name not in df.columns:
+            raise DatasetLoadError(f"collection_records 数据中不存在过滤字段: {field_name}")
+        if not _is_scalar_filter_value(value):
+            raise DatasetLoadError(f"collection_records query.filters 字段 '{field_name}' 仅支持标量值")
+        df = _apply_collection_record_scalar_filter(df, field_name, value)
 
     return df.reset_index(drop=True)
 
@@ -580,4 +663,4 @@ def load_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataF
     return loader(dataset_ref, table_name)
 
 
-register_dataset_loader("snapshot", _load_from_snapshot)
+register_dataset_loader("collection_records", _load_from_collection_records)

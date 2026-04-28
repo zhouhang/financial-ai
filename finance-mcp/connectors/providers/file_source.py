@@ -11,7 +11,7 @@ class FileConnector(BaseDataSourceConnector):
 
     @property
     def capabilities(self) -> list[str]:
-        return ["test", "discover", "sync", "preview", "published_snapshot", "upload"]
+        return ["test", "discover", "sync", "preview", "collection_records", "upload"]
 
     def test_connection(self, arguments):
         cfg = self.ctx.config.get("connection_config") or {}

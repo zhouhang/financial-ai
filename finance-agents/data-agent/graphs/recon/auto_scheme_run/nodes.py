@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import date, datetime, timedelta
@@ -13,8 +12,9 @@ from services.notifications import get_notification_adapter
 from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
     call_mcp_tool,
-    data_source_get_published_snapshot,
-    data_source_trigger_sync,
+    data_source_get,
+    data_source_list_collection_records,
+    data_source_trigger_dataset_collection,
     execution_run_exception_update,
     get_file_validation_rule,
     recon_auto_task_get,
@@ -22,14 +22,10 @@ from tools.mcp_client import (
 
 logger = logging.getLogger(__name__)
 
-COLLECT_MAX_RETRIES = 3
-COLLECT_RETRY_INTERVAL_SECONDS = 1.0
-
 _FAILED_STAGE_LABELS: dict[str, str] = {
     "config": "配置错误，请检查对账方案配置",
     "prepare": "数据整理阶段失败",
     "build_inputs": "输入数据构建失败",
-    "collect": "数据采集失败",
     "validate_dataset": "数据就绪校验失败",
     "execution_result_failed": "对账执行失败，结果未通过校验",
     "recon": "对账执行失败",
@@ -71,15 +67,13 @@ def _build_anomaly_summary(
     *,
     left_name: str = "",
     right_name: str = "",
+    field_labels: dict[str, str] | None = None,
 ) -> str:
-    """Build a finance-friendly one-line summary for an anomaly item.
-
-    For matched_with_diff: shows each compare field with left/right values and diff.
-    For source_only/target_only: shows the key field value from the side that exists.
-    """
+    """Build a finance-friendly one-line summary for an anomaly item."""
     src = str(left_name or "左侧数据").strip()
     tgt = str(right_name or "右侧数据").strip()
     atype = str(anomaly_type or "").strip()
+    fl = field_labels or {}
 
     _type_labels: dict[str, str] = {
         "source_only": f"仅 {src} 存在（{tgt} 缺失）",
@@ -94,21 +88,22 @@ def _build_anomaly_summary(
     join_key = [k for k in _safe_list(item.get("join_key")) if isinstance(k, dict)]
     key_parts: list[str] = []
     for k in join_key[:2]:
-        field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "")
-        # source_only 取 source_value，target_only 取 target_value，其余取 source_value
+        raw_field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "")
+        display_field = fl.get(raw_field) or raw_field
         if atype == "target_only":
             value = k.get("target_value") or k.get("value") or ""
         else:
             value = k.get("source_value") or k.get("value") or ""
-        if field and value is not None and str(value).strip():
-            key_parts.append(f"{field}={value}")
+        if display_field and value is not None and str(value).strip():
+            key_parts.append(f"{display_field}={value}")
 
     # ── 差异明细（matched_with_diff / value_mismatch 专用）───────────────────────
     compare_values = [c for c in _safe_list(item.get("compare_values")) if isinstance(c, dict)]
     diff_parts: list[str] = []
     if atype in {"matched_with_diff", "value_mismatch"} and compare_values:
         for cv in compare_values[:3]:
-            name = str(cv.get("name") or cv.get("source_field") or "").strip()
+            raw_field = str(cv.get("source_field") or "").strip()
+            name = str(cv.get("name") or fl.get(raw_field) or raw_field).strip()
             left_val = cv.get("source_value")
             right_val = cv.get("target_value")
             diff_val = cv.get("diff_value")
@@ -120,7 +115,6 @@ def _build_anomaly_summary(
                 part += f"（{diff_str}）"
             diff_parts.append(part)
 
-    # ── 拼装最终摘要 ────────────────────────────────────────────────────────────
     parts: list[str] = []
     if key_parts:
         parts.append("、".join(key_parts))
@@ -132,12 +126,74 @@ def _build_anomaly_summary(
     return label
 
 
+def _source_display_name(src: dict[str, Any]) -> str:
+    """Extract the most human-friendly name from a source/binding dict.
+
+    Checks in priority order: dataset_name → business_name → display_name → name → dataset_code.
+    Skips raw table identifiers that look like DB table paths (contain dots or underscores only).
+    """
+    for key in ("dataset_name", "business_name", "display_name", "name"):
+        val = str(src.get(key) or "").strip()
+        if val:
+            return val
+    # Last resort: dataset_code / resource_key — only if no better name found
+    return str(src.get("dataset_code") or src.get("resource_key") or "").strip()
+
+
+def _build_field_label_map(scheme_meta: dict[str, Any]) -> dict[str, str]:
+    """Build a {internal_field_name: display_label} map from scheme meta.
+
+    Sources (in merge order, later overrides earlier):
+    1. Static fallback for known internal field names
+    2. compare_columns[].name mapped to source_column and target_column
+    3. field_label_map in left_sources / right_sources (if present)
+    """
+    # 1. Static fallbacks for commonly-used internal field names
+    labels: dict[str, str] = {
+        "biz_key": "业务单号",
+        "biz_date": "业务日期",
+        "amount": "金额",
+        "fee": "手续费",
+        "refund_amount": "退款金额",
+        "order_no": "订单号",
+        "trade_no": "交易号",
+        "trans_no": "交易流水号",
+        "merchant_order_no": "商户订单号",
+        "source_name": "来源名称",
+    }
+    # 2. compare_columns from recon rules
+    for rule in _safe_list((scheme_meta.get("recon_rule_json") or {}).get("rules")):
+        if not isinstance(rule, dict):
+            continue
+        compare = _safe_dict((rule.get("recon") or {}).get("compare_columns"))
+        for col in _safe_list(compare.get("columns")):
+            if not isinstance(col, dict):
+                continue
+            col_name = str(col.get("name") or "").strip()
+            if not col_name:
+                continue
+            for fk in ("source_column", "target_column"):
+                field = str(col.get(fk) or "").strip()
+                if field:
+                    labels[field] = col_name
+    # 3. Explicit field_label_map on each source
+    for src in _safe_list(scheme_meta.get("left_sources")) + _safe_list(scheme_meta.get("right_sources")):
+        if not isinstance(src, dict):
+            continue
+        flm = src.get("field_label_map")
+        if isinstance(flm, dict):
+            for k, v in flm.items():
+                if k and v:
+                    labels[str(k)] = str(v)
+    return labels
+
+
 def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
     """Return (left_name, right_name) from ctx for use in anomaly summaries.
 
     Priority:
     1. scheme_meta_json.left_sources / right_sources (most explicit)
-    2. ready_snapshots binding side + dataset_name
+    2. ready_collections binding side + dataset_name
     3. plan_input_bindings side + dataset_name
     4. ("", "") — caller falls back to generic labels
     """
@@ -145,10 +201,7 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
         for src in sources:
             if not isinstance(src, dict):
                 continue
-            name = str(
-                src.get("dataset_name") or src.get("business_name")
-                or src.get("display_name") or src.get("dataset_code") or ""
-            ).strip()
+            name = _source_display_name(src)
             if name:
                 return name
         return ""
@@ -166,17 +219,14 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
         if left or right:
             return left, right
 
-    # 2. ready_snapshots binding side + dataset_name
+    # 2. ready_collections binding side + dataset_name
     side_map: dict[str, str] = {}
-    for snap in _safe_list(ctx.get("ready_snapshots")):
-        if not isinstance(snap, dict):
+    for collection in _safe_list(ctx.get("ready_collections")):
+        if not isinstance(collection, dict):
             continue
-        binding = _safe_dict(snap.get("binding"))
+        binding = _safe_dict(collection.get("binding"))
         side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-        name = str(
-            binding.get("dataset_name") or binding.get("display_name")
-            or binding.get("dataset_code") or ""
-        ).strip()
+        name = _source_display_name(binding)
         if side in {"left", "right"} and name and side not in side_map:
             side_map[side] = name
     if "left" in side_map or "right" in side_map:
@@ -187,10 +237,7 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
         if not isinstance(binding, dict):
             continue
         side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-        name = str(
-            binding.get("dataset_name") or binding.get("display_name")
-            or binding.get("dataset_code") or ""
-        ).strip()
+        name = _source_display_name(binding)
         if side in {"left", "right"} and name and side not in side_map:
             side_map[side] = name
     if "left" in side_map or "right" in side_map:
@@ -233,12 +280,14 @@ def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
 
 def _normalize_execution_trigger_type(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"chat", "schedule", "api"}:
+    if normalized in {"chat", "schedule", "api", "manual", "rerun"}:
         return normalized
     if normalized in {"cron", "scheduler", "scheduled"}:
         return "schedule"
-    if normalized in {"manual", "manual_trigger", "retry"}:
-        return "api"
+    if normalized == "manual_trigger":
+        return "manual"
+    if normalized == "retry":
+        return "rerun"
     return "schedule"
 
 
@@ -261,6 +310,19 @@ def _get_binding_required(binding: dict[str, Any]) -> bool:
     return bool(binding.get("required"))
 
 
+def _normalize_collection_trigger_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"schedule", "scheduled", "cron", "scheduler"}:
+        return "scheduled"
+    if normalized in {"rerun", "retry"}:
+        return "retry"
+    return "manual"
+
+
+def _should_collect_before_recon(value: Any) -> bool:
+    return _normalize_collection_trigger_mode(value) in {"scheduled", "manual", "retry"}
+
+
 def _build_plan_binding_from_source(source: dict[str, Any], date_field: str) -> dict[str, Any] | None:
     source_id = str(source.get("source_id") or source.get("data_source_id") or "").strip()
     table_name = str(
@@ -278,21 +340,9 @@ def _build_plan_binding_from_source(source: dict[str, Any], date_field: str) -> 
         "data_source_id": source_id,
         "table_name": table_name,
         "resource_key": table_name,
-        "dataset_source_type": "snapshot",
+        "dataset_source_type": "collection_records",
         "query": query,
     }
-
-
-def _infer_binding_side(role_code: str, mapping_config: dict[str, Any]) -> str:
-    side = str(mapping_config.get("side") or "").strip().lower()
-    if side in {"left", "right"}:
-        return side
-    normalized_role = str(role_code or "").strip().lower()
-    if normalized_role.startswith("left"):
-        return "left"
-    if normalized_role.startswith("right"):
-        return "right"
-    return ""
 
 
 def _resolve_time_semantics(run_plan: dict[str, Any]) -> tuple[str, str]:
@@ -306,22 +356,45 @@ def _resolve_time_semantics(run_plan: dict[str, Any]) -> tuple[str, str]:
     return left, right
 
 
-def _normalize_plan_binding(item: dict[str, Any]) -> dict[str, Any] | None:
+def _get_scheme_meta(ctx: dict[str, Any]) -> dict[str, Any]:
+    scheme = _safe_dict(ctx.get("scheme"))
+    return _safe_dict(
+        scheme.get("scheme_meta_json")
+        or scheme.get("scheme_meta")
+        or scheme.get("meta")
+    )
+
+
+def _normalize_semantic_role(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_plan_binding(
+    item: dict[str, Any],
+    *,
+    left_time_semantic: str = "",
+    right_time_semantic: str = "",
+    scheme_meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     source_id = _get_binding_source_id(item)
     table_name = str(item.get("table_name") or "").strip()
     if not source_id or not table_name:
         return None
+    role_code = str(item.get("role_code") or "").strip()
+    query = _safe_dict(item.get("query"))
     return {
         "data_source_id": source_id,
         "table_name": table_name,
         "resource_key": _get_binding_resource_key(item),
         "required": _get_binding_required(item),
-        "query": _safe_dict(item.get("query")),
-        "dataset_source_type": str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot",
-        "role_code": str(item.get("role_code") or "").strip(),
+        "query": query,
+        "dataset_source_type": str(item.get("dataset_source_type") or "collection_records").strip() or "collection_records",
+        "role_code": role_code,
         "dataset_code": str(item.get("dataset_code") or "").strip(),
         "dataset_name": str(item.get("dataset_name") or item.get("display_name") or "").strip(),
         "display_name": str(item.get("display_name") or item.get("dataset_name") or "").strip(),
+        "source_kind": str(item.get("source_kind") or "").strip(),
+        "provider_code": str(item.get("provider_code") or "").strip(),
     }
 
 
@@ -330,6 +403,7 @@ def _build_plan_binding_from_dataset_binding(
     binding: dict[str, Any],
     left_time_semantic: str,
     right_time_semantic: str,
+    scheme_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     source_id = str(binding.get("data_source_id") or "").strip()
     resource_key = str(binding.get("resource_key") or "").strip()
@@ -343,12 +417,6 @@ def _build_plan_binding_from_dataset_binding(
         query["resource_key"] = resource_key
 
     role_code = str(binding.get("role_code") or "").strip()
-    side = _infer_binding_side(role_code, mapping_config)
-    if not str(query.get("date_field") or "").strip():
-        if side == "left" and left_time_semantic:
-            query["date_field"] = left_time_semantic
-        elif side == "right" and right_time_semantic:
-            query["date_field"] = right_time_semantic
 
     table_name = str(
         mapping_config.get("table_name")
@@ -364,10 +432,55 @@ def _build_plan_binding_from_dataset_binding(
         "resource_key": resource_key,
         "required": bool(binding.get("is_required", True)),
         "query": query,
-        "dataset_source_type": str(mapping_config.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+        "dataset_source_type": str(mapping_config.get("dataset_source_type") or "collection_records").strip() or "collection_records",
         "role_code": role_code,
         "dataset_code": str(mapping_config.get("dataset_code") or resource_key).strip() or resource_key,
+        "source_kind": str(mapping_config.get("source_kind") or binding.get("source_kind") or "").strip(),
+        "provider_code": str(mapping_config.get("provider_code") or binding.get("provider_code") or "").strip(),
     }
+
+
+def _collection_record_count(collection: dict[str, Any]) -> int:
+    for key in ("record_count", "row_count"):
+        try:
+            return int(collection.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _binding_display_name(binding: dict[str, Any]) -> str:
+    return str(
+        binding.get("display_name")
+        or binding.get("dataset_name")
+        or binding.get("resource_key")
+        or binding.get("table_name")
+        or "未知数据集"
+    ).strip()
+
+
+def _is_required_collection_empty(binding: dict[str, Any], collection: dict[str, Any]) -> bool:
+    return _get_binding_required(binding) and _collection_record_count(collection) <= 0
+
+
+async def _hydrate_binding_source_meta(
+    *,
+    auth_token: str,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    if str(binding.get("source_kind") or "").strip() and str(binding.get("provider_code") or "").strip():
+        return binding
+    source_id = _get_binding_source_id(binding)
+    if not source_id:
+        return binding
+    result = await data_source_get(auth_token, source_id, mode="real")
+    source = _safe_dict(result.get("source"))
+    if not bool(result.get("success")) or not source:
+        return binding
+    hydrated = dict(binding)
+    hydrated["source_kind"] = str(hydrated.get("source_kind") or source.get("source_kind") or "").strip()
+    hydrated["provider_code"] = str(hydrated.get("provider_code") or source.get("provider_code") or "").strip()
+    return hydrated
 
 
 async def _list_dataset_bindings_by_scope(
@@ -400,23 +513,23 @@ async def _list_dataset_bindings_by_scope(
     return []
 
 
-def _build_recon_inputs_from_ready_snapshots(
-    ready_snapshots: list[dict[str, Any]],
+def _build_recon_inputs_from_ready_collections(
+    ready_collections: list[dict[str, Any]],
     *,
     biz_date: str,
 ) -> list[dict[str, Any]]:
     recon_inputs: list[dict[str, Any]] = []
-    for item in ready_snapshots:
+    for item in ready_collections:
         binding = _safe_dict(item.get("binding"))
-        snapshot = _safe_dict(item.get("published_snapshot"))
+        collection = _safe_dict(item.get("collection_records"))
         table_name = str(binding.get("table_name") or "").strip()
         source_id = _get_binding_source_id(binding)
         if not table_name or not source_id:
             continue
         query = {"resource_key": _get_binding_resource_key(binding)}
-        snapshot_id = str(snapshot.get("snapshot_id") or snapshot.get("id") or "").strip()
-        if snapshot_id:
-            query["snapshot_id"] = snapshot_id
+        dataset_id = str(collection.get("dataset_id") or binding.get("dataset_id") or "").strip()
+        if dataset_id:
+            query["dataset_id"] = dataset_id
 
         raw_query = _safe_dict(binding.get("query"))
         filters = _safe_dict(raw_query.get("filters"))
@@ -431,7 +544,7 @@ def _build_recon_inputs_from_ready_snapshots(
         if filters:
             query["filters"] = filters
 
-        dataset_source_type = str(binding.get("dataset_source_type") or "snapshot").strip() or "snapshot"
+        dataset_source_type = str(binding.get("dataset_source_type") or "collection_records").strip() or "collection_records"
         recon_inputs.append(
             {
                 "table_name": table_name,
@@ -490,7 +603,7 @@ async def _persist_execution_run(
     run_record = _safe_dict(ctx.get("execution_run_record"))
     subtasks_json = [item for item in _safe_list(ctx.get("subtasks_json")) if isinstance(item, dict)]
     run_context = _safe_dict(ctx.get("run_context"))
-    source_snapshot_json = _safe_dict(ctx.get("source_snapshot_json"))
+    source_collection_json = _safe_dict(ctx.get("source_collection_json"))
     recon_observation = _safe_dict(ctx.get("recon_observation"))
     summary = _safe_dict(recon_observation.get("summary"))
     artifacts = _safe_dict(recon_observation.get("artifacts"))
@@ -506,7 +619,7 @@ async def _persist_execution_run(
                 "failed_stage": failed_stage,
                 "failed_reason": failed_reason,
                 "run_context_json": run_context,
-                "source_snapshot_json": source_snapshot_json,
+                "source_snapshot_json": source_collection_json,
                 "subtasks_json": subtasks_json,
                 "recon_result_summary_json": summary,
                 "artifacts_json": artifacts,
@@ -532,7 +645,7 @@ async def _persist_execution_run(
             "failed_stage": failed_stage,
             "failed_reason": failed_reason,
             "run_context_json": run_context,
-            "source_snapshot_json": source_snapshot_json,
+            "source_snapshot_json": source_collection_json,
             "subtasks_json": subtasks_json,
             "recon_result_summary_json": summary,
             "artifacts_json": artifacts,
@@ -729,6 +842,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
     run_plan = _safe_dict(ctx.get("run_plan"))
     run_plan_code = str(run_plan.get("plan_code") or ctx.get("run_plan_code") or "").strip()
     scheme_code = str(run_plan.get("scheme_code") or ctx.get("scheme_code") or "").strip()
+    scheme_meta = _get_scheme_meta(ctx)
     left_time_semantic, right_time_semantic = _resolve_time_semantics(run_plan)
 
     bindings: list[dict[str, Any]] = []
@@ -745,6 +859,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
                 binding=row,
                 left_time_semantic=left_time_semantic,
                 right_time_semantic=right_time_semantic,
+                scheme_meta=scheme_meta,
             )
             if normalized is not None:
                 bindings.append(normalized)
@@ -761,6 +876,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
                     binding=row,
                     left_time_semantic=left_time_semantic,
                     right_time_semantic=right_time_semantic,
+                    scheme_meta=scheme_meta,
                 )
                 if normalized is not None:
                     bindings.append(normalized)
@@ -778,6 +894,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
                 binding=row,
                 left_time_semantic=left_time_semantic,
                 right_time_semantic=right_time_semantic,
+                scheme_meta=scheme_meta,
             )
             if normalized is not None:
                 bindings.append(normalized)
@@ -794,6 +911,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
                     binding=row,
                     left_time_semantic=left_time_semantic,
                     right_time_semantic=right_time_semantic,
+                    scheme_meta=scheme_meta,
                 )
                 if normalized is not None:
                     bindings.append(normalized)
@@ -815,7 +933,12 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
                 if isinstance(v, dict)
             ]
         for row in legacy_raw:
-            normalized = _normalize_plan_binding(row)
+            normalized = _normalize_plan_binding(
+                row,
+                left_time_semantic=left_time_semantic,
+                right_time_semantic=right_time_semantic,
+                scheme_meta=scheme_meta,
+            )
             if normalized is not None:
                 bindings.append(normalized)
         if bindings:
@@ -827,6 +950,11 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
         ctx["plan_input_bindings"] = []
         ctx["plan_input_source"] = ""
         return {"recon_ctx": ctx}
+
+    bindings = [
+        await _hydrate_binding_source_meta(auth_token=auth_token, binding=item)
+        for item in bindings
+    ]
 
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -863,8 +991,13 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
     bindings = [v for v in _safe_list(ctx.get("plan_input_bindings")) if isinstance(v, dict)]
-    ready_snapshots: list[dict[str, Any]] = []
+    ready_collections: list[dict[str, Any]] = []
     missing_bindings: list[dict[str, Any]] = []
+    collection_attempts: list[dict[str, Any]] = []
+    biz_date = str(ctx.get("biz_date") or "").strip()
+    run_context = _safe_dict(ctx.get("run_context"))
+    collection_trigger_mode = _normalize_collection_trigger_mode(run_context.get("trigger_type"))
+    should_collect_first = _should_collect_before_recon(run_context.get("trigger_type"))
 
     for binding in bindings:
         source_id = _get_binding_source_id(binding)
@@ -872,144 +1005,74 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
         if not source_id or not table_name:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
-        result = await data_source_get_published_snapshot(
+        if should_collect_first:
+            collect_result = await data_source_trigger_dataset_collection(
+                auth_token,
+                source_id,
+                dataset_id=str(binding.get("dataset_id") or "").strip(),
+                resource_key=_get_binding_resource_key(binding),
+                biz_date=biz_date,
+                trigger_mode=collection_trigger_mode,
+                mode="real",
+            )
+            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+            collection_attempts.append(
+                {
+                    "binding": binding,
+                    "success": bool(collect_result.get("success")),
+                    "job": _safe_dict(collect_result.get("job")),
+                    "error": collection_error,
+                }
+            )
+            if not bool(collect_result.get("success")):
+                missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
+                continue
+        result = await data_source_list_collection_records(
             auth_token,
             source_id,
             resource_key=_get_binding_resource_key(binding),
+            biz_date=biz_date,
+            limit=1,
         )
-        snapshot = _safe_dict(result.get("published_snapshot"))
-        if bool(result.get("success")) and snapshot:
-            ready_snapshots.append({"binding": binding, "published_snapshot": snapshot})
+        record_count = int(result.get("record_count") or result.get("count") or 0)
+        records = _safe_list(result.get("records") or result.get("rows"))
+        collection = {
+            "dataset_id": str(result.get("dataset_id") or binding.get("dataset_id") or ""),
+            "resource_key": str(result.get("resource_key") or _get_binding_resource_key(binding)),
+            "record_count": record_count or len(records),
+        }
+        if bool(result.get("success")) and not _is_required_collection_empty(binding, collection):
+            ready_binding = {**binding, "dataset_source_type": "collection_records"}
+            ready_collections.append({"binding": ready_binding, "collection_records": collection})
         else:
-            missing_bindings.append({**binding, "error": str(result.get("error") or "暂无可用快照")})
+            error = str(result.get("error") or "暂无采集记录，请先采集数据")
+            if bool(result.get("success")) and _is_required_collection_empty(binding, collection):
+                error = "暂无采集记录，请先采集数据"
+            missing_bindings.append({**binding, "error": error})
 
-    ctx["ready_snapshots"] = ready_snapshots
+    ctx["ready_collections"] = ready_collections
     ctx["missing_bindings"] = missing_bindings
+    if collection_attempts:
+        ctx["collection_attempts"] = collection_attempts
     return {"recon_ctx": ctx}
 
 
-def trigger_collection_node(state: AgentState) -> dict[str, Any]:
+def bind_ready_collection_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
-    missing_bindings = [v for v in _safe_list(ctx.get("missing_bindings")) if isinstance(v, dict)]
-    ctx["collection_targets"] = missing_bindings
-    return {"recon_ctx": ctx}
-
-
-async def retry_collection_node(state: AgentState) -> dict[str, Any]:
-    ctx = _get_recon_ctx(state)
-    auth_token = str(state.get("auth_token") or "")
-    targets = [v for v in _safe_list(ctx.get("collection_targets")) if isinstance(v, dict)]
-    ready_snapshots = [v for v in _safe_list(ctx.get("ready_snapshots")) if isinstance(v, dict)]
-    subtasks = [v for v in _safe_list(ctx.get("subtasks_json")) if isinstance(v, dict)]
-    unresolved: list[dict[str, Any]] = []
+    ready_collections = [v for v in _safe_list(ctx.get("ready_collections")) if isinstance(v, dict)]
+    collection_attempts = [v for v in _safe_list(ctx.get("collection_attempts")) if isinstance(v, dict)]
     biz_date = str(ctx.get("biz_date") or "")
-    run_plan_code = str(ctx.get("run_plan_code") or "")
-
-    for binding in targets:
-        source_id = _get_binding_source_id(binding)
-        table_name = str(binding.get("table_name") or "").strip()
-        if not source_id or not table_name:
-            unresolved.append(binding)
-            continue
-
-        raw_query = _safe_dict(binding.get("query"))
-        resource_key = _get_binding_resource_key(binding)
-        trigger_result = await data_source_trigger_sync(
-            auth_token,
-            source_id,
-            idempotency_key="::".join(
-                [
-                    run_plan_code or "run_plan",
-                    source_id,
-                    resource_key,
-                    biz_date or "biz_date_unknown",
-                ]
-            ),
-            params={
-                "biz_date": biz_date,
-                "resource_key": resource_key,
-                "query": raw_query,
-            },
-        )
-        subtasks.append(
-            {
-                "type": "collect_trigger",
-                "dataset_code": str(binding.get("dataset_code") or table_name),
-                "source_id": source_id,
-                "table_name": table_name,
-                "status": "success" if bool(trigger_result.get("success")) else "failed",
-                "error": "" if bool(trigger_result.get("success")) else str(trigger_result.get("error") or "触发采集失败"),
-            }
-        )
-        if not bool(trigger_result.get("success")):
-            unresolved.append(binding)
-            continue
-
-        succeeded = False
-        for attempt in range(1, COLLECT_MAX_RETRIES + 1):
-            result = await data_source_get_published_snapshot(
-                auth_token,
-                source_id,
-                resource_key=resource_key,
-            )
-            snapshot = _safe_dict(result.get("published_snapshot"))
-            ok = bool(result.get("success")) and bool(snapshot)
-            subtasks.append(
-                {
-                    "type": "collect",
-                    "dataset_code": str(binding.get("dataset_code") or table_name),
-                    "source_id": source_id,
-                    "table_name": table_name,
-                    "attempt": attempt,
-                    "status": "success" if ok else "failed",
-                    "error": "" if ok else str(result.get("error") or "暂无可用快照"),
-                }
-            )
-            if ok:
-                ready_snapshots.append({"binding": binding, "published_snapshot": snapshot})
-                succeeded = True
-                break
-            if attempt < COLLECT_MAX_RETRIES:
-                await asyncio.sleep(COLLECT_RETRY_INTERVAL_SECONDS)
-
-        if not succeeded:
-            unresolved.append(binding)
-
-    ctx["ready_snapshots"] = ready_snapshots
-    ctx["missing_bindings"] = unresolved
-    ctx["subtasks_json"] = subtasks
-    ctx["collect_failed"] = len(unresolved) > 0
-    return {"recon_ctx": ctx}
-
-
-def bind_ready_snapshot_node(state: AgentState) -> dict[str, Any]:
-    ctx = _get_recon_ctx(state)
-    ready_snapshots = [v for v in _safe_list(ctx.get("ready_snapshots")) if isinstance(v, dict)]
-    biz_date = str(ctx.get("biz_date") or "")
-    recon_inputs = _build_recon_inputs_from_ready_snapshots(ready_snapshots, biz_date=biz_date)
+    recon_inputs = _build_recon_inputs_from_ready_collections(ready_collections, biz_date=biz_date)
     ctx["recon_inputs"] = recon_inputs
-    ctx["source_snapshot_json"] = {
-        "ready_count": len(ready_snapshots),
+    source_collection_json = {
+        "ready_count": len(ready_collections),
         "missing_count": len(_safe_list(ctx.get("missing_bindings"))),
-        "snapshots": ready_snapshots,
+        "collections": ready_collections,
         "biz_date": biz_date,
     }
-    return {"recon_ctx": ctx}
-
-
-def return_collection_failed_node(state: AgentState) -> dict[str, Any]:
-    ctx = _get_recon_ctx(state)
-    ctx["failed_stage"] = "collect"
-    ctx["exec_status"] = "failed"
-    missing_bindings = [v for v in _safe_list(ctx.get("missing_bindings")) if isinstance(v, dict)]
-    if missing_bindings:
-        names = [
-            str(b.get("display_name") or b.get("dataset_name") or b.get("resource_key") or "未知数据集")
-            for b in missing_bindings
-        ]
-        ctx["failed_reason"] = f"以下数据集采集失败，超过重试次数上限：{' / '.join(names)}"
-    else:
-        ctx["failed_reason"] = "数据采集失败，超过重试次数上限"
+    if collection_attempts:
+        source_collection_json["collection_attempts"] = collection_attempts
+    ctx["source_collection_json"] = source_collection_json
     return {"recon_ctx": ctx}
 
 
@@ -1021,11 +1084,16 @@ def validate_dataset_completeness_node(state: AgentState) -> dict[str, Any]:
     required_missing = [b for b in missing_bindings if _get_binding_required(b)]
     if required_missing:
         names = [
-            str(b.get("display_name") or b.get("dataset_name") or b.get("resource_key") or "未知数据集")
+            f"{_binding_display_name(b)}（{str(b.get('error') or '数据未就绪')}）"
             for b in required_missing
         ]
         ctx["failed_stage"] = "validate_dataset"
-        ctx["failed_reason"] = f"以下关键数据集尚未就绪，无法执行对账：{' / '.join(names)}"
+        biz_date = str(ctx.get("biz_date") or "").strip()
+        date_hint = f"业务日期 {biz_date} 的" if biz_date else ""
+        ctx["failed_reason"] = (
+            f"数据未就绪，无法执行对账：{' / '.join(names)}。"
+            f"请先在数据连接中完成{date_hint}数据采集，或等待自动采集成功后重试。"
+        )
     elif not recon_inputs:
         ctx["failed_stage"] = "validate_dataset"
         ctx["failed_reason"] = "未能构建出有效的数据集输入，请检查数据源绑定配置"
@@ -1146,23 +1214,37 @@ def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str,
     return owner_name, owner_identifier, owner_contact_json, owner_available
 
 
-def _extract_todo_key_hint(exception: dict[str, Any]) -> str:
+def _extract_todo_key_hint(
+    exception: dict[str, Any],
+    field_labels: dict[str, str] | None = None,
+) -> str:
     """Extract a short key identifier from the exception for use in the todo title.
 
     Priority: join_key fields → first ：-separated segment of summary.
-    Returns a compact string like "order_no=ORD-001" or empty string.
+    Returns a compact string like "业务单号=ORD-001" or empty string.
     """
+    fl = field_labels or {}
     atype = str(exception.get("anomaly_type") or "").strip()
     detail = _safe_dict(exception.get("detail_json"))
     join_key = [k for k in _safe_list(detail.get("join_key") or exception.get("join_key")) if isinstance(k, dict)]
+    raw_record = _safe_dict(exception.get("raw_record") or detail.get("raw_record"))
+
+    def _raw_key_val(field: str) -> str:
+        prefix = "right_recon_ready." if atype == "target_only" else "left_recon_ready."
+        v = raw_record.get(prefix + field) or raw_record.get(field)
+        return str(v).strip() if v is not None and str(v).strip() not in {"None", "null", ""} else ""
+
     if join_key:
         parts: list[str] = []
         for k in join_key[:2]:
             field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "").strip()
-            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value") or ""
-            val_str = str(value).strip()
-            if field and val_str and val_str not in {"None", "null", ""}:
-                parts.append(f"{field}={val_str}")
+            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value")
+            val_str = str(value).strip() if value is not None and str(value).strip() not in {"None", "null", ""} else ""
+            if not val_str and field:
+                val_str = _raw_key_val(field)
+            if field and val_str:
+                display_field = fl.get(field) or field
+                parts.append(f"{display_field}={val_str}")
         if parts:
             return "、".join(parts)
 
@@ -1170,7 +1252,7 @@ def _extract_todo_key_hint(exception: dict[str, Any]) -> str:
     summary = str(exception.get("summary") or "")
     if "：" in summary:
         after_colon = summary.split("：", 1)[1].strip()
-        key_part = after_colon.split("  ")[0].strip()  # double-space separates key from diff detail
+        key_part = after_colon.split("  ")[0].strip()
         if key_part and len(key_part) <= 60:
             return key_part
     return ""
@@ -1195,23 +1277,22 @@ def _compose_execution_exception_reminder_text(
 
     # Extract dataset names from scheme_meta_json for user-friendly labels
     meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
-    def _first_ds_name(sources: list) -> str:
-        for src in sources:
-            if not isinstance(src, dict):
-                continue
-            name = str(src.get("dataset_name") or src.get("business_name") or src.get("display_name") or "").strip()
-            if name:
-                return name
-        return ""
-    left_name = _first_ds_name(_safe_list(meta.get("left_sources")))
-    right_name = _first_ds_name(_safe_list(meta.get("right_sources")))
+    left_name = next(
+        (_source_display_name(s) for s in _safe_list(meta.get("left_sources")) if isinstance(s, dict) and _source_display_name(s)),
+        ""
+    )
+    right_name = next(
+        (_source_display_name(s) for s in _safe_list(meta.get("right_sources")) if isinstance(s, dict) and _source_display_name(s)),
+        ""
+    )
 
+    field_labels = _build_field_label_map(meta)
     anomaly_type = str(exception.get("anomaly_type") or "unknown").strip()
     anomaly_label = _label_anomaly_type(anomaly_type, left_name=left_name, right_name=right_name)
     summary = str(exception.get("summary") or "详见对账结果")
 
     # Todo title: include key field so finance staff can identify the record directly
-    key_hint = _extract_todo_key_hint(exception)
+    key_hint = _extract_todo_key_hint(exception, field_labels=field_labels)
     if key_hint:
         todo_title = f"【对账异常】{anomaly_label} | {key_hint}"
     else:
@@ -1219,7 +1300,6 @@ def _compose_execution_exception_reminder_text(
     if biz_date:
         todo_title += f" | {biz_date}"
 
-    # Bot message
     bot_title = f"{plan_name} 对账异常催办"
     lines = [
         f"任务：{plan_name}",
@@ -1229,7 +1309,7 @@ def _compose_execution_exception_reminder_text(
         f"异常详情：{summary}",
         "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
     ]
-    bot_content = "\n".join(line for line in lines if line)
+    bot_content = "\n\n".join(line for line in lines if line)
     return todo_title, bot_title, bot_content
 
 
@@ -1499,8 +1579,13 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "contact_json": owner_contact_json,
     }
 
-    # 提取左右数据集业务名称，用于生成财务友好的异常摘要
+    # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
     left_name, right_name = _resolve_side_names(ctx)
+    scheme = _safe_dict(ctx.get("scheme"))
+    scheme_meta = _safe_dict(
+        scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta")
+    )
+    field_labels = _build_field_label_map(scheme_meta)
 
     created = 0
     created_exceptions: list[dict[str, Any]] = []
@@ -1514,7 +1599,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             "anomaly_key": anomaly_key,
             "anomaly_type": atype,
             "summary": str(item.get("summary") or "") or _build_anomaly_summary(
-                atype, item, left_name=left_name, right_name=right_name
+                atype, item, left_name=left_name, right_name=right_name, field_labels=field_labels
             ),
             "detail_json": item,
             "owner_name": owner_name,

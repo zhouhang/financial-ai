@@ -347,3 +347,76 @@ def test_steps_runtime_supports_add_months_and_lookup(tmp_path: Path) -> None:
     assert len(credit_usage) == 1
     assert credit_usage.iloc[0]["中心"] == "华东中心"
     assert str(credit_usage.iloc[0]["周期"]) == "2"
+
+
+def test_steps_runtime_supports_to_decimal_function_in_formula_binding(tmp_path: Path) -> None:
+    uploads_root = Path(__file__).resolve().parents[1] / "uploads/runtime_steps_spec" / tmp_path.name
+    uploads_root.mkdir(parents=True, exist_ok=True)
+
+    source_path = uploads_root / "订单.csv"
+    _write_csv(source_path, [{"订单号": "O-001", "金额": "80.60"}])
+
+    rule = {
+        "steps": [
+            {
+                "step_id": "create_output",
+                "action": "create_schema",
+                "target_table": "输出",
+                "schema": {
+                    "primary_key": ["订单号"],
+                    "columns": [
+                        {"name": "订单号", "data_type": "string"},
+                        {"name": "输出金额", "data_type": "decimal"},
+                    ],
+                },
+            },
+            {
+                "step_id": "write_output",
+                "depends_on": ["create_output"],
+                "action": "write_dataset",
+                "target_table": "输出",
+                "sources": [{"table": "订单", "alias": "orders"}],
+                "mappings": [
+                    {
+                        "target_field": "订单号",
+                        "value": {"type": "source", "source": {"alias": "orders", "field": "订单号"}},
+                        "field_write_mode": "overwrite",
+                    },
+                    {
+                        "target_field": "输出金额",
+                        "value": {
+                            "type": "formula",
+                            "expr": "{amount} + 10",
+                            "bindings": {
+                                "amount": {
+                                    "type": "function",
+                                    "function": "to_decimal",
+                                    "args": {
+                                        "value": {
+                                            "type": "source",
+                                            "source": {"alias": "orders", "field": "金额"},
+                                        }
+                                    },
+                                }
+                            },
+                        },
+                        "field_write_mode": "overwrite",
+                    },
+                ],
+                "row_write_mode": "upsert",
+            },
+        ]
+    }
+
+    runtime = StepsProcRuntime(
+        "runtime_to_decimal_rule",
+        rule,
+        [{"table_name": "订单", "file_path": str(source_path)}],
+        str(tmp_path / "output"),
+    )
+
+    runtime.execute()
+
+    output = runtime.tables["输出"]
+    assert len(output) == 1
+    assert output.iloc[0]["输出金额"] == 90.6

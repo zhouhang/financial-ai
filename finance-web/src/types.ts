@@ -219,6 +219,7 @@ export interface DataSourceDatasetSummary {
   field_label_map?: Record<string, string>;
   semantic_fields?: Array<Record<string, unknown>>;
   low_confidence_fields?: string[];
+  collection_config?: Record<string, unknown>;
   origin_type?: 'fixed' | 'discovered' | 'imported_openapi' | 'manual' | string;
   dataset_kind?: string;
   resource_key?: string;

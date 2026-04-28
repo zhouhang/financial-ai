@@ -1062,7 +1062,7 @@ export default function ReconAutoTaskConfigs({
         data_source_id: option.sourceId,
         table_name: slot.tableName,
         resource_key: option.resourceKey || 'default',
-        dataset_source_type: 'snapshot',
+        dataset_source_type: 'collection_records',
         query: {
           biz_date_filter: {
             field: dateField,

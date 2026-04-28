@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+from datetime import date, timedelta
 from typing import Any
 
 import psycopg2
@@ -16,6 +17,7 @@ from connectors.base import BaseDataSourceConnector
 logger = logging.getLogger(__name__)
 
 _DATASET_CODE_PATTERN = re.compile(r"[^a-z0-9_]+")
+_DATE_ONLY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _POSTGRES_DISCOVER_RELKINDS = ("r", "v", "m", "f", "p")
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 
@@ -185,7 +187,7 @@ class DatabaseConnector(BaseDataSourceConnector):
 
     @property
     def capabilities(self) -> list[str]:
-        return ["test", "discover_datasets", "list_datasets", "list_events"]
+        return ["test", "discover_datasets", "list_datasets", "list_events", "sync", "preview"]
 
     def _resolved_connection_config(self) -> dict[str, Any]:
         connection_config = dict(self.ctx.config.get("connection_config") or {})
@@ -341,6 +343,55 @@ class DatabaseConnector(BaseDataSourceConnector):
             "message": message,
         }
 
+    def trigger_sync(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        cfg = self._resolved_connection_config()
+        db_type = _normalize_db_type(cfg.get("db_type"))
+        missing = self._validate_connection_config(cfg)
+        if missing:
+            return {"success": False, "error": f"database 配置缺失: {', '.join(missing)}"}
+
+        schema_name, table_name, filters = self._resolve_sync_target(arguments)
+        if not table_name:
+            return {
+                "success": False,
+                "source_id": self.ctx.source_id,
+                "error": "missing_table",
+                "message": "同步数据需要提供 resource_key 或表名",
+            }
+
+        try:
+            if db_type == "postgresql":
+                rows = self._sync_postgresql(cfg, schema_name or "public", table_name, filters)
+            elif db_type == "mysql":
+                rows = self._sync_mysql(cfg, schema_name or str(cfg.get("database") or ""), table_name, filters)
+            elif db_type == "sqlite":
+                rows = self._sync_sqlite(cfg, table_name, filters)
+            else:
+                return {
+                    "success": False,
+                    "source_id": self.ctx.source_id,
+                    "error": f"unsupported_db_type:{db_type}",
+                    "message": f"暂不支持 {db_type} 的同步",
+                }
+        except Exception as exc:
+            logger.error("database trigger sync failed: %s", exc, exc_info=True)
+            detail = _friendly_database_error(exc)
+            return {
+                "success": False,
+                "source_id": self.ctx.source_id,
+                "error": detail,
+                "message": detail,
+            }
+
+        return {
+            "success": True,
+            "source_id": self.ctx.source_id,
+            "provider_code": self.ctx.provider_code,
+            "rows_ingested": len(rows),
+            "rows": rows,
+            "message": f"已同步 {len(rows)} 行数据库数据",
+        }
+
     def discover_datasets(self, arguments: dict[str, Any]) -> dict[str, Any]:
         cfg = self._resolved_connection_config()
         db_type = _normalize_db_type(cfg.get("db_type"))
@@ -485,6 +536,161 @@ class DatabaseConnector(BaseDataSourceConnector):
             "count": len(rows),
             "message": f"已返回 {len(rows)} 行样例数据",
         }
+
+    def _resolve_sync_target(
+        self,
+        arguments: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any]]:
+        params = arguments.get("params") if isinstance(arguments.get("params"), dict) else {}
+        query = params.get("query") if isinstance(params.get("query"), dict) else {}
+        dataset = arguments.get("dataset") if isinstance(arguments.get("dataset"), dict) else {}
+        extract_config = dataset.get("extract_config") if isinstance(dataset.get("extract_config"), dict) else {}
+
+        resource_key = str(
+            arguments.get("resource_key")
+            or query.get("resource_key")
+            or arguments.get("table_name")
+            or dataset.get("resource_key")
+            or dataset.get("dataset_code")
+            or ""
+        ).strip()
+        schema_name = str(arguments.get("schema") or extract_config.get("schema") or "").strip()
+        table_name = str(arguments.get("table") or extract_config.get("table") or "").strip()
+
+        if not table_name and resource_key:
+            if "." in resource_key:
+                schema_name, table_name = resource_key.split(".", 1)
+            else:
+                table_name = resource_key
+
+        filters = {
+            str(key): value
+            for key, value in dict(query.get("filters") or {}).items()
+            if str(key).strip()
+        }
+        biz_date = str(params.get("biz_date") or arguments.get("biz_date") or "").strip()
+        date_field = str(query.get("date_field") or "").strip()
+        if date_field and biz_date and date_field not in filters:
+            filters[date_field] = biz_date
+        return schema_name, table_name, filters
+
+    def _sync_postgresql(
+        self,
+        cfg: dict[str, Any],
+        schema_name: str,
+        table_name: str,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_postgresql(cfg)
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                query = pg_sql.SQL("SELECT * FROM {}.{}").format(
+                    pg_sql.Identifier(schema_name),
+                    pg_sql.Identifier(table_name),
+                )
+                where_sql, params = self._build_postgresql_filter_sql(filters)
+                if where_sql is not None:
+                    query += pg_sql.SQL(" WHERE ") + where_sql
+                cur.execute(query, params)
+                return [dict(row) for row in cur.fetchall() or []]
+        finally:
+            conn.close()
+
+    def _build_postgresql_filter_sql(
+        self,
+        filters: dict[str, Any],
+    ) -> tuple[pg_sql.Composed | None, list[Any]]:
+        if not filters:
+            return None, []
+        clauses: list[pg_sql.Composed] = []
+        params: list[Any] = []
+        for field_name, value in filters.items():
+            if self._is_date_only_filter_value(value):
+                start, end = self._date_filter_bounds(value)
+                clauses.append(
+                    pg_sql.SQL("{} >= %s AND {} < %s").format(
+                        pg_sql.Identifier(field_name),
+                        pg_sql.Identifier(field_name),
+                    )
+                )
+                params.extend([start, end])
+            else:
+                clauses.append(pg_sql.SQL("{} = %s").format(pg_sql.Identifier(field_name)))
+                params.append(value)
+        return pg_sql.SQL(" AND ").join(clauses), params
+
+    def _sync_mysql(
+        self,
+        cfg: dict[str, Any],
+        schema_name: str,
+        table_name: str,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_mysql(cfg)
+        safe_schema = schema_name.replace("`", "``") or str(cfg.get("database") or "")
+        safe_table = table_name.replace("`", "``")
+        try:
+            with conn.cursor() as cur:
+                sql = f"SELECT * FROM `{safe_schema}`.`{safe_table}`"
+                params: list[Any] = []
+                if filters:
+                    clauses: list[str] = []
+                    for field_name, value in filters.items():
+                        safe_field = field_name.replace("`", "``")
+                        if self._is_date_only_filter_value(value):
+                            start, end = self._date_filter_bounds(value)
+                            clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                            params.extend([start, end])
+                        else:
+                            clauses.append(f"`{safe_field}` = %s")
+                            params.append(value)
+                    sql += f" WHERE {' AND '.join(clauses)}"
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall() or []
+                return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def _sync_sqlite(
+        self,
+        cfg: dict[str, Any],
+        table_name: str,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        conn = self._connect_sqlite(cfg)
+        conn.row_factory = sqlite3.Row
+        safe_table = table_name.replace('"', '""')
+        try:
+            cur = conn.cursor()
+            try:
+                sql = f'SELECT * FROM "{safe_table}"'
+                params: list[Any] = []
+                if filters:
+                    clauses: list[str] = []
+                    for field_name, value in filters.items():
+                        safe_field = field_name.replace('"', '""')
+                        if self._is_date_only_filter_value(value):
+                            start, end = self._date_filter_bounds(value)
+                            clauses.append(f'datetime("{safe_field}") >= datetime(?) AND datetime("{safe_field}") < datetime(?)')
+                            params.extend([start, end])
+                        else:
+                            clauses.append(f'"{safe_field}" = ?')
+                            params.append(value)
+                    sql += f" WHERE {' AND '.join(clauses)}"
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall() or []
+                return [dict(row) for row in rows]
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+
+    def _is_date_only_filter_value(self, value: Any) -> bool:
+        return bool(_DATE_ONLY_PATTERN.match(str(value or "").strip()))
+
+    def _date_filter_bounds(self, value: Any) -> tuple[str, str]:
+        start_date = date.fromisoformat(str(value or "").strip())
+        return start_date.isoformat(), (start_date + timedelta(days=1)).isoformat()
 
     def _discover_postgresql(
         self,

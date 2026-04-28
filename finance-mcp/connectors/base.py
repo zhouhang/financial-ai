@@ -29,7 +29,7 @@ class BaseDataSourceConnector(ABC):
 
     @property
     def capabilities(self) -> list[str]:
-        return ["test", "discover", "sync", "preview", "published_snapshot"]
+        return ["test", "discover", "sync", "preview", "collection_records"]
 
     @abstractmethod
     def test_connection(self, arguments: dict[str, Any]) -> dict[str, Any]:

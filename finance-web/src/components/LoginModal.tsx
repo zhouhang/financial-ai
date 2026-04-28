@@ -152,7 +152,7 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess, titleHint 
         const errMsg = typeof data.detail === 'string' ? data.detail : data.error || data.detail || '用户名或密码错误';
         setError(errMsg);
       }
-    } catch (err) {
+    } catch {
       setError('登录失败，请稍后重试');
     } finally {
       setLoading(false);
@@ -214,7 +214,7 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess, titleHint 
         const errMsg = typeof data.detail === 'string' ? data.detail : data.error || data.detail || '注册失败';
         setError(errMsg);
       }
-    } catch (err) {
+    } catch {
       setError('注册失败，请稍后重试');
     } finally {
       setLoading(false);

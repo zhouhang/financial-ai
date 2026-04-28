@@ -23,6 +23,7 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
+_EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -30,11 +31,7 @@ _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_source_configs",
     "sync_jobs",
     "sync_job_attempts",
-    "sync_checkpoints",
-    "raw_ingestion_batches",
-    "raw_ingestion_records",
-    "dataset_snapshots",
-    "dataset_snapshot_items",
+    "dataset_collection_records",
     "dataset_bindings",
 }
 
@@ -83,12 +80,15 @@ def _serialize_datetimes(d: dict) -> dict:
 def _json_safe_value(value: Any) -> Any:
     """将 JSON 不可序列化对象转换为可安全写入 jsonb 的值。"""
     from datetime import date, datetime
+    from decimal import Decimal
     import uuid
 
     if isinstance(value, uuid.UUID):
         return str(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, dict):
         return {str(key): _json_safe_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -332,6 +332,19 @@ def ensure_unified_data_source_schema() -> list[str]:
     if missing_dataset_catalog_columns:
         _execute_sql_script(_migration_path("013_data_source_dataset_catalog_fields.sql"))
         applied.append("013_data_source_dataset_catalog_fields.sql")
+    if "dataset_collection_records" in missing_base_tables:
+        _execute_sql_script(_migration_path("016_dataset_collection_records.sql"))
+        applied.append("016_dataset_collection_records.sql")
+    legacy_collection_tables = {
+        "dataset_snapshots",
+        "dataset_snapshot_items",
+        "raw_ingestion_records",
+        "raw_ingestion_batches",
+        "sync_checkpoints",
+    }
+    if any(_table_exists(table_name) for table_name in legacy_collection_tables):
+        _execute_sql_script(_migration_path("017_drop_raw_snapshot_collection_tables.sql"))
+        applied.append("017_drop_raw_snapshot_collection_tables.sql")
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -364,6 +377,62 @@ def ensure_unified_data_source_schema() -> list[str]:
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
     return applied
+
+
+def _constraint_definition(
+    table_name: str,
+    constraint_name: str,
+    *,
+    schema: str = "public",
+) -> str:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(c.oid)
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = %s
+                      AND t.relname = %s
+                      AND c.conname = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name, constraint_name),
+                )
+                row = cur.fetchone()
+                return str(row[0] or "") if row else ""
+    except Exception as e:
+        logger.error(
+            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
+        )
+        raise
+
+
+def ensure_execution_run_trigger_types_schema() -> list[str]:
+    """确保 execution_runs.trigger_type 允许 manual/rerun。"""
+    global _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY
+    if _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY:
+        return []
+    if not _table_exists("execution_runs"):
+        return []
+
+    constraint_def = _constraint_definition("execution_runs", "execution_runs_trigger_type_check")
+    if "manual" in constraint_def and "rerun" in constraint_def:
+        _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
+        return []
+
+    migration_name = "020_execution_runs_trigger_type_manual_rerun.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("execution_runs", "execution_runs_trigger_type_check")
+    if "manual" not in applied_constraint_def or "rerun" not in applied_constraint_def:
+        raise RuntimeError("execution_runs.trigger_type 约束升级失败，manual/rerun 仍不可用")
+
+    _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
+    logger.info("execution_runs.trigger_type 约束已自动补齐: %s", migration_name)
+    return [migration_name]
 
 
 class _ConnectionContextManager:
@@ -1961,7 +2030,7 @@ def list_auth_sessions(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 通用数据连接模型（data_sources / sync_jobs / dataset_snapshots）
+# 通用数据连接模型（data_sources / sync_jobs / data_source_datasets）
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2704,466 +2773,6 @@ def update_sync_job_attempt_status(
         return None
 
 
-def upsert_sync_checkpoint(
-    *,
-    company_id: str,
-    data_source_id: str,
-    resource_type: str = "default",
-    checkpoint_key: str = "default",
-    cursor_value: str = "",
-    watermark_at: str | None = None,
-    last_successful_job_id: str | None = None,
-    last_published_snapshot_id: str | None = None,
-    status: str = "success",
-    last_error: str = "",
-) -> dict | None:
-    """写入同步 checkpoint；只建议在成功发布 snapshot 后推进。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO sync_checkpoints (
-                        company_id, data_source_id, resource_type, checkpoint_key,
-                        cursor_value, watermark_at, last_successful_job_id,
-                        last_published_snapshot_id, status, last_error
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (data_source_id, resource_type, checkpoint_key)
-                    DO UPDATE SET
-                        cursor_value = EXCLUDED.cursor_value,
-                        watermark_at = EXCLUDED.watermark_at,
-                        last_successful_job_id = EXCLUDED.last_successful_job_id,
-                        last_published_snapshot_id = EXCLUDED.last_published_snapshot_id,
-                        status = EXCLUDED.status,
-                        last_error = EXCLUDED.last_error,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING id, company_id, data_source_id, resource_type, checkpoint_key,
-                              cursor_value, watermark_at, last_successful_job_id,
-                              last_published_snapshot_id, status, last_error,
-                              created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        resource_type,
-                        checkpoint_key,
-                        cursor_value,
-                        watermark_at,
-                        last_successful_job_id,
-                        last_published_snapshot_id,
-                        status,
-                        last_error,
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"写入 sync_checkpoints 失败 (source_id={data_source_id}, resource={resource_type}): {e}")
-        return None
-
-
-def get_sync_checkpoint(
-    *,
-    data_source_id: str,
-    resource_type: str = "default",
-    checkpoint_key: str = "default",
-) -> dict | None:
-    """读取 checkpoint。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, resource_type, checkpoint_key,
-                           cursor_value, watermark_at, last_successful_job_id,
-                           last_published_snapshot_id, status, last_error,
-                           created_at, updated_at
-                    FROM sync_checkpoints
-                    WHERE data_source_id = %s
-                      AND resource_type = %s
-                      AND checkpoint_key = %s
-                    LIMIT 1
-                    """,
-                    (data_source_id, resource_type, checkpoint_key),
-                )
-                row = cur.fetchone()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"查询 sync_checkpoints 失败 (source_id={data_source_id}, resource={resource_type}): {e}")
-        return None
-
-
-def create_raw_ingestion_batch(
-    *,
-    company_id: str,
-    data_source_id: str,
-    sync_job_id: str,
-    sync_attempt_id: str,
-    resource_type: str = "default",
-    window_start: str | None = None,
-    window_end: str | None = None,
-    cursor_before: str = "",
-    cursor_after: str = "",
-    batch_hash: str = "",
-    record_count: int = 0,
-    status: str = "ingested",
-    metadata: dict[str, Any] | None = None,
-) -> dict | None:
-    """创建原始入湖批次。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO raw_ingestion_batches (
-                        company_id, data_source_id, sync_job_id, sync_attempt_id, resource_type,
-                        window_start, window_end, cursor_before, cursor_after,
-                        batch_hash, record_count, status, metadata
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_attempt_id,
-                              resource_type, window_start, window_end, cursor_before,
-                              cursor_after, batch_hash, record_count, status, metadata,
-                              created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        sync_job_id,
-                        sync_attempt_id,
-                        resource_type,
-                        window_start,
-                        window_end,
-                        cursor_before,
-                        cursor_after,
-                        batch_hash,
-                        record_count,
-                        status,
-                        psycopg2.extras.Json(metadata or {}),
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"创建 raw_ingestion_batches 失败 (source_id={data_source_id}, job_id={sync_job_id}): {e}")
-        return None
-
-
-def insert_raw_ingestion_records(
-    *,
-    company_id: str,
-    data_source_id: str,
-    raw_batch_id: str,
-    records: list[dict[str, Any]],
-) -> int:
-    """批量写入原始记录；同一 batch 内按 record_hash 去重。"""
-    if not records:
-        return 0
-    conn_manager = get_conn()
-    try:
-        values: list[tuple[Any, ...]] = []
-        for item in records:
-            values.append(
-                (
-                    company_id,
-                    data_source_id,
-                    raw_batch_id,
-                    str(item.get("source_record_key") or ""),
-                    str(item.get("business_key") or ""),
-                    str(item.get("record_hash") or ""),
-                    psycopg2.extras.Json(item.get("payload") or {}),
-                    item.get("source_event_at"),
-                    bool(item.get("is_deleted") or False),
-                )
-            )
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO raw_ingestion_records (
-                        company_id, data_source_id, raw_batch_id,
-                        source_record_key, business_key, record_hash,
-                        payload, source_event_at, is_deleted
-                    ) VALUES %s
-                    ON CONFLICT (raw_batch_id, record_hash) DO NOTHING
-                    """,
-                    values,
-                    page_size=200,
-                )
-                inserted = cur.rowcount
-                conn.commit()
-                return inserted if inserted is not None and inserted >= 0 else 0
-    except Exception as e:
-        logger.error(f"写入 raw_ingestion_records 失败 (batch_id={raw_batch_id}): {e}")
-        return 0
-
-
-def create_dataset_snapshot(
-    *,
-    company_id: str,
-    data_source_id: str,
-    sync_job_id: str,
-    sync_attempt_id: str,
-    dataset_code: str,
-    resource_type: str = "default",
-    snapshot_stage: str = "candidate",
-    validation_status: str = "pending",
-    record_count: int = 0,
-    checksum: str = "",
-    previous_snapshot_id: str | None = None,
-    window_start: str | None = None,
-    window_end: str | None = None,
-    snapshot_metadata: dict[str, Any] | None = None,
-) -> dict | None:
-    """创建数据集快照，默认先生成 candidate。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO dataset_snapshots (
-                        company_id, data_source_id, sync_job_id, sync_attempt_id,
-                        dataset_code, resource_type, snapshot_stage, is_active,
-                        validation_status, record_count, checksum, previous_snapshot_id,
-                        window_start, window_end, snapshot_metadata
-                    ) VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s, %s, false,
-                        %s, %s, %s, %s,
-                        %s, %s, %s::jsonb
-                    )
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_attempt_id,
-                              dataset_code, resource_type, snapshot_stage, is_active,
-                              validation_status, record_count, checksum, previous_snapshot_id,
-                              superseded_by_snapshot_id, window_start, window_end,
-                              snapshot_metadata, published_at, created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        sync_job_id,
-                        sync_attempt_id,
-                        dataset_code,
-                        resource_type,
-                        snapshot_stage,
-                        validation_status,
-                        record_count,
-                        checksum,
-                        previous_snapshot_id,
-                        window_start,
-                        window_end,
-                        psycopg2.extras.Json(snapshot_metadata or {}),
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"创建 dataset_snapshots 失败 (source_id={data_source_id}, dataset={dataset_code}): {e}")
-        return None
-
-
-def publish_dataset_snapshot(
-    *,
-    snapshot_id: str,
-    company_id: str,
-) -> dict | None:
-    """发布快照：先退役当前 active published，再将新 snapshot 标记为 active published。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, data_source_id, dataset_code, resource_type
-                    FROM dataset_snapshots
-                    WHERE id = %s AND company_id = %s
-                    LIMIT 1
-                    """,
-                    (snapshot_id, company_id),
-                )
-                target = cur.fetchone()
-                if not target:
-                    conn.rollback()
-                    return None
-
-                cur.execute(
-                    """
-                    UPDATE dataset_snapshots
-                    SET is_active = false,
-                        snapshot_stage = 'superseded',
-                        superseded_by_snapshot_id = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE company_id = %s
-                      AND data_source_id = %s
-                      AND dataset_code = %s
-                      AND resource_type = %s
-                      AND is_active = true
-                      AND id <> %s
-                    """,
-                    (
-                        snapshot_id,
-                        company_id,
-                        target["data_source_id"],
-                        target["dataset_code"],
-                        target["resource_type"],
-                        snapshot_id,
-                    ),
-                )
-
-                cur.execute(
-                    """
-                    UPDATE dataset_snapshots
-                    SET snapshot_stage = 'published',
-                        is_active = true,
-                        validation_status = CASE
-                            WHEN validation_status = 'pending' THEN 'passed'
-                            ELSE validation_status
-                        END,
-                        published_at = CURRENT_TIMESTAMP,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_attempt_id,
-                              dataset_code, resource_type, snapshot_stage, is_active,
-                              validation_status, record_count, checksum, previous_snapshot_id,
-                              superseded_by_snapshot_id, window_start, window_end,
-                              snapshot_metadata, published_at, created_at, updated_at
-                    """,
-                    (snapshot_id,),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"发布 dataset_snapshots 失败 (id={snapshot_id}, company_id={company_id}): {e}")
-        return None
-
-
-def get_published_dataset_snapshot(
-    *,
-    company_id: str,
-    data_source_id: str,
-    dataset_code: str,
-    resource_type: str = "default",
-) -> dict | None:
-    """获取当前已发布的健康快照。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, sync_job_id, sync_attempt_id,
-                           dataset_code, resource_type, snapshot_stage, is_active,
-                           validation_status, record_count, checksum, previous_snapshot_id,
-                           superseded_by_snapshot_id, window_start, window_end,
-                           snapshot_metadata, published_at, created_at, updated_at
-                    FROM dataset_snapshots
-                    WHERE company_id = %s
-                      AND data_source_id = %s
-                      AND dataset_code = %s
-                      AND resource_type = %s
-                      AND is_active = true
-                      AND snapshot_stage = 'published'
-                    LIMIT 1
-                    """,
-                    (company_id, data_source_id, dataset_code, resource_type),
-                )
-                row = cur.fetchone()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"查询 published dataset_snapshots 失败 (source_id={data_source_id}, dataset={dataset_code}): {e}")
-        return None
-
-
-def list_dataset_snapshots(
-    *,
-    company_id: str,
-    data_source_id: str,
-    dataset_code: str | None = None,
-    resource_type: str | None = None,
-    limit: int = 50,
-) -> list[dict]:
-    """列出快照。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                sql = """
-                    SELECT id, company_id, data_source_id, sync_job_id, sync_attempt_id,
-                           dataset_code, resource_type, snapshot_stage, is_active,
-                           validation_status, record_count, checksum, previous_snapshot_id,
-                           superseded_by_snapshot_id, window_start, window_end,
-                           snapshot_metadata, published_at, created_at, updated_at
-                    FROM dataset_snapshots
-                    WHERE company_id = %s
-                      AND data_source_id = %s
-                """
-                params: list[Any] = [company_id, data_source_id]
-                if dataset_code:
-                    sql += " AND dataset_code = %s"
-                    params.append(dataset_code)
-                if resource_type:
-                    sql += " AND resource_type = %s"
-                    params.append(resource_type)
-                sql += " ORDER BY created_at DESC LIMIT %s"
-                params.append(limit)
-                cur.execute(sql, tuple(params))
-                return [_normalize_record(dict(row)) for row in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"查询 dataset_snapshots 列表失败 (source_id={data_source_id}, dataset={dataset_code}): {e}")
-        return []
-
-
-def insert_dataset_snapshot_items(
-    *,
-    company_id: str,
-    snapshot_id: str,
-    items: list[dict[str, Any]],
-) -> int:
-    """批量写入标准化后的快照数据。"""
-    if not items:
-        return 0
-    conn_manager = get_conn()
-    try:
-        values: list[tuple[Any, ...]] = []
-        for item in items:
-            values.append(
-                (
-                    company_id,
-                    snapshot_id,
-                    str(item.get("source_record_key") or ""),
-                    str(item.get("business_key") or ""),
-                    str(item.get("item_hash") or ""),
-                    psycopg2.extras.Json(item.get("record_data") or {}),
-                )
-            )
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO dataset_snapshot_items (
-                        company_id, snapshot_id, source_record_key, business_key, item_hash, record_data
-                    ) VALUES %s
-                    ON CONFLICT (snapshot_id, item_hash) DO NOTHING
-                    """,
-                    values,
-                    page_size=200,
-                )
-                inserted = cur.rowcount
-                conn.commit()
-                return inserted if inserted is not None and inserted >= 0 else 0
-    except Exception as e:
-        logger.error(f"写入 dataset_snapshot_items 失败 (snapshot_id={snapshot_id}): {e}")
-        return 0
-
 
 def upsert_dataset_binding(
     *,
@@ -3298,7 +2907,7 @@ def create_data_source_event(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 通用数据连接模型（data_sources / sync_jobs / dataset_snapshots）
+# 通用数据连接模型（data_sources / sync_jobs / data_source_datasets）
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -4558,7 +4167,12 @@ def create_unified_sync_job(
     request_payload: dict | None = None,
     checkpoint_before: dict | None = None,
 ) -> dict | None:
-    """创建同步任务；同数据源下幂等键冲突时复用原任务。"""
+    """创建同步任务。
+
+    采集任务的幂等在 dataset_collection_records 数据层处理；任务层每次触发都应保留
+    一条独立审计记录，避免手动采集/重新对账复用旧任务导致状态不可追踪。
+    """
+    stored_idempotency_key = str(idempotency_key or "").strip() or None
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -4572,9 +4186,6 @@ def create_unified_sync_job(
                         %s, %s, %s, %s, %s,
                         %s, %s, %s::jsonb, %s::jsonb
                     )
-                    ON CONFLICT (company_id, data_source_id, idempotency_key)
-                    WHERE idempotency_key IS NOT NULL
-                    DO UPDATE SET updated_at = CURRENT_TIMESTAMP
                     RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
                               window_start, window_end, idempotency_key, job_status,
                               request_payload, checkpoint_before, checkpoint_after,
@@ -4586,7 +4197,7 @@ def create_unified_sync_job(
                         data_source_id,
                         trigger_mode,
                         resource_key,
-                        idempotency_key,
+                        stored_idempotency_key,
                         window_start,
                         window_end,
                         psycopg2.extras.Json(request_payload or {}),
@@ -4598,7 +4209,7 @@ def create_unified_sync_job(
                 return _normalize_record(dict(row)) if row else None
     except Exception as e:
         logger.error(
-            f"创建 sync_jobs 失败 (company_id={company_id}, data_source_id={data_source_id}, idempotency_key={idempotency_key}): {e}"
+            f"创建 sync_jobs 失败 (company_id={company_id}, data_source_id={data_source_id}, idempotency_key={stored_idempotency_key}): {e}"
         )
         return None
 
@@ -4704,6 +4315,43 @@ def list_unified_sync_jobs(
         return []
 
 
+def get_latest_unified_sync_job_attempts(
+    *,
+    company_id: str,
+    sync_job_ids: list[str],
+) -> dict[str, dict]:
+    """按 sync_job_id 查询最近一次任务尝试，返回 sync_job_id -> attempt 的映射。"""
+    normalized_ids = [str(item).strip() for item in sync_job_ids if str(item).strip()]
+    if not normalized_ids:
+        return {}
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (sync_job_id)
+                           id, company_id, sync_job_id, attempt_no, attempt_status,
+                           started_at, finished_at, error_message, metrics,
+                           checkpoint_before, checkpoint_after, created_at, updated_at
+                    FROM sync_job_attempts
+                    WHERE company_id = %s
+                      AND sync_job_id = ANY(%s::uuid[])
+                    ORDER BY sync_job_id, attempt_no DESC, created_at DESC
+                    """,
+                    (company_id, normalized_ids),
+                )
+                rows = cur.fetchall()
+                attempts = [_normalize_record(dict(row)) for row in rows]
+                return {str(item.get("sync_job_id") or ""): item for item in attempts if item.get("sync_job_id")}
+    except Exception as e:
+        logger.error(
+            f"查询 sync_job_attempts 最近记录失败 (company_id={company_id}, sync_job_ids={normalized_ids}): {e}"
+        )
+        return {}
+
+
 def create_unified_sync_job_attempt(
     *,
     company_id: str,
@@ -4804,8 +4452,6 @@ def update_unified_sync_job_status(
     job_status: str,
     error_message: str = "",
     checkpoint_after: dict | None = None,
-    active_snapshot_id: str | None = None,
-    published_snapshot_id: str | None = None,
     finish_job: bool = False,
 ) -> dict | None:
     """更新同步任务状态。"""
@@ -4822,8 +4468,6 @@ def update_unified_sync_job_status(
                             WHEN %s::jsonb = '{}'::jsonb THEN checkpoint_after
                             ELSE %s::jsonb
                         END,
-                        active_snapshot_id = COALESCE(%s, active_snapshot_id),
-                        published_snapshot_id = COALESCE(%s, published_snapshot_id),
                         completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE completed_at END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
@@ -4838,8 +4482,6 @@ def update_unified_sync_job_status(
                         error_message,
                         psycopg2.extras.Json(checkpoint_after or {}),
                         psycopg2.extras.Json(checkpoint_after or {}),
-                        active_snapshot_id,
-                        published_snapshot_id,
                         finish_job,
                         sync_job_id,
                     ),
@@ -4852,560 +4494,207 @@ def update_unified_sync_job_status(
         return None
 
 
-def upsert_unified_sync_checkpoint(
+
+def upsert_dataset_collection_records(
     *,
     company_id: str,
     data_source_id: str,
-    resource_key: str = "default",
-    checkpoint_value: dict | None = None,
-    updated_by_job_id: str | None = None,
-) -> dict | None:
-    """写入同步 checkpoint。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO sync_checkpoints (
-                        company_id, data_source_id, resource_key, checkpoint_value, checkpoint_version, updated_by_job_id
-                    ) VALUES (
-                        %s, %s, %s, %s::jsonb, 1, %s
-                    )
-                    ON CONFLICT (data_source_id, resource_key)
-                    DO UPDATE SET
-                        checkpoint_value = EXCLUDED.checkpoint_value,
-                        checkpoint_version = sync_checkpoints.checkpoint_version + 1,
-                        updated_by_job_id = EXCLUDED.updated_by_job_id,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING id, company_id, data_source_id, resource_key, checkpoint_value,
-                              checkpoint_version, updated_by_job_id, created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        resource_key,
-                        psycopg2.extras.Json(checkpoint_value or {}),
-                        updated_by_job_id,
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(
-            f"写入 sync_checkpoints 失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}): {e}"
-        )
-        return None
-
-
-def get_unified_sync_checkpoint(*, data_source_id: str, resource_key: str = "default") -> dict | None:
-    """查询同步 checkpoint。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, resource_key, checkpoint_value,
-                           checkpoint_version, updated_by_job_id, created_at, updated_at
-                    FROM sync_checkpoints
-                    WHERE data_source_id = %s
-                      AND resource_key = %s
-                    LIMIT 1
-                    """,
-                    (data_source_id, resource_key),
-                )
-                row = cur.fetchone()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"查询 sync_checkpoints 失败 (data_source_id={data_source_id}, resource_key={resource_key}): {e}")
-        return None
-
-
-def create_unified_raw_ingestion_batch(
-    *,
-    company_id: str,
-    data_source_id: str,
-    sync_job_id: str,
-    sync_job_attempt_id: str | None = None,
-    resource_key: str = "default",
-    meta: dict | None = None,
-) -> dict | None:
-    """创建原始数据批次。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO raw_ingestion_batches (
-                        company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                        resource_key, batch_status, meta
-                    ) VALUES (
-                        %s, %s, %s, %s,
-                        %s, 'staging', %s::jsonb
-                    )
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                              resource_key, batch_status, record_count, data_hash, meta,
-                              created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        sync_job_id,
-                        sync_job_attempt_id,
-                        resource_key,
-                        psycopg2.extras.Json(meta or {}),
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(
-            f"创建 raw_ingestion_batches 失败 (data_source_id={data_source_id}, sync_job_id={sync_job_id}): {e}"
-        )
-        return None
-
-
-def append_unified_raw_ingestion_records(
-    *,
-    company_id: str,
-    data_source_id: str,
-    batch_id: str,
-    records: list[dict],
-) -> int:
-    """向原始层追加记录（append-only）。"""
-    if not records:
-        return 0
-
-    conn_manager = get_conn()
-    inserted = 0
-    try:
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                for record in records:
-                    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-                    cur.execute(
-                        """
-                        INSERT INTO raw_ingestion_records (
-                            company_id, data_source_id, batch_id,
-                            source_record_key, source_event_time, payload, payload_hash
-                        ) VALUES (
-                            %s, %s, %s,
-                            %s, %s, %s::jsonb, %s
-                        )
-                        """,
-                        (
-                            company_id,
-                            data_source_id,
-                            batch_id,
-                            str(record.get("source_record_key") or ""),
-                            record.get("source_event_time"),
-                            psycopg2.extras.Json(payload),
-                            str(record.get("payload_hash") or ""),
-                        ),
-                    )
-                    inserted += 1
-
-                cur.execute(
-                    """
-                    UPDATE raw_ingestion_batches
-                    SET record_count = record_count + %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    """,
-                    (inserted, batch_id),
-                )
-            conn.commit()
-            return inserted
-    except Exception as e:
-        logger.error(
-            f"写入 raw_ingestion_records 失败 (data_source_id={data_source_id}, batch_id={batch_id}, records={len(records)}): {e}"
-        )
-        return 0
-
-
-def update_unified_raw_ingestion_batch_status(
-    *,
-    batch_id: str,
-    batch_status: str,
-    data_hash: str = "",
-    meta: dict | None = None,
-) -> dict | None:
-    """更新原始批次状态。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    UPDATE raw_ingestion_batches
-                    SET batch_status = %s,
-                        data_hash = CASE WHEN %s = '' THEN data_hash ELSE %s END,
-                        meta = CASE
-                            WHEN %s::jsonb = '{}'::jsonb THEN meta
-                            ELSE %s::jsonb
-                        END,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                              resource_key, batch_status, record_count, data_hash, meta,
-                              created_at, updated_at
-                    """,
-                    (
-                        batch_status,
-                        data_hash,
-                        data_hash,
-                        psycopg2.extras.Json(meta or {}),
-                        psycopg2.extras.Json(meta or {}),
-                        batch_id,
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"更新 raw_ingestion_batches 状态失败 (batch_id={batch_id}, status={batch_status}): {e}")
-        return None
-
-
-def create_unified_dataset_snapshot(
-    *,
-    company_id: str,
-    data_source_id: str,
-    resource_key: str = "default",
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    biz_date: str,
     sync_job_id: str | None = None,
-    sync_job_attempt_id: str | None = None,
-    snapshot_name: str = "",
-    snapshot_status: str = "candidate",
-    record_count: int = 0,
-    data_hash: str = "",
-    schema_hash: str = "",
-    window_start: str | None = None,
-    window_end: str | None = None,
-    meta: dict | None = None,
-) -> dict | None:
-    """创建数据快照（默认 candidate）。"""
+    records: list[dict] | None = None,
+) -> dict:
+    """按数据集业务主键 upsert 采集明细记录。"""
+    items = records or []
+    if not items:
+        return {"input_count": 0, "upserted_count": 0, "inserted_count": 0, "updated_count": 0, "unchanged_count": 0}
+
     conn_manager = get_conn()
+    input_count = len(items)
+    inserted_count = 0
+    updated_count = 0
+    unchanged_count = 0
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO dataset_snapshots (
-                        company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                        resource_key, snapshot_name, snapshot_version, snapshot_status,
-                        is_published, record_count, data_hash, schema_hash,
-                        window_start, window_end, meta
-                    ) VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s,
-                        COALESCE((
-                            SELECT MAX(snapshot_version) + 1
-                            FROM dataset_snapshots
-                            WHERE data_source_id = %s
-                              AND resource_key = %s
-                        ), 1),
-                        %s, false, %s, %s, %s,
-                        %s, %s, %s::jsonb
-                    )
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                              resource_key, snapshot_name, snapshot_version, snapshot_status,
-                              is_published, published_at, published_by_job_id,
-                              record_count, data_hash, schema_hash, window_start, window_end,
-                              meta, created_at, updated_at
-                    """,
-                    (
-                        company_id,
-                        data_source_id,
-                        sync_job_id,
-                        sync_job_attempt_id,
-                        resource_key,
-                        snapshot_name,
-                        data_source_id,
-                        resource_key,
-                        snapshot_status,
-                        record_count,
-                        data_hash,
-                        schema_hash,
-                        window_start,
-                        window_end,
-                        psycopg2.extras.Json(meta or {}),
-                    ),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(
-            f"创建 dataset_snapshots 失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}): {e}"
-        )
-        return None
-
-
-def append_unified_dataset_snapshot_items(
-    *,
-    company_id: str,
-    data_source_id: str,
-    snapshot_id: str,
-    items: list[dict],
-) -> int:
-    """向快照追加数据项。"""
-    if not items:
-        return 0
-    conn_manager = get_conn()
-    inserted = 0
-    try:
-        with conn_manager as conn:
-            with conn.cursor() as cur:
                 for item in items:
-                    payload = _json_safe_payload(item.get("item_payload")) if isinstance(item.get("item_payload"), dict) else {}
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                    key_values = item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {}
                     cur.execute(
                         """
-                        INSERT INTO dataset_snapshot_items (
-                            company_id, data_source_id, snapshot_id,
-                            item_key, item_payload, item_hash
+                        INSERT INTO dataset_collection_records (
+                            company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                            biz_date, item_key, item_key_values, item_hash, payload, record_status,
+                            first_seen_job_id, latest_seen_job_id
                         ) VALUES (
-                            %s, %s, %s,
-                            %s, %s::jsonb, %s
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s::jsonb, %s, %s::jsonb, 'active',
+                            %s, %s
                         )
-                        ON CONFLICT (snapshot_id, item_hash, item_key)
-                        DO NOTHING
+                        ON CONFLICT (company_id, dataset_id, biz_date, item_key)
+                        DO UPDATE SET
+                            data_source_id = EXCLUDED.data_source_id,
+                            dataset_code = EXCLUDED.dataset_code,
+                            resource_key = EXCLUDED.resource_key,
+                            item_key_values = EXCLUDED.item_key_values,
+                            item_hash = EXCLUDED.item_hash,
+                            payload = EXCLUDED.payload,
+                            record_status = CASE
+                                WHEN dataset_collection_records.item_hash = EXCLUDED.item_hash THEN 'unchanged'
+                                ELSE 'updated'
+                            END,
+                            latest_seen_job_id = EXCLUDED.latest_seen_job_id,
+                            latest_seen_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING (xmax = 0) AS inserted, record_status
                         """,
                         (
                             company_id,
                             data_source_id,
-                            snapshot_id,
+                            dataset_id,
+                            dataset_code,
+                            resource_key or "default",
+                            biz_date,
                             str(item.get("item_key") or ""),
-                            psycopg2.extras.Json(payload),
+                            psycopg2.extras.Json(_json_safe_payload(key_values)),
                             str(item.get("item_hash") or ""),
+                            psycopg2.extras.Json(_json_safe_payload(payload)),
+                            sync_job_id,
+                            sync_job_id,
                         ),
                     )
-                    inserted += 1 if cur.rowcount > 0 else 0
-
-                cur.execute(
-                    """
-                    UPDATE dataset_snapshots
-                    SET record_count = record_count + %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    """,
-                    (inserted, snapshot_id),
-                )
+                    row = cur.fetchone()
+                    if row and bool(row.get("inserted")):
+                        inserted_count += 1
+                    elif row and str(row.get("record_status") or "") == "unchanged":
+                        unchanged_count += 1
+                    else:
+                        updated_count += 1
             conn.commit()
-            return inserted
+            return {
+                "input_count": input_count,
+                "upserted_count": inserted_count + updated_count + unchanged_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+                "unchanged_count": unchanged_count,
+            }
     except Exception as e:
         logger.error(
-            f"写入 dataset_snapshot_items 失败 (data_source_id={data_source_id}, snapshot_id={snapshot_id}, items={len(items)}): {e}"
+            f"写入 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}, records={input_count}): {e}"
         )
-        return 0
+        raise
 
 
-def mark_unified_dataset_snapshot_published(
-    *,
-    snapshot_id: str,
-    published_by_job_id: str | None = None,
-) -> dict | None:
-    """发布快照：同资源下旧 published 标记为 superseded，新快照标记为 published。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, data_source_id, resource_key
-                    FROM dataset_snapshots
-                    WHERE id = %s
-                    LIMIT 1
-                    """,
-                    (snapshot_id,),
-                )
-                target = cur.fetchone()
-                if not target:
-                    return None
-
-                data_source_id = target["data_source_id"]
-                resource_key = target["resource_key"]
-
-                cur.execute(
-                    """
-                    UPDATE dataset_snapshots
-                    SET is_published = false,
-                        snapshot_status = CASE
-                            WHEN snapshot_status = 'published' THEN 'superseded'
-                            ELSE snapshot_status
-                        END,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE data_source_id = %s
-                      AND resource_key = %s
-                      AND id <> %s
-                      AND is_published = true
-                    """,
-                    (data_source_id, resource_key, snapshot_id),
-                )
-
-                cur.execute(
-                    """
-                    UPDATE dataset_snapshots
-                    SET is_published = true,
-                        snapshot_status = 'published',
-                        published_at = CURRENT_TIMESTAMP,
-                        published_by_job_id = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    RETURNING id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                              resource_key, snapshot_name, snapshot_version, snapshot_status,
-                              is_published, published_at, published_by_job_id,
-                              record_count, data_hash, schema_hash, window_start, window_end,
-                              meta, created_at, updated_at
-                    """,
-                    (published_by_job_id, snapshot_id),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"发布 dataset_snapshots 失败 (snapshot_id={snapshot_id}): {e}")
-        return None
-
-
-def get_unified_published_dataset_snapshot(
-    *,
-    data_source_id: str,
-    resource_key: str = "default",
-) -> dict | None:
-    """查询已发布快照。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                           resource_key, snapshot_name, snapshot_version, snapshot_status,
-                           is_published, published_at, published_by_job_id,
-                           record_count, data_hash, schema_hash, window_start, window_end,
-                           meta, created_at, updated_at
-                    FROM dataset_snapshots
-                    WHERE data_source_id = %s
-                      AND resource_key = %s
-                      AND is_published = true
-                    ORDER BY published_at DESC NULLS LAST, updated_at DESC
-                    LIMIT 1
-                    """,
-                    (data_source_id, resource_key),
-                )
-                row = cur.fetchone()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(
-            f"查询已发布 dataset_snapshots 失败 (data_source_id={data_source_id}, resource_key={resource_key}): {e}"
-        )
-        return None
-
-
-def get_unified_dataset_snapshot_by_id(*, snapshot_id: str) -> dict | None:
-    """按 snapshot_id 查询快照。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                           resource_key, snapshot_name, snapshot_version, snapshot_status,
-                           is_published, published_at, published_by_job_id,
-                           record_count, data_hash, schema_hash, window_start, window_end,
-                           meta, created_at, updated_at
-                    FROM dataset_snapshots
-                    WHERE id = %s
-                    LIMIT 1
-                    """,
-                    (snapshot_id,),
-                )
-                row = cur.fetchone()
-                return _normalize_record(dict(row)) if row else None
-    except Exception as e:
-        logger.error(f"查询 dataset_snapshots 失败 (id={snapshot_id}): {e}")
-        return None
-
-
-def list_unified_dataset_snapshot_items(
-    *,
-    snapshot_id: str,
-    limit: int | None = None,
-    offset: int = 0,
-) -> list[dict]:
-    """按 snapshot_id 查询快照行。"""
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                sql = """
-                    SELECT id, snapshot_id, data_source_id, item_key, item_payload, item_hash, created_at
-                    FROM dataset_snapshot_items
-                    WHERE snapshot_id = %s
-                    ORDER BY id ASC
-                """
-                params: list[Any] = [snapshot_id]
-                if offset > 0:
-                    sql += " OFFSET %s"
-                    params.append(offset)
-                if limit is not None and limit > 0:
-                    sql += " LIMIT %s"
-                    params.append(limit)
-                cur.execute(sql, tuple(params))
-                rows = cur.fetchall()
-                return [_normalize_record(dict(row)) for row in rows]
-    except Exception as e:
-        logger.error(f"查询 dataset_snapshot_items 失败 (snapshot_id={snapshot_id}, limit={limit}, offset={offset}): {e}")
-        return []
-
-
-def list_unified_dataset_snapshots(
+def list_dataset_collection_records(
     *,
     company_id: str,
     data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
     resource_key: str | None = None,
-    snapshot_status: str | None = None,
-    limit: int = 100,
+    biz_date: str | None = None,
+    item_key: str | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
 ) -> list[dict]:
-    """查询快照列表。"""
+    """查询数据资产层采集记录。limit=None 表示不限条数，返回全量。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 sql = """
-                    SELECT id, company_id, data_source_id, sync_job_id, sync_job_attempt_id,
-                           resource_key, snapshot_name, snapshot_version, snapshot_status,
-                           is_published, published_at, published_by_job_id,
-                           record_count, data_hash, schema_hash, window_start, window_end,
-                           meta, created_at, updated_at
-                    FROM dataset_snapshots
+                    SELECT id, company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                           biz_date, item_key, item_key_values, item_hash, payload, record_status,
+                           first_seen_job_id, latest_seen_job_id, first_seen_at, latest_seen_at,
+                           created_at, updated_at
+                    FROM dataset_collection_records
                     WHERE company_id = %s
                 """
                 params: list[Any] = [company_id]
                 if data_source_id:
                     sql += " AND data_source_id = %s"
                     params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
                 if resource_key:
                     sql += " AND resource_key = %s"
                     params.append(resource_key)
-                if snapshot_status:
-                    sql += " AND snapshot_status = %s"
-                    params.append(snapshot_status)
-                sql += " ORDER BY created_at DESC LIMIT %s"
-                params.append(limit)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                if item_key:
+                    sql += " AND item_key = %s"
+                    params.append(item_key)
+                sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
                 return [_normalize_record(dict(row)) for row in rows]
     except Exception as e:
         logger.error(
-            f"查询 dataset_snapshots 列表失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}, snapshot_status={snapshot_status}): {e}"
+            f"查询 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
         )
         return []
+
+
+def get_dataset_collection_record_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计数据资产层采集记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(*) FILTER (WHERE record_status = 'active')::bigint AS active_count,
+                           COUNT(*) FILTER (WHERE record_status = 'updated')::bigint AS updated_count,
+                           COUNT(*) FILTER (WHERE record_status = 'unchanged')::bigint AS unchanged_count,
+                           COUNT(DISTINCT biz_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM dataset_collection_records
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"统计 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return {}
 
 
 def upsert_unified_dataset_binding(
@@ -7657,3 +6946,136 @@ def update_execution_run_exception(
             f"更新 execution_run_exceptions 失败 (company_id={company_id}, exception_id={exception_id}): {e}"
         )
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# recon_execution_queue  （持久化对账执行队列）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def enqueue_recon_run(
+    *,
+    company_id: str,
+    run_plan_code: str,
+    biz_date: str = "",
+    trigger_mode: str = "schedule",
+    run_context: dict | None = None,
+) -> dict:
+    """把一次对账执行请求写入队列，返回创建的 job 记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO recon_execution_queue
+                        (company_id, run_plan_code, biz_date, trigger_mode, run_context, status)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, 'queued')
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        run_plan_code,
+                        biz_date or "",
+                        trigger_mode or "schedule",
+                        json.dumps(run_context or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row))
+    except Exception as e:
+        logger.error(f"enqueue_recon_run 失败 (run_plan_code={run_plan_code}): {e}")
+        raise
+
+
+def dequeue_recon_run() -> dict | None:
+    """原子地取出并锁定一条 queued job（SKIP LOCKED），置为 running 后返回。
+    无可用任务时返回 None。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'running',
+                        started_at = CURRENT_TIMESTAMP,
+                        attempt = attempt + 1
+                    WHERE id = (
+                        SELECT id FROM recon_execution_queue
+                        WHERE status = 'queued'
+                        ORDER BY created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    RETURNING *
+                    """
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"dequeue_recon_run 失败: {e}")
+        return None
+
+
+def complete_recon_run(job_id: str) -> None:
+    """将 job 标记为 done。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'done', finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (job_id,),
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error(f"complete_recon_run 失败 (job_id={job_id}): {e}")
+
+
+def fail_recon_run(job_id: str, error: str = "") -> None:
+    """将 job 标记为 failed 并记录错误信息。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'failed', finished_at = CURRENT_TIMESTAMP, error = %s
+                    WHERE id = %s
+                    """,
+                    (str(error or "")[:4000], job_id),
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error(f"fail_recon_run 失败 (job_id={job_id}): {e}")
+
+
+def reclaim_stale_recon_runs(timeout_minutes: int = 15) -> int:
+    """把卡在 running 超过 timeout_minutes 的 job 重置回 queued，返回重置数量。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'queued', started_at = NULL
+                    WHERE status = 'running'
+                      AND started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                    """,
+                    (max(1, timeout_minutes),),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"reclaim_stale_recon_runs 失败: {e}")
+        return 0

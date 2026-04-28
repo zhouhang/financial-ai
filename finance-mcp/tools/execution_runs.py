@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import shutil
 import tempfile
@@ -25,13 +26,13 @@ from mcp import Tool
 
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
-from security_utils import UPLOAD_ROOT, resolve_upload_file_path
+from security_utils import resolve_upload_file_path
 from tools.rule_schema import validate_rule_record
 
 
 _ALLOWED_SCHEME_TYPES = {"recon"}
 _ALLOWED_SCHEDULE_TYPES = {"manual_trigger", "daily", "weekly", "monthly", "cron"}
-_ALLOWED_TRIGGER_TYPES = {"chat", "schedule", "api"}
+_ALLOWED_TRIGGER_TYPES = {"chat", "schedule", "api", "manual", "rerun"}
 _ALLOWED_ENTRY_MODES = {"file", "dataset"}
 _ALLOWED_EXECUTION_STATUS = {"running", "success", "failed"}
 _ALLOWED_BINDING_SCOPES = {"execution_scheme", "execution_run_plan", "recon_scheme", "recon_task"}
@@ -41,6 +42,7 @@ _DEFAULT_RECON_OUTPUT_SHEETS = {
     "target_only": "目标文件独有",
     "matched_with_diff": "差异记录",
 }
+logger = logging.getLogger(__name__)
 
 
 def create_tools() -> list[Tool]:
@@ -735,29 +737,37 @@ def _preview_value(value: Any) -> str | int | float | None:
     return str(value)
 
 
-def _rows_to_preview_rows(rows: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
+def _rows_to_preview_rows(rows: list[dict[str, Any]], *, limit: int | None = 3) -> list[dict[str, Any]]:
     preview_rows: list[dict[str, Any]] = []
-    for raw_row in rows[:limit]:
+    selected_rows = rows if limit is None else rows[:limit]
+    for raw_row in selected_rows:
         row = _safe_dict(raw_row)
         preview_rows.append({str(key): _preview_value(value) for key, value in row.items()})
     return preview_rows
 
 
-def _dataframe_to_preview_rows(df: pd.DataFrame, *, limit: int = 3) -> list[dict[str, Any]]:
-    records = df.head(limit).to_dict(orient="records")
-    return _rows_to_preview_rows([_safe_dict(item) for item in records])
+def _dataframe_to_preview_rows(df: pd.DataFrame, *, limit: int | None = 3) -> list[dict[str, Any]]:
+    selected_df = df if limit is None else df.head(limit)
+    records = selected_df.to_dict(orient="records")
+    return _rows_to_preview_rows([_safe_dict(item) for item in records], limit=None)
 
 
-def _safe_trial_filename(name: str, index: int) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "_", _as_text(name)) or f"sample_{index}"
-    return f"{index:02d}_{normalized}.xlsx"
-
-
-def _write_trial_dataset_file(base_dir: Path, table_name: str, rows: list[dict[str, Any]], index: int) -> Path:
-    base_dir.mkdir(parents=True, exist_ok=True)
-    output_path = base_dir / _safe_trial_filename(table_name, index)
-    pd.DataFrame(rows).to_excel(output_path, index=False)
-    return output_path
+def _rows_to_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    normalized_rows: list[dict[str, Any]] = []
+    column_order: list[str] = []
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        normalized_row: dict[str, Any] = {}
+        for key, value in raw_row.items():
+            column_name = str(key)
+            normalized_row[column_name] = value
+            if column_name not in column_order:
+                column_order.append(column_name)
+        normalized_rows.append(normalized_row)
+    if not normalized_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(normalized_rows).reindex(columns=column_order)
 
 
 def _read_preview_dataframe(file_path: str) -> pd.DataFrame:
@@ -806,12 +816,86 @@ def _format_trial_errors(errors: list[Any]) -> list[dict[str, Any]]:
     return formatted
 
 
+def _extract_dataset_semantic_profile(item: dict[str, Any]) -> dict[str, Any]:
+    direct_profile = _safe_dict(item.get("semantic_profile"))
+    if direct_profile:
+        return direct_profile
+    for container_key in ("meta", "metadata", "dataset_meta"):
+        container = _safe_dict(item.get(container_key))
+        profile = _safe_dict(container.get("semantic_profile"))
+        if profile:
+            return profile
+    return {}
+
+
+def _normalize_label_map(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_name, display_name in raw.items():
+        key = _as_text(raw_name).strip()
+        if not key:
+            continue
+        display = _as_text(display_name).strip() or key
+        normalized[key] = display
+    return normalized
+
+
+def _build_dataset_field_label_map(item: dict[str, Any]) -> dict[str, str]:
+    profile = _extract_dataset_semantic_profile(item)
+    field_label_map: dict[str, str] = {}
+    field_label_map.update(_normalize_label_map(profile.get("field_label_map")))
+    field_label_map.update(_normalize_label_map(item.get("field_label_map")))
+
+    candidate_fields: list[dict[str, Any]] = []
+    for key in ("fields", "semantic_fields"):
+        candidate_fields.extend(
+            field
+            for field in _safe_list(item.get(key))
+            if isinstance(field, dict)
+        )
+    candidate_fields.extend(
+        field
+        for field in _safe_list(profile.get("fields"))
+        if isinstance(field, dict)
+    )
+    for field in candidate_fields:
+        raw_name = _as_text(
+            field.get("raw_name")
+            or field.get("field_name")
+            or field.get("name")
+            or field.get("key")
+        ).strip()
+        if not raw_name:
+            continue
+        display_name = _as_text(
+            field.get("display_name")
+            or field.get("display_name_zh")
+            or field.get("label")
+            or field_label_map.get(raw_name)
+        ).strip()
+        if display_name:
+            field_label_map[raw_name] = display_name
+        else:
+            field_label_map.setdefault(raw_name, raw_name)
+
+    for row in _safe_list(item.get("sample_rows"))[:3]:
+        if not isinstance(row, dict):
+            continue
+        for key in row.keys():
+            raw_name = _as_text(key).strip()
+            if raw_name:
+                field_label_map.setdefault(raw_name, raw_name)
+    return field_label_map
+
+
 def _build_proc_trial_inputs(
     *,
     uploaded_files: list[dict[str, Any]],
     sample_datasets: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], str | None]:
+) -> tuple[list[dict[str, Any]], dict[str, pd.DataFrame], list[dict[str, Any]], list[str], str | None]:
     validated_files: list[dict[str, Any]] = []
+    preloaded_frames: dict[str, pd.DataFrame] = {}
     source_samples: list[dict[str, Any]] = []
     warnings: list[str] = []
     temp_input_dir: str | None = None
@@ -847,8 +931,6 @@ def _build_proc_trial_inputs(
 
     dataset_rows = [item for item in sample_datasets if isinstance(item, dict)]
     if dataset_rows:
-        temp_input_dir = tempfile.mkdtemp(prefix="proc_trial_", dir=str(UPLOAD_ROOT))
-        input_dir = Path(temp_input_dir)
         for index, item in enumerate(dataset_rows, start=1):
             table_name = _as_text(
                 item.get("table_name")
@@ -868,28 +950,33 @@ def _build_proc_trial_inputs(
             if not sample_rows:
                 warnings.append(f"{table_name} 未提供 sample_rows，已跳过。")
                 continue
-            sample_file_path = _write_trial_dataset_file(input_dir, table_name, sample_rows, index)
+            if table_name in preloaded_frames:
+                warnings.append(f"{table_name} 提供了多份样例数据，已使用最后一份。")
+            preloaded_frames[table_name] = _rows_to_dataframe(sample_rows)
             snapshot_id = _as_text(item.get("snapshot_id"))
-            validated_files.append(
-                {
-                    "file_name": sample_file_path.name,
-                    "file_path": str(sample_file_path),
-                    "table_name": table_name,
-                }
+            field_label_map = _build_dataset_field_label_map(item)
+            display_name = _as_text(
+                item.get("business_name")
+                or item.get("display_name")
+                or item.get("dataset_name")
+                or table_name
             )
             source_samples.append(
                 {
                     "side": _infer_preview_side(item.get("side") or table_name),
                     "table_name": table_name,
-                    "display_name": _as_text(item.get("display_name") or item.get("dataset_name") or table_name),
+                    "display_name": display_name,
                     "source_id": _as_text(item.get("source_id") or item.get("source_key") or table_name),
                     "sample_origin": _resolve_sample_origin(item.get("sample_origin"), fallback="sample_rows"),
                     **({"snapshot_id": snapshot_id} if snapshot_id else {}),
-                    "rows": _rows_to_preview_rows(sample_rows),
+                    "field_label_map": field_label_map,
+                    "columns_label_map": field_label_map,
+                    "column_display_map": field_label_map,
+                    "rows": _rows_to_preview_rows(sample_rows, limit=None),
                 }
             )
 
-    return validated_files, source_samples, warnings, temp_input_dir
+    return validated_files, preloaded_frames, source_samples, warnings, temp_input_dir
 
 
 def _extract_schema_field_names(item: dict[str, Any]) -> list[str]:
@@ -1102,8 +1189,9 @@ def _build_recon_trial_inputs(
     *,
     validated_inputs: list[dict[str, Any]],
     sample_datasets: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], str | None]:
+) -> tuple[list[dict[str, Any]], dict[str, pd.DataFrame], list[dict[str, Any]], list[str], str | None]:
     normalized_inputs: list[dict[str, Any]] = []
+    preloaded_frames: dict[str, pd.DataFrame] = {}
     source_samples: list[dict[str, Any]] = []
     warnings: list[str] = []
     temp_input_dir: str | None = None
@@ -1159,22 +1247,46 @@ def _build_recon_trial_inputs(
             }
         )
 
-    dataset_inputs, dataset_samples, dataset_warnings, temp_input_dir = _build_proc_trial_inputs(
+    _, dataset_frames, dataset_samples, dataset_warnings, temp_input_dir = _build_proc_trial_inputs(
         uploaded_files=[],
         sample_datasets=sample_datasets,
     )
     warnings.extend(dataset_warnings)
     source_samples.extend(dataset_samples)
-    for item in dataset_inputs:
+    for item in dataset_samples:
+        table_name = _as_text(item.get("table_name"))
+        if not table_name:
+            continue
         normalized_inputs.append(
             {
-                "table_name": _as_text(item.get("table_name")),
-                "input_type": "file",
-                "file_path": _as_text(item.get("file_path")),
+                "table_name": table_name,
+                "input_type": "inline",
+                "display_name": _as_text(item.get("display_name") or table_name),
             }
         )
+    preloaded_frames.update(dataset_frames)
 
-    return normalized_inputs, source_samples, warnings, temp_input_dir
+    return normalized_inputs, preloaded_frames, source_samples, warnings, temp_input_dir
+
+
+def _resolve_recon_trial_input_to_df(
+    input_item: dict[str, Any],
+    *,
+    rule_id: str,
+    table_name: str,
+    preloaded_frames: dict[str, pd.DataFrame],
+) -> tuple[pd.DataFrame, str]:
+    input_type = _as_text(input_item.get("input_type")).lower()
+    resolved_table_name = _as_text(input_item.get("table_name")) or table_name
+    if input_type == "inline":
+        frame = preloaded_frames.get(resolved_table_name)
+        if frame is None:
+            raise ValueError(f"[{rule_id}] 内存样例缺少表 {resolved_table_name}")
+        return frame.copy(), _as_text(input_item.get("display_name") or resolved_table_name)
+
+    from recon.mcp_server import recon_tool
+
+    return recon_tool._resolve_input_to_df(input_item, rule_id, table_name)  # noqa: SLF001
 
 
 def _pick_plan_id(arguments: dict[str, Any]) -> str:
@@ -1236,7 +1348,7 @@ def _normalize_dataset_binding_item(
             "query": query,
         }
     mapping_config = _safe_dict(item.get("mapping_config"))
-    for key in ("table_name", "dataset_code", "dataset_source_type", "side"):
+    for key in ("table_name", "dataset_code", "dataset_source_type", "side", "source_kind", "provider_code"):
         value = item.get(key)
         if value is None:
             continue
@@ -1406,7 +1518,7 @@ def _extract_run_plan_dataset_bindings(
             "query": _safe_dict(item.get("query")),
             "table_name": _as_text(item.get("table_name") or resource_key),
             "dataset_code": _as_text(item.get("dataset_code") or resource_key),
-            "dataset_source_type": _as_text(item.get("dataset_source_type") or "snapshot"),
+            "dataset_source_type": _as_text(item.get("dataset_source_type") or "collection_records"),
         }
         binding = _normalize_dataset_binding_item(
             normalized_item,
@@ -1896,6 +2008,7 @@ def _run_get(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_create(arguments: dict[str, Any]) -> dict[str, Any]:
+    auth_db.ensure_execution_run_trigger_types_schema()
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user.get("company_id") or "")
     scheme_code = _as_text(arguments.get("scheme_code"))
@@ -2151,22 +2264,29 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             "errors": missing_source_bindings,
             "normalized_rule": normalized_rule,
         }
-    expected_targets = {
+    requested_expected_targets = {
+        _as_text(item)
+        for item in _safe_list(arguments.get("expected_targets"))
+        if _as_text(item)
+    }
+    expected_targets = requested_expected_targets or {
         _as_text(_safe_dict(step).get("target_table"))
         for step in _safe_list(normalized_rule.get("steps"))
         if _as_text(_safe_dict(step).get("target_table"))
     }
+    require_both_sides = bool(arguments.get("require_both_sides", True))
     temp_input_dir: str | None = None
     temp_output_dir: str | None = None
     source_samples: list[dict[str, Any]] = []
     input_warnings: list[str] = []
 
     try:
-        validated_files, source_samples, input_warnings, temp_input_dir = _build_proc_trial_inputs(
+        validated_files, preloaded_frames, source_samples, input_warnings, temp_input_dir = _build_proc_trial_inputs(
             uploaded_files=uploaded_file_dicts,
             sample_datasets=sample_datasets,
         )
-        if not validated_files:
+        valid_input_tables = len(validated_files) + len(preloaded_frames)
+        if valid_input_tables == 0:
             return {
                 "success": False,
                 "trial_status": "input_missing",
@@ -2183,7 +2303,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                     "uploaded_files_total": len(uploaded_files),
                     "uploaded_files_valid": len(uploaded_file_dicts),
                     "sample_datasets_total": len(sample_datasets),
-                    "sample_datasets_valid": 0,
+                    "sample_datasets_valid": len(preloaded_frames),
                     "step_nodes": len(_safe_list(normalized_rule.get("steps"))),
                 },
                 "normalized_rule": normalized_rule,
@@ -2197,6 +2317,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             rule_data=normalized_rule,
             validated_files=validated_files,
             output_dir=temp_output_dir,
+            preloaded_frames=preloaded_frames,
         )
 
         output_samples: list[dict[str, Any]] = []
@@ -2209,7 +2330,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             preview_rows: list[dict[str, Any]] = []
             if output_file:
                 try:
-                    preview_rows = _dataframe_to_preview_rows(_read_output_dataframe(output_file))
+                    preview_rows = _dataframe_to_preview_rows(_read_output_dataframe(output_file), limit=None)
                 except Exception as exc:  # noqa: BLE001
                     output_warnings.append(f"读取输出 {target_table or output_file} 抽样失败：{exc}")
             output_samples.append(
@@ -2233,15 +2354,34 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             item.get("target_table") == "right_recon_ready" and bool(item.get("rows"))
             for item in output_samples
         )
-        ready_for_confirm = has_left_output and has_right_output and has_left_preview_rows and has_right_preview_rows
+        if require_both_sides:
+            ready_for_confirm = (
+                has_left_output
+                and has_right_output
+                and has_left_preview_rows
+                and has_right_preview_rows
+            )
+        else:
+            ready_for_confirm = bool(expected_targets) and expected_targets.issubset(output_targets)
+            if ready_for_confirm:
+                ready_for_confirm = all(
+                    any(item.get("target_table") == target and bool(item.get("rows")) for item in output_samples)
+                    for target in expected_targets
+                )
         warnings = [*input_warnings, *output_warnings]
         if expected_targets and not expected_targets.issubset(output_targets):
             missing_targets = sorted(expected_targets - output_targets)
             warnings.append(f"试跑未生成预期输出：{', '.join(missing_targets)}")
-        if not has_left_preview_rows or not has_right_preview_rows:
-            warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
-        if not ready_for_confirm:
-            warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
+        if require_both_sides:
+            if not has_left_preview_rows or not has_right_preview_rows:
+                warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
+            if not ready_for_confirm:
+                warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
+        elif expected_targets and not ready_for_confirm:
+            warnings.append(
+                "试跑未生成指定目标表的可展示抽样结果："
+                + ", ".join(sorted(expected_targets))
+            )
 
         return {
             "success": True,
@@ -2270,10 +2410,13 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                 "uploaded_files_total": len(uploaded_files),
                 "uploaded_files_valid": len(uploaded_file_dicts),
                 "sample_datasets_total": len(sample_datasets),
-                "sample_datasets_valid": len([item for item in source_samples if item.get('source_id')]),
+                "sample_datasets_valid": len(preloaded_frames),
+                "input_tables_valid": valid_input_tables,
                 "step_nodes": len(_safe_list(normalized_rule.get("steps"))),
                 "output_tables": len(output_targets),
             },
+            "expected_targets": sorted(expected_targets),
+            "require_both_sides": require_both_sides,
             "normalized_rule": normalized_rule,
             "source_samples": source_samples,
             "output_samples": output_samples,
@@ -2286,7 +2429,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             "ready_for_confirm": False,
             "error": f"proc 试跑执行失败：{exc}",
             "errors": _format_trial_errors([exc]),
-            "warnings": [],
+            "warnings": input_warnings,
             "highlights": [
                 f"上传文件条数: {len(uploaded_file_dicts)}",
                 f"样本数据集条数: {len(sample_datasets)}",
@@ -2298,7 +2441,6 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                 "step_nodes": len(_safe_list(normalized_rule.get("steps"))),
             },
             "normalized_rule": normalized_rule,
-            "warnings": input_warnings,
             "source_samples": source_samples,
         }
     finally:
@@ -2336,7 +2478,7 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
     temp_output_dir: str | None = None
 
     try:
-        normalized_inputs, source_samples, input_warnings, temp_input_dir = _build_recon_trial_inputs(
+        normalized_inputs, preloaded_frames, source_samples, input_warnings, temp_input_dir = _build_recon_trial_inputs(
             validated_inputs=validated_inputs,
             sample_datasets=sample_datasets,
         )
@@ -2405,19 +2547,29 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                 )
                 continue
 
-            df_source, source_ref = recon_tool._resolve_input_to_df(  # noqa: SLF001
+            df_source, source_ref = _resolve_recon_trial_input_to_df(
                 source_input,
-                rule_id,
-                _as_text(source_file_config.get("table_name")) or "源数据",
+                rule_id=rule_id,
+                table_name=_as_text(source_file_config.get("table_name")) or "源数据",
+                preloaded_frames=preloaded_frames,
             )
-            df_target, target_ref = recon_tool._resolve_input_to_df(  # noqa: SLF001
+            df_target, target_ref = _resolve_recon_trial_input_to_df(
                 target_input,
-                rule_id,
-                _as_text(target_file_config.get("table_name")) or "目标数据",
+                rule_id=rule_id,
+                table_name=_as_text(target_file_config.get("table_name")) or "目标数据",
+                preloaded_frames=preloaded_frames,
             )
 
-            source_rows = _dataframe_to_preview_rows(df_source)
-            target_rows = _dataframe_to_preview_rows(df_target)
+            source_rows = _dataframe_to_preview_rows(df_source, limit=None)
+            target_rows = _dataframe_to_preview_rows(df_target, limit=None)
+            logger.info(
+                "[execution_recon_draft_trial] input rule_id=%s source_table=%s source_rows=%d target_table=%s target_rows=%d",
+                rule_id,
+                _as_text(source_file_config.get("table_name")) or source_ref,
+                len(df_source),
+                _as_text(target_file_config.get("table_name")) or target_ref,
+                len(df_target),
+            )
 
             df_source = recon_tool.filter_dataframe_by_rule_config(df_source, source_file_config)
             df_target = recon_tool.filter_dataframe_by_rule_config(df_target, target_file_config)
@@ -2458,6 +2610,16 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             source_only = source_only_df if isinstance(source_only_df, pd.DataFrame) else pd.DataFrame()
             target_only = target_only_df if isinstance(target_only_df, pd.DataFrame) else pd.DataFrame()
             matched_exact = matched_exact_df if isinstance(matched_exact_df, pd.DataFrame) else pd.DataFrame()
+            logger.info(
+                "[execution_recon_draft_trial] result rule_id=%s source_rows=%d target_rows=%d matched_exact=%d matched_with_diff=%d source_only=%d target_only=%d",
+                rule_id,
+                len(df_source),
+                len(df_target),
+                len(matched_exact),
+                len(matched_with_diff),
+                len(source_only),
+                len(target_only),
+            )
             rule_results.append(
                 {
                     "success": True,
@@ -2485,9 +2647,9 @@ def _recon_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                     "rule_name": rule_name,
                     "left_samples": source_rows,
                     "right_samples": target_rows,
-                    "matched_with_diff_samples": _dataframe_to_preview_rows(matched_with_diff),
-                    "source_only_samples": _dataframe_to_preview_rows(source_only),
-                    "target_only_samples": _dataframe_to_preview_rows(target_only),
+                    "matched_with_diff_samples": _dataframe_to_preview_rows(matched_with_diff, limit=None),
+                    "source_only_samples": _dataframe_to_preview_rows(source_only, limit=None),
+                    "target_only_samples": _dataframe_to_preview_rows(target_only, limit=None),
                     "matched_exact_samples": _dataframe_to_preview_rows(matched_exact),
                     "result_summary": {
                         "matched_exact": len(matched_exact),

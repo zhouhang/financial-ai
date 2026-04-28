@@ -19,7 +19,6 @@ from graphs.recon.execution_service import (
 )
 from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from tools.mcp_client import (
-    data_source_export_published_snapshot,
     execute_proc_rule,
     execution_scheme_update,
 )
@@ -118,8 +117,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         ctx["prepare_message"] = "当前运行未提供 dataset 输入，跳过 proc。"
         return {"recon_ctx": ctx}
 
-    uploaded_files: list[dict[str, Any]] = []
-    export_records: list[dict[str, Any]] = []
+    proc_dataset_inputs: list[dict[str, Any]] = []
     for item in dataset_inputs:
         table_name = str(item.get("table_name") or "").strip()
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
@@ -129,56 +127,39 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         resource_key = str(query.get("resource_key") or "").strip()
         if not source_id or not table_name:
             continue
-        export_result = await data_source_export_published_snapshot(
-            auth_token,
-            source_id,
-            table_name=table_name,
-            resource_key=resource_key,
-            query=query,
-        )
-        if not bool(export_result.get("success")):
-            ctx["prepare_status"] = "error"
-            ctx["prepare_message"] = str(export_result.get("error") or f"导出 {table_name} 快照失败")
-            ctx["exec_status"] = "error"
-            ctx["exec_error"] = ctx["prepare_message"]
-            ctx["failed_stage"] = "prepare"
-            return {"recon_ctx": ctx}
-        file_path = str(export_result.get("file_path") or "").strip()
-        if not file_path:
-            ctx["prepare_status"] = "error"
-            ctx["prepare_message"] = f"{table_name} 导出后缺少 file_path"
-            ctx["exec_status"] = "error"
-            ctx["exec_error"] = ctx["prepare_message"]
-            ctx["failed_stage"] = "prepare"
-            return {"recon_ctx": ctx}
-        uploaded_files.append(
-            {
-                "file_name": file_path.split("/")[-1],
-                "file_path": file_path,
-                "table_name": table_name,
-                "table_id": table_name,
-            }
-        )
-        export_records.append(
+        ref_query: dict[str, Any] = {}
+        dataset_id = str(query.get("dataset_id") or dataset_ref.get("dataset_id") or "").strip()
+        if dataset_id:
+            ref_query["dataset_id"] = dataset_id
+        if resource_key:
+            ref_query["resource_key"] = resource_key
+        biz_date = str(query.get("biz_date") or ctx.get("biz_date") or "").strip()
+        if biz_date:
+            ref_query["biz_date"] = biz_date
+        if isinstance(query.get("filters"), dict) and query["filters"]:
+            ref_query["filters"] = query["filters"]
+        proc_dataset_inputs.append(
             {
                 "table_name": table_name,
-                "source_id": source_id,
-                "file_path": file_path,
-                "snapshot_id": str(export_result.get("snapshot_id") or ""),
-                "row_count": export_result.get("row_count"),
+                "dataset_ref": {
+                    "source_type": "collection_records",
+                    "source_key": source_id,
+                    "query": ref_query,
+                },
             }
         )
 
-    if not uploaded_files:
+    if not proc_dataset_inputs:
         ctx["prepare_status"] = "error"
-        ctx["prepare_message"] = "未导出到可供 proc 使用的输入文件"
+        ctx["prepare_message"] = "未找到可供 proc 使用的 dataset 输入"
         ctx["exec_status"] = "error"
         ctx["exec_error"] = ctx["prepare_message"]
         ctx["failed_stage"] = "prepare"
         return {"recon_ctx": ctx}
 
     proc_result = await execute_proc_rule(
-        uploaded_files=uploaded_files,
+        uploaded_files=[],
+        dataset_inputs=proc_dataset_inputs,
         rule_code=proc_rule_code,
         auth_token=auth_token,
     )
@@ -224,7 +205,6 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
     ctx["proc_result"] = proc_result
     ctx["prepare_status"] = "success"
     ctx["prepare_message"] = f"已生成 {len(proc_recon_inputs)} 个整理结果，供后续对账使用。"
-    ctx["proc_export_records"] = export_records
     return {"recon_ctx": ctx}
 
 

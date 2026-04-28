@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -23,8 +24,9 @@ from tools.mcp_client import (
     data_source_discover_datasets,
     data_source_get,
     data_source_get_dataset,
+    data_source_get_dataset_collection_detail,
+    data_source_list_collection_records,
     data_source_list_dataset_candidates,
-    data_source_get_published_snapshot,
     data_source_get_sync_job,
     data_source_handle_callback,
     data_source_import_openapi,
@@ -37,6 +39,7 @@ from tools.mcp_client import (
     data_source_publish_dataset,
     data_source_preview,
     data_source_test,
+    data_source_trigger_dataset_collection,
     data_source_trigger_sync,
     data_source_unpublish_dataset,
     data_source_upsert_dataset,
@@ -312,7 +315,6 @@ class DataSourceItem(BaseModel):
     last_checked_at: Optional[str] = None
     last_error_message: str = ""
     last_sync_at: Optional[str] = None
-    published_snapshot_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -329,7 +331,6 @@ class DataSourceGetResponse(BaseModel):
     success: bool
     mode: str = "mock"
     source: Optional[DataSourceItem] = None
-    published_snapshot: dict[str, Any] | None = None
     message: str = ""
 
 
@@ -435,7 +436,6 @@ class DataSourceSyncJobResponse(BaseModel):
     mode: str = "mock"
     source_id: Optional[str] = None
     job: dict[str, Any] | None = None
-    published_snapshot: dict[str, Any] | None = None
     reused: Optional[bool] = None
     message: str = ""
 
@@ -462,11 +462,30 @@ class DataSourcePreviewResponse(BaseModel):
     message: str = ""
 
 
-class DataSourcePublishedSnapshotResponse(BaseModel):
+class DataSourceDatasetCollectionDetailResponse(BaseModel):
     success: bool
     mode: str = "mock"
-    source_id: str
-    published_snapshot: dict[str, Any] | None = None
+    source_id: str = ""
+    resource_key: str = ""
+    dataset: dict[str, Any] | None = None
+    collection_stats: dict[str, Any] = Field(default_factory=dict)
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    row_count: int = 0
+    message: str = ""
+
+
+class DataSourceCollectionRecordsResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    source_id: str = ""
+    resource_key: str = ""
+    dataset: dict[str, Any] | None = None
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    record_count: int = 0
     message: str = ""
 
 
@@ -550,6 +569,7 @@ class DataSourceDatasetPublishRequest(BaseModel):
     usage_count: int | None = None
     last_used_at: str = ""
     catalog_profile: dict[str, Any] = Field(default_factory=dict)
+    collection_config: dict[str, Any] = Field(default_factory=dict)
     mode: str = ""
 
 
@@ -579,6 +599,19 @@ class DataSourceDatasetSemanticUpdateRequest(BaseModel):
     fields: list[dict[str, Any]] = Field(default_factory=list)
     status: str = ""
     mode: str = ""
+
+
+class DataSourceDatasetCollectionTriggerRequest(BaseModel):
+    resource_key: str = ""
+    biz_date: str = ""
+    background: bool = True
+    params: dict[str, Any] = Field(default_factory=dict)
+    mode: str = ""
+
+
+def _default_collection_biz_date() -> str:
+    """服务器侧统一计算手动采集默认业务日期：T-1。"""
+    return (datetime.now() - timedelta(days=1)).date().isoformat()
 
 
 class DataSourceDatasetUpsertResponse(BaseModel):
@@ -767,7 +800,6 @@ async def get_data_source(
         success=True,
         mode=str(result.get("mode") or mode or "mock"),
         source=result.get("source"),
-        published_snapshot=result.get("published_snapshot"),
         message=str(result.get("message") or ""),
     )
 
@@ -989,7 +1021,6 @@ async def trigger_data_source_sync(
         mode=str(result.get("mode") or body.mode or "mock"),
         source_id=str(result.get("source_id") or source_id),
         job=result.get("job"),
-        published_snapshot=result.get("published_snapshot"),
         reused=result.get("reused"),
         message=str(result.get("message") or ""),
     )
@@ -1013,7 +1044,6 @@ async def get_sync_job(
         mode=str(result.get("mode") or mode or "mock"),
         source_id=str((result.get("job") or {}).get("source_id") or ""),
         job=result.get("job"),
-        published_snapshot=result.get("published_snapshot"),
         reused=result.get("reused"),
         message=str(result.get("message") or ""),
     )
@@ -1047,6 +1077,118 @@ async def list_sync_jobs(
     )
 
 
+@router.get(
+    "/data-sources/{source_id}/datasets/{dataset_id}/collection-detail",
+    response_model=DataSourceDatasetCollectionDetailResponse,
+)
+async def get_dataset_collection_detail(
+    source_id: str,
+    dataset_id: str,
+    resource_key: str = Query("", description="可选：物理资源 key；为空时按 dataset_id 查找"),
+    limit: int = Query(10, ge=1, le=50, description="最近采集任务数量"),
+    sample_limit: int = Query(10, ge=1, le=50, description="最新样本行数量"),
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_get_dataset_collection_detail(
+        auth_token,
+        source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        limit=limit,
+        sample_limit=sample_limit,
+        mode=mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取采集详情失败"))
+    return DataSourceDatasetCollectionDetailResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "mock"),
+        source_id=str(result.get("source_id") or source_id),
+        resource_key=str(result.get("resource_key") or resource_key or ""),
+        dataset=result.get("dataset"),
+        collection_stats=result.get("collection_stats") or {},
+        jobs=result.get("jobs") or [],
+        rows=result.get("rows") or [],
+        count=int(result.get("count") or len(result.get("jobs") or [])),
+        row_count=int(result.get("row_count") or len(result.get("rows") or [])),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.get(
+    "/data-sources/{source_id}/datasets/{dataset_id}/collection-records",
+    response_model=DataSourceCollectionRecordsResponse,
+)
+async def list_dataset_collection_records(
+    source_id: str,
+    dataset_id: str,
+    resource_key: str = Query("", description="可选：物理资源 key；为空时按 dataset_id 查找"),
+    biz_date: str = Query("", description="可选：业务日期，用于筛选本次采集数据"),
+    limit: int = Query(20, ge=1, le=1000, description="返回记录数量"),
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_list_collection_records(
+        auth_token,
+        source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        limit=limit,
+        mode=mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取采集记录失败"))
+    records = [item for item in (result.get("records") or result.get("rows") or []) if isinstance(item, dict)]
+    return DataSourceCollectionRecordsResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "mock"),
+        source_id=str(result.get("source_id") or source_id),
+        resource_key=str(result.get("resource_key") or resource_key or ""),
+        dataset=result.get("dataset"),
+        records=records,
+        rows=records,
+        count=int(result.get("count") or result.get("record_count") or len(records)),
+        record_count=int(result.get("record_count") or result.get("count") or len(records)),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.post("/data-sources/{source_id}/datasets/{dataset_id}/collection")
+async def trigger_dataset_collection(
+    source_id: str,
+    dataset_id: str,
+    body: DataSourceDatasetCollectionTriggerRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_trigger_dataset_collection(
+        auth_token,
+        source_id,
+        dataset_id=dataset_id,
+        resource_key=body.resource_key,
+        biz_date=body.biz_date or _default_collection_biz_date(),
+        background=body.background,
+        params=body.params,
+        mode=body.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "触发数据集采集失败"))
+    return result
+
+
 @router.post("/data-sources/{source_id}/preview", response_model=DataSourcePreviewResponse)
 async def preview_data_source(
     source_id: str,
@@ -1066,28 +1208,6 @@ async def preview_data_source(
         source_id=source_id,
         count=int(result.get("count") or len(result.get("rows") or [])),
         rows=result.get("rows") or [],
-        message=str(result.get("message") or ""),
-    )
-
-
-@router.get("/data-sources/{source_id}/published-snapshot", response_model=DataSourcePublishedSnapshotResponse)
-async def get_published_snapshot(
-    source_id: str,
-    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
-    authorization: Optional[str] = Header(None),
-):
-    auth_token = _extract_auth_token(authorization)
-    if not auth_token:
-        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-
-    result = await data_source_get_published_snapshot(auth_token, source_id, mode=mode)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "获取已发布快照失败"))
-    return DataSourcePublishedSnapshotResponse(
-        success=True,
-        mode=str(result.get("mode") or mode or "mock"),
-        source_id=source_id,
-        published_snapshot=result.get("published_snapshot"),
         message=str(result.get("message") or ""),
     )
 

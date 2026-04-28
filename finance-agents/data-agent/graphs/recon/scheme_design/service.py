@@ -23,7 +23,9 @@ from models import (
     SchemeDesignTargetState,
 )
 from tools.mcp_client import (
-    data_source_list_published_snapshot_rows,
+    data_source_preview,
+    data_source_get_dataset,
+    data_source_list_collection_records,
     execution_proc_draft_trial,
     execution_proc_rule_compatibility_check,
     execution_recon_draft_trial,
@@ -34,7 +36,6 @@ from tools.mcp_client import (
 from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
 
 from .executor import (
-    DeepAgentSchemeDesignExecutor,
     SingleShotSchemeDesignExecutor,
     SchemeDesignExecutor,
 )
@@ -55,6 +56,54 @@ _GENERATION_LABELS = {
     "proc": "整理配置生成器",
     "recon": "对账逻辑生成器",
 }
+DESIGN_SAMPLE_ROW_LIMIT = 20
+
+
+def _fix_proc_formula_exprs(rule: dict[str, Any]) -> dict[str, Any]:
+    """Fix bare unquoted string identifiers in formula expr values.
+
+    Older or fallback-generated proc JSON may contain formulas like
+    ``"expr": "支付宝订单数据"`` (no Python string quotes).  The MCP runtime
+    parses this as an AST Name node and rejects it.  This pass wraps such
+    values in JSON-encoded string literals so they evaluate correctly.
+    """
+    import ast as _ast
+    import copy as _copy
+    import json as _json
+
+    rule = _copy.deepcopy(rule)
+
+    def _fix_expr(expr: str) -> str:
+        text = expr.strip()
+        if not text:
+            return expr
+        if (text.startswith("'") and text.endswith("'")) or (
+            text.startswith('"') and text.endswith('"')
+        ):
+            return expr
+        if any(c in text for c in ("(", ")", "{", "}", "+", "*", "?", ":", "<", ">")):
+            return expr
+        try:
+            tree = _ast.parse(text, mode="eval")
+            if isinstance(tree.body, _ast.Name):
+                return _json.dumps(text, ensure_ascii=False)
+        except SyntaxError:
+            return _json.dumps(text, ensure_ascii=False)
+        return expr
+
+    for step in list(rule.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        for mapping in list(step.get("mappings") or []):
+            if not isinstance(mapping, dict):
+                continue
+            value = mapping.get("value")
+            if not isinstance(value, dict) or value.get("type") != "formula":
+                continue
+            expr = value.get("expr")
+            if isinstance(expr, str):
+                value["expr"] = _fix_expr(expr)
+    return rule
 
 _READY_FIELD_LABELS = {
     "biz_key": "业务主键",
@@ -198,8 +247,8 @@ def _merge_schema_summary(existing: Any, rows: list[dict[str, Any]]) -> dict[str
     inferred = _infer_schema_summary_from_rows(rows)
     inferred_map = _schema_summary_to_field_map(inferred)
     existing_map = _schema_summary_to_field_map(existing)
-    merged_map = dict(inferred_map)
-    merged_map.update(existing_map)
+    merged_map = dict(existing_map)
+    merged_map.update(inferred_map)  # rows-based schema is authoritative over stale schema_summary
     if not merged_map:
         return inferred
     prefer_columns = isinstance(existing, dict) and isinstance(existing.get("columns"), list)
@@ -311,8 +360,10 @@ def _force_recon_table_names(rule_json: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(ident, dict):
                 ident = {}
                 file_cfg["identification"] = ident
+            file_cfg["table_name"] = table_name
             ident["match_by"] = "table_name"
             ident["match_value"] = table_name
+            ident["match_strategy"] = "exact"
     return patched
 
 
@@ -333,10 +384,13 @@ def _collect_display_maps(
         if not isinstance(item, dict):
             continue
         normalized = ensure_dataset_semantic_context(dict(item))
-        table_name = str(normalized.get("table_name") or "").strip()
         business_name = str(normalized.get("business_name") or "").strip()
-        if table_name and business_name:
-            table_label_map[table_name] = business_name
+        if business_name:
+            # Map every possible identifier so the renderer can translate aliases, resource_key, etc.
+            for id_key in ("table_name", "resource_key", "dataset_code", "dataset_name", "source_id", "source_key"):
+                id_val = str(normalized.get(id_key) or "").strip()
+                if id_val and id_val != business_name:
+                    table_label_map.setdefault(id_val, business_name)
         raw_map = normalized.get("field_label_map") if isinstance(normalized.get("field_label_map"), dict) else {}
         for raw_name, display_name in raw_map.items():
             raw = str(raw_name or "").strip()
@@ -353,12 +407,19 @@ def _collect_proc_display_maps(session: SchemeDesignSession) -> tuple[dict[str, 
         *(item for item in session.target_step.right_datasets if isinstance(item, dict)),
         *(item for item in session.sample_datasets if isinstance(item, dict)),
     ]
-    return _collect_display_maps(datasets)
+    field_label_map, table_label_map = _collect_display_maps(datasets)
+    # Standard output fields always get Chinese labels regardless of dataset configuration
+    for raw, label in _READY_FIELD_LABELS.items():
+        field_label_map.setdefault(raw, label)
+    return field_label_map, table_label_map
 
 
 def _collect_recon_display_maps(session: SchemeDesignSession) -> tuple[dict[str, str], dict[str, str]]:
     datasets = [item for item in session.sample_datasets if isinstance(item, dict)]
-    return _collect_display_maps(datasets)
+    field_label_map, table_label_map = _collect_display_maps(datasets)
+    for raw, label in _READY_FIELD_LABELS.items():
+        field_label_map.setdefault(raw, label)
+    return field_label_map, table_label_map
 
 
 def _render_proc_draft_text_for_session(session: SchemeDesignSession, rule_json: dict[str, Any]) -> str:
@@ -413,6 +474,36 @@ def _build_rule_step_state(
     )
 
 
+def _reset_rule_step_state(
+    step_state: SchemeDesignRuleStepState,
+    *,
+    preserve_draft_text: bool = False,
+) -> None:
+    preserved_draft_text = step_state.draft_text if preserve_draft_text else ""
+    step_state.mode = "idle"
+    step_state.selected_rule_code = ""
+    step_state.draft_text = preserved_draft_text
+    step_state.rule_summary = ""
+    step_state.effective_rule_json = {}
+    step_state.compatibility_result = {}
+    step_state.validation_result = {}
+    step_state.trial_result = {}
+    step_state.status = "idle"
+    step_state.generation_used_fallback = False
+    step_state.generation_note = ""
+    step_state.generation_phase = ""
+    step_state.generation_message = ""
+    step_state.generation_skill = ""
+    step_state.generation_started_at = None
+    step_state.generation_finished_at = None
+
+
+def _invalidate_recon_state(session: SchemeDesignSession) -> None:
+    _reset_rule_step_state(session.recon_step, preserve_draft_text=False)
+    session.drafts.recon_draft_json = {}
+    session.drafts.recon_trial_result = {}
+
+
 def _normalize_generation_meta(
     meta: dict[str, Any] | None,
     *,
@@ -440,6 +531,43 @@ def _truncate_log_text(value: Any, *, limit: int = 320) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+
+
+def _log_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _dataset_log_summary(datasets: Any) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in list(datasets or []):
+        if not isinstance(item, dict):
+            continue
+        rows = [row for row in list(item.get("sample_rows") or []) if isinstance(row, dict)]
+        summary.append({
+            "side": item.get("side"),
+            "table": item.get("table_name") or item.get("resource_key") or item.get("dataset_name"),
+            "business_name": item.get("business_name") or item.get("display_name") or item.get("dataset_name"),
+            "sample_rows": len(rows),
+        })
+    return summary
+
+
+def _proc_output_sample_summary(output_samples: Any) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in list(output_samples or []):
+        if not isinstance(item, dict):
+            continue
+        rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)]
+        summary.append({
+            "side": item.get("side"),
+            "target_table": item.get("target_table") or item.get("title"),
+            "row_count": item.get("row_count"),
+            "preview_rows": len(rows),
+        })
+    return summary
 
 
 class SchemeDesignService:
@@ -565,6 +693,13 @@ class SchemeDesignService:
             return session
 
         now = datetime.now(timezone.utc)
+        latest_instruction_text = str(payload.instruction_text or "").strip()
+        _reset_rule_step_state(session.proc_step, preserve_draft_text=True)
+        if latest_instruction_text:
+            session.proc_step.draft_text = latest_instruction_text
+        session.drafts.proc_draft_json = {}
+        session.drafts.proc_trial_result = {}
+        _invalidate_recon_state(session)
         session.proc_step.mode = "ai_generated"
         session.proc_step.status = "generating"
         session.proc_step.generation_phase = "preparing_context"
@@ -574,6 +709,7 @@ class SchemeDesignService:
         session.proc_step.generation_finished_at = None
         session.proc_step.validation_result = {}
         session.updated_at = now
+        self._refresh_session_status(session)
         await self._store.upsert(session)
         await self._schedule_generation_task(
             stage="proc",
@@ -756,10 +892,32 @@ class SchemeDesignService:
             )
             working_session.sample_datasets = target_sample_datasets
             session.sample_datasets = [dict(item) for item in target_sample_datasets]
+            # Update target_step in working_session with hydrated data so the AI prompt
+            # sees real schema/fields from the published snapshot, not stale frontend metadata.
+            _hydrated_left = [
+                item for item in target_sample_datasets
+                if str(item.get("side") or "").strip() == "left"
+            ]
+            _hydrated_right = [
+                item for item in target_sample_datasets
+                if str(item.get("side") or "").strip() == "right"
+            ]
+            if _hydrated_left:
+                working_session.target_step.left_datasets = _hydrated_left
+            if _hydrated_right:
+                working_session.target_step.right_datasets = _hydrated_right
             working_session.source_description = _compose_source_description(
                 session.target_step.left_description,
                 session.target_step.right_description,
             )
+            current_draft_text = str(payload.instruction_text or "").strip()
+            if current_draft_text:
+                working_session.proc_step.draft_text = current_draft_text
+                # When the user has manually rewritten the draft text, this round should
+                # generate JSON from that text instead of inheriting the last successful JSON.
+                working_session.proc_step.effective_rule_json = {}
+                working_session.proc_step.trial_result = {}
+                working_session.proc_step.validation_result = {}
             await self._update_generation_progress(
                 auth_token=auth_token,
                 session_id=session_id,
@@ -767,9 +925,18 @@ class SchemeDesignService:
                 phase="generating_rule",
                 message="正在根据目标、描述和样例生成数据整理配置",
             )
+            proc_generation_request = "只生成proc。"
+            if current_draft_text:
+                proc_generation_request = (
+                    "只生成proc。\n"
+                    "当前用户已经手工编辑了一份完整的数据整理说明。请严格优先依据下面这份说明生成 JSON，"
+                    "不要沿用上一版 JSON 中未在说明里出现的字段、映射或步骤；"
+                    "若说明与当前 DSL 能力冲突，只保留合法部分，并在 unsupported_points 中说明。\n"
+                    f"【当前数据整理说明】\n{current_draft_text}"
+                )
             turn_result = await self._executor.run_turn(
                 session=working_session,
-                user_message=f"只生成proc。\n{(payload.instruction_text or '').strip()}".strip(),
+                user_message=proc_generation_request,
                 is_resume=False,
             )
             proc_rule_json = dict(turn_result.proc_draft_json or {})
@@ -792,16 +959,23 @@ class SchemeDesignService:
             session = await self._get_owned_session(auth_token, session_id, touch=False)
             if session is None:
                 return
+            # Restore hydrated sample datasets — the store.get() returns a deep copy so
+            # the mutation at session.sample_datasets above was not persisted to the store yet.
+            session.sample_datasets = [dict(item) for item in target_sample_datasets]
             session.drafts.proc_draft_json = proc_rule_json
             proc_generation_meta = _normalize_generation_meta(
                 turn_result.proc_generation_meta,
                 fallback_message="AI 已生成数据整理配置。",
             )
+            proc_draft_text = (
+                (turn_result.proc_draft_text or "").strip()
+                or _render_proc_draft_text_for_session(session, proc_rule_json)
+            )
             session.proc_step = _build_rule_step_state(
                 mode="ai_generated",
                 rule_json=proc_rule_json,
                 summary_builder=_summarize_proc_rule,
-                draft_text=(turn_result.proc_draft_text or "").strip(),
+                draft_text=proc_draft_text,
                 compatibility_result=proc_generation_meta,
                 validation_result={
                     "success": True,
@@ -977,6 +1151,12 @@ class SchemeDesignService:
             session,
             auth_token=auth_token,
         )
+        logger.info(
+            "[scheme_design][proc] use_existing session_id=%s datasets=%s rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(target_sample_datasets)),
+            _truncate_log_text(json.dumps(rule_json, ensure_ascii=False), limit=500),
+        )
         compatibility = await execution_proc_rule_compatibility_check(
             auth_token,
             {
@@ -986,6 +1166,8 @@ class SchemeDesignService:
         )
         normalized_rule = compatibility.get("normalized_rule") if isinstance(compatibility.get("normalized_rule"), dict) else rule_json
         session.drafts.proc_draft_json = dict(normalized_rule)
+        session.drafts.proc_trial_result = {}
+        _invalidate_recon_state(session)
         session.sample_datasets = [dict(item) for item in target_sample_datasets]
         draft_text = _render_proc_draft_text_for_session(session, dict(normalized_rule)) or _summarize_proc_rule(normalized_rule)
         session.proc_step = _build_rule_step_state(
@@ -1015,9 +1197,17 @@ class SchemeDesignService:
         proc_rule_json = self._current_proc_rule_json(session)
         if not proc_rule_json:
             raise ValueError("当前没有可试跑的数据整理配置")
+        # Fix any bare unquoted string formula exprs that may exist in stored JSON
+        proc_rule_json = _fix_proc_formula_exprs(dict(proc_rule_json))
         target_sample_datasets = await self._build_target_sample_datasets(
             session,
             auth_token=auth_token,
+        )
+        logger.info(
+            "[scheme_design][proc] trial start session_id=%s datasets=%s proc_rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(target_sample_datasets)),
+            _truncate_log_text(json.dumps(proc_rule_json, ensure_ascii=False), limit=500),
         )
         trial_result = await self.run_proc_trial(
             auth_token=auth_token,
@@ -1038,6 +1228,13 @@ class SchemeDesignService:
         session.proc_step.validation_result = {"success": bool(trial_result.get("success"))}
         session.proc_step.trial_result = trial_result
         session.proc_step.status = "trial_passed" if trial_result.get("ready_for_confirm") else "trial_failed"
+        logger.info(
+            "[scheme_design][proc] trial done session_id=%s ready=%s outputs=%s warnings=%s",
+            session_id,
+            trial_result.get("ready_for_confirm"),
+            _log_json(_proc_output_sample_summary(trial_result.get("output_samples"))),
+            _log_json(list(trial_result.get("warnings") or [])[:5]),
+        )
         if not session.proc_step.draft_text:
             session.proc_step.draft_text = session.proc_step.rule_summary
         session.updated_at = datetime.now(timezone.utc)
@@ -1059,6 +1256,12 @@ class SchemeDesignService:
         if not prepared_datasets:
             raise ValueError("请先完成数据整理试跑，再选择已有对账逻辑")
         rule_json = await self._resolve_rule_json(auth_token, payload.rule_code, payload.rule_json)
+        logger.info(
+            "[scheme_design][recon] use_existing session_id=%s prepared=%s rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(prepared_datasets)),
+            _truncate_log_text(json.dumps(rule_json, ensure_ascii=False), limit=500),
+        )
         compatibility = await execution_recon_rule_compatibility_check(
             auth_token,
             {
@@ -1102,6 +1305,12 @@ class SchemeDesignService:
         prepared_datasets = self._build_recon_sample_datasets(session)
         if not prepared_datasets:
             raise ValueError("请先完成数据整理试跑，再进行对账试跑")
+        logger.info(
+            "[scheme_design][recon] trial start session_id=%s prepared=%s recon_rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(prepared_datasets)),
+            _truncate_log_text(json.dumps(recon_rule_json, ensure_ascii=False), limit=500),
+        )
         trial_result = await self.run_recon_trial(
             auth_token=auth_token,
             payload=ReconTrialInput(
@@ -1119,6 +1328,14 @@ class SchemeDesignService:
         session.recon_step.validation_result = {"success": bool(trial_result.get("success"))}
         session.recon_step.trial_result = trial_result
         session.recon_step.status = "trial_passed" if trial_result.get("ready_for_confirm") else "trial_failed"
+        logger.info(
+            "[scheme_design][recon] trial done session_id=%s ready=%s left_rows=%d right_rows=%d result_summary=%s",
+            session_id,
+            trial_result.get("ready_for_confirm"),
+            len([row for row in list(trial_result.get("left_samples") or []) if isinstance(row, dict)]),
+            len([row for row in list(trial_result.get("right_samples") or []) if isinstance(row, dict)]),
+            _log_json(trial_result.get("result_summary") or {}),
+        )
         if not session.recon_step.draft_text:
             session.recon_step.draft_text = session.recon_step.rule_summary
         session.updated_at = datetime.now(timezone.utc)
@@ -1263,6 +1480,51 @@ class SchemeDesignService:
             return False
         return await self._store.delete(session_id)
 
+    async def get_dataset_field_preview(
+        self,
+        *,
+        auth_token: str,
+        source_id: str,
+        resource_key: str = "",
+        dataset_id: str = "",
+    ) -> dict[str, Any]:
+        """Return field list with Chinese display names for dataset picker tooltip."""
+        result = await data_source_get_dataset(
+            auth_token,
+            source_id=source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+        )
+        if not result.get("success") or not isinstance(result.get("dataset"), dict):
+            return {"success": False, "fields": [], "business_name": ""}
+        dataset = result["dataset"]
+        normalized = ensure_dataset_semantic_context(dict(dataset))
+        business_name = str(normalized.get("business_name") or "").strip()
+        field_label_map = dict(normalized.get("field_label_map") or {})
+        fields = normalized.get("fields") if isinstance(normalized.get("fields"), list) else []
+        # Build display list: prefer explicit fields list, fall back to field_label_map
+        field_items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            raw_name = str(field.get("raw_name") or "").strip()
+            if not raw_name or raw_name in seen:
+                continue
+            display_name = str(field.get("display_name") or field_label_map.get(raw_name) or raw_name).strip()
+            field_items.append({"raw_name": raw_name, "display_name": display_name})
+            seen.add(raw_name)
+        for raw_name, display_name in field_label_map.items():
+            if raw_name in seen:
+                continue
+            field_items.append({"raw_name": raw_name, "display_name": display_name or raw_name})
+            seen.add(raw_name)
+        return {
+            "success": True,
+            "business_name": business_name,
+            "fields": field_items,
+        }
+
     async def run_proc_trial(self, *, auth_token: str, payload: ProcTrialInput) -> dict[str, Any]:
         return await execution_proc_draft_trial(
             auth_token,
@@ -1397,8 +1659,9 @@ class SchemeDesignService:
         if current_keys != cached_keys:
             return []
         if not all(
-            str(item.get("sample_origin") or "").strip() == "published_snapshot"
+            str(item.get("sample_origin") or "").strip() == "collection_records"
             and _has_dict_rows(item.get("sample_rows"))
+            and len([row for row in list(item.get("sample_rows") or []) if isinstance(row, dict)]) >= DESIGN_SAMPLE_ROW_LIMIT
             for item in cached
         ):
             return []
@@ -1430,29 +1693,112 @@ class SchemeDesignService:
         if not auth_token or not source_id:
             return dict(dataset)
         resource_key = _resolve_dataset_resource_key(dataset)
-        result = await data_source_list_published_snapshot_rows(
-            auth_token,
-            source_id,
-            resource_key=resource_key,
-            limit=3,
+        rows_result, semantic_result = await asyncio.gather(
+            data_source_list_collection_records(
+                auth_token,
+                source_id,
+                resource_key=resource_key,
+                limit=DESIGN_SAMPLE_ROW_LIMIT,
+            ),
+            data_source_get_dataset(
+                auth_token,
+                source_id=source_id,
+                resource_key=resource_key,
+            ),
+            return_exceptions=True,
         )
-        rows = [row for row in list(result.get("rows") or []) if isinstance(row, dict)]
-        if not bool(result.get("success")) or not rows:
-            return _normalize_target_dataset(dict(dataset))
+        if isinstance(rows_result, Exception):
+            rows_result = {}
+        if isinstance(semantic_result, Exception):
+            semantic_result = {}
+        rows = []
+        for item in list(rows_result.get("records") or rows_result.get("rows") or []):
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload") or item.get("item_payload") or item.get("record_payload")
+            rows.append(dict(payload) if isinstance(payload, dict) else dict(item))
+        has_rows = bool(rows_result.get("success")) and bool(rows)
+
+        # Always start from a copy so we can apply semantic info regardless of whether
+        # snapshot rows are available. Returning early on no-rows was the bug: semantic
+        # field_label_map and business_name from the data-connection phase were discarded.
         resolved = dict(dataset)
         table_name = _resolve_dataset_table_name(resolved)
         if table_name:
             resolved["table_name"] = table_name
         if resource_key:
             resolved["resource_key"] = resource_key
-        resolved["sample_rows"] = rows[:3]
-        resolved["schema_summary"] = _merge_schema_summary(resolved.get("schema_summary"), rows)
-        published_snapshot = result.get("published_snapshot")
-        if isinstance(published_snapshot, dict):
-            resolved["snapshot_id"] = str(
-                published_snapshot.get("snapshot_id") or published_snapshot.get("id") or ""
+
+        if has_rows:
+            resolved["sample_rows"] = rows[:DESIGN_SAMPLE_ROW_LIMIT]
+            resolved["schema_summary"] = _merge_schema_summary(resolved.get("schema_summary"), rows)
+            resolved["sample_origin"] = "collection_records"
+
+        # Always apply semantic profile (business_name, field_label_map) from the dataset
+        # metadata API — this data comes from the data-connection phase and is authoritative
+        # regardless of whether a published snapshot with rows exists.
+        semantic_dataset = semantic_result.get("dataset") if isinstance(semantic_result, dict) else None
+        if isinstance(semantic_dataset, dict):
+            sem_normalized = ensure_dataset_semantic_context(dict(semantic_dataset))
+            sem_biz = str(sem_normalized.get("business_name") or "").strip()
+            sem_field_label_map = dict(sem_normalized.get("field_label_map") or {})
+            logger.info(
+                "[scheme_design][hydrate] source_id=%s resource_key=%s has_rows=%s "
+                "sem_business_name=%s sem_field_count=%d sem_fields_sample=%s",
+                source_id,
+                resource_key,
+                has_rows,
+                sem_biz[:80],
+                len(sem_field_label_map),
+                {k: v for k, v in list(sem_field_label_map.items())[:5]},
             )
-        resolved["sample_origin"] = "published_snapshot"
+            if sem_biz:
+                resolved["business_name"] = sem_biz
+            semantic_schema_summary = semantic_dataset.get("schema_summary")
+            if isinstance(semantic_schema_summary, dict):
+                resolved["schema_summary"] = dict(semantic_schema_summary)
+            if sem_field_label_map:
+                merged_labels: dict[str, str] = dict(resolved.get("field_label_map") or {})
+                merged_labels.update(sem_field_label_map)
+                resolved["field_label_map"] = merged_labels
+            semantic_fields = semantic_dataset.get("fields")
+            if isinstance(semantic_fields, list) and semantic_fields:
+                resolved["fields"] = [dict(item) for item in semantic_fields if isinstance(item, dict)]
+            semantic_profile = semantic_dataset.get("semantic_profile")
+            if isinstance(semantic_profile, dict):
+                resolved["semantic_profile"] = dict(semantic_profile)
+            if isinstance(semantic_dataset.get("meta"), dict) and not resolved.get("meta"):
+                resolved["meta"] = dict(semantic_dataset["meta"])
+        else:
+            logger.info(
+                "[scheme_design][hydrate] source_id=%s resource_key=%s has_rows=%s no semantic dataset returned",
+                source_id,
+                resource_key,
+                has_rows,
+            )
+
+        if not has_rows:
+            try:
+                preview_result = await data_source_preview(
+                    auth_token,
+                    source_id,
+                    resource_key=resource_key,
+                    limit=DESIGN_SAMPLE_ROW_LIMIT,
+                )
+            except Exception:
+                preview_result = {}
+            preview_rows = [row for row in list(preview_result.get("rows") or []) if isinstance(row, dict)]
+            if preview_result.get("success") and preview_rows:
+                resolved["sample_rows"] = preview_rows[:DESIGN_SAMPLE_ROW_LIMIT]
+                resolved["schema_summary"] = _merge_schema_summary(resolved.get("schema_summary"), preview_rows)
+                resolved["sample_origin"] = "connector_preview"
+                has_rows = True
+                logger.info(
+                    "[scheme_design][hydrate] source_id=%s resource_key=%s fallback_preview_rows=%d",
+                    source_id,
+                    resource_key,
+                    len(preview_rows[:DESIGN_SAMPLE_ROW_LIMIT]),
+                )
         return _normalize_target_dataset(resolved)
 
     def _build_recon_sample_datasets(self, session: SchemeDesignSession) -> list[dict[str, Any]]:
@@ -1464,7 +1810,7 @@ class SchemeDesignService:
         for item in output_samples:
             if not isinstance(item, dict):
                 continue
-            rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)][:3]
+            rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)]
             table_name = str(item.get("target_table") or item.get("title") or "").strip()
             if not table_name or not rows:
                 continue
@@ -1524,7 +1870,10 @@ class SchemeDesignService:
                 mode="ai_generated",
                 rule_json=proc_rule_json,
                 summary_builder=_summarize_proc_rule,
-                draft_text=(result.proc_draft_text or "").strip(),
+                draft_text=(
+                    (result.proc_draft_text or "").strip()
+                    or _render_proc_draft_text_for_session(session, proc_rule_json)
+                ),
                 validation_result={"success": True},
                 compatibility_result=_normalize_generation_meta(
                     result.proc_generation_meta,
@@ -1605,16 +1954,9 @@ _service_singleton: SchemeDesignService | None = None
 
 
 def _build_default_executor() -> SchemeDesignExecutor:
-    try:
-        executor = DeepAgentSchemeDesignExecutor()
-        logger.info("scheme design executor initialized: %s", executor.name)
-        return executor
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "scheme design DeepAgent executor init failed, fallback to single-shot executor: %s",
-            exc,
-        )
-        return SingleShotSchemeDesignExecutor()
+    executor = SingleShotSchemeDesignExecutor()
+    logger.info("scheme design executor initialized: %s", executor.name)
+    return executor
 
 
 def get_scheme_design_service() -> SchemeDesignService:

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
+import jwt
 from pydantic import BaseModel, Field
 
 from graphs.recon.auto_run_service import (
     execute_run_plan_run,
     execute_auto_task_run,
+    prepare_execution_run_rerun,
     send_exception_reminder,
     send_execution_run_exception_reminder,
     sync_execution_run_exception_reminder,
@@ -46,15 +49,32 @@ from tools.mcp_client import (
     recon_auto_task_update,
     recon_exception_get,
     recon_exception_update,
+    recon_queue_enqueue,
 )
 
 router = APIRouter(prefix="/recon", tags=["recon-auto"])
+JWT_SECRET = os.getenv("JWT_SECRET", "tally-secret-change-in-production")
+JWT_ALGORITHM = "HS256"
 
 
 def _extract_auth_token(authorization: Optional[str]) -> str:
     if not authorization:
         return ""
     return authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+
+
+def _get_user_from_token(token: str) -> dict[str, Any] | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        return None
+    return {
+        "user_id": payload.get("sub"),
+        "username": payload.get("username"),
+        "role": payload.get("role"),
+        "company_id": payload.get("company_id"),
+        "department_id": payload.get("department_id"),
+    }
 
 
 class AutoTaskCreateRequest(BaseModel):
@@ -124,6 +144,12 @@ class AutoRunUpdateRequest(BaseModel):
 
 
 class AutoRunActionRequest(BaseModel):
+    reason: str = ""
+
+
+class ExecutionRunRerunRequest(BaseModel):
+    original_run_id: str
+    exception_id: str = ""
     reason: str = ""
 
 
@@ -221,21 +247,6 @@ class ExceptionSyncRequest(BaseModel):
     poll_interval_seconds: float = 2.0
 
 
-def _resolve_retry_run_context(run: dict[str, Any], reason: str) -> tuple[str, str, dict[str, Any]]:
-    run_context = dict(run.get("run_context_json") or {})
-    biz_date = str(
-        run_context.get("biz_date")
-        or (dict(run.get("source_snapshot_json") or {}).get("biz_date"))
-        or ""
-    ).strip()
-    run_plan_code = str(run.get("plan_code") or run_context.get("run_plan_code") or "").strip()
-    # retry must create a new execution record; do not carry old run_id forward.
-    run_context.pop("run_id", None)
-    run_context["retry_from_run_id"] = str(run.get("id") or "")
-    run_context["retry_reason"] = reason
-    return run_plan_code, biz_date, run_context
-
-
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -284,7 +295,7 @@ def _extract_source_bindings_from_scheme_meta(
                     "side": side,
                     "dataset_code": dataset_code or resource_key,
                     "table_name": table_name,
-                    "dataset_source_type": str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+                    "dataset_source_type": str(item.get("dataset_source_type") or "collection_records").strip() or "collection_records",
                 },
             }
         )
@@ -643,54 +654,54 @@ async def get_execution_run_api(
     return result
 
 
-@router.post("/runs/{run_id}/retry")
-async def retry_execution_run_api(
-    run_id: str,
-    body: AutoRunActionRequest,
+@router.post("/runs/rerun")
+async def rerun_execution_run_api(
+    body: ExecutionRunRerunRequest,
     authorization: Optional[str] = Header(None),
 ):
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
 
-    run_result = await execution_run_get(auth_token, run_id)
-    if not run_result.get("success"):
-        raise HTTPException(status_code=404, detail=run_result.get("error", "运行记录不存在"))
+    user = _get_user_from_token(auth_token)
+    if not user or not user.get("company_id"):
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
 
-    source_run = dict(run_result.get("run") or {})
-    status = str(source_run.get("execution_status") or "").strip().lower()
-    if status not in {"failed", "error"}:
+    prepare_result = await prepare_execution_run_rerun(
+        auth_token=auth_token,
+        original_run_id=body.original_run_id,
+        exception_id=body.exception_id,
+        reason=body.reason,
+    )
+    if not prepare_result.get("success"):
+        status = str(prepare_result.get("status") or "todo")
         raise HTTPException(
-            status_code=400,
-            detail=f"仅失败状态可重试，当前状态为 {source_run.get('execution_status') or 'unknown'}",
+            status_code=400 if status not in {"not_found"} else 404,
+            detail={
+                "status": status,
+                "message": prepare_result.get("error") or "重新对账验证暂不可用",
+                "todo": prepare_result.get("todo") or "",
+            },
         )
 
-    run_plan_code, biz_date, run_context = _resolve_retry_run_context(source_run, body.reason)
-    if not run_plan_code:
-        raise HTTPException(status_code=400, detail="当前运行未绑定 plan_code，无法重试")
-
-    retry_result = await execute_run_plan_run(
-        auth_token=auth_token,
-        run_plan_code=run_plan_code,
-        biz_date=biz_date,
-        trigger_mode="retry",
-        run_context=run_context,
+    result = await recon_queue_enqueue(
+        company_id=str(user["company_id"]),
+        run_plan_code=str(prepare_result.get("run_plan_code") or ""),
+        biz_date=str(prepare_result.get("biz_date") or ""),
+        trigger_mode="rerun",
+        run_context=dict(prepare_result.get("run_context") or {}),
     )
-
-    # If a new run record is created, return 200 so frontend can refresh and display it.
-    retried_run = dict(retry_result.get("run") or {})
-    if not retry_result.get("success") and not retried_run.get("id"):
-        raise HTTPException(status_code=400, detail=retry_result.get("error", "重试执行失败"))
-
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
     return {
-        "success": True,
-        "execution_success": bool(retry_result.get("success")),
-        "message": "" if retry_result.get("success") else str(retry_result.get("error") or "重试执行失败"),
-        "source_run_id": run_id,
-        "retried_run": retried_run,
-        "run_plan_code": run_plan_code,
-        "failed_stage": str(retry_result.get("failed_stage") or ""),
-        "subtasks_json": retry_result.get("subtasks_json") or [],
+        "queued": True,
+        "status": "queued",
+        "job_id": str((result.get("job") or {}).get("id") or ""),
+        "source_run_id": prepare_result.get("source_run_id") or body.original_run_id,
+        "exception_id": prepare_result.get("exception_id") or body.exception_id,
+        "run_plan_code": prepare_result.get("run_plan_code") or "",
+        "biz_date": prepare_result.get("biz_date") or "",
+        "message": "重新对账验证已进入执行队列，请稍后查询运行结果",
     }
 
 
@@ -897,16 +908,19 @@ async def execute_run_plan(
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await execute_run_plan_run(
-        auth_token=auth_token,
+    user = _get_user_from_token(auth_token)
+    if not user or not user.get("company_id"):
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    result = await recon_queue_enqueue(
+        company_id=str(user["company_id"]),
         run_plan_code=run_plan_code,
-        biz_date=body.biz_date,
-        trigger_mode=body.trigger_mode,
-        run_context=body.run_context,
+        biz_date=str(body.biz_date or ""),
+        trigger_mode=str(body.trigger_mode or "schedule"),
+        run_context=dict(body.run_context or {}),
     )
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "执行运行计划失败"))
-    return result
+        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
+    return {"queued": True, "run_plan_code": run_plan_code, "job_id": str((result.get("job") or {}).get("id") or ""), "message": "对账任务已进入执行队列，请稍后查询运行结果"}
 
 
 @router.post("/auto-runs")

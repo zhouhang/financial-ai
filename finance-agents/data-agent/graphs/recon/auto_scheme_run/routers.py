@@ -9,7 +9,7 @@ from langgraph.graph import END, StateGraph
 from models import AgentState
 from graphs.recon.scheme_execution import build_scheme_execution_graph
 from .nodes import (
-    bind_ready_snapshot_node,
+    bind_ready_collection_node,
     build_auto_run_context_node,
     check_dataset_ready_node,
     create_exception_tasks_node,
@@ -20,9 +20,6 @@ from .nodes import (
     persist_failed_run_node,
     resolve_biz_date_node,
     resolve_plan_inputs_node,
-    retry_collection_node,
-    return_collection_failed_node,
-    trigger_collection_node,
     validate_dataset_completeness_node,
     validate_run_plan_node,
     validate_scheme_rules_node,
@@ -62,49 +59,14 @@ def route_after_validate_scheme_rules(state: AgentState) -> str:
     return "resolve_plan_inputs_node"
 
 
-def route_after_check_dataset_ready(state: AgentState) -> str:
-    ctx = _get_ctx(state)
-    missing = list(ctx.get("missing_bindings") or [])
-    if missing:
-        return "trigger_collection_node"
-    return "bind_ready_snapshot_node"
-
-
-def route_after_retry_collection(state: AgentState) -> str:
-    ctx = _get_ctx(state)
-    if bool(ctx.get("collect_failed")):
-        return "return_collection_failed_node"
-    return "bind_ready_snapshot_node"
-
-
 def build_ensure_dataset_ready_subgraph() -> StateGraph:
     graph = StateGraph(AgentState)
     graph.add_node("check_dataset_ready_node", check_dataset_ready_node)
-    graph.add_node("trigger_collection_node", trigger_collection_node)
-    graph.add_node("retry_collection_node", retry_collection_node)
-    graph.add_node("return_collection_failed_node", return_collection_failed_node)
-    graph.add_node("bind_ready_snapshot_node", bind_ready_snapshot_node)
+    graph.add_node("bind_ready_collection_node", bind_ready_collection_node)
 
     graph.set_entry_point("check_dataset_ready_node")
-    graph.add_conditional_edges(
-        "check_dataset_ready_node",
-        route_after_check_dataset_ready,
-        {
-            "trigger_collection_node": "trigger_collection_node",
-            "bind_ready_snapshot_node": "bind_ready_snapshot_node",
-        },
-    )
-    graph.add_edge("trigger_collection_node", "retry_collection_node")
-    graph.add_conditional_edges(
-        "retry_collection_node",
-        route_after_retry_collection,
-        {
-            "return_collection_failed_node": "return_collection_failed_node",
-            "bind_ready_snapshot_node": "bind_ready_snapshot_node",
-        },
-    )
-    graph.add_edge("return_collection_failed_node", END)
-    graph.add_edge("bind_ready_snapshot_node", END)
+    graph.add_edge("check_dataset_ready_node", "bind_ready_collection_node")
+    graph.add_edge("bind_ready_collection_node", END)
     return graph
 
 
@@ -227,4 +189,3 @@ async def run_auto_scheme_run_graph(
         }
     )
     return dict(output) if isinstance(output, dict) else {}
-

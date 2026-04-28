@@ -277,6 +277,10 @@ check_*.txt
 *_check.txt
 check_*.json
 *_check.json
+!finance-agents/data-agent/tests/
+!finance-agents/data-agent/tests/**
+!finance-mcp/tests/
+!finance-mcp/tests/**
 
 # macOS
 .DS_Store
@@ -298,6 +302,8 @@ check_*.json
 !.gitattributes
 !.env.example
 !.cursorrules
+!.planning/
+!.planning/**
 
 finance-ai/finance-mcp/uploads
 finance-ai/finance-mcp/data_preparation/output
@@ -326,6 +332,12 @@ finance-agents/data-agent/.langgraph_api/
 
 !finance-agents/data-agent/tests/
 !finance-agents/data-agent/tests/test_notifications_dingtalk.py
+!finance-mcp/tests/
+!finance-mcp/tests/**
+finance-agents/data-agent/tests/**/__pycache__/
+finance-agents/data-agent/tests/**/__pycache__/**
+finance-mcp/tests/**/__pycache__/
+finance-mcp/tests/**/__pycache__/**
 
 # Ralph (cloned repo - only keep scripts/ralph)
 /ralph/

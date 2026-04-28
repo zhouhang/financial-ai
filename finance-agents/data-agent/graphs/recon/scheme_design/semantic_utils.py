@@ -71,6 +71,45 @@ def infer_raw_field_names(dataset: dict[str, Any]) -> list[str]:
     return names
 
 
+def infer_authoritative_raw_field_names(dataset: dict[str, Any]) -> list[str]:
+    """Prefer fields observed in published snapshot rows over stale schema metadata."""
+    from_rows = _field_names_from_rows(dataset.get("sample_rows"))
+    if from_rows:
+        return from_rows
+
+    names: list[str] = []
+    raw_fields = dataset.get("fields")
+    if not isinstance(raw_fields, list):
+        raw_fields = dataset.get("semantic_fields")
+    if not isinstance(raw_fields, list):
+        raw_fields = _extract_semantic_profile(dataset).get("fields")
+    if isinstance(raw_fields, list):
+        for field in raw_fields:
+            if not isinstance(field, dict):
+                continue
+            raw_name = str(
+                field.get("raw_name")
+                or field.get("field_name")
+                or field.get("name")
+                or field.get("key")
+                or ""
+            ).strip()
+            if raw_name and raw_name not in names:
+                names.append(raw_name)
+    if names:
+        return names
+
+    direct_map = _normalize_string_map(dataset.get("field_label_map"))
+    profile_map = _normalize_string_map(_extract_semantic_profile(dataset).get("field_label_map"))
+    for raw_name in [*direct_map.keys(), *profile_map.keys()]:
+        if raw_name and raw_name not in names:
+            names.append(raw_name)
+    if names:
+        return names
+
+    return infer_raw_field_names(dataset)
+
+
 def _normalize_fields_list(raw_fields: Any, fallback_map: dict[str, str]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -201,10 +240,26 @@ def format_table_label(table_name: str, table_label_map: dict[str, str] | None) 
     return label if (label and label != raw) else raw
 
 
+def format_field_label(raw_name: str, field_label_map: dict[str, str] | None) -> str:
+    """Return only the Chinese label for prose/draft_text — never expose raw field name."""
+    raw = str(raw_name or "").strip()
+    if not raw:
+        return ""
+    label = str((field_label_map or {}).get(raw) or "").strip()
+    return label if (label and label != raw) else raw
+
+
 def build_prompt_dataset_payload(dataset: dict[str, Any]) -> dict[str, Any]:
     resolved = ensure_dataset_semantic_context(dataset)
     field_label_map = _normalize_string_map(resolved.get("field_label_map"))
-    field_names = infer_raw_field_names(resolved)
+    sample_rows = [
+        row
+        for row in list(resolved.get("sample_rows") or [])
+        if isinstance(row, dict)
+    ][:3]
+
+    field_names = infer_authoritative_raw_field_names(resolved)
+
     field_display_pairs = [
         {
             "raw_name": raw_name,
@@ -213,11 +268,6 @@ def build_prompt_dataset_payload(dataset: dict[str, Any]) -> dict[str, Any]:
         }
         for raw_name in field_names
     ]
-    sample_rows = [
-        row
-        for row in list(resolved.get("sample_rows") or [])
-        if isinstance(row, dict)
-    ][:3]
     sample_rows_with_display_fields: list[dict[str, Any]] = []
     for row in sample_rows:
         sample_rows_with_display_fields.append(
@@ -226,17 +276,24 @@ def build_prompt_dataset_payload(dataset: dict[str, Any]) -> dict[str, Any]:
                 for key, value in row.items()
             }
         )
+    prepared_output_fields = [
+        dict(item)
+        for item in list(resolved.get("prepared_output_fields") or [])
+        if isinstance(item, dict)
+    ]
     return {
         "side": str(resolved.get("side") or "").strip(),
         "business_name": str(resolved.get("business_name") or "").strip(),
         "dataset_name": str(resolved.get("dataset_name") or "").strip(),
-        "table_name": str(resolved.get("table_name") or "").strip(),
+        # Renamed from table_name → source_table_identifier to avoid confusion:
+        # this is the execution-layer identifier of the whole table, NOT a data column
+        # named "table_name" inside the table. Never use this value as source.field.
+        "source_table_identifier": str(resolved.get("table_name") or "").strip(),
         "resource_key": str(resolved.get("resource_key") or "").strip(),
         "description": str(resolved.get("description") or "").strip(),
-        "schema_summary": resolved.get("schema_summary") if isinstance(resolved.get("schema_summary"), dict) else {},
         "sample_rows": sample_rows,
         "field_label_map": field_label_map,
-        "fields": resolved.get("fields") if isinstance(resolved.get("fields"), list) else [],
         "field_display_pairs": field_display_pairs,
         "sample_rows_with_display_fields": sample_rows_with_display_fields,
+        "prepared_output_fields": prepared_output_fields,
     }

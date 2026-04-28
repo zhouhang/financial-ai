@@ -59,7 +59,7 @@ class PlatformOAuthConnector(BaseDataSourceConnector):
             "discover",
             "sync",
             "preview",
-            "published_snapshot",
+            "collection_records",
         ]
 
     def test_connection(self, arguments):

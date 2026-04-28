@@ -18,6 +18,8 @@ from apscheduler.triggers.cron import CronTrigger
 from data_agent_client import trigger_run_plan
 from mcp_client import (
     aclose_mcp_session,
+    data_source_scheduler_list_collection_plans,
+    data_source_trigger_dataset_collection,
     execution_scheduler_get_slot_run,
     execution_scheduler_list_run_plans,
 )
@@ -149,6 +151,17 @@ def build_job_id(plan: dict[str, Any]) -> str:
     return f"run-plan:{_as_text(plan.get('company_id'))}:{_as_text(plan.get('plan_code'))}"
 
 
+def build_collection_job_id(plan: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            "collection",
+            _as_text(plan.get("company_id")),
+            _as_text(plan.get("source_id")),
+            _as_text(plan.get("dataset_id")) or _as_text(plan.get("resource_key")),
+        ]
+    )
+
+
 def build_plan_signature(plan: dict[str, Any]) -> str:
     return "|".join(
         [
@@ -156,6 +169,20 @@ def build_plan_signature(plan: dict[str, Any]) -> str:
             _as_text(plan.get("plan_code")),
             _as_text(plan.get("schedule_type")),
             _as_text(plan.get("schedule_expr")),
+        ]
+    )
+
+
+def build_collection_signature(plan: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            _as_text(plan.get("company_id")),
+            _as_text(plan.get("source_id")),
+            _as_text(plan.get("dataset_id")),
+            _as_text(plan.get("resource_key")),
+            _as_text(plan.get("schedule_type")),
+            _as_text(plan.get("schedule_expr")),
+            _as_text(plan.get("date_field")),
         ]
     )
 
@@ -194,7 +221,9 @@ class FinanceCronSchedulerService:
         self.timezone = ZoneInfo(config.timezone)
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self._plan_signatures: dict[str, str] = {}
+        self._collection_plan_signatures: dict[str, str] = {}
         self._inflight_slots: set[tuple[str, str, str]] = set()
+        self._inflight_collection_slots: set[tuple[str, str, str, str]] = set()
 
     async def start(self) -> None:
         self.scheduler.add_job(
@@ -207,7 +236,18 @@ class FinanceCronSchedulerService:
             max_instances=1,
             misfire_grace_time=self.config.misfire_grace_seconds,
         )
+        self.scheduler.add_job(
+            self.refresh_collection_plans,
+            trigger="interval",
+            seconds=self.config.refresh_interval_seconds,
+            id="refresh-collection-plans",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=self.config.misfire_grace_seconds,
+        )
         await self.refresh_run_plans()
+        await self.refresh_collection_plans()
         self.scheduler.start()
         logger.info(
             "[finance-cron] 已启动 APScheduler: timezone=%s refresh_interval_seconds=%s",
@@ -351,6 +391,118 @@ class FinanceCronSchedulerService:
         with suppress_job_lookup_error():
             self.scheduler.remove_job(job_id)
         self._plan_signatures.pop(job_id, None)
+
+    async def refresh_collection_plans(self) -> None:
+        scheduler_token = create_scheduler_auth_token()
+        result = await data_source_scheduler_list_collection_plans(
+            scheduler_token,
+            limit=self.config.plan_page_size,
+        )
+        if not bool(result.get("success")):
+            raise RuntimeError(str(result.get("error") or "查询数据集采集计划失败"))
+        plans = [item for item in (result.get("collection_plans") or []) if isinstance(item, dict)]
+
+        active_job_ids: set[str] = set()
+        for plan in plans:
+            job_id = build_collection_job_id(plan)
+            signature = build_collection_signature(plan)
+            trigger = build_trigger_from_plan(plan, tz=self.timezone)
+            if trigger is None:
+                self._remove_collection_job(job_id)
+                continue
+
+            active_job_ids.add(job_id)
+            existing_job = self.scheduler.get_job(job_id)
+            if existing_job and self._collection_plan_signatures.get(job_id) == signature:
+                continue
+
+            self.scheduler.add_job(
+                self.execute_collection_job,
+                trigger=trigger,
+                id=job_id,
+                replace_existing=True,
+                kwargs={
+                    "company_id": _as_text(plan.get("company_id")),
+                    "source_id": _as_text(plan.get("source_id")),
+                    "dataset_id": _as_text(plan.get("dataset_id")),
+                    "resource_key": _as_text(plan.get("resource_key")),
+                    "schedule_type": _as_text(plan.get("schedule_type")),
+                    "schedule_expr": _as_text(plan.get("schedule_expr")),
+                },
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=self.config.misfire_grace_seconds,
+            )
+            self._collection_plan_signatures[job_id] = signature
+
+        for job_id in list(self._collection_plan_signatures.keys()):
+            if job_id not in active_job_ids:
+                self._remove_collection_job(job_id)
+
+    async def execute_collection_job(
+        self,
+        *,
+        company_id: str,
+        source_id: str,
+        dataset_id: str,
+        resource_key: str,
+        schedule_type: str,
+        schedule_expr: str,
+    ) -> None:
+        company_id = _as_text(company_id)
+        source_id = _as_text(source_id)
+        dataset_id = _as_text(dataset_id)
+        resource_key = _as_text(resource_key)
+        if not company_id or not source_id or not dataset_id:
+            return
+
+        due_at = datetime.now(self.timezone).replace(second=0, microsecond=0)
+        biz_date = (due_at - timedelta(days=1)).date().isoformat()
+        schedule_slot = build_schedule_slot(schedule_type, due_at)
+        slot_key = (company_id, source_id, dataset_id, schedule_slot)
+        if slot_key in self._inflight_collection_slots:
+            return
+
+        self._inflight_collection_slots.add(slot_key)
+        try:
+            company_token = create_scheduler_auth_token(company_id=company_id)
+            result = await data_source_trigger_dataset_collection(
+                company_token,
+                source_id=source_id,
+                dataset_id=dataset_id,
+                resource_key=resource_key,
+                biz_date=biz_date,
+                trigger_mode="schedule",
+                params={
+                    "schedule_slot": schedule_slot,
+                    "schedule_expr": schedule_expr,
+                    "scheduler_time_zone": self.config.timezone,
+                    "scheduler_triggered_at": due_at.isoformat(),
+                },
+            )
+            if bool(result.get("success")):
+                logger.info(
+                    "[finance-cron] 数据集采集触发成功: source_id=%s dataset_id=%s biz_date=%s reused=%s",
+                    source_id,
+                    dataset_id,
+                    biz_date,
+                    result.get("reused"),
+                )
+                return
+            logger.warning(
+                "[finance-cron] 数据集采集触发失败: source_id=%s dataset_id=%s biz_date=%s error=%s",
+                source_id,
+                dataset_id,
+                biz_date,
+                result.get("error"),
+            )
+        finally:
+            self._inflight_collection_slots.discard(slot_key)
+
+    def _remove_collection_job(self, job_id: str) -> None:
+        with suppress_job_lookup_error():
+            self.scheduler.remove_job(job_id)
+        self._collection_plan_signatures.pop(job_id, None)
 
 
 class suppress_job_lookup_error:

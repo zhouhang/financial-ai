@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type SetStateAction } from 'react';
 import {
   AlertCircle,
   Check,
@@ -14,7 +14,6 @@ import {
 import { collaborationProviderLabel } from '../collaborationChannelConfig';
 import { normalizeChannelConfig } from '../collaborationChannelDrafts';
 import { sourceKindLabel } from '../dataSourceConfig';
-import { ruleSupportsEntryMode } from '../utils/ruleEntryModes';
 import type {
   CollaborationChannelListItem,
   CollaborationProvider,
@@ -22,10 +21,45 @@ import type {
   ReconWorkspaceMode,
   UserTaskRule,
 } from '../types';
-import { consumeReconAutoSse, fetchReconAutoApi } from './recon/autoApi';
+import { fetchReconAutoApi } from './recon/autoApi';
+import SchemeWizardIntentStep from './recon/SchemeWizardIntentStep';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
-import SchemeWizardTargetProcStep from './recon/SchemeWizardTargetProcStep';
+import {
+  applyPreparationOutputFields,
+  applyPreparationSources,
+  applyLegacySchemeDraftSnapshot,
+  buildLegacySchemeDraftSnapshot,
+  buildSchemeCreatePayloadDraft,
+  createOutputFieldDraft,
+  createEmptySchemeWizardDraftState,
+  createReconFieldPairDraft,
+  hydratePreparationOutputFieldsFromProcRule,
+  inferOutputFieldSemanticRole,
+  normalizeOutputFieldSemanticRole,
+  type OutputFieldDraft,
+  type OutputFieldSemanticRole,
+  type ReconFieldPairDraft,
+  updateDerivedDraft,
+  updateIntentDraft,
+  updateReconciliationDraft,
+  type SchemeWizardDraftState,
+} from './recon/schemeWizardState';
+import SchemeWizardTargetProcStep, {
+  type AiProcSide,
+  type AiProcSideDraft,
+  type ProcBuildMode,
+} from './recon/SchemeWizardTargetProcStep';
+import {
+  applyRuleGenerationEventToDraft,
+  buildAiSideProcRuleJson,
+  buildRuleGenerationSourcePayloads,
+  createDefaultRuleGenerationNodeTraces,
+  createEmptyAiProcSideDrafts,
+  normalizeAiOutputFields,
+  parseSseFrame,
+} from './recon/ruleGenerationState';
+import { buildRunPlanBindings } from './recon/runPlanBindings';
 import {
   cn,
   type ReconCenterRunItem,
@@ -57,7 +91,7 @@ type CenterModalState =
   | { kind: 'task-detail'; task: ReconTaskListItem }
   | { kind: 'run-exceptions'; run: ReconCenterRunItem };
 
-type SchemeWizardStep = 1 | 2 | 3 | 4;
+type SchemeWizardStep = 1 | 2 | 3;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
@@ -114,6 +148,8 @@ interface SchemeDraft {
   reconConfigMode: ConfigMode;
   selectedReconConfigId: string;
   reconRuleName: string;
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
   matchKey: string;
   leftAmountField: string;
   rightAmountField: string;
@@ -124,29 +160,6 @@ interface SchemeDraft {
   reconRuleJson: Record<string, unknown> | null;
   reconTrialStatus: TrialStatus;
   reconTrialSummary: string;
-}
-
-interface ExistingConfigOption {
-  id: string;
-  name: string;
-  draftText: string;
-  ruleJson?: Record<string, unknown> | null;
-  schemeCode?: string;
-  ruleCode?: string;
-  leftSources?: SchemeSourceDraft[];
-  rightSources?: SchemeSourceDraft[];
-  matchKey?: string;
-  leftAmountField?: string;
-  rightAmountField?: string;
-  tolerance?: string;
-  leftTimeSemantic?: string;
-  rightTimeSemantic?: string;
-}
-
-interface RuleGenerationProgress {
-  skill: string;
-  phase: string;
-  message: string;
 }
 
 interface CompatibilityCheckResult {
@@ -189,12 +202,10 @@ interface ProcTrialPreview {
 }
 
 interface ReconResultRow {
-  matchKey: string;
-  result: 'matched' | 'amount_diff' | 'left_only' | 'right_only';
-  leftAmount: number | '--';
-  rightAmount: number | '--';
-  diffAmount: number | '--';
-  note: string;
+  matchFields: string;
+  leftCompareFields: string;
+  rightCompareFields: string;
+  result: string;
 }
 
 interface ReconTrialPreview {
@@ -216,17 +227,27 @@ interface ReconTrialPreview {
 }
 
 interface ParsedReconDraftConfig {
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
   matchKey: string;
   leftAmountField: string;
   rightAmountField: string;
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
   tolerance: string;
 }
 
-interface SourceFieldProfile {
-  keyField: string;
-  amountField: string;
-  dateField: string;
-  labelField?: string;
+interface ReconFieldOption {
+  value: string;
+  label: string;
+}
+
+type PreviewColumnOriginTone = 'sky' | 'emerald' | 'amber' | 'violet';
+
+interface PreviewColumnHintMeta {
+  badge?: string;
+  helper?: string;
+  tone?: PreviewColumnOriginTone;
 }
 
 interface PlanDraft {
@@ -236,6 +257,7 @@ interface PlanDraft {
   scheduleMinute: string;
   scheduleDayOfWeek: string;
   scheduleDayOfMonth: string;
+  bizDateOffset: string;
   leftTimeSemantic: string;
   rightTimeSemantic: string;
   channelConfigId: string;
@@ -246,6 +268,10 @@ interface SchemeMetaSummary {
   businessGoal: string;
   leftSources: SchemeSourceDraft[];
   rightSources: SchemeSourceDraft[];
+  leftOutputFields: OutputFieldDraft[];
+  rightOutputFields: OutputFieldDraft[];
+  leftOutputFieldLabelMap: Record<string, string>;
+  rightOutputFieldLabelMap: Record<string, string>;
   leftDescription: string;
   rightDescription: string;
   procRuleName: string;
@@ -256,6 +282,8 @@ interface SchemeMetaSummary {
   procDraftText: string;
   reconDraftText: string;
   reconRuleName: string;
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
   matchKey: string;
   leftAmountField: string;
   rightAmountField: string;
@@ -269,7 +297,7 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(0,2.3fr) minmax(200px,1.1fr) minmax(180px,0.9fr) minmax(120px,0.7fr) minmax(280px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.4fr) minmax(190px,1fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(148px,auto)';
+  'minmax(0,2.9fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(188px,auto)';
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -282,46 +310,17 @@ const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
 };
 
 const RECON_RESULT_FIELD_LABEL_MAP: Record<string, string> = {
-  match_key: '匹配键',
+  match_fields: '匹配字段',
+  left_compare_fields: '左侧对比字段',
+  right_compare_fields: '右侧对比字段',
   result: '对账结果',
-  left_amount: '左侧金额',
-  right_amount: '右侧金额',
-  diff_amount: '差额',
-  note: '说明',
 };
 
 const SCHEME_WIZARD_STEPS: Array<{ id: SchemeWizardStep; title: string; description: string }> = [
-  { id: 1, title: '对账目标', description: '选择左右数据并描述口径' },
-  { id: 2, title: '数据整理', description: 'AI 生成整理配置并试跑' },
-  { id: 3, title: '对账逻辑', description: 'AI 生成对账逻辑并试跑' },
-  { id: 4, title: '保存方案', description: '确认摘要后保存方案' },
+  { id: 1, title: '方案目标', description: '先说明这次对账要解决什么问题' },
+  { id: 2, title: '数据整理', description: '选择左右数据并整理成可对账结构' },
+  { id: 3, title: '对账规则', description: '基于整理后的结构生成、修正规则并保存方案' },
 ];
-
-const EMPTY_SCHEME_DRAFT: SchemeDraft = {
-  name: '',
-  businessGoal: '',
-  leftDescription: '',
-  rightDescription: '',
-  procConfigMode: 'ai',
-  selectedProcConfigId: '',
-  procDraft: '',
-  procRuleJson: null,
-  procTrialStatus: 'idle',
-  procTrialSummary: '',
-  reconConfigMode: 'ai',
-  selectedReconConfigId: '',
-  reconRuleName: '',
-  matchKey: '',
-  leftAmountField: '',
-  rightAmountField: '',
-  tolerance: '',
-  leftTimeSemantic: '',
-  rightTimeSemantic: '',
-  reconDraft: '',
-  reconRuleJson: null,
-  reconTrialStatus: 'idle',
-  reconTrialSummary: '',
-};
 
 const EMPTY_PLAN_DRAFT: PlanDraft = {
   schemeCode: '',
@@ -330,17 +329,12 @@ const EMPTY_PLAN_DRAFT: PlanDraft = {
   scheduleMinute: '30',
   scheduleDayOfWeek: '1',
   scheduleDayOfMonth: '1',
+  bizDateOffset: 'T-1',
   leftTimeSemantic: '',
   rightTimeSemantic: '',
   channelConfigId: '',
   ownerSummary: '',
 };
-
-function createEmptySchemeDraft(): SchemeDraft {
-  return {
-    ...EMPTY_SCHEME_DRAFT,
-  };
-}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
@@ -369,6 +363,41 @@ function normalizeFieldLabelMap(value: unknown): Record<string, string> | undefi
 
 function normalizeStringList(value: unknown): string[] {
   return asList(value).map((item) => toText(item).trim()).filter(Boolean);
+}
+
+function normalizeOutputFieldDrafts(value: unknown): OutputFieldDraft[] {
+  return asList(value)
+    .map((item, index) => {
+      const record = asRecord(item);
+      const valueMode = toText(record.value_mode, 'source_field');
+      const concatParts = asList(record.concat_parts)
+        .map((part, partIndex) => {
+          const partRecord = asRecord(part);
+          return {
+            id: toText(partRecord.id, `concat_${index}_${partIndex}`),
+            datasetId: toText(partRecord.dataset_id),
+            fieldName: toText(partRecord.field_name),
+          };
+        });
+      return {
+        id: toText(record.id, `field_${index}`),
+        outputName: toText(record.output_name),
+        semanticRole: normalizeOutputFieldSemanticRole(
+          record.semantic_role ?? record.semanticRole ?? inferOutputFieldSemanticRole(toText(record.output_name), toText(record.source_field)),
+        ),
+        valueMode:
+          valueMode === 'fixed_value' || valueMode === 'formula' || valueMode === 'concat'
+            ? valueMode
+            : 'source_field',
+        sourceDatasetId: toText(record.source_dataset_id),
+        sourceField: toText(record.source_field),
+        fixedValue: toText(record.fixed_value),
+        formula: toText(record.formula),
+        concatDelimiter: toText(record.concat_delimiter),
+        concatParts,
+      } satisfies OutputFieldDraft;
+    })
+    .filter((item) => item.outputName || item.sourceDatasetId || item.sourceField || item.fixedValue || item.formula || item.concatParts.length > 0);
 }
 
 function mergeFieldLabelMaps(
@@ -409,15 +438,15 @@ function toBool(value: unknown, fallback = false): boolean {
 
 function humanizeProcTargetTable(targetTable: string): string {
   const normalized = targetTable.trim();
-  if (normalized === 'left_recon_ready') return '左侧整理结果表';
-  if (normalized === 'right_recon_ready') return '右侧整理结果表';
-  return normalized || '整理结果表';
+  if (normalized === 'left_recon_ready') return '左侧输出结果表';
+  if (normalized === 'right_recon_ready') return '右侧输出结果表';
+  return normalized || '输出结果表';
 }
 
 function humanizeProcDescription(text: string): string {
   return text
-    .replaceAll('left_recon_ready', '左侧整理结果表')
-    .replaceAll('right_recon_ready', '右侧整理结果表')
+    .replaceAll('left_recon_ready', '左侧输出结果表')
+    .replaceAll('right_recon_ready', '右侧输出结果表')
     .replaceAll('biz_key', '业务主键')
     .replaceAll('amount', '金额')
     .replaceAll('biz_date', '业务日期')
@@ -427,9 +456,9 @@ function humanizeProcDescription(text: string): string {
 
 function humanizeProcRoleDesc(roleDesc: string): string {
   const normalized = humanizeProcDescription(roleDesc);
-  if (!normalized) return '数据整理配置说明';
+  if (!normalized) return '整理规则说明';
   if (/(规则生成器|draft proc|fallback proc|tally 财务 ai)/i.test(normalized)) {
-    return '数据整理配置说明';
+    return '整理规则说明';
   }
   return normalized;
 }
@@ -648,28 +677,33 @@ function summarizeProcDraft(json: Record<string, unknown>): string {
   return lines.join('\n').trim();
 }
 
-function summarizeReconDraft(json: Record<string, unknown>): string {
+function summarizeReconDraft(
+  json: Record<string, unknown>,
+  fallback: Partial<ParsedReconDraftConfig> = {},
+): string {
+  const parsed = parseReconRuleJsonConfig(json, fallback);
   const ruleName = toText(json.rule_name, '未命名对账逻辑');
   const rules = Array.isArray(json.rules) ? json.rules : [];
   const firstRule = asRecord(rules[0]);
-  const recon = asRecord(firstRule.recon);
-  const keyColumns = asRecord(recon.key_columns);
-  const compareColumns = asRecord(recon.compare_columns);
-  const mappings = Array.isArray(keyColumns.mappings) ? keyColumns.mappings : [];
-  const columns = Array.isArray(compareColumns.columns) ? compareColumns.columns : [];
-  const firstMapping = asRecord(mappings[0]);
-  const firstColumn = asRecord(columns[0]);
   const sourceFile = asRecord(firstRule.source_file);
   const targetFile = asRecord(firstRule.target_file);
+  const leftTimeSemantic = toText(
+    json.left_time_semantic,
+    toText(firstRule.left_time_semantic, fallback.leftTimeSemantic || ''),
+  );
+  const rightTimeSemantic = toText(
+    json.right_time_semantic,
+    toText(firstRule.right_time_semantic, fallback.rightTimeSemantic || ''),
+  );
 
   return [
     `# ${ruleName}`,
     `输入：${toText(sourceFile.table_name, 'left_recon_ready')} ↔ ${toText(targetFile.table_name, 'right_recon_ready')}`,
-    `匹配主键：${toText(firstMapping.source_field, 'biz_key')}`,
-    `左金额字段：${toText(firstColumn.source_column, 'amount')}`,
-    `右金额字段：${toText(firstColumn.target_column, 'amount')}`,
-    `容差：${toText(firstColumn.tolerance, '0')}`,
-    '识别方式：按匹配主键对齐左右记录，比较金额差异并输出差异结果。',
+    `匹配字段：${resolveReconFieldPairsSummary(parsed.matchFieldPairs)}`,
+    `对比字段：${resolveReconFieldPairsSummary(parsed.compareFieldPairs)}`,
+    `左时间字段：${leftTimeSemantic || '未配置'}`,
+    `右时间字段：${rightTimeSemantic || '未配置'}`,
+    '识别方式：按匹配字段对齐左右记录，比较对比字段差异并输出差异结果。',
   ].join('\n');
 }
 
@@ -745,6 +779,14 @@ function formatScheduleLabel(scheduleType: string, scheduleExpr: string): string
   return expr ? `${base} / ${expr}` : base;
 }
 
+function formatBizDateOffsetLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return '--';
+  if (normalized === 't-1' || normalized === 'previous_day') return 'T-1';
+  if (normalized === 't' || normalized === 'today') return 'T';
+  return value;
+}
+
 function summarizeOwnerMapping(raw: unknown): string {
   const ownerMapping = asRecord(raw);
   const mappings = asList(ownerMapping.mappings);
@@ -797,16 +839,11 @@ function executionStatusMeta(status: string): { label: string; className: string
   };
 }
 
-function canRetryExecutionRun(status: string): boolean {
-  const normalized = status.trim().toLowerCase();
-  return normalized === 'failed' || normalized === 'error';
-}
-
 function formatAnomalyTypeLabel(value: string): string {
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'source_only') return '源侧独有';
-  if (normalized === 'target_only') return '目标侧独有';
-  if (normalized === 'matched_with_diff') return '匹配但字段有差异';
+  if (normalized === 'source_only') return '左侧独有';
+  if (normalized === 'target_only') return '右侧独有';
+  if (normalized === 'matched_with_diff') return '已匹配但字段不一致';
   if (normalized === 'value_mismatch') return '字段值不一致';
   if (normalized === 'amount_diff') return '金额不一致';
   return value || '未知异常';
@@ -861,41 +898,57 @@ function formatDetailValue(value: unknown): string {
   }
 }
 
-function buildRunExceptionReasonLines(item: ReconRunExceptionDetail): string[] {
-  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-  const compareValues = asList(detail.compare_values).map((entry) => asRecord(entry));
-  const anomalyType = item.anomalyType.trim().toLowerCase();
+function stripRunExceptionFieldPrefix(field: string): string {
+  const normalized = field.trim();
+  if (!normalized) return '';
+  const prefixes = ['left_recon_ready.', 'right_recon_ready.', 'source.', 'target.', 'left.', 'right.'];
+  for (const prefix of prefixes) {
+    if (normalized.startsWith(prefix)) {
+      return normalized.slice(prefix.length);
+    }
+  }
+  return normalized;
+}
 
-  if (compareValues.length > 0) {
-    const lines = compareValues
-      .map((entry) => {
-        const label = toText(entry.name, '差异字段');
-        const sourceField = toText(entry.source_field);
-        const targetField = toText(entry.target_field);
-        const sourceValue = formatDetailValue(entry.source_value);
-        const targetValue = formatDetailValue(entry.target_value);
-        const diffValue = formatDetailValue(entry.diff_value);
-        return `${label}不一致：源侧${sourceField || '--'}=${sourceValue}，目标侧${targetField || '--'}=${targetValue}，差额=${diffValue}。`;
-      })
-      .filter(Boolean);
-    if (lines.length > 0) return lines;
-  }
+function humanizeExceptionFieldName(field: string, fallback = ''): string {
+  const normalized = stripRunExceptionFieldPrefix(field || fallback);
+  if (!normalized) return fallback || '--';
+  return PREPARED_OUTPUT_FIELD_LABEL_MAP[normalized] || humanizeProcDescription(normalized).trim() || normalized;
+}
 
-  if (anomalyType === 'source_only') {
-    return ['该记录只出现在源侧数据，目标侧没有找到相同对账键的记录。'];
-  }
-  if (anomalyType === 'target_only') {
-    return ['该记录只出现在目标侧数据，源侧没有找到相同对账键的记录。'];
-  }
-  if (anomalyType === 'matched_with_diff' || anomalyType === 'value_mismatch' || anomalyType === 'amount_diff') {
-    return ['源侧与目标侧已匹配到同一笔记录，但用于核对的字段值不一致。'];
-  }
+function buildRunExceptionJoinKeySummary(item: ReconRunExceptionDetail): string[] {
+  return getRunExceptionJoinKeys(item)
+    .map((entry) => {
+      const label = humanizeExceptionFieldName(
+        toText(entry.source_field),
+        toText(entry.target_field, '匹配字段'),
+      );
+      const sourceValue = formatDetailValue(entry.source_value);
+      const targetValue = formatDetailValue(entry.target_value);
+      if (sourceValue !== '--') {
+        return `${label}：${sourceValue}`;
+      }
+      if (targetValue !== '--') {
+        return `${label}：${targetValue}`;
+      }
+      return '';
+    })
+    .filter(Boolean);
+}
 
-  const latestFeedback = item.latestFeedback.trim();
-  if (latestFeedback) {
-    return [latestFeedback];
-  }
-  return ['当前没有更详细的差异原因，建议结合明细数据继续核查。'];
+function buildRunExceptionCompareSummary(item: ReconRunExceptionDetail): string[] {
+  return getRunExceptionCompareValues(item)
+    .map((entry) => {
+      const label = toText(
+        entry.name,
+        humanizeExceptionFieldName(toText(entry.source_field), toText(entry.target_field, '对比字段')),
+      );
+      const sourceValue = formatDetailValue(entry.source_value);
+      const targetValue = formatDetailValue(entry.target_value);
+      const diffValue = formatDetailValue(entry.diff_value);
+      return `${label}：左侧 ${sourceValue} / 右侧 ${targetValue}${diffValue !== '--' ? ` / 差额 ${diffValue}` : ''}`;
+    })
+    .filter(Boolean);
 }
 
 function getRunExceptionJoinKeys(item: ReconRunExceptionDetail): Array<Record<string, unknown>> {
@@ -917,6 +970,46 @@ function getRunExceptionRawRecord(item: ReconRunExceptionDetail): Record<string,
   return firstNonEmptyRecord(detail.raw_record, detail.record, detail.source_record, detail.left_record);
 }
 
+function getRunExceptionRecordsBySide(
+  item: ReconRunExceptionDetail,
+): { left: Record<string, unknown>; right: Record<string, unknown>; extra: Record<string, unknown> } {
+  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
+  const explicitLeft = firstNonEmptyRecord(detail.left_record, detail.source_record, detail.left_row);
+  const explicitRight = firstNonEmptyRecord(detail.right_record, detail.target_record, detail.right_row);
+  const rawRecord = firstNonEmptyRecord(detail.raw_record, detail.record);
+
+  const normalizeRecordKeys = (record: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(
+      Object.entries(record).map(([key, value]) => [stripRunExceptionFieldPrefix(key), value]),
+    );
+
+  if (Object.keys(explicitLeft).length > 0 || Object.keys(explicitRight).length > 0) {
+    return {
+      left: normalizeRecordKeys(explicitLeft),
+      right: normalizeRecordKeys(explicitRight),
+      extra: {},
+    };
+  }
+
+  const left: Record<string, unknown> = {};
+  const right: Record<string, unknown> = {};
+  const extra: Record<string, unknown> = {};
+
+  Object.entries(rawRecord).forEach(([key, value]) => {
+    if (key.startsWith('left_recon_ready.') || key.startsWith('source.') || key.startsWith('left.')) {
+      left[stripRunExceptionFieldPrefix(key)] = value;
+      return;
+    }
+    if (key.startsWith('right_recon_ready.') || key.startsWith('target.') || key.startsWith('right.')) {
+      right[stripRunExceptionFieldPrefix(key)] = value;
+      return;
+    }
+    extra[stripRunExceptionFieldPrefix(key)] = value;
+  });
+
+  return { left, right, extra };
+}
+
 function enabledStatusMeta(enabled: boolean): { label: string; className: string } {
   return enabled
     ? {
@@ -934,6 +1027,40 @@ function emptyCompatibilityResult(): CompatibilityCheckResult {
     status: 'idle',
     message: '等待校验',
     details: [],
+  };
+}
+
+const PROC_REFERENCE_VALIDATION = '以下展示的是上一次试跑的数据样例，仅供参考。';
+const PREPARATION_REFERENCE_EDIT_SUMMARY =
+  '已保留上一次试跑结果的数据样例供参考。当前数据整理已修改，请重新试跑。';
+const RECON_REFERENCE_EDIT_SUMMARY =
+  '已保留上一次对账试跑结果供参考。当前对账设置已修改，请重新试跑。';
+
+function markProcTrialPreviewAsReference(
+  preview: ProcTrialPreview | null,
+  summary: string,
+): ProcTrialPreview | null {
+  if (!preview) return preview;
+  const validations = preview.validations.includes(PROC_REFERENCE_VALIDATION)
+    ? preview.validations
+    : [PROC_REFERENCE_VALIDATION, ...preview.validations];
+  return {
+    ...preview,
+    status: 'needs_adjustment',
+    summary,
+    validations,
+  };
+}
+
+function markReconTrialPreviewAsReference(
+  preview: ReconTrialPreview | null,
+  summary: string,
+): ReconTrialPreview | null {
+  if (!preview) return preview;
+  return {
+    ...preview,
+    status: 'needs_adjustment',
+    summary,
   };
 }
 
@@ -968,7 +1095,7 @@ function mapTask(item: unknown, schemeNameByCode: Map<string, string>): ReconTas
     schemeName: schemeNameByCode.get(schemeCode) || schemeCode || '--',
     scheduleType: toText(raw.schedule_type),
     scheduleExpr: toText(raw.schedule_expr),
-    bizDateOffset: toText(raw.biz_date_offset, 'T'),
+    bizDateOffset: toText(raw.biz_date_offset, 'T-1'),
     leftTimeSemantic: toText(planMeta.left_time_semantic),
     rightTimeSemantic: toText(planMeta.right_time_semantic),
     channelConfigId: toText(raw.channel_config_id),
@@ -995,6 +1122,7 @@ function mapRun(
   taskNameByCode: Map<string, string>,
 ): ReconCenterRunItem {
   const raw = asRecord(item);
+  const runContext = asRecord(raw.run_context_json);
   const schemeCode = toText(raw.scheme_code);
   const planCode = toText(raw.plan_code);
   return {
@@ -1005,7 +1133,7 @@ function mapRun(
     schemeName: schemeNameByCode.get(schemeCode) || schemeCode || '--',
     planName: taskNameByCode.get(planCode) || planCode || '--',
     executionStatus: toText(raw.execution_status),
-    triggerType: toText(raw.trigger_type),
+    triggerType: toText(runContext.trigger_type, toText(raw.trigger_type)),
     entryMode: toText(raw.entry_mode),
     anomalyCount: toInt(raw.anomaly_count, 0),
     failedStage: toText(raw.failed_stage),
@@ -1045,6 +1173,8 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
 
 function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
+  const procRuleJson = asRecord(schemeMeta.proc_rule_json);
+  const reconRuleJson = asRecord(schemeMeta.recon_rule_json);
   const datasetBindings = asRecord(schemeMeta.dataset_bindings);
   const leftBindingRows = asList(datasetBindings.left);
   const rightBindingRows = asList(datasetBindings.right);
@@ -1098,11 +1228,54 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
       datasetKind: toText(value.dataset_kind),
     };
   });
+  const parsedReconConfig = parseReconRuleJsonConfig(reconRuleJson, {
+    matchFieldPairs: normalizeReconFieldPairs(
+      schemeMeta.match_field_pairs,
+      toText(schemeMeta.match_key)
+        ? [{ leftField: toText(schemeMeta.match_key), rightField: toText(schemeMeta.match_key) }]
+        : [],
+    ),
+    compareFieldPairs: normalizeReconFieldPairs(
+      schemeMeta.compare_field_pairs,
+      toText(schemeMeta.left_amount_field) || toText(schemeMeta.right_amount_field)
+        ? [
+            {
+              leftField: toText(schemeMeta.left_amount_field),
+              rightField: toText(schemeMeta.right_amount_field),
+            },
+          ]
+        : [],
+    ),
+    matchKey: toText(schemeMeta.match_key),
+    leftAmountField: toText(schemeMeta.left_amount_field),
+    rightAmountField: toText(schemeMeta.right_amount_field),
+    leftTimeSemantic: toText(schemeMeta.left_time_semantic, toText(schemeMeta.time_semantic)),
+    rightTimeSemantic: toText(schemeMeta.right_time_semantic, toText(schemeMeta.time_semantic)),
+    tolerance: toText(schemeMeta.tolerance),
+  });
+  const leftOutputFields = normalizeOutputFieldDrafts(schemeMeta.left_output_fields);
+  const rightOutputFields = normalizeOutputFieldDrafts(schemeMeta.right_output_fields);
+  const leftOutputFieldLabelMap = mergeLabelMaps(
+    buildOutputFieldLabelMap(leftOutputFields, leftSources),
+    buildProcOutputFieldLabelMap(procRuleJson, 'left_recon_ready', leftSources),
+    normalizeFieldLabelMap(schemeMeta.left_output_field_label_map),
+    normalizeFieldLabelMap(schemeMeta.leftOutputFieldLabelMap),
+  );
+  const rightOutputFieldLabelMap = mergeLabelMaps(
+    buildOutputFieldLabelMap(rightOutputFields, rightSources),
+    buildProcOutputFieldLabelMap(procRuleJson, 'right_recon_ready', rightSources),
+    normalizeFieldLabelMap(schemeMeta.right_output_field_label_map),
+    normalizeFieldLabelMap(schemeMeta.rightOutputFieldLabelMap),
+  );
 
   return {
     businessGoal: toText(schemeMeta.business_goal, item.description),
     leftSources,
     rightSources,
+    leftOutputFields,
+    rightOutputFields,
+    leftOutputFieldLabelMap,
+    rightOutputFieldLabelMap,
     leftDescription: toText(schemeMeta.left_description),
     rightDescription: toText(schemeMeta.right_description),
     procRuleName: toText(schemeMeta.proc_rule_name),
@@ -1113,12 +1286,14 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     procDraftText: toText(schemeMeta.proc_draft_text),
     reconDraftText: toText(schemeMeta.recon_draft_text),
     reconRuleName: toText(schemeMeta.recon_rule_name, toText(schemeMeta.bound_recon_rule_name)),
-    matchKey: toText(schemeMeta.match_key),
-    leftAmountField: toText(schemeMeta.left_amount_field),
-    rightAmountField: toText(schemeMeta.right_amount_field),
-    tolerance: toText(schemeMeta.tolerance),
-    leftTimeSemantic: toText(schemeMeta.left_time_semantic, toText(schemeMeta.time_semantic)),
-    rightTimeSemantic: toText(schemeMeta.right_time_semantic, toText(schemeMeta.time_semantic)),
+    matchFieldPairs: parsedReconConfig.matchFieldPairs,
+    compareFieldPairs: parsedReconConfig.compareFieldPairs,
+    matchKey: parsedReconConfig.matchKey,
+    leftAmountField: parsedReconConfig.leftAmountField,
+    rightAmountField: parsedReconConfig.rightAmountField,
+    tolerance: parsedReconConfig.tolerance,
+    leftTimeSemantic: parsedReconConfig.leftTimeSemantic,
+    rightTimeSemantic: parsedReconConfig.rightTimeSemantic,
   };
 }
 
@@ -1151,19 +1326,19 @@ function resolveSourceFieldLabelMap(
 
 function resolveSampleOriginMeta(
   origin: unknown,
-  snapshotId?: unknown,
+  collectionId?: unknown,
 ): {
   key: string;
   label: string;
   hint?: string;
 } {
   const originKey = toText(origin).trim().toLowerCase();
-  const resolvedSnapshotId = toText(snapshotId).trim();
-  if (originKey === 'published_snapshot') {
+  const resolvedCollectionId = toText(collectionId).trim();
+  if (originKey === 'collection_records') {
     return {
       key: originKey,
-      label: '已发布快照',
-      hint: resolvedSnapshotId ? `来自真实已发布快照：${resolvedSnapshotId}` : '来自真实已发布快照',
+      label: '已采集数据',
+      hint: resolvedCollectionId ? `来自已采集数据：${resolvedCollectionId}` : '来自已采集数据',
     };
   }
   if (originKey === 'uploaded_file') {
@@ -1180,60 +1355,14 @@ function resolveSampleOriginMeta(
   };
 }
 
-function buildRunPlanBinding(
-  source: SchemeSourceDraft,
-  dateField: string,
-  side: 'left' | 'right',
-  index: number,
-): Record<string, unknown> | null {
-  const sourceId = toText(source.sourceId).trim();
-  const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
-  if (!sourceId || !tableName) return null;
-
-  const query: Record<string, unknown> = {};
-  if (tableName) {
-    query.resource_key = tableName;
-  }
-  if (dateField.trim()) {
-    query.date_field = dateField.trim();
-  }
-
+function resolvePlanTimeSemantics(schemeMeta: SchemeMetaSummary | null): {
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
+} {
   return {
-    data_source_id: sourceId,
-    table_name: tableName,
-    resource_key: tableName,
-    dataset_source_type: 'snapshot',
-    role_code: `${side}_${index + 1}`,
-    side,
-    query,
+    leftTimeSemantic: schemeMeta?.leftTimeSemantic.trim() || '',
+    rightTimeSemantic: schemeMeta?.rightTimeSemantic.trim() || '',
   };
-}
-
-function buildRunPlanBindings(
-  schemeMeta: SchemeMetaSummary | null,
-  leftTimeSemantic: string,
-  rightTimeSemantic: string,
-): Array<Record<string, unknown>> {
-  if (!schemeMeta) return [];
-  const bindings = [
-    ...schemeMeta.leftSources.map((source, index) => buildRunPlanBinding(source, leftTimeSemantic, 'left', index)),
-    ...schemeMeta.rightSources.map((source, index) => buildRunPlanBinding(source, rightTimeSemantic, 'right', index)),
-  ].filter(Boolean) as Array<Record<string, unknown>>;
-
-  const seen = new Set<string>();
-  return bindings.filter((item) => {
-    const query = asRecord(item.query);
-    const key = [
-      toText(item.data_source_id),
-      toText(item.table_name),
-      toText(item.resource_key),
-      toText(item.side),
-      toText(query.date_field),
-    ].join('::');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function normalizeSchemaType(value: unknown): string {
@@ -1352,27 +1481,6 @@ function buildRawSourceRows(
   });
 }
 
-function buildPreparedRows(
-  sources: SchemeSourceOption[],
-  side: 'left' | 'right',
-  procDraft: string,
-): PreviewTableRow[] {
-  const draftSeed = hashText(`${procDraft}-${side}`);
-  const prefix = procDraft.includes('退款') ? 'REF' : procDraft.includes('游戏') ? 'GAME' : 'BIZ';
-  return Array.from({ length: 3 }, (_, index) => {
-    const seq = index + 1;
-    return {
-      biz_key: `${prefix}-${seq.toString().padStart(3, '0')}`,
-      amount: formatPreviewAmount(120 + seq * 18.4 + (draftSeed % 7) * 0.11),
-      biz_date: `2026-04-${String(seq + 1).padStart(2, '0')}`,
-      source_count: sources.length,
-      source_side: side === 'left' ? 'left_recon_ready' : 'right_recon_ready',
-      source_hint:
-        sources.map((item) => (item.sourceName ? `${item.sourceName}/${item.name}` : item.name)).join(' / ') || '--',
-    };
-  });
-}
-
 function buildDatasetSamplePayload(
   source: SchemeSourceOption,
   side: 'left' | 'right',
@@ -1382,14 +1490,15 @@ function buildDatasetSamplePayload(
     tableName?: string;
     schemaSummary?: Record<string, unknown>;
     sampleRows?: PreviewTableRow[];
+    preparedOutputFields?: Array<Record<string, unknown>>;
   },
 ): Record<string, unknown> {
   const tableName = options?.tableName || resolveDatasetTableName(source);
   const sampleRows = options?.sampleRows || buildRawSourceRows(source, side, seedText);
-  const sourceSchemaSummary = asRecord(source.schemaSummary);
   return {
     side,
     dataset_name: source.name,
+    business_name: source.businessName || source.name,
     table_name: tableName,
     dataset_code: source.datasetCode,
     source_type: 'dataset',
@@ -1399,42 +1508,10 @@ function buildDatasetSamplePayload(
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     description,
-    schema_summary:
-      options?.schemaSummary
-      || (Object.keys(sourceSchemaSummary).length > 0
-        ? sourceSchemaSummary
-        : inferSchemaSummaryFromRows(sampleRows)),
+    field_label_map: source.fieldLabelMap || undefined,
+    prepared_output_fields: options?.preparedOutputFields,
     sample_rows: sampleRows,
   };
-}
-
-function inferSchemaSummaryFromRows(rows: PreviewTableRow[]): Record<string, string> {
-  const summary = new Map<string, string>();
-  rows.forEach((row) => {
-    Object.entries(row).forEach(([key, value]) => {
-      if (summary.has(key)) return;
-      if (typeof value === 'number') {
-        summary.set(key, Number.isInteger(value) ? 'integer' : 'number');
-        return;
-      }
-      if (typeof value === 'string') {
-        if (/^\d{4}-\d{2}-\d{2}/.test(value)) {
-          summary.set(key, 'date');
-        } else if (!Number.isNaN(Number(value)) && value.trim() !== '') {
-          summary.set(key, 'number');
-        } else {
-          summary.set(key, 'string');
-        }
-        return;
-      }
-      if (value === null) {
-        summary.set(key, 'null');
-        return;
-      }
-      summary.set(key, 'unknown');
-    });
-  });
-  return Object.fromEntries(summary);
 }
 
 function toPreviewTableRows(value: unknown): PreviewTableRow[] {
@@ -1469,35 +1546,523 @@ function parseTrialMessages(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function extractConfigValue(draft: string, label: string, fallback: string): string {
-  const pattern = new RegExp(`${label}[：:]\\s*([^\\n]+)`);
-  const match = draft.match(pattern);
-  return match?.[1]?.trim() || fallback;
-}
-
-function parseReconDraftConfig({
-  reconDraft,
-  matchKey,
-  leftAmountField,
-  rightAmountField,
-  tolerance,
-}: Pick<
-  SchemeDraft,
-  | 'reconDraft'
-  | 'matchKey'
-  | 'leftAmountField'
-  | 'rightAmountField'
-  | 'tolerance'
->): ParsedReconDraftConfig {
+function buildProcPreviewFromTrialResult(trialResult: unknown): ProcTrialPreview | null {
+  const raw = asRecord(trialResult);
+  if (Object.keys(raw).length === 0) return null;
+  const sourceSamples = asList(raw.source_samples)
+    .filter((item) => typeof item === 'object' && item !== null)
+    .map((item) => asRecord(item));
+  const outputSamples = asList(raw.output_samples)
+    .filter((item) => typeof item === 'object' && item !== null)
+    .map((item) => asRecord(item));
   return {
-    matchKey: extractConfigValue(reconDraft, '匹配主键', matchKey || 'biz_key'),
-    leftAmountField: extractConfigValue(reconDraft, '左金额字段', leftAmountField || 'amount'),
-    rightAmountField: extractConfigValue(reconDraft, '右金额字段', rightAmountField || 'amount'),
-    tolerance: extractConfigValue(reconDraft, '容差', tolerance || '0.00'),
+    status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
+    summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据整理试跑完成'))),
+    rawSources: sourceSamples.map((item) => {
+      const collectionId = toText(item.collection_id, toText(item.snapshot_id));
+      const originMeta = resolveSampleOriginMeta(item.sample_origin, collectionId);
+      const fieldLabelMap =
+        normalizeFieldLabelMap(item.field_label_map)
+        || normalizeFieldLabelMap(item.columns_label_map)
+        || normalizeFieldLabelMap(item.column_display_map);
+      return {
+        sourceId: toText(item.source_id, toText(item.table_name)),
+        sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
+        side: toText(item.side) === 'right' ? 'right' : 'left',
+        fieldLabelMap,
+        sampleOrigin: originMeta.key,
+        sampleOriginLabel: originMeta.label,
+        sampleOriginHint: originMeta.hint,
+        snapshotId: collectionId || undefined,
+        rows: toPreviewTableRows(item.rows),
+      };
+    }),
+    preparedOutputs: outputSamples.map((item) => {
+      const fieldLabelMap =
+        normalizeFieldLabelMap(item.field_label_map)
+        || normalizeFieldLabelMap(item.columns_label_map)
+        || PREPARED_OUTPUT_FIELD_LABEL_MAP;
+      return {
+        side: toText(item.side) === 'right' ? 'right' : 'left',
+        title: toText(item.title, toText(item.target_table, 'output')),
+        fieldLabelMap,
+        rows: toPreviewTableRows(item.rows),
+      };
+    }),
+    validations: [
+      ...parseTrialMessages(raw.errors),
+      ...parseTrialMessages(raw.warnings),
+      ...parseTrialMessages(raw.highlights),
+    ],
   };
 }
 
-function parseReconRuleJsonConfig(json: Record<string, unknown>): ParsedReconDraftConfig {
+function normalizeReconFieldPairs(
+  value: unknown,
+  fallbackPairs: Array<{ leftField: string; rightField: string }> = [],
+): ReconFieldPairDraft[] {
+  const rows = Array.isArray(value)
+    ? value
+    : fallbackPairs.map((pair) => ({
+        left_field: pair.leftField,
+        right_field: pair.rightField,
+      }));
+  const seen = new Set<string>();
+  const normalized: ReconFieldPairDraft[] = [];
+  rows.forEach((item) => {
+    const record = asRecord(item);
+    const leftField = toText(record.left_field, toText(record.leftField)).trim();
+    const rightField = toText(record.right_field, toText(record.rightField)).trim();
+    if (!leftField && !rightField) return;
+    const dedupeKey = `${leftField}::${rightField}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    normalized.push({
+      id: toText(record.id).trim() || createReconFieldPairDraft().id,
+      leftField,
+      rightField,
+    });
+  });
+  return normalized;
+}
+
+function isCompleteReconFieldPair(pair: ReconFieldPairDraft): boolean {
+  return Boolean(pair.leftField.trim() && pair.rightField.trim());
+}
+
+function filterCompleteReconFieldPairs(pairs: ReconFieldPairDraft[]): ReconFieldPairDraft[] {
+  return normalizeReconFieldPairs(pairs).filter(isCompleteReconFieldPair);
+}
+
+function resolveFirstReconFieldPairValue(
+  pairs: ReconFieldPairDraft[],
+  side: 'left' | 'right',
+  fallback = '',
+): string {
+  const firstPair = filterCompleteReconFieldPairs(pairs)[0];
+  if (!firstPair) return fallback;
+  return side === 'left' ? firstPair.leftField : firstPair.rightField;
+}
+
+function resolveReconFieldPairsSummary(
+  pairs: ReconFieldPairDraft[],
+  fallback = '--',
+): string {
+  const text = filterCompleteReconFieldPairs(pairs)
+    .map((pair) => `${pair.leftField} ↔ ${pair.rightField}`)
+    .join('；');
+  return text || fallback;
+}
+
+function buildSemanticRoleReconFieldPairs(
+  leftFields: OutputFieldDraft[],
+  rightFields: OutputFieldDraft[],
+  role: OutputFieldSemanticRole,
+): ReconFieldPairDraft[] {
+  const leftCandidates = leftFields.filter(
+    (field) => normalizeOutputFieldSemanticRole(field.semanticRole) === role && field.outputName.trim(),
+  );
+  const rightCandidates = rightFields.filter(
+    (field) => normalizeOutputFieldSemanticRole(field.semanticRole) === role && field.outputName.trim(),
+  );
+  if (leftCandidates.length === 0 || rightCandidates.length === 0) {
+    return [];
+  }
+
+  const usedRightIndexes = new Set<number>();
+  const nextPairs: ReconFieldPairDraft[] = [];
+
+  leftCandidates.forEach((leftField, index) => {
+    const leftName = leftField.outputName.trim();
+    const exactRightIndex = rightCandidates.findIndex(
+      (candidate, candidateIndex) =>
+        !usedRightIndexes.has(candidateIndex)
+        && candidate.outputName.trim() === leftName,
+    );
+    const fallbackRightIndex = rightCandidates.findIndex(
+      (_candidate, candidateIndex) => !usedRightIndexes.has(candidateIndex),
+    );
+    const resolvedRightIndex = exactRightIndex >= 0
+      ? exactRightIndex
+      : index < rightCandidates.length && !usedRightIndexes.has(index)
+      ? index
+      : fallbackRightIndex;
+    if (resolvedRightIndex < 0) return;
+    usedRightIndexes.add(resolvedRightIndex);
+    nextPairs.push(
+      createReconFieldPairDraft({
+        leftField: leftName,
+        rightField: rightCandidates[resolvedRightIndex].outputName.trim(),
+      }),
+    );
+  });
+
+  return filterCompleteReconFieldPairs(nextPairs);
+}
+
+function buildSourceDisplayNameMap(
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): Map<string, string> {
+  return new Map(
+    sources
+      .filter((source) => source.id.trim())
+      .map((source) => [source.id, resolveDatasetDisplayName(source)] as const),
+  );
+}
+
+function buildSourceFieldLabelMapById(
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): Map<string, Record<string, string>> {
+  return new Map(
+    sources
+      .filter((source) => source.id.trim())
+      .map((source) => [source.id, normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap) || {}] as const),
+  );
+}
+
+function formatPreviewFieldReference(
+  datasetName: string,
+  fieldName: string,
+  fieldLabelMap?: Record<string, string>,
+): string {
+  const normalizedFieldName = fieldName.trim();
+  const displayName = toText(fieldLabelMap?.[normalizedFieldName], normalizedFieldName).trim();
+  if (!normalizedFieldName) return datasetName;
+  if (displayName && displayName !== normalizedFieldName) {
+    return `${datasetName}.${displayName} (${normalizedFieldName})`;
+  }
+  return `${datasetName}.${normalizedFieldName}`;
+}
+
+function formatPreviewFieldLabel(
+  fieldName: string,
+  fieldLabelMap?: Record<string, string>,
+): string {
+  const normalizedFieldName = fieldName.trim();
+  const displayName = toText(fieldLabelMap?.[normalizedFieldName], normalizedFieldName).trim();
+  if (!normalizedFieldName) return '--';
+  if (displayName && displayName !== normalizedFieldName) {
+    return `${displayName} (${normalizedFieldName})`;
+  }
+  return normalizedFieldName;
+}
+
+function buildOutputPreviewColumnHints(
+  fields: OutputFieldDraft[],
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+  fieldLabelMap?: Record<string, string>,
+): Record<string, PreviewColumnHintMeta> | undefined {
+  if (fields.length === 0 || sources.length === 0) return undefined;
+
+  const sourceNameById = buildSourceDisplayNameMap(sources);
+  const sourceFieldLabelMapById = buildSourceFieldLabelMapById(sources);
+  const normalizedFields = fields
+    .map((field) => ({
+      valueMode: field.valueMode,
+      outputName: field.outputName.trim(),
+      sourceDatasetId: field.sourceDatasetId,
+      sourceField: field.sourceField,
+      fixedValue: field.fixedValue,
+      formula: field.formula,
+      concatParts: field.concatParts,
+    }))
+    .filter((field) => field.outputName);
+
+  const hints: Record<string, PreviewColumnHintMeta> = {};
+  const resolveFieldHint = (columnKey: string): PreviewColumnHintMeta | null => {
+    const label = toText(fieldLabelMap?.[columnKey]).trim();
+    const matchedField = normalizedFields.find((field) => (
+      field.outputName === columnKey.trim() || (label && field.outputName === label)
+    ));
+    if (!matchedField) return null;
+    const sourceFieldLabelMap = sourceFieldLabelMapById.get(matchedField.sourceDatasetId) || {};
+    if (matchedField.valueMode === 'source_field') {
+      return {
+        helper: `源字段：${formatPreviewFieldLabel(matchedField.sourceField, sourceFieldLabelMap)}`,
+        tone: 'sky',
+      };
+    }
+    if (matchedField.valueMode === 'fixed_value') {
+      return {
+        badge: '固定值',
+        helper: `值：${matchedField.fixedValue.trim() || '--'}`,
+        tone: 'amber',
+      };
+    }
+    if (matchedField.valueMode === 'formula') {
+      return {
+        badge: '公式',
+        helper: `表达式：${matchedField.formula.trim() || '--'}`,
+        tone: 'violet',
+      };
+    }
+    const concatParts = matchedField.concatParts
+      .map((part) => {
+        const datasetName = sourceNameById.get(part.datasetId) || '数据集';
+        const fieldLabelMapBySourceId = sourceFieldLabelMapById.get(part.datasetId) || {};
+        return formatPreviewFieldReference(datasetName, part.fieldName, fieldLabelMapBySourceId);
+      })
+      .filter((item) => item !== '数据集');
+    return {
+      badge: concatParts.length > 1 ? '多来源拼接' : '拼接',
+      helper: `字段：${concatParts.length > 0 ? concatParts.join(' + ') : '待补充'}`,
+      tone: concatParts.length > 1 ? 'violet' : 'sky',
+    };
+  };
+
+  Object.keys(fieldLabelMap || {}).forEach((columnKey) => {
+    const meta = resolveFieldHint(columnKey);
+    if (meta) {
+      hints[columnKey] = meta;
+    }
+  });
+
+  normalizedFields.forEach((field) => {
+    if (hints[field.outputName]) return;
+    const sourceFieldLabelMap = sourceFieldLabelMapById.get(field.sourceDatasetId) || {};
+    if (field.valueMode === 'source_field') {
+      hints[field.outputName] = {
+        helper: `源字段：${formatPreviewFieldLabel(field.sourceField, sourceFieldLabelMap)}`,
+        tone: 'sky',
+      };
+      return;
+    }
+    if (field.valueMode === 'fixed_value') {
+      hints[field.outputName] = {
+        badge: '固定值',
+        helper: `值：${field.fixedValue.trim() || '--'}`,
+        tone: 'amber',
+      };
+      return;
+    }
+    if (field.valueMode === 'formula') {
+      hints[field.outputName] = {
+        badge: '公式',
+        helper: `表达式：${field.formula.trim() || '--'}`,
+        tone: 'violet',
+      };
+      return;
+    }
+    const concatParts = field.concatParts
+      .map((part) => {
+        const datasetName = sourceNameById.get(part.datasetId) || '数据集';
+        const fieldLabelMapBySourceId = sourceFieldLabelMapById.get(part.datasetId) || {};
+        return formatPreviewFieldReference(datasetName, part.fieldName, fieldLabelMapBySourceId);
+      })
+      .filter((item) => item !== '数据集');
+    hints[field.outputName] = {
+      badge: concatParts.length > 1 ? '多来源拼接' : '拼接',
+      helper: `字段：${concatParts.length > 0 ? concatParts.join(' + ') : '待补充'}`,
+      tone: concatParts.length > 1 ? 'violet' : 'sky',
+    };
+  });
+
+  return Object.keys(hints).length > 0 ? hints : undefined;
+}
+
+function buildInputPreviewColumnHints(
+  source: SchemeSourceOption | SchemeSourceDraft | undefined,
+  fields: OutputFieldDraft[],
+  fieldLabelMap?: Record<string, string>,
+): Record<string, PreviewColumnHintMeta> | undefined {
+  if (!source || !source.id.trim()) return undefined;
+  const sourceFieldLabelMap = normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap) || {};
+  const outputFieldNames = fields
+    .filter((field) => field.sourceDatasetId === source.id || field.concatParts.some((part) => part.datasetId === source.id))
+    .map((field) => field.outputName.trim())
+    .filter(Boolean);
+  if (outputFieldNames.length === 0) return undefined;
+
+  const hints: Record<string, PreviewColumnHintMeta> = {};
+  const sampleColumns = Array.from(
+    new Set<string>([
+      ...Object.keys(fieldLabelMap || {}),
+      ...Object.keys(sourceFieldLabelMap),
+    ]),
+  );
+  sampleColumns.forEach((columnKey) => {
+    const normalizedColumnKey = columnKey.trim();
+    if (!normalizedColumnKey) return;
+    const displayName = toText(
+      fieldLabelMap?.[normalizedColumnKey],
+      toText(sourceFieldLabelMap[normalizedColumnKey], normalizedColumnKey),
+    ).trim();
+    const matchedOutputs = fields.flatMap((field) => {
+      const outputName = field.outputName.trim();
+      if (!outputName) return [];
+      if (
+        field.valueMode === 'source_field'
+        && field.sourceDatasetId === source.id
+        && (field.sourceField.trim() === normalizedColumnKey || field.sourceField.trim() === displayName)
+      ) {
+        return [outputName];
+      }
+      if (
+        field.valueMode === 'concat'
+        && field.concatParts.some((part) => part.datasetId === source.id && (part.fieldName.trim() === normalizedColumnKey || part.fieldName.trim() === displayName))
+      ) {
+        return [`${outputName}（拼接）`];
+      }
+      return [];
+    });
+    if (matchedOutputs.length === 0) return;
+    hints[normalizedColumnKey] = {
+      helper: `被用于：${Array.from(new Set(matchedOutputs)).join('、')}`,
+      tone: 'sky',
+    };
+  });
+
+  return Object.keys(hints).length > 0 ? hints : undefined;
+}
+
+function resolveFieldDrivenDatasetLabel(
+  fieldName: string,
+  fields: OutputFieldDraft[],
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): string {
+  if (sources.length === 0) return '--';
+  const normalizedFieldName = fieldName.trim();
+  const sourceNameById = buildSourceDisplayNameMap(sources);
+  const matchedField = fields.find((field) => field.outputName.trim() === normalizedFieldName);
+  const matchedSourceName = matchedField?.sourceDatasetId
+    ? sourceNameById.get(matchedField.sourceDatasetId)
+    : '';
+  return matchedSourceName || resolveDatasetDisplayName(sources[0]);
+}
+
+function resolveResultDatasetLabel(
+  side: 'left' | 'right',
+  matchFieldPairs: ReconFieldPairDraft[],
+  fields: OutputFieldDraft[],
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): string {
+  if (sources.length > 1) {
+    return side === 'left' ? '左侧表' : '右侧表';
+  }
+  const firstPair = filterCompleteReconFieldPairs(matchFieldPairs)[0];
+  const fieldName = side === 'left' ? firstPair?.leftField : firstPair?.rightField;
+  return resolveFieldDrivenDatasetLabel(fieldName || '', fields, sources);
+}
+
+function resolvePreviewFieldValue(row: PreviewTableRow, candidateKeys: string[]): string {
+  for (const key of candidateKeys) {
+    const rawValue = row[key];
+    if (rawValue === null || rawValue === undefined || rawValue === '') {
+      continue;
+    }
+    return String(rawValue);
+  }
+  return '--';
+}
+
+function formatPreviewFieldValueSummary(
+  row: PreviewTableRow,
+  pairs: ReconFieldPairDraft[],
+  side: 'match' | 'left_compare' | 'right_compare',
+): string {
+  const normalizedPairs = filterCompleteReconFieldPairs(pairs);
+  if (normalizedPairs.length === 0) return '--';
+  return normalizedPairs
+    .map((pair) => {
+      if (side === 'match') {
+        const value = resolvePreviewFieldValue(row, [
+          `source_${pair.leftField}`,
+          pair.leftField,
+          `target_${pair.rightField}`,
+          pair.rightField,
+          'match_key',
+          'biz_key',
+        ]);
+        return normalizedPairs.length === 1 ? value : `${pair.leftField}: ${value}`;
+      }
+      if (side === 'left_compare') {
+        const value = resolvePreviewFieldValue(row, [`source_${pair.leftField}`, pair.leftField]);
+        return normalizedPairs.length === 1 ? value : `${pair.leftField}: ${value}`;
+      }
+      const value = resolvePreviewFieldValue(row, [`target_${pair.rightField}`, pair.rightField]);
+      return normalizedPairs.length === 1 ? value : `${pair.rightField}: ${value}`;
+    })
+    .join('；');
+}
+
+function buildReconResultFieldLabelMap(
+  matchFieldPairs: ReconFieldPairDraft[],
+  compareFieldPairs: ReconFieldPairDraft[],
+): Record<string, string> {
+  const matchLabel = filterCompleteReconFieldPairs(matchFieldPairs)
+    .map((pair) => pair.leftField.trim())
+    .filter(Boolean)
+    .join('、');
+  const leftCompareLabel = filterCompleteReconFieldPairs(compareFieldPairs)
+    .map((pair) => pair.leftField.trim())
+    .filter(Boolean)
+    .join('、');
+  const rightCompareLabel = filterCompleteReconFieldPairs(compareFieldPairs)
+    .map((pair) => pair.rightField.trim())
+    .filter(Boolean)
+    .join('、');
+  return {
+    match_fields: matchLabel ? `匹配字段（${matchLabel}）` : '匹配字段',
+    left_compare_fields: leftCompareLabel ? `左侧对比字段（${leftCompareLabel}）` : '左侧对比字段',
+    right_compare_fields: rightCompareLabel ? `右侧对比字段（${rightCompareLabel}）` : '右侧对比字段',
+    result: '对账结果',
+  };
+}
+
+function parseReconDraftConfig({
+  matchFieldPairs,
+  compareFieldPairs,
+  matchKey,
+  leftAmountField,
+  rightAmountField,
+  leftTimeSemantic,
+  rightTimeSemantic,
+  tolerance,
+}: Pick<
+  SchemeDraft,
+  | 'matchFieldPairs'
+  | 'compareFieldPairs'
+  | 'matchKey'
+  | 'leftAmountField'
+  | 'rightAmountField'
+  | 'leftTimeSemantic'
+  | 'rightTimeSemantic'
+  | 'tolerance'
+>): ParsedReconDraftConfig {
+  const normalizedMatchFieldPairs = normalizeReconFieldPairs(
+    matchFieldPairs,
+    matchKey ? [{ leftField: matchKey, rightField: matchKey }] : [],
+  );
+  const normalizedCompareFieldPairs = normalizeReconFieldPairs(
+    compareFieldPairs,
+    leftAmountField || rightAmountField
+      ? [{ leftField: leftAmountField, rightField: rightAmountField }]
+      : [],
+  );
+  return {
+    matchFieldPairs: normalizedMatchFieldPairs,
+    compareFieldPairs: normalizedCompareFieldPairs,
+    matchKey: resolveFirstReconFieldPairValue(normalizedMatchFieldPairs, 'left', matchKey || ''),
+    leftAmountField: resolveFirstReconFieldPairValue(
+      normalizedCompareFieldPairs,
+      'left',
+      leftAmountField || '',
+    ),
+    rightAmountField: resolveFirstReconFieldPairValue(
+      normalizedCompareFieldPairs,
+      'right',
+      rightAmountField || '',
+    ),
+    leftTimeSemantic: leftTimeSemantic || '',
+    rightTimeSemantic: rightTimeSemantic || '',
+    tolerance: tolerance || '0.00',
+  };
+}
+
+function parseReconRuleJsonConfig(
+  json: Record<string, unknown>,
+  fallback: Partial<ParsedReconDraftConfig> = {},
+): ParsedReconDraftConfig {
   const rules = Array.isArray(json.rules) ? json.rules : [];
   const firstRule = asRecord(rules[0]);
   const recon = asRecord(firstRule.recon);
@@ -1505,43 +2070,719 @@ function parseReconRuleJsonConfig(json: Record<string, unknown>): ParsedReconDra
   const compareColumns = asRecord(recon.compare_columns);
   const mappings = Array.isArray(keyColumns.mappings) ? keyColumns.mappings : [];
   const columns = Array.isArray(compareColumns.columns) ? compareColumns.columns : [];
-  const firstMapping = asRecord(mappings[0]);
+  const normalizedMatchFieldPairs = normalizeReconFieldPairs(
+    mappings.map((item) => {
+      const record = asRecord(item);
+      return {
+        left_field: toText(record.source_field).trim(),
+        right_field: toText(record.target_field).trim(),
+      };
+    }),
+    fallback.matchFieldPairs || (fallback.matchKey ? [{ leftField: fallback.matchKey, rightField: fallback.matchKey }] : []),
+  );
+  const normalizedCompareFieldPairs = normalizeReconFieldPairs(
+    columns.map((item) => {
+      const record = asRecord(item);
+      return {
+        left_field: toText(record.source_column).trim(),
+        right_field: toText(record.target_column).trim(),
+      };
+    }),
+    fallback.compareFieldPairs || (
+      fallback.leftAmountField || fallback.rightAmountField
+        ? [{ leftField: fallback.leftAmountField || '', rightField: fallback.rightAmountField || '' }]
+        : []
+    ),
+  );
   const firstColumn = asRecord(columns[0]);
 
   return {
-    matchKey: toText(firstMapping.source_field, 'biz_key'),
-    leftAmountField: toText(firstColumn.source_column, 'amount'),
-    rightAmountField: toText(firstColumn.target_column, 'amount'),
-    tolerance: toText(firstColumn.tolerance, '0'),
+    matchFieldPairs: normalizedMatchFieldPairs,
+    compareFieldPairs: normalizedCompareFieldPairs,
+    matchKey: resolveFirstReconFieldPairValue(normalizedMatchFieldPairs, 'left', fallback.matchKey || ''),
+    leftAmountField: resolveFirstReconFieldPairValue(
+      normalizedCompareFieldPairs,
+      'left',
+      fallback.leftAmountField || '',
+    ),
+    rightAmountField: resolveFirstReconFieldPairValue(
+      normalizedCompareFieldPairs,
+      'right',
+      fallback.rightAmountField || '',
+    ),
+    leftTimeSemantic: toText(
+      json.left_time_semantic,
+      toText(firstRule.left_time_semantic, fallback.leftTimeSemantic || ''),
+    ),
+    rightTimeSemantic: toText(
+      json.right_time_semantic,
+      toText(firstRule.right_time_semantic, fallback.rightTimeSemantic || ''),
+    ),
+    tolerance: toText(firstColumn.tolerance, fallback.tolerance || '0'),
   };
 }
 
-function getPreviewRowKey(row: PreviewTableRow, field: string, fallback: string): string {
-  const value = row[field];
-  if (value === null || value === undefined) {
-    return fallback;
+function renderPreparedFieldOptionLabel(fieldName: string): string {
+  const normalized = fieldName.trim();
+  return PREPARED_OUTPUT_FIELD_LABEL_MAP[normalized] || humanizeProcDescription(normalized).trim() || normalized;
+}
+
+function buildOutputFieldLabelMap(
+  fields: OutputFieldDraft[],
+  sources: SchemeSourceDraft[] = [],
+): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const sourceLabelMaps = new Map(
+    sources.map((source) => [source.id, source.fieldLabelMap || {}] as const),
+  );
+  fields.forEach((field) => {
+    const outputName = field.outputName.trim();
+    if (!outputName) return;
+    const sourceFieldLabel = field.sourceDatasetId && field.sourceField
+      ? sourceLabelMaps.get(field.sourceDatasetId)?.[field.sourceField]?.trim()
+      : '';
+    labels[outputName] = sourceFieldLabel || renderPreparedFieldOptionLabel(outputName);
+  });
+  return labels;
+}
+
+function buildProcOutputFieldLabelMap(
+  ruleJson: Record<string, unknown>,
+  targetTable: string,
+  sources: SchemeSourceDraft[],
+): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const sourceFieldLabels = Object.assign({}, ...sources.map((source) => source.fieldLabelMap || {}));
+  asList(ruleJson.steps).forEach((item) => {
+    const step = asRecord(item);
+    if (toText(step.target_table).trim() !== targetTable) return;
+
+    asList(asRecord(step.schema).columns).forEach((columnItem) => {
+      const column = asRecord(columnItem);
+      const name = toText(column.name, toText(column.column_name)).trim();
+      const label = toText(column.label, toText(column.display_name)).trim();
+      if (name && label) {
+        labels[name] = label;
+      }
+    });
+
+    asList(step.mappings).forEach((mappingItem) => {
+      const mapping = asRecord(mappingItem);
+      const targetField = toText(mapping.target_field).trim();
+      if (!targetField || labels[targetField]) return;
+      const value = asRecord(mapping.value);
+      if (toText(value.type).trim() !== 'source') return;
+      const sourceField = toText(asRecord(value.source).field, toText(value.field)).trim();
+      const sourceLabel = sourceFieldLabels[sourceField]?.trim();
+      if (sourceLabel) {
+        labels[targetField] = sourceLabel;
+      }
+    });
+  });
+  return labels;
+}
+
+function mergeLabelMaps(...maps: Array<Record<string, string> | undefined>): Record<string, string> {
+  return Object.assign({}, ...maps.filter(Boolean));
+}
+
+function scoreMatchFieldCandidate(rawName: string): number {
+  const raw = rawName.trim().toLowerCase();
+  if (!raw) return Number.NEGATIVE_INFINITY;
+
+  let score = 0;
+  if (/(^biz_key$|match_key|unique_key|primary_key|pk|order_no|order_id|trade_no|trade_id|transaction_id|serial_no|ledger_id|record_id)/.test(raw)) {
+    score += 16;
   }
-  const text = String(value).trim();
-  return text || fallback;
+  if (/(key|id|no|code|sn|uuid|number|identifier)/.test(raw)) {
+    score += 8;
+  }
+  if (/(amount|amt|money|fee|price|balance|date|time|status|type|name|desc|remark)/.test(raw)) {
+    score -= 6;
+  }
+  return score;
 }
 
-function sanitizeRuleId(input: string, fallback: string): string {
-  const normalized = input
-    .trim()
-    .replace(/[^a-zA-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .toUpperCase();
-  return normalized || fallback;
+function scoreAmountFieldCandidate(rawName: string): number {
+  const raw = rawName.trim().toLowerCase();
+  if (!raw) return Number.NEGATIVE_INFINITY;
+
+  let score = 0;
+  if (/(^amount$|gross_amount|net_amount|booked_amount|paid_amount|settled_amount|total_amount|tax_amount)/.test(raw)) {
+    score += 16;
+  }
+  if (/(amount|amt|money|fee|price|balance|total|income|payment|paid|booked|settled|tax|cost)/.test(raw)) {
+    score += 8;
+  }
+  if (/(id|code|date|time|status|type|name|desc|remark|order)/.test(raw)) {
+    score -= 6;
+  }
+  return score;
 }
 
-function buildRuleTimestamp(): string {
-  return new Date().toISOString();
+function buildReconFieldOptions(
+  fields: OutputFieldDraft[],
+  fallbackValue = '',
+  scorer?: (fieldName: string, label: string) => number,
+  preferredRole: OutputFieldSemanticRole = 'normal',
+  fieldLabelMap?: Record<string, string>,
+  options?: { onlyTimeRelated?: boolean; includeFallback?: boolean },
+): ReconFieldOption[] {
+  const optionMap = new Map<string, { value: string; label: string; score: number }>();
+  fields.forEach((field) => {
+    const value = field.outputName.trim();
+    if (!value) return;
+    const label = fieldLabelMap?.[value] || renderPreparedFieldOptionLabel(value);
+    const role = normalizeOutputFieldSemanticRole(field.semanticRole);
+    if (options?.onlyTimeRelated && role !== 'time_field' && !isTimeRelatedFieldName(value, label)) {
+      return;
+    }
+    optionMap.set(value, {
+      value,
+      label,
+      score: (scorer ? scorer(value, label) : 0) + (preferredRole !== 'normal' && role === preferredRole ? 100 : 0),
+    });
+  });
+  const normalizedFallback = fallbackValue.trim();
+  const fallbackLabel = fieldLabelMap?.[normalizedFallback] || renderPreparedFieldOptionLabel(normalizedFallback);
+  const shouldIncludeFallback = options?.includeFallback !== false
+    && normalizedFallback
+    && !optionMap.has(normalizedFallback)
+    && (!options?.onlyTimeRelated || isTimeRelatedFieldName(normalizedFallback, fallbackLabel));
+  if (shouldIncludeFallback) {
+    optionMap.set(fallbackValue.trim(), {
+      value: fallbackValue.trim(),
+      label: fallbackLabel,
+      score: 999,
+    });
+  }
+  return Array.from(optionMap.values())
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
+    .map(({ value, label }) => ({ value, label }));
 }
 
-function getDefaultDateFieldBySourceKind(sourceKind: SupportedSourceKind): string {
-  if (sourceKind === 'platform_oauth') return 'biz_date';
-  if (sourceKind === 'database') return 'accounting_date';
-  return 'happened_at';
+function buildAllReconFieldOptions(
+  fields: OutputFieldDraft[],
+  fieldLabelMap?: Record<string, string>,
+): ReconFieldOption[] {
+  return buildReconFieldOptions(fields, '', undefined, 'normal', fieldLabelMap);
+}
+
+function firstOutputFieldValueByRole(
+  fields: OutputFieldDraft[],
+  role: OutputFieldSemanticRole,
+): string {
+  return fields.find(
+    (field) =>
+      normalizeOutputFieldSemanticRole(field.semanticRole) === role && field.outputName.trim(),
+  )?.outputName.trim() || '';
+}
+
+function pickPreferredTimeFieldValue(
+  options: ReconFieldOption[],
+  currentValue: string,
+  roleDerivedValue = '',
+): string {
+  const normalizedCurrent = currentValue.trim();
+  if (normalizedCurrent && options.some((option) => option.value === normalizedCurrent)) {
+    return normalizedCurrent;
+  }
+  const normalizedRoleDerived = roleDerivedValue.trim();
+  if (normalizedRoleDerived && options.some((option) => option.value === normalizedRoleDerived)) {
+    return normalizedRoleDerived;
+  }
+  return '';
+}
+
+function buildStructuredReconDraftText(config: {
+  reconRuleName: string;
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
+}): string {
+  const leftTimeText = config.leftTimeSemantic.trim() || '未配置';
+  const rightTimeText = config.rightTimeSemantic.trim() || '未配置';
+  return [
+    `# ${config.reconRuleName.trim() || '数据对账逻辑'}`,
+    `匹配字段: ${resolveReconFieldPairsSummary(config.matchFieldPairs)}`,
+    `对比字段: ${resolveReconFieldPairsSummary(config.compareFieldPairs)}`,
+    `左时间字段: ${leftTimeText}`,
+    `右时间字段: ${rightTimeText}`,
+    '识别方式：按匹配字段对齐左右记录，再逐项比较对比字段差异。',
+  ].join('\n');
+}
+
+function buildLocalReconRuleJson(config: {
+  schemeName: string;
+  businessGoal: string;
+  reconRuleName: string;
+  matchFieldPairs: ReconFieldPairDraft[];
+  compareFieldPairs: ReconFieldPairDraft[];
+  leftTimeSemantic: string;
+  rightTimeSemantic: string;
+}): Record<string, unknown> {
+  const matchFieldPairs = filterCompleteReconFieldPairs(config.matchFieldPairs);
+  const compareFieldPairs = filterCompleteReconFieldPairs(config.compareFieldPairs);
+  if (matchFieldPairs.length === 0) {
+    throw new Error('请至少配置一组完整的匹配字段。');
+  }
+  if (compareFieldPairs.length === 0) {
+    throw new Error('请至少配置一组完整的对比字段。');
+  }
+
+  const ruleName = config.reconRuleName.trim() || buildDefaultReconRuleName(config.schemeName);
+  const leftTimeSemantic = config.leftTimeSemantic.trim();
+  const rightTimeSemantic = config.rightTimeSemantic.trim();
+  const tolerance = 0;
+  const signature = [
+    ruleName,
+    ...matchFieldPairs.map((pair) => `${pair.leftField}:${pair.rightField}`),
+    ...compareFieldPairs.map((pair) => `${pair.leftField}:${pair.rightField}`),
+    leftTimeSemantic,
+    rightTimeSemantic,
+  ].join('|');
+
+  return {
+    rule_id: `wizard_recon_${hashText(signature)}`,
+    rule_name: ruleName,
+    description: config.businessGoal.trim() || `${ruleName} 自动生成对账逻辑`,
+    schema_version: '1.6',
+    left_time_semantic: leftTimeSemantic,
+    right_time_semantic: rightTimeSemantic,
+    rules: [
+      {
+        enabled: true,
+        source_file: {
+          table_name: 'left_recon_ready',
+          identification: {
+            match_by: 'table_name',
+            match_value: 'left_recon_ready',
+            match_strategy: 'exact',
+          },
+        },
+        target_file: {
+          table_name: 'right_recon_ready',
+          identification: {
+            match_by: 'table_name',
+            match_value: 'right_recon_ready',
+            match_strategy: 'exact',
+          },
+        },
+        left_time_semantic: leftTimeSemantic,
+        right_time_semantic: rightTimeSemantic,
+        recon: {
+          key_columns: {
+            source_field: matchFieldPairs[0].leftField,
+            target_field: matchFieldPairs[0].rightField,
+            mappings: matchFieldPairs.map((pair) => ({
+              source_field: pair.leftField,
+              target_field: pair.rightField,
+            })),
+          },
+          compare_columns: {
+            columns: compareFieldPairs.map((pair) => ({
+              name: pair.leftField === pair.rightField
+                ? pair.leftField
+                : `${pair.leftField} ↔ ${pair.rightField}`,
+              source_column: pair.leftField,
+              target_column: pair.rightField,
+              tolerance,
+            })),
+          },
+        },
+        output: {
+          format: 'xlsx',
+          sheets: {
+            summary: { name: '核对汇总', enabled: true },
+            source_only: { name: '左侧独有', enabled: true },
+            target_only: { name: '右侧独有', enabled: true },
+            matched_with_diff: { name: '差异记录', enabled: true },
+          },
+        },
+      },
+    ],
+  };
+}
+
+function buildPreparedOutputFieldPayload(fields: OutputFieldDraft[]): Array<Record<string, unknown>> {
+  return fields.map((field) => ({
+    output_name: field.outputName.trim(),
+    semantic_role: normalizeOutputFieldSemanticRole(field.semanticRole),
+    value_mode: field.valueMode,
+    source_dataset_id: field.sourceDatasetId,
+    source_field: field.sourceField.trim(),
+    fixed_value: field.fixedValue.trim(),
+    formula: field.formula.trim(),
+    concat_delimiter: field.concatDelimiter,
+    concat_parts: field.concatParts.map((part) => ({
+      dataset_id: part.datasetId,
+      field_name: part.fieldName.trim(),
+    })),
+  }));
+}
+
+interface SourceFieldCandidate {
+  rawName: string;
+  label: string;
+  schemaType: string;
+  matchScore: number;
+  amountScore: number;
+  dateScore: number;
+}
+
+function collectSourceFieldCandidates(source: SchemeSourceOption): SourceFieldCandidate[] {
+  const fieldLabelMap = resolveSourceFieldLabelMap(source) || {};
+  const keyFieldSet = new Set(normalizeStringList(source.keyFields).map((item) => item.trim()));
+  const rawNames = Array.from(
+    new Set<string>([
+      ...extractSchemaFieldNames(source.schemaSummary),
+      ...Object.keys(fieldLabelMap),
+    ]),
+  ).map((item) => item.trim()).filter(Boolean);
+
+  return rawNames.map((rawName) => {
+    const label = toText(fieldLabelMap[rawName], rawName);
+    return {
+      rawName,
+      label,
+      schemaType: normalizeSchemaType(asRecord(source.schemaSummary)[rawName]),
+      matchScore:
+        scoreMatchFieldCandidate(rawName)
+        + (keyFieldSet.has(rawName) ? 24 : 0)
+        + (/(订单|单号|流水|业务|交易|凭证|识别|唯一|主键|编号)/.test(label) ? 4 : 0),
+      amountScore:
+        scoreAmountFieldCandidate(rawName)
+        + (/(金额|实收|实付|收入|支出|收款|付款|入账|到账|结算|含税|未税)/.test(label) ? 4 : 0),
+      dateScore: scoreDateFieldCandidate(rawName, label),
+    };
+  });
+}
+
+function buildRecommendedOutputFieldsForSources(
+  sources: SchemeSourceOption[],
+): OutputFieldDraft[] {
+  const source = sources[0];
+  if (!source) return [];
+
+  const candidates = collectSourceFieldCandidates(source);
+  if (candidates.length === 0) return [];
+
+  const usedRawNames = new Set<string>();
+  const nextFields: OutputFieldDraft[] = [];
+
+  const appendSourceField = (
+    outputName: string,
+    candidate: SourceFieldCandidate | undefined,
+    semanticRole: OutputFieldSemanticRole,
+  ) => {
+    if (!candidate || usedRawNames.has(candidate.rawName)) return;
+    usedRawNames.add(candidate.rawName);
+    const draft = createOutputFieldDraft(outputName);
+    draft.semanticRole = semanticRole;
+    draft.valueMode = 'source_field';
+    draft.sourceDatasetId = source.id;
+    draft.sourceField = candidate.rawName;
+    nextFields.push(draft);
+  };
+
+  const keyCandidate =
+    [...candidates].sort((left, right) => right.matchScore - left.matchScore)[0]
+    || candidates[0];
+  appendSourceField('业务单号', keyCandidate, 'match_key');
+
+  const amountCandidate = [...candidates]
+    .filter((candidate) => !usedRawNames.has(candidate.rawName))
+    .sort((left, right) => right.amountScore - left.amountScore)[0];
+  if (amountCandidate && amountCandidate.amountScore > 0) {
+    appendSourceField('金额', amountCandidate, 'compare_field');
+  }
+
+  const dateCandidate = [...candidates]
+    .filter((candidate) => !usedRawNames.has(candidate.rawName))
+    .sort((left, right) => right.dateScore - left.dateScore)[0];
+  if (dateCandidate && dateCandidate.dateScore > 0) {
+    appendSourceField('业务时间', dateCandidate, 'time_field');
+  }
+
+  return nextFields;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sourceHasRecommendationMetadata(source: SchemeSourceOption): boolean {
+  if (source.fieldLabelMap && Object.keys(source.fieldLabelMap).length > 0) {
+    return true;
+  }
+  return extractSchemaFieldNames(source.schemaSummary).length > 0;
+}
+
+function inferFixedValueFormulaExpr(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '""';
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    return trimmed;
+  }
+  return JSON.stringify(trimmed);
+}
+
+function inferOutputFieldDataType(
+  field: OutputFieldDraft,
+  sourceMap: Map<string, SchemeSourceOption>,
+): 'string' | 'decimal' | 'date' {
+  const outputName = field.outputName.trim();
+  const lowerOutputName = outputName.toLowerCase();
+  const source = sourceMap.get(field.sourceDatasetId);
+  const fieldCandidates = source ? collectSourceFieldCandidates(source) : [];
+  const matchedSourceField = fieldCandidates.find((item) => item.rawName === field.sourceField.trim());
+  const sourceSchemaType = matchedSourceField?.schemaType || '';
+
+  if (field.valueMode === 'source_field') {
+    if (sourceSchemaType === 'date' || sourceSchemaType === 'datetime') return 'date';
+    if (sourceSchemaType === 'number' || sourceSchemaType === 'integer' || sourceSchemaType === 'decimal') {
+      return 'decimal';
+    }
+  }
+
+  if (
+    field.valueMode === 'fixed_value'
+    && /^-?\d+(?:\.\d+)?$/.test(field.fixedValue.trim())
+  ) {
+    return 'decimal';
+  }
+
+  if (field.valueMode === 'concat') return 'string';
+
+  if (scoreDateFieldCandidate(outputName, outputName) > 0 || /(time|date|日期|时间)/i.test(lowerOutputName)) {
+    return 'date';
+  }
+  if (scoreAmountFieldCandidate(outputName) > 0 || /(金额|amount|amt|fee|price|money)/i.test(outputName)) {
+    return 'decimal';
+  }
+  return 'string';
+}
+
+function buildFormulaBindingsForSource(
+  source: SchemeSourceOption,
+  alias: string,
+): Record<string, Record<string, unknown>> {
+  const bindings: Record<string, Record<string, unknown>> = {};
+  collectSourceFieldCandidates(source).forEach((candidate) => {
+    bindings[candidate.rawName] = {
+      type: 'source',
+      source: {
+        alias,
+        field: candidate.rawName,
+      },
+    };
+  });
+  return bindings;
+}
+
+function validateOutputFieldsForCompilation(
+  side: 'left' | 'right',
+  sources: SchemeSourceOption[],
+  fields: OutputFieldDraft[],
+): void {
+  if (sources.length !== 1) {
+    throw new Error(`请先选择${side === 'left' ? '左侧' : '右侧'}数据集，当前版本每侧仅支持 1 个数据集。`);
+  }
+  const namedFields = fields.filter((field) => field.outputName.trim());
+  if (namedFields.length === 0) {
+    throw new Error(`请先配置${side === 'left' ? '左侧' : '右侧'}输出字段。`);
+  }
+  const duplicatedField = namedFields
+    .map((field) => field.outputName.trim())
+    .find((name, index, items) => items.indexOf(name) !== index);
+  if (duplicatedField) {
+    throw new Error(`${side === 'left' ? '左侧' : '右侧'}输出字段存在重复字段名：${duplicatedField}`);
+  }
+
+  namedFields.forEach((field, index) => {
+    if (field.valueMode === 'source_field') {
+      if (!field.sourceField.trim()) {
+        throw new Error(`${side === 'left' ? '左侧' : '右侧'}字段 ${index + 1} 未选择来源字段。`);
+      }
+      return;
+    }
+    if (field.valueMode === 'formula' && !field.formula.trim()) {
+      throw new Error(`${side === 'left' ? '左侧' : '右侧'}字段 ${index + 1} 的公式不能为空。`);
+    }
+    if (field.valueMode === 'concat') {
+      if (field.concatParts.length === 0) {
+        throw new Error(`${side === 'left' ? '左侧' : '右侧'}字段 ${index + 1} 至少需要 1 个拼接字段。`);
+      }
+      field.concatParts.forEach((part, partIndex) => {
+        if (!part.fieldName.trim()) {
+          throw new Error(
+            `${side === 'left' ? '左侧' : '右侧'}字段 ${index + 1} 的拼接字段 ${partIndex + 1} 未选择来源字段。`,
+          );
+        }
+      });
+    }
+  });
+}
+
+function buildProcMappingFromOutputField(
+  field: OutputFieldDraft,
+  options: {
+    fallbackSource: SchemeSourceOption;
+    sourceMap: Map<string, SchemeSourceOption>;
+    aliasMap: Map<string, string>;
+  },
+): Record<string, unknown> {
+  const { fallbackSource, sourceMap, aliasMap } = options;
+  const outputName = field.outputName.trim();
+  if (!outputName) {
+    throw new Error('输出字段名不能为空。');
+  }
+
+  if (field.valueMode === 'source_field') {
+    const datasetId = field.sourceDatasetId || fallbackSource.id;
+    const source = sourceMap.get(datasetId) || fallbackSource;
+    const alias = aliasMap.get(source.id) || aliasMap.get(fallbackSource.id) || 'source_1';
+    return {
+      target_field: outputName,
+      value: {
+        type: 'source',
+        source: {
+          alias,
+          field: field.sourceField.trim(),
+        },
+      },
+      field_write_mode: 'overwrite',
+    };
+  }
+
+  if (field.valueMode === 'fixed_value') {
+    return {
+      target_field: outputName,
+      value: {
+        type: 'formula',
+        expr: inferFixedValueFormulaExpr(field.fixedValue),
+      },
+      field_write_mode: 'overwrite',
+    };
+  }
+
+  if (field.valueMode === 'formula') {
+    const datasetId = field.sourceDatasetId || fallbackSource.id;
+    const source = sourceMap.get(datasetId) || fallbackSource;
+    const alias = aliasMap.get(source.id) || aliasMap.get(fallbackSource.id) || 'source_1';
+    return {
+      target_field: outputName,
+      value: {
+        type: 'formula',
+        expr: field.formula.trim(),
+      },
+      bindings: buildFormulaBindingsForSource(source, alias),
+      field_write_mode: 'overwrite',
+    };
+  }
+
+  const parts = field.concatParts
+    .map((part, index) => {
+      const datasetId = part.datasetId || fallbackSource.id;
+      const source = sourceMap.get(datasetId) || fallbackSource;
+      const alias = aliasMap.get(source.id) || aliasMap.get(fallbackSource.id) || 'source_1';
+      return {
+        expr: `coalesce({part_${index}}, '')`,
+        binding: {
+          type: 'source',
+          source: {
+            alias,
+            field: part.fieldName.trim(),
+          },
+        },
+      };
+    })
+    .filter((item) => item.binding.source.field);
+  const delimiter = JSON.stringify(field.concatDelimiter || '');
+  const expr = parts
+    .map((item, index) => (index === 0 ? item.expr : `${delimiter} + ${item.expr}`))
+    .join(' + ');
+  return {
+    target_field: outputName,
+    value: {
+      type: 'formula',
+      expr: expr || '""',
+    },
+    bindings: Object.fromEntries(parts.map((item, index) => [`part_${index}`, item.binding])),
+    field_write_mode: 'overwrite',
+  };
+}
+
+function buildLocalProcRuleJson(options: {
+  schemeName: string;
+  businessGoal: string;
+  leftSources: SchemeSourceOption[];
+  rightSources: SchemeSourceOption[];
+  leftOutputFields: OutputFieldDraft[];
+  rightOutputFields: OutputFieldDraft[];
+}): Record<string, unknown> {
+  validateOutputFieldsForCompilation('left', options.leftSources, options.leftOutputFields);
+  validateOutputFieldsForCompilation('right', options.rightSources, options.rightOutputFields);
+
+  const buildSideSteps = (
+    side: 'left' | 'right',
+    sources: SchemeSourceOption[],
+    fields: OutputFieldDraft[],
+  ) => {
+    const source = sources[0];
+    const targetTable = side === 'left' ? 'left_recon_ready' : 'right_recon_ready';
+    const createStepId = `create_${targetTable}`;
+    const writeStepId = `${side}_write_recon_ready`;
+    const alias = `${side}_source_1`;
+    const sourceMap = new Map(sources.map((item) => [item.id, item]));
+    const aliasMap = new Map(sources.map((item) => [item.id, alias]));
+    const namedFields = fields.filter((field) => field.outputName.trim());
+
+    return [
+      {
+        step_id: createStepId,
+        action: 'create_schema',
+        target_table: targetTable,
+        schema: {
+          columns: namedFields.map((field) => ({
+            name: field.outputName.trim(),
+            data_type: inferOutputFieldDataType(field, sourceMap),
+          })),
+        },
+      },
+      {
+        step_id: writeStepId,
+        action: 'write_dataset',
+        target_table: targetTable,
+        depends_on: [createStepId],
+        row_write_mode: 'upsert',
+        sources: [
+          {
+            table: resolveDatasetTableName(source),
+            alias,
+          },
+        ],
+        mappings: namedFields.map((field) =>
+          buildProcMappingFromOutputField(field, {
+            fallbackSource: source,
+            sourceMap,
+            aliasMap,
+          }),
+        ),
+      },
+    ];
+  };
+
+  return {
+    role_desc: options.businessGoal.trim() || `${options.schemeName.trim() || '未命名方案'}整理规则`,
+    file_rule_code: '',
+    version: '4.5',
+    steps: [
+      ...buildSideSteps('left', options.leftSources, options.leftOutputFields),
+      ...buildSideSteps('right', options.rightSources, options.rightOutputFields),
+    ],
+  };
 }
 
 function extractSchemaFieldNames(schemaSummary: Record<string, unknown> | undefined): string[] {
@@ -1578,288 +2819,13 @@ function scoreDateFieldCandidate(rawName: string, label: string): number {
   return score;
 }
 
-function buildDateFieldLabel(rawName: string, label: string): string {
-  const normalizedLabel = label.trim();
-  if (normalizedLabel && normalizedLabel !== rawName) {
-    return `${normalizedLabel} (${rawName})`;
-  }
-  return rawName;
-}
-
-function resolveSourceFieldProfile(source: SchemeSourceOption): SourceFieldProfile {
-  if (source.sourceKind === 'platform_oauth') {
-    return {
-      keyField: 'order_no',
-      amountField: 'gross_amount',
-      dateField: 'biz_date',
-      labelField: 'shop_name',
-    };
-  }
-  if (source.sourceKind === 'database') {
-    return {
-      keyField: 'ledger_id',
-      amountField: 'booked_amount',
-      dateField: 'accounting_date',
-      labelField: 'table_name',
-    };
-  }
-  return {
-    keyField: 'request_id',
-    amountField: 'amount',
-    dateField: 'happened_at',
-    labelField: 'endpoint',
-  };
-}
-
-function inferTimeOptionsFromSources(
-  sources: SchemeSourceDraft[],
-  fallbackValue = '',
-): Array<{ value: string; label: string }> {
-  const optionMap = new Map<string, { value: string; label: string; score: number }>();
-  sources.forEach((source) => {
-    const fieldLabelMap = normalizeFieldLabelMap(source.fieldLabelMap) || {};
-    const rawNames = Array.from(
-      new Set<string>([
-        ...extractSchemaFieldNames(source.schemaSummary),
-        ...Object.keys(fieldLabelMap),
-      ]),
-    );
-    rawNames.forEach((rawName) => {
-      const normalizedRawName = rawName.trim();
-      if (!normalizedRawName) return;
-      const label = toText(fieldLabelMap[normalizedRawName], normalizedRawName);
-      const score = scoreDateFieldCandidate(normalizedRawName, label);
-      if (score <= 0) return;
-      const current = optionMap.get(normalizedRawName);
-      if (!current || score > current.score) {
-        optionMap.set(normalizedRawName, {
-          value: normalizedRawName,
-          label: buildDateFieldLabel(normalizedRawName, label),
-          score,
-        });
-      }
-    });
-  });
-  if (optionMap.size === 0) {
-    sources.forEach((source) => {
-      const field = getDefaultDateFieldBySourceKind(source.sourceKind || 'platform_oauth');
-      if (!field || optionMap.has(field)) return;
-      optionMap.set(field, { value: field, label: field, score: 1 });
-    });
-  }
-  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
-    optionMap.set(fallbackValue.trim(), {
-      value: fallbackValue.trim(),
-      label: fallbackValue.trim(),
-      score: 999,
-    });
-  }
-  return Array.from(optionMap.values())
-    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
-    .map(({ value, label }) => ({ value, label }));
-}
-
-function buildProcSourceAlias(side: 'left' | 'right', index: number): string {
-  return `${side}_source_${index + 1}`;
-}
-
-function buildProcJsonPayload(
-  draft: SchemeDraft,
-  leftSources: SchemeSourceOption[],
-  rightSources: SchemeSourceOption[],
-): Record<string, unknown> {
-  const timestamp = buildRuleTimestamp();
-  const roleDesc = draft.name.trim() || draft.businessGoal.trim() || '未命名数据整理配置';
-  const buildCreateSchemaStep = (targetTable: string, stepId: string) => ({
-    step_id: stepId,
-    action: 'create_schema',
-    target_table: targetTable,
-    description: `创建 ${targetTable} 标准化输出结构`,
-    schema: {
-      columns: [
-        { name: 'biz_key', data_type: 'string', nullable: false },
-        { name: 'amount', data_type: 'decimal', precision: 18, scale: 2, default: 0 },
-        { name: 'biz_date', data_type: 'date', nullable: true },
-        { name: 'source_name', data_type: 'string', nullable: true },
-      ],
-      primary_key: ['biz_key'],
-      export_enabled: true,
-    },
-  });
-
-  const buildWriteDatasetStep = (
-    side: 'left' | 'right',
-    targetTable: string,
-    dependsOn: string,
-    sources: SchemeSourceOption[],
-  ) => ({
-    step_id: `${side}_write_recon_ready`,
-    action: 'write_dataset',
-    target_table: targetTable,
-    depends_on: [dependsOn],
-    description: `${side === 'left' ? '左侧' : '右侧'}原始数据标准化到 ${targetTable}`,
-    row_write_mode: 'upsert',
-    sources: sources.map((source, index) => ({
-      alias: buildProcSourceAlias(side, index),
-      table: source.resourceKey || source.datasetCode || source.name,
-    })),
-    match: {
-      sources: sources.map((source, index) => {
-        const profile = resolveSourceFieldProfile(source);
-        return {
-          alias: buildProcSourceAlias(side, index),
-          keys: [{ field: profile.keyField, target_field: 'biz_key' }],
-        };
-      }),
-    },
-    mappings: sources.flatMap((source, index) => {
-      const alias = buildProcSourceAlias(side, index);
-      const profile = resolveSourceFieldProfile(source);
-      const mappings: Array<Record<string, unknown>> = [
-        {
-          target_field: 'amount',
-          value: {
-            type: 'source',
-            source: { alias, field: profile.amountField },
-          },
-          field_write_mode: 'overwrite',
-        },
-        {
-          target_field: 'biz_date',
-          value: {
-            type: 'source',
-            source: { alias, field: profile.dateField },
-          },
-          field_write_mode: 'overwrite',
-        },
-      ];
-      if (profile.labelField) {
-        mappings.push({
-          target_field: 'source_name',
-          value: {
-            type: 'source',
-            source: { alias, field: profile.labelField },
-          },
-          field_write_mode: 'overwrite',
-        });
-      }
-      return mappings;
-    }),
-  });
-
-  return {
-    role_desc: roleDesc,
-    version: '4.5',
-    metadata: {
-      created_at: timestamp,
-      author: 'finance-web',
-      tags: ['数据整理', '对账方案'],
-    },
-    global_config: {
-      default_round_precision: 2,
-      date_format: 'YYYY-MM-DD',
-      null_value_handling: 'keep',
-      error_handling: 'stop',
-    },
-    file_rule_code: '',
-    dsl_constraints: {
-      actions: ['create_schema', 'write_dataset'],
-      builtin_functions: ['earliest_date', 'current_date', 'month_of'],
-      aggregate_operators: ['sum', 'min'],
-      field_write_modes: ['overwrite', 'increment'],
-      row_write_modes: ['insert_if_missing', 'update_only', 'upsert'],
-      column_data_types: ['string', 'date', 'decimal'],
-      value_node_types: ['source', 'formula', 'template_source', 'function', 'context'],
-      merge_strategies: ['union_distinct'],
-      loop_context_vars: ['month', 'prev_month', 'is_first_month'],
-    },
-    steps: [
-      buildCreateSchemaStep('left_recon_ready', 'create_left_recon_ready'),
-      buildWriteDatasetStep('left', 'left_recon_ready', 'create_left_recon_ready', leftSources),
-      buildCreateSchemaStep('right_recon_ready', 'create_right_recon_ready'),
-      buildWriteDatasetStep('right', 'right_recon_ready', 'create_right_recon_ready', rightSources),
-    ],
-  };
-}
-
-function buildReconJsonPayload(
-  draft: SchemeDraft,
-  config: ParsedReconDraftConfig = parseReconDraftConfig(draft),
-): Record<string, unknown> {
-  const ruleName = buildDefaultReconRuleName(draft.name);
-  const tolerance = Number(config.tolerance);
-  const toleranceValue = Number.isFinite(tolerance) ? tolerance : 0;
-  return {
-    rule_id: sanitizeRuleId(ruleName, 'DRAFT_RECON_RULE'),
-    rule_name: ruleName,
-    description: draft.businessGoal || '数据对账逻辑',
-    file_rule_code: '',
-    schema_version: '1.6',
-    rules: [
-      {
-        enabled: true,
-        source_file: {
-          table_name: 'left_recon_ready',
-          description: '左侧整理输出。',
-          identification: {
-            match_by: 'table_name',
-            match_value: 'left_recon_ready',
-            match_strategy: 'exact',
-          },
-        },
-        target_file: {
-          table_name: 'right_recon_ready',
-          description: '右侧整理输出。',
-          identification: {
-            match_by: 'table_name',
-            match_value: 'right_recon_ready',
-            match_strategy: 'exact',
-          },
-        },
-        recon: {
-          key_columns: {
-            mappings: [
-              {
-                source_field: config.matchKey,
-                target_field: config.matchKey,
-              },
-            ],
-            match_type: 'exact',
-            transformations: {
-              source: {},
-              target: {},
-            },
-          },
-          compare_columns: {
-            columns: [
-              {
-                name: '金额差异',
-                compare_type: 'numeric',
-                source_column: config.leftAmountField,
-                target_column: config.rightAmountField,
-                tolerance: toleranceValue,
-              },
-            ],
-          },
-          aggregation: {
-            enabled: false,
-            group_by: [],
-            aggregations: [],
-          },
-        },
-        output: {
-          format: 'xlsx',
-          file_name_template: '{rule_name}_核对结果_{timestamp}',
-          sheets: {
-            summary: { name: '核对汇总', enabled: true },
-            source_only: { name: '左侧独有', enabled: true },
-            target_only: { name: '右侧独有', enabled: true },
-            matched_with_diff: { name: '差异记录', enabled: true },
-          },
-        },
-      },
-    ],
-  };
+function isTimeRelatedFieldName(rawName: string, label: string): boolean {
+  const raw = rawName.trim().toLowerCase();
+  const display = label.trim();
+  if (!raw && !display) return false;
+  const rawHasTimeToken = /(^|[_\-.])(date|time|datetime|timestamp|dt|day)([_\-.]|$)|(^|[_\-.])gmt[_\-.]?|created_at|updated_at|occurred_at|happened_at|booked_at|posted_at|settled_at|paid_at|completed_at|finished_at/.test(raw);
+  const labelHasTimeToken = /(日期|时间|时刻|账期|期间|年月|年度|月份|自然日|业务日|结算日|记账日|入账日|发生日|完成日|创建日|更新日|支付日|付款日|下单日)/.test(display);
+  return rawHasTimeToken || labelHasTimeToken;
 }
 
 function SummaryBadge({ label, value }: { label: string; value: number }) {
@@ -1878,6 +2844,47 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-start justify-between gap-4 py-2">
       <span className="text-xs text-text-secondary">{label}</span>
       <span className="max-w-[70%] text-right text-sm text-text-primary">{value || '--'}</span>
+    </div>
+  );
+}
+
+function dedupeTextList(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function collectReconSideFieldValues(
+  side: 'left' | 'right',
+  pairs: ReconFieldPairDraft[],
+): string[] {
+  return dedupeTextList(
+    filterCompleteReconFieldPairs(pairs).map((pair) => (side === 'left' ? pair.leftField : pair.rightField)),
+  );
+}
+
+function formatDetailFieldValues(
+  values: string[],
+  fieldLabelMap: Record<string, string>,
+): string[] {
+  return dedupeTextList(values).map((value) => fieldLabelMap[value] || renderPreparedFieldOptionLabel(value));
+}
+
+function DetailListRow({ label, values }: { label: string; values: string[] }) {
+  const normalizedValues = dedupeTextList(values);
+
+  return (
+    <div className="py-2">
+      <p className="text-xs text-text-secondary">{label}</p>
+      <div className="mt-2 space-y-1.5 text-sm text-text-primary">
+        {normalizedValues.length > 0 ? (
+          normalizedValues.map((value) => (
+            <p key={`${label}-${value}`} className="leading-6">
+              {value}
+            </p>
+          ))
+        ) : (
+          <p className="leading-6 text-text-secondary">--</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -1943,7 +2950,6 @@ function WizardStepBadge({
 
 export default function ReconWorkspace({
   mode = 'center',
-  availableRules = [],
   authToken,
   onOpenCollaborationChannels,
   onSchemeCreated,
@@ -1954,10 +2960,7 @@ export default function ReconWorkspace({
   const [tasks, setTasks] = useState<ReconTaskListItem[]>([]);
   const [runs, setRuns] = useState<ReconCenterRunItem[]>([]);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
-  const [selectedLeftSources, setSelectedLeftSources] = useState<SchemeSourceOption[]>([]);
-  const [selectedRightSources, setSelectedRightSources] = useState<SchemeSourceOption[]>([]);
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
-  const [availableProcRules, setAvailableProcRules] = useState<UserTaskRule[]>([]);
   const [loadingCenter, setLoadingCenter] = useState(false);
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [loadingExceptionsRunId, setLoadingExceptionsRunId] = useState<string | null>(null);
@@ -1977,30 +2980,73 @@ export default function ReconWorkspace({
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
-  const [schemeDraft, setSchemeDraft] = useState<SchemeDraft>(() => createEmptySchemeDraft());
+  const [procBuildMode, setProcBuildMode] = useState<ProcBuildMode>('ai_complex_rule');
+  const [aiProcSideDrafts, setAiProcSideDrafts] = useState<Record<AiProcSide, AiProcSideDraft>>(() =>
+    createEmptyAiProcSideDrafts(),
+  );
+  const aiProcSideDraftsRef = useRef<Record<AiProcSide, AiProcSideDraft>>(aiProcSideDrafts);
+  const [wizardDraftState, setWizardDraftState] = useState<SchemeWizardDraftState>(() =>
+    createEmptySchemeWizardDraftState(),
+  );
   const [designSessionId, setDesignSessionId] = useState('');
   const [planDraft, setPlanDraft] = useState<PlanDraft>(EMPTY_PLAN_DRAFT);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmittingScheme, setIsSubmittingScheme] = useState(false);
   const [isSubmittingPlan, setIsSubmittingPlan] = useState(false);
-  const [isGeneratingProc, setIsGeneratingProc] = useState(false);
   const [isTrialingProc, setIsTrialingProc] = useState(false);
-  const [isGeneratingRecon, setIsGeneratingRecon] = useState(false);
   const [isTrialingRecon, setIsTrialingRecon] = useState(false);
-  const [procGenerationProgress, setProcGenerationProgress] = useState<RuleGenerationProgress | null>(null);
-  const [reconGenerationProgress, setReconGenerationProgress] = useState<RuleGenerationProgress | null>(null);
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
-  const [procCompatibility, setProcCompatibility] = useState<CompatibilityCheckResult>(emptyCompatibilityResult);
-  const [reconCompatibility, setReconCompatibility] = useState<CompatibilityCheckResult>(emptyCompatibilityResult);
-  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
     panel: 'proc' | 'recon';
     status: 'success' | 'error';
   } | null>(null);
   const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const aiProcAbortControllersRef = useRef<Partial<Record<AiProcSide, AbortController>>>({});
+  const aiProcGenerationSeqRef = useRef<Record<AiProcSide, number>>({ left: 0, right: 0 });
+  const schemeDraft = useMemo<SchemeDraft>(() => buildLegacySchemeDraftSnapshot(wizardDraftState), [wizardDraftState]);
+  const selectedLeftSources = wizardDraftState.preparation.leftSources as SchemeSourceOption[];
+  const selectedRightSources = wizardDraftState.preparation.rightSources as SchemeSourceOption[];
+  const leftOutputFields = wizardDraftState.preparation.leftOutputFields;
+  const rightOutputFields = wizardDraftState.preparation.rightOutputFields;
+  const procCompatibilityState = wizardDraftState.derived.procCompatibility as CompatibilityCheckResult;
+  const reconCompatibilityState = wizardDraftState.derived.reconCompatibility as CompatibilityCheckResult;
+  const setSchemeDraft = useCallback((updater: SetStateAction<SchemeDraft>) => {
+    setWizardDraftState((prev) => {
+      const prevDraft = buildLegacySchemeDraftSnapshot(prev);
+      const nextDraft = typeof updater === 'function'
+        ? (updater as (value: SchemeDraft) => SchemeDraft)(prevDraft)
+        : updater;
+      return applyLegacySchemeDraftSnapshot(prev, nextDraft);
+    });
+  }, []);
+  const setProcCompatibility = useCallback((next: SetStateAction<CompatibilityCheckResult>) => {
+    setWizardDraftState((prev) =>
+      updateDerivedDraft(prev, {
+        procCompatibility:
+          typeof next === 'function'
+            ? (next as (value: CompatibilityCheckResult) => CompatibilityCheckResult)(
+                prev.derived.procCompatibility as CompatibilityCheckResult,
+              )
+            : next,
+      }),
+    );
+  }, []);
+  const setReconCompatibility = useCallback((next: SetStateAction<CompatibilityCheckResult>) => {
+    setWizardDraftState((prev) =>
+      updateDerivedDraft(prev, {
+        reconCompatibility:
+          typeof next === 'function'
+            ? (next as (value: CompatibilityCheckResult) => CompatibilityCheckResult)(
+                prev.derived.reconCompatibility as CompatibilityCheckResult,
+              )
+            : next,
+      }),
+    );
+  }, []);
 
   const channelById = useMemo(
     () => new Map(availableChannels.map((item) => [item.id, item])),
@@ -2014,119 +3060,11 @@ export default function ReconWorkspace({
     () => (selectedPlanScheme ? extractSchemeMeta(selectedPlanScheme) : null),
     [selectedPlanScheme],
   );
-  const planLeftTimeOptions = useMemo(
-    () =>
-      inferTimeOptionsFromSources(
-        selectedPlanSchemeMeta?.leftSources || [],
-        selectedPlanSchemeMeta?.leftTimeSemantic || '',
-      ),
-    [selectedPlanSchemeMeta],
-  );
-  const planRightTimeOptions = useMemo(
-    () =>
-      inferTimeOptionsFromSources(
-        selectedPlanSchemeMeta?.rightSources || [],
-        selectedPlanSchemeMeta?.rightTimeSemantic || '',
-      ),
-    [selectedPlanSchemeMeta],
-  );
 
-  const existingProcOptions = useMemo<ExistingConfigOption[]>(() => {
-    const options: ExistingConfigOption[] = [];
-    const seen = new Set<string>();
+  useEffect(() => {
+    aiProcSideDraftsRef.current = aiProcSideDrafts;
+  }, [aiProcSideDrafts]);
 
-    availableProcRules
-      .forEach((rule) => {
-        const id = `rule:${rule.rule_code}`;
-        if (seen.has(id)) return;
-        seen.add(id);
-        options.push({
-          id,
-          name: rule.name,
-          draftText: '',
-          ruleJson: null,
-          ruleCode: rule.rule_code,
-        });
-      });
-
-    // From existing schemes
-    schemes.forEach((scheme) => {
-      const meta = extractSchemeMeta(scheme);
-      const draftText = meta.procDraftText.trim();
-      const schemeMeta = firstNonEmptyRecord(scheme.raw.scheme_meta_json, scheme.raw.scheme_meta, scheme.raw.meta);
-      const procRuleJson = asRecord(schemeMeta.proc_rule_json);
-      if (!draftText && !scheme.procRuleCode) return;
-      const id = `scheme:${scheme.schemeCode || scheme.id}:proc`;
-      if (seen.has(id)) return;
-      seen.add(id);
-options.push({
-          id,
-          name: `${scheme.name} 整理规则`,
-          draftText,
-          ruleJson: Object.keys(procRuleJson).length > 0 ? procRuleJson : null,
-          schemeCode: scheme.schemeCode,
-          ruleCode: scheme.procRuleCode || toText(scheme.raw.proc_rule_code),
-          leftSources: meta.leftSources,
-          rightSources: meta.rightSources,
-        });
-    });
-    return options;
-  }, [availableProcRules, schemes]);
-  const existingReconOptions = useMemo<ExistingConfigOption[]>(() => {
-    const options: ExistingConfigOption[] = [];
-    const seen = new Set<string>();
-
-    availableRules
-      .filter((rule) => rule.task_type === 'recon' && ruleSupportsEntryMode(rule, 'dataset'))
-      .forEach((rule) => {
-        const id = `rule:${rule.rule_code}`;
-        if (seen.has(id)) return;
-        seen.add(id);
-        options.push({
-          id,
-          name: rule.name,
-          draftText: '',
-          ruleJson: null,
-          ruleCode: rule.rule_code,
-        });
-      });
-
-    schemes.forEach((scheme) => {
-      const meta = extractSchemeMeta(scheme);
-      const draftText = meta.reconDraftText.trim();
-      const schemeMeta = firstNonEmptyRecord(scheme.raw.scheme_meta_json, scheme.raw.scheme_meta, scheme.raw.meta);
-      const reconRuleJson = asRecord(schemeMeta.recon_rule_json);
-      if (!draftText && !scheme.reconRuleCode) return;
-      const id = `scheme:${scheme.schemeCode || scheme.id}:recon`;
-      if (seen.has(id)) return;
-      seen.add(id);
-      options.push({
-        id,
-        name: meta.reconRuleName || `${scheme.name} 对账逻辑`,
-        draftText,
-        ruleJson: Object.keys(reconRuleJson).length > 0 ? reconRuleJson : null,
-        schemeCode: scheme.schemeCode,
-        ruleCode: scheme.reconRuleCode || toText(scheme.raw.recon_rule_code),
-        leftSources: meta.leftSources,
-        rightSources: meta.rightSources,
-        matchKey: meta.matchKey,
-        leftAmountField: meta.leftAmountField,
-        rightAmountField: meta.rightAmountField,
-        tolerance: meta.tolerance,
-        leftTimeSemantic: meta.leftTimeSemantic,
-        rightTimeSemantic: meta.rightTimeSemantic,
-      });
-    });
-    return options;
-  }, [availableRules, schemes]);
-  const selectedProcOption = useMemo(
-    () => existingProcOptions.find((item) => item.id === schemeDraft.selectedProcConfigId) || null,
-    [existingProcOptions, schemeDraft.selectedProcConfigId],
-  );
-  const selectedReconOption = useMemo(
-    () => existingReconOptions.find((item) => item.id === schemeDraft.selectedReconConfigId) || null,
-    [existingReconOptions, schemeDraft.selectedReconConfigId],
-  );
   const procJsonPreview = useMemo(
     () => (schemeDraft.procRuleJson ? JSON.stringify(schemeDraft.procRuleJson, null, 2) : ''),
     [schemeDraft.procRuleJson],
@@ -2134,31 +3072,150 @@ options.push({
   const parsedReconConfig = useMemo(
     () =>
       parseReconDraftConfig({
-        reconDraft: schemeDraft.reconDraft,
+        matchFieldPairs: schemeDraft.matchFieldPairs,
+        compareFieldPairs: schemeDraft.compareFieldPairs,
         matchKey: schemeDraft.matchKey,
         leftAmountField: schemeDraft.leftAmountField,
         rightAmountField: schemeDraft.rightAmountField,
+        leftTimeSemantic: schemeDraft.leftTimeSemantic,
+        rightTimeSemantic: schemeDraft.rightTimeSemantic,
         tolerance: schemeDraft.tolerance,
       }),
     [
+      schemeDraft.compareFieldPairs,
       schemeDraft.leftAmountField,
+      schemeDraft.leftTimeSemantic,
+      schemeDraft.matchFieldPairs,
       schemeDraft.matchKey,
-      schemeDraft.reconDraft,
       schemeDraft.rightAmountField,
+      schemeDraft.rightTimeSemantic,
       schemeDraft.tolerance,
     ],
   );
+  const roleDerivedMatchFieldPairs = useMemo(
+    () => buildSemanticRoleReconFieldPairs(leftOutputFields, rightOutputFields, 'match_key'),
+    [leftOutputFields, rightOutputFields],
+  );
+  const roleDerivedCompareFieldPairs = useMemo(
+    () => buildSemanticRoleReconFieldPairs(leftOutputFields, rightOutputFields, 'compare_field'),
+    [leftOutputFields, rightOutputFields],
+  );
+  const activeMatchFieldPairs = useMemo(
+    () => (
+      parsedReconConfig.matchFieldPairs.length > 0
+        ? parsedReconConfig.matchFieldPairs
+        : roleDerivedMatchFieldPairs
+    ),
+    [parsedReconConfig.matchFieldPairs, roleDerivedMatchFieldPairs],
+  );
+  const activeCompareFieldPairs = useMemo(
+    () => (
+      parsedReconConfig.compareFieldPairs.length > 0
+        ? parsedReconConfig.compareFieldPairs
+        : roleDerivedCompareFieldPairs
+    ),
+    [parsedReconConfig.compareFieldPairs, roleDerivedCompareFieldPairs],
+  );
+  const leftOutputFieldLabelMap = useMemo(
+    () => mergeLabelMaps(
+      buildOutputFieldLabelMap(leftOutputFields, selectedLeftSources),
+      aiProcSideDrafts.left.outputFieldLabelMap,
+    ),
+    [aiProcSideDrafts.left.outputFieldLabelMap, leftOutputFields, selectedLeftSources],
+  );
+  const rightOutputFieldLabelMap = useMemo(
+    () => mergeLabelMaps(
+      buildOutputFieldLabelMap(rightOutputFields, selectedRightSources),
+      aiProcSideDrafts.right.outputFieldLabelMap,
+    ),
+    [aiProcSideDrafts.right.outputFieldLabelMap, rightOutputFields, selectedRightSources],
+  );
+  const roleDerivedLeftTimeSemantic = useMemo(
+    () => firstOutputFieldValueByRole(leftOutputFields, 'time_field'),
+    [leftOutputFields],
+  );
+  const roleDerivedRightTimeSemantic = useMemo(
+    () => firstOutputFieldValueByRole(rightOutputFields, 'time_field'),
+    [rightOutputFields],
+  );
+  const leftTimeFieldOptions = useMemo(
+    () => buildReconFieldOptions(
+      leftOutputFields,
+      roleDerivedLeftTimeSemantic,
+      scoreDateFieldCandidate,
+      'time_field',
+      leftOutputFieldLabelMap,
+      { onlyTimeRelated: true, includeFallback: false },
+    ),
+    [leftOutputFieldLabelMap, leftOutputFields, roleDerivedLeftTimeSemantic],
+  );
+  const rightTimeFieldOptions = useMemo(
+    () => buildReconFieldOptions(
+      rightOutputFields,
+      roleDerivedRightTimeSemantic,
+      scoreDateFieldCandidate,
+      'time_field',
+      rightOutputFieldLabelMap,
+      { onlyTimeRelated: true, includeFallback: false },
+    ),
+    [rightOutputFieldLabelMap, rightOutputFields, roleDerivedRightTimeSemantic],
+  );
+  const effectiveLeftTimeSemantic = useMemo(
+    () => pickPreferredTimeFieldValue(
+      leftTimeFieldOptions,
+      parsedReconConfig.leftTimeSemantic,
+      roleDerivedLeftTimeSemantic,
+    ),
+    [leftTimeFieldOptions, parsedReconConfig.leftTimeSemantic, roleDerivedLeftTimeSemantic],
+  );
+  const effectiveRightTimeSemantic = useMemo(
+    () => pickPreferredTimeFieldValue(
+      rightTimeFieldOptions,
+      parsedReconConfig.rightTimeSemantic,
+      roleDerivedRightTimeSemantic,
+    ),
+    [parsedReconConfig.rightTimeSemantic, rightTimeFieldOptions, roleDerivedRightTimeSemantic],
+  );
+  const leftReconFieldOptions = useMemo(
+    () => buildAllReconFieldOptions(leftOutputFields, leftOutputFieldLabelMap),
+    [leftOutputFieldLabelMap, leftOutputFields],
+  );
+  const rightReconFieldOptions = useMemo(
+    () => buildAllReconFieldOptions(rightOutputFields, rightOutputFieldLabelMap),
+    [rightOutputFieldLabelMap, rightOutputFields],
+  );
+  const compiledReconRuleResult = useMemo(() => {
+    try {
+      return {
+        json: buildLocalReconRuleJson({
+          schemeName: schemeDraft.name,
+          businessGoal: schemeDraft.businessGoal,
+          reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
+          matchFieldPairs: activeMatchFieldPairs,
+          compareFieldPairs: activeCompareFieldPairs,
+          leftTimeSemantic: effectiveLeftTimeSemantic,
+          rightTimeSemantic: effectiveRightTimeSemantic,
+        }),
+        error: '',
+      };
+    } catch (error) {
+      return {
+        json: null,
+        error: error instanceof Error ? error.message : '当前对账配置无法生成 JSON。',
+      };
+    }
+  }, [
+    activeCompareFieldPairs,
+    activeMatchFieldPairs,
+    effectiveLeftTimeSemantic,
+    effectiveRightTimeSemantic,
+    schemeDraft.businessGoal,
+    schemeDraft.name,
+    schemeDraft.reconRuleName,
+  ]);
   const reconJsonPreview = useMemo(
-    () => (schemeDraft.reconRuleJson ? JSON.stringify(schemeDraft.reconRuleJson, null, 2) : ''),
-    [schemeDraft.reconRuleJson],
-  );
-  const preparedLeftRows = useMemo(
-    () => procTrialPreview?.preparedOutputs.find((item) => item.side === 'left')?.rows || [],
-    [procTrialPreview],
-  );
-  const preparedRightRows = useMemo(
-    () => procTrialPreview?.preparedOutputs.find((item) => item.side === 'right')?.rows || [],
-    [procTrialPreview],
+    () => (compiledReconRuleResult.json ? JSON.stringify(compiledReconRuleResult.json, null, 2) : ''),
+    [compiledReconRuleResult.json],
   );
   const resolveChannelProviderLabel = useCallback(
     (channelConfigId: string) => {
@@ -2356,59 +3413,11 @@ options.push({
     }
   }, [authToken]);
 
-  const loadProcRuleOptions = useCallback(async () => {
-    if (!authToken) {
-      setAvailableProcRules([]);
-      return;
-    }
-
-    try {
-      const response = await fetch('/api/proc/list_user_tasks', {
-        headers: { Authorization: `Bearer ${authToken}` },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data?.success === false) {
-        throw new Error(String(data?.detail || data?.message || '加载数据整理规则失败'));
-      }
-
-      const nextRules = asList(data?.tasks).flatMap((task) => {
-        const taskValue = asRecord(task);
-        const taskType = toText(taskValue.task_type);
-        if (taskType !== 'proc') return [];
-        return asList(taskValue.rules).flatMap((rule) => {
-          const ruleValue = asRecord(rule);
-          const ruleCode = toText(ruleValue.rule_code).trim();
-          if (!ruleCode) return [];
-          return [
-            {
-              id: toInt(ruleValue.id, 0),
-              user_id: toText(ruleValue.user_id) || null,
-              task_id: ruleValue.task_id == null ? null : toInt(ruleValue.task_id, 0),
-              rule_code: ruleCode,
-              name: toText(ruleValue.name, ruleCode),
-              rule_type: toText(ruleValue.rule_type),
-              remark: toText(ruleValue.remark),
-              task_code: toText(ruleValue.task_code),
-              task_name: toText(ruleValue.task_name),
-              task_type: 'proc',
-              file_rule_code: toText(ruleValue.file_rule_code),
-            } satisfies UserTaskRule,
-          ];
-        });
-      });
-
-      setAvailableProcRules(nextRules.filter((rule) => ruleSupportsEntryMode(rule, 'dataset')));
-    } catch {
-      setAvailableProcRules([]);
-    }
-  }, [authToken]);
-
   useEffect(() => {
     if (mode !== 'center') return;
     void loadCenterData();
     void loadChannelOptions();
-    void loadProcRuleOptions();
-  }, [loadCenterData, loadChannelOptions, loadProcRuleOptions, mode]);
+  }, [loadCenterData, loadChannelOptions, mode]);
 
   useEffect(() => {
     if (modalState?.kind !== 'run-exceptions') return;
@@ -2419,42 +3428,34 @@ options.push({
 
   const resetSchemeWizard = useCallback(() => {
     setSchemeWizardStep(1);
-    setSchemeDraft(createEmptySchemeDraft());
-    setSelectedLeftSources([]);
-    setSelectedRightSources([]);
+    setProcBuildMode('ai_complex_rule');
+    setAiProcSideDrafts(createEmptyAiProcSideDrafts());
+    setWizardDraftState(createEmptySchemeWizardDraftState());
     setDesignSessionId('');
     setWizardJsonPanel(null);
     setProcTrialPreview(null);
     setReconTrialPreview(null);
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
-  }, []);
+  }, [setProcCompatibility, setReconCompatibility]);
 
   const openCreateSchemeModal = useCallback(() => {
     setModalError(null);
     resetSchemeWizard();
     setModalState({ kind: 'create-scheme' });
-    void loadProcRuleOptions();
-  }, [loadProcRuleOptions, resetSchemeWizard]);
+  }, [resetSchemeWizard]);
 
   const openCreatePlanModal = useCallback(
     (scheme: ReconSchemeListItem | null = null) => {
       setModalError(null);
       const resolvedScheme = scheme || schemes[0] || null;
       const resolvedSchemeMeta = resolvedScheme ? extractSchemeMeta(resolvedScheme) : null;
-      const leftTimeOptions = inferTimeOptionsFromSources(
-        resolvedSchemeMeta?.leftSources || [],
-        resolvedSchemeMeta?.leftTimeSemantic || '',
-      );
-      const rightTimeOptions = inferTimeOptionsFromSources(
-        resolvedSchemeMeta?.rightSources || [],
-        resolvedSchemeMeta?.rightTimeSemantic || '',
-      );
+      const resolvedTimeSemantics = resolvePlanTimeSemantics(resolvedSchemeMeta);
       setPlanDraft({
         ...EMPTY_PLAN_DRAFT,
         schemeCode: resolvedScheme?.schemeCode || '',
-        leftTimeSemantic: resolvedSchemeMeta?.leftTimeSemantic || leftTimeOptions[0]?.value || '',
-        rightTimeSemantic: resolvedSchemeMeta?.rightTimeSemantic || rightTimeOptions[0]?.value || '',
+        leftTimeSemantic: resolvedTimeSemantics.leftTimeSemantic,
+        rightTimeSemantic: resolvedTimeSemantics.rightTimeSemantic,
       });
       setModalState({ kind: 'create-plan', scheme: resolvedScheme });
       void loadChannelOptions();
@@ -2471,7 +3472,7 @@ options.push({
     setDesignSessionId('');
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
-  }, []);
+  }, [setProcCompatibility, setReconCompatibility]);
 
   const handleCopyWizardJson = useCallback(async (panel: 'proc' | 'recon') => {
     const jsonText = panel === 'proc' ? procJsonPreview : reconJsonPreview;
@@ -2506,24 +3507,12 @@ options.push({
 
   const resetSchemeDraftFromGoalChange = useCallback(
     (patch: Partial<SchemeDraft>) => {
-      setSchemeDraft((prev) => ({
-        ...prev,
-        ...patch,
-        procDraft: '',
-        procRuleJson: null,
-        procTrialStatus: 'idle',
-        procTrialSummary: '',
-        matchKey: '',
-        leftAmountField: '',
-        rightAmountField: '',
-        tolerance: '',
-        leftTimeSemantic: '',
-        rightTimeSemantic: '',
-        reconDraft: '',
-        reconRuleJson: null,
-        reconTrialStatus: 'idle',
-        reconTrialSummary: '',
-      }));
+      setWizardDraftState((prev) =>
+        updateIntentDraft(prev, {
+          name: patch.name ?? prev.intent.name,
+          businessGoal: patch.businessGoal ?? prev.intent.businessGoal,
+        }),
+      );
       setDesignSessionId('');
       setWizardJsonPanel(null);
       setProcTrialPreview(null);
@@ -2531,47 +3520,575 @@ options.push({
       setProcCompatibility(emptyCompatibilityResult());
       setReconCompatibility(emptyCompatibilityResult());
     },
+    [setProcCompatibility, setReconCompatibility],
+  );
+
+  const handlePreparationDraftChange = useCallback(
+    (updater: (prev: SchemeWizardDraftState) => SchemeWizardDraftState) => {
+      const hasExistingPreview = Boolean(procTrialPreview);
+      setWizardDraftState((prev) => {
+        const next = updater(prev);
+        if (!hasExistingPreview) {
+          return next;
+        }
+        return updateDerivedDraft(next, {
+          procTrialStatus: 'needs_adjustment',
+          procTrialSummary: PREPARATION_REFERENCE_EDIT_SUMMARY,
+          procPreviewState: 'reference',
+          reconTrialStatus: 'idle',
+          reconTrialSummary: '',
+          reconPreviewState: 'empty',
+        });
+      });
+      setDesignSessionId('');
+      setWizardJsonPanel(null);
+      if (hasExistingPreview) {
+        setProcTrialPreview((prev) =>
+          markProcTrialPreviewAsReference(prev, PREPARATION_REFERENCE_EDIT_SUMMARY),
+        );
+        setProcCompatibility({
+          status: 'warning',
+          message: '数据整理已修改，下面保留的是上一次试跑结果，仅供参考。请重新试跑。',
+          details: [],
+        });
+      } else {
+        setProcTrialPreview(null);
+        setProcCompatibility(emptyCompatibilityResult());
+      }
+      setReconTrialPreview(null);
+      setReconCompatibility(emptyCompatibilityResult());
+    },
+    [procTrialPreview, setProcCompatibility, setReconCompatibility],
+  );
+
+  const handleProcBuildModeChange = useCallback(
+    (mode: ProcBuildMode) => {
+      setProcBuildMode(mode);
+      setModalError(null);
+      if (mode === 'simple_mapping') {
+        setAiProcSideDrafts(createEmptyAiProcSideDrafts());
+        return;
+      }
+
+      setDesignSessionId('');
+      setWizardJsonPanel(null);
+      setProcTrialPreview(null);
+      setReconTrialPreview(null);
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(prev, {
+          procTrialStatus: 'idle',
+          procTrialSummary: '',
+          procRuleJson: null,
+          procCompatibility: emptyCompatibilityResult(),
+          procPreviewState: 'empty',
+          reconTrialStatus: 'idle',
+          reconTrialSummary: '',
+          reconRuleJson: null,
+          reconCompatibility: emptyCompatibilityResult(),
+          reconPreviewState: 'empty',
+        }),
+      );
+    },
     [],
   );
 
+  const handleAiProcRuleDraftChange = useCallback((side: AiProcSide, value: string) => {
+    aiProcGenerationSeqRef.current[side] += 1;
+    aiProcAbortControllersRef.current[side]?.abort();
+    delete aiProcAbortControllersRef.current[side];
+    setAiProcSideDrafts((prev) => {
+      const current = prev[side];
+      const hasGeneratedResult = current.outputRows.length > 0 || Boolean(current.procRuleJson);
+      return {
+        ...prev,
+        [side]: {
+          ...current,
+          ruleDraft: value,
+          status: hasGeneratedResult ? 'succeeded' : 'idle',
+          summary: hasGeneratedResult ? current.summary : '',
+          error: '',
+          failureReasons: [],
+          questions: [],
+          nodeTraces: hasGeneratedResult ? current.nodeTraces : createDefaultRuleGenerationNodeTraces(),
+        },
+      };
+    });
+  }, []);
+
+  const applyRuleGenerationEvent = useCallback((side: AiProcSide, sideLabel: string, payload: Record<string, unknown>) => {
+    setAiProcSideDrafts((prev) => {
+      const current = prev[side];
+      const { draft: nextDraft } = applyRuleGenerationEventToDraft(current, sideLabel, payload);
+
+      return {
+        ...prev,
+        [side]: nextDraft,
+      };
+    });
+  }, []);
+
+  const handleGenerateAiProcOutput = useCallback(
+    async (side: AiProcSide) => {
+      const selectedSources = side === 'left' ? selectedLeftSources : selectedRightSources;
+      const currentDraft = aiProcSideDraftsRef.current[side];
+      const ruleText = currentDraft.ruleDraft.trim();
+      const sideLabel = side === 'left' ? '左侧' : '右侧';
+      const targetTable = side === 'left' ? 'left_recon_ready' : 'right_recon_ready';
+      if (!ruleText) {
+        setAiProcSideDrafts((prev) => ({
+          ...prev,
+          [side]: {
+            ...prev[side],
+            status: 'failed',
+            error: `请先输入${sideLabel}整理规则描述。`,
+            summary: '',
+            failureReasons: [],
+          },
+        }));
+        return;
+      }
+      if (selectedSources.length === 0) {
+        setAiProcSideDrafts((prev) => ({
+          ...prev,
+          [side]: {
+            ...prev[side],
+            status: 'failed',
+            error: `请先选择${sideLabel}数据集。`,
+            summary: '',
+            failureReasons: [],
+          },
+        }));
+        return;
+      }
+
+      setModalError(null);
+      aiProcAbortControllersRef.current[side]?.abort();
+      const generationSeq = aiProcGenerationSeqRef.current[side] + 1;
+      aiProcGenerationSeqRef.current[side] = generationSeq;
+      const controller = new AbortController();
+      aiProcAbortControllersRef.current[side] = controller;
+      setAiProcSideDrafts((prev) => ({
+        ...prev,
+        [side]: {
+          ...prev[side],
+          status: 'generating',
+          summary: `${sideLabel}规则已提交，正在执行规则理解、字段绑定、JSON生成、样例执行和断言验证。`,
+          error: '',
+          failureReasons: [],
+          nodeTraces: createDefaultRuleGenerationNodeTraces(),
+          questions: [],
+          warnings: [],
+        },
+      }));
+
+      try {
+        const sourcePayloads = await buildRuleGenerationSourcePayloads(selectedSources, authToken);
+        const response = await fetch('/api/rule-generation/proc/side/stream', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken || ''}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            side,
+            target_table: targetTable,
+            rule_text: ruleText,
+            sources: sourcePayloads,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) {
+          const detail = await response.text().catch(() => '');
+          throw new Error(detail || 'AI生成输出数据请求失败');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalEvent: Record<string, unknown> | null = null;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() || '';
+          frames.forEach((frame) => {
+            const eventPayload = parseSseFrame(frame);
+            if (!eventPayload) return;
+            if (aiProcGenerationSeqRef.current[side] !== generationSeq) return;
+            finalEvent = eventPayload;
+            applyRuleGenerationEvent(side, sideLabel, eventPayload);
+          });
+        }
+        if (buffer.trim()) {
+          const eventPayload = parseSseFrame(buffer);
+          if (eventPayload) {
+            if (aiProcGenerationSeqRef.current[side] !== generationSeq) return;
+            finalEvent = eventPayload;
+            applyRuleGenerationEvent(side, sideLabel, eventPayload);
+          }
+        }
+        if (aiProcGenerationSeqRef.current[side] !== generationSeq) {
+          return;
+        }
+        if (!finalEvent || finalEvent.event !== 'graph_completed') {
+          return;
+        }
+
+        const outputFields = normalizeAiOutputFields(finalEvent.output_fields);
+        const currentRule = isRecord(finalEvent.proc_rule_json) ? finalEvent.proc_rule_json : undefined;
+        const latestSideDrafts = aiProcSideDraftsRef.current;
+        const leftRule = side === 'left' ? currentRule : latestSideDrafts.left.procRuleJson;
+        const rightRule = side === 'right' ? currentRule : latestSideDrafts.right.procRuleJson;
+        const mergedRule = leftRule && rightRule
+          ? buildAiSideProcRuleJson({
+              schemeName: schemeDraft.name,
+              businessGoal: schemeDraft.businessGoal,
+              leftRule,
+              rightRule,
+            })
+          : null;
+        let mergedTrialPassed = false;
+        let mergedTrialSummary = `${sideLabel}输出数据已生成，请继续生成${side === 'left' ? '右侧' : '左侧'}输出数据。`;
+        let verifiedMergedRule = mergedRule;
+
+        if (mergedRule) {
+          setIsTrialingProc(true);
+          try {
+            const [leftSamples, rightSamples] = await Promise.all([
+              buildRuleGenerationSourcePayloads(selectedLeftSources, authToken),
+              buildRuleGenerationSourcePayloads(selectedRightSources, authToken),
+            ]);
+            const trialResponse = await fetchReconAutoApi('/schemes/design/proc-trial', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${authToken || ''}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                proc_rule_json: mergedRule,
+                sample_datasets: [
+                  ...leftSamples.map((source) => ({ ...source, side: 'left' })),
+                  ...rightSamples.map((source) => ({ ...source, side: 'right' })),
+                ],
+              }),
+            });
+            const trialData = await trialResponse.json().catch(() => ({}));
+            if (!trialResponse.ok) {
+              throw new Error(String(trialData.detail || trialData.message || trialData.error || '合并后数据整理试跑失败'));
+            }
+            const trialResult = asRecord(trialData);
+            const normalizedRule = asRecord(trialResult.normalized_rule);
+            verifiedMergedRule = Object.keys(normalizedRule).length > 0 ? normalizedRule : mergedRule;
+            mergedTrialPassed = trialResult.ready_for_confirm === true && trialResult.success !== false;
+            mergedTrialSummary = toText(
+              trialResult.summary,
+              toText(trialResult.message, toText(trialResult.error, mergedTrialPassed ? '合并后数据整理试跑通过。' : '合并后数据整理试跑未通过。')),
+            );
+            setProcCompatibility({
+              status: mergedTrialPassed ? 'passed' : 'warning',
+              message: mergedTrialPassed
+                ? 'AI 复杂规则合并后试跑通过，可进入第三步配置对账逻辑。'
+                : 'AI 复杂规则已生成，但合并后试跑未通过，请调整规则描述后重新生成。',
+              details: parseTrialMessages(trialResult.errors).concat(parseTrialMessages(trialResult.warnings)),
+            });
+            setProcTrialPreview(buildProcPreviewFromTrialResult(trialResult));
+          } catch (trialError) {
+            mergedTrialPassed = false;
+            mergedTrialSummary = trialError instanceof Error ? trialError.message : '合并后数据整理试跑失败。';
+            setProcCompatibility({
+              status: 'failed',
+              message: 'AI 复杂规则合并后试跑失败。',
+              details: [mergedTrialSummary],
+            });
+            setProcTrialPreview(null);
+          } finally {
+            setIsTrialingProc(false);
+          }
+        }
+
+        setDesignSessionId('');
+        setWizardJsonPanel(null);
+        setReconTrialPreview(null);
+        setReconCompatibility(emptyCompatibilityResult());
+        setWizardDraftState((prev) => {
+          const withGeneratedFields = outputFields.length > 0
+            ? applyPreparationOutputFields(prev, side, outputFields)
+            : prev;
+          const next = withGeneratedFields;
+          const leftGenerated = Boolean(leftRule);
+          const rightGenerated = Boolean(rightRule);
+          const withMergedFields = leftGenerated && rightGenerated && verifiedMergedRule
+            ? hydratePreparationOutputFieldsFromProcRule(next, verifiedMergedRule)
+            : next;
+          if (
+            !leftGenerated
+            || !rightGenerated
+            || withMergedFields.preparation.leftOutputFields.length === 0
+            || withMergedFields.preparation.rightOutputFields.length === 0
+          ) {
+            return updateDerivedDraft(withMergedFields, {
+              procTrialStatus: 'needs_adjustment',
+              procTrialSummary: `${sideLabel}输出数据已生成，请继续生成${side === 'left' ? '右侧' : '左侧'}输出数据。`,
+              procPreviewState: 'current',
+              reconTrialStatus: 'idle',
+              reconTrialSummary: '',
+              reconRuleJson: null,
+              reconPreviewState: 'empty',
+            });
+          }
+          return updateDerivedDraft(withMergedFields, {
+            procRuleJson: verifiedMergedRule,
+            procTrialStatus: mergedTrialPassed ? 'passed' : 'needs_adjustment',
+            procTrialSummary: mergedTrialSummary,
+            procCompatibility: {
+              status: mergedTrialPassed ? 'passed' : 'failed',
+              message: mergedTrialPassed
+                ? 'AI 复杂规则合并后试跑通过，生成 left_recon_ready / right_recon_ready。'
+                : 'AI 复杂规则合并后试跑未通过。',
+              details: mergedTrialPassed ? [] : [mergedTrialSummary],
+            },
+            procPreviewState: 'current',
+            reconTrialStatus: 'idle',
+            reconTrialSummary: '',
+            reconRuleJson: null,
+            reconPreviewState: 'empty',
+          });
+        });
+        setReconTrialPreview(null);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        if (aiProcGenerationSeqRef.current[side] !== generationSeq) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : 'AI生成输出数据失败';
+        setAiProcSideDrafts((prev) => ({
+          ...prev,
+          [side]: {
+            ...prev[side],
+            status: 'failed',
+            summary: `${sideLabel}AI生成失败。`,
+            error: message,
+          },
+        }));
+      } finally {
+        if (aiProcGenerationSeqRef.current[side] === generationSeq) {
+          delete aiProcAbortControllersRef.current[side];
+        }
+      }
+    },
+    [
+      authToken,
+      applyRuleGenerationEvent,
+      schemeDraft.businessGoal,
+      schemeDraft.name,
+      selectedLeftSources,
+      selectedRightSources,
+      setProcCompatibility,
+      setReconCompatibility,
+    ],
+  );
+
+  const hydrateSourcesForRecommendation = useCallback(
+    async (sources: SchemeSourceOption[]): Promise<SchemeSourceOption[]> => {
+      const normalizedSources = sources.slice(0, 1);
+      if (!authToken) {
+        return normalizedSources;
+      }
+
+      return Promise.all(
+        normalizedSources.map(async (source) => {
+          if (!source.sourceId || sourceHasRecommendationMetadata(source)) {
+            return source;
+          }
+
+          try {
+            const response = await fetch('/api/recon/schemes/design/dataset-fields', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${authToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                source_id: source.sourceId,
+                resource_key: source.resourceKey || source.datasetCode || '',
+                dataset_id: source.id,
+              }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !Array.isArray(data.fields)) {
+              return source;
+            }
+
+            const fieldEntries = (data.fields as Array<Record<string, string>>)
+              .map((item) => ({
+                rawName: toText(item.raw_name).trim(),
+                displayName: toText(item.display_name, toText(item.raw_name)).trim(),
+              }))
+              .filter((item) => item.rawName);
+            if (fieldEntries.length === 0) {
+              return source;
+            }
+
+            return {
+              ...source,
+              fieldLabelMap: Object.fromEntries(
+                fieldEntries.map((item) => [item.rawName, item.displayName || item.rawName]),
+              ),
+              schemaSummary: {
+                ...(source.schemaSummary || {}),
+                columns: fieldEntries.map((item) => ({
+                  name: item.rawName,
+                })),
+              },
+            } satisfies SchemeSourceOption;
+          } catch {
+            return source;
+          }
+        }),
+      );
+    },
+    [authToken],
+  );
+
+  const recommendPreparationOutputFields = useCallback(
+    async (side: 'left' | 'right', overrideSources?: SchemeSourceOption[]) => {
+      const nextSources = (overrideSources || (side === 'left' ? selectedLeftSources : selectedRightSources)).slice(0, 1);
+      const hydratedSources = await hydrateSourcesForRecommendation(nextSources);
+      handlePreparationDraftChange((prev) => {
+        const stateWithSources = overrideSources ? applyPreparationSources(prev, side, hydratedSources) : prev;
+        return applyPreparationOutputFields(
+          stateWithSources,
+          side,
+          buildRecommendedOutputFieldsForSources(hydratedSources),
+        );
+      });
+    },
+    [handlePreparationDraftChange, hydrateSourcesForRecommendation, selectedLeftSources, selectedRightSources],
+  );
+
   const changeSchemeSources = useCallback((side: 'left' | 'right', sources: SchemeSourceOption[]) => {
+    const allowMultipleSources = procBuildMode === 'ai_complex_rule';
+    const normalizedSources = allowMultipleSources ? sources : sources.slice(0, 1);
     const current = side === 'left' ? selectedLeftSources : selectedRightSources;
     const currentIds = current.map((item) => item.id);
-    const nextIds = sources.map((item) => item.id);
+    const nextIds = normalizedSources.map((item) => item.id);
     if (sameStringSet(currentIds, nextIds)) {
       return;
     }
 
-    if (side === 'left') {
-      setSelectedLeftSources(sources);
-    } else {
-      setSelectedRightSources(sources);
+    handlePreparationDraftChange((prev) => applyPreparationSources(prev, side, normalizedSources));
+    if (!allowMultipleSources) {
+      void recommendPreparationOutputFields(side, normalizedSources);
     }
+  }, [handlePreparationDraftChange, procBuildMode, recommendPreparationOutputFields, selectedLeftSources, selectedRightSources]);
 
-    setSchemeDraft((prev) => ({
-      ...prev,
-      procDraft: '',
-      procRuleJson: null,
-      procTrialStatus: 'idle',
-      procTrialSummary: '',
-      matchKey: '',
-      leftAmountField: '',
-      rightAmountField: '',
-      tolerance: '',
-      leftTimeSemantic: '',
-      rightTimeSemantic: '',
-      reconDraft: '',
-      reconRuleJson: null,
-      reconTrialStatus: 'idle',
-      reconTrialSummary: '',
-    }));
-    setDesignSessionId('');
-    setWizardJsonPanel(null);
-    setProcTrialPreview(null);
-    setReconTrialPreview(null);
-    setProcCompatibility(emptyCompatibilityResult());
-    setReconCompatibility(emptyCompatibilityResult());
-  }, [selectedLeftSources, selectedRightSources]);
+  const handleReconDraftMutation = useCallback(
+    (
+      updater: (prev: SchemeWizardDraftState) => SchemeWizardDraftState,
+      referenceSummary = RECON_REFERENCE_EDIT_SUMMARY,
+    ) => {
+      const hasExistingPreview = Boolean(reconTrialPreview);
+      setWizardDraftState((prev) => {
+        const next = updater(prev);
+        return updateDerivedDraft(next, {
+          reconTrialStatus: hasExistingPreview ? 'needs_adjustment' : 'idle',
+          reconTrialSummary: hasExistingPreview ? referenceSummary : '',
+          reconPreviewState: hasExistingPreview ? 'reference' : 'empty',
+        });
+      });
+      setWizardJsonPanel(null);
+      if (hasExistingPreview) {
+        setReconTrialPreview((prev) => markReconTrialPreviewAsReference(prev, referenceSummary));
+        setReconCompatibility({
+          status: 'warning',
+          message: '对账设置已修改，下面保留的是上一次试跑结果，仅供参考。请重新试跑。',
+          details: [],
+        });
+      } else {
+        setReconTrialPreview(null);
+        setReconCompatibility(emptyCompatibilityResult());
+      }
+    },
+    [reconTrialPreview, setReconCompatibility],
+  );
+
+  const applyStructuredReconConfig = useCallback(
+    (
+      patch: Partial<{
+        reconRuleName: string;
+        matchFieldPairs: ReconFieldPairDraft[];
+        compareFieldPairs: ReconFieldPairDraft[];
+        leftTimeSemantic: string;
+        rightTimeSemantic: string;
+        tolerance: string;
+      }>,
+    ) => {
+      handleReconDraftMutation((prev) => {
+        const current = buildLegacySchemeDraftSnapshot(prev);
+        const nextRuleName =
+          patch.reconRuleName ?? current.reconRuleName ?? buildDefaultReconRuleName(current.name);
+        const defaultMatchFieldPairs = current.matchFieldPairs.length > 0
+          ? current.matchFieldPairs
+          : activeMatchFieldPairs;
+        const defaultCompareFieldPairs = current.compareFieldPairs.length > 0
+          ? current.compareFieldPairs
+          : activeCompareFieldPairs;
+        const nextMatchFieldPairs = normalizeReconFieldPairs(
+          patch.matchFieldPairs ?? defaultMatchFieldPairs,
+          current.matchKey ? [{ leftField: current.matchKey, rightField: current.matchKey }] : [],
+        );
+        const nextCompareFieldPairs = normalizeReconFieldPairs(
+          patch.compareFieldPairs ?? defaultCompareFieldPairs,
+          current.leftAmountField || current.rightAmountField
+            ? [{ leftField: current.leftAmountField, rightField: current.rightAmountField }]
+            : [],
+        );
+        const nextMatchKey = resolveFirstReconFieldPairValue(
+          nextMatchFieldPairs,
+          'left',
+          current.matchKey,
+        );
+        const nextLeftAmountField = resolveFirstReconFieldPairValue(
+          nextCompareFieldPairs,
+          'left',
+          current.leftAmountField,
+        );
+        const nextRightAmountField = resolveFirstReconFieldPairValue(
+          nextCompareFieldPairs,
+          'right',
+          current.rightAmountField,
+        );
+        const nextLeftTimeSemantic = patch.leftTimeSemantic ?? current.leftTimeSemantic;
+        const nextRightTimeSemantic = patch.rightTimeSemantic ?? current.rightTimeSemantic;
+        const nextTolerance = patch.tolerance ?? current.tolerance ?? '0.00';
+        return updateReconciliationDraft(prev, {
+          reconConfigMode: 'ai',
+          selectedReconConfigId: '',
+          reconRuleName: nextRuleName,
+          matchFieldPairs: nextMatchFieldPairs,
+          compareFieldPairs: nextCompareFieldPairs,
+          matchKey: nextMatchKey,
+          leftAmountField: nextLeftAmountField,
+          rightAmountField: nextRightAmountField,
+          leftTimeSemantic: nextLeftTimeSemantic,
+          rightTimeSemantic: nextRightTimeSemantic,
+          tolerance: nextTolerance,
+          reconDraft: buildStructuredReconDraftText({
+            reconRuleName: nextRuleName,
+            matchFieldPairs: nextMatchFieldPairs,
+            compareFieldPairs: nextCompareFieldPairs,
+            leftTimeSemantic: nextLeftTimeSemantic,
+            rightTimeSemantic: nextRightTimeSemantic,
+          }),
+        });
+      });
+    },
+    [activeCompareFieldPairs, activeMatchFieldPairs, handleReconDraftMutation],
+  );
 
   useEffect(() => {
     if (modalState?.kind !== 'create-plan') return;
@@ -2583,15 +4100,10 @@ options.push({
 
   useEffect(() => {
     if (modalState?.kind !== 'create-plan') return;
+    const nextTimeSemantics = resolvePlanTimeSemantics(selectedPlanSchemeMeta);
     setPlanDraft((prev) => {
-      const nextLeft =
-        prev.leftTimeSemantic && planLeftTimeOptions.some((option) => option.value === prev.leftTimeSemantic)
-          ? prev.leftTimeSemantic
-          : planLeftTimeOptions[0]?.value || '';
-      const nextRight =
-        prev.rightTimeSemantic && planRightTimeOptions.some((option) => option.value === prev.rightTimeSemantic)
-          ? prev.rightTimeSemantic
-          : planRightTimeOptions[0]?.value || '';
+      const nextLeft = nextTimeSemantics.leftTimeSemantic;
+      const nextRight = nextTimeSemantics.rightTimeSemantic;
       if (nextLeft === prev.leftTimeSemantic && nextRight === prev.rightTimeSemantic) {
         return prev;
       }
@@ -2601,39 +4113,24 @@ options.push({
         rightTimeSemantic: nextRight,
       };
     });
-  }, [modalState, planLeftTimeOptions, planRightTimeOptions]);
-
-  const loadRuleJsonByCode = useCallback(
-    async (ruleCode: string) => {
-      const normalizedRuleCode = ruleCode.trim();
-      if (!normalizedRuleCode) return null;
-      const response = await fetch(
-        `/api/proc/get_proc_rule?rule_code=${encodeURIComponent(normalizedRuleCode)}`,
-        {
-          headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
-        },
-      );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data?.success === false) {
-        throw new Error(String(data?.detail || data?.message || '加载规则详情失败'));
-      }
-      const ruleRecord = asRecord(data?.data);
-      const ruleJson = asRecord(ruleRecord.rule);
-      return Object.keys(ruleJson).length > 0 ? ruleJson : null;
-    },
-    [authToken],
-  );
+  }, [modalState, selectedPlanSchemeMeta]);
 
   const buildTargetSampleDatasets = useCallback(
     (seedText = '') => [
       ...selectedLeftSources.map((item) =>
-        buildDatasetSamplePayload(item, 'left', schemeDraft.leftDescription.trim(), seedText || schemeDraft.procDraft.trim()),
+        buildDatasetSamplePayload(item, 'left', schemeDraft.leftDescription.trim(), seedText || schemeDraft.procDraft.trim(), {
+          preparedOutputFields: buildPreparedOutputFieldPayload(leftOutputFields),
+        }),
       ),
       ...selectedRightSources.map((item) =>
-        buildDatasetSamplePayload(item, 'right', schemeDraft.rightDescription.trim(), seedText || schemeDraft.procDraft.trim()),
+        buildDatasetSamplePayload(item, 'right', schemeDraft.rightDescription.trim(), seedText || schemeDraft.procDraft.trim(), {
+          preparedOutputFields: buildPreparedOutputFieldPayload(rightOutputFields),
+        }),
       ),
     ],
     [
+      leftOutputFields,
+      rightOutputFields,
       schemeDraft.leftDescription,
       schemeDraft.procDraft,
       schemeDraft.rightDescription,
@@ -2702,76 +4199,6 @@ options.push({
     ],
   );
 
-  const consumeRuleGenerationStream = useCallback(
-    async (
-      sessionId: string,
-      stage: 'proc' | 'recon',
-      instructionText: string,
-    ): Promise<Record<string, unknown>> => {
-      let finalSession: Record<string, unknown> | null = null;
-
-      const response = await consumeReconAutoSse(
-        `/schemes/design/${encodeURIComponent(sessionId)}/${stage}/generate/stream`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            instruction_text: instructionText,
-          }),
-        },
-        (event) => {
-          const payload = asRecord(event.data);
-          const progress = {
-            skill: toText(payload.skill, stage === 'proc' ? '整理配置生成器' : '对账逻辑生成器'),
-            phase: toText(payload.phase, 'generating_rule'),
-            message: toText(
-              payload.message,
-              stage === 'proc'
-                ? '正在生成数据整理 JSON'
-                : '正在生成数据对账 JSON',
-            ),
-          };
-
-          if (stage === 'proc') {
-            setProcGenerationProgress(progress);
-          } else {
-            setReconGenerationProgress(progress);
-          }
-
-          if (event.event === 'error') {
-            throw new Error(
-              toText(
-                payload.message,
-                stage === 'proc' ? 'AI 生成整理配置失败' : 'AI 生成对账逻辑失败',
-              ),
-            );
-          }
-          if (event.event === 'completed') {
-            finalSession = asRecord(payload.session);
-          }
-        },
-      );
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(
-          String(
-            data.detail
-            || data.message
-            || (stage === 'proc' ? 'AI 生成整理配置失败' : 'AI 生成对账逻辑失败'),
-          ),
-        );
-      }
-      if (!finalSession) {
-        throw new Error(stage === 'proc' ? 'AI 生成整理配置未返回完成结果' : 'AI 生成对账逻辑未返回完成结果');
-      }
-      return finalSession;
-    },
-    [authToken],
-  );
 
   const toCompatibilityResult = useCallback((value: unknown, fallbackMessage = '等待校验'): CompatibilityCheckResult => {
     const raw = asRecord(value);
@@ -2800,57 +4227,6 @@ options.push({
     };
   }, []);
 
-  const buildProcPreviewFromTrial = useCallback((trialResult: unknown): ProcTrialPreview | null => {
-    const raw = asRecord(trialResult);
-    if (Object.keys(raw).length === 0) return null;
-    const sourceSamples = asList(raw.source_samples)
-      .filter((item) => typeof item === 'object' && item !== null)
-      .map((item) => asRecord(item));
-    const outputSamples = asList(raw.output_samples)
-      .filter((item) => typeof item === 'object' && item !== null)
-      .map((item) => asRecord(item));
-    return {
-      status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
-      summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据整理试跑完成'))),
-      rawSources: sourceSamples.map((item) => {
-        const snapshotId = toText(item.snapshot_id);
-        const originMeta = resolveSampleOriginMeta(item.sample_origin, snapshotId);
-        const fieldLabelMap =
-          normalizeFieldLabelMap(item.field_label_map)
-          || normalizeFieldLabelMap(item.columns_label_map)
-          || normalizeFieldLabelMap(item.column_display_map);
-        return {
-          sourceId: toText(item.source_id, toText(item.table_name)),
-          sourceName: toText(item.display_name, toText(item.table_name, '数据源')),
-          side: toText(item.side) === 'right' ? 'right' : 'left',
-          fieldLabelMap,
-          sampleOrigin: originMeta.key,
-          sampleOriginLabel: originMeta.label,
-          sampleOriginHint: originMeta.hint,
-          snapshotId: snapshotId || undefined,
-          rows: toPreviewTableRows(item.rows),
-        };
-      }),
-      preparedOutputs: outputSamples.map((item) => {
-        const fieldLabelMap =
-          normalizeFieldLabelMap(item.field_label_map)
-          || normalizeFieldLabelMap(item.columns_label_map)
-          || PREPARED_OUTPUT_FIELD_LABEL_MAP;
-        return {
-          side: toText(item.side) === 'right' ? 'right' : 'left',
-          title: toText(item.title, toText(item.target_table, 'output')),
-          fieldLabelMap,
-          rows: toPreviewTableRows(item.rows),
-        };
-      }),
-      validations: [
-        ...parseTrialMessages(raw.errors),
-        ...parseTrialMessages(raw.warnings),
-        ...parseTrialMessages(raw.highlights),
-      ],
-    };
-  }, []);
-
   const buildReconPreviewFromTrial = useCallback((trialResult: unknown): ReconTrialPreview | null => {
     const raw = asRecord(trialResult);
     if (Object.keys(raw).length === 0) return null;
@@ -2858,46 +4234,36 @@ options.push({
     const matchedWithDiff = toPreviewTableRows(resultSamples.matched_with_diff);
     const sourceOnly = toPreviewTableRows(resultSamples.source_only);
     const targetOnly = toPreviewTableRows(resultSamples.target_only);
-    const resolvePreviewNumber = (row: PreviewTableRow, keys: string[]): number | '--' => {
-      for (const key of keys) {
-        const value = row[key];
-        if (typeof value === 'number') return value;
-        const parsed = Number(value);
-        if (value !== null && value !== undefined && Number.isFinite(parsed)) {
-          return parsed;
-        }
-      }
-      return '--';
-    };
-    const resolveMatchKey = (row: PreviewTableRow): string =>
-      toText(
-        row.source_biz_key,
-        toText(row.target_biz_key, toText(row.biz_key, toText(row.match_key, '--'))),
-      );
+    const leftDatasetLabel = resolveResultDatasetLabel(
+      'left',
+      activeMatchFieldPairs,
+      leftOutputFields,
+      selectedLeftSources,
+    );
+    const rightDatasetLabel = resolveResultDatasetLabel(
+      'right',
+      activeMatchFieldPairs,
+      rightOutputFields,
+      selectedRightSources,
+    );
     const rows: ReconResultRow[] = [
       ...matchedWithDiff.map((item) => ({
-        matchKey: resolveMatchKey(item),
-        result: 'amount_diff' as const,
-        leftAmount: resolvePreviewNumber(item, ['source_amount', 'left_amount', 'amount']),
-        rightAmount: resolvePreviewNumber(item, ['target_amount', 'right_amount']),
-        diffAmount: resolvePreviewNumber(item, ['diff_amount', '金额差异']),
-        note: '金额差异',
+        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
+        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
+        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
+        result: '存在差异',
       })),
       ...sourceOnly.map((item) => ({
-        matchKey: resolveMatchKey(item),
-        result: 'left_only' as const,
-        leftAmount: resolvePreviewNumber(item, ['source_amount', 'left_amount', 'amount']),
-        rightAmount: '--' as const,
-        diffAmount: '--' as const,
-        note: '左侧独有',
+        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
+        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
+        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
+        result: `${leftDatasetLabel}独有`,
       })),
       ...targetOnly.map((item) => ({
-        matchKey: resolveMatchKey(item),
-        result: 'right_only' as const,
-        leftAmount: '--' as const,
-        rightAmount: resolvePreviewNumber(item, ['target_amount', 'right_amount', 'amount']),
-        diffAmount: '--' as const,
-        note: '右侧独有',
+        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
+        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
+        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
+        result: `${rightDatasetLabel}独有`,
       })),
     ];
     const resultSummary = asRecord(raw.result_summary);
@@ -2912,7 +4278,7 @@ options.push({
     const resultFieldLabelMap =
       normalizeFieldLabelMap(raw.result_field_label_map)
       || normalizeFieldLabelMap(resultSamples.result_field_label_map)
-      || RECON_RESULT_FIELD_LABEL_MAP;
+      || buildReconResultFieldLabelMap(activeMatchFieldPairs, activeCompareFieldPairs);
     return {
       status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
       summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据对账试跑完成'))),
@@ -2929,697 +4295,39 @@ options.push({
         diffCount: toInt(resultSummary.matched_with_diff, 0),
       },
     };
-  }, []);
-
-  const evaluateSourceCompatibility = useCallback(
-    (
-      label: string,
-      currentSources: SchemeSourceOption[],
-      expectedSources?: SchemeSourceDraft[],
-    ): CompatibilityCheckResult => {
-      if (currentSources.length === 0) {
-        return {
-          status: 'failed',
-          message: `${label}还未选择数据集。`,
-          details: [],
-        };
-      }
-      if (!expectedSources || expectedSources.length === 0) {
-        return {
-          status: 'passed',
-          message: `${label}缺少历史绑定信息，已按当前所选数据集做弱校验。`,
-          details: [`当前选择 ${currentSources.length} 个数据集`],
-        };
-      }
-
-      const currentIds = currentSources.map((item) => item.id);
-      const expectedIds = expectedSources.map((item) => item.id);
-      if (sameStringSet(currentIds, expectedIds)) {
-        return {
-          status: 'passed',
-          message: `${label}数据集与历史配置一致。`,
-          details: expectedSources.map((item) => resolveDatasetDisplayName(item)),
-        };
-      }
-
-      const currentKinds = currentSources
-        .map((item) => item.sourceKind)
-        .sort()
-        .join('|');
-      const expectedKinds = expectedSources
-        .map((item) => item.sourceKind)
-        .sort()
-        .join('|');
-      if (currentSources.length === expectedSources.length && currentKinds === expectedKinds) {
-        return {
-          status: 'passed',
-          message: `${label}数据集发生变化，但数据源类型结构一致，允许继续试跑。`,
-          details: [
-            `当前：${currentSources.map((item) => resolveDatasetDisplayName(item)).join('、')}`,
-            `历史：${expectedSources.map((item) => resolveDatasetDisplayName(item)).join('、')}`,
-          ],
-        };
-      }
-
-      return {
-        status: 'failed',
-        message: `${label}数据集与历史配置差异较大，请更换配置或重新生成。`,
-        details: [
-          `当前：${currentSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--'}`,
-          `历史：${expectedSources.map((item) => resolveDatasetDisplayName(item)).join('、') || '--'}`,
-        ],
-      };
-    },
-    [],
-  );
-
-  const evaluateProcDraftState = useCallback(() => {
-    const details: string[] = [];
-    let failed = false;
-    const draftText =
-      schemeDraft.procDraft.trim()
-      || selectedProcOption?.draftText?.trim()
-      || (selectedProcOption?.ruleJson ? summarizeProcDraft(selectedProcOption.ruleJson) : '');
-    const ruleJson =
-      schemeDraft.procRuleJson
-      || selectedProcOption?.ruleJson
-      || (draftText ? buildProcJsonPayload(schemeDraft, selectedLeftSources, selectedRightSources) : null);
-    const leftCheck = evaluateSourceCompatibility('左侧', selectedLeftSources, selectedProcOption?.leftSources);
-    const rightCheck = evaluateSourceCompatibility('右侧', selectedRightSources, selectedProcOption?.rightSources);
-
-    details.push(leftCheck.message, ...leftCheck.details, rightCheck.message, ...rightCheck.details);
-    failed = leftCheck.status === 'failed' || rightCheck.status === 'failed';
-
-    if (!draftText && !ruleJson) {
-      failed = true;
-      details.push('当前没有可试跑的数据整理配置内容。');
-    }
-
-    const targetTables = new Set(
-      (Array.isArray(ruleJson?.steps) ? ruleJson.steps : [])
-        .map((step) => toText(asRecord(step).target_table))
-        .filter(Boolean),
-    );
-    const hasOutputHint =
-      (targetTables.has('left_recon_ready') && targetTables.has('right_recon_ready'))
-      || draftText.includes('left_recon_ready')
-      || draftText.includes('right_recon_ready')
-      || draftText.includes('target_table');
-    if (!hasOutputHint) {
-      failed = true;
-      details.push('整理配置缺少 left_recon_ready / right_recon_ready 输出标识。');
-    }
-
-    const seedText = draftText || JSON.stringify(ruleJson || {}, null, 2) || schemeDraft.name || 'proc';
-    const sampleOriginMeta = resolveSampleOriginMeta('sample_rows');
-    const preview: ProcTrialPreview = {
-      status: failed ? 'needs_adjustment' : 'passed',
-      summary: failed
-        ? '试跑结果：当前整理配置与所选数据集仍不兼容，请调整后重试。'
-        : '试跑结果：左右两侧已生成可对账数据集，关键字段校验通过，可进入对账逻辑配置。',
-      rawSources: [
-        ...selectedLeftSources.map((source) => ({
-          sourceId: source.id,
-          sourceName: resolveDatasetDisplayName(source),
-          side: 'left' as const,
-          fieldLabelMap: resolveSourceFieldLabelMap(source),
-          sampleOrigin: sampleOriginMeta.key,
-          sampleOriginLabel: sampleOriginMeta.label,
-          sampleOriginHint: sampleOriginMeta.hint,
-          rows: buildRawSourceRows(source, 'left', seedText),
-        })),
-        ...selectedRightSources.map((source) => ({
-          sourceId: source.id,
-          sourceName: resolveDatasetDisplayName(source),
-          side: 'right' as const,
-          fieldLabelMap: resolveSourceFieldLabelMap(source),
-          sampleOrigin: sampleOriginMeta.key,
-          sampleOriginLabel: sampleOriginMeta.label,
-          sampleOriginHint: sampleOriginMeta.hint,
-          rows: buildRawSourceRows(source, 'right', seedText),
-        })),
-      ],
-      preparedOutputs: failed
-        ? []
-        : [
-            {
-              side: 'left',
-              title: 'left_recon_ready',
-              fieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
-              rows: buildPreparedRows(selectedLeftSources, 'left', seedText),
-            },
-            {
-              side: 'right',
-              title: 'right_recon_ready',
-              fieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
-              rows: buildPreparedRows(selectedRightSources, 'right', seedText),
-            },
-          ],
-      validations: failed
-        ? details
-        : ['已生成 left_recon_ready', '已生成 right_recon_ready', '金额与业务日期字段可用于后续对账'],
-    };
-
-    return {
-      passed: !failed,
-      draftText,
-      ruleJson,
-      compatibility: {
-        status: failed ? 'failed' : 'passed',
-        message: failed ? '兼容性检查未通过，请调整数据整理配置。' : '兼容性检查通过，可继续试跑或进入下一步。',
-        details,
-      } as CompatibilityCheckResult,
-      preview,
-    };
   }, [
-    evaluateSourceCompatibility,
-    schemeDraft,
+    activeCompareFieldPairs,
+    activeMatchFieldPairs,
+    leftOutputFields,
+    rightOutputFields,
     selectedLeftSources,
-    selectedProcOption,
     selectedRightSources,
-  ]);
-
-  const applyProcEvaluation = useCallback(
-    (result: ReturnType<typeof evaluateProcDraftState>) => {
-      setProcCompatibility(result.compatibility);
-      setSchemeDraft((prev) => ({
-        ...prev,
-        procDraft: result.draftText || prev.procDraft,
-        procRuleJson: result.ruleJson,
-        procTrialStatus: result.preview.status,
-        procTrialSummary: result.preview.summary,
-        reconDraft: result.passed ? prev.reconDraft : '',
-        reconRuleJson: result.passed ? prev.reconRuleJson : null,
-        reconTrialStatus: 'idle',
-        reconTrialSummary: '',
-      }));
-      setProcTrialPreview(result.preview);
-      setReconTrialPreview(null);
-      setReconCompatibility(emptyCompatibilityResult());
-    },
-    [],
-  );
-  void applyProcEvaluation;
-
-  const resolvePreparedRowsForRecon = useCallback(() => {
-    const procSeed =
-      schemeDraft.procDraft.trim()
-      || selectedProcOption?.draftText?.trim()
-      || (selectedProcOption?.ruleJson ? summarizeProcDraft(selectedProcOption.ruleJson) : '')
-      || selectedProcOption?.name
-      || schemeDraft.name
-      || 'proc';
-
-    if (procTrialPreview) {
-      return {
-        leftRows: preparedLeftRows.slice(0, 3),
-        rightRows: preparedRightRows.slice(0, 3),
-      };
-    }
-
-    return {
-      leftRows: buildPreparedRows(selectedLeftSources, 'left', procSeed),
-      rightRows: buildPreparedRows(selectedRightSources, 'right', procSeed),
-    };
-  }, [
-    procTrialPreview,
-    preparedLeftRows,
-    preparedRightRows,
-    schemeDraft.name,
-    schemeDraft.procDraft,
-    selectedLeftSources,
-    selectedProcOption,
-    selectedRightSources,
-  ]);
-
-  const evaluateReconDraftState = useCallback(() => {
-    const details: string[] = [];
-    let failed = false;
-    const baseDraftText =
-      schemeDraft.reconDraft.trim()
-      || selectedReconOption?.draftText?.trim()
-      || (selectedReconOption?.ruleJson ? summarizeReconDraft(selectedReconOption.ruleJson) : '');
-    const baseRuleJson = schemeDraft.reconRuleJson || selectedReconOption?.ruleJson || null;
-    const parsedConfig =
-      baseDraftText.trim()
-        ? parseReconDraftConfig({
-            reconDraft: baseDraftText,
-            matchKey: schemeDraft.matchKey || selectedReconOption?.matchKey || '',
-            leftAmountField: schemeDraft.leftAmountField || selectedReconOption?.leftAmountField || '',
-            rightAmountField: schemeDraft.rightAmountField || selectedReconOption?.rightAmountField || '',
-            tolerance: schemeDraft.tolerance || selectedReconOption?.tolerance || '',
-          })
-        : baseRuleJson
-        ? parseReconRuleJsonConfig(baseRuleJson)
-        : {
-            matchKey: selectedReconOption?.matchKey || '',
-            leftAmountField: selectedReconOption?.leftAmountField || '',
-            rightAmountField: selectedReconOption?.rightAmountField || '',
-            tolerance: selectedReconOption?.tolerance || '',
-          };
-
-    const leftCheck = evaluateSourceCompatibility('左侧', selectedLeftSources, selectedReconOption?.leftSources);
-    const rightCheck = evaluateSourceCompatibility('右侧', selectedRightSources, selectedReconOption?.rightSources);
-    details.push(leftCheck.message, ...leftCheck.details, rightCheck.message, ...rightCheck.details);
-    failed = leftCheck.status === 'failed' || rightCheck.status === 'failed';
-
-    if (!baseDraftText && !baseRuleJson) {
-      failed = true;
-      details.push('当前没有可试跑的数据对账逻辑。');
-    }
-    if (!parsedConfig.matchKey.trim()) {
-      failed = true;
-      details.push('缺少匹配主键。');
-    }
-    if (!parsedConfig.leftAmountField.trim() || !parsedConfig.rightAmountField.trim()) {
-      failed = true;
-      details.push('缺少左右金额字段。');
-    }
-
-    const toleranceValue = Number(parsedConfig.tolerance);
-    if (!Number.isFinite(toleranceValue)) {
-      failed = true;
-      details.push('容差必须是数字。');
-    }
-
-    const { leftRows, rightRows } = resolvePreparedRowsForRecon();
-    if (!leftRows.length || !rightRows.length) {
-      failed = true;
-      details.push('缺少整理后的左右数据抽样，请先完成数据整理试跑。');
-    }
-
-    const leftColumns = new Set(Object.keys(leftRows[0] || {}));
-    const rightColumns = new Set(Object.keys(rightRows[0] || {}));
-    if (parsedConfig.matchKey && (!leftColumns.has(parsedConfig.matchKey) || !rightColumns.has(parsedConfig.matchKey))) {
-      failed = true;
-      details.push(`匹配主键 ${parsedConfig.matchKey} 不存在于整理后的左右数据中。`);
-    }
-    if (parsedConfig.leftAmountField && !leftColumns.has(parsedConfig.leftAmountField)) {
-      failed = true;
-      details.push(`左金额字段 ${parsedConfig.leftAmountField} 不存在于左侧整理结果中。`);
-    }
-    if (parsedConfig.rightAmountField && !rightColumns.has(parsedConfig.rightAmountField)) {
-      failed = true;
-      details.push(`右金额字段 ${parsedConfig.rightAmountField} 不存在于右侧整理结果中。`);
-    }
-
-    const orderedKeys = Array.from(
-      new Set([
-        ...leftRows.map((row, index) => getPreviewRowKey(row, parsedConfig.matchKey, `LEFT-${index + 1}`)),
-        ...rightRows.map((row, index) => getPreviewRowKey(row, parsedConfig.matchKey, `RIGHT-${index + 1}`)),
-      ]),
-    );
-    const leftBuckets = new Map<string, PreviewTableRow[]>();
-    const rightBuckets = new Map<string, PreviewTableRow[]>();
-    leftRows.forEach((row, index) => {
-      const key = getPreviewRowKey(row, parsedConfig.matchKey, `LEFT-${index + 1}`);
-      leftBuckets.set(key, [...(leftBuckets.get(key) || []), row]);
-    });
-    rightRows.forEach((row, index) => {
-      const key = getPreviewRowKey(row, parsedConfig.matchKey, `RIGHT-${index + 1}`);
-      rightBuckets.set(key, [...(rightBuckets.get(key) || []), row]);
-    });
-    const results: ReconResultRow[] = orderedKeys.flatMap((key) => {
-      const leftBucket = leftBuckets.get(key) || [];
-      const rightBucket = rightBuckets.get(key) || [];
-      const rowCount = Math.max(leftBucket.length, rightBucket.length);
-      return Array.from({ length: rowCount }, (_, index) => {
-        const leftRow = leftBucket[index];
-        const rightRow = rightBucket[index];
-        const leftAmount = Number(leftRow?.[parsedConfig.leftAmountField]);
-        const rightAmount = Number(rightRow?.[parsedConfig.rightAmountField]);
-        const displayKey = rowCount > 1 ? `${key} #${index + 1}` : key;
-        if (leftRow && rightRow) {
-          const diffAmount = formatPreviewAmount(leftAmount - rightAmount);
-          const isMatched = !failed && Math.abs(diffAmount) <= toleranceValue;
-          return {
-            matchKey: displayKey,
-            result: isMatched ? 'matched' : 'amount_diff',
-            leftAmount: Number.isFinite(leftAmount) ? leftAmount : '--',
-            rightAmount: Number.isFinite(rightAmount) ? rightAmount : '--',
-            diffAmount: Number.isFinite(diffAmount) ? diffAmount : '--',
-            note: isMatched ? '匹配通过' : '金额超出容差',
-          };
-        }
-        if (leftRow) {
-          return {
-            matchKey: displayKey,
-            result: 'left_only',
-            leftAmount: Number.isFinite(leftAmount) ? leftAmount : '--',
-            rightAmount: '--',
-            diffAmount: '--',
-            note: '右侧缺少对应记录',
-          };
-        }
-        return {
-          matchKey: displayKey,
-          result: 'right_only',
-          leftAmount: '--',
-          rightAmount: Number.isFinite(rightAmount) ? rightAmount : '--',
-          diffAmount: '--',
-          note: '左侧缺少对应记录',
-        };
-      });
-    });
-
-    const reconRuleName = buildDefaultReconRuleName(schemeDraft.name);
-    const resolvedRuleJson =
-      baseDraftText.trim() && (!baseRuleJson || summarizeReconDraft(baseRuleJson) !== baseDraftText)
-        ? buildReconJsonPayload(
-            {
-              ...schemeDraft,
-              reconRuleName,
-              matchKey: parsedConfig.matchKey,
-              leftAmountField: parsedConfig.leftAmountField,
-              rightAmountField: parsedConfig.rightAmountField,
-              tolerance: parsedConfig.tolerance,
-            },
-            parsedConfig,
-          )
-        : baseRuleJson
-        ? baseRuleJson
-        : buildReconJsonPayload(
-            {
-              ...schemeDraft,
-              reconRuleName,
-              matchKey: parsedConfig.matchKey,
-              leftAmountField: parsedConfig.leftAmountField,
-              rightAmountField: parsedConfig.rightAmountField,
-              tolerance: parsedConfig.tolerance,
-            },
-            parsedConfig,
-          );
-
-    return {
-      passed: !failed,
-      draftText: baseDraftText,
-      ruleJson: resolvedRuleJson,
-      parsedConfig,
-      reconRuleName,
-      compatibility: {
-        status: failed ? 'failed' : 'passed',
-        message: failed ? '兼容性检查未通过，请调整数据对账逻辑。' : '兼容性检查通过，可进入保存方案。',
-        details,
-      } as CompatibilityCheckResult,
-      preview: {
-        status: failed ? 'needs_adjustment' : 'passed',
-        summary: failed
-          ? '试跑结果：当前对账逻辑仍与整理后数据不兼容，请调整后重试。'
-          : `试跑结果：已按 ${parsedConfig.matchKey} 对抽样数据完成验证，可进入保存方案。`,
-        leftRows,
-        rightRows,
-        leftFieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
-        rightFieldLabelMap: PREPARED_OUTPUT_FIELD_LABEL_MAP,
-        resultFieldLabelMap: RECON_RESULT_FIELD_LABEL_MAP,
-        results,
-      } as ReconTrialPreview,
-    };
-  }, [
-    evaluateSourceCompatibility,
-    resolvePreparedRowsForRecon,
-    schemeDraft,
-    selectedLeftSources,
-    selectedReconOption,
-    selectedRightSources,
-  ]);
-
-  const applyReconEvaluation = useCallback(
-    (result: ReturnType<typeof evaluateReconDraftState>) => {
-      setReconCompatibility(result.compatibility);
-      setSchemeDraft((prev) => ({
-        ...prev,
-        reconDraft: result.draftText || prev.reconDraft,
-        reconRuleJson: result.ruleJson,
-        reconRuleName: result.reconRuleName,
-        matchKey: result.parsedConfig.matchKey,
-        leftAmountField: result.parsedConfig.leftAmountField,
-        rightAmountField: result.parsedConfig.rightAmountField,
-        tolerance: result.parsedConfig.tolerance,
-        reconTrialStatus: result.preview.status,
-        reconTrialSummary: result.preview.summary,
-      }));
-      setReconTrialPreview(result.preview);
-    },
-    [],
-  );
-  void applyReconEvaluation;
-
-  const handleSelectExistingProcConfig = useCallback(
-    async (configId: string) => {
-      setModalError(null);
-      if (!configId) {
-        setSchemeDraft((prev) => ({
-          ...prev,
-          selectedProcConfigId: '',
-          procDraft: '',
-          procRuleJson: null,
-          procTrialStatus: 'idle',
-          procTrialSummary: '',
-          reconDraft: '',
-          reconRuleJson: null,
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }));
-        setDesignSessionId('');
-        setProcTrialPreview(null);
-        setReconTrialPreview(null);
-        setProcCompatibility(emptyCompatibilityResult());
-        setReconCompatibility(emptyCompatibilityResult());
-        return;
-      }
-
-      const option = existingProcOptions.find((item) => item.id === configId) || null;
-      if (!option) return;
-
-      setIsGeneratingProc(true);
-      try {
-        const ruleJson = option.ruleJson || (option.ruleCode ? await loadRuleJsonByCode(option.ruleCode) : null);
-        if (!ruleJson) {
-          throw new Error('已有数据整理配置缺少可用的规则 JSON');
-        }
-        const sessionId = await ensureDesignSession();
-        await syncDesignTarget(sessionId);
-        const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/use-existing`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            rule_code: option.ruleCode || '',
-            rule_json: ruleJson,
-          }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(String(data.detail || data.message || '加载已有数据整理配置失败'));
-        }
-        const session = asRecord(data.session);
-        const procStep = asRecord(session.proc_step);
-        const compatibility = toCompatibilityResult(
-          procStep.compatibility_result,
-          '已载入已有数据整理配置，请继续试跑验证。',
-        );
-        const normalizedRuleJson = asRecord(procStep.effective_rule_json);
-        const draftText = resolveWizardDraftText(
-          procStep.draft_text,
-          procStep.rule_summary,
-          option.draftText.trim() || summarizeProcDraft(normalizedRuleJson),
-        );
-        setSchemeDraft((prev) => ({
-          ...prev,
-          procConfigMode: 'existing',
-          selectedProcConfigId: configId,
-          procDraft: draftText,
-          procRuleJson: normalizedRuleJson,
-          procTrialStatus: 'idle',
-          procTrialSummary: '',
-          reconDraft: '',
-          reconRuleJson: null,
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }));
-        setProcTrialPreview(null);
-        setReconTrialPreview(null);
-        setProcCompatibility(compatibility);
-        setReconCompatibility(emptyCompatibilityResult());
-      } catch (error) {
-        setModalError(error instanceof Error ? error.message : '加载已有数据整理配置失败');
-      } finally {
-        setIsGeneratingProc(false);
-      }
-    },
-    [
-      authToken,
-      ensureDesignSession,
-      existingProcOptions,
-      loadRuleJsonByCode,
-      syncDesignTarget,
-      toCompatibilityResult,
-    ],
-  );
-
-  const handleSelectExistingReconConfig = useCallback(
-    async (configId: string) => {
-      setModalError(null);
-      if (!configId) {
-        setSchemeDraft((prev) => ({
-          ...prev,
-          selectedReconConfigId: '',
-          reconDraft: '',
-          reconRuleJson: null,
-          reconRuleName: '',
-          matchKey: '',
-          leftAmountField: '',
-          rightAmountField: '',
-          tolerance: '',
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }));
-        setDesignSessionId('');
-        setReconTrialPreview(null);
-        setReconCompatibility(emptyCompatibilityResult());
-        return;
-      }
-
-      const option = existingReconOptions.find((item) => item.id === configId) || null;
-      if (!option) return;
-
-      setIsGeneratingRecon(true);
-      try {
-        const ruleJson = option.ruleJson || (option.ruleCode ? await loadRuleJsonByCode(option.ruleCode) : null);
-        if (!ruleJson) {
-          throw new Error('已有对账逻辑缺少可用的规则 JSON');
-        }
-        const sessionId = await ensureDesignSession();
-        await syncDesignTarget(sessionId);
-        const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/use-existing`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            rule_code: option.ruleCode || '',
-            rule_json: ruleJson,
-          }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(String(data.detail || data.message || '加载已有数据对账逻辑失败'));
-        }
-        const session = asRecord(data.session);
-        const reconStep = asRecord(session.recon_step);
-        const normalizedRuleJson = asRecord(reconStep.effective_rule_json);
-        const parsed = parseReconRuleJsonConfig(normalizedRuleJson);
-        const draftText = resolveWizardDraftText(
-          reconStep.draft_text,
-          reconStep.rule_summary,
-          option.draftText.trim() || summarizeReconDraft(normalizedRuleJson),
-        );
-        setSchemeDraft((prev) => ({
-          ...prev,
-          reconConfigMode: 'existing',
-          selectedReconConfigId: configId,
-          reconDraft: draftText,
-          reconRuleJson: normalizedRuleJson,
-          matchKey: parsed.matchKey,
-          leftAmountField: parsed.leftAmountField,
-          rightAmountField: parsed.rightAmountField,
-          tolerance: parsed.tolerance,
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }));
-        setReconTrialPreview(null);
-        setReconCompatibility(
-          toCompatibilityResult(reconStep.compatibility_result, '已载入已有数据对账逻辑，请继续试跑验证。'),
-        );
-      } catch (error) {
-        setModalError(error instanceof Error ? error.message : '加载已有数据对账逻辑失败');
-      } finally {
-        setIsGeneratingRecon(false);
-      }
-    },
-    [
-      authToken,
-      ensureDesignSession,
-      existingReconOptions,
-      loadRuleJsonByCode,
-      syncDesignTarget,
-      toCompatibilityResult,
-    ],
-  );
-
-  const generateProcDraft = useCallback(async () => {
-    if (!authToken) {
-      setModalError('请先登录后再使用 AI 生成整理配置。');
-      return;
-    }
-    if (!selectedLeftSources.length || !selectedRightSources.length) {
-      setModalError('请先完成左右数据集选择。');
-      return;
-    }
-
-    setIsGeneratingProc(true);
-    setProcGenerationProgress({
-      skill: '整理配置生成器',
-      phase: 'preparing_context',
-      message: '正在准备左右数据集样例',
-    });
-    setModalError(null);
-    try {
-      const sessionId = await ensureDesignSession();
-      await syncDesignTarget(sessionId);
-      const session = await consumeRuleGenerationStream(sessionId, 'proc', schemeDraft.procDraft.trim());
-      const procStep = asRecord(session.proc_step);
-      const procRuleJson = asRecord(procStep.effective_rule_json);
-      if (!procRuleJson || !Array.isArray(procRuleJson.steps)) {
-        throw new Error('AI 未返回有效的数据整理配置');
-      }
-      setSchemeDraft((prev) => ({
-        ...prev,
-        procConfigMode: 'ai',
-        selectedProcConfigId: '',
-        procDraft: resolveWizardDraftText(
-          procStep.draft_text,
-          procStep.rule_summary,
-          summarizeProcDraft(procRuleJson),
-        ),
-        procRuleJson,
-        procTrialStatus: 'idle',
-        procTrialSummary: '',
-        reconDraft: '',
-        reconRuleJson: null,
-        reconTrialStatus: 'idle',
-        reconTrialSummary: '',
-      }));
-      setProcTrialPreview(null);
-      setReconTrialPreview(null);
-      setProcCompatibility(toCompatibilityResult(procStep.compatibility_result, 'AI 已生成数据整理配置。'));
-      setReconCompatibility(emptyCompatibilityResult());
-    } catch (error) {
-      setModalError(error instanceof Error ? error.message : 'AI 生成整理配置失败');
-    } finally {
-      setProcGenerationProgress(null);
-      setIsGeneratingProc(false);
-    }
-  }, [
-    authToken,
-    schemeDraft.procDraft,
-    consumeRuleGenerationStream,
-    ensureDesignSession,
-    syncDesignTarget,
-    toCompatibilityResult,
   ]);
 
   const trialProcDraft = useCallback(async (): Promise<boolean> => {
     setModalError(null);
-    if (!schemeDraft.procRuleJson) {
-      setModalError('请先 AI 生成或选择已有数据整理配置。');
-      return false;
-    }
     if (!authToken) {
       setModalError('请先登录后再试跑验证。');
+      return false;
+    }
+    if (!selectedLeftSources.length || !selectedRightSources.length) {
+      setModalError('请先完成左右数据集选择。');
+      return false;
+    }
+
+    let compiledProcRuleJson: Record<string, unknown>;
+    try {
+      compiledProcRuleJson = buildLocalProcRuleJson({
+        schemeName: schemeDraft.name,
+        businessGoal: schemeDraft.businessGoal,
+        leftSources: selectedLeftSources,
+        rightSources: selectedRightSources,
+        leftOutputFields,
+        rightOutputFields,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '当前输出字段配置无法生成可执行的数据整理规则。';
+      setModalError(message);
       return false;
     }
 
@@ -3627,6 +4335,61 @@ options.push({
     try {
       const sessionId = await ensureDesignSession();
       await syncDesignTarget(sessionId);
+      const prepareResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/use-existing`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rule_json: compiledProcRuleJson,
+        }),
+      });
+      const prepareData = await prepareResponse.json().catch(() => ({}));
+      if (!prepareResponse.ok) {
+        throw new Error(String(prepareData.detail || prepareData.message || '生成数据整理规则失败'));
+      }
+      const prepareSession = asRecord(prepareData.session);
+      const prepareProcStep = asRecord(prepareSession.proc_step);
+      const preparedRule = asRecord(prepareProcStep.effective_rule_json);
+      const preparedCompatibility = toCompatibilityResult(
+        prepareProcStep.compatibility_result,
+        '已根据当前输出字段生成数据整理规则。',
+      );
+      if (preparedCompatibility.status === 'failed') {
+        const firstDetail = preparedCompatibility.details[0];
+        throw new Error(firstDetail || preparedCompatibility.message || '当前输出字段配置无法生成可执行的数据整理规则。');
+      }
+      const preparedRuleJson = Object.keys(preparedRule).length > 0 ? preparedRule : compiledProcRuleJson;
+      setSchemeDraft((prev) => ({
+        ...prev,
+        procConfigMode: 'ai',
+        selectedProcConfigId: '',
+        procDraft: resolveWizardDraftText(
+          prepareProcStep.draft_text,
+          prepareProcStep.rule_summary,
+          summarizeProcDraft(preparedRuleJson),
+        ),
+        procRuleJson: preparedRuleJson,
+        procTrialStatus: 'idle',
+        procTrialSummary: '',
+        reconDraft: '',
+        matchFieldPairs: [],
+        compareFieldPairs: [],
+        matchKey: '',
+        leftAmountField: '',
+        rightAmountField: '',
+        leftTimeSemantic: '',
+        rightTimeSemantic: '',
+        tolerance: '',
+        reconRuleJson: null,
+        reconTrialStatus: 'idle',
+        reconTrialSummary: '',
+      }));
+      if (Object.keys(preparedRule).length > 0) {
+        setWizardDraftState((prev) => hydratePreparationOutputFieldsFromProcRule(prev, preparedRule));
+      }
+      setProcCompatibility(preparedCompatibility);
       const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/trial`, {
         method: 'POST',
         headers: {
@@ -3649,7 +4412,7 @@ options.push({
       setProcCompatibility(
         toCompatibilityResult(
           procStep.compatibility_result,
-          passed ? '试跑验证通过，可进入下一步。' : '试跑未通过，请调整数据整理配置后重试。',
+          passed ? '试跑验证通过，可进入下一步。' : '试跑未通过，请调整输出字段配置后重试。',
         ),
       );
       setSchemeDraft((prev) => ({
@@ -3663,20 +4426,38 @@ options.push({
         procTrialStatus: passed ? 'passed' : 'needs_adjustment',
         procTrialSummary: summary,
         reconDraft: passed ? prev.reconDraft : '',
+        matchFieldPairs: passed ? prev.matchFieldPairs : [],
+        compareFieldPairs: passed ? prev.compareFieldPairs : [],
+        matchKey: passed ? prev.matchKey : '',
+        leftAmountField: passed ? prev.leftAmountField : '',
+        rightAmountField: passed ? prev.rightAmountField : '',
+        leftTimeSemantic: passed ? prev.leftTimeSemantic : '',
+        rightTimeSemantic: passed ? prev.rightTimeSemantic : '',
+        tolerance: passed ? prev.tolerance : '',
         reconRuleJson: passed ? prev.reconRuleJson : null,
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
       }));
-      setProcTrialPreview(buildProcPreviewFromTrial(trialResult));
+      if (Object.keys(normalizedRule).length > 0) {
+        setWizardDraftState((prev) => hydratePreparationOutputFieldsFromProcRule(prev, normalizedRule));
+      }
+      const procPreview = buildProcPreviewFromTrialResult(trialResult);
+      setProcTrialPreview(procPreview);
       setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(prev, {
+          procPreviewState: procPreview ? 'current' : 'empty',
+          reconPreviewState: 'empty',
+        }),
+      );
       return passed;
     } catch (error) {
       const message = error instanceof Error ? error.message : '数据整理试跑失败';
       setModalError(message);
       setProcCompatibility({
         status: 'failed',
-        message: '试跑未通过，请检查整理配置或样本数据。',
+        message: '试跑未通过，请检查输出字段配置或样本数据。',
         details: [message],
       });
       setSchemeDraft((prev) => ({
@@ -3684,6 +4465,14 @@ options.push({
         procTrialStatus: 'needs_adjustment',
         procTrialSummary: message,
         reconDraft: '',
+        matchFieldPairs: [],
+        compareFieldPairs: [],
+        matchKey: '',
+        leftAmountField: '',
+        rightAmountField: '',
+        leftTimeSemantic: '',
+        rightTimeSemantic: '',
+        tolerance: '',
         reconRuleJson: null,
         reconTrialStatus: 'idle',
         reconTrialSummary: '',
@@ -3691,103 +4480,34 @@ options.push({
       setProcTrialPreview(null);
       setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(prev, {
+          procPreviewState: 'empty',
+          reconPreviewState: 'empty',
+        }),
+      );
       return false;
     } finally {
       setIsTrialingProc(false);
     }
   }, [
     authToken,
-    buildProcPreviewFromTrial,
     ensureDesignSession,
-    schemeDraft.procRuleJson,
-    syncDesignTarget,
-    toCompatibilityResult,
-  ]);
-
-  const generateReconDraft = useCallback(async () => {
-    if (!authToken) {
-      setModalError('请先登录后再使用 AI 生成对账逻辑。');
-      return;
-    }
-    if (!selectedLeftSources.length || !selectedRightSources.length) {
-      setModalError('请先完成左右数据集选择。');
-      return;
-    }
-    if (schemeDraft.procTrialStatus !== 'passed' || !schemeDraft.procRuleJson) {
-      setModalError('请先完成数据整理试跑，再生成对账逻辑。');
-      return;
-    }
-
-    setIsGeneratingRecon(true);
-    setReconGenerationProgress({
-      skill: '对账逻辑生成器',
-      phase: 'preparing_context',
-      message: '正在准备数据整理后的左右输出样例',
-    });
-    setModalError(null);
-    try {
-      const sessionId = await ensureDesignSession();
-      await syncDesignTarget(sessionId);
-      const session = await consumeRuleGenerationStream(sessionId, 'recon', schemeDraft.reconDraft.trim());
-      const reconStep = asRecord(session.recon_step);
-      const reconRuleJson = asRecord(reconStep.effective_rule_json);
-      if (!Array.isArray(reconRuleJson.rules) || reconRuleJson.rules.length === 0) {
-        throw new Error('AI 未返回有效的数据对账逻辑');
-      }
-      const nextConfig = parseReconRuleJsonConfig(reconRuleJson);
-      const draftText = resolveWizardDraftText(
-        reconStep.draft_text,
-        reconStep.rule_summary,
-        summarizeReconDraft(reconRuleJson),
-      );
-      setSchemeDraft((prev) => ({
-        ...prev,
-        reconConfigMode: 'ai',
-        selectedReconConfigId: '',
-        reconRuleName: toText(reconRuleJson.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
-        matchKey: nextConfig.matchKey,
-        leftAmountField: nextConfig.leftAmountField,
-        rightAmountField: nextConfig.rightAmountField,
-        tolerance: nextConfig.tolerance,
-        reconDraft: draftText,
-        reconRuleJson,
-        reconTrialStatus: 'idle',
-        reconTrialSummary: '',
-      }));
-      setReconTrialPreview(null);
-      setReconCompatibility(
-        toCompatibilityResult(reconStep.compatibility_result, 'AI 已生成数据对账逻辑。'),
-      );
-      setWizardJsonPanel(null);
-    } catch (error) {
-      setModalError(error instanceof Error ? error.message : 'AI 生成对账逻辑失败');
-    } finally {
-      setReconGenerationProgress(null);
-      setIsGeneratingRecon(false);
-    }
-  }, [
-    authToken,
-    consumeRuleGenerationStream,
-    ensureDesignSession,
-    schemeDraft.procRuleJson,
-    schemeDraft.procTrialStatus,
-    syncDesignTarget,
-    toCompatibilityResult,
+    leftOutputFields,
+    rightOutputFields,
     schemeDraft.businessGoal,
-    schemeDraft.leftDescription,
     schemeDraft.name,
-    schemeDraft.reconDraft,
-    schemeDraft.rightDescription,
     selectedLeftSources,
     selectedRightSources,
+    setProcCompatibility,
+    setReconCompatibility,
+    setSchemeDraft,
+    syncDesignTarget,
+    toCompatibilityResult,
   ]);
 
   const trialReconDraft = useCallback(async (): Promise<boolean> => {
     setModalError(null);
-    if (!schemeDraft.reconRuleJson) {
-      setModalError('请先 AI 生成或选择已有数据对账逻辑。');
-      return false;
-    }
     if (!authToken) {
       setModalError('请先登录后再试跑验证。');
       return false;
@@ -3796,11 +4516,57 @@ options.push({
       setModalError('请先完成数据整理试跑，再进行对账试跑。');
       return false;
     }
+    if (!compiledReconRuleResult.json) {
+      setModalError(compiledReconRuleResult.error || '请先完成对账字段配置。');
+      return false;
+    }
 
     setIsTrialingRecon(true);
     try {
       const sessionId = await ensureDesignSession();
       await syncDesignTarget(sessionId);
+      const procPrepareResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/use-existing`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rule_json: schemeDraft.procRuleJson,
+        }),
+      });
+      const procPrepareData = await procPrepareResponse.json().catch(() => ({}));
+      if (!procPrepareResponse.ok) {
+        throw new Error(String(procPrepareData.detail || procPrepareData.message || '同步数据整理规则失败'));
+      }
+      const procTrialResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/trial`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      const procTrialData = await procTrialResponse.json().catch(() => ({}));
+      if (!procTrialResponse.ok) {
+        throw new Error(String(procTrialData.detail || procTrialData.message || procTrialData.error || '数据整理结果同步试跑失败'));
+      }
+      const procTrialResult = asRecord(asRecord(asRecord(procTrialData.session).proc_step).trial_result);
+      if (procTrialResult.ready_for_confirm !== true || procTrialResult.success === false) {
+        throw new Error(String(procTrialResult.summary || procTrialResult.message || procTrialResult.error || '数据整理结果未生成可用于对账的左右样例数据'));
+      }
+      const prepareResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/use-existing`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rule_json: compiledReconRuleResult.json,
+        }),
+      });
+      const prepareData = await prepareResponse.json().catch(() => ({}));
+      if (!prepareResponse.ok) {
+        throw new Error(String(prepareData.detail || prepareData.message || '生成数据对账逻辑失败'));
+      }
       const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/trial`, {
         method: 'POST',
         headers: {
@@ -3815,7 +4581,7 @@ options.push({
       const reconStep = asRecord(session.recon_step);
       const trialResult = asRecord(reconStep.trial_result);
       const normalizedRule = asRecord(reconStep.effective_rule_json);
-      const parsed = parseReconRuleJsonConfig(normalizedRule);
+      const parsed = parseReconRuleJsonConfig(normalizedRule, parsedReconConfig);
       const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
       const summary = toText(
         trialResult.summary,
@@ -3829,21 +4595,36 @@ options.push({
       );
       setSchemeDraft((prev) => ({
         ...prev,
-        reconDraft: resolveWizardDraftText(
-          reconStep.draft_text,
-          reconStep.rule_summary,
-          prev.reconDraft,
-        ),
+        reconDraft: buildStructuredReconDraftText({
+          reconRuleName: toText(
+            normalizedRule.rule_name,
+            prev.reconRuleName || buildDefaultReconRuleName(prev.name),
+          ),
+          matchFieldPairs: parsed.matchFieldPairs,
+          compareFieldPairs: parsed.compareFieldPairs,
+          leftTimeSemantic: parsed.leftTimeSemantic,
+          rightTimeSemantic: parsed.rightTimeSemantic,
+        }),
         reconRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.reconRuleJson,
         reconRuleName: toText(normalizedRule.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
+        matchFieldPairs: parsed.matchFieldPairs,
+        compareFieldPairs: parsed.compareFieldPairs,
         matchKey: parsed.matchKey,
         leftAmountField: parsed.leftAmountField,
         rightAmountField: parsed.rightAmountField,
+        leftTimeSemantic: parsed.leftTimeSemantic,
+        rightTimeSemantic: parsed.rightTimeSemantic,
         tolerance: parsed.tolerance,
         reconTrialStatus: passed ? 'passed' : 'needs_adjustment',
         reconTrialSummary: summary,
       }));
-      setReconTrialPreview(buildReconPreviewFromTrial(trialResult));
+      const reconPreview = buildReconPreviewFromTrial(trialResult);
+      setReconTrialPreview(reconPreview);
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(prev, {
+          reconPreviewState: reconPreview ? 'current' : 'empty',
+        }),
+      );
       return passed;
     } catch (error) {
       const message = error instanceof Error ? error.message : '数据对账试跑失败';
@@ -3859,6 +4640,11 @@ options.push({
         reconTrialSummary: message,
       }));
       setReconTrialPreview(null);
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(prev, {
+          reconPreviewState: 'empty',
+        }),
+      );
       return false;
     } finally {
       setIsTrialingRecon(false);
@@ -3866,10 +4652,12 @@ options.push({
   }, [
     authToken,
     buildReconPreviewFromTrial,
+    compiledReconRuleResult.error,
+    compiledReconRuleResult.json,
     ensureDesignSession,
+    parsedReconConfig,
     schemeDraft.procRuleJson,
     schemeDraft.procTrialStatus,
-    schemeDraft.reconRuleJson,
     syncDesignTarget,
     toCompatibilityResult,
   ]);
@@ -3879,20 +4667,52 @@ options.push({
   }, []);
 
   const handleViewReconJson = useCallback(() => {
+    if (!compiledReconRuleResult.json) {
+      setModalError(compiledReconRuleResult.error || '请先完成对账字段配置。');
+      return;
+    }
+    setModalError(null);
     setWizardJsonPanel((prev) => (prev === 'recon' ? null : 'recon'));
-  }, []);
+  }, [compiledReconRuleResult.error, compiledReconRuleResult.json]);
 
   const handleCreateScheme = useCallback(async () => {
     if (!authToken) {
       setModalError('请先登录后再保存对账方案。');
       return;
     }
-    if (!schemeDraft.procRuleJson || !schemeDraft.reconRuleJson) {
-      setModalError('请先生成并验证数据整理与对账逻辑。');
+    if (!schemeDraft.procRuleJson) {
+      setModalError('请先生成并验证数据整理规则。');
       return;
     }
-    if (schemeDraft.procTrialStatus !== 'passed' || schemeDraft.reconTrialStatus !== 'passed') {
-      setModalError('请先完成数据整理和对账逻辑的试跑验证，再保存方案。');
+    if (!compiledReconRuleResult.json && !schemeDraft.reconRuleJson) {
+      setModalError(compiledReconRuleResult.error || '请先生成并验证数据对账逻辑。');
+      return;
+    }
+    if (schemeDraft.procTrialStatus !== 'passed') {
+      setModalError('请先完成数据整理试跑验证，再保存方案。');
+      return;
+    }
+
+    let effectiveReconRuleJson = schemeDraft.reconRuleJson || compiledReconRuleResult.json;
+    if (!effectiveReconRuleJson) {
+      setModalError('请先生成并验证数据整理规则与对账逻辑。');
+      return;
+    }
+
+    if (schemeDraft.reconTrialStatus !== 'passed') {
+      const passed = await trialReconDraft();
+      if (!passed) {
+        setModalError('数据对账试跑未通过，请调整逻辑后重试。');
+        return;
+      }
+      effectiveReconRuleJson = schemeDraft.reconRuleJson || compiledReconRuleResult.json;
+      if (!effectiveReconRuleJson) {
+        setModalError('数据对账试跑完成后，仍未生成可保存的对账逻辑。');
+        return;
+      }
+    }
+
+    if (!window.confirm('确认当前规则、字段映射和试跑结果都已检查完毕，立即保存方案吗？')) {
       return;
     }
 
@@ -3900,15 +4720,13 @@ options.push({
     setModalError(null);
 
     try {
+      const schemePayloadDraft = buildSchemeCreatePayloadDraft(wizardDraftState);
       const procRuleJson = schemeDraft.procRuleJson;
-      const reconRuleJson = schemeDraft.reconRuleJson;
-      const parsedReconRule = parseReconRuleJsonConfig(reconRuleJson);
-      const procRuleName =
-        selectedProcOption?.name
-        || (schemeDraft.name.trim() ? `${schemeDraft.name.trim()} 整理规则` : '整理规则');
+      const reconRuleJson = effectiveReconRuleJson;
+      const parsedReconRule = parseReconRuleJsonConfig(reconRuleJson, parsedReconConfig);
+      const procRuleName = schemeDraft.name.trim() ? `${schemeDraft.name.trim()}整理规则` : '整理规则';
       const reconRuleName =
-        selectedReconOption?.name
-        || toText(asRecord(reconRuleJson).rule_name, buildDefaultReconRuleName(schemeDraft.name));
+        toText(asRecord(reconRuleJson).rule_name, buildDefaultReconRuleName(schemeDraft.name));
       const leftDatasetBindings = selectedLeftSources.map((item, index) => ({
         side: 'left',
         slot_key: `left_${index + 1}`,
@@ -3957,7 +4775,7 @@ options.push({
           side: 'left',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'snapshot',
+          dataset_source_type: 'collection_records',
         })),
         ...rightDatasetBindings.map((item, index) => ({
           role_code: `right_${index + 1}`,
@@ -3970,7 +4788,7 @@ options.push({
           side: 'right',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'snapshot',
+          dataset_source_type: 'collection_records',
         })),
       ];
       const response = await fetchReconAutoApi('/schemes', {
@@ -3980,14 +4798,14 @@ options.push({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          scheme_name: schemeDraft.name.trim(),
-          description: schemeDraft.businessGoal.trim(),
+          scheme_name: schemePayloadDraft.scheme_name,
+          description: schemePayloadDraft.description,
           file_rule_code: '',
-          proc_rule_code: selectedProcOption?.ruleCode || '',
-          recon_rule_code: selectedReconOption?.ruleCode || '',
+          proc_rule_code: '',
+          recon_rule_code: '',
           dataset_bindings_json: datasetBindingsJson,
           scheme_meta_json: {
-            business_goal: schemeDraft.businessGoal.trim(),
+            ...schemePayloadDraft.scheme_meta_json,
             dataset_bindings: {
               version: 'v1',
               left: leftDatasetBindings,
@@ -4007,30 +4825,37 @@ options.push({
                 data_source_name: item.data_source_name,
               })),
             },
-            left_description: schemeDraft.leftDescription.trim(),
-            right_description: schemeDraft.rightDescription.trim(),
+            left_description: schemePayloadDraft.scheme_meta_json.left_description,
+            right_description: schemePayloadDraft.scheme_meta_json.right_description,
             validation_summary: {
               proc: {
-                status: schemeDraft.procTrialStatus,
-                summary: schemeDraft.procTrialSummary.trim(),
+                status: schemePayloadDraft.scheme_meta_json.proc_trial_status,
+                summary: schemePayloadDraft.scheme_meta_json.proc_trial_summary,
               },
               recon: {
-                status: schemeDraft.reconTrialStatus,
-                summary: schemeDraft.reconTrialSummary.trim(),
+                status: schemePayloadDraft.scheme_meta_json.recon_trial_status,
+                summary: schemePayloadDraft.scheme_meta_json.recon_trial_summary,
               },
             },
-            proc_trial_status: schemeDraft.procTrialStatus,
-            proc_trial_summary: schemeDraft.procTrialSummary.trim(),
-            recon_trial_status: schemeDraft.reconTrialStatus,
-            recon_trial_summary: schemeDraft.reconTrialSummary.trim(),
+            proc_trial_status: schemePayloadDraft.scheme_meta_json.proc_trial_status,
+            proc_trial_summary: schemePayloadDraft.scheme_meta_json.proc_trial_summary,
+            recon_trial_status: schemePayloadDraft.scheme_meta_json.recon_trial_status,
+            recon_trial_summary: schemePayloadDraft.scheme_meta_json.recon_trial_summary,
+            left_output_field_label_map: leftOutputFieldLabelMap,
+            right_output_field_label_map: rightOutputFieldLabelMap,
             match_key: parsedReconRule.matchKey.trim() || parsedReconConfig.matchKey.trim(),
             left_amount_field: parsedReconRule.leftAmountField.trim() || parsedReconConfig.leftAmountField.trim(),
             right_amount_field: parsedReconRule.rightAmountField.trim() || parsedReconConfig.rightAmountField.trim(),
+            left_time_semantic:
+              parsedReconRule.leftTimeSemantic.trim() || parsedReconConfig.leftTimeSemantic.trim(),
+            right_time_semantic:
+              parsedReconRule.rightTimeSemantic.trim() || parsedReconConfig.rightTimeSemantic.trim(),
             tolerance: parsedReconRule.tolerance.trim() || parsedReconConfig.tolerance.trim(),
             proc_rule_name: procRuleName,
             recon_rule_name: reconRuleName,
-            proc_draft_text: schemeDraft.procDraft.trim() || summarizeProcDraft(procRuleJson),
-            recon_draft_text: schemeDraft.reconDraft.trim() || summarizeReconDraft(reconRuleJson),
+            proc_draft_text: schemePayloadDraft.scheme_meta_json.proc_draft_text || summarizeProcDraft(procRuleJson),
+            recon_draft_text:
+              schemePayloadDraft.scheme_meta_json.recon_draft_text || summarizeReconDraft(reconRuleJson, parsedReconRule),
             proc_rule_json: procRuleJson,
             recon_rule_json: reconRuleJson,
           },
@@ -4052,15 +4877,17 @@ options.push({
   }, [
     authToken,
     closeModal,
+    compiledReconRuleResult.error,
+    compiledReconRuleResult.json,
+    leftOutputFieldLabelMap,
     loadCenterData,
     parsedReconConfig,
+    rightOutputFieldLabelMap,
     schemeDraft,
-    selectedProcOption?.name,
-    selectedProcOption?.ruleCode,
-    selectedReconOption?.name,
-    selectedReconOption?.ruleCode,
     selectedLeftSources,
     selectedRightSources,
+    trialReconDraft,
+    wizardDraftState,
   ]);
 
   const handleCreatePlan = useCallback(async () => {
@@ -4077,20 +4904,19 @@ options.push({
       setModalError('请填写责任人。');
       return;
     }
-    if (!planDraft.leftTimeSemantic.trim() || !planDraft.rightTimeSemantic.trim()) {
-      setModalError('请先选择左右时间口径。');
-      return;
-    }
 
     const matchedScheme = schemes.find((s) => s.schemeCode === schemeCode);
     const schemeName = matchedScheme?.name || schemeCode;
     const matchedSchemeMeta = matchedScheme ? extractSchemeMeta(matchedScheme) : null;
+    const resolvedTimeSemantics = resolvePlanTimeSemantics(matchedSchemeMeta);
+    const leftTimeSemantic = resolvedTimeSemantics.leftTimeSemantic || planDraft.leftTimeSemantic.trim();
+    const rightTimeSemantic = resolvedTimeSemantics.rightTimeSemantic || planDraft.rightTimeSemantic.trim();
     const todayStr = new Date().toISOString().slice(0, 10);
     const autoName = `${schemeName} ${todayStr}`;
     const inputBindings = buildRunPlanBindings(
       matchedSchemeMeta,
-      planDraft.leftTimeSemantic.trim(),
-      planDraft.rightTimeSemantic.trim(),
+      leftTimeSemantic,
+      rightTimeSemantic,
     );
 
     if (inputBindings.length === 0) {
@@ -4124,16 +4950,18 @@ options.push({
           scheme_code: schemeCode,
           schedule_type: scheduleTypeForSave,
           schedule_expr: scheduleExpr,
-          biz_date_offset: 'previous_day',
+          biz_date_offset: planDraft.bizDateOffset.trim() || 'T-1',
           input_bindings_json: inputBindings,
           channel_config_id: planDraft.channelConfigId.trim(),
           owner_mapping_json: planDraft.ownerSummary.trim()
             ? { default_owner: { name: planDraft.ownerSummary.trim() } }
             : {},
           plan_meta_json: {
-            left_time_semantic: planDraft.leftTimeSemantic.trim(),
-            right_time_semantic: planDraft.rightTimeSemantic.trim(),
-            time_semantic: [planDraft.leftTimeSemantic.trim(), planDraft.rightTimeSemantic.trim()]
+            biz_date_offset: planDraft.bizDateOffset.trim() || 'T-1',
+            reconciliation_period: planDraft.bizDateOffset.trim() || 'T-1',
+            left_time_semantic: leftTimeSemantic,
+            right_time_semantic: rightTimeSemantic,
+            time_semantic: [leftTimeSemantic, rightTimeSemantic]
               .filter(Boolean)
               .join(' / '),
             input_bindings: inputBindings,
@@ -4299,35 +5127,48 @@ options.push({
     [authToken],
   );
 
-  const handleRetryRun = useCallback(
-    async (runId: string) => {
+  const handleRerunValidation = useCallback(
+    async (originalRunId: string, exceptionId = '') => {
       if (!authToken) {
-        setCenterError('请先登录后再重试运行。');
+        setCenterError('请先登录后再重新对账验证。');
         return;
       }
-      setRetryingRunId(runId);
+      setRerunningRunId(originalRunId);
       setCenterError(null);
       setCenterNotice(null);
+      setModalError(null);
       try {
-        const response = await fetchReconAutoApi(`/runs/${runId}/retry`, {
+        const response = await fetchReconAutoApi('/runs/rerun', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${authToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ reason: '前端手动重试' }),
+          body: JSON.stringify({
+            original_run_id: originalRunId,
+            exception_id: exceptionId,
+            reason: exceptionId ? '前端按异常重新对账验证' : '前端按运行重新对账验证',
+          }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(String(data.detail || data.message || '重试运行失败'));
+          const detail = data.detail;
+          if (typeof detail === 'object' && detail !== null) {
+            const message = toText(detail.message) || toText(detail.error) || '重新对账验证失败';
+            const todo = toText(detail.todo);
+            throw new Error(todo ? `${message}：${todo}` : message);
+          }
+          throw new Error(String(detail || data.message || '重新对账验证失败'));
         }
         await loadCenterData();
         setActiveTab('runs');
-        setCenterNotice('已重新触发该运行任务，请稍后刷新查看最新状态。');
+        setCenterNotice(toText(data.message) || '重新对账验证已提交，请稍后刷新查看最新状态。');
       } catch (error) {
-        setCenterError(error instanceof Error ? error.message : '重试运行失败');
+        const message = error instanceof Error ? error.message : '重新对账验证失败';
+        setCenterError(message);
+        setModalError(message);
       } finally {
-        setRetryingRunId((prev) => (prev === runId ? null : prev));
+        setRerunningRunId((prev) => (prev === originalRunId ? null : prev));
       }
     },
     [authToken, loadCenterData],
@@ -4335,25 +5176,29 @@ options.push({
 
   const schemeStepOneReady =
     Boolean(schemeDraft.name.trim()) &&
-    Boolean(schemeDraft.businessGoal.trim()) &&
-    selectedLeftSources.length > 0 &&
-    selectedRightSources.length > 0;
-  const schemeStepTwoReady = Boolean(
-    schemeDraft.procConfigMode === 'existing'
-      ? schemeDraft.selectedProcConfigId || schemeDraft.procRuleJson
-      : schemeDraft.procDraft.trim() || schemeDraft.procRuleJson,
+    Boolean(schemeDraft.businessGoal.trim());
+  const aiProcGenerationBusy =
+    aiProcSideDrafts.left.status === 'generating' || aiProcSideDrafts.right.status === 'generating';
+  const aiProcStepReady = Boolean(
+    aiProcSideDrafts.left.status === 'succeeded'
+    && aiProcSideDrafts.right.status === 'succeeded'
+    && schemeDraft.procRuleJson
+    && leftOutputFields.length > 0
+    && rightOutputFields.length > 0,
   );
-  const schemeStepThreeReady = Boolean(
-    schemeDraft.reconConfigMode === 'existing'
-      ? schemeDraft.selectedReconConfigId || schemeDraft.reconRuleJson
-      : schemeDraft.reconDraft.trim() || schemeDraft.reconRuleJson,
+  const schemeStepTwoReady = Boolean(
+    procBuildMode === 'ai_complex_rule'
+      ? aiProcStepReady
+      : selectedLeftSources.length > 0
+        && selectedRightSources.length > 0
+        && leftOutputFields.length > 0
+        && rightOutputFields.length > 0,
   );
   const schemeStepTwoPassed =
     schemeDraft.procTrialStatus === 'passed' && Boolean(schemeDraft.procRuleJson);
-  const schemeStepThreePassed =
-    schemeDraft.reconTrialStatus === 'passed' && Boolean(schemeDraft.reconRuleJson);
+  const schemeStepThreeReady = Boolean(compiledReconRuleResult.json);
   const isSchemeWizardBusy =
-    isGeneratingProc || isTrialingProc || isGeneratingRecon || isTrialingRecon;
+    isTrialingProc || isTrialingRecon || aiProcGenerationBusy;
 
   const goToNextSchemeStep = useCallback(async () => {
     setModalError(null);
@@ -4363,7 +5208,7 @@ options.push({
     }
     if (schemeWizardStep === 1) {
       if (!schemeStepOneReady) {
-        setModalError('请先完成方案名称、对账目标以及左右数据集选择。');
+        setModalError('请先完成方案名称和对账目标。');
         return;
       }
       setSchemeWizardStep(2);
@@ -4371,48 +5216,73 @@ options.push({
     }
     if (schemeWizardStep === 2) {
       if (!schemeStepTwoReady) {
-        setModalError('请先生成或选择一条可用的数据整理配置。');
+        setModalError(
+          procBuildMode === 'ai_complex_rule'
+            ? '请先分别完成左侧和右侧的“AI生成输出数据”。'
+            : '请先完成左右数据集选择与输出字段配置。',
+        );
         return;
       }
       if (!schemeStepTwoPassed) {
+        if (procBuildMode === 'ai_complex_rule') {
+          setModalError('AI生成输出数据尚未通过，请重新生成左右侧输出数据。');
+          return;
+        }
         const passed = await trialProcDraft();
         if (!passed) {
           setModalError('数据整理试跑未通过，请调整配置后重试。');
           return;
         }
       }
+      const nextMatchFieldPairs = filterCompleteReconFieldPairs(activeMatchFieldPairs);
+      const nextCompareFieldPairs = filterCompleteReconFieldPairs(activeCompareFieldPairs);
+      applyStructuredReconConfig({
+        reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
+        matchFieldPairs: nextMatchFieldPairs,
+        compareFieldPairs: nextCompareFieldPairs,
+        leftTimeSemantic: pickPreferredTimeFieldValue(
+          leftTimeFieldOptions,
+          effectiveLeftTimeSemantic,
+          roleDerivedLeftTimeSemantic,
+        ),
+        rightTimeSemantic: pickPreferredTimeFieldValue(
+          rightTimeFieldOptions,
+          effectiveRightTimeSemantic,
+          roleDerivedRightTimeSemantic,
+        ),
+      });
       setSchemeWizardStep(3);
       return;
     }
     if (schemeWizardStep === 3) {
       if (!schemeStepThreeReady) {
-        setModalError('请先生成或选择一条可用的数据对账逻辑。');
+        setModalError(compiledReconRuleResult.error || '请至少配置一组匹配字段和一组对比字段。');
         return;
       }
-      if (!schemeStepThreePassed) {
-        const passed = await trialReconDraft();
-        if (!passed) {
-          setModalError('数据对账试跑未通过，请调整逻辑后重试。');
-          return;
-        }
-      }
-      if (!schemeDraft.reconRuleJson) {
-        setModalError('当前缺少可保存的数据对账逻辑。');
-        return;
-      }
-      setSchemeWizardStep(4);
+      setModalError('第三步已是最后一步，请直接点击“保存方案”。');
     }
   }, [
+    compiledReconRuleResult.error,
+    compiledReconRuleResult.json,
     schemeStepOneReady,
-    schemeStepThreePassed,
     schemeStepThreeReady,
     schemeStepTwoPassed,
     schemeStepTwoReady,
+    procBuildMode,
+    aiProcGenerationBusy,
     isSchemeWizardBusy,
     schemeDraft.reconRuleJson,
     schemeWizardStep,
     trialProcDraft,
-    trialReconDraft,
+    applyStructuredReconConfig,
+    activeCompareFieldPairs,
+    activeMatchFieldPairs,
+    effectiveLeftTimeSemantic,
+    effectiveRightTimeSemantic,
+    leftTimeFieldOptions,
+    rightTimeFieldOptions,
+    roleDerivedLeftTimeSemantic,
+    roleDerivedRightTimeSemantic,
   ]);
 
   const goToPreviousSchemeStep = useCallback(() => {
@@ -4460,25 +5330,56 @@ options.push({
     </div>
   );
 
-  const selectedExceptionReasonLines = selectedExceptionDetail
-    ? buildRunExceptionReasonLines(selectedExceptionDetail)
-    : [];
-  const selectedExceptionPayload = selectedExceptionDetail
-    ? firstNonEmptyRecord(
-        selectedExceptionDetail.raw.detail_json,
-        selectedExceptionDetail.raw.detail,
-        selectedExceptionDetail.raw,
-      )
-    : {};
-  const selectedExceptionJoinKeys = selectedExceptionDetail
-    ? getRunExceptionJoinKeys(selectedExceptionDetail)
-    : [];
-  const selectedExceptionCompareValues = selectedExceptionDetail
-    ? getRunExceptionCompareValues(selectedExceptionDetail)
-    : [];
   const selectedExceptionRawRecord = selectedExceptionDetail
     ? getRunExceptionRawRecord(selectedExceptionDetail)
     : {};
+  const selectedExceptionSideRecords = selectedExceptionDetail
+    ? getRunExceptionRecordsBySide(selectedExceptionDetail)
+    : { left: {}, right: {}, extra: {} };
+  const selectedExceptionRun =
+    selectedExceptionDetail && modalState?.kind === 'run-exceptions' ? modalState.run : null;
+  const selectedExceptionScheme = selectedExceptionRun
+    ? schemes.find((item) => item.schemeCode === selectedExceptionRun.schemeCode) || null
+    : null;
+  const selectedExceptionSchemeMeta = selectedExceptionScheme
+    ? extractSchemeMeta(selectedExceptionScheme)
+    : null;
+  const selectedExceptionLeftDatasetLabel = (
+    selectedExceptionSchemeMeta
+      ? resolveResultDatasetLabel(
+          'left',
+          selectedExceptionSchemeMeta.matchFieldPairs,
+          selectedExceptionSchemeMeta.leftOutputFields,
+          selectedExceptionSchemeMeta.leftSources,
+        )
+      : ''
+  ) || toText(selectedExceptionSideRecords.left.source_name, toText(selectedExceptionRawRecord.source_name, '原始记录'));
+  const selectedExceptionRightDatasetLabel = (
+    selectedExceptionSchemeMeta
+      ? resolveResultDatasetLabel(
+          'right',
+          selectedExceptionSchemeMeta.matchFieldPairs,
+          selectedExceptionSchemeMeta.rightOutputFields,
+          selectedExceptionSchemeMeta.rightSources,
+        )
+      : ''
+  ) || toText(selectedExceptionSideRecords.right.source_name, toText(selectedExceptionRawRecord.source_name, '原始记录'));
+  const selectedExceptionRecordSections = selectedExceptionDetail
+    ? [
+        Object.keys(selectedExceptionSideRecords.left).length > 0
+          ? {
+              title: selectedExceptionLeftDatasetLabel || '原始记录',
+              record: selectedExceptionSideRecords.left,
+            }
+          : null,
+        Object.keys(selectedExceptionSideRecords.right).length > 0
+          ? {
+              title: selectedExceptionRightDatasetLabel || '原始记录',
+              record: selectedExceptionSideRecords.right,
+            }
+          : null,
+      ].filter((item): item is { title: string; record: Record<string, unknown> } => Boolean(item))
+    : [];
 
   const renderSchemeRows = () =>
     schemes.length === 0
@@ -4495,7 +5396,7 @@ options.push({
         />
         {schemes.map((item) => {
           const schemeMeta = extractSchemeMeta(item);
-          const procRuleLabel = schemeMeta.procRuleName || (item.name ? `${item.name} 整理规则` : '未命名整理规则');
+          const procRuleLabel = schemeMeta.procRuleName || (item.name ? `${item.name}整理规则` : '整理规则');
           const reconRuleLabel = schemeMeta.reconRuleName || (item.name ? `${item.name} 对账逻辑` : '未命名对账逻辑');
           const isGuardVisible = schemeDeleteGuard?.schemeId === item.id;
           const guardTasks = isGuardVisible ? schemeDeleteGuard?.tasks || [] : [];
@@ -4685,7 +5586,7 @@ options.push({
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
       <div className="min-w-[1080px]">
         <ListHeader
-          columns={['运行任务', '触发信息', '异常数', '状态', '操作']}
+          columns={['运行任务', '异常数', '状态', '操作']}
           template={RUN_LIST_TEMPLATE}
         />
         {runs.map((item) => {
@@ -4705,9 +5606,6 @@ options.push({
                     : `${item.schemeName} · ${formatDateTime(item.startedAt)}`}
                 </p>
               </div>
-              <span className="text-sm text-text-secondary">
-                {item.triggerType || '--'} / {item.entryMode || '--'}
-              </span>
               <span className="text-sm text-text-secondary">{item.anomalyCount}</span>
               <span
                 className={cn(
@@ -4719,17 +5617,15 @@ options.push({
               </span>
               <div className="justify-self-end">
                 <div className="flex items-center gap-2">
-                  {canRetryExecutionRun(item.executionStatus) ? (
-                    <button
-                      type="button"
-                      onClick={() => void handleRetryRun(item.id)}
-                      disabled={retryingRunId === item.id}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <RefreshCw className={cn('h-4 w-4', retryingRunId === item.id && 'animate-spin')} />
-                      {retryingRunId === item.id ? '重试中...' : '重试'}
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void handleRerunValidation(item.id)}
+                    disabled={rerunningRunId === item.id}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <RefreshCw className={cn('h-4 w-4', rerunningRunId === item.id && 'animate-spin')} />
+                    {rerunningRunId === item.id ? '验证中...' : '重新对账验证'}
+                  </button>
                   <button
                     type="button"
                     data-testid={`execution-run-exceptions-${item.id}`}
@@ -4767,12 +5663,19 @@ options.push({
             .filter((item) => item.side === 'left')
             .map((item) => {
               const matchedSource = findSourceByPreview(item);
+              const mergedFieldLabelMap = mergeFieldLabelMaps(
+                item.fieldLabelMap,
+                resolveSourceFieldLabelMap(matchedSource),
+              );
               return {
                 title: matchedSource ? resolveDatasetDisplayName(matchedSource) : item.sourceName,
-                fieldLabelMap: mergeFieldLabelMaps(
-                  item.fieldLabelMap,
-                  resolveSourceFieldLabelMap(matchedSource),
+                fieldLabelMap: mergedFieldLabelMap,
+                columnHints: buildInputPreviewColumnHints(
+                  matchedSource,
+                  leftOutputFields,
+                  mergedFieldLabelMap,
                 ),
+                showRawFieldName: false,
                 originLabel: item.sampleOriginLabel,
                 originHint: item.sampleOriginHint,
                 rows: item.rows,
@@ -4782,15 +5685,22 @@ options.push({
             .filter((item) => item.side === 'right')
             .map((item) => {
               const matchedSource = findSourceByPreview(item);
+              const mergedFieldLabelMap = mergeFieldLabelMaps(
+                item.fieldLabelMap,
+                resolveSourceFieldLabelMap(matchedSource),
+              );
               return {
                 title: matchedSource ? resolveDatasetDisplayName(matchedSource) : item.sourceName,
-                fieldLabelMap: mergeFieldLabelMaps(
-                  item.fieldLabelMap,
-                  resolveSourceFieldLabelMap(matchedSource),
+                fieldLabelMap: mergedFieldLabelMap,
+                columnHints: buildInputPreviewColumnHints(
+                  matchedSource,
+                  rightOutputFields,
+                  mergedFieldLabelMap,
                 ),
-              originLabel: item.sampleOriginLabel,
-              originHint: item.sampleOriginHint,
-              rows: item.rows,
+                showRawFieldName: false,
+                originLabel: item.sampleOriginLabel,
+                originHint: item.sampleOriginHint,
+                rows: item.rows,
               };
             }),
           leftOutputSamples: procTrialPreview.preparedOutputs
@@ -4798,6 +5708,12 @@ options.push({
             .map((item) => ({
               title: item.title,
               fieldLabelMap: item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              columnHints: buildOutputPreviewColumnHints(
+                leftOutputFields,
+                selectedLeftSources,
+                item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              ),
+              showRawFieldName: true,
               rows: item.rows,
             })),
           rightOutputSamples: procTrialPreview.preparedOutputs
@@ -4805,6 +5721,12 @@ options.push({
             .map((item) => ({
               title: item.title,
               fieldLabelMap: item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              columnHints: buildOutputPreviewColumnHints(
+                rightOutputFields,
+                selectedRightSources,
+                item.fieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
+              ),
+              showRawFieldName: true,
               rows: item.rows,
             })),
           validations: procTrialPreview.validations,
@@ -4819,90 +5741,57 @@ options.push({
           leftFieldLabelMap: reconTrialPreview.leftFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
           rightFieldLabelMap: reconTrialPreview.rightFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
           resultSamples: reconTrialPreview.results.map((item) => ({
-            match_key: item.matchKey,
+            match_fields: item.matchFields,
+            left_compare_fields: item.leftCompareFields,
+            right_compare_fields: item.rightCompareFields,
             result: item.result,
-            left_amount: item.leftAmount,
-            right_amount: item.rightAmount,
-            diff_amount: item.diffAmount,
-            note: item.note,
           })),
           resultFieldLabelMap: reconTrialPreview.resultFieldLabelMap || RECON_RESULT_FIELD_LABEL_MAP,
           resultSummary: reconTrialPreview.resultSummary,
         }
       : undefined;
 
-    if (schemeWizardStep === 1 || schemeWizardStep === 2) {
+    if (schemeWizardStep === 1) {
+      return (
+        <SchemeWizardIntentStep
+          name={schemeDraft.name}
+          businessGoal={schemeDraft.businessGoal}
+          onNameChange={(value) => resetSchemeDraftFromGoalChange({ name: value })}
+          onBusinessGoalChange={(value) => resetSchemeDraftFromGoalChange({ businessGoal: value })}
+        />
+      );
+    }
+
+    if (schemeWizardStep === 2) {
       return (
         <div className="space-y-5">
           <SchemeWizardTargetProcStep
-            step={schemeWizardStep as 1 | 2}
             authToken={authToken}
             schemeDraft={{
               name: schemeDraft.name,
               businessGoal: schemeDraft.businessGoal,
               leftDescription: schemeDraft.leftDescription,
               rightDescription: schemeDraft.rightDescription,
-              procConfigMode: schemeDraft.procConfigMode,
-              selectedProcConfigId: schemeDraft.selectedProcConfigId,
-              procDraft: schemeDraft.procDraft,
               procTrialStatus: schemeDraft.procTrialStatus,
               procTrialSummary: schemeDraft.procTrialSummary,
             }}
             selectedLeftSources={selectedLeftSources}
             selectedRightSources={selectedRightSources}
-            existingProcOptions={existingProcOptions}
-            procCompatibility={procCompatibility}
-            onNameChange={(value) => resetSchemeDraftFromGoalChange({ name: value })}
-            onBusinessGoalChange={(value) => resetSchemeDraftFromGoalChange({ businessGoal: value })}
-            onDescriptionChange={(side, value) =>
-              resetSchemeDraftFromGoalChange(
-                side === 'left' ? { leftDescription: value } : { rightDescription: value },
-              )
-            }
+            leftOutputFields={leftOutputFields}
+            rightOutputFields={rightOutputFields}
+            procBuildMode={procBuildMode}
+            aiProcSideDrafts={aiProcSideDrafts}
+            procCompatibility={procCompatibilityState}
+            onChangeProcBuildMode={handleProcBuildModeChange}
+            onChangeAiProcRuleDraft={handleAiProcRuleDraftChange}
+            onGenerateAiProcOutput={handleGenerateAiProcOutput}
             onChangeSourceSelection={(side, sources) => changeSchemeSources(side, sources)}
-            onProcConfigModeChange={(mode) => {
-              setSchemeDraft((prev) => ({
-                ...prev,
-                procConfigMode: mode,
-                selectedProcConfigId: mode === 'existing' ? prev.selectedProcConfigId : '',
-                procRuleJson: null,
-                procTrialStatus: 'idle',
-                procTrialSummary: '',
-                reconDraft: '',
-                reconRuleJson: null,
-                reconTrialStatus: 'idle',
-                reconTrialSummary: '',
-              }));
-              setProcTrialPreview(null);
-              setReconTrialPreview(null);
-              setProcCompatibility(emptyCompatibilityResult());
-              setReconCompatibility(emptyCompatibilityResult());
-            }}
-            onSelectExistingProcConfig={(configId) => void handleSelectExistingProcConfig(configId)}
-            isGeneratingProc={isGeneratingProc}
-            generationSkill={procGenerationProgress?.skill}
-            generationPhase={procGenerationProgress?.phase}
-            generationMessage={procGenerationProgress?.message}
+            onChangeOutputFields={(side, fields) =>
+              handlePreparationDraftChange((prev) => applyPreparationOutputFields(prev, side, fields))
+            }
+            onRecommendOutputFields={(side) => recommendPreparationOutputFields(side)}
             isTrialingProc={isTrialingProc}
-            onGenerateProc={generateProcDraft}
             onTrialProc={trialProcDraft}
-            onProcDraftChange={(value) => {
-              setSchemeDraft((prev) => ({
-                ...prev,
-                procDraft: value,
-                procRuleJson: null,
-                procTrialStatus: 'idle',
-                procTrialSummary: '',
-                reconDraft: '',
-                reconRuleJson: null,
-                reconTrialStatus: 'idle',
-                reconTrialSummary: '',
-              }));
-              setProcTrialPreview(null);
-              setReconTrialPreview(null);
-              setProcCompatibility(emptyCompatibilityResult());
-              setReconCompatibility(emptyCompatibilityResult());
-            }}
             onViewProcJson={handleViewProcJson}
             procJsonPreview={procJsonPreview}
             procTrialPreview={mappedProcTrialPreview}
@@ -4917,71 +5806,34 @@ options.push({
         <div className="space-y-5">
           <SchemeWizardReconStep
             schemeDraft={{
-              reconDraft: schemeDraft.reconDraft,
               reconTrialStatus: schemeDraft.reconTrialStatus,
               reconTrialSummary: schemeDraft.reconTrialSummary,
             }}
-            reconConfigMode={schemeDraft.reconConfigMode}
-            selectedReconConfigId={schemeDraft.selectedReconConfigId}
-            existingReconOptions={existingReconOptions.map((item) => ({ id: item.id, name: item.name }))}
-            reconCompatibility={reconCompatibility}
-            onReconConfigModeChange={(mode) => {
-              setSchemeDraft((prev) => ({
-                ...prev,
-                reconConfigMode: mode,
-                selectedReconConfigId: mode === 'existing' ? prev.selectedReconConfigId : '',
-                reconRuleName: '',
-                matchKey: '',
-                leftAmountField: '',
-                rightAmountField: '',
-                tolerance: '',
-                reconRuleJson: null,
-                reconTrialStatus: 'idle',
-                reconTrialSummary: '',
-              }));
-              setReconTrialPreview(null);
-              setReconCompatibility(
-                mode === 'existing'
-                  ? {
-                      status: 'idle',
-                      message: '请选择一条已有数据对账逻辑后再试跑。',
-                      details: [],
-                    }
-                  : emptyCompatibilityResult(),
-              );
-            }}
-            onSelectExistingReconConfig={(configId) => void handleSelectExistingReconConfig(configId)}
-            onGenerateRecon={generateReconDraft}
+            reconRuleName={schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name)}
+            matchFieldPairs={activeMatchFieldPairs}
+            compareFieldPairs={activeCompareFieldPairs}
+            leftTimeSemantic={effectiveLeftTimeSemantic}
+            rightTimeSemantic={effectiveRightTimeSemantic}
+            leftMatchFieldOptions={leftReconFieldOptions}
+            rightMatchFieldOptions={rightReconFieldOptions}
+            leftCompareFieldOptions={leftReconFieldOptions}
+            rightCompareFieldOptions={rightReconFieldOptions}
+            leftTimeFieldOptions={leftTimeFieldOptions}
+            rightTimeFieldOptions={rightTimeFieldOptions}
+            leftFieldLabelMap={leftOutputFieldLabelMap}
+            rightFieldLabelMap={rightOutputFieldLabelMap}
+            reconCompatibility={reconCompatibilityState}
+            onStructuredConfigChange={(patch) => applyStructuredReconConfig(patch)}
             onTrialRecon={trialReconDraft}
-            onReconDraftChange={(value) => {
-              setSchemeDraft((prev) => ({
-                ...prev,
-                reconDraft: value,
-                reconRuleJson: null,
-                reconTrialStatus: 'idle',
-                reconTrialSummary: '',
-              }));
-              setReconTrialPreview(null);
-              setReconCompatibility(emptyCompatibilityResult());
-            }}
             onViewReconJson={handleViewReconJson}
             reconJsonPreview={reconJsonPreview}
             reconTrialPreview={mappedReconTrialPreview}
             trialDisabled={
               isTrialingRecon
-              || isGeneratingRecon
               || !schemeDraft.procRuleJson
               || schemeDraft.procTrialStatus !== 'passed'
-              || !(
-                (schemeDraft.reconConfigMode === 'existing'
-                  ? schemeDraft.selectedReconConfigId
-                  : schemeDraft.reconDraft.trim() || schemeDraft.reconRuleJson)
-              )
+              || !compiledReconRuleResult.json
             }
-            isGeneratingRecon={isGeneratingRecon}
-            generationSkill={reconGenerationProgress?.skill}
-            generationPhase={reconGenerationProgress?.phase}
-            generationMessage={reconGenerationProgress?.message}
             isTrialingRecon={isTrialingRecon}
           />
 
@@ -4989,35 +5841,7 @@ options.push({
       );
     }
 
-    const procDisplayName =
-      selectedProcOption?.name || (schemeDraft.name ? `${schemeDraft.name} · 数据整理配置` : '数据整理配置');
-    const reconDisplayName =
-      selectedReconOption?.name
-      || schemeDraft.reconRuleName
-      || toText(asRecord(schemeDraft.reconRuleJson || {}).rule_name)
-      || buildDefaultReconRuleName(schemeDraft.name);
-
-    return (
-      <div className="space-y-5">
-        <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-          <p className="text-sm font-semibold text-text-primary">方案摘要</p>
-          <div className="mt-4 space-y-4">
-            <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-              <p className="text-xs text-text-secondary">对账目标</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{schemeDraft.businessGoal || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-              <p className="text-xs text-text-secondary">数据整理</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{procDisplayName}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-              <p className="text-xs text-text-secondary">对账逻辑</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{reconDisplayName}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+    return null;
   };
 
   const renderModalContent = () => {
@@ -5028,10 +5852,10 @@ options.push({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">新增对账方案</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">按四步完成方案设计与试跑确认</h3>
+            <h3 className="mt-1 text-lg font-semibold text-text-primary">按三步完成方案设计与试跑确认</h3>
           </div>
           <div className="space-y-6 px-6 py-5">
-            <div className="grid gap-3 lg:grid-cols-4">
+            <div className="grid gap-3 lg:grid-cols-3">
               {SCHEME_WIZARD_STEPS.map((step) => (
                 <WizardStepBadge
                   key={step.id}
@@ -5069,7 +5893,7 @@ options.push({
                 </button>
               ) : null}
             </div>
-            {schemeWizardStep < 4 ? (
+            {schemeWizardStep < 3 ? (
               <button
                 type="button"
                 onClick={goToNextSchemeStep}
@@ -5092,7 +5916,7 @@ options.push({
                   isSubmittingScheme ||
                   !schemeStepOneReady ||
                   !schemeStepTwoPassed ||
-                  !schemeStepThreePassed
+                  !schemeStepThreeReady
                 }
                 className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -5109,7 +5933,7 @@ options.push({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">新增运行计划</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">为方案补充调度、时间口径、协作通道与责任人</h3>
+            <h3 className="mt-1 text-lg font-semibold text-text-primary">为方案补充调度、对账周期、协作通道与责任人</h3>
           </div>
           <div className="space-y-4 px-6 py-5">
             {modalError ? (
@@ -5125,19 +5949,12 @@ options.push({
                   const nextSchemeCode = event.target.value;
                   const nextScheme = schemes.find((scheme) => scheme.schemeCode === nextSchemeCode) || null;
                   const nextSchemeMeta = nextScheme ? extractSchemeMeta(nextScheme) : null;
-                  const nextLeftOptions = inferTimeOptionsFromSources(
-                    nextSchemeMeta?.leftSources || [],
-                    nextSchemeMeta?.leftTimeSemantic || '',
-                  );
-                  const nextRightOptions = inferTimeOptionsFromSources(
-                    nextSchemeMeta?.rightSources || [],
-                    nextSchemeMeta?.rightTimeSemantic || '',
-                  );
+                  const nextTimeSemantics = resolvePlanTimeSemantics(nextSchemeMeta);
                   setPlanDraft((prev) => ({
                     ...prev,
                     schemeCode: nextSchemeCode,
-                    leftTimeSemantic: nextSchemeMeta?.leftTimeSemantic || nextLeftOptions[0]?.value || '',
-                    rightTimeSemantic: nextSchemeMeta?.rightTimeSemantic || nextRightOptions[0]?.value || '',
+                    leftTimeSemantic: nextTimeSemantics.leftTimeSemantic,
+                    rightTimeSemantic: nextTimeSemantics.rightTimeSemantic,
                   }));
                 }}
                 className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
@@ -5149,9 +5966,24 @@ options.push({
                   </option>
                 ))}
               </select>
+              <p className="mt-2 text-xs leading-5 text-text-muted">
+                运行计划默认沿用该对账方案里已经确认的左右时间字段，不在这里单独配置。
+              </p>
             </label>
 
             <div className="grid gap-4 md:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium text-text-secondary">对账周期</span>
+                <select
+                  value={planDraft.bizDateOffset}
+                  onChange={(event) =>
+                    setPlanDraft((prev) => ({ ...prev, bizDateOffset: event.target.value }))
+                  }
+                  className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                >
+                  <option value="T-1">T-1</option>
+                </select>
+              </label>
               <label className="block">
                 <span className="text-xs font-medium text-text-secondary">调度方式</span>
                 <select
@@ -5169,6 +6001,8 @@ options.push({
                   <option value="monthly">每月</option>
                 </select>
               </label>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
               {planDraft.scheduleType === 'weekly' ? (
                 <label className="block">
                   <span className="text-xs font-medium text-text-secondary">星期几</span>
@@ -5250,43 +6084,6 @@ options.push({
 
             <div className="grid gap-4 md:grid-cols-2">
               <label className="block">
-                <span className="text-xs font-medium text-text-secondary">左侧时间口径</span>
-                <select
-                  value={planDraft.leftTimeSemantic}
-                  onChange={(event) =>
-                    setPlanDraft((prev) => ({ ...prev, leftTimeSemantic: event.target.value }))
-                  }
-                  className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                >
-                  <option value="">请选择左侧时间字段</option>
-                  {planLeftTimeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-text-secondary">右侧时间口径</span>
-                <select
-                  value={planDraft.rightTimeSemantic}
-                  onChange={(event) =>
-                    setPlanDraft((prev) => ({ ...prev, rightTimeSemantic: event.target.value }))
-                  }
-                  className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                >
-                  <option value="">请选择右侧时间字段</option>
-                  {planRightTimeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="block">
                 <span className="text-xs font-medium text-text-secondary">协作通道</span>
                 <select
                   value={planDraft.channelConfigId}
@@ -5356,9 +6153,7 @@ options.push({
                 disabled={
                   isSubmittingPlan ||
                   !planDraft.schemeCode.trim() ||
-                  !planDraft.ownerSummary.trim() ||
-                  !planDraft.leftTimeSemantic.trim() ||
-                  !planDraft.rightTimeSemantic.trim()
+                  !planDraft.ownerSummary.trim()
                 }
                 className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -5373,6 +6168,30 @@ options.push({
     if (modalState.kind === 'scheme-detail') {
       const { scheme } = modalState;
       const schemeMeta = extractSchemeMeta(scheme);
+      const leftMatchFields = formatDetailFieldValues(
+        collectReconSideFieldValues('left', schemeMeta.matchFieldPairs),
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightMatchFields = formatDetailFieldValues(
+        collectReconSideFieldValues('right', schemeMeta.matchFieldPairs),
+        schemeMeta.rightOutputFieldLabelMap,
+      );
+      const leftCompareFields = formatDetailFieldValues(
+        collectReconSideFieldValues('left', schemeMeta.compareFieldPairs),
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightCompareFields = formatDetailFieldValues(
+        collectReconSideFieldValues('right', schemeMeta.compareFieldPairs),
+        schemeMeta.rightOutputFieldLabelMap,
+      );
+      const leftTimeFields = formatDetailFieldValues(
+        [schemeMeta.leftTimeSemantic],
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightTimeFields = formatDetailFieldValues(
+        [schemeMeta.rightTimeSemantic],
+        schemeMeta.rightOutputFieldLabelMap,
+      );
       return (
         <>
           <div className="border-b border-border px-6 py-5">
@@ -5395,19 +6214,30 @@ options.push({
                       key={source.id || source.name}
                       className="min-w-0 overflow-hidden rounded-2xl border border-border bg-surface px-4 py-3"
                     >
-                      <p
-                        className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
-                        title={source.name}
-                      >
-                        {source.name}
-                      </p>
-                      <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
-                        {source.sourceName ? `${source.sourceName} · ` : ''}
-                        {sourceKindLabel(source.sourceKind)}
-                      </p>
+                      {(() => {
+                        const sourceDisplayName = resolveDatasetDisplayName(source);
+                        return (
+                          <>
+                            <p
+                              className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
+                              title={sourceDisplayName}
+                            >
+                              {sourceDisplayName}
+                            </p>
+                            <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
+                              {source.sourceName ? `${source.sourceName} · ` : ''}
+                              {sourceKindLabel(source.sourceKind)}
+                            </p>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
-                  <p className="text-sm leading-6 text-text-secondary">{schemeMeta.leftDescription || '未补充说明。'}</p>
+                  <div className="rounded-2xl border border-border bg-surface px-4 py-2">
+                    <DetailListRow label="匹配字段" values={leftMatchFields} />
+                    <DetailListRow label="对比字段" values={leftCompareFields} />
+                    <DetailListRow label="时间字段" values={leftTimeFields} />
+                  </div>
                 </div>
               </div>
               <div className="min-w-0 overflow-hidden rounded-3xl border border-border bg-surface-secondary p-4">
@@ -5418,19 +6248,30 @@ options.push({
                       key={source.id || source.name}
                       className="min-w-0 overflow-hidden rounded-2xl border border-border bg-surface px-4 py-3"
                     >
-                      <p
-                        className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
-                        title={source.name}
-                      >
-                        {source.name}
-                      </p>
-                      <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
-                        {source.sourceName ? `${source.sourceName} · ` : ''}
-                        {sourceKindLabel(source.sourceKind)}
-                      </p>
+                      {(() => {
+                        const sourceDisplayName = resolveDatasetDisplayName(source);
+                        return (
+                          <>
+                            <p
+                              className="whitespace-normal break-words [overflow-wrap:anywhere] text-sm font-medium leading-6 text-text-primary"
+                              title={sourceDisplayName}
+                            >
+                              {sourceDisplayName}
+                            </p>
+                            <p className="mt-1 whitespace-normal break-words [overflow-wrap:anywhere] text-xs leading-5 text-text-secondary">
+                              {source.sourceName ? `${source.sourceName} · ` : ''}
+                              {sourceKindLabel(source.sourceKind)}
+                            </p>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
-                  <p className="text-sm leading-6 text-text-secondary">{schemeMeta.rightDescription || '未补充说明。'}</p>
+                  <div className="rounded-2xl border border-border bg-surface px-4 py-2">
+                    <DetailListRow label="匹配字段" values={rightMatchFields} />
+                    <DetailListRow label="对比字段" values={rightCompareFields} />
+                    <DetailListRow label="时间字段" values={rightTimeFields} />
+                  </div>
                 </div>
               </div>
             </div>
@@ -5440,15 +6281,12 @@ options.push({
                 <p className="mt-2 text-sm leading-6 text-text-secondary">
                   {schemeMeta.procTrialSummary || '暂无摘要。'}
                 </p>
-                {scheme.procRuleCode ? (
-                  <p className="mt-2 text-xs text-text-muted">规则：{scheme.procRuleCode}</p>
-                ) : null}
+                <p className="mt-2 text-xs text-text-muted">
+                  规则：{schemeMeta.procRuleName || scheme.procRuleCode || '--'}
+                </p>
               </div>
               <div className="rounded-3xl border border-border bg-surface-secondary p-4">
                 <p className="text-sm font-semibold text-text-primary">数据对账</p>
-                <p className="mt-2 text-sm leading-6 text-text-secondary">
-                  {schemeMeta.reconTrialSummary || '暂无摘要。'}
-                </p>
                 {(schemeMeta.reconRuleName || scheme.reconRuleCode) ? (
                   <p className="mt-2 text-xs text-text-muted">规则：{schemeMeta.reconRuleName || scheme.reconRuleCode}</p>
                 ) : null}
@@ -5481,7 +6319,7 @@ options.push({
               <DetailRow label="任务编码" value={task.planCode || '--'} />
               <DetailRow label="对账方案" value={task.schemeName || '--'} />
               <DetailRow label="运行计划" value={formatScheduleLabel(task.scheduleType, task.scheduleExpr)} />
-              <DetailRow label="时间口径" value={`左 ${task.leftTimeSemantic || '--'} / 右 ${task.rightTimeSemantic || '--'}`} />
+              <DetailRow label="对账周期" value={formatBizDateOffsetLabel(task.bizDateOffset)} />
               <DetailRow label="协作通道" value={resolveChannelProviderLabel(task.channelConfigId)} />
               <DetailRow label="责任人" value={task.ownerSummary || '--'} />
               <DetailRow label="创建时间" value={formatDateTime(task.createdAt)} />
@@ -5500,19 +6338,29 @@ options.push({
       <>
         <div className="border-b border-border px-6 py-5">
           <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常看板</p>
-          <h3 className="mt-1 text-lg font-semibold text-text-primary">{run.planName}</h3>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-lg font-semibold text-text-primary">{run.planName}</h3>
+            <button
+              type="button"
+              onClick={() => void handleRerunValidation(run.id)}
+              disabled={rerunningRunId === run.id}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <RefreshCw className={cn('h-4 w-4', rerunningRunId === run.id && 'animate-spin')} />
+              {rerunningRunId === run.id ? '验证中...' : '重新对账验证'}
+            </button>
+          </div>
         </div>
         <div className="space-y-5 px-6 py-5">
+          {modalError ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              {modalError}
+            </div>
+          ) : null}
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">所属方案</p>
               <p className="mt-1 text-sm font-medium text-text-primary">{run.schemeName || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">触发信息</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">
-                {run.triggerType || '--'} / {run.entryMode || '--'}
-              </p>
             </div>
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">运行状态</p>
@@ -5554,7 +6402,7 @@ options.push({
             <div className="overflow-x-auto rounded-3xl border border-border bg-surface">
               <div className="min-w-[940px]">
                 <div className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_170px] gap-6 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
-                  <span>异常内容</span>
+                  <span>异常摘要</span>
                   <span>责任人</span>
                   <span>催办</span>
                   <span>处理进展</span>
@@ -5567,9 +6415,23 @@ options.push({
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-text-primary">{item.summary}</p>
-                      <p className="mt-1 text-xs leading-5 text-text-secondary">
-                        {formatAnomalyTypeLabel(item.anomalyType)}
-                        {item.latestFeedback ? ` · 最新反馈：${item.latestFeedback}` : ''}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <span className="inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-700">
+                          {formatAnomalyTypeLabel(item.anomalyType)}
+                        </span>
+                        {buildRunExceptionJoinKeySummary(item).slice(0, 1).map((line) => (
+                          <span
+                            key={`${item.id}-${line}`}
+                            className="inline-flex rounded-full border border-border bg-surface-secondary px-2 py-0.5 text-[11px] text-text-secondary"
+                          >
+                            {line}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-text-secondary">
+                        {buildRunExceptionCompareSummary(item)[0]
+                          || item.latestFeedback
+                          || '打开详情查看匹配字段、对比字段差异与左右侧原始记录。'}
                       </p>
                       <button
                         type="button"
@@ -5577,7 +6439,16 @@ options.push({
                         className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
                       >
                         <Eye className="h-3.5 w-3.5" />
-                        查看详细
+                        查看详情
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRerunValidation(run.id, item.id)}
+                        disabled={rerunningRunId === run.id}
+                        className="mt-3 ml-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <RefreshCw className={cn('h-3.5 w-3.5', rerunningRunId === run.id && 'animate-spin')} />
+                        {rerunningRunId === run.id ? '验证中...' : '重新对账验证'}
                       </button>
                     </div>
                     <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
@@ -5718,9 +6589,6 @@ options.push({
               <div>
                 <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常详情</p>
                 <h3 className="mt-1 text-lg font-semibold text-text-primary">{selectedExceptionDetail.summary}</h3>
-                <p className="mt-2 text-sm text-text-secondary">
-                  {formatAnomalyTypeLabel(selectedExceptionDetail.anomalyType)}
-                </p>
               </div>
               <button
                 type="button"
@@ -5731,130 +6599,67 @@ options.push({
               </button>
             </div>
 
-            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                  <p className="text-xs text-text-secondary">责任人</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">{selectedExceptionDetail.ownerName || '--'}</p>
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {modalError ? (
+                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                  {modalError}
                 </div>
-                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                  <p className="text-xs text-text-secondary">催办状态</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {formatReminderStatusLabel(selectedExceptionDetail.reminderStatus)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                  <p className="text-xs text-text-secondary">处理进展</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {formatProcessingStatusLabel(selectedExceptionDetail.processingStatus)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                  <p className="text-xs text-text-secondary">修复状态</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {formatFixStatusLabel(selectedExceptionDetail.fixStatus, selectedExceptionDetail.isClosed)}
-                  </p>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                <p className="text-sm font-semibold text-text-primary">为什么对不上</p>
-                <div className="mt-3 space-y-2 text-sm leading-6 text-text-secondary">
-                  {selectedExceptionReasonLines.map((line) => (
-                    <p key={line}>{line}</p>
+              ) : null}
+              {selectedExceptionRecordSections.length > 0 ? (
+                <div className={cn('grid gap-5', selectedExceptionRecordSections.length > 1 && 'xl:grid-cols-2')}>
+                  {selectedExceptionRecordSections.map((section) => (
+                    <div key={`${selectedExceptionDetail.id}-${section.title}`} className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
+                      <p className="text-sm font-semibold text-text-primary">{section.title}</p>
+                      <div className="mt-3 grid gap-3">
+                        {Object.entries(section.record)
+                          .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
+                          .map(([key, value]) => (
+                            <div key={`${selectedExceptionDetail.id}-${section.title}-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                              <p className="text-xs text-text-secondary">{humanizeExceptionFieldName(key)}</p>
+                              <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
+                                {formatDetailValue(value)}
+                              </p>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
                   ))}
                 </div>
-              </div>
-
-              <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+              ) : Object.keys(selectedExceptionRawRecord).length > 0 ? (
                 <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                  <p className="text-sm font-semibold text-text-primary">对账键</p>
-                  {selectedExceptionJoinKeys.length > 0 ? (
-                    <div className="mt-3 space-y-3">
-                      {selectedExceptionJoinKeys.map((entry, index) => (
-                        <div key={`${selectedExceptionDetail.id}-join-${index}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <DetailRow
-                              label={`源侧字段 ${index + 1}`}
-                              value={`${toText(entry.source_field, '--')} = ${formatDetailValue(entry.source_value)}`}
-                            />
-                            <DetailRow
-                              label={`目标侧字段 ${index + 1}`}
-                              value={`${toText(entry.target_field, '--')} = ${formatDetailValue(entry.target_value)}`}
-                            />
-                          </div>
+                  <p className="text-sm font-semibold text-text-primary">原始记录</p>
+                  <div className="mt-3 grid gap-3">
+                    {Object.entries(selectedExceptionRawRecord)
+                      .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
+                      .map(([key, value]) => (
+                        <div key={`${selectedExceptionDetail.id}-field-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                          <p className="text-xs text-text-secondary">{humanizeExceptionFieldName(key)}</p>
+                          <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
+                            {formatDetailValue(value)}
+                          </p>
                         </div>
                       ))}
-                    </div>
-                  ) : (
-                    <p className="mt-3 text-sm text-text-secondary">当前没有返回对账键明细。</p>
-                  )}
-                </div>
-
-                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                  <p className="text-sm font-semibold text-text-primary">差异字段</p>
-                  {selectedExceptionCompareValues.length > 0 ? (
-                    <div className="mt-3 space-y-3">
-                      {selectedExceptionCompareValues.map((entry, index) => (
-                        <div key={`${selectedExceptionDetail.id}-compare-${index}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                          <p className="text-sm font-medium text-text-primary">{toText(entry.name, `差异字段 ${index + 1}`)}</p>
-                          <div className="mt-2 grid gap-2 md:grid-cols-2">
-                            <DetailRow
-                              label="源侧"
-                              value={`${toText(entry.source_field, '--')} = ${formatDetailValue(entry.source_value)}`}
-                            />
-                            <DetailRow
-                              label="目标侧"
-                              value={`${toText(entry.target_field, '--')} = ${formatDetailValue(entry.target_value)}`}
-                            />
-                          </div>
-                          <DetailRow label="差额" value={formatDetailValue(entry.diff_value)} />
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-3 text-sm text-text-secondary">当前没有返回差异字段明细。</p>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                <p className="text-sm font-semibold text-text-primary">异常记录明细</p>
-                {Object.keys(selectedExceptionRawRecord).length > 0 ? (
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    {Object.entries(selectedExceptionRawRecord).map(([key, value]) => (
-                      <div key={`${selectedExceptionDetail.id}-field-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                        <p className="text-xs text-text-secondary">{key}</p>
-                        <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
-                          {formatDetailValue(value)}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-3 text-sm text-text-secondary">当前没有返回原始异常记录。</p>
-                )}
-              </div>
-
-              {selectedExceptionDetail.latestFeedback ? (
-                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                  <p className="text-sm font-semibold text-text-primary">最新反馈</p>
-                  <p className="mt-3 text-sm leading-6 text-text-secondary">{selectedExceptionDetail.latestFeedback}</p>
-                </div>
-              ) : null}
-
-              {(toText(selectedExceptionPayload.source_ref) || toText(selectedExceptionPayload.target_ref)) ? (
-                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                  <p className="text-sm font-semibold text-text-primary">来源文件</p>
-                  <div className="mt-3 divide-y divide-border-subtle">
-                    <DetailRow label="源侧文件" value={toText(selectedExceptionPayload.source_ref, '--')} />
-                    <DetailRow label="目标侧文件" value={toText(selectedExceptionPayload.target_ref, '--')} />
                   </div>
                 </div>
-              ) : null}
+              ) : (
+                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-5 text-sm text-text-secondary">
+                  当前没有返回原始记录。
+                </div>
+              )}
             </div>
 
-            <div className="flex items-center justify-end border-t border-border px-6 py-4">
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-6 py-4">
+              {selectedExceptionRun ? (
+                <button
+                  type="button"
+                  onClick={() => void handleRerunValidation(selectedExceptionRun.id, selectedExceptionDetail.id)}
+                  disabled={rerunningRunId === selectedExceptionRun.id}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <RefreshCw className={cn('h-4 w-4', rerunningRunId === selectedExceptionRun.id && 'animate-spin')} />
+                  {rerunningRunId === selectedExceptionRun.id ? '验证中...' : '重新对账验证'}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setSelectedExceptionDetail(null)}
@@ -5872,7 +6677,7 @@ options.push({
           <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
               <p className="text-sm font-semibold text-text-primary">
-                {wizardJsonPanel === 'proc' ? '数据整理配置 JSON' : '对账逻辑 JSON'}
+                {wizardJsonPanel === 'proc' ? '数据整理规则 JSON' : '对账逻辑 JSON'}
               </p>
               <div className="flex items-center gap-2">
                 <button

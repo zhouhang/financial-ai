@@ -46,8 +46,10 @@ def create_proc_rule_tools() -> list[Tool]:
             name="proc_execute",
             description=(
                 "根据规则编码（rule_code）从数据库获取数据整理规则，"
-                "对上传文件执行字段映射和数据转换，生成目标 Excel 文件。\n"
-                "uploaded_files 格式为文件校验工具（validate_files）返回的 matched_results。"
+                "对输入数据执行字段映射和数据转换，生成目标 Excel 文件。\n"
+                "支持两种输入方式（至少提供一种）：\n"
+                "1. uploaded_files：文件校验工具（validate_files）返回的 matched_results；\n"
+                "2. dataset_inputs：直接从采集记录数据库加载数据，无需写临时文件。"
             ),
             inputSchema={
                 "type": "object",
@@ -69,6 +71,22 @@ def create_proc_rule_tools() -> list[Tool]:
                             "required": ["file_name", "table_name"],
                         },
                     },
+                    "dataset_inputs": {
+                        "type": "array",
+                        "description": (
+                            "直接从采集记录加载的数据集列表，每个元素格式：\n"
+                            "{ table_name: 表名, dataset_ref: { source_type: 'collection_records', "
+                            "source_key: 数据源ID, query: { dataset_id, biz_date, resource_key, filters } } }"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "table_name": {"type": "string"},
+                                "dataset_ref": {"type": "object"},
+                            },
+                            "required": ["table_name", "dataset_ref"],
+                        },
+                    },
                     "rule_code": {
                         "type": "string",
                         "description": "整理规则编码，用于从 rule_detail 表中获取规则 JSON",
@@ -78,7 +96,7 @@ def create_proc_rule_tools() -> list[Tool]:
                         "description": "JWT token，用于校验当前用户和生成下载鉴权链接",
                     },
                 },
-                "required": ["uploaded_files", "rule_code", "auth_token"],
+                "required": ["rule_code", "auth_token"],
             },
         )
     ]
@@ -99,13 +117,14 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
     from proc.config.config import OUTPUT_DIR
 
-    uploaded_files: list[dict] = arguments.get("uploaded_files") or []
+    uploaded_files: list[dict] = list(arguments.get("uploaded_files") or [])
+    dataset_inputs: list[dict] = list(arguments.get("dataset_inputs") or [])
     rule_code: str = (arguments.get("rule_code") or "").strip()
     auth_token: str = (arguments.get("auth_token") or "").strip()
 
     # ── 参数校验 ──────────────────────────────────────────────────────────────
-    if not uploaded_files:
-        return {"success": False, "error": "uploaded_files 不能为空"}
+    if not uploaded_files and not dataset_inputs:
+        return {"success": False, "error": "uploaded_files 与 dataset_inputs 不能同时为空"}
     if not rule_code:
         return {"success": False, "error": "rule_code 不能为空"}
     if not auth_token:
@@ -118,6 +137,27 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     user_id = str(user.get("user_id") or user.get("id") or "")
     if not user_id:
         return {"success": False, "error": "token 中缺少用户标识"}
+
+    # ── 从 dataset_inputs 加载 DataFrame ────────────────────────────────────
+    preloaded_frames: dict[str, pd.DataFrame] = {}
+    if dataset_inputs:
+        from recon.mcp_server.dataset_loader import load_dataset_as_df, DatasetLoadError
+        for item in dataset_inputs:
+            if not isinstance(item, dict):
+                continue
+            table_name = str(item.get("table_name") or "").strip()
+            dataset_ref = item.get("dataset_ref")
+            if not table_name or not isinstance(dataset_ref, dict):
+                continue
+            try:
+                df = load_dataset_as_df(dataset_ref, table_name)
+                preloaded_frames[table_name] = df
+                logger.info("[proc_rule] dataset_inputs 加载 table=%s rows=%d", table_name, len(df))
+            except DatasetLoadError as exc:
+                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 失败: {exc}"}
+            except Exception as exc:
+                logger.error("[proc_rule] dataset_inputs 加载异常 table=%s", table_name, exc_info=True)
+                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 异常: {exc}"}
 
     # ── 确定输出目录（按 rule_code 分子目录）────────────────────────────────
     output_dir = str(Path(OUTPUT_DIR) / rule_code)
@@ -145,6 +185,7 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                 rule_data=rule_data,
                 validated_files=uploaded_files,
                 output_dir=output_dir,
+                preloaded_frames=preloaded_frames if preloaded_frames else None,
             )
         except Exception as e:
             logger.error(f"[proc_rule] steps 规则执行失败: {e}", exc_info=True)
@@ -192,6 +233,24 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             "message": f"成功生成 {len(generated_files)} 个文件",
             "merged_files": [],
         }
+
+    # 对 rules/merge_rules 格式：将 preloaded_frames 写为临时 xlsx，补入 uploaded_files
+    if preloaded_frames:
+        import tempfile
+        for tname, df in preloaded_frames.items():
+            if any(str(f.get("table_name") or "") == tname for f in uploaded_files):
+                continue  # 已有文件，不覆盖
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".xlsx", prefix=f"{tname}_", dir=output_dir, delete=False
+            )
+            df.to_excel(tmp.name, index=False, engine="openpyxl")
+            tmp.close()
+            uploaded_files.append({
+                "file_name": Path(tmp.name).name,
+                "file_path": tmp.name,
+                "table_name": tname,
+                "table_id": tname,
+            })
 
     # 支持两种规则格式：rules（普通整理规则）或 merge_rules（合并规则）
     rules_list: list[dict] = rule_data.get("rules", [])

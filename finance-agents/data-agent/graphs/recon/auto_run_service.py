@@ -21,12 +21,13 @@ from services.notifications import get_notification_adapter
 from services.notifications.models import UnifiedTodoStatus
 from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
+    data_source_trigger_dataset_collection,
     execution_run_exception_get,
     execution_run_exception_update,
     execution_run_get,
     execution_run_plan_get,
     execution_scheme_get,
-    data_source_get_published_snapshot,
+    data_source_list_collection_records,
     get_file_validation_rule,
     recon_auto_run_create,
     recon_auto_run_get,
@@ -88,24 +89,43 @@ def _build_anomaly_summary(
     }
     label = _type_labels.get(atype, _label_anomaly_type(anomaly_type))
 
-    # 主键定位
+    raw_record = _safe_dict(item.get("raw_record"))
+
+    def _raw_val(field: str, side: str = "left") -> str:
+        """Extract value from raw_record with table-prefix fallback."""
+        prefix = "left_recon_ready." if side == "left" else "right_recon_ready."
+        v = raw_record.get(prefix + field)
+        if v is None:
+            v = raw_record.get(field)
+        return str(v).strip() if v is not None and str(v).strip() not in {"None", "null", ""} else ""
+
+    # 主键定位（join_key source_value/target_value 可能为 null，从 raw_record 兜底）
     join_key = [k for k in list(item.get("join_key") or []) if isinstance(k, dict)]
     key_parts: list[str] = []
     for k in join_key[:2]:
         field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "")
-        value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value") or ""
-        if field and value is not None and str(value).strip():
-            key_parts.append(f"{field}={value}")
+        value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value")
+        val_str = str(value).strip() if value is not None and str(value).strip() not in {"None", "null", ""} else ""
+        if not val_str and field:
+            val_str = _raw_val(field, "right" if atype == "target_only" else "left")
+        if field and val_str:
+            key_parts.append(f"{field}={val_str}")
 
-    # 差异明细
+    # 差异明细（source_value/target_value 可能为 null，从 raw_record 兜底）
     compare_values = [c for c in list(item.get("compare_values") or []) if isinstance(c, dict)]
     diff_parts: list[str] = []
     if atype in {"matched_with_diff", "value_mismatch"} and compare_values:
         for cv in compare_values[:3]:
             name = str(cv.get("name") or cv.get("source_field") or "").strip()
+            src_field = str(cv.get("source_field") or "").strip()
+            tgt_field = str(cv.get("target_field") or src_field).strip()
             left_val = cv.get("source_value")
             right_val = cv.get("target_value")
             diff_val = cv.get("diff_value")
+            if left_val is None and src_field:
+                left_val = _raw_val(src_field, "left") or None
+            if right_val is None and tgt_field:
+                right_val = _raw_val(tgt_field, "right") or None
             if not name or left_val is None or right_val is None:
                 continue
             diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
@@ -164,6 +184,19 @@ def _classify_execution_failure(failed_stage: str) -> str:
     return "unknown_failed"
 
 
+def _normalize_collection_trigger_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"schedule", "scheduled", "cron", "scheduler"}:
+        return "scheduled"
+    if normalized in {"rerun", "retry"}:
+        return "retry"
+    return "manual"
+
+
+def _should_collect_before_recon(value: Any) -> bool:
+    return _normalize_collection_trigger_mode(value) in {"scheduled", "manual", "retry"}
+
+
 def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -173,11 +206,12 @@ def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "data_source_id": source_id,
+        "dataset_id": str(item.get("dataset_id") or "").strip(),
         "table_name": table_name,
         "resource_key": str(item.get("resource_key") or "default").strip() or "default",
         "required": bool(item.get("required", True)),
         "query": _safe_dict(item.get("query")),
-        "dataset_source_type": str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot",
+        "dataset_source_type": str(item.get("dataset_source_type") or "collection_records").strip() or "collection_records",
     }
 
 
@@ -239,10 +273,10 @@ def _resolve_owner(owner_mapping: dict[str, Any], anomaly: dict[str, Any]) -> di
     return default_owner if isinstance(default_owner, dict) else {}
 
 
-def _build_source_snapshot_summary(bindings: list[dict[str, Any]], snapshot_results: list[dict[str, Any]], missing: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_source_collection_summary(bindings: list[dict[str, Any]], collection_results: list[dict[str, Any]], missing: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "bindings": bindings,
-        "snapshots": snapshot_results,
+        "collections": collection_results,
         "missing": missing,
     }
 
@@ -299,20 +333,20 @@ def _materialize_binding_query(binding: dict[str, Any], *, biz_date: str) -> dic
     return resolved_query
 
 
-def _build_recon_inputs_from_snapshots(snapshot_results: list[dict[str, Any]], *, biz_date: str) -> list[dict[str, Any]]:
+def _build_recon_inputs_from_collections(collection_results: list[dict[str, Any]], *, biz_date: str) -> list[dict[str, Any]]:
     recon_inputs: list[dict[str, Any]] = []
-    for item in snapshot_results:
-        snapshot = _safe_dict(item.get("published_snapshot"))
+    for item in collection_results:
+        collection_records = _safe_dict(item.get("collection_records"))
         source_id = str(item.get("data_source_id") or "").strip()
         table_name = str(item.get("table_name") or "").strip()
         resource_key = str(item.get("resource_key") or "default").strip() or "default"
-        dataset_source_type = str(item.get("dataset_source_type") or "snapshot").strip() or "snapshot"
+        dataset_source_type = str(item.get("dataset_source_type") or "collection_records").strip() or "collection_records"
         if not source_id or not table_name:
             continue
         query = {"resource_key": resource_key}
-        snapshot_id = str(snapshot.get("snapshot_id") or snapshot.get("id") or "").strip()
-        if snapshot_id:
-            query["snapshot_id"] = snapshot_id
+        dataset_id = str(collection_records.get("dataset_id") or item.get("dataset_id") or "").strip()
+        if dataset_id:
+            query["dataset_id"] = dataset_id
         query.update(_materialize_binding_query(item, biz_date=biz_date))
         recon_inputs.append(
             {
@@ -375,19 +409,133 @@ def _merge_feedback(existing: dict[str, Any], patch: dict[str, Any]) -> dict[str
     return {**_safe_dict(existing), **_safe_dict(patch)}
 
 
-def _extract_todo_key_hint(exception: dict[str, Any]) -> str:
+async def prepare_execution_run_rerun(
+    *,
+    auth_token: str,
+    original_run_id: str,
+    exception_id: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    """Validate and build the minimal context required to rerun recon validation.
+
+    This does not claim a new run was created. The caller may enqueue
+    execute_run_plan_run only when this returns status=ready.
+    """
+    source_run_id = str(original_run_id or "").strip()
+    if not source_run_id:
+        return {"success": False, "status": "todo", "error": "original_run_id 不能为空"}
+
+    run_result = await execution_run_get(auth_token, source_run_id)
+    if not run_result.get("success"):
+        return {
+            "success": False,
+            "status": "not_found",
+            "error": str(run_result.get("error") or "原运行记录不存在"),
+        }
+
+    source_run = _safe_dict(run_result.get("run"))
+    run_context = _safe_dict(source_run.get("run_context_json"))
+    biz_date = str(
+        source_run.get("biz_date")
+        or run_context.get("biz_date")
+        or _safe_dict(source_run.get("source_snapshot_json")).get("biz_date")
+        or ""
+    ).strip()
+    run_plan_code = str(source_run.get("plan_code") or run_context.get("run_plan_code") or "").strip()
+
+    exception: dict[str, Any] = {}
+    exception_ref = str(exception_id or "").strip()
+    if exception_ref:
+        exception_result = await execution_run_exception_get(auth_token, exception_ref)
+        if not exception_result.get("success"):
+            return {
+                "success": False,
+                "status": "not_found",
+                "error": str(exception_result.get("error") or "异常处理项不存在"),
+            }
+        exception = _safe_dict(exception_result.get("exception"))
+        exception_run_id = str(exception.get("run_id") or exception.get("execution_run_id") or "").strip()
+        if exception_run_id and exception_run_id != source_run_id:
+            return {
+                "success": False,
+                "status": "invalid_request",
+                "error": "exception_id 不属于 original_run_id，无法重新对账验证",
+            }
+
+    if not run_plan_code:
+        return {
+            "success": False,
+            "status": "todo",
+            "error": "原运行缺少 plan_code，暂不能创建重新对账验证流程",
+            "todo": "补齐 execution_run 到 execution_run_plan 的反查能力后再启用",
+            "source_run": source_run,
+        }
+    if not biz_date:
+        return {
+            "success": False,
+            "status": "todo",
+            "error": "原运行缺少 biz_date，暂不能创建重新对账验证流程",
+            "todo": "补齐运行上下文中的业务日期恢复逻辑后再启用",
+            "source_run": source_run,
+        }
+
+    rerun_context = dict(run_context)
+    rerun_context.pop("run_id", None)
+    rerun_context.update(
+        {
+            "rerun_from_run_id": source_run_id,
+            "rerun_exception_id": exception_ref,
+            "rerun_reason": str(reason or "重新对账验证").strip() or "重新对账验证",
+        }
+    )
+    return {
+        "success": True,
+        "status": "ready",
+        "source_run_id": source_run_id,
+        "exception_id": exception_ref,
+        "run_plan_code": run_plan_code,
+        "biz_date": biz_date,
+        "run_context": rerun_context,
+        "source_run": source_run,
+        "exception": exception,
+    }
+
+
+_COMMON_FIELD_LABELS: dict[str, str] = {
+    "biz_key": "业务单号", "biz_date": "业务日期", "amount": "金额",
+    "fee": "手续费", "refund_amount": "退款金额", "order_no": "订单号",
+    "trade_no": "交易号", "trans_no": "交易流水号",
+    "merchant_order_no": "商户订单号", "source_name": "来源名称",
+}
+
+
+def _extract_todo_key_hint(
+    exception: dict[str, Any],
+    field_labels: dict[str, str] | None = None,
+) -> str:
     """Extract a short key identifier from the exception for use in the todo title."""
+    fl = {**_COMMON_FIELD_LABELS, **(field_labels or {})}
     atype = str(exception.get("anomaly_type") or "").strip()
     detail = _safe_dict(exception.get("detail_json"))
     join_key = [k for k in _safe_list(detail.get("join_key") or exception.get("join_key")) if isinstance(k, dict)]
+    raw_record = _safe_dict(exception.get("raw_record") or detail.get("raw_record"))
+
+    def _raw_key_val(field: str) -> str:
+        prefix = "right_recon_ready." if atype == "target_only" else "left_recon_ready."
+        v = raw_record.get(prefix + field) or raw_record.get(field)
+        return str(v).strip() if v is not None and str(v).strip() not in {"None", "null", ""} else ""
+
     if join_key:
         parts: list[str] = []
         for k in join_key[:2]:
             field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "").strip()
-            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value") or ""
-            val_str = str(value).strip()
-            if field and val_str and val_str not in {"None", "null", ""}:
-                parts.append(f"{field}={val_str}")
+            value = k.get("target_value" if atype == "target_only" else "source_value") or k.get("value")
+            val_str = str(value).strip() if value is not None and str(value).strip() not in {"None", "null", ""} else ""
+            if not val_str and field:
+                val_str = _raw_key_val(field)
+            if field and val_str:
+                display_field = fl.get(field) or field
+                parts.append(f"{display_field}={val_str}")
         if parts:
             return "、".join(parts)
     # Fallback: extract from summary text (after first ：, before double-space)
@@ -430,7 +578,7 @@ def _compose_reminder_text(
     lines.append(f"异常类型：{anomaly_label}")
     lines.append(f"异常详情：{summary}")
     lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
-    return todo_title, bot_title, "\n".join(lines)
+    return todo_title, bot_title, "\n\n".join(lines)
 
 
 async def execute_run_plan_run(
@@ -495,26 +643,66 @@ async def execute_auto_task_run(
     if not bindings:
         return {"success": False, "error": "任务未配置 input_bindings，无法构建自动对账输入"}
 
-    source_snapshots: list[dict[str, Any]] = []
+    source_collections: list[dict[str, Any]] = []
     missing_bindings: list[dict[str, Any]] = []
+    collection_attempts: list[dict[str, Any]] = []
+    collection_trigger_mode = _normalize_collection_trigger_mode(trigger_mode)
+    should_collect_first = _should_collect_before_recon(trigger_mode)
     for binding in bindings:
-        snapshot_result = await data_source_get_published_snapshot(
+        if should_collect_first:
+            collect_result = await data_source_trigger_dataset_collection(
+                auth_token,
+                binding["data_source_id"],
+                dataset_id=str(binding.get("dataset_id") or "").strip(),
+                resource_key=binding["resource_key"],
+                biz_date=normalized_biz_date,
+                trigger_mode=collection_trigger_mode,
+                mode="real",
+            )
+            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+            collection_attempts.append(
+                {
+                    "binding": binding,
+                    "success": bool(collect_result.get("success")),
+                    "job": _safe_dict(collect_result.get("job")),
+                    "error": collection_error,
+                }
+            )
+            if not bool(collect_result.get("success")):
+                missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
+                continue
+        collection_result = await data_source_list_collection_records(
             auth_token,
             binding["data_source_id"],
             resource_key=binding["resource_key"],
+            biz_date=normalized_biz_date,
+            limit=1,
         )
-        published_snapshot = _safe_dict(snapshot_result.get("published_snapshot"))
-        if snapshot_result.get("success") and published_snapshot:
-            source_snapshots.append({**binding, "published_snapshot": published_snapshot})
+        record_count = int(collection_result.get("record_count") or collection_result.get("count") or 0)
+        records = _safe_list(collection_result.get("records") or collection_result.get("rows"))
+        if collection_result.get("success") and (record_count > 0 or records):
+            source_collections.append(
+                {
+                    **binding,
+                    "dataset_source_type": "collection_records",
+                    "collection_records": {
+                        "dataset_id": str(collection_result.get("dataset_id") or binding.get("dataset_id") or ""),
+                        "resource_key": str(collection_result.get("resource_key") or binding["resource_key"]),
+                        "record_count": record_count or len(records),
+                    },
+                }
+            )
         else:
             missing_bindings.append(
                 {
                     **binding,
-                    "error": str(snapshot_result.get("error") or snapshot_result.get("message") or "暂无已发布快照"),
+                    "error": str(collection_result.get("error") or collection_result.get("message") or "暂无采集记录，请先采集数据"),
                 }
             )
 
-    source_snapshot_json = _build_source_snapshot_summary(bindings, source_snapshots, missing_bindings)
+    source_collection_json = _build_source_collection_summary(bindings, source_collections, missing_bindings)
+    if collection_attempts:
+        source_collection_json["collection_attempts"] = collection_attempts
     run_create = await recon_auto_run_create(
         auth_token,
         {
@@ -525,7 +713,7 @@ async def execute_auto_task_run(
             "readiness_status": "data_partial" if missing_bindings else "data_ready",
             "closure_status": "open",
             "task_snapshot_json": task,
-            "source_snapshot_json": source_snapshot_json,
+            "source_snapshot_json": source_collection_json,
             "recon_result_summary_json": {},
             "anomaly_count": 0,
         },
@@ -551,7 +739,7 @@ async def execute_auto_task_run(
     run_job_record = _safe_dict(run_job.get("run_job"))
 
     if missing_bindings:
-        message = "存在未就绪的数据源快照，自动运行已记录为待补数"
+        message = "存在未就绪的数据源采集记录，请先采集数据后重试"
         await recon_auto_run_update(
             auth_token,
             auto_run_id,
@@ -631,7 +819,7 @@ async def execute_auto_task_run(
     rule_record = _safe_dict(rule_response.get("data"))
     rule_data = _safe_dict(rule_record.get("rule"))
     rule_name = str(rule_data.get("rule_name") or rule_record.get("name") or task.get("rule_code") or "")
-    recon_inputs = _build_recon_inputs_from_snapshots(source_snapshots, biz_date=normalized_biz_date)
+    recon_inputs = _build_recon_inputs_from_collections(source_collections, biz_date=normalized_biz_date)
     run_ctx = {
         **_safe_dict(run_context),
         "run_id": auto_run_id,
@@ -784,9 +972,10 @@ async def send_exception_reminder(
             for src in sources:
                 if not isinstance(src, dict):
                     continue
-                name = str(src.get("dataset_name") or src.get("business_name") or src.get("display_name") or "").strip()
-                if name:
-                    return name
+                for key in ("dataset_name", "business_name", "display_name", "name"):
+                    val = str(src.get(key) or "").strip()
+                    if val:
+                        return val
             return ""
         left_name = _first_name(_safe_list(meta.get("left_sources")))
         right_name = _first_name(_safe_list(meta.get("right_sources")))
@@ -1176,23 +1365,46 @@ async def send_execution_run_exception_reminder(
     ).strip()
     scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
 
+    # Extract dataset display names for finance-friendly labels
+    scheme_meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
+    def _first_name_local(sources: list) -> str:
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            for key in ("dataset_name", "business_name", "display_name", "name"):
+                val = str(src.get(key) or "").strip()
+                if val:
+                    return val
+        return ""
+    left_name = _first_name_local(_safe_list(scheme_meta.get("left_sources")))
+    right_name = _first_name_local(_safe_list(scheme_meta.get("right_sources")))
+    anomaly_type = str(exception.get("anomaly_type") or exception.get("exception_type") or "未知")
+    anomaly_label = _label_anomaly_type(anomaly_type, left_name=left_name, right_name=right_name)
+    summary = str(exception.get("summary") or "详见对账结果")
+
+    key_hint = _extract_todo_key_hint(exception, field_labels=dict(_COMMON_FIELD_LABELS))
+    todo_title = f"【对账异常】{anomaly_label} | {key_hint}" if key_hint else f"【对账异常】{anomaly_label}"
+    if biz_date:
+        todo_title += f" | {biz_date}"
+
     if not title:
-        title = f"{plan_name} 异常催办"
+        title = f"{plan_name} 对账异常催办"
     if not content:
         lines = [
             f"任务：{plan_name}",
             f"业务日期：{biz_date}" if biz_date else "",
             f"对账方案：{scheme_name}" if scheme_name else "",
-            f"异常类型：{_label_anomaly_type(exception.get('anomaly_type') or exception.get('exception_type') or '未知')}",
-            f"异常摘要：{str(exception.get('summary') or '详见对账结果')}",
-            "请尽快处理，并在待办中标记完成后同步给财务复核。",
+            f"异常类型：{anomaly_label}",
+            f"异常详情：{summary}",
+            "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
         ]
-        content = "\n".join(line for line in lines if line)
+        content = "\n\n".join(line for line in lines if line)
 
     # ── 8. 发送催办 ───────────────────────────────────────────────────────────
     reminder = adapter.send_reminder(
         title=title,
         content=content,
+        todo_title=todo_title,
         assignee_user_id=resolved.user_id,
         due_time=due_time,
         source_id=exception_id,

@@ -50,16 +50,9 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class FileCountConfig(StrictModel):
-    min: int = 1
-    max: int = 0
-    allow_multiple: bool = True
-
-
 class ValidationConfig(StrictModel):
     ignore_whitespace: bool = True
     case_sensitive: bool = False
-    file_count: FileCountConfig = Field(default_factory=FileCountConfig)
 
 
 class TableSchema(StrictModel):

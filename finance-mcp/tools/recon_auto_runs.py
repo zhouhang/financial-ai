@@ -316,6 +316,69 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "exception_id"],
             },
         ),
+        Tool(
+            name="recon_queue_enqueue",
+            description="将一次对账执行请求写入持久化队列。由 API 层调用，worker 消费。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string"},
+                    "run_plan_code": {"type": "string"},
+                    "biz_date": {"type": "string"},
+                    "trigger_mode": {"type": "string"},
+                    "run_context": {"type": "object"},
+                },
+                "required": ["company_id", "run_plan_code"],
+            },
+        ),
+        Tool(
+            name="recon_queue_dequeue",
+            description="Worker 专用：原子取出并锁定下一条 queued job（SKIP LOCKED）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
+        Tool(
+            name="recon_queue_complete",
+            description="Worker 专用：将 job 标记为 done。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["worker_token", "job_id"],
+            },
+        ),
+        Tool(
+            name="recon_queue_fail",
+            description="Worker 专用：将 job 标记为 failed 并记录错误。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "error": {"type": "string"},
+                },
+                "required": ["worker_token", "job_id"],
+            },
+        ),
+        Tool(
+            name="recon_queue_reclaim_stale",
+            description="Worker 专用：把卡死的 running job 重置回 queued。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "timeout_minutes": {"type": "integer"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
     ]
 
 
@@ -354,6 +417,16 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return _exception_create(arguments)
     if name == "recon_exception_update":
         return _exception_update(arguments)
+    if name == "recon_queue_enqueue":
+        return _queue_enqueue(arguments)
+    if name == "recon_queue_dequeue":
+        return _queue_dequeue(arguments)
+    if name == "recon_queue_complete":
+        return _queue_complete(arguments)
+    if name == "recon_queue_fail":
+        return _queue_fail(arguments)
+    if name == "recon_queue_reclaim_stale":
+        return _queue_reclaim_stale(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -789,3 +862,78 @@ def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:
     if not updated:
         return {"success": False, "error": "异常任务不存在或更新失败"}
     return {"success": True, "exception": updated}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# recon_execution_queue 工具实现
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _require_system(worker_token: str) -> None:
+    """验证调用方持有 role=system 的系统令牌。"""
+    token = str(worker_token or "").strip()
+    if not token:
+        raise ValueError("未提供 worker_token")
+    user = get_user_from_token(token)
+    if not user or str(user.get("role") or "") != "system":
+        raise ValueError("worker_token 无效或不是系统令牌")
+
+
+def _queue_enqueue(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = str(arguments.get("company_id") or "").strip()
+    run_plan_code = str(arguments.get("run_plan_code") or "").strip()
+    if not company_id or not run_plan_code:
+        return {"success": False, "error": "company_id 和 run_plan_code 不能为空"}
+    try:
+        job = auth_db.enqueue_recon_run(
+            company_id=company_id,
+            run_plan_code=run_plan_code,
+            biz_date=str(arguments.get("biz_date") or ""),
+            trigger_mode=str(arguments.get("trigger_mode") or "schedule"),
+            run_context=dict(arguments.get("run_context") or {}),
+        )
+        return {"success": True, "job": job}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _queue_dequeue(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    job = auth_db.dequeue_recon_run()
+    return {"success": True, "job": job}
+
+
+def _queue_complete(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    job_id = str(arguments.get("job_id") or "").strip()
+    if not job_id:
+        return {"success": False, "error": "job_id 不能为空"}
+    auth_db.complete_recon_run(job_id)
+    return {"success": True}
+
+
+def _queue_fail(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    job_id = str(arguments.get("job_id") or "").strip()
+    if not job_id:
+        return {"success": False, "error": "job_id 不能为空"}
+    auth_db.fail_recon_run(job_id, str(arguments.get("error") or ""))
+    return {"success": True}
+
+
+def _queue_reclaim_stale(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    timeout = int(arguments.get("timeout_minutes") or 15)
+    count = auth_db.reclaim_stale_recon_runs(timeout_minutes=timeout)
+    return {"success": True, "reclaimed": count}
