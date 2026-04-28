@@ -249,7 +249,6 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_get_dataset_collection_detail",
     "data_source_list_collection_records",
     "data_source_preview",
-    "data_source_export_collection_records",
 }
 
 _RECON_AUTO_TOOL_NAMES = {
@@ -270,6 +269,11 @@ _RECON_AUTO_TOOL_NAMES = {
     "recon_exception_get",
     "recon_exception_create",
     "recon_exception_update",
+    "recon_queue_enqueue",
+    "recon_queue_dequeue",
+    "recon_queue_complete",
+    "recon_queue_fail",
+    "recon_queue_reclaim_stale",
 }
 
 _EXECUTION_TOOL_NAMES = {

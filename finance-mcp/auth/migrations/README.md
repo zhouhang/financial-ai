@@ -18,6 +18,7 @@
 10. **016_dataset_collection_records.sql** - 采集资产层明细记录，替代旧 raw/snapshot 主链路
 11. **017_drop_raw_snapshot_collection_tables.sql** - 删除旧 raw/snapshot/checkpoint 表
 12. **018_drop_sync_jobs_idempotency_index.sql** - 删除采集任务级幂等索引，任务只保留审计记录，幂等由采集数据层处理
+13. **020_execution_runs_trigger_type_manual_rerun.sql** - 为 execution_runs.trigger_type 增加 manual / rerun 语义
 
 ## 使用方法
 

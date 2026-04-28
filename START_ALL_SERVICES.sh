@@ -50,6 +50,32 @@ configure_langsmith_env() {
     export TRACE_LANGSMITH=0
 }
 
+start_detached() {
+    local log_file="$1"
+    local work_dir="$2"
+    shift 2
+    python - "$log_file" "$work_dir" "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+log_path = sys.argv[1]
+work_dir = sys.argv[2]
+cmd = sys.argv[3:]
+log_file = open(log_path, "ab", buffering=0)
+process = subprocess.Popen(
+    cmd,
+    cwd=work_dir,
+    stdin=subprocess.DEVNULL,
+    stdout=log_file,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    env=os.environ.copy(),
+)
+print(process.pid)
+PY
+}
+
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 
@@ -64,6 +90,13 @@ echo "📌 步骤 1: 停止现有服务..."
 lsof -ti:3335,8100,5173 | xargs kill -9 2>/dev/null || true
 [ -f /tmp/finance-cron.pid ] && kill -9 "$(cat /tmp/finance-cron.pid)" 2>/dev/null || true
 rm -f /tmp/finance-cron.pid
+# 停止已有的 recon-worker 进程
+if [ -f /tmp/recon-workers.pids ]; then
+    while IFS= read -r pid; do
+        kill -9 "$pid" 2>/dev/null || true
+    done < /tmp/recon-workers.pids
+    rm -f /tmp/recon-workers.pids
+fi
 sleep 2
 echo "✅ 现有服务已停止"
 
@@ -73,9 +106,7 @@ echo "📌 步骤 2: 启动 finance-mcp (端口 3335)..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
 load_project_env
-cd finance-mcp
-nohup python unified_mcp_server.py > "$LOG_DIR/finance-mcp.log" 2>&1 &
-FINANCE_MCP_PID=$!
+FINANCE_MCP_PID="$(start_detached "$LOG_DIR/finance-mcp.log" "$PROJECT_ROOT/finance-mcp" python unified_mcp_server.py)"
 echo "✅ finance-mcp 已启动 (PID: $FINANCE_MCP_PID)"
 
 # 等待 finance-mcp 启动
@@ -92,8 +123,7 @@ load_project_env
 # 在 Python 启动前导出 LangSmith 环境变量（必须在进程启动时已存在，否则 LangSmith 追踪不生效）
 [ -f .env ] && source .env
 configure_langsmith_env
-nohup python -m server > "$LOG_DIR/data-agent.log" 2>&1 &
-DATA_AGENT_PID=$!
+DATA_AGENT_PID="$(start_detached "$LOG_DIR/data-agent.log" "$PROJECT_ROOT/finance-agents/data-agent" python -m server)"
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
 
 # 等待 data-agent 启动
@@ -105,20 +135,31 @@ echo "📌 步骤 4: 启动 finance-cron..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
 load_project_env
-nohup python finance-cron/run_scheduler.py --config finance-cron/config/cron_config.yaml > "$LOG_DIR/finance-cron.log" 2>&1 &
-FINANCE_CRON_PID=$!
+FINANCE_CRON_PID="$(start_detached "$LOG_DIR/finance-cron.log" "$PROJECT_ROOT" python finance-cron/run_scheduler.py --config finance-cron/config/cron_config.yaml)"
 echo "$FINANCE_CRON_PID" > /tmp/finance-cron.pid
 echo "✅ finance-cron 已启动 (PID: $FINANCE_CRON_PID)"
 
 # 等待 finance-cron 启动
 sleep 2
 
+# 启动 recon-worker（默认 4 个进程，可通过 RECON_WORKER_COUNT 覆盖）
+echo ""
+RECON_WORKER_COUNT="${RECON_WORKER_COUNT:-4}"
+echo "📌 步骤 5: 启动 recon-worker × ${RECON_WORKER_COUNT}..."
+cd "$PROJECT_ROOT"
+source .venv/bin/activate
+load_project_env
+> /tmp/recon-workers.pids
+for i in $(seq 1 "$RECON_WORKER_COUNT"); do
+    WORKER_PID="$(start_detached "$LOG_DIR/recon-worker-${i}.log" "$PROJECT_ROOT/finance-agents/data-agent" python recon_worker.py)"
+    echo "$WORKER_PID" >> /tmp/recon-workers.pids
+    echo "  ✅ recon-worker-${i} 已启动 (PID: $WORKER_PID)"
+done
+
 # 启动 finance-web
 echo ""
-echo "📌 步骤 5: 启动 finance-web (端口 5173)..."
-cd "$PROJECT_ROOT/finance-web"
-nohup npm run dev > "$LOG_DIR/finance-web.log" 2>&1 &
-FINANCE_WEB_PID=$!
+echo "📌 步骤 6: 启动 finance-web (端口 5173)..."
+FINANCE_WEB_PID="$(start_detached "$LOG_DIR/finance-web.log" "$PROJECT_ROOT/finance-web" npm run dev)"
 echo "✅ finance-web 已启动 (PID: $FINANCE_WEB_PID)"
 
 # 等待所有服务完全启动
@@ -164,6 +205,20 @@ else
     SERVICES_OK=false
 fi
 
+# 检查 recon-worker
+WORKER_ALIVE=0
+if [ -f /tmp/recon-workers.pids ]; then
+    while IFS= read -r pid; do
+        kill -0 "$pid" 2>/dev/null && WORKER_ALIVE=$((WORKER_ALIVE + 1))
+    done < /tmp/recon-workers.pids
+fi
+if [ "$WORKER_ALIVE" -ge 1 ]; then
+    echo "✅ recon-worker  (×${WORKER_ALIVE}) - 运行正常"
+else
+    echo "❌ recon-worker  - 启动失败"
+    SERVICES_OK=false
+fi
+
 echo ""
 echo "=========================================="
 
@@ -176,10 +231,11 @@ if [ "$SERVICES_OK" = true ]; then
     echo "   - finance-mcp: http://localhost:3335"
     echo ""
     echo "📋 查看日志："
-    echo "   - finance-mcp: tail -f $LOG_DIR/finance-mcp.log"
-    echo "   - data-agent:  tail -f $LOG_DIR/data-agent.log"
-    echo "   - finance-cron: tail -f $LOG_DIR/finance-cron.log"
-    echo "   - finance-web: tail -f $LOG_DIR/finance-web.log"
+    echo "   - finance-mcp:    tail -f $LOG_DIR/finance-mcp.log"
+    echo "   - data-agent:     tail -f $LOG_DIR/data-agent.log"
+    echo "   - finance-cron:   tail -f $LOG_DIR/finance-cron.log"
+    echo "   - recon-worker-1: tail -f $LOG_DIR/recon-worker-1.log"
+    echo "   - finance-web:    tail -f $LOG_DIR/finance-web.log"
     echo ""
     echo "🧭 LangSmith 调试："
     echo "   - 默认关闭 tracing：./START_ALL_SERVICES.sh"

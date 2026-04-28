@@ -279,7 +279,7 @@ function sanitizeOutputFieldDrafts(
 }
 
 function filterSupportedPreparationOutputFields(fields: OutputFieldDraft[]): OutputFieldDraft[] {
-  return fields.filter((field) => field.valueMode === 'source_field');
+  return fields.filter((field) => field.outputName.trim());
 }
 
 function buildPreparationWithRenderedDescriptions(

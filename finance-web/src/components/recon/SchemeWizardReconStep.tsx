@@ -84,6 +84,7 @@ function renderSampleTable(
   rows: ReconSampleRow[] | undefined,
   title: string,
   fieldLabelMap?: Record<string, string>,
+  options: { showCount?: boolean } = {},
 ) {
   if (!rows || rows.length === 0) {
     return (
@@ -101,13 +102,13 @@ function renderSampleTable(
   );
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-border bg-surface">
+    <div className="max-h-[280px] overflow-auto rounded-2xl border border-border bg-surface">
       <div className="min-w-[680px]">
-        <div className="border-b border-border-subtle px-4 py-2 text-xs font-semibold tracking-[0.16em] text-text-muted">
-          {title}
+        <div className="sticky top-0 z-20 border-b border-border-subtle bg-surface px-4 py-2 text-xs font-semibold tracking-[0.16em] text-text-muted">
+          {options.showCount === false ? title : `${title}（${rows.length} 条）`}
         </div>
         <table className="w-full text-left text-sm text-text-secondary">
-          <thead className="text-[11px] uppercase tracking-[0.14em] text-text-muted">
+          <thead className="sticky top-[33px] z-10 bg-surface-secondary text-[11px] uppercase tracking-[0.14em] text-text-muted">
             <tr>
               {columns.map((col) => (
                 <th key={col} className="px-4 py-2 font-semibold">
@@ -457,8 +458,8 @@ export default function SchemeWizardReconStep({
 
       {showTrialResult ? (
         <div ref={previewAnchorRef} className="space-y-4">
-          {renderSampleTable(preview?.leftSamples, '左侧整理结果抽样', preview?.leftFieldLabelMap)}
-          {renderSampleTable(preview?.rightSamples, '右侧整理结果抽样', preview?.rightFieldLabelMap)}
+          {renderSampleTable(preview?.leftSamples, '左侧整理结果', preview?.leftFieldLabelMap)}
+          {renderSampleTable(preview?.rightSamples, '右侧整理结果', preview?.rightFieldLabelMap)}
 
           <div className="rounded-3xl border border-border bg-surface-secondary p-4">
             <p className="text-sm font-semibold text-text-primary">对账结果摘要</p>
@@ -496,7 +497,7 @@ export default function SchemeWizardReconStep({
             )}
           </div>
 
-          {renderSampleTable(preview?.resultSamples, '对账差异抽样', preview?.resultFieldLabelMap)}
+          {renderSampleTable(preview?.resultSamples, '对账差异', preview?.resultFieldLabelMap, { showCount: false })}
         </div>
       ) : null}
     </div>

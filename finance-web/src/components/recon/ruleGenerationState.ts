@@ -1,6 +1,11 @@
 import type { DataSourceKind } from '../../types';
 import { extractCollectionDetailSampleRows } from './datasetPreview';
-import { createOutputFieldDraft, inferOutputFieldSemanticRole, type OutputFieldDraft } from './schemeWizardState';
+import {
+  createOutputFieldDraft,
+  inferOutputFieldSemanticRole,
+  normalizeOutputFieldSemanticRole,
+  type OutputFieldDraft,
+} from './schemeWizardState';
 import type {
   AiProcQuestionCandidate,
   AiProcQuestion,
@@ -46,16 +51,23 @@ export interface RuleGenerationEventDraftUpdate {
 const RULE_GENERATION_NODE_DEFS = [
   ['prepare_context', '准备上下文'],
   ['understand_rule', '理解业务规则'],
-  ['field_binding', '绑定规则字段'],
+  ['validate_ir_structure', '校验 IR 结构'],
+  ['resolve_source_bindings', '绑定源字段'],
+  ['lint_ir', '校验规则 IR'],
+  ['repair_ir', '修复规则 IR'],
   ['semantic_resolution', '自动消除歧义'],
   ['ambiguity_gate', '判断是否需要补充'],
-  ['generate_or_repair_json', '生成规则'],
-  ['lint_json', '校验规则'],
+  ['generate_proc_json', '生成规则'],
+  ['check_ir_dsl_consistency', '检查规则一致性'],
+  ['lint_proc_json', '校验规则可执行性'],
   ['build_sample_inputs', '读取真实样例数据'],
   ['run_sample', '样例执行'],
+  ['diagnose_sample', '诊断样例结果'],
   ['assert_output', '校验输出结果'],
   ['result', '生成结果'],
 ] as const;
+
+const RULE_GENERATION_SAMPLE_ROW_LIMIT = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -303,6 +315,7 @@ export function createEmptyAiProcSideDraft(): AiProcSideDraft {
     status: 'idle',
     summary: '',
     error: '',
+    failureReasons: [],
     nodeTraces: createDefaultRuleGenerationNodeTraces(),
     questions: [],
     assumptions: [],
@@ -310,6 +323,7 @@ export function createEmptyAiProcSideDraft(): AiProcSideDraft {
     warnings: [],
     outputRows: [],
     outputFieldLabelMap: {},
+    outputColumnHints: {},
   };
 }
 
@@ -369,7 +383,7 @@ export async function fetchRuleGenerationSampleRows(
     const params = new URLSearchParams({
       resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
       limit: '1',
-      sample_limit: '5',
+      sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
     });
     const response = await fetch(
       `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
@@ -377,7 +391,8 @@ export async function fetchRuleGenerationSampleRows(
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return [];
-    return toPreviewTableRows(extractCollectionDetailSampleRows(data, 5)).slice(0, 5);
+    return toPreviewTableRows(extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
+      .slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT);
   } catch {
     return [];
   }
@@ -394,7 +409,7 @@ async function fetchRuleGenerationSourceMetadata(
     const params = new URLSearchParams({
       resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
       limit: '1',
-      sample_limit: '5',
+      sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
     });
     const response = await fetch(
       `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
@@ -403,7 +418,8 @@ async function fetchRuleGenerationSourceMetadata(
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return { sampleRows: [] };
     return {
-      sampleRows: toPreviewTableRows(extractCollectionDetailSampleRows(data, 5)).slice(0, 5),
+      sampleRows: toPreviewTableRows(extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
+        .slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT),
       fieldLabelMap: extractFieldLabelMapFromDataset(asRecord(data).dataset),
       schemaSummary: extractSchemaSummaryFromDataset(asRecord(data).dataset),
     };
@@ -440,8 +456,19 @@ export function normalizeAiOutputFields(value: unknown): OutputFieldDraft[] {
     .map((item) => {
       const name = String(item.name || item.label || '').trim();
       const draft = createOutputFieldDraft(name);
-      draft.semanticRole = inferOutputFieldSemanticRole(name);
-      draft.valueMode = 'source_field';
+      const dataType = String(item.data_type || item.dataType || '').trim().toLowerCase();
+      const sourceFields = normalizeStringList(item.source_fields || item.sourceFields);
+      const inferredRole = /date|time|timestamp|datetime/.test(dataType)
+        ? 'time_field'
+        : inferOutputFieldSemanticRole(name);
+      draft.semanticRole = normalizeOutputFieldSemanticRole(
+        item.semantic_role ?? item.semanticRole ?? inferredRole,
+      );
+      draft.valueMode = item.is_derived === true ? 'formula' : 'source_field';
+      draft.sourceField = sourceFields[0] || '';
+      if (draft.valueMode === 'formula') {
+        draft.formula = normalizeStringList(item.source_labels || item.sourceLabels).join(' + ');
+      }
       return draft;
     })
     .filter((field) => field.outputName.trim());
@@ -456,6 +483,32 @@ function normalizeAiOutputFieldLabelMap(value: unknown): Record<string, string> 
         const name = String(item.name || '').trim();
         const label = String(item.label || item.display_name || name).trim();
         return [name, label] as const;
+      })
+      .filter(([name]) => Boolean(name)),
+  );
+}
+
+function normalizeAiOutputColumnHints(value: unknown): Record<string, {
+  helper?: string;
+  tone?: 'sky' | 'emerald' | 'amber' | 'violet';
+}> {
+  if (!Array.isArray(value)) return {};
+  return Object.fromEntries(
+    value
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => {
+        const name = String(item.name || '').trim();
+        const sourceLabels = normalizeStringList(item.source_labels || item.sourceLabels);
+        if (!name || item.is_derived !== true || sourceLabels.length === 0) {
+          return ['', {}] as const;
+        }
+        return [
+          name,
+          {
+            helper: `源字段：${sourceLabels.join(' / ')}`,
+            tone: 'violet' as const,
+          },
+        ] as const;
       })
       .filter(([name]) => Boolean(name)),
   );
@@ -538,6 +591,26 @@ function normalizeQuestions(value: unknown): AiProcQuestion[] {
   }));
 }
 
+function normalizeFailureReasons(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const errorItems = value.filter(isRecord);
+  const terminalItems = errorItems.filter((item) => {
+    const stage = toText(item.stage, toText(item.node)).trim();
+    return stage && stage !== 'run_sample';
+  });
+  const items = terminalItems.length > 0 ? terminalItems : errorItems;
+  return items
+    .filter(isRecord)
+    .map((item) => {
+      const stage = toText(item.stage, toText(item.node)).trim();
+      const stepId = toText(item.step_id).trim();
+      const message = toText(item.message, toText(item.error)).trim();
+      const parts = [stage, stepId, message].filter(Boolean);
+      return parts.join(' - ');
+    })
+    .filter(Boolean);
+}
+
 export function applyRuleGenerationEventToDraft(
   current: AiProcSideDraft,
   sideLabel: string,
@@ -554,21 +627,24 @@ export function applyRuleGenerationEventToDraft(
     nextDraft.status = 'needs_user_input';
     nextDraft.summary = '规则存在需要确认的字段或业务口径，请修改上方完整规则描述后重新生成。';
     nextDraft.questions = normalizeQuestions(payload.questions);
+    nextDraft.failureReasons = [];
   }
 
   if (eventName === 'graph_completed') {
     const outputRows = normalizeAiOutputRows(payload.output_preview_rows);
     outputFields = normalizeAiOutputFields(payload.output_fields);
     const outputFieldLabelMap = normalizeAiOutputFieldLabelMap(payload.output_fields);
+    const outputColumnHints = normalizeAiOutputColumnHints(payload.output_fields);
     nextDraft.status = 'succeeded';
-    nextDraft.ruleDraft = '';
     nextDraft.summary = `${sideLabel}输出数据已生成，已通过 rule_generation 校验。`;
     nextDraft.error = '';
+    nextDraft.failureReasons = [];
     nextDraft.questions = [];
     nextDraft.outputRows = outputRows;
     nextDraft.outputFieldLabelMap = Object.keys(outputFieldLabelMap).length > 0
       ? outputFieldLabelMap
       : Object.fromEntries(outputFields.map((field) => [field.outputName, field.outputName]));
+    nextDraft.outputColumnHints = outputColumnHints;
     nextDraft.procRuleJson = isRecord(payload.proc_rule_json) ? payload.proc_rule_json : undefined;
     nextDraft.procSteps = isRecord(payload.proc_rule_json) && Array.isArray(payload.proc_rule_json.steps)
       ? payload.proc_rule_json.steps.filter(isRecord)
@@ -579,9 +655,11 @@ export function applyRuleGenerationEventToDraft(
   }
 
   if (eventName === 'graph_failed') {
+    const failureReasons = normalizeFailureReasons(payload.errors);
     nextDraft.status = 'failed';
     nextDraft.summary = `${sideLabel}AI生成失败。`;
-    nextDraft.error = String(payload.message || 'AI生成输出数据失败');
+    nextDraft.error = failureReasons[0] || String(payload.message || 'AI生成输出数据失败');
+    nextDraft.failureReasons = failureReasons;
   }
 
   if (eventName === 'repair_started') {

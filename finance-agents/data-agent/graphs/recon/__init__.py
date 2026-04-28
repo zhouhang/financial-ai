@@ -18,24 +18,47 @@
 
 from __future__ import annotations
 
-# ── 节点函数 ──────────────────────────────────────────────────────────────────
-from graphs.recon.nodes import (
-    recon_task_execution_node,
-    recon_result_node,
-)
 
-# ── 公共节点（从 main_graph 导入）──────────────────────────────────────────────
-from graphs.main_graph.public_nodes import (
-    get_rule_node,
-    check_file_node,
-)
+def get_rule_node(*args, **kwargs):
+    from graphs.main_graph.public_nodes import get_rule_node as _get_rule_node
 
-# ── 路由函数 & 子图构建 ────────────────────────────────────────────────────────
-from graphs.recon.routers import (
-    route_after_get_rule,
-    route_after_check_file,
-    build_recon_subgraph,
-)
+    return _get_rule_node(*args, **kwargs)
+
+
+def check_file_node(*args, **kwargs):
+    from graphs.main_graph.public_nodes import check_file_node as _check_file_node
+
+    return _check_file_node(*args, **kwargs)
+
+
+async def recon_task_execution_node(*args, **kwargs):
+    from graphs.recon.nodes import recon_task_execution_node as _recon_task_execution_node
+
+    return await _recon_task_execution_node(*args, **kwargs)
+
+
+def recon_result_node(*args, **kwargs):
+    from graphs.recon.nodes import recon_result_node as _recon_result_node
+
+    return _recon_result_node(*args, **kwargs)
+
+
+def route_after_get_rule(*args, **kwargs):
+    from graphs.recon.routers import route_after_get_rule as _route_after_get_rule
+
+    return _route_after_get_rule(*args, **kwargs)
+
+
+def route_after_check_file(*args, **kwargs):
+    from graphs.recon.routers import route_after_check_file as _route_after_check_file
+
+    return _route_after_check_file(*args, **kwargs)
+
+
+def build_recon_subgraph(*args, **kwargs):
+    from graphs.recon.routers import build_recon_subgraph as _build_recon_subgraph
+
+    return _build_recon_subgraph(*args, **kwargs)
 
 __all__ = [
     # 节点函数

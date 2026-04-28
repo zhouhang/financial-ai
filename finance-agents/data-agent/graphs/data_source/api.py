@@ -468,6 +468,7 @@ class DataSourceDatasetCollectionDetailResponse(BaseModel):
     source_id: str = ""
     resource_key: str = ""
     dataset: dict[str, Any] | None = None
+    collection_stats: dict[str, Any] = Field(default_factory=dict)
     jobs: list[dict[str, Any]] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     count: int = 0
@@ -603,6 +604,7 @@ class DataSourceDatasetSemanticUpdateRequest(BaseModel):
 class DataSourceDatasetCollectionTriggerRequest(BaseModel):
     resource_key: str = ""
     biz_date: str = ""
+    background: bool = True
     params: dict[str, Any] = Field(default_factory=dict)
     mode: str = ""
 
@@ -1109,6 +1111,7 @@ async def get_dataset_collection_detail(
         source_id=str(result.get("source_id") or source_id),
         resource_key=str(result.get("resource_key") or resource_key or ""),
         dataset=result.get("dataset"),
+        collection_stats=result.get("collection_stats") or {},
         jobs=result.get("jobs") or [],
         rows=result.get("rows") or [],
         count=int(result.get("count") or len(result.get("jobs") or [])),
@@ -1177,6 +1180,7 @@ async def trigger_dataset_collection(
         dataset_id=dataset_id,
         resource_key=body.resource_key,
         biz_date=body.biz_date or _default_collection_biz_date(),
+        background=body.background,
         params=body.params,
         mode=body.mode,
     )

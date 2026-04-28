@@ -11,6 +11,8 @@ export type AiProcSide = 'left' | 'right';
 export type AiProcGenerationStatus = 'idle' | 'generating' | 'needs_user_input' | 'succeeded' | 'failed';
 export type RuleGenerationNodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'needs_user_input';
 
+const SIMPLE_MAPPING_UI_ENABLED = false;
+
 export interface RuleGenerationNodeTrace {
   code: string;
   name: string;
@@ -114,6 +116,7 @@ export interface AiProcSideDraft {
   status: AiProcGenerationStatus;
   summary: string;
   error: string;
+  failureReasons: string[];
   nodeTraces: RuleGenerationNodeTrace[];
   questions: AiProcQuestion[];
   assumptions: Array<Record<string, unknown>>;
@@ -123,6 +126,7 @@ export interface AiProcSideDraft {
   procSteps?: Array<Record<string, unknown>>;
   outputRows: ProcSampleRow[];
   outputFieldLabelMap: Record<string, string>;
+  outputColumnHints?: Record<string, PreviewColumnHintMeta>;
 }
 
 export interface SchemeWizardTargetProcStepProps {
@@ -211,9 +215,9 @@ function RowTable({
   const columns = buildSampleColumns(rows);
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-border bg-surface">
+    <div className="max-h-[280px] overflow-auto rounded-2xl border border-border bg-surface">
       <table className="w-max min-w-full border-collapse text-xs">
-        <thead>
+        <thead className="sticky top-0 z-10 bg-surface-secondary">
           <tr className="border-b border-border-subtle text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
             {columns.map((col) => {
               const label = fieldLabelMap?.[col]?.trim();
@@ -509,6 +513,20 @@ function mergeDatasetDisplayColumns(fields: FieldItem[], rows: Record<string, un
 type FieldItem = { raw_name: string; display_name: string };
 type PopupPos = { top: number; left: number; maxWidth: number };
 
+const RULE_GENERATION_SAMPLE_ROW_LIMIT = 20;
+const DATASET_PREVIEW_CACHE = new Map<string, Promise<DatasetPreviewState>>();
+const DATASET_FIELD_ITEMS_CACHE = new Map<string, Promise<FieldItem[]>>();
+
+function datasetStructureCacheKey(source: SchemeSourceOption, suffix: string): string {
+  return [
+    suffix,
+    source.sourceId,
+    source.id,
+    source.resourceKey || source.datasetCode || source.technicalName || source.name,
+    RULE_GENERATION_SAMPLE_ROW_LIMIT,
+  ].join('|');
+}
+
 function mergeFieldItems(primary: FieldItem[], fallback: FieldItem[]): FieldItem[] {
   const labelByRawName = new Map<string, string>();
   [...fallback, ...primary].forEach((field) => {
@@ -679,14 +697,14 @@ function ProcBuildModeSelector({
     {
       value: 'simple_mapping',
       title: '简单字段映射',
-      badge: '当前可用',
+      badge: '基础模式',
       description: '适合左右单表字段整理、固定值、公式和拼接输出。',
       points: ['选择左右原始数据集', '调整输出字段', '试跑生成 proc JSON'],
     },
     {
       value: 'ai_complex_rule',
       title: 'AI复杂规则',
-      badge: '入口已预留',
+      badge: '推荐',
       description: '适合风险资产这类多表、多步骤、完整性检核和条件计算规则。',
       points: ['输入自然语言规则', 'AI 生成 proc JSON', '静态校验、样例执行和断言验证'],
     },
@@ -766,24 +784,37 @@ function DatasetStructureCard({
       }
       setPreview({ loading: true, error: '', rows: [] });
       try {
-        const params = new URLSearchParams({
-          resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
-          limit: '1',
-          sample_limit: '5',
-        });
-        const response = await fetch(
-          `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
-          { headers: { Authorization: `Bearer ${authToken}` } },
-        );
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(String(data.detail || data.message || '样例数据加载失败'));
+        const cacheKey = datasetStructureCacheKey(source, 'preview');
+        let previewRequest = DATASET_PREVIEW_CACHE.get(cacheKey);
+        if (!previewRequest) {
+          previewRequest = (async () => {
+            const params = new URLSearchParams({
+              resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+              limit: '1',
+              sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
+            });
+            const response = await fetch(
+              `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
+              { headers: { Authorization: `Bearer ${authToken}` } },
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(String(data.detail || data.message || '样例数据加载失败'));
+            }
+            return {
+              loading: false,
+              error: '',
+              rows: extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT),
+            };
+          })();
+          DATASET_PREVIEW_CACHE.set(cacheKey, previewRequest);
         }
-        const rows = extractCollectionDetailSampleRows(data, 5);
+        const nextPreview = await previewRequest;
         if (!cancelled) {
-          setPreview({ loading: false, error: '', rows });
+          setPreview(nextPreview);
         }
       } catch (error) {
+        DATASET_PREVIEW_CACHE.delete(datasetStructureCacheKey(source, 'preview'));
         if (!cancelled) {
           setPreview({
             loading: false,
@@ -811,32 +842,41 @@ function DatasetStructureCard({
       }
 
       try {
-        const response = await fetch('/api/recon/schemes/design/dataset-fields', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            source_id: source.sourceId,
-            resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
-            dataset_id: source.id,
-          }),
-        });
-        const data = await response.json().catch(() => ({}));
-        const fields = response.ok && Array.isArray(data.fields)
-          ? (data.fields as FieldItem[])
-              .map((field) => ({
-                raw_name: toText(field.raw_name).trim(),
-                display_name: toText(field.display_name, toText(field.raw_name)).trim(),
-              }))
-              .filter((field) => field.raw_name)
-          : [];
+        const cacheKey = datasetStructureCacheKey(source, 'fields');
+        let fieldsRequest = DATASET_FIELD_ITEMS_CACHE.get(cacheKey);
+        if (!fieldsRequest) {
+          fieldsRequest = (async () => {
+            const response = await fetch('/api/recon/schemes/design/dataset-fields', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${authToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                source_id: source.sourceId,
+                resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+                dataset_id: source.id,
+              }),
+            });
+            const data = await response.json().catch(() => ({}));
+            return response.ok && Array.isArray(data.fields)
+              ? (data.fields as FieldItem[])
+                  .map((field) => ({
+                    raw_name: toText(field.raw_name).trim(),
+                    display_name: toText(field.display_name, toText(field.raw_name)).trim(),
+                  }))
+                  .filter((field) => field.raw_name)
+              : [];
+          })();
+          DATASET_FIELD_ITEMS_CACHE.set(cacheKey, fieldsRequest);
+        }
+        const fields = await fieldsRequest;
         if (!cancelled) {
           const mergedFields = mergeFieldItems(fields, localFields);
           setFieldItems(mergedFields.length > 0 ? mergedFields : null);
         }
       } catch {
+        DATASET_FIELD_ITEMS_CACHE.delete(datasetStructureCacheKey(source, 'fields'));
         if (!cancelled) {
           setFieldItems(localFields.length > 0 ? localFields : null);
         }
@@ -871,7 +911,7 @@ function DatasetStructureCard({
       <div className="mt-4 rounded-2xl border border-border bg-surface px-3 py-3">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">表结构和样例 5 条数据</p>
+            <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">表结构和样例 20 条数据</p>
             <p className="mt-1 text-[11px] text-text-muted">列名优先显示中文名称，下方显示原始字段名。</p>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-text-muted">
@@ -879,7 +919,7 @@ function DatasetStructureCard({
             {preview.loading ? <span className="text-sky-700">加载中...</span> : null}
           </div>
         </div>
-        <div className="mt-3 max-h-72 overflow-auto rounded-xl border border-border bg-white">
+        <div className="mt-3 max-h-[280px] overflow-auto rounded-xl border border-border bg-white">
           {preview.loading ? (
             <p className="px-3 py-3 text-sm text-text-secondary">正在加载样例数据...</p>
           ) : preview.error ? (
@@ -963,7 +1003,7 @@ function AiSideConfigurationPanel({
   const nextSideLabel = isLeft ? '右侧' : '左侧';
   const targetTable = isLeft ? 'left_recon_ready' : 'right_recon_ready';
   const isGenerating = sideDraft.status === 'generating';
-  const hasGeneratedOutput = sideDraft.status === 'succeeded' && sideDraft.outputRows.length > 0;
+  const hasGeneratedOutput = sideDraft.outputRows.length > 0;
   const statusLabel =
     sideDraft.status === 'succeeded'
       ? '已生成'
@@ -996,7 +1036,7 @@ function AiSideConfigurationPanel({
           <div>
             <p className="text-sm font-semibold text-text-primary">{sideLabel}数据集样例</p>
             <p className="mt-1 text-xs leading-5 text-text-secondary">
-              每个数据集用样例表展示字段和最新 5 条数据，作为 AI 对话的固定上下文。
+              每个数据集用样例表展示字段和最新 20 条数据，作为 AI 对话的固定上下文。
             </p>
           </div>
           <span className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-text-secondary">
@@ -1081,16 +1121,17 @@ function AiSideConfigurationPanel({
             {statusLabel}
           </span>
         </div>
-        <div className="mt-4 overflow-auto rounded-2xl border border-border bg-surface">
+        <div className="mt-4">
           {hasGeneratedOutput ? (
             <RowTable
               rows={sideDraft.outputRows}
               fieldLabelMap={sideDraft.outputFieldLabelMap}
-              showRawFieldName
+              columnHints={sideDraft.outputColumnHints}
+              showRawFieldName={false}
             />
           ) : (
             <div className="rounded-2xl border border-dashed border-border bg-surface px-4 py-8 text-center text-sm text-text-secondary">
-              完成{sideLabel} AI 生成和样例执行后，将展示 {targetTable} 的 5 条输出样例。
+              完成{sideLabel} AI 生成和样例执行后，将展示 {targetTable} 的输出样例。
             </div>
           )}
         </div>
@@ -1111,7 +1152,7 @@ function RuleGenerationInlineProgress({
   if (!hasStarted && status === 'idle') return null;
 
   const activeTrace = resolveActiveRuleGenerationTrace(items);
-  const failed = activeTrace?.status === 'failed' || status === 'failed';
+  const failed = status === 'failed';
   const needsInput = activeTrace?.status === 'needs_user_input' || status === 'needs_user_input';
   const succeeded = status === 'succeeded';
   const title = failed
@@ -1148,7 +1189,7 @@ function RuleGenerationInlineProgress({
       {activeTrace?.message ? (
         <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-secondary">{activeTrace.message}</p>
       ) : null}
-      {activeTrace && activeTrace.attempt > 1 ? (
+      {activeTrace && activeTrace.status === 'running' && activeTrace.attempt > 1 ? (
         <p className="mt-1 text-[11px] text-amber-700">正在第 {activeTrace.attempt} 次尝试修复。</p>
       ) : null}
     </div>
@@ -1170,7 +1211,18 @@ function RuleGenerationFeedback({ sideDraft }: { sideDraft: AiProcSideDraft }) {
     : 'border-sky-100 bg-sky-50 text-sky-800';
   return (
     <div className={cn('mt-3 rounded-2xl border px-4 py-3 text-sm leading-6', tone)}>
-      {hasError ? <p>{sideDraft.error || sideDraft.summary}</p> : null}
+      {hasError ? (
+        <div className="space-y-2">
+          <p>{sideDraft.error || sideDraft.summary}</p>
+          {sideDraft.failureReasons.length > 0 ? (
+            <ul className="list-disc space-y-1 pl-5 text-xs leading-5">
+              {sideDraft.failureReasons.map((reason, index) => (
+                <li key={`${reason}-${index}`}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
       {hasQuestions ? (
         <div className="space-y-2">
           {sideDraft.questions.map((question) => (
@@ -1191,8 +1243,8 @@ function RuleGenerationFeedback({ sideDraft }: { sideDraft: AiProcSideDraft }) {
 function resolveActiveRuleGenerationTrace(items: RuleGenerationNodeTrace[]) {
   return (
     items.find((trace) => trace.status === 'running')
-    || items.find((trace) => trace.status === 'needs_user_input')
-    || items.find((trace) => trace.status === 'failed')
+    || [...items].reverse().find((trace) => trace.status === 'needs_user_input')
+    || [...items].reverse().find((trace) => trace.status === 'failed')
     || [...items].reverse().find((trace) => trace.status === 'completed')
     || items.find((trace) => trace.status === 'pending')
   );
@@ -1208,13 +1260,18 @@ function formatQuestionCandidate(candidate: AiProcQuestionCandidate): string {
 const DEFAULT_RULE_GENERATION_NODES: RuleGenerationNodeTrace[] = [
   ['prepare_context', '准备上下文'],
   ['understand_rule', '理解业务规则'],
-  ['field_binding', '绑定规则字段'],
+  ['validate_ir_structure', '校验 IR 结构'],
+  ['resolve_source_bindings', '绑定源字段'],
+  ['lint_ir', '校验规则 IR'],
+  ['repair_ir', '修复规则 IR'],
   ['semantic_resolution', '自动消除歧义'],
   ['ambiguity_gate', '判断是否需要补充'],
-  ['generate_or_repair_json', '生成规则'],
-  ['lint_json', '校验规则'],
+  ['generate_proc_json', '生成规则'],
+  ['check_ir_dsl_consistency', '检查规则一致性'],
+  ['lint_proc_json', '校验规则可执行性'],
   ['build_sample_inputs', '读取真实样例数据'],
   ['run_sample', '样例执行'],
+  ['diagnose_sample', '诊断样例执行'],
   ['assert_output', '校验输出结果'],
   ['result', '生成结果'],
 ].map(([code, name]) => ({ code, name, status: 'pending', message: '', attempt: 1 }));
@@ -1225,6 +1282,7 @@ function createEmptyAiProcSideDraft(): AiProcSideDraft {
     status: 'idle',
     summary: '',
     error: '',
+    failureReasons: [],
     nodeTraces: DEFAULT_RULE_GENERATION_NODES.map((node) => ({ ...node })),
     questions: [],
     assumptions: [],
@@ -1232,6 +1290,7 @@ function createEmptyAiProcSideDraft(): AiProcSideDraft {
     warnings: [],
     outputRows: [],
     outputFieldLabelMap: {},
+    outputColumnHints: {},
   };
 }
 
@@ -1752,7 +1811,7 @@ export default function SchemeWizardTargetProcStep({
   selectedRightSources,
   leftOutputFields,
   rightOutputFields,
-  procBuildMode = 'simple_mapping',
+  procBuildMode = 'ai_complex_rule',
   aiProcSideDrafts,
   procCompatibility,
   onChangeProcBuildMode = () => undefined,
@@ -1783,6 +1842,12 @@ export default function SchemeWizardTargetProcStep({
     scrollToPreviewPendingRef.current = false;
   }, [procTrialPreview]);
 
+  useEffect(() => {
+    if (procBuildMode !== 'ai_complex_rule') {
+      onChangeProcBuildMode('ai_complex_rule');
+    }
+  }, [onChangeProcBuildMode, procBuildMode]);
+
   const handleTrialProc = () => {
     scrollToPreviewPendingRef.current = true;
     onTrialProc();
@@ -1795,22 +1860,24 @@ export default function SchemeWizardTargetProcStep({
     || (showCompatibility ? procCompatibility.message : '')
   ).trim();
   const compactDetailsText = procCompatibility.details.join('；').trim();
-  const isSimpleBuildMode = procBuildMode === 'simple_mapping';
+  const isSimpleBuildMode = SIMPLE_MAPPING_UI_ENABLED && procBuildMode === 'simple_mapping';
 
   return (
     <div className="space-y-5">
       <div className="rounded-3xl border border-border bg-surface-secondary p-5">
         <p className="text-sm font-semibold text-text-primary">第二步：选择数据集并配置输出字段</p>
         <p className="mt-2 text-sm leading-6 text-text-secondary">
-          当前版本先聚焦最短路径：每侧选 1 个原始数据集，系统会自动推荐一版输出字段，你调整后直接试跑。
+          当前版本聚焦 AI 生成整理规则：选择左右侧数据集后，用自然语言描述整理逻辑并生成输出数据。
         </p>
 
-        <div className="mt-5">
+        {SIMPLE_MAPPING_UI_ENABLED ? (
+          <div className="mt-5">
           <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">选择数据整理方式</p>
           <div className="mt-3">
             <ProcBuildModeSelector value={procBuildMode} onChange={onChangeProcBuildMode} />
           </div>
-        </div>
+          </div>
+        ) : null}
 
         {isSimpleBuildMode ? (
           <>

@@ -65,17 +65,6 @@ def parse_json_content(content: str) -> dict[str, Any]:
     return parsed
 
 
-def unwrap_rule_json(parsed: dict[str, Any]) -> dict[str, Any]:
-    """Extract an effective proc rule object from common LLM envelopes."""
-    for key in ("effective_rule_json", "proc_rule_json", "rule", "proc"):
-        nested = parsed.get(key)
-        if isinstance(nested, dict):
-            return nested
-    if isinstance(parsed.get("steps"), list):
-        return parsed
-    raise ValueError("模型未返回有效 proc JSON")
-
-
 def _decode_first_json_object(text: str) -> dict[str, Any]:
     decoder = json.JSONDecoder()
     for start in [index for index, char in enumerate(text) if char == "{"]:

@@ -616,29 +616,16 @@ async def execute_proc_rule(
     uploaded_files: list[dict[str, Any]],
     rule_code: str,
     auth_token: str = "",
+    dataset_inputs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """根据规则编码执行数据整理规则，生成目标 Excel 文件。
-    
-    Args:
-        uploaded_files: 文件校验结果列表，格式 [{"file_name": str, "file_path": str, "table_id": str, "table_name": str}]
-        rule_code: 整理规则编码，用于从数据库查询对应的规则 JSON；输出目录由 MCP 服务端的 config 决定
-        
-    Returns:
-        {
-            "success": bool,
-            "rule_code": str,
-            "generated_files": [{"rule_id": str, "target_table": str, "output_file": str, "row_count": int}],
-            "generated_count": int,
-            "errors": [str],
-            "message": str
-        }
-    """
     args: dict[str, Any] = {
         "uploaded_files": uploaded_files,
         "rule_code": rule_code,
     }
     if auth_token:
         args["auth_token"] = auth_token
+    if dataset_inputs is not None:
+        args["dataset_inputs"] = dataset_inputs
     return await call_mcp_tool("proc_execute", args)
 
 
@@ -3349,6 +3336,8 @@ async def data_source_trigger_dataset_collection(
     dataset_id: str = "",
     resource_key: str = "",
     biz_date: str = "",
+    trigger_mode: str = "",
+    background: bool | None = None,
     params: dict[str, Any] | None = None,
     mode: str = "",
 ) -> dict[str, Any]:
@@ -3383,6 +3372,10 @@ async def data_source_trigger_dataset_collection(
         payload["resource_key"] = resource_key
     if biz_date:
         payload["biz_date"] = biz_date
+    if trigger_mode:
+        payload["trigger_mode"] = trigger_mode
+    if background is not None:
+        payload["background"] = bool(background)
     if params:
         payload["params"] = params
     result = await call_mcp_tool("data_source_trigger_dataset_collection", payload)
@@ -3540,41 +3533,6 @@ async def data_source_list_collection_records(
         )
     return _attach_mode(result, normalized_mode)
 
-
-async def data_source_export_collection_records(
-    auth_token: str,
-    source_id: str,
-    *,
-    dataset_id: str = "",
-    table_name: str = "",
-    resource_key: str = "",
-    biz_date: str = "",
-    query: dict[str, Any] | None = None,
-    mode: str = "",
-) -> dict[str, Any]:
-    if not auth_token:
-        return {"success": False, "error": "未提供认证 token，请先登录"}
-    if not source_id:
-        return {"success": False, "error": "source_id 不能为空"}
-
-    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
-    args: dict[str, Any] = {
-        "auth_token": auth_token,
-        "source_id": source_id,
-        "mode": normalized_mode,
-    }
-    if dataset_id:
-        args["dataset_id"] = dataset_id
-    if table_name:
-        args["table_name"] = table_name
-    if resource_key:
-        args["resource_key"] = resource_key
-    if biz_date:
-        args["biz_date"] = biz_date
-    if isinstance(query, dict) and query:
-        args["query"] = query
-    result = await call_mcp_tool("data_source_export_collection_records", args)
-    return _attach_mode(result, normalized_mode)
 
 
 async def data_source_preview(
@@ -4591,3 +4549,38 @@ async def data_source_preflight_rule_binding(
             "error": "任务前检查能力暂不可用，请联系管理员检查数据连接服务",
         }
     return _attach_mode(result, normalized_mode)
+
+
+async def recon_queue_enqueue(
+    company_id: str,
+    run_plan_code: str,
+    biz_date: str = "",
+    trigger_mode: str = "schedule",
+    run_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_enqueue", {
+        "company_id": company_id,
+        "run_plan_code": run_plan_code,
+        "biz_date": biz_date,
+        "trigger_mode": trigger_mode,
+        "run_context": run_context or {},
+    })
+
+
+async def recon_queue_dequeue(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_dequeue", {"worker_token": worker_token})
+
+
+async def recon_queue_complete(worker_token: str, job_id: str) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_complete", {"worker_token": worker_token, "job_id": job_id})
+
+
+async def recon_queue_fail(worker_token: str, job_id: str, error: str = "") -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_fail", {"worker_token": worker_token, "job_id": job_id, "error": error})
+
+
+async def recon_queue_reclaim_stale(worker_token: str, timeout_minutes: int = 15) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_reclaim_stale", {
+        "worker_token": worker_token,
+        "timeout_minutes": timeout_minutes,
+    })

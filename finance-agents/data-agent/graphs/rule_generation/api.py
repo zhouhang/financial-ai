@@ -19,6 +19,7 @@ class ProcSideGenerationRequest(BaseModel):
     target_table: str
     rule_text: str = ""
     sources: list[dict[str, Any]] = Field(default_factory=list)
+    proc_json_examples: list[dict[str, Any]] = Field(default_factory=list)
     max_retries: int = 2
 
 

@@ -21,6 +21,7 @@ from services.notifications import get_notification_adapter
 from services.notifications.models import UnifiedTodoStatus
 from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
+    data_source_trigger_dataset_collection,
     execution_run_exception_get,
     execution_run_exception_update,
     execution_run_get,
@@ -183,6 +184,19 @@ def _classify_execution_failure(failed_stage: str) -> str:
     return "unknown_failed"
 
 
+def _normalize_collection_trigger_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"schedule", "scheduled", "cron", "scheduler"}:
+        return "scheduled"
+    if normalized in {"rerun", "retry"}:
+        return "retry"
+    return "manual"
+
+
+def _should_collect_before_recon(value: Any) -> bool:
+    return _normalize_collection_trigger_mode(value) in {"scheduled", "manual", "retry"}
+
+
 def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -192,6 +206,7 @@ def _normalize_binding(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "data_source_id": source_id,
+        "dataset_id": str(item.get("dataset_id") or "").strip(),
         "table_name": table_name,
         "resource_key": str(item.get("resource_key") or "default").strip() or "default",
         "required": bool(item.get("required", True)),
@@ -630,7 +645,32 @@ async def execute_auto_task_run(
 
     source_collections: list[dict[str, Any]] = []
     missing_bindings: list[dict[str, Any]] = []
+    collection_attempts: list[dict[str, Any]] = []
+    collection_trigger_mode = _normalize_collection_trigger_mode(trigger_mode)
+    should_collect_first = _should_collect_before_recon(trigger_mode)
     for binding in bindings:
+        if should_collect_first:
+            collect_result = await data_source_trigger_dataset_collection(
+                auth_token,
+                binding["data_source_id"],
+                dataset_id=str(binding.get("dataset_id") or "").strip(),
+                resource_key=binding["resource_key"],
+                biz_date=normalized_biz_date,
+                trigger_mode=collection_trigger_mode,
+                mode="real",
+            )
+            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+            collection_attempts.append(
+                {
+                    "binding": binding,
+                    "success": bool(collect_result.get("success")),
+                    "job": _safe_dict(collect_result.get("job")),
+                    "error": collection_error,
+                }
+            )
+            if not bool(collect_result.get("success")):
+                missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
+                continue
         collection_result = await data_source_list_collection_records(
             auth_token,
             binding["data_source_id"],
@@ -661,6 +701,8 @@ async def execute_auto_task_run(
             )
 
     source_collection_json = _build_source_collection_summary(bindings, source_collections, missing_bindings)
+    if collection_attempts:
+        source_collection_json["collection_attempts"] = collection_attempts
     run_create = await recon_auto_run_create(
         auth_token,
         {

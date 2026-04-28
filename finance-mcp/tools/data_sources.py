@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1522,46 +1521,6 @@ def _collection_record_filter_matches(row_value: Any, expected_value: Any) -> bo
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expected):
         return actual.startswith(expected)
     return actual == expected
-
-
-def _export_collection_records_to_excel(
-    *,
-    company_id: str,
-    data_source_id: str,
-    dataset_id: str = "",
-    dataset_code: str = "",
-    resource_key: str = "",
-    biz_date: str = "",
-    table_name: str,
-    query: dict[str, Any] | None = None,
-) -> tuple[str, int]:
-    records = auth_db.list_dataset_collection_records(
-        company_id=company_id,
-        data_source_id=data_source_id,
-        dataset_id=_safe_text(dataset_id) or None,
-        dataset_code=_safe_text(dataset_code) or None,
-        resource_key=_safe_text(resource_key) or None,
-        biz_date=_safe_text(biz_date) or None,
-        limit=None,
-        offset=0,
-    )
-    payload_rows = _extract_collection_payload_rows(records, limit=max(len(records), 1))
-    filters = dict((query or {}).get("filters") or {}) if isinstance(query, dict) else {}
-    if filters:
-        payload_rows = [
-            row for row in payload_rows
-            if all(_collection_record_filter_matches(row.get(key), value) for key, value in filters.items())
-        ]
-
-    export_root = UPLOAD_ROOT / "collection_record_exports"
-    export_root.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix="collection_records_export_", dir=str(export_root)))
-    safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in table_name).strip("_") or "dataset"
-    output_path = temp_dir / f"{safe_name}.xlsx"
-    df = pd.DataFrame(payload_rows)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    return str(output_path), len(payload_rows)
 
 
 def _persist_dataset_semantic_profile(
@@ -3188,6 +3147,36 @@ def _attach_aliases_to_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _enrich_jobs_with_latest_attempts(company_id: str, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not jobs:
+        return []
+
+    sync_job_ids = [_safe_text(job.get("id")) for job in jobs if _safe_text(job.get("id"))]
+    attempts_by_job_id = auth_db.get_latest_unified_sync_job_attempts(
+        company_id=company_id,
+        sync_job_ids=sync_job_ids,
+    )
+
+    enriched_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        enriched_job = dict(job)
+        sync_job_id = _safe_text(job.get("id"))
+        attempt = attempts_by_job_id.get(sync_job_id or "")
+        if attempt:
+            attempt_metrics = dict(attempt.get("metrics") or {}) if isinstance(attempt.get("metrics"), dict) else {}
+            current_metrics = dict(enriched_job.get("metrics") or {}) if isinstance(enriched_job.get("metrics"), dict) else {}
+            merged_metrics = {**attempt_metrics, **current_metrics}
+            if merged_metrics:
+                enriched_job["metrics"] = merged_metrics
+            if not _safe_text(enriched_job.get("error_message")) and _safe_text(attempt.get("error_message")):
+                enriched_job["error_message"] = _safe_text(attempt.get("error_message"))
+            enriched_job["attempt_status"] = _safe_text(attempt.get("attempt_status"))
+            enriched_job["attempt_no"] = attempt.get("attempt_no")
+            enriched_job["attempt_finished_at"] = attempt.get("finished_at")
+        enriched_jobs.append(enriched_job)
+    return enriched_jobs
+
+
 def create_tools() -> list[Tool]:
     source_id_schema = {
         "source_id": {"type": "string"},
@@ -3705,24 +3694,6 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="data_source_export_collection_records",
-            description="将数据资产层 dataset_collection_records 导出为临时 Excel 文件，供 proc/recon 运行时复用。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "auth_token": {"type": "string"},
-                    **source_id_schema,
-                    "dataset_id": {"type": "string"},
-                    "dataset_code": {"type": "string"},
-                    "resource_key": {"type": "string"},
-                    "biz_date": {"type": "string"},
-                    "table_name": {"type": "string"},
-                    "query": {"type": "object"},
-                },
-                "required": ["auth_token", "source_id"],
-            },
-        ),
-        Tool(
             name="data_source_preview",
             description="预览数据源数据样例。",
             inputSchema={
@@ -3798,8 +3769,6 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_get_dataset_collection_detail(arguments)
         if name == "data_source_list_collection_records":
             return await _handle_data_source_list_collection_records(arguments)
-        if name == "data_source_export_collection_records":
-            return await _handle_data_source_export_collection_records(arguments)
         if name == "data_source_preview":
             return await _handle_data_source_preview(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
@@ -5553,7 +5522,7 @@ async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, An
         "source_id": source_id,
         "resource_key": resource_key,
         "idempotency_key": "",
-        "background": False,
+        "background": _normalize_bool(arguments.get("background"), default=False),
         "params": params,
     }
     result = await _handle_data_source_trigger_sync(payload)
@@ -5574,9 +5543,10 @@ async def _handle_data_source_get_sync_job(arguments: dict[str, Any]) -> dict[st
     job = auth_db.get_unified_sync_job_by_id(str(arguments.get("sync_job_id") or ""))
     if not job or str(job.get("company_id") or "") != company_id:
         return {"success": False, "error": "同步任务不存在"}
+    enriched_jobs = _enrich_jobs_with_latest_attempts(company_id, [job])
     return {
         "success": True,
-        "job": _attach_aliases_to_job(job),
+        "job": _attach_aliases_to_job(enriched_jobs[0]) if enriched_jobs else _attach_aliases_to_job(job),
     }
 
 
@@ -5592,6 +5562,7 @@ async def _handle_data_source_list_sync_jobs(arguments: dict[str, Any]) -> dict[
         job_status=status,
         limit=max(1, min(limit, 100)),
     )
+    jobs = _enrich_jobs_with_latest_attempts(company_id, jobs)
     return {
         "success": True,
         "count": len(jobs),
@@ -5625,6 +5596,7 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
         )
         if _safe_text(job.get("resource_key")) == resource_key
     ][:limit]
+    jobs = _enrich_jobs_with_latest_attempts(company_id, jobs)
     stats = auth_db.get_dataset_collection_record_stats(
         company_id=company_id,
         data_source_id=source_id,
@@ -5711,55 +5683,6 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
         "offset": offset,
     }
 
-
-async def _handle_data_source_export_collection_records(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
-    source_id = _source_id_from_args(arguments)
-    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
-    if not source_row:
-        return {"success": False, "error": "数据源不存在"}
-
-    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
-    dataset_id = _safe_text((dataset_row or {}).get("id")) or _dataset_id_from_args(arguments)
-    dataset_code = _safe_text((dataset_row or {}).get("dataset_code")) or _sanitize_dataset_code(arguments.get("dataset_code"))
-    resource_key = _resource_key_from_args(arguments)
-    if dataset_row:
-        resource_key = _safe_text(dataset_row.get("resource_key")) or resource_key
-
-    query = arguments.get("query") if isinstance(arguments.get("query"), dict) else {}
-    table_name = _safe_text(
-        arguments.get("table_name")
-        or (dataset_row or {}).get("business_name")
-        or (dataset_row or {}).get("dataset_name")
-        or dataset_code
-        or resource_key
-        or source_id
-    )
-    biz_date = _safe_text(arguments.get("biz_date") or query.get("biz_date"))
-    file_path, row_count = _export_collection_records_to_excel(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=dataset_id,
-        dataset_code=dataset_code,
-        resource_key=resource_key,
-        biz_date=biz_date,
-        table_name=table_name,
-        query=query,
-    )
-    return {
-        "success": True,
-        "source_id": source_id,
-        "dataset_id": dataset_id,
-        "dataset_code": dataset_code,
-        "resource_key": resource_key,
-        "biz_date": biz_date,
-        "table_name": table_name,
-        "file_path": file_path,
-        "row_count": row_count,
-        "query": query,
-        "message": "已导出采集记录",
-    }
 
 
 async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, Any]:

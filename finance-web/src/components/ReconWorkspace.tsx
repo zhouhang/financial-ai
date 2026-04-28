@@ -25,7 +25,6 @@ import { fetchReconAutoApi } from './recon/autoApi';
 import SchemeWizardIntentStep from './recon/SchemeWizardIntentStep';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
-import SchemeWizardSummaryStep from './recon/SchemeWizardSummaryStep';
 import {
   applyPreparationOutputFields,
   applyPreparationSources,
@@ -38,7 +37,6 @@ import {
   hydratePreparationOutputFieldsFromProcRule,
   inferOutputFieldSemanticRole,
   normalizeOutputFieldSemanticRole,
-  resolveOutputFieldSemanticRoleLabel,
   type OutputFieldDraft,
   type OutputFieldSemanticRole,
   type ReconFieldPairDraft,
@@ -93,7 +91,7 @@ type CenterModalState =
   | { kind: 'task-detail'; task: ReconTaskListItem }
   | { kind: 'run-exceptions'; run: ReconCenterRunItem };
 
-type SchemeWizardStep = 1 | 2 | 3 | 4;
+type SchemeWizardStep = 1 | 2 | 3;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
@@ -272,6 +270,8 @@ interface SchemeMetaSummary {
   rightSources: SchemeSourceDraft[];
   leftOutputFields: OutputFieldDraft[];
   rightOutputFields: OutputFieldDraft[];
+  leftOutputFieldLabelMap: Record<string, string>;
+  rightOutputFieldLabelMap: Record<string, string>;
   leftDescription: string;
   rightDescription: string;
   procRuleName: string;
@@ -319,8 +319,7 @@ const RECON_RESULT_FIELD_LABEL_MAP: Record<string, string> = {
 const SCHEME_WIZARD_STEPS: Array<{ id: SchemeWizardStep; title: string; description: string }> = [
   { id: 1, title: '方案目标', description: '先说明这次对账要解决什么问题' },
   { id: 2, title: '数据整理', description: '选择左右数据并整理成可对账结构' },
-  { id: 3, title: '对账规则', description: '基于整理后的结构生成和修正规则' },
-  { id: 4, title: '确认保存', description: '确认摘要和试跑状态后保存方案' },
+  { id: 3, title: '对账规则', description: '基于整理后的结构生成、修正规则并保存方案' },
 ];
 
 const EMPTY_PLAN_DRAFT: PlanDraft = {
@@ -840,11 +839,6 @@ function executionStatusMeta(status: string): { label: string; className: string
   };
 }
 
-function canRetryExecutionRun(status: string): boolean {
-  const normalized = status.trim().toLowerCase();
-  return normalized === 'failed' || normalized === 'error';
-}
-
 function formatAnomalyTypeLabel(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'source_only') return '左侧独有';
@@ -1128,6 +1122,7 @@ function mapRun(
   taskNameByCode: Map<string, string>,
 ): ReconCenterRunItem {
   const raw = asRecord(item);
+  const runContext = asRecord(raw.run_context_json);
   const schemeCode = toText(raw.scheme_code);
   const planCode = toText(raw.plan_code);
   return {
@@ -1138,7 +1133,7 @@ function mapRun(
     schemeName: schemeNameByCode.get(schemeCode) || schemeCode || '--',
     planName: taskNameByCode.get(planCode) || planCode || '--',
     executionStatus: toText(raw.execution_status),
-    triggerType: toText(raw.trigger_type),
+    triggerType: toText(runContext.trigger_type, toText(raw.trigger_type)),
     entryMode: toText(raw.entry_mode),
     anomalyCount: toInt(raw.anomaly_count, 0),
     failedStage: toText(raw.failed_stage),
@@ -1178,6 +1173,7 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
 
 function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
+  const procRuleJson = asRecord(schemeMeta.proc_rule_json);
   const reconRuleJson = asRecord(schemeMeta.recon_rule_json);
   const datasetBindings = asRecord(schemeMeta.dataset_bindings);
   const leftBindingRows = asList(datasetBindings.left);
@@ -1257,13 +1253,29 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     rightTimeSemantic: toText(schemeMeta.right_time_semantic, toText(schemeMeta.time_semantic)),
     tolerance: toText(schemeMeta.tolerance),
   });
+  const leftOutputFields = normalizeOutputFieldDrafts(schemeMeta.left_output_fields);
+  const rightOutputFields = normalizeOutputFieldDrafts(schemeMeta.right_output_fields);
+  const leftOutputFieldLabelMap = mergeLabelMaps(
+    buildOutputFieldLabelMap(leftOutputFields, leftSources),
+    buildProcOutputFieldLabelMap(procRuleJson, 'left_recon_ready', leftSources),
+    normalizeFieldLabelMap(schemeMeta.left_output_field_label_map),
+    normalizeFieldLabelMap(schemeMeta.leftOutputFieldLabelMap),
+  );
+  const rightOutputFieldLabelMap = mergeLabelMaps(
+    buildOutputFieldLabelMap(rightOutputFields, rightSources),
+    buildProcOutputFieldLabelMap(procRuleJson, 'right_recon_ready', rightSources),
+    normalizeFieldLabelMap(schemeMeta.right_output_field_label_map),
+    normalizeFieldLabelMap(schemeMeta.rightOutputFieldLabelMap),
+  );
 
   return {
     businessGoal: toText(schemeMeta.business_goal, item.description),
     leftSources,
     rightSources,
-    leftOutputFields: normalizeOutputFieldDrafts(schemeMeta.left_output_fields),
-    rightOutputFields: normalizeOutputFieldDrafts(schemeMeta.right_output_fields),
+    leftOutputFields,
+    rightOutputFields,
+    leftOutputFieldLabelMap,
+    rightOutputFieldLabelMap,
     leftDescription: toText(schemeMeta.left_description),
     rightDescription: toText(schemeMeta.right_description),
     procRuleName: toText(schemeMeta.proc_rule_name),
@@ -1924,6 +1936,9 @@ function resolveResultDatasetLabel(
   fields: OutputFieldDraft[],
   sources: Array<SchemeSourceOption | SchemeSourceDraft>,
 ): string {
+  if (sources.length > 1) {
+    return side === 'left' ? '左侧表' : '右侧表';
+  }
   const firstPair = filterCompleteReconFieldPairs(matchFieldPairs)[0];
   const fieldName = side === 'left' ? firstPair?.leftField : firstPair?.rightField;
   return resolveFieldDrivenDatasetLabel(fieldName || '', fields, sources);
@@ -2112,28 +2127,63 @@ function renderPreparedFieldOptionLabel(fieldName: string): string {
   return PREPARED_OUTPUT_FIELD_LABEL_MAP[normalized] || humanizeProcDescription(normalized).trim() || normalized;
 }
 
-function buildOutputFieldLabelMap(fields: OutputFieldDraft[]): Record<string, string> {
+function buildOutputFieldLabelMap(
+  fields: OutputFieldDraft[],
+  sources: SchemeSourceDraft[] = [],
+): Record<string, string> {
   const labels: Record<string, string> = {};
+  const sourceLabelMaps = new Map(
+    sources.map((source) => [source.id, source.fieldLabelMap || {}] as const),
+  );
   fields.forEach((field) => {
     const outputName = field.outputName.trim();
     if (!outputName) return;
-    labels[outputName] = renderPreparedFieldOptionLabel(outputName);
+    const sourceFieldLabel = field.sourceDatasetId && field.sourceField
+      ? sourceLabelMaps.get(field.sourceDatasetId)?.[field.sourceField]?.trim()
+      : '';
+    labels[outputName] = sourceFieldLabel || renderPreparedFieldOptionLabel(outputName);
+  });
+  return labels;
+}
+
+function buildProcOutputFieldLabelMap(
+  ruleJson: Record<string, unknown>,
+  targetTable: string,
+  sources: SchemeSourceDraft[],
+): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const sourceFieldLabels = Object.assign({}, ...sources.map((source) => source.fieldLabelMap || {}));
+  asList(ruleJson.steps).forEach((item) => {
+    const step = asRecord(item);
+    if (toText(step.target_table).trim() !== targetTable) return;
+
+    asList(asRecord(step.schema).columns).forEach((columnItem) => {
+      const column = asRecord(columnItem);
+      const name = toText(column.name, toText(column.column_name)).trim();
+      const label = toText(column.label, toText(column.display_name)).trim();
+      if (name && label) {
+        labels[name] = label;
+      }
+    });
+
+    asList(step.mappings).forEach((mappingItem) => {
+      const mapping = asRecord(mappingItem);
+      const targetField = toText(mapping.target_field).trim();
+      if (!targetField || labels[targetField]) return;
+      const value = asRecord(mapping.value);
+      if (toText(value.type).trim() !== 'source') return;
+      const sourceField = toText(asRecord(value.source).field, toText(value.field)).trim();
+      const sourceLabel = sourceFieldLabels[sourceField]?.trim();
+      if (sourceLabel) {
+        labels[targetField] = sourceLabel;
+      }
+    });
   });
   return labels;
 }
 
 function mergeLabelMaps(...maps: Array<Record<string, string> | undefined>): Record<string, string> {
   return Object.assign({}, ...maps.filter(Boolean));
-}
-
-function renderOutputFieldListLabel(field: OutputFieldDraft): string {
-  const name = field.outputName.trim();
-  if (!name) return '';
-  const role = normalizeOutputFieldSemanticRole(field.semanticRole);
-  if (role === 'normal') {
-    return name;
-  }
-  return `${name}（${resolveOutputFieldSemanticRoleLabel(role)}）`;
 }
 
 function scoreMatchFieldCandidate(rawName: string): number {
@@ -2176,6 +2226,7 @@ function buildReconFieldOptions(
   scorer?: (fieldName: string, label: string) => number,
   preferredRole: OutputFieldSemanticRole = 'normal',
   fieldLabelMap?: Record<string, string>,
+  options?: { onlyTimeRelated?: boolean; includeFallback?: boolean },
 ): ReconFieldOption[] {
   const optionMap = new Map<string, { value: string; label: string; score: number }>();
   fields.forEach((field) => {
@@ -2183,16 +2234,25 @@ function buildReconFieldOptions(
     if (!value) return;
     const label = fieldLabelMap?.[value] || renderPreparedFieldOptionLabel(value);
     const role = normalizeOutputFieldSemanticRole(field.semanticRole);
+    if (options?.onlyTimeRelated && role !== 'time_field' && !isTimeRelatedFieldName(value, label)) {
+      return;
+    }
     optionMap.set(value, {
       value,
       label,
       score: (scorer ? scorer(value, label) : 0) + (preferredRole !== 'normal' && role === preferredRole ? 100 : 0),
     });
   });
-  if (fallbackValue.trim() && !optionMap.has(fallbackValue.trim())) {
+  const normalizedFallback = fallbackValue.trim();
+  const fallbackLabel = fieldLabelMap?.[normalizedFallback] || renderPreparedFieldOptionLabel(normalizedFallback);
+  const shouldIncludeFallback = options?.includeFallback !== false
+    && normalizedFallback
+    && !optionMap.has(normalizedFallback)
+    && (!options?.onlyTimeRelated || isTimeRelatedFieldName(normalizedFallback, fallbackLabel));
+  if (shouldIncludeFallback) {
     optionMap.set(fallbackValue.trim(), {
       value: fallbackValue.trim(),
-      label: fieldLabelMap?.[fallbackValue.trim()] || renderPreparedFieldOptionLabel(fallbackValue.trim()),
+      label: fallbackLabel,
       score: 999,
     });
   }
@@ -2208,12 +2268,30 @@ function buildAllReconFieldOptions(
   return buildReconFieldOptions(fields, '', undefined, 'normal', fieldLabelMap);
 }
 
-function pickPreferredFieldValue(options: ReconFieldOption[], currentValue: string): string {
+function firstOutputFieldValueByRole(
+  fields: OutputFieldDraft[],
+  role: OutputFieldSemanticRole,
+): string {
+  return fields.find(
+    (field) =>
+      normalizeOutputFieldSemanticRole(field.semanticRole) === role && field.outputName.trim(),
+  )?.outputName.trim() || '';
+}
+
+function pickPreferredTimeFieldValue(
+  options: ReconFieldOption[],
+  currentValue: string,
+  roleDerivedValue = '',
+): string {
   const normalizedCurrent = currentValue.trim();
   if (normalizedCurrent && options.some((option) => option.value === normalizedCurrent)) {
     return normalizedCurrent;
   }
-  return options[0]?.value || '';
+  const normalizedRoleDerived = roleDerivedValue.trim();
+  if (normalizedRoleDerived && options.some((option) => option.value === normalizedRoleDerived)) {
+    return normalizedRoleDerived;
+  }
+  return '';
 }
 
 function buildStructuredReconDraftText(config: {
@@ -2741,6 +2819,15 @@ function scoreDateFieldCandidate(rawName: string, label: string): number {
   return score;
 }
 
+function isTimeRelatedFieldName(rawName: string, label: string): boolean {
+  const raw = rawName.trim().toLowerCase();
+  const display = label.trim();
+  if (!raw && !display) return false;
+  const rawHasTimeToken = /(^|[_\-.])(date|time|datetime|timestamp|dt|day)([_\-.]|$)|(^|[_\-.])gmt[_\-.]?|created_at|updated_at|occurred_at|happened_at|booked_at|posted_at|settled_at|paid_at|completed_at|finished_at/.test(raw);
+  const labelHasTimeToken = /(日期|时间|时刻|账期|期间|年月|年度|月份|自然日|业务日|结算日|记账日|入账日|发生日|完成日|创建日|更新日|支付日|付款日|下单日)/.test(display);
+  return rawHasTimeToken || labelHasTimeToken;
+}
+
 function SummaryBadge({ label, value }: { label: string; value: number }) {
   return (
     <span className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-text-secondary">
@@ -2772,6 +2859,13 @@ function collectReconSideFieldValues(
   return dedupeTextList(
     filterCompleteReconFieldPairs(pairs).map((pair) => (side === 'left' ? pair.leftField : pair.rightField)),
   );
+}
+
+function formatDetailFieldValues(
+  values: string[],
+  fieldLabelMap: Record<string, string>,
+): string[] {
+  return dedupeTextList(values).map((value) => fieldLabelMap[value] || renderPreparedFieldOptionLabel(value));
 }
 
 function DetailListRow({ label, values }: { label: string; values: string[] }) {
@@ -2886,10 +2980,11 @@ export default function ReconWorkspace({
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
-  const [procBuildMode, setProcBuildMode] = useState<ProcBuildMode>('simple_mapping');
+  const [procBuildMode, setProcBuildMode] = useState<ProcBuildMode>('ai_complex_rule');
   const [aiProcSideDrafts, setAiProcSideDrafts] = useState<Record<AiProcSide, AiProcSideDraft>>(() =>
     createEmptyAiProcSideDrafts(),
   );
+  const aiProcSideDraftsRef = useRef<Record<AiProcSide, AiProcSideDraft>>(aiProcSideDrafts);
   const [wizardDraftState, setWizardDraftState] = useState<SchemeWizardDraftState>(() =>
     createEmptySchemeWizardDraftState(),
   );
@@ -2903,7 +2998,6 @@ export default function ReconWorkspace({
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
-  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
   const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
@@ -2911,6 +3005,8 @@ export default function ReconWorkspace({
     status: 'success' | 'error';
   } | null>(null);
   const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const aiProcAbortControllersRef = useRef<Partial<Record<AiProcSide, AbortController>>>({});
+  const aiProcGenerationSeqRef = useRef<Record<AiProcSide, number>>({ left: 0, right: 0 });
   const schemeDraft = useMemo<SchemeDraft>(() => buildLegacySchemeDraftSnapshot(wizardDraftState), [wizardDraftState]);
   const selectedLeftSources = wizardDraftState.preparation.leftSources as SchemeSourceOption[];
   const selectedRightSources = wizardDraftState.preparation.rightSources as SchemeSourceOption[];
@@ -2965,6 +3061,10 @@ export default function ReconWorkspace({
     [selectedPlanScheme],
   );
 
+  useEffect(() => {
+    aiProcSideDraftsRef.current = aiProcSideDrafts;
+  }, [aiProcSideDrafts]);
+
   const procJsonPreview = useMemo(
     () => (schemeDraft.procRuleJson ? JSON.stringify(schemeDraft.procRuleJson, null, 2) : ''),
     [schemeDraft.procRuleJson],
@@ -3017,20 +3117,64 @@ export default function ReconWorkspace({
     [parsedReconConfig.compareFieldPairs, roleDerivedCompareFieldPairs],
   );
   const leftOutputFieldLabelMap = useMemo(
-    () => mergeLabelMaps(buildOutputFieldLabelMap(leftOutputFields), aiProcSideDrafts.left.outputFieldLabelMap),
-    [aiProcSideDrafts.left.outputFieldLabelMap, leftOutputFields],
+    () => mergeLabelMaps(
+      buildOutputFieldLabelMap(leftOutputFields, selectedLeftSources),
+      aiProcSideDrafts.left.outputFieldLabelMap,
+    ),
+    [aiProcSideDrafts.left.outputFieldLabelMap, leftOutputFields, selectedLeftSources],
   );
   const rightOutputFieldLabelMap = useMemo(
-    () => mergeLabelMaps(buildOutputFieldLabelMap(rightOutputFields), aiProcSideDrafts.right.outputFieldLabelMap),
-    [aiProcSideDrafts.right.outputFieldLabelMap, rightOutputFields],
+    () => mergeLabelMaps(
+      buildOutputFieldLabelMap(rightOutputFields, selectedRightSources),
+      aiProcSideDrafts.right.outputFieldLabelMap,
+    ),
+    [aiProcSideDrafts.right.outputFieldLabelMap, rightOutputFields, selectedRightSources],
+  );
+  const roleDerivedLeftTimeSemantic = useMemo(
+    () => firstOutputFieldValueByRole(leftOutputFields, 'time_field'),
+    [leftOutputFields],
+  );
+  const roleDerivedRightTimeSemantic = useMemo(
+    () => firstOutputFieldValueByRole(rightOutputFields, 'time_field'),
+    [rightOutputFields],
   );
   const leftTimeFieldOptions = useMemo(
-    () => buildReconFieldOptions(leftOutputFields, parsedReconConfig.leftTimeSemantic, scoreDateFieldCandidate, 'time_field', leftOutputFieldLabelMap),
-    [leftOutputFieldLabelMap, leftOutputFields, parsedReconConfig.leftTimeSemantic],
+    () => buildReconFieldOptions(
+      leftOutputFields,
+      roleDerivedLeftTimeSemantic,
+      scoreDateFieldCandidate,
+      'time_field',
+      leftOutputFieldLabelMap,
+      { onlyTimeRelated: true, includeFallback: false },
+    ),
+    [leftOutputFieldLabelMap, leftOutputFields, roleDerivedLeftTimeSemantic],
   );
   const rightTimeFieldOptions = useMemo(
-    () => buildReconFieldOptions(rightOutputFields, parsedReconConfig.rightTimeSemantic, scoreDateFieldCandidate, 'time_field', rightOutputFieldLabelMap),
-    [parsedReconConfig.rightTimeSemantic, rightOutputFieldLabelMap, rightOutputFields],
+    () => buildReconFieldOptions(
+      rightOutputFields,
+      roleDerivedRightTimeSemantic,
+      scoreDateFieldCandidate,
+      'time_field',
+      rightOutputFieldLabelMap,
+      { onlyTimeRelated: true, includeFallback: false },
+    ),
+    [rightOutputFieldLabelMap, rightOutputFields, roleDerivedRightTimeSemantic],
+  );
+  const effectiveLeftTimeSemantic = useMemo(
+    () => pickPreferredTimeFieldValue(
+      leftTimeFieldOptions,
+      parsedReconConfig.leftTimeSemantic,
+      roleDerivedLeftTimeSemantic,
+    ),
+    [leftTimeFieldOptions, parsedReconConfig.leftTimeSemantic, roleDerivedLeftTimeSemantic],
+  );
+  const effectiveRightTimeSemantic = useMemo(
+    () => pickPreferredTimeFieldValue(
+      rightTimeFieldOptions,
+      parsedReconConfig.rightTimeSemantic,
+      roleDerivedRightTimeSemantic,
+    ),
+    [parsedReconConfig.rightTimeSemantic, rightTimeFieldOptions, roleDerivedRightTimeSemantic],
   );
   const leftReconFieldOptions = useMemo(
     () => buildAllReconFieldOptions(leftOutputFields, leftOutputFieldLabelMap),
@@ -3049,8 +3193,8 @@ export default function ReconWorkspace({
           reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
           matchFieldPairs: activeMatchFieldPairs,
           compareFieldPairs: activeCompareFieldPairs,
-          leftTimeSemantic: parsedReconConfig.leftTimeSemantic,
-          rightTimeSemantic: parsedReconConfig.rightTimeSemantic,
+          leftTimeSemantic: effectiveLeftTimeSemantic,
+          rightTimeSemantic: effectiveRightTimeSemantic,
         }),
         error: '',
       };
@@ -3063,8 +3207,8 @@ export default function ReconWorkspace({
   }, [
     activeCompareFieldPairs,
     activeMatchFieldPairs,
-    parsedReconConfig.leftTimeSemantic,
-    parsedReconConfig.rightTimeSemantic,
+    effectiveLeftTimeSemantic,
+    effectiveRightTimeSemantic,
     schemeDraft.businessGoal,
     schemeDraft.name,
     schemeDraft.reconRuleName,
@@ -3284,7 +3428,7 @@ export default function ReconWorkspace({
 
   const resetSchemeWizard = useCallback(() => {
     setSchemeWizardStep(1);
-    setProcBuildMode('simple_mapping');
+    setProcBuildMode('ai_complex_rule');
     setAiProcSideDrafts(createEmptyAiProcSideDrafts());
     setWizardDraftState(createEmptySchemeWizardDraftState());
     setDesignSessionId('');
@@ -3449,17 +3593,26 @@ export default function ReconWorkspace({
   );
 
   const handleAiProcRuleDraftChange = useCallback((side: AiProcSide, value: string) => {
-    setAiProcSideDrafts((prev) => ({
-      ...prev,
-      [side]: {
-        ...prev[side],
-        ruleDraft: value,
-        status: prev[side].status === 'generating' ? prev[side].status : 'idle',
-        summary: '',
-        error: '',
-        questions: [],
-      },
-    }));
+    aiProcGenerationSeqRef.current[side] += 1;
+    aiProcAbortControllersRef.current[side]?.abort();
+    delete aiProcAbortControllersRef.current[side];
+    setAiProcSideDrafts((prev) => {
+      const current = prev[side];
+      const hasGeneratedResult = current.outputRows.length > 0 || Boolean(current.procRuleJson);
+      return {
+        ...prev,
+        [side]: {
+          ...current,
+          ruleDraft: value,
+          status: hasGeneratedResult ? 'succeeded' : 'idle',
+          summary: hasGeneratedResult ? current.summary : '',
+          error: '',
+          failureReasons: [],
+          questions: [],
+          nodeTraces: hasGeneratedResult ? current.nodeTraces : createDefaultRuleGenerationNodeTraces(),
+        },
+      };
+    });
   }, []);
 
   const applyRuleGenerationEvent = useCallback((side: AiProcSide, sideLabel: string, payload: Record<string, unknown>) => {
@@ -3477,7 +3630,7 @@ export default function ReconWorkspace({
   const handleGenerateAiProcOutput = useCallback(
     async (side: AiProcSide) => {
       const selectedSources = side === 'left' ? selectedLeftSources : selectedRightSources;
-      const currentDraft = aiProcSideDrafts[side];
+      const currentDraft = aiProcSideDraftsRef.current[side];
       const ruleText = currentDraft.ruleDraft.trim();
       const sideLabel = side === 'left' ? '左侧' : '右侧';
       const targetTable = side === 'left' ? 'left_recon_ready' : 'right_recon_ready';
@@ -3489,6 +3642,7 @@ export default function ReconWorkspace({
             status: 'failed',
             error: `请先输入${sideLabel}整理规则描述。`,
             summary: '',
+            failureReasons: [],
           },
         }));
         return;
@@ -3501,19 +3655,26 @@ export default function ReconWorkspace({
             status: 'failed',
             error: `请先选择${sideLabel}数据集。`,
             summary: '',
+            failureReasons: [],
           },
         }));
         return;
       }
 
       setModalError(null);
+      aiProcAbortControllersRef.current[side]?.abort();
+      const generationSeq = aiProcGenerationSeqRef.current[side] + 1;
+      aiProcGenerationSeqRef.current[side] = generationSeq;
+      const controller = new AbortController();
+      aiProcAbortControllersRef.current[side] = controller;
       setAiProcSideDrafts((prev) => ({
         ...prev,
         [side]: {
           ...prev[side],
           status: 'generating',
-          summary: `${sideLabel}规则已提交，正在执行规则理解、JSON生成、静态校验、样例执行和断言验证。`,
+          summary: `${sideLabel}规则已提交，正在执行规则理解、字段绑定、JSON生成、样例执行和断言验证。`,
           error: '',
+          failureReasons: [],
           nodeTraces: createDefaultRuleGenerationNodeTraces(),
           questions: [],
           warnings: [],
@@ -3534,6 +3695,7 @@ export default function ReconWorkspace({
             rule_text: ruleText,
             sources: sourcePayloads,
           }),
+          signal: controller.signal,
         });
         if (!response.ok || !response.body) {
           const detail = await response.text().catch(() => '');
@@ -3554,6 +3716,7 @@ export default function ReconWorkspace({
           frames.forEach((frame) => {
             const eventPayload = parseSseFrame(frame);
             if (!eventPayload) return;
+            if (aiProcGenerationSeqRef.current[side] !== generationSeq) return;
             finalEvent = eventPayload;
             applyRuleGenerationEvent(side, sideLabel, eventPayload);
           });
@@ -3561,9 +3724,13 @@ export default function ReconWorkspace({
         if (buffer.trim()) {
           const eventPayload = parseSseFrame(buffer);
           if (eventPayload) {
+            if (aiProcGenerationSeqRef.current[side] !== generationSeq) return;
             finalEvent = eventPayload;
             applyRuleGenerationEvent(side, sideLabel, eventPayload);
           }
+        }
+        if (aiProcGenerationSeqRef.current[side] !== generationSeq) {
+          return;
         }
         if (!finalEvent || finalEvent.event !== 'graph_completed') {
           return;
@@ -3571,8 +3738,9 @@ export default function ReconWorkspace({
 
         const outputFields = normalizeAiOutputFields(finalEvent.output_fields);
         const currentRule = isRecord(finalEvent.proc_rule_json) ? finalEvent.proc_rule_json : undefined;
-        const leftRule = side === 'left' ? currentRule : aiProcSideDrafts.left.procRuleJson;
-        const rightRule = side === 'right' ? currentRule : aiProcSideDrafts.right.procRuleJson;
+        const latestSideDrafts = aiProcSideDraftsRef.current;
+        const leftRule = side === 'left' ? currentRule : latestSideDrafts.left.procRuleJson;
+        const rightRule = side === 'right' ? currentRule : latestSideDrafts.right.procRuleJson;
         const mergedRule = leftRule && rightRule
           ? buildAiSideProcRuleJson({
               schemeName: schemeDraft.name,
@@ -3645,11 +3813,22 @@ export default function ReconWorkspace({
         setReconTrialPreview(null);
         setReconCompatibility(emptyCompatibilityResult());
         setWizardDraftState((prev) => {
-          const next = applyPreparationOutputFields(prev, side, outputFields);
+          const withGeneratedFields = outputFields.length > 0
+            ? applyPreparationOutputFields(prev, side, outputFields)
+            : prev;
+          const next = withGeneratedFields;
           const leftGenerated = Boolean(leftRule);
           const rightGenerated = Boolean(rightRule);
-          if (!leftGenerated || !rightGenerated || next.preparation.leftOutputFields.length === 0 || next.preparation.rightOutputFields.length === 0) {
-            return updateDerivedDraft(next, {
+          const withMergedFields = leftGenerated && rightGenerated && verifiedMergedRule
+            ? hydratePreparationOutputFieldsFromProcRule(next, verifiedMergedRule)
+            : next;
+          if (
+            !leftGenerated
+            || !rightGenerated
+            || withMergedFields.preparation.leftOutputFields.length === 0
+            || withMergedFields.preparation.rightOutputFields.length === 0
+          ) {
+            return updateDerivedDraft(withMergedFields, {
               procTrialStatus: 'needs_adjustment',
               procTrialSummary: `${sideLabel}输出数据已生成，请继续生成${side === 'left' ? '右侧' : '左侧'}输出数据。`,
               procPreviewState: 'current',
@@ -3659,7 +3838,7 @@ export default function ReconWorkspace({
               reconPreviewState: 'empty',
             });
           }
-          return updateDerivedDraft(next, {
+          return updateDerivedDraft(withMergedFields, {
             procRuleJson: verifiedMergedRule,
             procTrialStatus: mergedTrialPassed ? 'passed' : 'needs_adjustment',
             procTrialSummary: mergedTrialSummary,
@@ -3679,6 +3858,12 @@ export default function ReconWorkspace({
         });
         setReconTrialPreview(null);
       } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        if (aiProcGenerationSeqRef.current[side] !== generationSeq) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'AI生成输出数据失败';
         setAiProcSideDrafts((prev) => ({
           ...prev,
@@ -3689,12 +3874,15 @@ export default function ReconWorkspace({
             error: message,
           },
         }));
+      } finally {
+        if (aiProcGenerationSeqRef.current[side] === generationSeq) {
+          delete aiProcAbortControllersRef.current[side];
+        }
       }
     },
     [
       authToken,
       applyRuleGenerationEvent,
-      aiProcSideDrafts,
       schemeDraft.businessGoal,
       schemeDraft.name,
       selectedLeftSources,
@@ -4492,12 +4680,39 @@ export default function ReconWorkspace({
       setModalError('请先登录后再保存对账方案。');
       return;
     }
-    if (!schemeDraft.procRuleJson || !schemeDraft.reconRuleJson) {
+    if (!schemeDraft.procRuleJson) {
+      setModalError('请先生成并验证数据整理规则。');
+      return;
+    }
+    if (!compiledReconRuleResult.json && !schemeDraft.reconRuleJson) {
+      setModalError(compiledReconRuleResult.error || '请先生成并验证数据对账逻辑。');
+      return;
+    }
+    if (schemeDraft.procTrialStatus !== 'passed') {
+      setModalError('请先完成数据整理试跑验证，再保存方案。');
+      return;
+    }
+
+    let effectiveReconRuleJson = schemeDraft.reconRuleJson || compiledReconRuleResult.json;
+    if (!effectiveReconRuleJson) {
       setModalError('请先生成并验证数据整理规则与对账逻辑。');
       return;
     }
-    if (schemeDraft.procTrialStatus !== 'passed' || schemeDraft.reconTrialStatus !== 'passed') {
-      setModalError('请先完成数据整理和对账逻辑的试跑验证，再保存方案。');
+
+    if (schemeDraft.reconTrialStatus !== 'passed') {
+      const passed = await trialReconDraft();
+      if (!passed) {
+        setModalError('数据对账试跑未通过，请调整逻辑后重试。');
+        return;
+      }
+      effectiveReconRuleJson = schemeDraft.reconRuleJson || compiledReconRuleResult.json;
+      if (!effectiveReconRuleJson) {
+        setModalError('数据对账试跑完成后，仍未生成可保存的对账逻辑。');
+        return;
+      }
+    }
+
+    if (!window.confirm('确认当前规则、字段映射和试跑结果都已检查完毕，立即保存方案吗？')) {
       return;
     }
 
@@ -4507,7 +4722,7 @@ export default function ReconWorkspace({
     try {
       const schemePayloadDraft = buildSchemeCreatePayloadDraft(wizardDraftState);
       const procRuleJson = schemeDraft.procRuleJson;
-      const reconRuleJson = schemeDraft.reconRuleJson;
+      const reconRuleJson = effectiveReconRuleJson;
       const parsedReconRule = parseReconRuleJsonConfig(reconRuleJson, parsedReconConfig);
       const procRuleName = schemeDraft.name.trim() ? `${schemeDraft.name.trim()}整理规则` : '整理规则';
       const reconRuleName =
@@ -4626,6 +4841,8 @@ export default function ReconWorkspace({
             proc_trial_summary: schemePayloadDraft.scheme_meta_json.proc_trial_summary,
             recon_trial_status: schemePayloadDraft.scheme_meta_json.recon_trial_status,
             recon_trial_summary: schemePayloadDraft.scheme_meta_json.recon_trial_summary,
+            left_output_field_label_map: leftOutputFieldLabelMap,
+            right_output_field_label_map: rightOutputFieldLabelMap,
             match_key: parsedReconRule.matchKey.trim() || parsedReconConfig.matchKey.trim(),
             left_amount_field: parsedReconRule.leftAmountField.trim() || parsedReconConfig.leftAmountField.trim(),
             right_amount_field: parsedReconRule.rightAmountField.trim() || parsedReconConfig.rightAmountField.trim(),
@@ -4660,11 +4877,16 @@ export default function ReconWorkspace({
   }, [
     authToken,
     closeModal,
+    compiledReconRuleResult.error,
+    compiledReconRuleResult.json,
+    leftOutputFieldLabelMap,
     loadCenterData,
     parsedReconConfig,
+    rightOutputFieldLabelMap,
     schemeDraft,
     selectedLeftSources,
     selectedRightSources,
+    trialReconDraft,
     wizardDraftState,
   ]);
 
@@ -4905,40 +5127,6 @@ export default function ReconWorkspace({
     [authToken],
   );
 
-  const handleRetryRun = useCallback(
-    async (runId: string) => {
-      if (!authToken) {
-        setCenterError('请先登录后再重试运行。');
-        return;
-      }
-      setRetryingRunId(runId);
-      setCenterError(null);
-      setCenterNotice(null);
-      try {
-        const response = await fetchReconAutoApi(`/runs/${runId}/retry`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ reason: '前端手动重试' }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(String(data.detail || data.message || '重试运行失败'));
-        }
-        await loadCenterData();
-        setActiveTab('runs');
-        setCenterNotice('已重新触发该运行任务，请稍后刷新查看最新状态。');
-      } catch (error) {
-        setCenterError(error instanceof Error ? error.message : '重试运行失败');
-      } finally {
-        setRetryingRunId((prev) => (prev === runId ? null : prev));
-      }
-    },
-    [authToken, loadCenterData],
-  );
-
   const handleRerunValidation = useCallback(
     async (originalRunId: string, exceptionId = '') => {
       if (!authToken) {
@@ -5009,8 +5197,6 @@ export default function ReconWorkspace({
   const schemeStepTwoPassed =
     schemeDraft.procTrialStatus === 'passed' && Boolean(schemeDraft.procRuleJson);
   const schemeStepThreeReady = Boolean(compiledReconRuleResult.json);
-  const schemeStepThreePassed =
-    schemeDraft.reconTrialStatus === 'passed' && Boolean(schemeDraft.reconRuleJson);
   const isSchemeWizardBusy =
     isTrialingProc || isTrialingRecon || aiProcGenerationBusy;
 
@@ -5054,8 +5240,16 @@ export default function ReconWorkspace({
         reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
         matchFieldPairs: nextMatchFieldPairs,
         compareFieldPairs: nextCompareFieldPairs,
-        leftTimeSemantic: pickPreferredFieldValue(leftTimeFieldOptions, parsedReconConfig.leftTimeSemantic),
-        rightTimeSemantic: pickPreferredFieldValue(rightTimeFieldOptions, parsedReconConfig.rightTimeSemantic),
+        leftTimeSemantic: pickPreferredTimeFieldValue(
+          leftTimeFieldOptions,
+          effectiveLeftTimeSemantic,
+          roleDerivedLeftTimeSemantic,
+        ),
+        rightTimeSemantic: pickPreferredTimeFieldValue(
+          rightTimeFieldOptions,
+          effectiveRightTimeSemantic,
+          roleDerivedRightTimeSemantic,
+        ),
       });
       setSchemeWizardStep(3);
       return;
@@ -5065,24 +5259,12 @@ export default function ReconWorkspace({
         setModalError(compiledReconRuleResult.error || '请至少配置一组匹配字段和一组对比字段。');
         return;
       }
-      if (!schemeStepThreePassed) {
-        const passed = await trialReconDraft();
-        if (!passed) {
-          setModalError('数据对账试跑未通过，请调整逻辑后重试。');
-          return;
-        }
-      }
-      if (!schemeDraft.reconRuleJson) {
-        setModalError('当前缺少可保存的数据对账逻辑。');
-        return;
-      }
-      setSchemeWizardStep(4);
+      setModalError('第三步已是最后一步，请直接点击“保存方案”。');
     }
   }, [
     compiledReconRuleResult.error,
     compiledReconRuleResult.json,
     schemeStepOneReady,
-    schemeStepThreePassed,
     schemeStepThreeReady,
     schemeStepTwoPassed,
     schemeStepTwoReady,
@@ -5092,14 +5274,15 @@ export default function ReconWorkspace({
     schemeDraft.reconRuleJson,
     schemeWizardStep,
     trialProcDraft,
-    trialReconDraft,
     applyStructuredReconConfig,
     activeCompareFieldPairs,
     activeMatchFieldPairs,
+    effectiveLeftTimeSemantic,
+    effectiveRightTimeSemantic,
     leftTimeFieldOptions,
-    parsedReconConfig.leftTimeSemantic,
-    parsedReconConfig.rightTimeSemantic,
     rightTimeFieldOptions,
+    roleDerivedLeftTimeSemantic,
+    roleDerivedRightTimeSemantic,
   ]);
 
   const goToPreviousSchemeStep = useCallback(() => {
@@ -5434,17 +5617,6 @@ export default function ReconWorkspace({
               </span>
               <div className="justify-self-end">
                 <div className="flex items-center gap-2">
-                  {canRetryExecutionRun(item.executionStatus) ? (
-                    <button
-                      type="button"
-                      onClick={() => void handleRetryRun(item.id)}
-                      disabled={retryingRunId === item.id}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <RefreshCw className={cn('h-4 w-4', retryingRunId === item.id && 'animate-spin')} />
-                      {retryingRunId === item.id ? '重试中...' : '重试'}
-                    </button>
-                  ) : null}
                   <button
                     type="button"
                     onClick={() => void handleRerunValidation(item.id)}
@@ -5640,8 +5812,8 @@ export default function ReconWorkspace({
             reconRuleName={schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name)}
             matchFieldPairs={activeMatchFieldPairs}
             compareFieldPairs={activeCompareFieldPairs}
-            leftTimeSemantic={parsedReconConfig.leftTimeSemantic}
-            rightTimeSemantic={parsedReconConfig.rightTimeSemantic}
+            leftTimeSemantic={effectiveLeftTimeSemantic}
+            rightTimeSemantic={effectiveRightTimeSemantic}
             leftMatchFieldOptions={leftReconFieldOptions}
             rightMatchFieldOptions={rightReconFieldOptions}
             leftCompareFieldOptions={leftReconFieldOptions}
@@ -5669,37 +5841,7 @@ export default function ReconWorkspace({
       );
     }
 
-    const procDisplayName =
-      schemeDraft.name ? `${schemeDraft.name}整理规则` : '整理规则';
-    const reconDisplayName =
-      schemeDraft.reconRuleName
-      || toText(asRecord(schemeDraft.reconRuleJson || {}).rule_name)
-      || buildDefaultReconRuleName(schemeDraft.name);
-
-    return (
-      <SchemeWizardSummaryStep
-        schemeName={schemeDraft.name}
-        businessGoal={schemeDraft.businessGoal}
-        leftSources={selectedLeftSources.map((item) => resolveDatasetDisplayName(item))}
-        rightSources={selectedRightSources.map((item) => resolveDatasetDisplayName(item))}
-        leftOutputFields={leftOutputFields.map((item) => renderOutputFieldListLabel(item)).filter(Boolean)}
-        rightOutputFields={rightOutputFields.map((item) => renderOutputFieldListLabel(item)).filter(Boolean)}
-        procDisplayName={procDisplayName}
-        reconDisplayName={reconDisplayName}
-        matchFieldPairs={activeMatchFieldPairs}
-        compareFieldPairs={activeCompareFieldPairs}
-        leftTimeSemantic={parsedReconConfig.leftTimeSemantic}
-        rightTimeSemantic={parsedReconConfig.rightTimeSemantic}
-        procHasConfig={Boolean(schemeDraft.procRuleJson)}
-        reconHasConfig={Boolean(schemeDraft.reconRuleJson)}
-        procTrialStatus={schemeDraft.procTrialStatus}
-        reconTrialStatus={schemeDraft.reconTrialStatus}
-        procTrialSummary={schemeDraft.procTrialSummary}
-        reconTrialSummary={schemeDraft.reconTrialSummary}
-        procPreviewState={wizardDraftState.derived.procPreviewState}
-        reconPreviewState={wizardDraftState.derived.reconPreviewState}
-      />
-    );
+    return null;
   };
 
   const renderModalContent = () => {
@@ -5710,10 +5852,10 @@ export default function ReconWorkspace({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">新增对账方案</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">按四步完成方案设计与试跑确认</h3>
+            <h3 className="mt-1 text-lg font-semibold text-text-primary">按三步完成方案设计与试跑确认</h3>
           </div>
           <div className="space-y-6 px-6 py-5">
-            <div className="grid gap-3 lg:grid-cols-4">
+            <div className="grid gap-3 lg:grid-cols-3">
               {SCHEME_WIZARD_STEPS.map((step) => (
                 <WizardStepBadge
                   key={step.id}
@@ -5751,7 +5893,7 @@ export default function ReconWorkspace({
                 </button>
               ) : null}
             </div>
-            {schemeWizardStep < 4 ? (
+            {schemeWizardStep < 3 ? (
               <button
                 type="button"
                 onClick={goToNextSchemeStep}
@@ -5774,7 +5916,7 @@ export default function ReconWorkspace({
                   isSubmittingScheme ||
                   !schemeStepOneReady ||
                   !schemeStepTwoPassed ||
-                  !schemeStepThreePassed
+                  !schemeStepThreeReady
                 }
                 className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -6026,12 +6168,30 @@ export default function ReconWorkspace({
     if (modalState.kind === 'scheme-detail') {
       const { scheme } = modalState;
       const schemeMeta = extractSchemeMeta(scheme);
-      const leftMatchFields = collectReconSideFieldValues('left', schemeMeta.matchFieldPairs);
-      const rightMatchFields = collectReconSideFieldValues('right', schemeMeta.matchFieldPairs);
-      const leftCompareFields = collectReconSideFieldValues('left', schemeMeta.compareFieldPairs);
-      const rightCompareFields = collectReconSideFieldValues('right', schemeMeta.compareFieldPairs);
-      const leftTimeFields = dedupeTextList([schemeMeta.leftTimeSemantic]);
-      const rightTimeFields = dedupeTextList([schemeMeta.rightTimeSemantic]);
+      const leftMatchFields = formatDetailFieldValues(
+        collectReconSideFieldValues('left', schemeMeta.matchFieldPairs),
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightMatchFields = formatDetailFieldValues(
+        collectReconSideFieldValues('right', schemeMeta.matchFieldPairs),
+        schemeMeta.rightOutputFieldLabelMap,
+      );
+      const leftCompareFields = formatDetailFieldValues(
+        collectReconSideFieldValues('left', schemeMeta.compareFieldPairs),
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightCompareFields = formatDetailFieldValues(
+        collectReconSideFieldValues('right', schemeMeta.compareFieldPairs),
+        schemeMeta.rightOutputFieldLabelMap,
+      );
+      const leftTimeFields = formatDetailFieldValues(
+        [schemeMeta.leftTimeSemantic],
+        schemeMeta.leftOutputFieldLabelMap,
+      );
+      const rightTimeFields = formatDetailFieldValues(
+        [schemeMeta.rightTimeSemantic],
+        schemeMeta.rightOutputFieldLabelMap,
+      );
       return (
         <>
           <div className="border-b border-border px-6 py-5">
@@ -6073,19 +6233,6 @@ export default function ReconWorkspace({
                       })()}
                     </div>
                   ))}
-                  {schemeMeta.leftOutputFields.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {schemeMeta.leftOutputFields.map((field) => (
-                        <span
-                          key={field.id}
-                          className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700"
-                        >
-                          {field.outputName}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                  <p className="text-sm leading-6 text-text-secondary">{schemeMeta.leftDescription || '未补充说明。'}</p>
                   <div className="rounded-2xl border border-border bg-surface px-4 py-2">
                     <DetailListRow label="匹配字段" values={leftMatchFields} />
                     <DetailListRow label="对比字段" values={leftCompareFields} />
@@ -6120,19 +6267,6 @@ export default function ReconWorkspace({
                       })()}
                     </div>
                   ))}
-                  {schemeMeta.rightOutputFields.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {schemeMeta.rightOutputFields.map((field) => (
-                        <span
-                          key={field.id}
-                          className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700"
-                        >
-                          {field.outputName}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                  <p className="text-sm leading-6 text-text-secondary">{schemeMeta.rightDescription || '未补充说明。'}</p>
                   <div className="rounded-2xl border border-border bg-surface px-4 py-2">
                     <DetailListRow label="匹配字段" values={rightMatchFields} />
                     <DetailListRow label="对比字段" values={rightCompareFields} />

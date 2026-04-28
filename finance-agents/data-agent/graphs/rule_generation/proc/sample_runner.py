@@ -40,5 +40,5 @@ def _to_sample_dataset(source: dict[str, Any]) -> dict[str, Any]:
     return {
         **source,
         "table_name": table_name,
-        "sample_rows": list(source.get("sample_rows") or [])[:20],
+        "sample_rows": list(source.get("sample_rows") or []),
     }

@@ -39,8 +39,9 @@ def execute_steps_rule(
     rule_data: dict[str, Any],
     validated_files: list[dict[str, Any]],
     output_dir: str,
+    preloaded_frames: dict[str, pd.DataFrame] | None = None,
 ) -> list[dict[str, Any]]:
-    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir)
+    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
     return runtime.execute()
 
 
@@ -51,12 +52,14 @@ class StepsProcRuntime:
         rule_data: dict[str, Any],
         validated_files: list[dict[str, Any]],
         output_dir: str,
+        preloaded_frames: dict[str, pd.DataFrame] | None = None,
     ) -> None:
         self.rule_code = rule_code
         self.rule_data = rule_data
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.validated_files = validated_files
+        self.preloaded_frames: dict[str, pd.DataFrame] = preloaded_frames or {}
         self.table_file_map = {
             str(item.get("table_name") or "").strip(): str(
                 item.get("file_path") or item.get("file_name") or ""
@@ -363,8 +366,27 @@ class StepsProcRuntime:
                 raise ValueError(f"aggregate source_alias 不存在: {source_alias}")
             if not output_alias:
                 raise ValueError("aggregate 缺少 output_alias")
+            if not aggregations:
+                raise ValueError("aggregate.aggregations 不能为空")
 
             source_df = alias_frames[source_alias]
+            if not group_fields:
+                result_df = pd.DataFrame(
+                    [
+                        {
+                            str(item.get("alias") or item.get("field") or ""): _evaluate_aggregate_series(
+                                source_df[item.get("field")],
+                                str(item.get("operator") or item.get("function") or "").strip(),
+                            )
+                            for item in aggregations
+                            if str(item.get("alias") or item.get("field") or "").strip()
+                        }
+                    ]
+                )
+                alias_frames[output_alias] = result_df
+                alias_tables[output_alias] = alias_tables.get(source_alias, source_alias)
+                continue
+
             grouped = source_df.groupby(group_fields, dropna=False, sort=False)
             agg_frames = []
             for item in aggregations:
@@ -372,7 +394,7 @@ class StepsProcRuntime:
                 operator = str(item.get("operator") or item.get("function") or "").strip()
                 alias = item.get("alias")
                 if operator == "sum":
-                    series = grouped[field].sum(min_count=1)
+                    series = grouped[field].agg(_series_sum)
                 elif operator == "min":
                     series = grouped[field].agg(_series_min)
                 else:
@@ -1142,6 +1164,16 @@ class StepsProcRuntime:
                 contexts,
             )
             return _extract_fraction_numerator(value)
+        if function_name == "to_decimal":
+            value = self._evaluate_value_spec(
+                args.get("value") or args.get("text") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            return _to_decimal(value)
         if function_name == "earliest_date":
             source_table = str(args.get("source") or "").strip()
             date_field = str(args.get("date_field") or "").strip()
@@ -1447,6 +1479,19 @@ class StepsProcRuntime:
     def _ensure_table_loaded(self, table_name: str) -> pd.DataFrame:
         if table_name in self.tables:
             return self.tables[table_name]
+        if table_name in self.preloaded_frames:
+            df = self.preloaded_frames[table_name].copy()
+            self.tables[table_name] = df
+            if table_name not in self.schemas:
+                self.schemas[table_name] = TableSchemaState(
+                    name=table_name,
+                    primary_key=[],
+                    column_order=list(df.columns),
+                    defaults={column: None for column in df.columns},
+                    export_enabled=True,
+                )
+            self._invalidate_row_index_cache(table_name)
+            return df
         file_path = self.table_file_map.get(table_name)
         if not file_path:
             raise ValueError(f"表 '{table_name}' 未在上传文件或中间结果中找到")
@@ -1671,6 +1716,28 @@ def _series_min(series: pd.Series) -> Any:
     return cleaned.min()
 
 
+def _series_sum(series: pd.Series) -> Any:
+    numeric_values: list[float] = []
+    for value in series:
+        if _is_nullish(value):
+            continue
+        numeric_value = _to_decimal(value)
+        if numeric_value is not None:
+            numeric_values.append(numeric_value)
+    if not numeric_values:
+        return None
+    total = sum(numeric_values)
+    return int(total) if float(total).is_integer() else total
+
+
+def _evaluate_aggregate_series(series: pd.Series, operator: str) -> Any:
+    if operator == "sum":
+        return _series_sum(series)
+    if operator == "min":
+        return _series_min(series)
+    raise ValueError(f"不支持的 aggregate operator: {operator}")
+
+
 def _coerce_number(value: Any) -> Optional[float]:
     if _is_nullish(value):
         return 0.0
@@ -1813,6 +1880,30 @@ def _as_month(value: Any) -> int:
     return month
 
 
+def _to_decimal(value: Any) -> Optional[float]:
+    if _is_nullish(value):
+        return None
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            item_value = value.item()
+            if isinstance(item_value, (int, float)):
+                return float(item_value)
+            value = item_value
+        except Exception:
+            pass
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"无法解析 decimal 值: {value}") from exc
+
+
 def _offset_month(month: int, offset: int) -> int:
     return ((month - 1 + offset) % 12) + 1
 
@@ -1881,7 +1972,8 @@ def _compile_formula_expression(expr: str) -> ast.Expression:
             raise ValueError(f"公式包含不支持的语法: {type(node).__name__}")
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in {"coalesce", "is_null"}:
-                raise ValueError("公式包含不支持的函数")
+                function_name = node.func.id if isinstance(node.func, ast.Name) else type(node.func).__name__
+                raise ValueError(f"公式包含不支持的函数: {function_name}")
         if isinstance(node, ast.Name) and node.id not in {"__vars__", "coalesce", "is_null"}:
             raise ValueError(f"公式包含不支持的标识符: {node.id}")
     return tree

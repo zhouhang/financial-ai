@@ -56,6 +56,7 @@ _GENERATION_LABELS = {
     "proc": "整理配置生成器",
     "recon": "对账逻辑生成器",
 }
+DESIGN_SAMPLE_ROW_LIMIT = 20
 
 
 def _fix_proc_formula_exprs(rule: dict[str, Any]) -> dict[str, Any]:
@@ -359,8 +360,10 @@ def _force_recon_table_names(rule_json: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(ident, dict):
                 ident = {}
                 file_cfg["identification"] = ident
+            file_cfg["table_name"] = table_name
             ident["match_by"] = "table_name"
             ident["match_value"] = table_name
+            ident["match_strategy"] = "exact"
     return patched
 
 
@@ -528,6 +531,43 @@ def _truncate_log_text(value: Any, *, limit: int = 320) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+
+
+def _log_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _dataset_log_summary(datasets: Any) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in list(datasets or []):
+        if not isinstance(item, dict):
+            continue
+        rows = [row for row in list(item.get("sample_rows") or []) if isinstance(row, dict)]
+        summary.append({
+            "side": item.get("side"),
+            "table": item.get("table_name") or item.get("resource_key") or item.get("dataset_name"),
+            "business_name": item.get("business_name") or item.get("display_name") or item.get("dataset_name"),
+            "sample_rows": len(rows),
+        })
+    return summary
+
+
+def _proc_output_sample_summary(output_samples: Any) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in list(output_samples or []):
+        if not isinstance(item, dict):
+            continue
+        rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)]
+        summary.append({
+            "side": item.get("side"),
+            "target_table": item.get("target_table") or item.get("title"),
+            "row_count": item.get("row_count"),
+            "preview_rows": len(rows),
+        })
+    return summary
 
 
 class SchemeDesignService:
@@ -1111,6 +1151,12 @@ class SchemeDesignService:
             session,
             auth_token=auth_token,
         )
+        logger.info(
+            "[scheme_design][proc] use_existing session_id=%s datasets=%s rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(target_sample_datasets)),
+            _truncate_log_text(json.dumps(rule_json, ensure_ascii=False), limit=500),
+        )
         compatibility = await execution_proc_rule_compatibility_check(
             auth_token,
             {
@@ -1157,6 +1203,12 @@ class SchemeDesignService:
             session,
             auth_token=auth_token,
         )
+        logger.info(
+            "[scheme_design][proc] trial start session_id=%s datasets=%s proc_rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(target_sample_datasets)),
+            _truncate_log_text(json.dumps(proc_rule_json, ensure_ascii=False), limit=500),
+        )
         trial_result = await self.run_proc_trial(
             auth_token=auth_token,
             payload=ProcTrialInput(
@@ -1176,6 +1228,13 @@ class SchemeDesignService:
         session.proc_step.validation_result = {"success": bool(trial_result.get("success"))}
         session.proc_step.trial_result = trial_result
         session.proc_step.status = "trial_passed" if trial_result.get("ready_for_confirm") else "trial_failed"
+        logger.info(
+            "[scheme_design][proc] trial done session_id=%s ready=%s outputs=%s warnings=%s",
+            session_id,
+            trial_result.get("ready_for_confirm"),
+            _log_json(_proc_output_sample_summary(trial_result.get("output_samples"))),
+            _log_json(list(trial_result.get("warnings") or [])[:5]),
+        )
         if not session.proc_step.draft_text:
             session.proc_step.draft_text = session.proc_step.rule_summary
         session.updated_at = datetime.now(timezone.utc)
@@ -1197,6 +1256,12 @@ class SchemeDesignService:
         if not prepared_datasets:
             raise ValueError("请先完成数据整理试跑，再选择已有对账逻辑")
         rule_json = await self._resolve_rule_json(auth_token, payload.rule_code, payload.rule_json)
+        logger.info(
+            "[scheme_design][recon] use_existing session_id=%s prepared=%s rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(prepared_datasets)),
+            _truncate_log_text(json.dumps(rule_json, ensure_ascii=False), limit=500),
+        )
         compatibility = await execution_recon_rule_compatibility_check(
             auth_token,
             {
@@ -1240,6 +1305,12 @@ class SchemeDesignService:
         prepared_datasets = self._build_recon_sample_datasets(session)
         if not prepared_datasets:
             raise ValueError("请先完成数据整理试跑，再进行对账试跑")
+        logger.info(
+            "[scheme_design][recon] trial start session_id=%s prepared=%s recon_rule=%s",
+            session_id,
+            _log_json(_dataset_log_summary(prepared_datasets)),
+            _truncate_log_text(json.dumps(recon_rule_json, ensure_ascii=False), limit=500),
+        )
         trial_result = await self.run_recon_trial(
             auth_token=auth_token,
             payload=ReconTrialInput(
@@ -1257,6 +1328,14 @@ class SchemeDesignService:
         session.recon_step.validation_result = {"success": bool(trial_result.get("success"))}
         session.recon_step.trial_result = trial_result
         session.recon_step.status = "trial_passed" if trial_result.get("ready_for_confirm") else "trial_failed"
+        logger.info(
+            "[scheme_design][recon] trial done session_id=%s ready=%s left_rows=%d right_rows=%d result_summary=%s",
+            session_id,
+            trial_result.get("ready_for_confirm"),
+            len([row for row in list(trial_result.get("left_samples") or []) if isinstance(row, dict)]),
+            len([row for row in list(trial_result.get("right_samples") or []) if isinstance(row, dict)]),
+            _log_json(trial_result.get("result_summary") or {}),
+        )
         if not session.recon_step.draft_text:
             session.recon_step.draft_text = session.recon_step.rule_summary
         session.updated_at = datetime.now(timezone.utc)
@@ -1582,6 +1661,7 @@ class SchemeDesignService:
         if not all(
             str(item.get("sample_origin") or "").strip() == "collection_records"
             and _has_dict_rows(item.get("sample_rows"))
+            and len([row for row in list(item.get("sample_rows") or []) if isinstance(row, dict)]) >= DESIGN_SAMPLE_ROW_LIMIT
             for item in cached
         ):
             return []
@@ -1618,7 +1698,7 @@ class SchemeDesignService:
                 auth_token,
                 source_id,
                 resource_key=resource_key,
-                limit=3,
+                limit=DESIGN_SAMPLE_ROW_LIMIT,
             ),
             data_source_get_dataset(
                 auth_token,
@@ -1650,7 +1730,7 @@ class SchemeDesignService:
             resolved["resource_key"] = resource_key
 
         if has_rows:
-            resolved["sample_rows"] = rows[:3]
+            resolved["sample_rows"] = rows[:DESIGN_SAMPLE_ROW_LIMIT]
             resolved["schema_summary"] = _merge_schema_summary(resolved.get("schema_summary"), rows)
             resolved["sample_origin"] = "collection_records"
 
@@ -1703,13 +1783,13 @@ class SchemeDesignService:
                     auth_token,
                     source_id,
                     resource_key=resource_key,
-                    limit=3,
+                    limit=DESIGN_SAMPLE_ROW_LIMIT,
                 )
             except Exception:
                 preview_result = {}
             preview_rows = [row for row in list(preview_result.get("rows") or []) if isinstance(row, dict)]
             if preview_result.get("success") and preview_rows:
-                resolved["sample_rows"] = preview_rows[:3]
+                resolved["sample_rows"] = preview_rows[:DESIGN_SAMPLE_ROW_LIMIT]
                 resolved["schema_summary"] = _merge_schema_summary(resolved.get("schema_summary"), preview_rows)
                 resolved["sample_origin"] = "connector_preview"
                 has_rows = True
@@ -1717,7 +1797,7 @@ class SchemeDesignService:
                     "[scheme_design][hydrate] source_id=%s resource_key=%s fallback_preview_rows=%d",
                     source_id,
                     resource_key,
-                    len(preview_rows[:3]),
+                    len(preview_rows[:DESIGN_SAMPLE_ROW_LIMIT]),
                 )
         return _normalize_target_dataset(resolved)
 
@@ -1730,7 +1810,7 @@ class SchemeDesignService:
         for item in output_samples:
             if not isinstance(item, dict):
                 continue
-            rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)][:3]
+            rows = [row for row in list(item.get("rows") or []) if isinstance(row, dict)]
             table_name = str(item.get("target_table") or item.get("title") or "").strip()
             if not table_name or not rows:
                 continue

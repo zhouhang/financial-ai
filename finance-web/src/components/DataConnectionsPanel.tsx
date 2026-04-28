@@ -3900,7 +3900,7 @@ export default function DataConnectionsPanel({
     const jobs = Array.isArray(collectionDetailDialog?.detail?.jobs) ? collectionDetailDialog.detail.jobs : [];
     return jobs.some((job) => {
       const status = asString(asRecord(job)?.status) || asString(asRecord(job)?.job_status) || '';
-      return status.toLowerCase() === 'running';
+      return ['queued', 'running'].includes(status.toLowerCase());
     });
   }, [collectionDetailDialog?.detail]);
 
@@ -6501,6 +6501,7 @@ export default function DataConnectionsPanel({
                   )}
                   {(() => {
                     const detail = collectionDetailDialog.detail ?? {};
+                    const collectionStats = asRecord(detail.collection_stats) ?? {};
                     const jobs = Array.isArray(detail.jobs)
                       ? detail.jobs.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
                       : [];
@@ -6516,6 +6517,11 @@ export default function DataConnectionsPanel({
                       const metrics = asRecord(job.metrics) ?? {};
                       return total + (asNumber(metrics.collection_upserted) ?? asNumber(metrics.row_count) ?? asNumber(metrics.rows) ?? 0);
                     }, 0);
+                    const totalRecordCount =
+                      asNumber(collectionStats.total_count) ??
+                      asNumber(collectionStats.record_count) ??
+                      collectedCount ??
+                      rows.length;
                     return (
                       <>
                         <div className="grid gap-3 sm:grid-cols-3">
@@ -6528,7 +6534,7 @@ export default function DataConnectionsPanel({
                           <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
                             <p className="text-xs text-text-muted">采集记录数</p>
                             <p className="mt-2 text-lg font-semibold text-text-primary">
-                              {collectedCount || rows.length}
+                              {totalRecordCount || rows.length}
                             </p>
                           </div>
                           <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">

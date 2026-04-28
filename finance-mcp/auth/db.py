@@ -23,6 +23,7 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
+_EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -376,6 +377,62 @@ def ensure_unified_data_source_schema() -> list[str]:
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
     return applied
+
+
+def _constraint_definition(
+    table_name: str,
+    constraint_name: str,
+    *,
+    schema: str = "public",
+) -> str:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(c.oid)
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = %s
+                      AND t.relname = %s
+                      AND c.conname = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name, constraint_name),
+                )
+                row = cur.fetchone()
+                return str(row[0] or "") if row else ""
+    except Exception as e:
+        logger.error(
+            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
+        )
+        raise
+
+
+def ensure_execution_run_trigger_types_schema() -> list[str]:
+    """确保 execution_runs.trigger_type 允许 manual/rerun。"""
+    global _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY
+    if _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY:
+        return []
+    if not _table_exists("execution_runs"):
+        return []
+
+    constraint_def = _constraint_definition("execution_runs", "execution_runs_trigger_type_check")
+    if "manual" in constraint_def and "rerun" in constraint_def:
+        _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
+        return []
+
+    migration_name = "020_execution_runs_trigger_type_manual_rerun.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("execution_runs", "execution_runs_trigger_type_check")
+    if "manual" not in applied_constraint_def or "rerun" not in applied_constraint_def:
+        raise RuntimeError("execution_runs.trigger_type 约束升级失败，manual/rerun 仍不可用")
+
+    _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
+    logger.info("execution_runs.trigger_type 约束已自动补齐: %s", migration_name)
+    return [migration_name]
 
 
 class _ConnectionContextManager:
@@ -4258,6 +4315,43 @@ def list_unified_sync_jobs(
         return []
 
 
+def get_latest_unified_sync_job_attempts(
+    *,
+    company_id: str,
+    sync_job_ids: list[str],
+) -> dict[str, dict]:
+    """按 sync_job_id 查询最近一次任务尝试，返回 sync_job_id -> attempt 的映射。"""
+    normalized_ids = [str(item).strip() for item in sync_job_ids if str(item).strip()]
+    if not normalized_ids:
+        return {}
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (sync_job_id)
+                           id, company_id, sync_job_id, attempt_no, attempt_status,
+                           started_at, finished_at, error_message, metrics,
+                           checkpoint_before, checkpoint_after, created_at, updated_at
+                    FROM sync_job_attempts
+                    WHERE company_id = %s
+                      AND sync_job_id = ANY(%s::uuid[])
+                    ORDER BY sync_job_id, attempt_no DESC, created_at DESC
+                    """,
+                    (company_id, normalized_ids),
+                )
+                rows = cur.fetchall()
+                attempts = [_normalize_record(dict(row)) for row in rows]
+                return {str(item.get("sync_job_id") or ""): item for item in attempts if item.get("sync_job_id")}
+    except Exception as e:
+        logger.error(
+            f"查询 sync_job_attempts 最近记录失败 (company_id={company_id}, sync_job_ids={normalized_ids}): {e}"
+        )
+        return {}
+
+
 def create_unified_sync_job_attempt(
     *,
     company_id: str,
@@ -4502,10 +4596,10 @@ def list_dataset_collection_records(
     resource_key: str | None = None,
     biz_date: str | None = None,
     item_key: str | None = None,
-    limit: int = 100,
+    limit: int | None = 100,
     offset: int = 0,
 ) -> list[dict]:
-    """查询数据资产层采集记录。"""
+    """查询数据资产层采集记录。limit=None 表示不限条数，返回全量。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -4537,8 +4631,11 @@ def list_dataset_collection_records(
                 if item_key:
                     sql += " AND item_key = %s"
                     params.append(item_key)
-                sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s LIMIT %s"
-                params.extend([max(0, offset), max(1, min(limit, 1000))])
+                sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
                 return [_normalize_record(dict(row)) for row in rows]
@@ -6849,3 +6946,136 @@ def update_execution_run_exception(
             f"更新 execution_run_exceptions 失败 (company_id={company_id}, exception_id={exception_id}): {e}"
         )
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# recon_execution_queue  （持久化对账执行队列）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def enqueue_recon_run(
+    *,
+    company_id: str,
+    run_plan_code: str,
+    biz_date: str = "",
+    trigger_mode: str = "schedule",
+    run_context: dict | None = None,
+) -> dict:
+    """把一次对账执行请求写入队列，返回创建的 job 记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO recon_execution_queue
+                        (company_id, run_plan_code, biz_date, trigger_mode, run_context, status)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, 'queued')
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        run_plan_code,
+                        biz_date or "",
+                        trigger_mode or "schedule",
+                        json.dumps(run_context or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row))
+    except Exception as e:
+        logger.error(f"enqueue_recon_run 失败 (run_plan_code={run_plan_code}): {e}")
+        raise
+
+
+def dequeue_recon_run() -> dict | None:
+    """原子地取出并锁定一条 queued job（SKIP LOCKED），置为 running 后返回。
+    无可用任务时返回 None。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'running',
+                        started_at = CURRENT_TIMESTAMP,
+                        attempt = attempt + 1
+                    WHERE id = (
+                        SELECT id FROM recon_execution_queue
+                        WHERE status = 'queued'
+                        ORDER BY created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    RETURNING *
+                    """
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"dequeue_recon_run 失败: {e}")
+        return None
+
+
+def complete_recon_run(job_id: str) -> None:
+    """将 job 标记为 done。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'done', finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (job_id,),
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error(f"complete_recon_run 失败 (job_id={job_id}): {e}")
+
+
+def fail_recon_run(job_id: str, error: str = "") -> None:
+    """将 job 标记为 failed 并记录错误信息。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'failed', finished_at = CURRENT_TIMESTAMP, error = %s
+                    WHERE id = %s
+                    """,
+                    (str(error or "")[:4000], job_id),
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error(f"fail_recon_run 失败 (job_id={job_id}): {e}")
+
+
+def reclaim_stale_recon_runs(timeout_minutes: int = 15) -> int:
+    """把卡在 running 超过 timeout_minutes 的 job 重置回 queued，返回重置数量。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'queued', started_at = NULL
+                    WHERE status = 'running'
+                      AND started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                    """,
+                    (max(1, timeout_minutes),),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"reclaim_stale_recon_runs 失败: {e}")
+        return 0

@@ -280,12 +280,14 @@ def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
 
 def _normalize_execution_trigger_type(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"chat", "schedule", "api"}:
+    if normalized in {"chat", "schedule", "api", "manual", "rerun"}:
         return normalized
     if normalized in {"cron", "scheduler", "scheduled"}:
         return "schedule"
-    if normalized in {"manual", "manual_trigger", "retry"}:
-        return "api"
+    if normalized == "manual_trigger":
+        return "manual"
+    if normalized == "retry":
+        return "rerun"
     return "schedule"
 
 
@@ -306,6 +308,19 @@ def _get_binding_required(binding: dict[str, Any]) -> bool:
     if "required" not in binding:
         return True
     return bool(binding.get("required"))
+
+
+def _normalize_collection_trigger_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"schedule", "scheduled", "cron", "scheduler"}:
+        return "scheduled"
+    if normalized in {"rerun", "retry"}:
+        return "retry"
+    return "manual"
+
+
+def _should_collect_before_recon(value: Any) -> bool:
+    return _normalize_collection_trigger_mode(value) in {"scheduled", "manual", "retry"}
 
 
 def _build_plan_binding_from_source(source: dict[str, Any], date_field: str) -> dict[str, Any] | None:
@@ -981,7 +996,8 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
     collection_attempts: list[dict[str, Any]] = []
     biz_date = str(ctx.get("biz_date") or "").strip()
     run_context = _safe_dict(ctx.get("run_context"))
-    should_collect_first = str(run_context.get("trigger_type") or "").strip().lower() == "rerun"
+    collection_trigger_mode = _normalize_collection_trigger_mode(run_context.get("trigger_type"))
+    should_collect_first = _should_collect_before_recon(run_context.get("trigger_type"))
 
     for binding in bindings:
         source_id = _get_binding_source_id(binding)
@@ -989,7 +1005,6 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
         if not source_id or not table_name:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
-        collection_error = ""
         if should_collect_first:
             collect_result = await data_source_trigger_dataset_collection(
                 auth_token,
@@ -997,18 +1012,21 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
                 dataset_id=str(binding.get("dataset_id") or "").strip(),
                 resource_key=_get_binding_resource_key(binding),
                 biz_date=biz_date,
+                trigger_mode=collection_trigger_mode,
                 mode="real",
             )
+            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
             collection_attempts.append(
                 {
                     "binding": binding,
                     "success": bool(collect_result.get("success")),
                     "job": _safe_dict(collect_result.get("job")),
-                    "error": str(collect_result.get("error") or collect_result.get("detail") or ""),
+                    "error": collection_error,
                 }
             )
             if not bool(collect_result.get("success")):
-                collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+                missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
+                continue
         result = await data_source_list_collection_records(
             auth_token,
             source_id,
@@ -1030,8 +1048,6 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             error = str(result.get("error") or "暂无采集记录，请先采集数据")
             if bool(result.get("success")) and _is_required_collection_empty(binding, collection):
                 error = "暂无采集记录，请先采集数据"
-            if collection_error:
-                error = f"先同步失败：{collection_error}"
             missing_bindings.append({**binding, "error": error})
 
     ctx["ready_collections"] = ready_collections
@@ -1044,6 +1060,7 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
 def bind_ready_collection_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     ready_collections = [v for v in _safe_list(ctx.get("ready_collections")) if isinstance(v, dict)]
+    collection_attempts = [v for v in _safe_list(ctx.get("collection_attempts")) if isinstance(v, dict)]
     biz_date = str(ctx.get("biz_date") or "")
     recon_inputs = _build_recon_inputs_from_ready_collections(ready_collections, biz_date=biz_date)
     ctx["recon_inputs"] = recon_inputs
@@ -1053,6 +1070,8 @@ def bind_ready_collection_node(state: AgentState) -> dict[str, Any]:
         "collections": ready_collections,
         "biz_date": biz_date,
     }
+    if collection_attempts:
+        source_collection_json["collection_attempts"] = collection_attempts
     ctx["source_collection_json"] = source_collection_json
     return {"recon_ctx": ctx}
 
