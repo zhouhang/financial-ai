@@ -49,23 +49,25 @@ export interface RuleGenerationEventDraftUpdate {
 }
 
 const RULE_GENERATION_NODE_DEFS = [
-  ['prepare_context', '准备上下文'],
-  ['understand_rule', '理解业务规则'],
-  ['validate_ir_structure', '校验 IR 结构'],
-  ['resolve_source_bindings', '绑定源字段'],
-  ['lint_ir', '校验规则 IR'],
-  ['repair_ir', '修复规则 IR'],
-  ['semantic_resolution', '自动消除歧义'],
-  ['ambiguity_gate', '判断是否需要补充'],
-  ['generate_proc_json', '生成规则'],
+  ['prepare_context', '准备数据集信息'],
+  ['understand_rule', '理解整理描述'],
+  ['validate_ir_structure', '检查描述结构'],
+  ['resolve_source_bindings', '检查字段对应关系'],
+  ['lint_ir', '检查整理规则'],
+  ['repair_ir', '自动修复规则'],
+  ['semantic_resolution', '自动处理字段歧义'],
+  ['ambiguity_gate', '判断是否需要补充描述'],
+  ['generate_proc_json', '生成整理规则'],
   ['check_ir_dsl_consistency', '检查规则一致性'],
-  ['lint_proc_json', '校验规则可执行性'],
-  ['build_sample_inputs', '读取真实样例数据'],
-  ['run_sample', '样例执行'],
-  ['diagnose_sample', '诊断样例结果'],
-  ['assert_output', '校验输出结果'],
-  ['result', '生成结果'],
+  ['lint_proc_json', '检查规则可执行性'],
+  ['build_sample_inputs', '读取样例数据'],
+  ['run_sample', '试跑输出数据'],
+  ['diagnose_sample', '诊断试跑结果'],
+  ['assert_output', '核对输出结果'],
+  ['result', '整理完成'],
 ] as const;
+
+const RULE_GENERATION_NODE_LABELS = Object.fromEntries(RULE_GENERATION_NODE_DEFS) as Record<string, string>;
 
 const RULE_GENERATION_SAMPLE_ROW_LIMIT = 20;
 
@@ -316,6 +318,7 @@ export function createEmptyAiProcSideDraft(): AiProcSideDraft {
     summary: '',
     error: '',
     failureReasons: [],
+    failureDetails: [],
     nodeTraces: createDefaultRuleGenerationNodeTraces(),
     questions: [],
     assumptions: [],
@@ -542,7 +545,7 @@ export function updateRuleGenerationTraces(
     if (trace.code !== code) return trace;
     return {
       ...trace,
-      name: nodeName || trace.name,
+      name: RULE_GENERATION_NODE_LABELS[code] || nodeName || trace.name,
       status,
       message: String(payload.message || trace.message || ''),
       attempt: Number.isFinite(attempt) ? attempt : trace.attempt,
@@ -599,16 +602,62 @@ function normalizeFailureReasons(value: unknown): string[] {
     return stage && stage !== 'run_sample';
   });
   const items = terminalItems.length > 0 ? terminalItems : errorItems;
-  return items
+  const reasons = items
     .filter(isRecord)
-    .map((item) => {
-      const stage = toText(item.stage, toText(item.node)).trim();
-      const stepId = toText(item.step_id).trim();
-      const message = toText(item.message, toText(item.error)).trim();
-      const parts = [stage, stepId, message].filter(Boolean);
-      return parts.join(' - ');
-    })
+    .map(formatBusinessFailureReason)
     .filter(Boolean);
+  return Array.from(new Set(reasons));
+}
+
+function normalizeFailureDetails(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord);
+}
+
+function formatBusinessFailureReason(item: Record<string, unknown>): string {
+  const stage = toText(item.stage, toText(item.node)).trim();
+  const reason = toText(item.reason, toText(item.category)).trim();
+  const type = toText(item.type).trim();
+  const message = toText(item.message, toText(item.error)).trim();
+  const combined = `${stage} ${reason} ${type} ${message}`.toLowerCase();
+
+  if (type === 'LlmJsonGenerationError' || combined.includes('deepseek') || combined.includes('timeout')) {
+    return 'AI 服务响应超时或暂时不可用，请稍后重试。';
+  }
+  if (stage === 'prepare_context') {
+    return '请先确认已选择正确的数据集。';
+  }
+  if (reason === 'rule_text_field_mentions_missing_ir_refs') {
+    return '描述中提到的字段没有被完整用于输出、过滤、关联或计算，请把字段用途写得更明确后重新生成。';
+  }
+  if (reason === 'source_passthrough_has_unprojected_source_refs') {
+    return '描述中提到了需要进入结果的字段，但输出字段不够明确，请补充要保留或生成哪些字段后重新生成。';
+  }
+  if (stage === 'validate_ir_structure' || combined.includes('无法映射到任何源字段')) {
+    return '描述中的字段没有匹配到已选数据集，请检查是否选错数据集或字段名称。';
+  }
+  if (stage === 'resolve_source_bindings' || stage === 'semantic_resolution' || stage === 'ambiguity_gate') {
+    return '描述中有字段或业务口径不够明确，请按候选提示修改描述后重新生成。';
+  }
+  if (stage === 'lint_ir' || reason === 'ir_error' || reason === 'llm_repair_failed') {
+    return 'AI 多次修复后仍未形成完整规则，请把过滤、关联、计算、输出字段拆成更明确的多行描述。';
+  }
+  if (stage === 'generate_proc_json' || stage === 'lint_proc_json' || reason === 'compiler_error') {
+    return '当前整理方式暂未被系统稳定支持，请联系技术处理。';
+  }
+  if (stage === 'check_ir_dsl_consistency' || reason === 'ir_linter_gap') {
+    return '规则生成过程出现系统一致性问题，请联系技术处理。';
+  }
+  if (stage === 'build_sample_inputs') {
+    return '样例数据读取失败，请稍后重试或联系技术处理。';
+  }
+  if (stage === 'run_sample' || stage === 'assert_output' || stage === 'diagnose_sample') {
+    if (combined.includes('0 行') || combined.includes('没有生成') || combined.includes('未生成')) {
+      return '规则已试跑，但样例数据没有生成输出结果，请检查过滤条件或样例数据是否匹配。';
+    }
+    return '规则已生成，但样例试跑未通过，请调整描述后重新生成。';
+  }
+  return message || 'AI 生成未通过，请修改描述后重新生成。';
 }
 
 export function applyRuleGenerationEventToDraft(
@@ -628,6 +677,7 @@ export function applyRuleGenerationEventToDraft(
     nextDraft.summary = '规则存在需要确认的字段或业务口径，请修改上方完整规则描述后重新生成。';
     nextDraft.questions = normalizeQuestions(payload.questions);
     nextDraft.failureReasons = [];
+    nextDraft.failureDetails = [];
   }
 
   if (eventName === 'graph_completed') {
@@ -636,9 +686,10 @@ export function applyRuleGenerationEventToDraft(
     const outputFieldLabelMap = normalizeAiOutputFieldLabelMap(payload.output_fields);
     const outputColumnHints = normalizeAiOutputColumnHints(payload.output_fields);
     nextDraft.status = 'succeeded';
-    nextDraft.summary = `${sideLabel}输出数据已生成，已通过 rule_generation 校验。`;
+    nextDraft.summary = `${sideLabel}输出数据已生成，样例试跑通过。`;
     nextDraft.error = '';
     nextDraft.failureReasons = [];
+    nextDraft.failureDetails = [];
     nextDraft.questions = [];
     nextDraft.outputRows = outputRows;
     nextDraft.outputFieldLabelMap = Object.keys(outputFieldLabelMap).length > 0
@@ -660,15 +711,37 @@ export function applyRuleGenerationEventToDraft(
     nextDraft.summary = `${sideLabel}AI生成失败。`;
     nextDraft.error = failureReasons[0] || String(payload.message || 'AI生成输出数据失败');
     nextDraft.failureReasons = failureReasons;
+    nextDraft.failureDetails = normalizeFailureDetails(payload.errors);
   }
 
   if (eventName === 'repair_started') {
-    nextDraft.summary = String(payload.message || '正在根据校验结果修复规则。');
+    nextDraft.summary = '发现规则问题，正在自动修复。';
   } else if (eventName.startsWith('node_')) {
-    nextDraft.summary = String(payload.message || nextDraft.summary || '正在执行 rule_generation。');
+    nextDraft.summary = formatBusinessEventSummary(payload, nextDraft.summary);
   }
 
   return { draft: nextDraft, outputFields };
+}
+
+function formatBusinessEventSummary(payload: Record<string, unknown>, fallback: string): string {
+  const node = isRecord(payload.node) ? payload.node : {};
+  const code = toText(node.code).trim();
+  const status = toText(node.status).trim();
+  if (status === 'failed') {
+    if (code === 'run_sample' || code === 'assert_output' || code === 'diagnose_sample') {
+      return '样例试跑未通过，正在判断是否可以自动修复。';
+    }
+    if (code === 'repair_ir') return '自动修复未完成。';
+    return '当前步骤未通过。';
+  }
+  if (status === 'completed') {
+    if (code === 'result') return '输出数据已生成，样例试跑通过。';
+    return fallback || '正在生成输出数据。';
+  }
+  if (code === 'repair_ir') return '发现规则问题，正在自动修复。';
+  if (code === 'run_sample') return '正在用样例数据试跑输出结果。';
+  if (code === 'diagnose_sample') return '试跑结果未达到预期，正在定位原因。';
+  return fallback || '正在生成输出数据。';
 }
 
 export function buildAiSideProcRuleJson(options: {

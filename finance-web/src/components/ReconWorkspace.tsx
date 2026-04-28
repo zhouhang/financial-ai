@@ -3613,6 +3613,7 @@ export default function ReconWorkspace({
           summary: hasGeneratedResult ? current.summary : '',
           error: '',
           failureReasons: [],
+          failureDetails: [],
           questions: [],
           nodeTraces: hasGeneratedResult ? current.nodeTraces : createDefaultRuleGenerationNodeTraces(),
         },
@@ -3648,6 +3649,7 @@ export default function ReconWorkspace({
             error: `请先输入${sideLabel}整理规则描述。`,
             summary: '',
             failureReasons: [],
+            failureDetails: [],
           },
         }));
         return;
@@ -3661,6 +3663,7 @@ export default function ReconWorkspace({
             error: `请先选择${sideLabel}数据集。`,
             summary: '',
             failureReasons: [],
+            failureDetails: [],
           },
         }));
         return;
@@ -3677,9 +3680,10 @@ export default function ReconWorkspace({
         [side]: {
           ...prev[side],
           status: 'generating',
-          summary: `${sideLabel}规则已提交，正在执行规则理解、字段绑定、JSON生成、样例执行和断言验证。`,
+          summary: `${sideLabel}规则已提交，正在理解描述、检查字段、生成规则并试跑输出数据。`,
           error: '',
           failureReasons: [],
+          failureDetails: [],
           nodeTraces: createDefaultRuleGenerationNodeTraces(),
           questions: [],
           warnings: [],
@@ -3877,6 +3881,8 @@ export default function ReconWorkspace({
             status: 'failed',
             summary: `${sideLabel}AI生成失败。`,
             error: message,
+            failureReasons: [message],
+            failureDetails: [],
           },
         }));
       } finally {
