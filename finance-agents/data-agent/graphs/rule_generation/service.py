@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -39,6 +40,13 @@ from graphs.rule_generation.proc.understanding import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _rule_generation_llm_timeout_seconds() -> int:
+    try:
+        return max(45, int(os.getenv("RULE_GENERATION_LLM_TIMEOUT_SECONDS", "120")))
+    except (TypeError, ValueError):
+        return 120
 
 
 class RuleGenerationService:
@@ -733,7 +741,11 @@ class RuleGenerationService:
             "business_rules": [],
         }
         try:
-            parsed = await invoke_llm_json(build_understanding_prompt(context), temperature=0.05, timeout_seconds=45)
+            parsed = await invoke_llm_json(
+                build_understanding_prompt(context),
+                temperature=0.05,
+                timeout_seconds=_rule_generation_llm_timeout_seconds(),
+            )
             context["understanding"] = normalize_understanding(
                 _safe_dict(parsed.get("understanding")) or fallback_understanding,
                 rule_text=rule_text,
@@ -836,7 +848,7 @@ class RuleGenerationService:
         parsed = await invoke_llm_json(
             build_ir_repair_prompt(context, failures=failures),
             temperature=0.05,
-            timeout_seconds=45,
+            timeout_seconds=_rule_generation_llm_timeout_seconds(),
         )
         repaired_understanding = normalize_understanding(
             _safe_dict(parsed.get("understanding")) or {},

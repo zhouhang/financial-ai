@@ -32,7 +32,12 @@ async def invoke_llm_json(
     for provider in providers:
         try:
             logger.info("[rule_generation] invoke LLM provider=%s", provider)
-            llm = get_llm(provider=provider, temperature=temperature)
+            llm = get_llm(
+                provider=provider,
+                temperature=temperature,
+                model_kwargs={"response_format": {"type": "json_object"}},
+                extra_body={"thinking": {"type": "disabled"}} if provider == "deepseek" else None,
+            )
             response = await asyncio.wait_for(
                 asyncio.to_thread(llm.invoke, prompt),
                 timeout=timeout_seconds,
@@ -41,8 +46,13 @@ async def invoke_llm_json(
             if isinstance(content, list):
                 content = "".join(str(getattr(item, "text", item)) for item in content)
             return parse_json_content(str(content or ""))
+        except TimeoutError:
+            message = f"{provider}: LLM 请求超过 {timeout_seconds} 秒未完成"
+            provider_errors.append(message)
+            logger.warning("[rule_generation] provider timed out: %s", message)
         except Exception as exc:  # noqa: BLE001
-            message = f"{provider}: {exc}"
+            error_text = str(exc).strip() or exc.__class__.__name__
+            message = f"{provider}: {error_text}"
             provider_errors.append(message)
             logger.warning("[rule_generation] provider failed: %s", message)
     raise LlmJsonGenerationError("; ".join(provider_errors) or "LLM JSON 生成失败")

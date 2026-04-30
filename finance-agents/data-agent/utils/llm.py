@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from typing import Any
 
 from langchain_openai import ChatOpenAI
 
@@ -72,6 +73,8 @@ def get_llm(
     *,
     provider: str | None = None,
     temperature: float = 0.3,
+    model_kwargs: dict[str, Any] | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> ChatOpenAI:
     """获取 LLM 实例。
 
@@ -100,4 +103,6 @@ def get_llm(
         temperature=temperature,
         streaming=True,  # 启用流式输出
         request_timeout=60,
+        model_kwargs=model_kwargs or {},
+        extra_body=extra_body,
     )
