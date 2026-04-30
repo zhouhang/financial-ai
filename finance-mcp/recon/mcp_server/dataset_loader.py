@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+from datetime import date, datetime
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -41,6 +42,7 @@ _COLLECTION_RECORDS_QUERY_ALLOWED_KEYS = {
     "dataset_id",
     "resource_key",
     "biz_date",
+    "date_field",
     "filters",
     "order_by",
     "limit",
@@ -52,6 +54,7 @@ class DatasetLoadError(RuntimeError):
 
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_FLOAT_INTEGER_RE = re.compile(r"^-?\d+\.0+$")
 
 
 def _is_scalar_filter_value(value: Any) -> bool:
@@ -59,14 +62,69 @@ def _is_scalar_filter_value(value: Any) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
 
 
+def _is_db_filter_value(value: Any) -> bool:
+    if _is_scalar_filter_value(value):
+        return True
+    if isinstance(value, list):
+        return all(_is_scalar_filter_value(item) for item in value)
+    return False
+
+
+def _is_collection_filter_value(value: Any) -> bool:
+    if _is_scalar_filter_value(value):
+        return True
+    if isinstance(value, list):
+        return all(_is_scalar_filter_value(item) for item in value)
+    return False
+
+
+def _normalize_filter_token(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return ""
+        if value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0:
+            return value.strftime("%Y-%m-%d")
+        return value.isoformat()
+    if isinstance(value, datetime):
+        if value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0:
+            return value.date().isoformat()
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if _FLOAT_INTEGER_RE.fullmatch(text):
+        return text.split(".", 1)[0]
+    return text
+
+
 def _apply_collection_record_scalar_filter(df: pd.DataFrame, field_name: str, value: Any) -> pd.DataFrame:
+    if isinstance(value, list):
+        expected_values = {_normalize_filter_token(item) for item in value}
+        series = df[field_name].map(_normalize_filter_token)
+        return df[series.isin(expected_values)]
     if value is None:
         return df[df[field_name].isna()]
 
-    expected = str(value)
+    expected = _normalize_filter_token(value)
     series = df[field_name]
-    exact_mask = series.astype(str) == expected
+    exact_mask = series.map(_normalize_filter_token) == expected
     if isinstance(value, str) and _DATE_ONLY_RE.fullmatch(expected):
+        token_series = series.map(_normalize_filter_token)
+        date_prefix_mask = (
+            (token_series == expected)
+            | token_series.str.startswith(f"{expected} ", na=False)
+            | token_series.str.startswith(f"{expected}T", na=False)
+        )
+        if date_prefix_mask.any():
+            return df[exact_mask | date_prefix_mask.fillna(False)]
+
         parsed = pd.to_datetime(series, errors="coerce")
         if parsed.notna().any():
             date_mask = parsed.dt.strftime("%Y-%m-%d") == expected
@@ -222,7 +280,42 @@ def _safe_table_identifier(table_name: str) -> str:
     return ".".join(f'"{part}"' for part in text.split("."))
 
 
-def _build_db_query_from_conditions(source_key: str, query: dict[str, Any], source_cfg: dict[str, Any]) -> tuple[str, list[Any]]:
+def _append_db_filter_condition(
+    *,
+    where_parts: list[str],
+    params: list[Any],
+    field_name: str,
+    value: Any,
+    coerce_filters_to_text: bool,
+) -> None:
+    identifier = _safe_identifier(field_name)
+    if isinstance(value, list):
+        values = [_normalize_filter_token(item) for item in value] if coerce_filters_to_text else value
+        if not values:
+            where_parts.append("1 = 0")
+            return
+        if coerce_filters_to_text:
+            where_parts.append(f"{identifier}::text = ANY(%s)")
+        else:
+            where_parts.append(f"{identifier} = ANY(%s)")
+        params.append(values)
+        return
+
+    if coerce_filters_to_text:
+        where_parts.append(f"{identifier}::text = %s")
+        params.append(_normalize_filter_token(value))
+        return
+    where_parts.append(f"{identifier} = %s")
+    params.append(value)
+
+
+def _build_db_query_from_conditions(
+    source_key: str,
+    query: dict[str, Any],
+    source_cfg: dict[str, Any],
+    *,
+    coerce_filters_to_text: bool = False,
+) -> tuple[str, list[Any]]:
     """Build SQL from query conditions (no raw SQL from caller)."""
     extra_keys = sorted(set(query.keys()) - _DB_QUERY_ALLOWED_KEYS)
     if extra_keys:
@@ -270,10 +363,15 @@ def _build_db_query_from_conditions(source_key: str, query: dict[str, Any], sour
             raise DatasetLoadError(
                 f"source_key={source_key} 不允许按字段 '{field_name}' 过滤。"
             )
-        if not _is_scalar_filter_value(value):
-            raise DatasetLoadError(f"query.filters 字段 '{field_name}' 仅支持标量值")
-        where_parts.append(f"{_safe_identifier(field_name)} = %s")
-        params.append(value)
+        if not _is_db_filter_value(value):
+            raise DatasetLoadError(f"query.filters 字段 '{field_name}' 仅支持标量值或标量数组")
+        _append_db_filter_condition(
+            where_parts=where_parts,
+            params=params,
+            field_name=field_name,
+            value=value,
+            coerce_filters_to_text=coerce_filters_to_text,
+        )
 
     default_filters = source_cfg.get("default_filters")
     if isinstance(default_filters, dict):
@@ -281,8 +379,15 @@ def _build_db_query_from_conditions(source_key: str, query: dict[str, Any], sour
             field_name = str(field or "").strip()
             if not field_name:
                 continue
-            where_parts.append(f"{_safe_identifier(field_name)} = %s")
-            params.append(value)
+            if not _is_db_filter_value(value):
+                raise DatasetLoadError(f"registry.default_filters 字段 '{field_name}' 仅支持标量值或标量数组")
+            _append_db_filter_condition(
+                where_parts=where_parts,
+                params=params,
+                field_name=field_name,
+                value=value,
+                coerce_filters_to_text=coerce_filters_to_text,
+            )
 
     sortable_fields = source_cfg.get("sortable_fields")
     if sortable_fields is None:
@@ -333,21 +438,28 @@ def _build_db_query_from_conditions(source_key: str, query: dict[str, Any], sour
     return sql, params
 
 
-def _load_from_db(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
-    """Load dataset by DB query conditions (source_key + query)."""
-    source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
-    handler = _SOURCE_KEY_HANDLERS.get((source_type, source_key))
-    source_cfg = _resolve_registry_source(source_type, source_key)
-    if handler is not None:
-        return handler(source_key, query, source_cfg)
+def _query_has_filters(query: dict[str, Any], source_cfg: dict[str, Any]) -> bool:
+    return bool(query.get("filters")) or bool(source_cfg.get("default_filters"))
 
-    sql, params = _build_db_query_from_conditions(source_key, query, source_cfg)
 
+def _execute_db_query(
+    *,
+    source_key: str,
+    query: dict[str, Any],
+    source_cfg: dict[str, Any],
+    coerce_filters_to_text: bool = False,
+) -> pd.DataFrame:
+    sql, params = _build_db_query_from_conditions(
+        source_key,
+        query,
+        source_cfg,
+        coerce_filters_to_text=coerce_filters_to_text,
+    )
     conn = None
     cur = None
+
     try:
         import psycopg2.extras
-
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql, params)
@@ -356,11 +468,6 @@ def _load_from_db(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
             return pd.DataFrame([dict(item) for item in rows])
         columns = [desc[0] for desc in (cur.description or [])]
         return pd.DataFrame(columns=columns)
-    except DatasetLoadError:
-        raise
-    except Exception as exc:
-        logger.error("[recon][dataset] source_key=%s DB 查询失败", source_key, exc_info=True)
-        raise DatasetLoadError("DB 查询失败，请检查 query 条件与数据源配置") from exc
     finally:
         try:
             if cur is not None:
@@ -368,6 +475,43 @@ def _load_from_db(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
         finally:
             if conn is not None:
                 conn.close()
+
+
+def _load_from_db(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
+    """Load dataset by DB query conditions (source_key + query)."""
+    source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
+    handler = _SOURCE_KEY_HANDLERS.get((source_type, source_key))
+    source_cfg = _resolve_registry_source(source_type, source_key)
+    if handler is not None:
+        return handler(source_key, query, source_cfg)
+
+    try:
+        return _execute_db_query(source_key=source_key, query=query, source_cfg=source_cfg)
+    except DatasetLoadError:
+        raise
+    except Exception as exc:
+        if _query_has_filters(query, source_cfg):
+            try:
+                logger.warning(
+                    "[recon][dataset] source_key=%s DB 查询类型不兼容，尝试文本兼容过滤",
+                    source_key,
+                )
+                return _execute_db_query(
+                    source_key=source_key,
+                    query=query,
+                    source_cfg=source_cfg,
+                    coerce_filters_to_text=True,
+                )
+            except DatasetLoadError:
+                raise
+            except Exception as retry_exc:
+                logger.error("[recon][dataset] source_key=%s DB 文本兼容查询仍失败", source_key, exc_info=True)
+                raise DatasetLoadError(
+                    f"source_key={source_key} DB 查询失败。字段类型可能与过滤值不一致，"
+                    "或字段/过滤条件配置有误，请检查对账日期字段、关联字段和数据源配置。"
+                ) from retry_exc
+        logger.error("[recon][dataset] source_key=%s DB 查询失败", source_key, exc_info=True)
+        raise DatasetLoadError(f"source_key={source_key} DB 查询失败，请检查 query 条件与数据源配置。") from exc
 
 
 def _extract_data_by_path(payload: Any, path: str) -> Any:
@@ -549,6 +693,25 @@ def _load_collection_record_rows(
         where_parts.append(f"{_safe_identifier(biz_date_col)} = %s")
         params.append(biz_date)
 
+    filters = query.get("filters")
+    if isinstance(filters, dict):
+        for field, value in filters.items():
+            field_name = str(field or "").strip()
+            if not field_name:
+                continue
+            if isinstance(value, list):
+                values = [str(item) for item in value if item is not None]
+                if not values:
+                    continue
+                where_parts.append(f"({_safe_identifier(payload_col)} ->> %s) = ANY(%s)")
+                params.extend([field_name, values])
+            elif _is_scalar_filter_value(value) and value is not None:
+                expected = str(value)
+                if _DATE_ONLY_RE.fullmatch(expected):
+                    continue
+                where_parts.append(f"({_safe_identifier(payload_col)} ->> %s) = %s")
+                params.extend([field_name, expected])
+
     order_by = query.get("order_by")
     if isinstance(order_by, str):
         order_by = [order_by]
@@ -640,8 +803,8 @@ def _load_from_collection_records(dataset_ref: dict[str, Any], table_name: str) 
             continue
         if field_name not in df.columns:
             raise DatasetLoadError(f"collection_records 数据中不存在过滤字段: {field_name}")
-        if not _is_scalar_filter_value(value):
-            raise DatasetLoadError(f"collection_records query.filters 字段 '{field_name}' 仅支持标量值")
+        if not _is_collection_filter_value(value):
+            raise DatasetLoadError(f"collection_records query.filters 字段 '{field_name}' 仅支持标量值或标量数组")
         df = _apply_collection_record_scalar_filter(df, field_name, value)
 
     return df.reset_index(drop=True)

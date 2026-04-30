@@ -41,24 +41,10 @@ def _result(payload: dict, *, success: bool = True, exit_code: int = 0) -> CLIEx
     )
 
 
-def test_resolve_user_by_keyword_queries_search_then_get():
+def test_resolve_user_by_keyword_queries_search_without_contact_detail_lookup():
     executor = FakeExecutor(
         [
             _result({"userId": ["01205058704740"]}),
-            _result(
-                {
-                    "success": True,
-                    "result": [
-                        {
-                            "orgEmployeeModel": {
-                                "orgUserId": "01205058704740",
-                                "orgUserName": "周行",
-                                "orgUserMobile": "15002781007",
-                            }
-                        }
-                    ],
-                }
-            ),
         ]
     )
     adapter = DingTalkDwsAdapter(
@@ -74,10 +60,87 @@ def test_resolve_user_by_keyword_queries_search_then_get():
     assert result.success is True
     assert result.resolved_user is not None
     assert result.resolved_user.user_id == "01205058704740"
-    assert executor.calls[0]["args"] == ["dws", "contact", "user", "search", "--keyword", "周行", "-f", "json"]
-    assert executor.calls[1]["args"] == ["dws", "contact", "user", "get", "--ids", "01205058704740", "-f", "json"]
+    assert result.resolved_user.display_name == "周行"
+    assert executor.calls[0]["args"] == ["dws", "contact", "user", "search", "--query", "周行", "-f", "json"]
+    assert len(executor.calls) == 1
     assert executor.calls[0]["env"]["DWS_CLIENT_ID"] == "cid"
     assert executor.calls[0]["env"]["DWS_CLIENT_SECRET"] == "secret"
+
+
+def test_resolve_user_by_user_id_does_not_call_contact_get():
+    executor = FakeExecutor([])
+    adapter = DingTalkDwsAdapter(
+        executor=executor,
+        cli_bin="dws",
+        client_id="cid",
+        client_secret="secret",
+        robot_code="robot",
+    )
+
+    result = adapter.resolve_user(user_id="01205058704740")
+
+    assert result.success is True
+    assert result.resolved_user is not None
+    assert result.resolved_user.user_id == "01205058704740"
+    assert executor.calls == []
+
+
+def test_resolve_user_by_keyword_enriches_multiple_matches_with_contact_detail():
+    executor = FakeExecutor(
+        [
+            _result({"userId": ["u-001", "u-002"]}),
+            _result(
+                {
+                    "result": [
+                        {
+                            "orgEmployeeModel": {
+                                "orgUserId": "u-001",
+                                "orgUserName": "张三",
+                                "orgUserMobile": "13800000001",
+                                "orgName": "华东公司",
+                                "deptNameList": ["财务部"],
+                            }
+                        },
+                        {
+                            "orgEmployeeModel": {
+                                "orgUserId": "u-002",
+                                "orgUserName": "张三",
+                                "orgUserMobile": "13900000002",
+                                "orgName": "华南公司",
+                                "deptNameList": ["结算组"],
+                            }
+                        },
+                    ]
+                }
+            ),
+        ]
+    )
+    adapter = DingTalkDwsAdapter(
+        executor=executor,
+        cli_bin="dws",
+        client_id="cid",
+        client_secret="secret",
+        robot_code="robot",
+    )
+
+    result = adapter.resolve_user(keyword="张三")
+
+    assert result.success is True
+    assert result.resolved_user is None
+    assert [user.user_id for user in result.users] == ["u-001", "u-002"]
+    assert result.users[0].organization == "华东公司"
+    assert result.users[0].departments == ["财务部"]
+    assert result.users[0].mobile == "13800000001"
+    assert executor.calls[1]["args"] == [
+        "dws",
+        "contact",
+        "user",
+        "get",
+        "--ids",
+        "u-001,u-002",
+        "-f",
+        "json",
+    ]
 
 
 def test_send_bot_message_requires_robot_code():
@@ -98,26 +161,6 @@ def test_send_bot_message_requires_robot_code():
 def test_send_reminder_runs_bot_and_todo_flow():
     executor = FakeExecutor(
         [
-            _result(
-                {
-                    "success": True,
-                    "result": [
-                        {
-                            "orgEmployeeModel": {
-                                "orgUserId": "u1",
-                                "orgUserName": "周行",
-                            }
-                        }
-                    ],
-                }
-            ),
-            _result(
-                {
-                    "success": True,
-                    "errorCode": 0,
-                    "result": {"processQueryKey": "msg-1"},
-                }
-            ),
             _result({"success": True, "result": {"taskId": "todo-1"}}),
             _result(
                 {
@@ -130,6 +173,13 @@ def test_send_reminder_runs_bot_and_todo_flow():
                             "executorIds": ["u1"],
                         }
                     },
+                }
+            ),
+            _result(
+                {
+                    "success": True,
+                    "errorCode": 0,
+                    "result": {"processQueryKey": "msg-1"},
                 }
             ),
         ]
@@ -152,7 +202,7 @@ def test_send_reminder_runs_bot_and_todo_flow():
     assert result.bot_result is not None and result.bot_result.message_id == "msg-1"
     assert result.todo_result is not None and result.todo_result.todo is not None
     assert result.todo_result.todo.todo_id == "todo-1"
-    assert executor.calls[1]["args"] == [
+    assert executor.calls[2]["args"][:8] == [
         "dws",
         "chat",
         "message",
@@ -161,8 +211,8 @@ def test_send_reminder_runs_bot_and_todo_flow():
         "robot-1",
         "--title",
         "催办标题",
-        "--text",
-        "请处理异常",
+    ]
+    assert executor.calls[2]["args"][-4:] == [
         "--users",
         "u1",
         "-f",

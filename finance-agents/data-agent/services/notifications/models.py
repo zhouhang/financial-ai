@@ -34,6 +34,8 @@ class NotificationUser:
     user_id: str
     display_name: str = ""
     mobile: str = ""
+    organization: str = ""
+    departments: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -109,4 +111,3 @@ class TodoSyncResult(OperationResult):
     polls: int = 0
     history: list[UnifiedTodoStatus] = field(default_factory=list)
     todo: TodoRecord | None = None
-

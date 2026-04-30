@@ -76,12 +76,24 @@ class DingTalkDwsAdapter(NotificationAdapter):
             return self._user_failure("缺少用户定位条件，必须传 user_id、mobile 或 keyword 之一", code="invalid_input")
 
         if user_id:
-            return self._get_users_by_ids([user_id])
+            # Newer dws versions require interactive PAT permission for
+            # contact.user:get. When callers already provide a DingTalk userId,
+            # use it directly so reminder delivery does not depend on contact
+            # detail lookup.
+            user = NotificationUser(user_id=user_id, display_name=keyword or user_id, mobile=mobile)
+            return UserResolveResult(
+                success=True,
+                provider=self.provider,
+                message="ok",
+                raw={"userId": [user_id], "source": "direct_user_id"},
+                users=[user],
+                resolved_user=user,
+            )
 
         if mobile:
             search = self._run(["contact", "user", "search-mobile", "--mobile", mobile])
         else:
-            search = self._run(["contact", "user", "search", "--keyword", keyword])
+            search = self._run(["contact", "user", "search", "--query", keyword])
         if not self._is_cli_success(search):
             return self._user_failure(self._build_cli_error_message("查询钉钉用户失败", search), code="cli_error", raw=search.payload)
 
@@ -89,7 +101,36 @@ class DingTalkDwsAdapter(NotificationAdapter):
         if not user_ids:
             query_text = mobile or keyword
             return self._user_failure(f"未找到匹配的钉钉用户: {query_text}", code="not_found", raw=search.payload)
-        return self._get_users_by_ids(user_ids)
+        users = [
+            NotificationUser(
+                user_id=item,
+                display_name=keyword or item,
+                mobile=mobile,
+                extra={"source": "search_result"},
+            )
+            for item in user_ids
+        ]
+        if len(users) > 1:
+            detail = self._get_users_by_ids(user_ids)
+            if detail.success and detail.users:
+                detail_by_id = {user.user_id: user for user in detail.users}
+                users = [detail_by_id.get(user.user_id, user) for user in users]
+                return UserResolveResult(
+                    success=True,
+                    provider=self.provider,
+                    message=f"命中 {len(users)} 个钉钉用户",
+                    raw={"search": search.payload, "detail": detail.raw},
+                    users=users,
+                    resolved_user=None,
+                )
+        return UserResolveResult(
+            success=True,
+            provider=self.provider,
+            message="ok" if len(users) == 1 else f"命中 {len(users)} 个钉钉用户",
+            raw=search.payload,
+            users=users,
+            resolved_user=users[0] if len(users) == 1 else None,
+        )
 
     def send_bot_message(
         self,
@@ -634,15 +675,53 @@ def _users_from_payload(payload: dict[str, Any]) -> list[NotificationUser]:
         user_id = str(model.get("orgUserId") or model.get("userId") or model.get("userid") or "").strip()
         if not user_id:
             continue
+        departments = _normalize_departments(
+            model.get("deptNameList")
+            or model.get("departmentNames")
+            or model.get("departments")
+            or model.get("department")
+            or model.get("deptName")
+        )
         users.append(
             NotificationUser(
                 user_id=user_id,
                 display_name=str(model.get("orgUserName") or model.get("name") or "").strip(),
                 mobile=str(model.get("orgUserMobile") or model.get("mobile") or "").strip(),
+                organization=str(
+                    model.get("organization")
+                    or model.get("orgName")
+                    or model.get("corpName")
+                    or model.get("tenantName")
+                    or ""
+                ).strip(),
+                departments=departments,
                 extra={"raw": item},
             )
         )
     return users
+
+
+def _normalize_departments(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if isinstance(raw, list):
+        values: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                value = item.strip()
+            elif isinstance(item, dict):
+                value = str(item.get("name") or item.get("deptName") or item.get("departmentName") or "").strip()
+            else:
+                value = str(item or "").strip()
+            if value:
+                values.append(value)
+        return values
+    if isinstance(raw, dict):
+        value = str(raw.get("name") or raw.get("deptName") or raw.get("departmentName") or "").strip()
+        return [value] if value else []
+    return []
 
 
 def _todo_from_detail(detail: dict[str, Any]) -> TodoRecord:

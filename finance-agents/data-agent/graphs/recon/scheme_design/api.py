@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -99,6 +99,7 @@ class ConfirmDesignSessionRequest(BaseModel):
 
 class ProcTrialRequest(BaseModel):
     proc_rule_json: dict[str, Any] = Field(default_factory=dict)
+    input_plan_json: dict[str, Any] = Field(default_factory=dict)
     sample_datasets: list[dict[str, Any]] = Field(default_factory=list)
     uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -353,6 +354,7 @@ async def use_existing_proc_rule(
 @router.post("/{session_id}/proc/trial")
 async def trial_proc_step(
     session_id: str,
+    body: ProcTrialRequest | None = Body(default=None),
     authorization: Optional[str] = Header(None),
 ):
     auth_token = _extract_auth_token(authorization)
@@ -360,7 +362,11 @@ async def trial_proc_step(
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     service = get_scheme_design_service()
     try:
-        session = await service.trial_proc_step(auth_token=auth_token, session_id=session_id)
+        session = await service.trial_proc_step(
+            auth_token=auth_token,
+            session_id=session_id,
+            input_plan_json=(body.input_plan_json if body else {}),
+        )
     except ValueError as exc:
         raise _translate_service_error(exc) from exc
     if session is None:
@@ -513,6 +519,7 @@ async def proc_trial(
             auth_token=auth_token,
             payload=ProcTrialInput(
                 proc_rule_json=body.proc_rule_json,
+                input_plan_json=body.input_plan_json,
                 sample_datasets=body.sample_datasets,
                 uploaded_files=body.uploaded_files,
             ),

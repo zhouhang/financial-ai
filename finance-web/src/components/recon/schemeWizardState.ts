@@ -68,6 +68,7 @@ export interface SchemeDraft {
   selectedProcConfigId: string;
   procDraft: string;
   procRuleJson: Record<string, unknown> | null;
+  inputPlanJson: Record<string, unknown> | null;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
   reconConfigMode: ConfigMode;
@@ -123,6 +124,7 @@ export type DerivedPreviewState = 'empty' | 'current' | 'reference';
 
 export interface SchemeWizardDerivedState {
   procRuleJson: Record<string, unknown> | null;
+  inputPlanJson: Record<string, unknown> | null;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
   procCompatibility: CompatibilityCheckResult;
@@ -209,13 +211,6 @@ export function inferOutputFieldSemanticRole(
   const combined = `${outputName} ${sourceField}`.trim();
   const normalized = combined.toLowerCase();
   if (!combined) return 'normal';
-  if (
-    /(时间|日期|账期|created_at|updated_at|date|time|day|dt|gmt|settle|payment|accounting|posting|entry|occurred|happened)/i.test(
-      combined,
-    )
-  ) {
-    return 'time_field';
-  }
   if (
     /(匹配|主键|唯一|单号|编号|业务键|biz_key|match_key|key|id|no|code|uuid|identifier|order_id|order_no|trade_no|serial_no|record_id|ledger_id)/i.test(
       combined,
@@ -654,6 +649,7 @@ export function createEmptyCompatibilityState(): CompatibilityCheckResult {
 export function createEmptySchemeWizardDerivedState(): SchemeWizardDerivedState {
   return {
     procRuleJson: null,
+    inputPlanJson: null,
     procTrialStatus: 'idle',
     procTrialSummary: '',
     procCompatibility: createEmptyCompatibilityState(),
@@ -714,6 +710,7 @@ export function buildLegacySchemeDraftSnapshot(state: SchemeWizardDraftState): S
     selectedProcConfigId: preparation.selectedProcConfigId,
     procDraft: preparation.procDraft,
     procRuleJson: state.derived.procRuleJson,
+    inputPlanJson: state.derived.inputPlanJson,
     procTrialStatus: state.derived.procTrialStatus,
     procTrialSummary: state.derived.procTrialSummary,
     reconConfigMode: state.reconciliation.reconConfigMode,
@@ -770,6 +767,7 @@ export function applyLegacySchemeDraftSnapshot(
     derived: {
       ...state.derived,
       procRuleJson: nextDraft.procRuleJson,
+      inputPlanJson: nextDraft.inputPlanJson,
       procTrialStatus: nextDraft.procTrialStatus,
       procTrialSummary: nextDraft.procTrialSummary,
       reconRuleJson: nextDraft.reconRuleJson,
@@ -948,6 +946,7 @@ export function applyExistingProcConfig(
     derived: {
       ...createEmptySchemeWizardDerivedState(),
       procRuleJson: payload.ruleJson,
+      inputPlanJson: null,
     },
   };
 }
@@ -1164,6 +1163,7 @@ export function buildSchemeCreatePayloadDraft(state: SchemeWizardDraftState) {
       recon_trial_status: state.derived.reconTrialStatus,
       recon_trial_summary: state.derived.reconTrialSummary.trim(),
       proc_draft_text: preparation.procDraft.trim(),
+      input_plan_json: state.derived.inputPlanJson,
       recon_draft_text: state.reconciliation.reconDraft.trim(),
       recon_rule_name: state.reconciliation.reconRuleName.trim(),
       match_field_pairs: matchFieldPairs.map((pair) => ({
@@ -1180,8 +1180,8 @@ export function buildSchemeCreatePayloadDraft(state: SchemeWizardDraftState) {
       left_amount_field: leftAmountField,
       right_amount_field: rightAmountField,
       tolerance: state.reconciliation.tolerance.trim(),
-      left_time_semantic: state.reconciliation.leftTimeSemantic.trim(),
-      right_time_semantic: state.reconciliation.rightTimeSemantic.trim(),
+      left_time_semantic: '',
+      right_time_semantic: '',
     },
   };
 }

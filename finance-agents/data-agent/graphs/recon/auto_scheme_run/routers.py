@@ -20,6 +20,7 @@ from .nodes import (
     persist_failed_run_node,
     resolve_biz_date_node,
     resolve_plan_inputs_node,
+    update_rerun_exception_verification_node,
     validate_dataset_completeness_node,
     validate_run_plan_node,
     validate_scheme_rules_node,
@@ -101,6 +102,7 @@ def build_auto_scheme_run_graph() -> StateGraph:
     graph.add_node("persist_auto_run_node", persist_auto_run_node)
     graph.add_node("create_exception_tasks_node", create_exception_tasks_node)
     graph.add_node("maybe_auto_notify_node", maybe_auto_notify_node)
+    graph.add_node("update_rerun_exception_verification_node", update_rerun_exception_verification_node)
 
     graph.set_entry_point("load_run_plan_node")
 
@@ -158,7 +160,8 @@ def build_auto_scheme_run_graph() -> StateGraph:
     graph.add_edge("scheme_execution_graph", "persist_auto_run_node")
     graph.add_edge("persist_auto_run_node", "create_exception_tasks_node")
     graph.add_edge("create_exception_tasks_node", "maybe_auto_notify_node")
-    graph.add_edge("maybe_auto_notify_node", END)
+    graph.add_edge("maybe_auto_notify_node", "update_rerun_exception_verification_node")
+    graph.add_edge("update_rerun_exception_verification_node", END)
     graph.add_edge("persist_failed_run_node", END)
     return graph
 

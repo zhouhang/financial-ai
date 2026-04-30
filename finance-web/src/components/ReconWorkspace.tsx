@@ -52,6 +52,7 @@ import SchemeWizardTargetProcStep, {
 } from './recon/SchemeWizardTargetProcStep';
 import {
   applyRuleGenerationEventToDraft,
+  buildAiSideInputPlanJson,
   buildAiSideProcRuleJson,
   buildRuleGenerationSourcePayloads,
   createDefaultRuleGenerationNodeTraces,
@@ -59,7 +60,11 @@ import {
   normalizeAiOutputFields,
   parseSseFrame,
 } from './recon/ruleGenerationState';
-import { buildRunPlanBindings } from './recon/runPlanBindings';
+import {
+  buildRunPlanBindings,
+  extractRunPlanInputDatasets,
+  type RunPlanInputDatasetDraft,
+} from './recon/runPlanBindings';
 import {
   cn,
   type ReconCenterRunItem,
@@ -143,6 +148,7 @@ interface SchemeDraft {
   selectedProcConfigId: string;
   procDraft: string;
   procRuleJson: Record<string, unknown> | null;
+  inputPlanJson: Record<string, unknown> | null;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
   reconConfigMode: ConfigMode;
@@ -258,10 +264,19 @@ interface PlanDraft {
   scheduleDayOfWeek: string;
   scheduleDayOfMonth: string;
   bizDateOffset: string;
-  leftTimeSemantic: string;
-  rightTimeSemantic: string;
+  dateFieldByInputKey: Record<string, string>;
   channelConfigId: string;
   ownerSummary: string;
+  ownerIdentifier: string;
+}
+
+interface OwnerCandidate {
+  display_name: string;
+  identifier: string;
+  organization: string;
+  departments: string[];
+  mobile_masked: string;
+  disambiguation_label: string;
 }
 
 interface SchemeMetaSummary {
@@ -290,6 +305,7 @@ interface SchemeMetaSummary {
   tolerance: string;
   leftTimeSemantic: string;
   rightTimeSemantic: string;
+  inputPlanJson?: Record<string, unknown> | null;
 }
 
 const SCHEME_LIST_TEMPLATE =
@@ -330,10 +346,10 @@ const EMPTY_PLAN_DRAFT: PlanDraft = {
   scheduleDayOfWeek: '1',
   scheduleDayOfMonth: '1',
   bizDateOffset: 'T-1',
-  leftTimeSemantic: '',
-  rightTimeSemantic: '',
+  dateFieldByInputKey: {},
   channelConfigId: '',
   ownerSummary: '',
+  ownerIdentifier: '',
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -365,35 +381,57 @@ function normalizeStringList(value: unknown): string[] {
   return asList(value).map((item) => toText(item).trim()).filter(Boolean);
 }
 
+function extractMobileTail(maskedMobile: string): string {
+  const match = maskedMobile.match(/(\d{4})$/);
+  return match?.[1] || '';
+}
+
+function formatOwnerCandidateHint(candidate: OwnerCandidate): string {
+  const departments = Array.isArray(candidate.departments)
+    ? candidate.departments.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const mobileTail = extractMobileTail(candidate.mobile_masked || '');
+  const hints = [
+    departments.length > 0 ? `部门：${departments.join(' / ')}` : '',
+    mobileTail ? `手机号后四位：${mobileTail}` : '',
+  ].filter(Boolean);
+  return hints.join(' · ') || candidate.disambiguation_label || candidate.identifier;
+}
+
 function normalizeOutputFieldDrafts(value: unknown): OutputFieldDraft[] {
   return asList(value)
     .map((item, index) => {
       const record = asRecord(item);
-      const valueMode = toText(record.value_mode, 'source_field');
-      const concatParts = asList(record.concat_parts)
+      const valueMode = toText(record.value_mode ?? record.valueMode, 'source_field');
+      const concatParts = asList(record.concat_parts ?? record.concatParts)
         .map((part, partIndex) => {
           const partRecord = asRecord(part);
           return {
             id: toText(partRecord.id, `concat_${index}_${partIndex}`),
-            datasetId: toText(partRecord.dataset_id),
-            fieldName: toText(partRecord.field_name),
+            datasetId: toText(partRecord.dataset_id ?? partRecord.datasetId),
+            fieldName: toText(partRecord.field_name ?? partRecord.fieldName),
           };
         });
       return {
         id: toText(record.id, `field_${index}`),
-        outputName: toText(record.output_name),
+        outputName: toText(record.output_name ?? record.outputName),
         semanticRole: normalizeOutputFieldSemanticRole(
-          record.semantic_role ?? record.semanticRole ?? inferOutputFieldSemanticRole(toText(record.output_name), toText(record.source_field)),
+          record.semantic_role
+            ?? record.semanticRole
+            ?? inferOutputFieldSemanticRole(
+              toText(record.output_name ?? record.outputName),
+              toText(record.source_field ?? record.sourceField),
+            ),
         ),
         valueMode:
           valueMode === 'fixed_value' || valueMode === 'formula' || valueMode === 'concat'
             ? valueMode
             : 'source_field',
-        sourceDatasetId: toText(record.source_dataset_id),
-        sourceField: toText(record.source_field),
-        fixedValue: toText(record.fixed_value),
+        sourceDatasetId: toText(record.source_dataset_id ?? record.sourceDatasetId),
+        sourceField: toText(record.source_field ?? record.sourceField),
+        fixedValue: toText(record.fixed_value ?? record.fixedValue),
         formula: toText(record.formula),
-        concatDelimiter: toText(record.concat_delimiter),
+        concatDelimiter: toText(record.concat_delimiter ?? record.concatDelimiter),
         concatParts,
       } satisfies OutputFieldDraft;
     })
@@ -687,22 +725,12 @@ function summarizeReconDraft(
   const firstRule = asRecord(rules[0]);
   const sourceFile = asRecord(firstRule.source_file);
   const targetFile = asRecord(firstRule.target_file);
-  const leftTimeSemantic = toText(
-    json.left_time_semantic,
-    toText(firstRule.left_time_semantic, fallback.leftTimeSemantic || ''),
-  );
-  const rightTimeSemantic = toText(
-    json.right_time_semantic,
-    toText(firstRule.right_time_semantic, fallback.rightTimeSemantic || ''),
-  );
 
   return [
     `# ${ruleName}`,
     `输入：${toText(sourceFile.table_name, 'left_recon_ready')} ↔ ${toText(targetFile.table_name, 'right_recon_ready')}`,
     `匹配字段：${resolveReconFieldPairsSummary(parsed.matchFieldPairs)}`,
     `对比字段：${resolveReconFieldPairsSummary(parsed.compareFieldPairs)}`,
-    `左时间字段：${leftTimeSemantic || '未配置'}`,
-    `右时间字段：${rightTimeSemantic || '未配置'}`,
     '识别方式：按匹配字段对齐左右记录，比较对比字段差异并输出差异结果。',
   ].join('\n');
 }
@@ -1294,6 +1322,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     tolerance: parsedReconConfig.tolerance,
     leftTimeSemantic: parsedReconConfig.leftTimeSemantic,
     rightTimeSemantic: parsedReconConfig.rightTimeSemantic,
+    inputPlanJson: firstNonEmptyRecord(schemeMeta.input_plan_json, schemeMeta.inputPlanJson),
   };
 }
 
@@ -1355,14 +1384,55 @@ function resolveSampleOriginMeta(
   };
 }
 
-function resolvePlanTimeSemantics(schemeMeta: SchemeMetaSummary | null): {
-  leftTimeSemantic: string;
-  rightTimeSemantic: string;
-} {
-  return {
-    leftTimeSemantic: schemeMeta?.leftTimeSemantic.trim() || '',
-    rightTimeSemantic: schemeMeta?.rightTimeSemantic.trim() || '',
-  };
+function runPlanInputSideLabel(side: 'left' | 'right'): string {
+  return side === 'left' ? '左侧' : '右侧';
+}
+
+function buildRunPlanDateFieldOptions(input: RunPlanInputDatasetDraft): ReconFieldOption[] {
+  const source = input.source;
+  const fieldLabelMap = normalizeFieldLabelMap(source?.fieldLabelMap) || {};
+  const rawNames = Array.from(
+    new Set<string>([
+      ...extractSchemaFieldNames(source?.schemaSummary),
+      ...Object.keys(fieldLabelMap),
+    ]),
+  ).map((item) => item.trim()).filter(Boolean);
+
+  return rawNames
+    .map((rawName) => {
+      const label = toText(fieldLabelMap[rawName], rawName);
+      const schemaType = normalizeSchemaType(asRecord(source?.schemaSummary)[rawName]);
+      const typeScore = schemaType === 'datetime' || schemaType === 'date' ? 20 : 0;
+      const score = scoreDateFieldCandidate(rawName, label) + typeScore;
+      return {
+        value: rawName,
+        label: label && label !== rawName ? `${label}（${rawName}）` : rawName,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
+    .map(({ value, label }) => ({ value, label }));
+}
+
+function pickDefaultRunPlanDateField(input: RunPlanInputDatasetDraft): string {
+  const options = buildRunPlanDateFieldOptions(input);
+  return options[0]?.value || '';
+}
+
+function buildDefaultRunPlanDateFieldMap(
+  schemeMeta: SchemeMetaSummary | null,
+  existing: Record<string, string> = {},
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  extractRunPlanInputDatasets(schemeMeta)
+    .filter((input) => input.requiresDateField)
+    .forEach((input) => {
+      const current = toText(existing[input.key]).trim();
+      const options = buildRunPlanDateFieldOptions(input);
+      const currentIsValid = current && options.some((option) => option.value === current);
+      next[input.key] = currentIsValid ? current : pickDefaultRunPlanDateField(input);
+    });
+  return next;
 }
 
 function normalizeSchemaType(value: unknown): string {
@@ -1944,6 +2014,51 @@ function resolveResultDatasetLabel(
   return resolveFieldDrivenDatasetLabel(fieldName || '', fields, sources);
 }
 
+function hasExplicitRunPlanDatasets(inputPlanJson: unknown): boolean {
+  const planJson = asRecord(inputPlanJson);
+  if (asList(planJson.datasets).length > 0) return true;
+  return asList(planJson.plans).some((rawPlan) => asList(asRecord(rawPlan).datasets).length > 0);
+}
+
+function resolveRunPlanBaseDatasetLabel(
+  side: 'left' | 'right',
+  inputPlanJson: unknown,
+  leftSources: Array<SchemeSourceOption | SchemeSourceDraft>,
+  rightSources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): string {
+  if (!hasExplicitRunPlanDatasets(inputPlanJson)) return '';
+  const inputs = extractRunPlanInputDatasets({
+    leftSources,
+    rightSources,
+    leftOutputFields: [],
+    rightOutputFields: [],
+    inputPlanJson: asRecord(inputPlanJson),
+  });
+  const sideInputs = inputs.filter((input) => input.side === side);
+  const baseInput =
+    sideInputs.find((input) => input.readMode === 'base')
+    || sideInputs.find((input) => input.requiresDateField);
+  return baseInput?.displayName.trim() || '';
+}
+
+function resolveReconOnlyResultDatasetLabel(
+  side: 'left' | 'right',
+  matchFieldPairs: ReconFieldPairDraft[],
+  fields: OutputFieldDraft[],
+  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
+  inputPlanJson: unknown,
+  leftSources: Array<SchemeSourceOption | SchemeSourceDraft>,
+  rightSources: Array<SchemeSourceOption | SchemeSourceDraft>,
+): string {
+  if (sources.length <= 1) {
+    return resolveResultDatasetLabel(side, matchFieldPairs, fields, sources);
+  }
+  return (
+    resolveRunPlanBaseDatasetLabel(side, inputPlanJson, leftSources, rightSources)
+    || resolveResultDatasetLabel(side, matchFieldPairs, fields, sources)
+  );
+}
+
 function resolvePreviewFieldValue(row: PreviewTableRow, candidateKeys: string[]): string {
   for (const key of candidateKeys) {
     const rawValue = row[key];
@@ -2268,47 +2383,15 @@ function buildAllReconFieldOptions(
   return buildReconFieldOptions(fields, '', undefined, 'normal', fieldLabelMap);
 }
 
-function firstOutputFieldValueByRole(
-  fields: OutputFieldDraft[],
-  role: OutputFieldSemanticRole,
-): string {
-  return fields.find(
-    (field) =>
-      normalizeOutputFieldSemanticRole(field.semanticRole) === role && field.outputName.trim(),
-  )?.outputName.trim() || '';
-}
-
-function pickPreferredTimeFieldValue(
-  options: ReconFieldOption[],
-  currentValue: string,
-  roleDerivedValue = '',
-): string {
-  const normalizedCurrent = currentValue.trim();
-  if (normalizedCurrent && options.some((option) => option.value === normalizedCurrent)) {
-    return normalizedCurrent;
-  }
-  const normalizedRoleDerived = roleDerivedValue.trim();
-  if (normalizedRoleDerived && options.some((option) => option.value === normalizedRoleDerived)) {
-    return normalizedRoleDerived;
-  }
-  return '';
-}
-
 function buildStructuredReconDraftText(config: {
   reconRuleName: string;
   matchFieldPairs: ReconFieldPairDraft[];
   compareFieldPairs: ReconFieldPairDraft[];
-  leftTimeSemantic: string;
-  rightTimeSemantic: string;
 }): string {
-  const leftTimeText = config.leftTimeSemantic.trim() || '未配置';
-  const rightTimeText = config.rightTimeSemantic.trim() || '未配置';
   return [
     `# ${config.reconRuleName.trim() || '数据对账逻辑'}`,
     `匹配字段: ${resolveReconFieldPairsSummary(config.matchFieldPairs)}`,
     `对比字段: ${resolveReconFieldPairsSummary(config.compareFieldPairs)}`,
-    `左时间字段: ${leftTimeText}`,
-    `右时间字段: ${rightTimeText}`,
     '识别方式：按匹配字段对齐左右记录，再逐项比较对比字段差异。',
   ].join('\n');
 }
@@ -2319,8 +2402,6 @@ function buildLocalReconRuleJson(config: {
   reconRuleName: string;
   matchFieldPairs: ReconFieldPairDraft[];
   compareFieldPairs: ReconFieldPairDraft[];
-  leftTimeSemantic: string;
-  rightTimeSemantic: string;
 }): Record<string, unknown> {
   const matchFieldPairs = filterCompleteReconFieldPairs(config.matchFieldPairs);
   const compareFieldPairs = filterCompleteReconFieldPairs(config.compareFieldPairs);
@@ -2332,15 +2413,11 @@ function buildLocalReconRuleJson(config: {
   }
 
   const ruleName = config.reconRuleName.trim() || buildDefaultReconRuleName(config.schemeName);
-  const leftTimeSemantic = config.leftTimeSemantic.trim();
-  const rightTimeSemantic = config.rightTimeSemantic.trim();
   const tolerance = 0;
   const signature = [
     ruleName,
     ...matchFieldPairs.map((pair) => `${pair.leftField}:${pair.rightField}`),
     ...compareFieldPairs.map((pair) => `${pair.leftField}:${pair.rightField}`),
-    leftTimeSemantic,
-    rightTimeSemantic,
   ].join('|');
 
   return {
@@ -2348,8 +2425,6 @@ function buildLocalReconRuleJson(config: {
     rule_name: ruleName,
     description: config.businessGoal.trim() || `${ruleName} 自动生成对账逻辑`,
     schema_version: '1.6',
-    left_time_semantic: leftTimeSemantic,
-    right_time_semantic: rightTimeSemantic,
     rules: [
       {
         enabled: true,
@@ -2369,8 +2444,6 @@ function buildLocalReconRuleJson(config: {
             match_strategy: 'exact',
           },
         },
-        left_time_semantic: leftTimeSemantic,
-        right_time_semantic: rightTimeSemantic,
         recon: {
           key_columns: {
             source_field: matchFieldPairs[0].leftField,
@@ -2403,6 +2476,25 @@ function buildLocalReconRuleJson(config: {
       },
     ],
   };
+}
+
+function stripReconTimeSemantics(ruleJson: Record<string, unknown>): Record<string, unknown> {
+  const nextRule = { ...ruleJson };
+  delete nextRule.left_time_semantic;
+  delete nextRule.right_time_semantic;
+  delete nextRule.time_semantic;
+  const rules = asList(nextRule.rules).map((rawRule) => {
+    const rule = asRecord(rawRule);
+    const nextItem = { ...rule };
+    delete nextItem.left_time_semantic;
+    delete nextItem.right_time_semantic;
+    delete nextItem.time_semantic;
+    return nextItem;
+  });
+  if (rules.length > 0) {
+    nextRule.rules = rules;
+  }
+  return nextRule;
 }
 
 function buildPreparedOutputFieldPayload(fields: OutputFieldDraft[]): Array<Record<string, unknown>> {
@@ -2993,15 +3085,19 @@ export default function ReconWorkspace({
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmittingScheme, setIsSubmittingScheme] = useState(false);
   const [isSubmittingPlan, setIsSubmittingPlan] = useState(false);
+  const [ownerCandidates, setOwnerCandidates] = useState<OwnerCandidate[]>([]);
+  const [ownerSearchMessage, setOwnerSearchMessage] = useState('');
   const [isTrialingProc, setIsTrialingProc] = useState(false);
   const [isTrialingRecon, setIsTrialingRecon] = useState(false);
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
+  const [wizardProcJsonView, setWizardProcJsonView] = useState<'proc' | 'inputPlan'>('proc');
+  const [wizardReconJsonView, setWizardReconJsonView] = useState<'proc' | 'recon'>('recon');
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
   const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
-    panel: 'proc' | 'recon';
+    panel: 'proc' | 'inputPlan' | 'recon';
     status: 'success' | 'error';
   } | null>(null);
   const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -3060,6 +3156,14 @@ export default function ReconWorkspace({
     () => (selectedPlanScheme ? extractSchemeMeta(selectedPlanScheme) : null),
     [selectedPlanScheme],
   );
+  const selectedPlanInputDatasets = useMemo(
+    () => extractRunPlanInputDatasets(selectedPlanSchemeMeta),
+    [selectedPlanSchemeMeta],
+  );
+  const selectedPlanDateInputs = useMemo(
+    () => selectedPlanInputDatasets.filter((input) => input.requiresDateField),
+    [selectedPlanInputDatasets],
+  );
 
   useEffect(() => {
     aiProcSideDraftsRef.current = aiProcSideDrafts;
@@ -3068,6 +3172,10 @@ export default function ReconWorkspace({
   const procJsonPreview = useMemo(
     () => (schemeDraft.procRuleJson ? JSON.stringify(schemeDraft.procRuleJson, null, 2) : ''),
     [schemeDraft.procRuleJson],
+  );
+  const inputPlanJsonPreview = useMemo(
+    () => (schemeDraft.inputPlanJson ? JSON.stringify(schemeDraft.inputPlanJson, null, 2) : ''),
+    [schemeDraft.inputPlanJson],
   );
   const parsedReconConfig = useMemo(
     () =>
@@ -3130,52 +3238,6 @@ export default function ReconWorkspace({
     ),
     [aiProcSideDrafts.right.outputFieldLabelMap, rightOutputFields, selectedRightSources],
   );
-  const roleDerivedLeftTimeSemantic = useMemo(
-    () => firstOutputFieldValueByRole(leftOutputFields, 'time_field'),
-    [leftOutputFields],
-  );
-  const roleDerivedRightTimeSemantic = useMemo(
-    () => firstOutputFieldValueByRole(rightOutputFields, 'time_field'),
-    [rightOutputFields],
-  );
-  const leftTimeFieldOptions = useMemo(
-    () => buildReconFieldOptions(
-      leftOutputFields,
-      roleDerivedLeftTimeSemantic,
-      scoreDateFieldCandidate,
-      'time_field',
-      leftOutputFieldLabelMap,
-      { onlyTimeRelated: true, includeFallback: false },
-    ),
-    [leftOutputFieldLabelMap, leftOutputFields, roleDerivedLeftTimeSemantic],
-  );
-  const rightTimeFieldOptions = useMemo(
-    () => buildReconFieldOptions(
-      rightOutputFields,
-      roleDerivedRightTimeSemantic,
-      scoreDateFieldCandidate,
-      'time_field',
-      rightOutputFieldLabelMap,
-      { onlyTimeRelated: true, includeFallback: false },
-    ),
-    [rightOutputFieldLabelMap, rightOutputFields, roleDerivedRightTimeSemantic],
-  );
-  const effectiveLeftTimeSemantic = useMemo(
-    () => pickPreferredTimeFieldValue(
-      leftTimeFieldOptions,
-      parsedReconConfig.leftTimeSemantic,
-      roleDerivedLeftTimeSemantic,
-    ),
-    [leftTimeFieldOptions, parsedReconConfig.leftTimeSemantic, roleDerivedLeftTimeSemantic],
-  );
-  const effectiveRightTimeSemantic = useMemo(
-    () => pickPreferredTimeFieldValue(
-      rightTimeFieldOptions,
-      parsedReconConfig.rightTimeSemantic,
-      roleDerivedRightTimeSemantic,
-    ),
-    [parsedReconConfig.rightTimeSemantic, rightTimeFieldOptions, roleDerivedRightTimeSemantic],
-  );
   const leftReconFieldOptions = useMemo(
     () => buildAllReconFieldOptions(leftOutputFields, leftOutputFieldLabelMap),
     [leftOutputFieldLabelMap, leftOutputFields],
@@ -3193,8 +3255,6 @@ export default function ReconWorkspace({
           reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
           matchFieldPairs: activeMatchFieldPairs,
           compareFieldPairs: activeCompareFieldPairs,
-          leftTimeSemantic: effectiveLeftTimeSemantic,
-          rightTimeSemantic: effectiveRightTimeSemantic,
         }),
         error: '',
       };
@@ -3207,8 +3267,6 @@ export default function ReconWorkspace({
   }, [
     activeCompareFieldPairs,
     activeMatchFieldPairs,
-    effectiveLeftTimeSemantic,
-    effectiveRightTimeSemantic,
     schemeDraft.businessGoal,
     schemeDraft.name,
     schemeDraft.reconRuleName,
@@ -3433,6 +3491,8 @@ export default function ReconWorkspace({
     setWizardDraftState(createEmptySchemeWizardDraftState());
     setDesignSessionId('');
     setWizardJsonPanel(null);
+    setWizardProcJsonView('proc');
+    setWizardReconJsonView('recon');
     setProcTrialPreview(null);
     setReconTrialPreview(null);
     setProcCompatibility(emptyCompatibilityResult());
@@ -3448,14 +3508,14 @@ export default function ReconWorkspace({
   const openCreatePlanModal = useCallback(
     (scheme: ReconSchemeListItem | null = null) => {
       setModalError(null);
+      setOwnerCandidates([]);
+      setOwnerSearchMessage('');
       const resolvedScheme = scheme || schemes[0] || null;
       const resolvedSchemeMeta = resolvedScheme ? extractSchemeMeta(resolvedScheme) : null;
-      const resolvedTimeSemantics = resolvePlanTimeSemantics(resolvedSchemeMeta);
       setPlanDraft({
         ...EMPTY_PLAN_DRAFT,
         schemeCode: resolvedScheme?.schemeCode || '',
-        leftTimeSemantic: resolvedTimeSemantics.leftTimeSemantic,
-        rightTimeSemantic: resolvedTimeSemantics.rightTimeSemantic,
+        dateFieldByInputKey: buildDefaultRunPlanDateFieldMap(resolvedSchemeMeta),
       });
       setModalState({ kind: 'create-plan', scheme: resolvedScheme });
       void loadChannelOptions();
@@ -3466,6 +3526,8 @@ export default function ReconWorkspace({
   const closeModal = useCallback(() => {
     setModalError(null);
     setWizardJsonPanel(null);
+    setWizardProcJsonView('proc');
+    setWizardReconJsonView('recon');
     setWizardJsonCopyState(null);
     setSelectedExceptionDetail(null);
     setModalState(null);
@@ -3475,9 +3537,18 @@ export default function ReconWorkspace({
   }, [setProcCompatibility, setReconCompatibility]);
 
   const handleCopyWizardJson = useCallback(async (panel: 'proc' | 'recon') => {
-    const jsonText = panel === 'proc' ? procJsonPreview : reconJsonPreview;
+    const copyPanel = panel === 'proc'
+      ? wizardProcJsonView === 'inputPlan' ? 'inputPlan' : 'proc'
+      : wizardReconJsonView;
+    const jsonText = panel === 'proc'
+      ? wizardProcJsonView === 'inputPlan'
+        ? inputPlanJsonPreview
+        : procJsonPreview
+      : wizardReconJsonView === 'proc'
+      ? procJsonPreview
+      : reconJsonPreview;
     if (!jsonText.trim()) {
-      setWizardJsonCopyState({ panel, status: 'error' });
+      setWizardJsonCopyState({ panel: copyPanel, status: 'error' });
       return;
     }
 
@@ -3495,15 +3566,15 @@ export default function ReconWorkspace({
         document.execCommand('copy');
         document.body.removeChild(textarea);
       }
-      setWizardJsonCopyState({ panel, status: 'success' });
+      setWizardJsonCopyState({ panel: copyPanel, status: 'success' });
     } catch {
-      setWizardJsonCopyState({ panel, status: 'error' });
+      setWizardJsonCopyState({ panel: copyPanel, status: 'error' });
     }
 
     window.setTimeout(() => {
-      setWizardJsonCopyState((prev) => (prev?.panel === panel ? null : prev));
+      setWizardJsonCopyState((prev) => (prev?.panel === copyPanel ? null : prev));
     }, 1800);
-  }, [procJsonPreview, reconJsonPreview]);
+  }, [inputPlanJsonPreview, procJsonPreview, reconJsonPreview, wizardProcJsonView, wizardReconJsonView]);
 
   const resetSchemeDraftFromGoalChange = useCallback(
     (patch: Partial<SchemeDraft>) => {
@@ -3515,6 +3586,8 @@ export default function ReconWorkspace({
       );
       setDesignSessionId('');
       setWizardJsonPanel(null);
+      setWizardProcJsonView('proc');
+      setWizardReconJsonView('recon');
       setProcTrialPreview(null);
       setReconTrialPreview(null);
       setProcCompatibility(emptyCompatibilityResult());
@@ -3542,6 +3615,8 @@ export default function ReconWorkspace({
       });
       setDesignSessionId('');
       setWizardJsonPanel(null);
+      setWizardProcJsonView('proc');
+      setWizardReconJsonView('recon');
       if (hasExistingPreview) {
         setProcTrialPreview((prev) =>
           markProcTrialPreviewAsReference(prev, PREPARATION_REFERENCE_EDIT_SUMMARY),
@@ -3572,6 +3647,7 @@ export default function ReconWorkspace({
 
       setDesignSessionId('');
       setWizardJsonPanel(null);
+      setWizardProcJsonView('proc');
       setProcTrialPreview(null);
       setReconTrialPreview(null);
       setWizardDraftState((prev) =>
@@ -3579,6 +3655,7 @@ export default function ReconWorkspace({
           procTrialStatus: 'idle',
           procTrialSummary: '',
           procRuleJson: null,
+          inputPlanJson: null,
           procCompatibility: emptyCompatibilityResult(),
           procPreviewState: 'empty',
           reconTrialStatus: 'idle',
@@ -3608,6 +3685,7 @@ export default function ReconWorkspace({
           summary: hasGeneratedResult ? current.summary : '',
           error: '',
           failureReasons: [],
+          failureDetails: [],
           questions: [],
           nodeTraces: hasGeneratedResult ? current.nodeTraces : createDefaultRuleGenerationNodeTraces(),
         },
@@ -3643,6 +3721,7 @@ export default function ReconWorkspace({
             error: `请先输入${sideLabel}整理规则描述。`,
             summary: '',
             failureReasons: [],
+            failureDetails: [],
           },
         }));
         return;
@@ -3656,6 +3735,7 @@ export default function ReconWorkspace({
             error: `请先选择${sideLabel}数据集。`,
             summary: '',
             failureReasons: [],
+            failureDetails: [],
           },
         }));
         return;
@@ -3672,9 +3752,10 @@ export default function ReconWorkspace({
         [side]: {
           ...prev[side],
           status: 'generating',
-          summary: `${sideLabel}规则已提交，正在执行规则理解、字段绑定、JSON生成、样例执行和断言验证。`,
+          summary: `${sideLabel}规则已提交，正在理解描述、检查字段、生成规则并试跑输出数据。`,
           error: '',
           failureReasons: [],
+          failureDetails: [],
           nodeTraces: createDefaultRuleGenerationNodeTraces(),
           questions: [],
           warnings: [],
@@ -3738,9 +3819,12 @@ export default function ReconWorkspace({
 
         const outputFields = normalizeAiOutputFields(finalEvent.output_fields);
         const currentRule = isRecord(finalEvent.proc_rule_json) ? finalEvent.proc_rule_json : undefined;
+        const currentInputPlan = isRecord(finalEvent.input_plan_json) ? finalEvent.input_plan_json : undefined;
         const latestSideDrafts = aiProcSideDraftsRef.current;
         const leftRule = side === 'left' ? currentRule : latestSideDrafts.left.procRuleJson;
         const rightRule = side === 'right' ? currentRule : latestSideDrafts.right.procRuleJson;
+        const leftInputPlan = side === 'left' ? currentInputPlan : latestSideDrafts.left.inputPlanJson;
+        const rightInputPlan = side === 'right' ? currentInputPlan : latestSideDrafts.right.inputPlanJson;
         const mergedRule = leftRule && rightRule
           ? buildAiSideProcRuleJson({
               schemeName: schemeDraft.name,
@@ -3748,6 +3832,9 @@ export default function ReconWorkspace({
               leftRule,
               rightRule,
             })
+          : null;
+        const mergedInputPlan = leftInputPlan && rightInputPlan
+          ? buildAiSideInputPlanJson({ leftPlan: leftInputPlan, rightPlan: rightInputPlan })
           : null;
         let mergedTrialPassed = false;
         let mergedTrialSummary = `${sideLabel}输出数据已生成，请继续生成${side === 'left' ? '右侧' : '左侧'}输出数据。`;
@@ -3766,11 +3853,12 @@ export default function ReconWorkspace({
                 Authorization: `Bearer ${authToken || ''}`,
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({
-                proc_rule_json: mergedRule,
-                sample_datasets: [
-                  ...leftSamples.map((source) => ({ ...source, side: 'left' })),
-                  ...rightSamples.map((source) => ({ ...source, side: 'right' })),
+        body: JSON.stringify({
+          proc_rule_json: mergedRule,
+          input_plan_json: mergedInputPlan || undefined,
+          sample_datasets: [
+            ...leftSamples.map((source) => ({ ...source, side: 'left' })),
+            ...rightSamples.map((source) => ({ ...source, side: 'right' })),
                 ],
               }),
             });
@@ -3810,6 +3898,7 @@ export default function ReconWorkspace({
 
         setDesignSessionId('');
         setWizardJsonPanel(null);
+        setWizardProcJsonView('proc');
         setReconTrialPreview(null);
         setReconCompatibility(emptyCompatibilityResult());
         setWizardDraftState((prev) => {
@@ -3831,6 +3920,7 @@ export default function ReconWorkspace({
             return updateDerivedDraft(withMergedFields, {
               procTrialStatus: 'needs_adjustment',
               procTrialSummary: `${sideLabel}输出数据已生成，请继续生成${side === 'left' ? '右侧' : '左侧'}输出数据。`,
+              inputPlanJson: null,
               procPreviewState: 'current',
               reconTrialStatus: 'idle',
               reconTrialSummary: '',
@@ -3842,6 +3932,7 @@ export default function ReconWorkspace({
             procRuleJson: verifiedMergedRule,
             procTrialStatus: mergedTrialPassed ? 'passed' : 'needs_adjustment',
             procTrialSummary: mergedTrialSummary,
+            inputPlanJson: mergedInputPlan,
             procCompatibility: {
               status: mergedTrialPassed ? 'passed' : 'failed',
               message: mergedTrialPassed
@@ -3872,6 +3963,8 @@ export default function ReconWorkspace({
             status: 'failed',
             summary: `${sideLabel}AI生成失败。`,
             error: message,
+            failureReasons: [message],
+            failureDetails: [],
           },
         }));
       } finally {
@@ -4001,6 +4094,8 @@ export default function ReconWorkspace({
         });
       });
       setWizardJsonPanel(null);
+      setWizardProcJsonView('proc');
+      setWizardReconJsonView('recon');
       if (hasExistingPreview) {
         setReconTrialPreview((prev) => markReconTrialPreviewAsReference(prev, referenceSummary));
         setReconCompatibility({
@@ -4022,8 +4117,6 @@ export default function ReconWorkspace({
         reconRuleName: string;
         matchFieldPairs: ReconFieldPairDraft[];
         compareFieldPairs: ReconFieldPairDraft[];
-        leftTimeSemantic: string;
-        rightTimeSemantic: string;
         tolerance: string;
       }>,
     ) => {
@@ -4062,8 +4155,6 @@ export default function ReconWorkspace({
           'right',
           current.rightAmountField,
         );
-        const nextLeftTimeSemantic = patch.leftTimeSemantic ?? current.leftTimeSemantic;
-        const nextRightTimeSemantic = patch.rightTimeSemantic ?? current.rightTimeSemantic;
         const nextTolerance = patch.tolerance ?? current.tolerance ?? '0.00';
         return updateReconciliationDraft(prev, {
           reconConfigMode: 'ai',
@@ -4074,15 +4165,13 @@ export default function ReconWorkspace({
           matchKey: nextMatchKey,
           leftAmountField: nextLeftAmountField,
           rightAmountField: nextRightAmountField,
-          leftTimeSemantic: nextLeftTimeSemantic,
-          rightTimeSemantic: nextRightTimeSemantic,
+          leftTimeSemantic: '',
+          rightTimeSemantic: '',
           tolerance: nextTolerance,
           reconDraft: buildStructuredReconDraftText({
             reconRuleName: nextRuleName,
             matchFieldPairs: nextMatchFieldPairs,
             compareFieldPairs: nextCompareFieldPairs,
-            leftTimeSemantic: nextLeftTimeSemantic,
-            rightTimeSemantic: nextRightTimeSemantic,
           }),
         });
       });
@@ -4100,17 +4189,14 @@ export default function ReconWorkspace({
 
   useEffect(() => {
     if (modalState?.kind !== 'create-plan') return;
-    const nextTimeSemantics = resolvePlanTimeSemantics(selectedPlanSchemeMeta);
     setPlanDraft((prev) => {
-      const nextLeft = nextTimeSemantics.leftTimeSemantic;
-      const nextRight = nextTimeSemantics.rightTimeSemantic;
-      if (nextLeft === prev.leftTimeSemantic && nextRight === prev.rightTimeSemantic) {
+      const nextMap = buildDefaultRunPlanDateFieldMap(selectedPlanSchemeMeta, prev.dateFieldByInputKey);
+      if (JSON.stringify(nextMap) === JSON.stringify(prev.dateFieldByInputKey)) {
         return prev;
       }
       return {
         ...prev,
-        leftTimeSemantic: nextLeft,
-        rightTimeSemantic: nextRight,
+        dateFieldByInputKey: nextMap,
       };
     });
   }, [modalState, selectedPlanSchemeMeta]);
@@ -4234,16 +4320,22 @@ export default function ReconWorkspace({
     const matchedWithDiff = toPreviewTableRows(resultSamples.matched_with_diff);
     const sourceOnly = toPreviewTableRows(resultSamples.source_only);
     const targetOnly = toPreviewTableRows(resultSamples.target_only);
-    const leftDatasetLabel = resolveResultDatasetLabel(
+    const leftDatasetLabel = resolveReconOnlyResultDatasetLabel(
       'left',
       activeMatchFieldPairs,
       leftOutputFields,
       selectedLeftSources,
+      schemeDraft.inputPlanJson,
+      selectedLeftSources,
+      selectedRightSources,
     );
-    const rightDatasetLabel = resolveResultDatasetLabel(
+    const rightDatasetLabel = resolveReconOnlyResultDatasetLabel(
       'right',
       activeMatchFieldPairs,
       rightOutputFields,
+      selectedRightSources,
+      schemeDraft.inputPlanJson,
+      selectedLeftSources,
       selectedRightSources,
     );
     const rows: ReconResultRow[] = [
@@ -4300,6 +4392,7 @@ export default function ReconWorkspace({
     activeMatchFieldPairs,
     leftOutputFields,
     rightOutputFields,
+    schemeDraft.inputPlanJson,
     selectedLeftSources,
     selectedRightSources,
   ]);
@@ -4371,6 +4464,7 @@ export default function ReconWorkspace({
           summarizeProcDraft(preparedRuleJson),
         ),
         procRuleJson: preparedRuleJson,
+        inputPlanJson: prev.inputPlanJson,
         procTrialStatus: 'idle',
         procTrialSummary: '',
         reconDraft: '',
@@ -4394,7 +4488,11 @@ export default function ReconWorkspace({
         method: 'POST',
         headers: {
           Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          input_plan_json: schemeDraft.inputPlanJson || undefined,
+        }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -4543,7 +4641,11 @@ export default function ReconWorkspace({
         method: 'POST',
         headers: {
           Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          input_plan_json: schemeDraft.inputPlanJson || undefined,
+        }),
       });
       const procTrialData = await procTrialResponse.json().catch(() => ({}));
       if (!procTrialResponse.ok) {
@@ -4560,7 +4662,7 @@ export default function ReconWorkspace({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          rule_json: compiledReconRuleResult.json,
+          rule_json: stripReconTimeSemantics(compiledReconRuleResult.json),
         }),
       });
       const prepareData = await prepareResponse.json().catch(() => ({}));
@@ -4580,7 +4682,7 @@ export default function ReconWorkspace({
       const session = asRecord(data.session);
       const reconStep = asRecord(session.recon_step);
       const trialResult = asRecord(reconStep.trial_result);
-      const normalizedRule = asRecord(reconStep.effective_rule_json);
+      const normalizedRule = stripReconTimeSemantics(asRecord(reconStep.effective_rule_json));
       const parsed = parseReconRuleJsonConfig(normalizedRule, parsedReconConfig);
       const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
       const summary = toText(
@@ -4602,8 +4704,6 @@ export default function ReconWorkspace({
           ),
           matchFieldPairs: parsed.matchFieldPairs,
           compareFieldPairs: parsed.compareFieldPairs,
-          leftTimeSemantic: parsed.leftTimeSemantic,
-          rightTimeSemantic: parsed.rightTimeSemantic,
         }),
         reconRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.reconRuleJson,
         reconRuleName: toText(normalizedRule.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
@@ -4612,8 +4712,8 @@ export default function ReconWorkspace({
         matchKey: parsed.matchKey,
         leftAmountField: parsed.leftAmountField,
         rightAmountField: parsed.rightAmountField,
-        leftTimeSemantic: parsed.leftTimeSemantic,
-        rightTimeSemantic: parsed.rightTimeSemantic,
+        leftTimeSemantic: '',
+        rightTimeSemantic: '',
         tolerance: parsed.tolerance,
         reconTrialStatus: passed ? 'passed' : 'needs_adjustment',
         reconTrialSummary: summary,
@@ -4663,6 +4763,9 @@ export default function ReconWorkspace({
   ]);
 
   const handleViewProcJson = useCallback(() => {
+    setWizardProcJsonView('proc');
+    setWizardReconJsonView('recon');
+    setWizardJsonCopyState(null);
     setWizardJsonPanel((prev) => (prev === 'proc' ? null : 'proc'));
   }, []);
 
@@ -4672,6 +4775,9 @@ export default function ReconWorkspace({
       return;
     }
     setModalError(null);
+    setWizardProcJsonView('proc');
+    setWizardReconJsonView('recon');
+    setWizardJsonCopyState(null);
     setWizardJsonPanel((prev) => (prev === 'recon' ? null : 'recon'));
   }, [compiledReconRuleResult.error, compiledReconRuleResult.json]);
 
@@ -4698,6 +4804,7 @@ export default function ReconWorkspace({
       setModalError('请先生成并验证数据整理规则与对账逻辑。');
       return;
     }
+    effectiveReconRuleJson = stripReconTimeSemantics(effectiveReconRuleJson);
 
     if (schemeDraft.reconTrialStatus !== 'passed') {
       const passed = await trialReconDraft();
@@ -4710,6 +4817,7 @@ export default function ReconWorkspace({
         setModalError('数据对账试跑完成后，仍未生成可保存的对账逻辑。');
         return;
       }
+      effectiveReconRuleJson = stripReconTimeSemantics(effectiveReconRuleJson);
     }
 
     if (!window.confirm('确认当前规则、字段映射和试跑结果都已检查完毕，立即保存方案吗？')) {
@@ -4723,6 +4831,10 @@ export default function ReconWorkspace({
       const schemePayloadDraft = buildSchemeCreatePayloadDraft(wizardDraftState);
       const procRuleJson = schemeDraft.procRuleJson;
       const reconRuleJson = effectiveReconRuleJson;
+      const activeInputPlanJson = firstNonEmptyRecord(
+        schemePayloadDraft.scheme_meta_json.input_plan_json,
+        schemeDraft.inputPlanJson,
+      );
       const parsedReconRule = parseReconRuleJsonConfig(reconRuleJson, parsedReconConfig);
       const procRuleName = schemeDraft.name.trim() ? `${schemeDraft.name.trim()}整理规则` : '整理规则';
       const reconRuleName =
@@ -4846,14 +4958,13 @@ export default function ReconWorkspace({
             match_key: parsedReconRule.matchKey.trim() || parsedReconConfig.matchKey.trim(),
             left_amount_field: parsedReconRule.leftAmountField.trim() || parsedReconConfig.leftAmountField.trim(),
             right_amount_field: parsedReconRule.rightAmountField.trim() || parsedReconConfig.rightAmountField.trim(),
-            left_time_semantic:
-              parsedReconRule.leftTimeSemantic.trim() || parsedReconConfig.leftTimeSemantic.trim(),
-            right_time_semantic:
-              parsedReconRule.rightTimeSemantic.trim() || parsedReconConfig.rightTimeSemantic.trim(),
+            left_time_semantic: '',
+            right_time_semantic: '',
             tolerance: parsedReconRule.tolerance.trim() || parsedReconConfig.tolerance.trim(),
             proc_rule_name: procRuleName,
             recon_rule_name: reconRuleName,
             proc_draft_text: schemePayloadDraft.scheme_meta_json.proc_draft_text || summarizeProcDraft(procRuleJson),
+            input_plan_json: activeInputPlanJson,
             recon_draft_text:
               schemePayloadDraft.scheme_meta_json.recon_draft_text || summarizeReconDraft(reconRuleJson, parsedReconRule),
             proc_rule_json: procRuleJson,
@@ -4890,6 +5001,42 @@ export default function ReconWorkspace({
     wizardDraftState,
   ]);
 
+  const searchOwnerCandidates = useCallback(async () => {
+    const query = planDraft.ownerSummary.trim();
+    if (!authToken) {
+      throw new Error('请先登录后再保存责任人。');
+    }
+    if (!query) {
+      throw new Error('请输入责任人姓名。');
+    }
+    if (!planDraft.channelConfigId.trim()) {
+      throw new Error('请先选择协作通道。');
+    }
+
+    const response = await fetchReconAutoApi('/owner-candidates/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        channel_config_id: planDraft.channelConfigId.trim(),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(data.detail || data.message || '查找责任人失败'));
+    }
+    const candidates = Array.isArray(data.candidates)
+      ? (data.candidates as OwnerCandidate[]).filter((item) => item.identifier)
+      : [];
+    return {
+      candidates,
+      message: String(data.message || ''),
+    };
+  }, [authToken, planDraft.channelConfigId, planDraft.ownerSummary]);
+
   const handleCreatePlan = useCallback(async () => {
     const schemeCode = planDraft.schemeCode.trim();
     if (!authToken) {
@@ -4908,15 +5055,23 @@ export default function ReconWorkspace({
     const matchedScheme = schemes.find((s) => s.schemeCode === schemeCode);
     const schemeName = matchedScheme?.name || schemeCode;
     const matchedSchemeMeta = matchedScheme ? extractSchemeMeta(matchedScheme) : null;
-    const resolvedTimeSemantics = resolvePlanTimeSemantics(matchedSchemeMeta);
-    const leftTimeSemantic = resolvedTimeSemantics.leftTimeSemantic || planDraft.leftTimeSemantic.trim();
-    const rightTimeSemantic = resolvedTimeSemantics.rightTimeSemantic || planDraft.rightTimeSemantic.trim();
+    const planInputDatasets = extractRunPlanInputDatasets(matchedSchemeMeta);
+    const missingDateInputs = planInputDatasets.filter(
+      (input) => input.requiresDateField && !toText(planDraft.dateFieldByInputKey[input.key]).trim(),
+    );
+    if (missingDateInputs.length > 0) {
+      setModalError(
+        `请先选择对账日期字段：${missingDateInputs
+          .map((input) => `${runPlanInputSideLabel(input.side)} ${input.displayName}`)
+          .join('、')}`,
+      );
+      return;
+    }
     const todayStr = new Date().toISOString().slice(0, 10);
     const autoName = `${schemeName} ${todayStr}`;
     const inputBindings = buildRunPlanBindings(
       matchedSchemeMeta,
-      leftTimeSemantic,
-      rightTimeSemantic,
+      planDraft.dateFieldByInputKey,
     );
 
     if (inputBindings.length === 0) {
@@ -4939,6 +5094,32 @@ export default function ReconWorkspace({
     setModalError(null);
 
     try {
+      let ownerSummaryForSubmit = planDraft.ownerSummary.trim();
+      let ownerIdentifierForSubmit = planDraft.ownerIdentifier.trim();
+      if (!ownerIdentifierForSubmit) {
+        setOwnerSearchMessage('');
+        setOwnerCandidates([]);
+        const ownerSearch = await searchOwnerCandidates();
+        if (ownerSearch.candidates.length === 0) {
+          setOwnerSearchMessage(ownerSearch.message || '未找到匹配的责任人，请检查姓名。');
+          return;
+        }
+        if (ownerSearch.candidates.length > 1) {
+          setOwnerCandidates(ownerSearch.candidates);
+          setOwnerSearchMessage(`匹配到 ${ownerSearch.candidates.length} 位同名候选人，请根据部门或手机号后四位选择后再保存。`);
+          return;
+        }
+        const [candidate] = ownerSearch.candidates;
+        ownerSummaryForSubmit = candidate.display_name || ownerSummaryForSubmit;
+        ownerIdentifierForSubmit = candidate.identifier;
+        setPlanDraft((prev) => ({
+          ...prev,
+          ownerSummary: ownerSummaryForSubmit,
+          ownerIdentifier: ownerIdentifierForSubmit,
+        }));
+        setOwnerSearchMessage('已自动匹配到明确责任人。');
+      }
+
       const response = await fetchReconAutoApi('/tasks', {
         method: 'POST',
         headers: {
@@ -4953,17 +5134,18 @@ export default function ReconWorkspace({
           biz_date_offset: planDraft.bizDateOffset.trim() || 'T-1',
           input_bindings_json: inputBindings,
           channel_config_id: planDraft.channelConfigId.trim(),
-          owner_mapping_json: planDraft.ownerSummary.trim()
-            ? { default_owner: { name: planDraft.ownerSummary.trim() } }
+          owner_mapping_json: ownerSummaryForSubmit
+            ? {
+                default_owner: {
+                  name: ownerSummaryForSubmit,
+                  identifier: ownerIdentifierForSubmit,
+                },
+              }
             : {},
           plan_meta_json: {
             biz_date_offset: planDraft.bizDateOffset.trim() || 'T-1',
             reconciliation_period: planDraft.bizDateOffset.trim() || 'T-1',
-            left_time_semantic: leftTimeSemantic,
-            right_time_semantic: rightTimeSemantic,
-            time_semantic: [leftTimeSemantic, rightTimeSemantic]
-              .filter(Boolean)
-              .join(' / '),
+            date_field_by_input_key: planDraft.dateFieldByInputKey,
             input_bindings: inputBindings,
           },
         }),
@@ -4980,7 +5162,7 @@ export default function ReconWorkspace({
     } finally {
       setIsSubmittingPlan(false);
     }
-  }, [authToken, closeModal, loadCenterData, planDraft, schemes]);
+  }, [authToken, closeModal, loadCenterData, planDraft, schemes, searchOwnerCandidates]);
 
   const handleDeleteScheme = useCallback(
     async (scheme: ReconSchemeListItem) => {
@@ -5174,9 +5356,7 @@ export default function ReconWorkspace({
     [authToken, loadCenterData],
   );
 
-  const schemeStepOneReady =
-    Boolean(schemeDraft.name.trim()) &&
-    Boolean(schemeDraft.businessGoal.trim());
+  const schemeStepOneReady = Boolean(schemeDraft.name.trim());
   const aiProcGenerationBusy =
     aiProcSideDrafts.left.status === 'generating' || aiProcSideDrafts.right.status === 'generating';
   const aiProcStepReady = Boolean(
@@ -5240,16 +5420,6 @@ export default function ReconWorkspace({
         reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
         matchFieldPairs: nextMatchFieldPairs,
         compareFieldPairs: nextCompareFieldPairs,
-        leftTimeSemantic: pickPreferredTimeFieldValue(
-          leftTimeFieldOptions,
-          effectiveLeftTimeSemantic,
-          roleDerivedLeftTimeSemantic,
-        ),
-        rightTimeSemantic: pickPreferredTimeFieldValue(
-          rightTimeFieldOptions,
-          effectiveRightTimeSemantic,
-          roleDerivedRightTimeSemantic,
-        ),
       });
       setSchemeWizardStep(3);
       return;
@@ -5277,12 +5447,6 @@ export default function ReconWorkspace({
     applyStructuredReconConfig,
     activeCompareFieldPairs,
     activeMatchFieldPairs,
-    effectiveLeftTimeSemantic,
-    effectiveRightTimeSemantic,
-    leftTimeFieldOptions,
-    rightTimeFieldOptions,
-    roleDerivedLeftTimeSemantic,
-    roleDerivedRightTimeSemantic,
   ]);
 
   const goToPreviousSchemeStep = useCallback(() => {
@@ -5755,9 +5919,7 @@ export default function ReconWorkspace({
       return (
         <SchemeWizardIntentStep
           name={schemeDraft.name}
-          businessGoal={schemeDraft.businessGoal}
           onNameChange={(value) => resetSchemeDraftFromGoalChange({ name: value })}
-          onBusinessGoalChange={(value) => resetSchemeDraftFromGoalChange({ businessGoal: value })}
         />
       );
     }
@@ -5812,14 +5974,10 @@ export default function ReconWorkspace({
             reconRuleName={schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name)}
             matchFieldPairs={activeMatchFieldPairs}
             compareFieldPairs={activeCompareFieldPairs}
-            leftTimeSemantic={effectiveLeftTimeSemantic}
-            rightTimeSemantic={effectiveRightTimeSemantic}
             leftMatchFieldOptions={leftReconFieldOptions}
             rightMatchFieldOptions={rightReconFieldOptions}
             leftCompareFieldOptions={leftReconFieldOptions}
             rightCompareFieldOptions={rightReconFieldOptions}
-            leftTimeFieldOptions={leftTimeFieldOptions}
-            rightTimeFieldOptions={rightTimeFieldOptions}
             leftFieldLabelMap={leftOutputFieldLabelMap}
             rightFieldLabelMap={rightOutputFieldLabelMap}
             reconCompatibility={reconCompatibilityState}
@@ -5949,12 +6107,10 @@ export default function ReconWorkspace({
                   const nextSchemeCode = event.target.value;
                   const nextScheme = schemes.find((scheme) => scheme.schemeCode === nextSchemeCode) || null;
                   const nextSchemeMeta = nextScheme ? extractSchemeMeta(nextScheme) : null;
-                  const nextTimeSemantics = resolvePlanTimeSemantics(nextSchemeMeta);
                   setPlanDraft((prev) => ({
                     ...prev,
                     schemeCode: nextSchemeCode,
-                    leftTimeSemantic: nextTimeSemantics.leftTimeSemantic,
-                    rightTimeSemantic: nextTimeSemantics.rightTimeSemantic,
+                    dateFieldByInputKey: buildDefaultRunPlanDateFieldMap(nextSchemeMeta),
                   }));
                 }}
                 className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
@@ -5967,9 +6123,69 @@ export default function ReconWorkspace({
                 ))}
               </select>
               <p className="mt-2 text-xs leading-5 text-text-muted">
-                运行计划默认沿用该对账方案里已经确认的左右时间字段，不在这里单独配置。
+                对账逻辑只负责“怎么匹配、怎么比较”；这里选择本次要按哪一天的数据发起对账。
               </p>
             </label>
+
+            <div className="rounded-3xl border border-border bg-surface-secondary p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">对账日期字段</p>
+                  <p className="mt-1 text-xs leading-5 text-text-secondary">
+                    选择每个基础数据集里代表业务发生日期的字段。运行计划是 T-1 时，系统会先从已采集数据中筛出“该字段等于昨天”的数据，再按整理规则自动补充关联数据。
+                  </p>
+                </div>
+                <span className="rounded-full border border-sky-100 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700">
+                  {selectedPlanDateInputs.length} 个基础数据集
+                </span>
+              </div>
+              {selectedPlanDateInputs.length > 0 ? (
+                <div className="mt-4 grid gap-3">
+                  {selectedPlanDateInputs.map((input) => {
+                    const options = buildRunPlanDateFieldOptions(input);
+                    return (
+                      <label
+                        key={input.key}
+                        className="grid gap-2 rounded-2xl border border-border-subtle bg-surface px-3 py-3 md:grid-cols-[minmax(160px,0.9fr)_minmax(0,1.4fr)] md:items-center"
+                      >
+                        <span>
+                          <span className="block text-xs font-medium text-text-secondary">
+                            {runPlanInputSideLabel(input.side)} {input.displayName}
+                          </span>
+                          <span className="mt-0.5 block truncate text-[11px] text-text-muted">
+                            {input.alias} / {input.table}
+                          </span>
+                        </span>
+                        <select
+                          value={planDraft.dateFieldByInputKey[input.key] || ''}
+                          onChange={(event) =>
+                            setPlanDraft((prev) => ({
+                              ...prev,
+                              dateFieldByInputKey: {
+                                ...prev.dateFieldByInputKey,
+                                [input.key]: event.target.value,
+                              },
+                            }))
+                          }
+                          className="w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                        >
+                          <option value="">请选择对账日期字段</option>
+                          {options.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                  当前方案没有可识别的基础输入数据集，请先重新生成数据整理规则。
+                </p>
+              )}
+            </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <label className="block">
@@ -6087,9 +6303,15 @@ export default function ReconWorkspace({
                 <span className="text-xs font-medium text-text-secondary">协作通道</span>
                 <select
                   value={planDraft.channelConfigId}
-                  onChange={(event) =>
-                    setPlanDraft((prev) => ({ ...prev, channelConfigId: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    setPlanDraft((prev) => ({
+                      ...prev,
+                      channelConfigId: event.target.value,
+                      ownerIdentifier: '',
+                    }));
+                    setOwnerCandidates([]);
+                    setOwnerSearchMessage('');
+                  }}
                   className="mt-1.5 w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
                 >
                   <option value="">暂不通知</option>
@@ -6104,15 +6326,66 @@ export default function ReconWorkspace({
                 <span className="text-xs font-medium text-text-secondary">责任人</span>
                 <input
                   value={planDraft.ownerSummary}
-                  onChange={(event) =>
-                    setPlanDraft((prev) => ({ ...prev, ownerSummary: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setPlanDraft((prev) => ({
+                      ...prev,
+                      ownerSummary: value,
+                      ownerIdentifier: '',
+                    }));
+                    setOwnerCandidates([]);
+                    setOwnerSearchMessage('');
+                  }}
                   required
                   className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
                   placeholder="例如：张三"
                 />
+                {planDraft.ownerIdentifier ? (
+                  <p className="mt-1.5 text-xs text-emerald-700">已选择明确责任人，保存后将使用钉钉 userId 发送通知。</p>
+                ) : (
+                  <p className="mt-1.5 text-xs text-text-muted">保存时自动校验责任人；同名时会提示选择候选人。</p>
+                )}
               </label>
             </div>
+
+            {ownerSearchMessage ? (
+              <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                {ownerSearchMessage}
+              </div>
+            ) : null}
+
+            {ownerCandidates.length > 0 ? (
+              <div className="grid gap-2">
+                {ownerCandidates.map((candidate) => {
+                  const selected = planDraft.ownerIdentifier === candidate.identifier;
+                  return (
+                    <button
+                      key={candidate.identifier}
+                      type="button"
+                      onClick={() => {
+                        setPlanDraft((prev) => ({
+                          ...prev,
+                          ownerSummary: candidate.display_name || prev.ownerSummary,
+                          ownerIdentifier: candidate.identifier,
+                        }));
+                        setOwnerSearchMessage('已选择明确责任人，请再次点击保存运行计划。');
+                      }}
+                      className={cn(
+                        'rounded-2xl border px-4 py-3 text-left text-sm transition',
+                        selected
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                          : 'border-border bg-surface text-text-primary hover:border-sky-200',
+                      )}
+                    >
+                      <div className="font-medium">{candidate.display_name || '未命名用户'}</div>
+                      <div className="mt-1 text-xs text-text-secondary">
+                        {formatOwnerCandidateHint(candidate)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
 
             {loadingChannels ? (
               <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
@@ -6184,14 +6457,6 @@ export default function ReconWorkspace({
         collectReconSideFieldValues('right', schemeMeta.compareFieldPairs),
         schemeMeta.rightOutputFieldLabelMap,
       );
-      const leftTimeFields = formatDetailFieldValues(
-        [schemeMeta.leftTimeSemantic],
-        schemeMeta.leftOutputFieldLabelMap,
-      );
-      const rightTimeFields = formatDetailFieldValues(
-        [schemeMeta.rightTimeSemantic],
-        schemeMeta.rightOutputFieldLabelMap,
-      );
       return (
         <>
           <div className="border-b border-border px-6 py-5">
@@ -6236,7 +6501,6 @@ export default function ReconWorkspace({
                   <div className="rounded-2xl border border-border bg-surface px-4 py-2">
                     <DetailListRow label="匹配字段" values={leftMatchFields} />
                     <DetailListRow label="对比字段" values={leftCompareFields} />
-                    <DetailListRow label="时间字段" values={leftTimeFields} />
                   </div>
                 </div>
               </div>
@@ -6270,7 +6534,6 @@ export default function ReconWorkspace({
                   <div className="rounded-2xl border border-border bg-surface px-4 py-2">
                     <DetailListRow label="匹配字段" values={rightMatchFields} />
                     <DetailListRow label="对比字段" values={rightCompareFields} />
-                    <DetailListRow label="时间字段" values={rightTimeFields} />
                   </div>
                 </div>
               </div>
@@ -6685,21 +6948,26 @@ export default function ReconWorkspace({
                   onClick={() => void handleCopyWizardJson(wizardJsonPanel)}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition',
-                    wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success'
+                    wizardJsonCopyState?.panel === (wizardJsonPanel === 'proc' ? wizardProcJsonView : wizardReconJsonView)
+                      && wizardJsonCopyState.status === 'success'
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                      : wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'error'
+                      : wizardJsonCopyState?.panel === (wizardJsonPanel === 'proc' ? wizardProcJsonView : wizardReconJsonView)
+                        && wizardJsonCopyState.status === 'error'
                       ? 'border-red-200 bg-red-50 text-red-700'
                       : 'border-border bg-surface text-text-primary hover:border-sky-200 hover:text-sky-700',
                   )}
                 >
-                  {wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success' ? (
+                  {wizardJsonCopyState?.panel === (wizardJsonPanel === 'proc' ? wizardProcJsonView : wizardReconJsonView)
+                    && wizardJsonCopyState.status === 'success' ? (
                     <Check className="h-4 w-4" />
                   ) : (
                     <Copy className="h-4 w-4" />
                   )}
-                  {wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'success'
+                  {wizardJsonCopyState?.panel === (wizardJsonPanel === 'proc' ? wizardProcJsonView : wizardReconJsonView)
+                    && wizardJsonCopyState.status === 'success'
                     ? '已复制'
-                    : wizardJsonCopyState?.panel === wizardJsonPanel && wizardJsonCopyState.status === 'error'
+                    : wizardJsonCopyState?.panel === (wizardJsonPanel === 'proc' ? wizardProcJsonView : wizardReconJsonView)
+                      && wizardJsonCopyState.status === 'error'
                     ? '复制失败'
                     : '复制 JSON'}
                 </button>
@@ -6707,6 +6975,8 @@ export default function ReconWorkspace({
                   type="button"
                   onClick={() => {
                     setWizardJsonPanel(null);
+                    setWizardProcJsonView('proc');
+                    setWizardReconJsonView('recon');
                     setWizardJsonCopyState(null);
                   }}
                   className="rounded-lg p-2 text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary"
@@ -6716,14 +6986,93 @@ export default function ReconWorkspace({
               </div>
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-5">
+              {wizardJsonPanel === 'proc' ? (
+                <div className="mb-4 flex flex-wrap gap-2 rounded-2xl border border-border bg-surface-secondary p-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWizardProcJsonView('proc');
+                      setWizardJsonCopyState(null);
+                    }}
+                    className={cn(
+                      'rounded-xl px-3 py-2 text-sm font-medium transition',
+                      wizardProcJsonView === 'proc'
+                        ? 'bg-text-primary text-white'
+                        : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                    )}
+                  >
+                    Proc JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWizardProcJsonView('inputPlan');
+                      setWizardJsonCopyState(null);
+                    }}
+                    disabled={!inputPlanJsonPreview}
+                    className={cn(
+                      'rounded-xl px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
+                      wizardProcJsonView === 'inputPlan'
+                        ? 'bg-text-primary text-white'
+                        : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                    )}
+                  >
+                    Input Plan JSON
+                  </button>
+                </div>
+              ) : (
+                <div className="mb-4 flex flex-wrap gap-2 rounded-2xl border border-border bg-surface-secondary p-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWizardReconJsonView('proc');
+                      setWizardJsonCopyState(null);
+                    }}
+                    disabled={!procJsonPreview}
+                    className={cn(
+                      'rounded-xl px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
+                      wizardReconJsonView === 'proc'
+                        ? 'bg-text-primary text-white'
+                        : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                    )}
+                  >
+                    Proc JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWizardReconJsonView('recon');
+                      setWizardJsonCopyState(null);
+                    }}
+                    className={cn(
+                      'rounded-xl px-3 py-2 text-sm font-medium transition',
+                      wizardReconJsonView === 'recon'
+                        ? 'bg-text-primary text-white'
+                        : 'border border-border bg-surface text-text-secondary hover:border-sky-200 hover:text-sky-700',
+                    )}
+                  >
+                    Recon JSON
+                  </button>
+                </div>
+              )}
               <pre className="overflow-x-auto rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-xs leading-6 text-text-primary">
-                {wizardJsonPanel === 'proc' ? procJsonPreview : reconJsonPreview}
+                {wizardJsonPanel === 'proc'
+                  ? wizardProcJsonView === 'inputPlan'
+                    ? inputPlanJsonPreview || '当前还没有生成 input plan json。'
+                    : procJsonPreview
+                  : wizardReconJsonView === 'proc'
+                  ? procJsonPreview || '当前还没有生成 proc json。'
+                  : reconJsonPreview}
               </pre>
             </div>
             <div className="flex items-center justify-end border-t border-border px-6 py-4">
               <button
                 type="button"
-                onClick={() => setWizardJsonPanel(null)}
+                onClick={() => {
+                  setWizardJsonPanel(null);
+                  setWizardProcJsonView('proc');
+                  setWizardReconJsonView('recon');
+                }}
                 className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200"
               >
                 取消

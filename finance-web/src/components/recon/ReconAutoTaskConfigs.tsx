@@ -59,6 +59,15 @@ interface BindingQueryDraft {
   dayOffset: string;
 }
 
+interface OwnerCandidate {
+  display_name: string;
+  identifier: string;
+  organization: string;
+  departments: string[];
+  mobile_masked: string;
+  disambiguation_label: string;
+}
+
 interface TableSchemaRequirement {
   tableName: string;
   requiredColumns: string[];
@@ -348,6 +357,23 @@ function formatDayOffset(offset: number): string {
   return `T${offset}`;
 }
 
+function extractMobileTail(maskedMobile: string): string {
+  const match = maskedMobile.match(/(\d{4})$/);
+  return match?.[1] || '';
+}
+
+function formatOwnerCandidateHint(candidate: OwnerCandidate): string {
+  const departments = Array.isArray(candidate.departments)
+    ? candidate.departments.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const mobileTail = extractMobileTail(candidate.mobile_masked || '');
+  const hints = [
+    departments.length > 0 ? `部门：${departments.join(' / ')}` : '',
+    mobileTail ? `手机号后四位：${mobileTail}` : '',
+  ].filter(Boolean);
+  return hints.join(' · ') || candidate.disambiguation_label || candidate.identifier;
+}
+
 function parseDayOffset(value: string): number | null {
   const text = value.trim();
   if (!text) return 0;
@@ -518,6 +544,9 @@ export default function ReconAutoTaskConfigs({
   const [isEnabled, setIsEnabled] = useState(true);
   const [defaultOwnerName, setDefaultOwnerName] = useState('');
   const [defaultOwnerMobile, setDefaultOwnerMobile] = useState('');
+  const [defaultOwnerIdentifier, setDefaultOwnerIdentifier] = useState('');
+  const [ownerCandidates, setOwnerCandidates] = useState<OwnerCandidate[]>([]);
+  const [ownerSearchMessage, setOwnerSearchMessage] = useState('');
 
   const [ruleInputSlots, setRuleInputSlots] = useState<RuleInputSlot[]>([]);
   const [loadingRuleInputs, setLoadingRuleInputs] = useState(false);
@@ -665,6 +694,9 @@ export default function ReconAutoTaskConfigs({
     setIsEnabled(true);
     setDefaultOwnerName('');
     setDefaultOwnerMobile('');
+    setDefaultOwnerIdentifier('');
+    setOwnerCandidates([]);
+    setOwnerSearchMessage('');
     setSelectedChannelId(channelOptions.find((item) => item.is_default)?.id || channelOptions[0]?.id || '');
     setSelectedDatasetKeys({});
     setBindingQueries({});
@@ -1217,6 +1249,44 @@ export default function ReconAutoTaskConfigs({
     });
   };
 
+  const searchOwnerCandidates = async () => {
+    const query = defaultOwnerName.trim();
+    const mobile = defaultOwnerMobile.trim();
+    if (!authToken) {
+      throw new Error('请先登录后再保存责任人。');
+    }
+    if (!selectedChannelId) {
+      throw new Error('请先选择协作通道。');
+    }
+    if (!query && !mobile) {
+      throw new Error('请输入处理人姓名或手机号。');
+    }
+
+    const response = await fetchReconAutoApi('/owner-candidates/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        mobile,
+        channel_config_id: selectedChannelId,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(data.detail || data.message || '查找责任人失败'));
+    }
+    const candidates = Array.isArray(data.candidates)
+      ? (data.candidates as OwnerCandidate[]).filter((item) => item.identifier)
+      : [];
+    return {
+      candidates,
+      message: String(data.message || ''),
+    };
+  };
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitError(null);
@@ -1250,6 +1320,29 @@ export default function ReconAutoTaskConfigs({
 
     setIsSaving(true);
     try {
+      let ownerNameForSubmit = defaultOwnerName.trim();
+      let ownerIdentifierForSubmit = defaultOwnerIdentifier.trim();
+      if (!ownerIdentifierForSubmit) {
+        setOwnerSearchMessage('');
+        setOwnerCandidates([]);
+        const ownerSearch = await searchOwnerCandidates();
+        if (ownerSearch.candidates.length === 0) {
+          setOwnerSearchMessage(ownerSearch.message || '未找到匹配的责任人，请检查姓名或手机号。');
+          return;
+        }
+        if (ownerSearch.candidates.length > 1) {
+          setOwnerCandidates(ownerSearch.candidates);
+          setOwnerSearchMessage(`匹配到 ${ownerSearch.candidates.length} 位同名候选人，请根据部门或手机号后四位选择后再保存。`);
+          return;
+        }
+        const [candidate] = ownerSearch.candidates;
+        ownerNameForSubmit = candidate.display_name || ownerNameForSubmit;
+        ownerIdentifierForSubmit = candidate.identifier;
+        setDefaultOwnerName(ownerNameForSubmit);
+        setDefaultOwnerIdentifier(ownerIdentifierForSubmit);
+        setOwnerSearchMessage('已自动匹配到明确责任人。');
+      }
+
       const response = await fetchReconAutoApi('/auto-tasks', {
         method: 'POST',
         headers: {
@@ -1275,7 +1368,8 @@ export default function ReconAutoTaskConfigs({
           input_bindings: resolvedBindings,
           owner_mapping_json: {
             default_owner: {
-              name: defaultOwnerName.trim(),
+              name: ownerNameForSubmit,
+              identifier: ownerIdentifierForSubmit,
               contact: {
                 mobile: defaultOwnerMobile.trim(),
               },
@@ -2014,7 +2108,12 @@ export default function ReconAutoTaskConfigs({
                         <span className="text-sm font-medium text-text-primary">处理人姓名</span>
                         <input
                           value={defaultOwnerName}
-                          onChange={(event) => setDefaultOwnerName(event.target.value)}
+                          onChange={(event) => {
+                            setDefaultOwnerName(event.target.value);
+                            setDefaultOwnerIdentifier('');
+                            setOwnerCandidates([]);
+                            setOwnerSearchMessage('');
+                          }}
                           placeholder="例如：张三"
                           className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-sky-300"
                         />
@@ -2024,11 +2123,60 @@ export default function ReconAutoTaskConfigs({
                         <span className="text-sm font-medium text-text-primary">手机号</span>
                         <input
                           value={defaultOwnerMobile}
-                          onChange={(event) => setDefaultOwnerMobile(event.target.value)}
+                          onChange={(event) => {
+                            setDefaultOwnerMobile(event.target.value);
+                            setDefaultOwnerIdentifier('');
+                            setOwnerCandidates([]);
+                            setOwnerSearchMessage('');
+                          }}
                           placeholder="可选，用于后续定位和催办扩展"
                           className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-sky-300"
                         />
                       </label>
+
+                      <div className="mt-4 flex items-center gap-3">
+                        {defaultOwnerIdentifier ? (
+                          <span className="text-xs text-emerald-700">已选择明确责任人</span>
+                        ) : (
+                          <span className="text-xs text-text-muted">保存时自动校验责任人；同名时会提示选择候选人</span>
+                        )}
+                      </div>
+
+                      {ownerSearchMessage ? (
+                        <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+                          {ownerSearchMessage}
+                        </div>
+                      ) : null}
+
+                      {ownerCandidates.length > 0 ? (
+                        <div className="mt-3 grid gap-2">
+                          {ownerCandidates.map((candidate) => {
+                            const selected = defaultOwnerIdentifier === candidate.identifier;
+                            return (
+                              <button
+                                key={candidate.identifier}
+                                type="button"
+                                onClick={() => {
+                                  setDefaultOwnerName(candidate.display_name || defaultOwnerName);
+                                  setDefaultOwnerIdentifier(candidate.identifier);
+                                  setOwnerSearchMessage('已选择明确责任人，请再次点击保存任务。');
+                                }}
+                                className={cn(
+                                  'rounded-xl border px-3 py-2 text-left text-sm transition-colors',
+                                  selected
+                                    ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                                    : 'border-border bg-surface-secondary text-text-primary hover:border-sky-200',
+                                )}
+                              >
+                                <div className="font-medium">{candidate.display_name || '未命名用户'}</div>
+                                <div className="mt-1 text-xs text-text-secondary">
+                                  {formatOwnerCandidateHint(candidate)}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 )}

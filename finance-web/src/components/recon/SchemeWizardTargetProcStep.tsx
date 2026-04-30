@@ -117,12 +117,14 @@ export interface AiProcSideDraft {
   summary: string;
   error: string;
   failureReasons: string[];
+  failureDetails: Array<Record<string, unknown>>;
   nodeTraces: RuleGenerationNodeTrace[];
   questions: AiProcQuestion[];
   assumptions: Array<Record<string, unknown>>;
   validations: Array<Record<string, unknown>>;
   warnings: string[];
   procRuleJson?: Record<string, unknown>;
+  inputPlanJson?: Record<string, unknown>;
   procSteps?: Array<Record<string, unknown>>;
   outputRows: ProcSampleRow[];
   outputFieldLabelMap: Record<string, string>;
@@ -985,6 +987,8 @@ function AiSideConfigurationPanel({
   onChangeSourceSelection,
   onChangeRuleDraft,
   onGenerateOutput,
+  onViewProcJson,
+  procJsonPreview,
   onSwitchSide,
 }: {
   side: AiProcSide;
@@ -996,6 +1000,8 @@ function AiSideConfigurationPanel({
   onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
   onChangeRuleDraft: (side: AiProcSide, value: string) => void;
   onGenerateOutput: (side: AiProcSide) => void;
+  onViewProcJson: () => void;
+  procJsonPreview?: string;
   onSwitchSide: (side: AiProcSide) => void;
 }) {
   const isLeft = side === 'left';
@@ -1135,6 +1141,21 @@ function AiSideConfigurationPanel({
             </div>
           )}
         </div>
+        {hasGeneratedOutput ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-border-subtle pt-4">
+            <button
+              type="button"
+              onClick={onViewProcJson}
+              disabled={!procJsonPreview}
+              className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              查看 JSON
+            </button>
+            {!procJsonPreview ? (
+              <span className="text-xs text-text-muted">左右侧输出都生成后可查看完整 Proc JSON 和 Input Plan JSON。</span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1156,11 +1177,11 @@ function RuleGenerationInlineProgress({
   const needsInput = activeTrace?.status === 'needs_user_input' || status === 'needs_user_input';
   const succeeded = status === 'succeeded';
   const title = failed
-    ? '执行失败'
+    ? '生成失败'
     : needsInput
     ? '需要补充规则口径'
     : succeeded
-    ? '执行完成'
+    ? '生成完成'
     : 'AI正在生成输出数据';
 
   const statusTone = failed
@@ -1182,15 +1203,17 @@ function RuleGenerationInlineProgress({
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-text-primary">{title}</p>
           <p className="mt-1 text-xs leading-5 text-text-secondary">
-            {activeTrace?.name || '等待开始'}
+            {formatRuleGenerationProgressLine(activeTrace)}
           </p>
         </div>
       </div>
-      {activeTrace?.message ? (
-        <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-secondary">{activeTrace.message}</p>
+      {activeTrace ? (
+        <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-secondary">
+          {formatRuleGenerationProgressMessage(activeTrace)}
+        </p>
       ) : null}
-      {activeTrace && activeTrace.status === 'running' && activeTrace.attempt > 1 ? (
-        <p className="mt-1 text-[11px] text-amber-700">正在第 {activeTrace.attempt} 次尝试修复。</p>
+      {activeTrace && activeTrace.status === 'running' && activeTrace.code === 'repair_ir' && activeTrace.attempt > 1 ? (
+        <p className="mt-1 text-[11px] text-amber-700">正在第 {activeTrace.attempt} 次自动修复。</p>
       ) : null}
     </div>
   );
@@ -1199,6 +1222,8 @@ function RuleGenerationInlineProgress({
 function RuleGenerationFeedback({ sideDraft }: { sideDraft: AiProcSideDraft }) {
   const hasQuestions = sideDraft.questions.length > 0;
   const hasError = sideDraft.status === 'failed' && Boolean(sideDraft.error || sideDraft.summary);
+  const technicalDetails = buildRuleGenerationTechnicalDetails(sideDraft);
+  const secondaryFailureReasons = sideDraft.failureReasons.filter((reason) => reason !== sideDraft.error);
   if (sideDraft.status === 'idle' || (!hasQuestions && !hasError)) {
     return null;
   }
@@ -1214,12 +1239,20 @@ function RuleGenerationFeedback({ sideDraft }: { sideDraft: AiProcSideDraft }) {
       {hasError ? (
         <div className="space-y-2">
           <p>{sideDraft.error || sideDraft.summary}</p>
-          {sideDraft.failureReasons.length > 0 ? (
+          {secondaryFailureReasons.length > 0 ? (
             <ul className="list-disc space-y-1 pl-5 text-xs leading-5">
-              {sideDraft.failureReasons.map((reason, index) => (
+              {secondaryFailureReasons.map((reason, index) => (
                 <li key={`${reason}-${index}`}>{reason}</li>
               ))}
             </ul>
+          ) : null}
+          {technicalDetails ? (
+            <details className="rounded-xl border border-red-200/80 bg-white/70 px-3 py-2 text-xs text-text-secondary">
+              <summary className="cursor-pointer select-none font-medium text-red-700">技术详情</summary>
+              <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">
+                {technicalDetails}
+              </pre>
+            </details>
           ) : null}
         </div>
       ) : null}
@@ -1258,23 +1291,95 @@ function formatQuestionCandidate(candidate: AiProcQuestionCandidate): string {
 }
 
 const DEFAULT_RULE_GENERATION_NODES: RuleGenerationNodeTrace[] = [
-  ['prepare_context', '准备上下文'],
-  ['understand_rule', '理解业务规则'],
-  ['validate_ir_structure', '校验 IR 结构'],
-  ['resolve_source_bindings', '绑定源字段'],
-  ['lint_ir', '校验规则 IR'],
-  ['repair_ir', '修复规则 IR'],
-  ['semantic_resolution', '自动消除歧义'],
-  ['ambiguity_gate', '判断是否需要补充'],
-  ['generate_proc_json', '生成规则'],
+  ['prepare_context', '准备数据集信息'],
+  ['understand_rule', '理解整理描述'],
+  ['validate_ir_structure', '检查描述结构'],
+  ['resolve_source_bindings', '检查字段对应关系'],
+  ['lint_ir', '检查整理规则'],
+  ['repair_ir', '自动修复规则'],
+  ['semantic_resolution', '自动处理字段歧义'],
+  ['ambiguity_gate', '判断是否需要补充描述'],
+  ['generate_proc_json', '生成整理规则'],
   ['check_ir_dsl_consistency', '检查规则一致性'],
-  ['lint_proc_json', '校验规则可执行性'],
-  ['build_sample_inputs', '读取真实样例数据'],
-  ['run_sample', '样例执行'],
-  ['diagnose_sample', '诊断样例执行'],
-  ['assert_output', '校验输出结果'],
-  ['result', '生成结果'],
+  ['lint_proc_json', '检查规则可执行性'],
+  ['generate_input_plan', '生成取数计划'],
+  ['validate_input_plan', '校验取数计划'],
+  ['repair_input_plan', '修复取数计划'],
+  ['execute_input_plan_preview', '预览取数计划'],
+  ['confirm_input_plan', '确认取数方式'],
+  ['build_sample_inputs', '读取样例数据'],
+  ['run_sample', '试跑输出数据'],
+  ['diagnose_sample', '诊断试跑结果'],
+  ['assert_output', '核对输出结果'],
+  ['result', '整理完成'],
 ].map(([code, name]) => ({ code, name, status: 'pending', message: '', attempt: 1 }));
+
+function formatRuleGenerationProgressLine(trace?: RuleGenerationNodeTrace) {
+  if (!trace) return '等待开始';
+  return trace.name || '正在处理';
+}
+
+function formatRuleGenerationProgressMessage(trace: RuleGenerationNodeTrace) {
+  if (trace.status === 'failed') {
+    if (trace.code === 'repair_ir') return '自动修复没有完成，请查看失败原因或修改描述后重新生成。';
+    if (trace.code === 'run_sample' || trace.code === 'assert_output') return '规则已生成，但样例试跑结果未达到预期。';
+    if (trace.code === 'diagnose_sample') return '样例试跑问题已完成诊断，请查看失败原因。';
+    return '当前步骤未通过，请查看失败原因。';
+  }
+  if (trace.status === 'completed') {
+    if (trace.code === 'result') return '输出数据已生成并通过样例试跑。';
+    return '已完成。';
+  }
+  if (trace.status === 'needs_user_input') {
+    return '需要你补充或改写描述后重新生成。';
+  }
+  if (trace.code === 'prepare_context') return '正在读取已选数据集、字段中文名和样例数据。';
+  if (trace.code === 'understand_rule') return '正在根据你的描述理解要保留、过滤、关联或计算的数据。';
+  if (trace.code === 'resolve_source_bindings') return '正在确认描述中的字段能否对应到已选数据集。';
+  if (trace.code === 'lint_ir' || trace.code === 'validate_ir_structure') return '正在检查规则是否完整、是否存在遗漏。';
+  if (trace.code === 'repair_ir') return `发现规则问题，正在自动修复，第 ${trace.attempt || 1} 次。`;
+  if (trace.code === 'semantic_resolution' || trace.code === 'ambiguity_gate') return '正在判断是否有字段或口径需要你确认。';
+  if (trace.code === 'generate_proc_json') return '正在生成可执行的数据整理规则。';
+  if (trace.code === 'check_ir_dsl_consistency' || trace.code === 'lint_proc_json') return '正在检查整理规则能否稳定执行。';
+  if (trace.code === 'generate_input_plan') return '正在根据整理规则生成正式运行时的取数计划。';
+  if (trace.code === 'validate_input_plan') return '正在检查取数计划能否覆盖基础表和关联表。';
+  if (trace.code === 'repair_input_plan') return `正在修复取数计划，第 ${trace.attempt || 1} 次。`;
+  if (trace.code === 'execute_input_plan_preview') return '正在用取数计划预览输入样例。';
+  if (trace.code === 'confirm_input_plan') return '取数方式需要确认后才能继续。';
+  if (trace.code === 'build_sample_inputs') return '正在读取样例数据。';
+  if (trace.code === 'run_sample') return '正在用样例数据试跑，验证能否生成输出数据。';
+  if (trace.code === 'diagnose_sample') return '试跑结果未达到预期，正在定位原因。';
+  if (trace.code === 'assert_output') return '正在核对输出字段和输出样例。';
+  return '正在处理。';
+}
+
+function buildRuleGenerationTechnicalDetails(sideDraft: AiProcSideDraft) {
+  const failedTraces = sideDraft.nodeTraces.filter((trace) => trace.status === 'failed');
+  const detail = {
+    status: sideDraft.status,
+    error: sideDraft.error,
+    failure_reasons: sideDraft.failureReasons,
+    failure_details: sideDraft.failureDetails,
+    failed_nodes: failedTraces.map((trace) => ({
+      code: trace.code,
+      name: trace.name,
+      attempt: trace.attempt,
+      duration_ms: trace.durationMs,
+      message: trace.message,
+      summary: trace.summary,
+      errors: trace.errors,
+    })),
+  };
+  if (
+    !sideDraft.error
+    && sideDraft.failureReasons.length === 0
+    && sideDraft.failureDetails.length === 0
+    && failedTraces.length === 0
+  ) {
+    return '';
+  }
+  return JSON.stringify(detail, null, 2);
+}
 
 function createEmptyAiProcSideDraft(): AiProcSideDraft {
   return {
@@ -1283,6 +1388,7 @@ function createEmptyAiProcSideDraft(): AiProcSideDraft {
     summary: '',
     error: '',
     failureReasons: [],
+    failureDetails: [],
     nodeTraces: DEFAULT_RULE_GENERATION_NODES.map((node) => ({ ...node })),
     questions: [],
     assumptions: [],
@@ -1312,6 +1418,8 @@ function AiComplexRuleWorkspace({
   onChangeSourceSelection,
   onChangeRuleDraft,
   onGenerateOutput,
+  onViewProcJson,
+  procJsonPreview,
 }: {
   authToken?: string | null;
   schemeDraft: SchemeDraftLite;
@@ -1321,6 +1429,8 @@ function AiComplexRuleWorkspace({
   onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
   onChangeRuleDraft: (side: AiProcSide, value: string) => void;
   onGenerateOutput: (side: AiProcSide) => void;
+  onViewProcJson: () => void;
+  procJsonPreview?: string;
 }) {
   const [activeSide, setActiveSide] = useState<'left' | 'right'>('left');
   const leftReady = selectedLeftSources.length > 0;
@@ -1399,6 +1509,8 @@ function AiComplexRuleWorkspace({
           onChangeSourceSelection={onChangeSourceSelection}
           onChangeRuleDraft={onChangeRuleDraft}
           onGenerateOutput={onGenerateOutput}
+          onViewProcJson={onViewProcJson}
+          procJsonPreview={procJsonPreview}
           onSwitchSide={setActiveSide}
         />
         <AiSideConfigurationPanel
@@ -1411,6 +1523,8 @@ function AiComplexRuleWorkspace({
           onChangeSourceSelection={onChangeSourceSelection}
           onChangeRuleDraft={onChangeRuleDraft}
           onGenerateOutput={onGenerateOutput}
+          onViewProcJson={onViewProcJson}
+          procJsonPreview={procJsonPreview}
           onSwitchSide={setActiveSide}
         />
       </div>
@@ -1945,6 +2059,8 @@ export default function SchemeWizardTargetProcStep({
               onChangeSourceSelection={onChangeSourceSelection}
               onChangeRuleDraft={onChangeAiProcRuleDraft}
               onGenerateOutput={onGenerateAiProcOutput}
+              onViewProcJson={onViewProcJson}
+              procJsonPreview={procJsonPreview}
             />
           </div>
         )}

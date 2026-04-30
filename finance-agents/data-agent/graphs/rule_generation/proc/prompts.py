@@ -234,6 +234,20 @@ def _required_repairs_payload(failures: list[dict[str, Any]]) -> list[dict[str, 
                     "while keeping operational-only refs such as filters in business_rules."
                 ),
             })
+        elif reason == "business_rule_missing_filter_predicate":
+            repairs.append({
+                "type": "complete_filter_predicate",
+                "reason": reason,
+                "rule_id": failure.get("rule_id"),
+                "instruction": (
+                    "The IR has a filter business_rule with only natural-language description. "
+                    "Read the original rule text and the rule description, identify the referenced "
+                    "source field and condition, then add a structured predicate that references an "
+                    "existing source_references.ref_id. For non-empty / non-null filters, use "
+                    "exists with a ref operand. If the referenced field is missing from "
+                    "source_references, add it first and bind it to the predicate."
+                ),
+            })
     return repairs
 
 

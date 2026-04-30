@@ -456,6 +456,7 @@ def create_tools() -> list[Tool]:
                 "properties": {
                     "auth_token": {"type": "string"},
                     "proc_rule_json": {"type": "object"},
+                    "input_plan_json": {"type": "object"},
                     "uploaded_files": {"type": "array"},
                     "sample_datasets": {"type": "array"},
                 },
@@ -599,6 +600,19 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
+
+
+def _flatten_input_plan_entries(input_plan_json: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(input_plan_json, dict):
+        return []
+    datasets = input_plan_json.get("datasets")
+    if isinstance(datasets, list):
+        return [item for item in datasets if isinstance(item, dict)]
+    entries: list[dict[str, Any]] = []
+    for plan in _safe_list(input_plan_json.get("plans")):
+        if isinstance(plan, dict):
+            entries.extend([item for item in _safe_list(plan.get("datasets")) if isinstance(item, dict)])
+    return entries
 
 
 def _resolve_sample_origin(value: Any, *, fallback: str) -> str:
@@ -893,6 +907,7 @@ def _build_proc_trial_inputs(
     *,
     uploaded_files: list[dict[str, Any]],
     sample_datasets: list[dict[str, Any]],
+    input_plan_json: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, pd.DataFrame], list[dict[str, Any]], list[str], str | None]:
     validated_files: list[dict[str, Any]] = []
     preloaded_frames: dict[str, pd.DataFrame] = {}
@@ -930,6 +945,17 @@ def _build_proc_trial_inputs(
         )
 
     dataset_rows = [item for item in sample_datasets if isinstance(item, dict)]
+    input_plan_entries = _flatten_input_plan_entries(input_plan_json or {})
+    if dataset_rows and input_plan_entries:
+        _append_input_plan_sample_frames(
+            entries=input_plan_entries,
+            dataset_rows=dataset_rows,
+            preloaded_frames=preloaded_frames,
+            source_samples=source_samples,
+            warnings=warnings,
+        )
+        return validated_files, preloaded_frames, source_samples, warnings, temp_input_dir
+
     if dataset_rows:
         for index, item in enumerate(dataset_rows, start=1):
             table_name = _as_text(
@@ -977,6 +1003,160 @@ def _build_proc_trial_inputs(
             )
 
     return validated_files, preloaded_frames, source_samples, warnings, temp_input_dir
+
+
+def _append_input_plan_sample_frames(
+    *,
+    entries: list[dict[str, Any]],
+    dataset_rows: list[dict[str, Any]],
+    preloaded_frames: dict[str, pd.DataFrame],
+    source_samples: list[dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    rows_by_table = {
+        _sample_dataset_table_name(item): item
+        for item in dataset_rows
+        if _sample_dataset_table_name(item)
+    }
+    frames_by_alias: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    pending = list(entries)
+    while pending:
+        progressed = False
+        next_pending: list[dict[str, Any]] = []
+        for entry in pending:
+            target_table = _as_text(entry.get("target_table")).strip()
+            alias = _as_text(entry.get("alias")).strip()
+            table_name = _as_text(entry.get("table")).strip()
+            read_mode = _as_text(entry.get("read_mode") or "base").strip()
+            sample_item = rows_by_table.get(table_name)
+            if not target_table or not alias or not table_name or sample_item is None:
+                warnings.append(f"input_plan 样例缺少数据集: {target_table}.{alias}({table_name})")
+                progressed = True
+                continue
+            sample_rows = [
+                _safe_dict(row)
+                for row in _safe_list(sample_item.get("sample_rows"))
+                if isinstance(row, dict)
+            ]
+            if read_mode == "by_key_set":
+                depends_on_alias = _as_text(entry.get("depends_on_alias")).strip()
+                dependency_key = (target_table, depends_on_alias)
+                if dependency_key not in frames_by_alias:
+                    next_pending.append(entry)
+                    continue
+                sample_rows = _filter_sample_rows_by_key_pairs(
+                    rows=sample_rows,
+                    dependency_rows=frames_by_alias[dependency_key],
+                    key_pairs=_normalize_plan_key_pairs(entry),
+                )
+
+            preloaded_frames[_input_plan_frame_key(target_table, alias, table_name)] = _rows_to_dataframe(sample_rows)
+            frames_by_alias[(target_table, alias)] = sample_rows
+            _append_source_sample_from_dataset(
+                sample_item=sample_item,
+                table_name=table_name,
+                alias=alias,
+                target_table=target_table,
+                rows=sample_rows,
+                source_samples=source_samples,
+            )
+            progressed = True
+        if not progressed:
+            unresolved = ", ".join(f"{item.get('target_table')}.{item.get('alias')}" for item in next_pending)
+            warnings.append(f"input_plan 样例存在无法解析的依赖: {unresolved}")
+            return
+        pending = next_pending
+
+
+def _sample_dataset_table_name(item: dict[str, Any]) -> str:
+    return _as_text(
+        item.get("table_name")
+        or item.get("resource_key")
+        or item.get("dataset_code")
+        or item.get("dataset_name")
+        or item.get("source_id")
+    ).strip()
+
+
+def _append_source_sample_from_dataset(
+    *,
+    sample_item: dict[str, Any],
+    table_name: str,
+    alias: str,
+    target_table: str,
+    rows: list[dict[str, Any]],
+    source_samples: list[dict[str, Any]],
+) -> None:
+    snapshot_id = _as_text(sample_item.get("snapshot_id"))
+    field_label_map = _build_dataset_field_label_map(sample_item)
+    display_name = _as_text(
+        sample_item.get("business_name")
+        or sample_item.get("display_name")
+        or sample_item.get("dataset_name")
+        or table_name
+    )
+    source_samples.append(
+        {
+            "side": _infer_preview_side(sample_item.get("side") or target_table),
+            "table_name": table_name,
+            "display_name": display_name,
+            "source_id": _as_text(sample_item.get("source_id") or sample_item.get("source_key") or table_name),
+            "sample_origin": "input_plan_preview",
+            "input_plan_alias": alias,
+            "input_plan_target_table": target_table,
+            **({"snapshot_id": snapshot_id} if snapshot_id else {}),
+            "field_label_map": field_label_map,
+            "columns_label_map": field_label_map,
+            "column_display_map": field_label_map,
+            "rows": _rows_to_preview_rows(rows, limit=None),
+        }
+    )
+
+
+def _input_plan_frame_key(target_table: str, alias: str, table_name: str) -> str:
+    return f"__input_plan__::{target_table}::{alias}::{table_name}"
+
+
+def _normalize_plan_key_pairs(entry: dict[str, Any]) -> list[dict[str, str]]:
+    pairs = [
+        {
+            "from_field": _as_text(item.get("from_field")).strip(),
+            "to_field": _as_text(item.get("to_field")).strip(),
+        }
+        for item in _safe_list(entry.get("key_pairs"))
+        if isinstance(item, dict)
+    ]
+    if not pairs:
+        from_field = _as_text(entry.get("key_from_field")).strip()
+        to_field = _as_text(entry.get("key_to_field")).strip()
+        if from_field and to_field:
+            pairs.append({"from_field": from_field, "to_field": to_field})
+    return [item for item in pairs if item["from_field"] and item["to_field"]]
+
+
+def _filter_sample_rows_by_key_pairs(
+    *,
+    rows: list[dict[str, Any]],
+    dependency_rows: list[dict[str, Any]],
+    key_pairs: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    if not rows or not dependency_rows or not key_pairs:
+        return []
+    key_set = {
+        tuple(_normalize_trial_key(row.get(pair["from_field"])) for pair in key_pairs)
+        for row in dependency_rows
+    }
+    return [
+        row
+        for row in rows
+        if tuple(_normalize_trial_key(row.get(pair["to_field"])) for pair in key_pairs) in key_set
+    ]
+
+
+def _normalize_trial_key(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _extract_schema_field_names(item: dict[str, Any]) -> list[str]:
@@ -1348,13 +1528,30 @@ def _normalize_dataset_binding_item(
             "query": query,
         }
     mapping_config = _safe_dict(item.get("mapping_config"))
-    for key in ("table_name", "dataset_code", "dataset_source_type", "side", "source_kind", "provider_code"):
+    for key in (
+        "table_name",
+        "dataset_code",
+        "dataset_source_type",
+        "side",
+        "source_kind",
+        "provider_code",
+        "dataset_id",
+        "input_plan_key",
+        "input_plan_alias",
+        "input_plan_read_mode",
+        "input_plan_target_table",
+    ):
         value = item.get(key)
         if value is None:
             continue
         text = _as_text(value)
         if text:
             mapping_config[key] = text
+    if "input_plan_apply_biz_date_filter" in item:
+        mapping_config["input_plan_apply_biz_date_filter"] = _as_bool(
+            item.get("input_plan_apply_biz_date_filter"),
+            True,
+        )
     if "is_required" not in item and "required" in item:
         item["is_required"] = item.get("required")
     return {
@@ -1519,6 +1716,12 @@ def _extract_run_plan_dataset_bindings(
             "table_name": _as_text(item.get("table_name") or resource_key),
             "dataset_code": _as_text(item.get("dataset_code") or resource_key),
             "dataset_source_type": _as_text(item.get("dataset_source_type") or "collection_records"),
+            "dataset_id": _as_text(item.get("dataset_id")),
+            "input_plan_key": _as_text(item.get("input_plan_key")),
+            "input_plan_alias": _as_text(item.get("input_plan_alias")),
+            "input_plan_read_mode": _as_text(item.get("input_plan_read_mode")),
+            "input_plan_target_table": _as_text(item.get("input_plan_target_table")),
+            "input_plan_apply_biz_date_filter": item.get("input_plan_apply_biz_date_filter", True),
         }
         binding = _normalize_dataset_binding_item(
             normalized_item,
@@ -2230,6 +2433,7 @@ def _validate_proc_source_tables(rule_json: dict[str, Any]) -> list[dict[str, An
 def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
     _require_user(arguments.get("auth_token", ""))
     rule_json = arguments.get("proc_rule_json")
+    input_plan_json = _safe_dict(arguments.get("input_plan_json"))
     if not isinstance(rule_json, dict):
         return {"success": False, "error": "proc_rule_json 必须是对象"}
 
@@ -2284,6 +2488,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
         validated_files, preloaded_frames, source_samples, input_warnings, temp_input_dir = _build_proc_trial_inputs(
             uploaded_files=uploaded_file_dicts,
             sample_datasets=sample_datasets,
+            input_plan_json=input_plan_json,
         )
         valid_input_tables = len(validated_files) + len(preloaded_frames)
         if valid_input_tables == 0:
@@ -2412,9 +2617,11 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                 "sample_datasets_total": len(sample_datasets),
                 "sample_datasets_valid": len(preloaded_frames),
                 "input_tables_valid": valid_input_tables,
+                "input_plan_dataset_count": len(_flatten_input_plan_entries(input_plan_json)),
                 "step_nodes": len(_safe_list(normalized_rule.get("steps"))),
                 "output_tables": len(output_targets),
             },
+            "input_plan_json": input_plan_json,
             "expected_targets": sorted(expected_targets),
             "require_both_sides": require_both_sides,
             "normalized_rule": normalized_rule,

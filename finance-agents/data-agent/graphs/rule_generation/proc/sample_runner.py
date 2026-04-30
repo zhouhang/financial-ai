@@ -14,6 +14,7 @@ async def run_proc_sample(
     sources: list[dict[str, Any]],
     expected_target: str = "",
     expected_targets: list[str] | None = None,
+    input_plan_json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a generated proc rule against source sample rows."""
     targets = [item for item in list(expected_targets or []) if str(item).strip()]
@@ -25,6 +26,8 @@ async def run_proc_sample(
         "expected_targets": targets,
         "require_both_sides": False,
     }
+    if input_plan_json:
+        payload["input_plan_json"] = input_plan_json
     return await execution_proc_draft_trial(auth_token=auth_token, payload=payload)
 
 

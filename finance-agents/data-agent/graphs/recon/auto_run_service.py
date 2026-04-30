@@ -330,6 +330,7 @@ def _materialize_binding_query(binding: dict[str, Any], *, biz_date: str) -> dic
     filters = _safe_dict(resolved_query.get("filters"))
     filters[field_name] = _shift_biz_date(biz_date, offset_days)
     resolved_query["filters"] = filters
+    resolved_query["date_field"] = field_name
     return resolved_query
 
 
@@ -659,16 +660,19 @@ async def execute_auto_task_run(
                 trigger_mode=collection_trigger_mode,
                 mode="real",
             )
-            collection_error = str(collect_result.get("error") or collect_result.get("detail") or "采集失败")
+            collection_success = bool(collect_result.get("success"))
+            collection_error = "" if collection_success else str(
+                collect_result.get("error") or collect_result.get("detail") or "采集失败"
+            )
             collection_attempts.append(
                 {
                     "binding": binding,
-                    "success": bool(collect_result.get("success")),
+                    "success": collection_success,
                     "job": _safe_dict(collect_result.get("job")),
                     "error": collection_error,
                 }
             )
-            if not bool(collect_result.get("success")):
+            if not collection_success:
                 missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
                 continue
         collection_result = await data_source_list_collection_records(

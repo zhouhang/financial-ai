@@ -527,10 +527,35 @@ class FallbackSchemeDesignExecutor:
         if target_table in {"left_recon_ready", "right_recon_ready"}:
             return
 
+        legacy_output = str(step.get("output") or "").strip()
+        if legacy_output in {"left_recon_ready", "right_recon_ready"}:
+            step["target_table"] = legacy_output
+            return
+
+        legacy_source = step.get("source")
+        if isinstance(legacy_source, dict):
+            legacy_source_table = str(legacy_source.get("table") or "").strip()
+            if legacy_source_table:
+                if any(
+                    self._resolve_dataset_table_name(dataset) == legacy_source_table
+                    for dataset in left_datasets
+                    if isinstance(dataset, dict)
+                ):
+                    step["target_table"] = "left_recon_ready"
+                    return
+                if any(
+                    self._resolve_dataset_table_name(dataset) == legacy_source_table
+                    for dataset in right_datasets
+                    if isinstance(dataset, dict)
+                ):
+                    step["target_table"] = "right_recon_ready"
+                    return
+
         hint_tokens = " ".join(
             str(value or "").strip().lower()
             for value in (
                 step.get("target_table"),
+                step.get("output"),
                 step.get("step_id"),
                 step.get("name"),
                 step.get("title"),
@@ -754,6 +779,14 @@ class FallbackSchemeDesignExecutor:
             primary_key_list = ["biz_key", *primary_key_list]
         schema["primary_key"] = list(dict.fromkeys(primary_key_list))
 
+        for legacy_key in _PROC_STANDARD_COLUMN_ORDER:
+            if isinstance(schema.get(legacy_key), str):
+                schema.pop(legacy_key, None)
+
+        step.pop("type", None)
+        step.pop("output", None)
+        step.pop("fields", None)
+
     def _normalize_proc_column_data_type(self, raw_data_type: Any, *, column_name: str) -> str:
         standard_column = _PROC_STANDARD_COLUMN_DEFS.get(column_name)
         if standard_column is not None:
@@ -793,6 +826,7 @@ class FallbackSchemeDesignExecutor:
         target_table = str(step.get("target_table") or "").strip()
         if target_table:
             step["step_id"] = f"{side}_write_recon_ready"
+        self._promote_legacy_proc_write_step_shape(step)
         sources = step.get("sources")
         if not isinstance(sources, list) or not sources:
             sources = [
@@ -843,6 +877,8 @@ class FallbackSchemeDesignExecutor:
             normalized_sources.append(normalized_source)
         step["sources"] = normalized_sources
 
+        self._promote_legacy_proc_filter(step)
+
         row_write_mode = str(step.get("row_write_mode") or "").strip()
         if row_write_mode not in {"upsert", "insert_if_missing", "update_only"}:
             step["row_write_mode"] = "upsert"
@@ -863,6 +899,194 @@ class FallbackSchemeDesignExecutor:
         )
         self._sanitize_proc_source_bindings(step=step, profile_map=profile_map)
         self._ensure_proc_standard_mappings(step, profile_map=profile_map)
+        step.pop("type", None)
+        step.pop("output", None)
+        step.pop("source", None)
+        step.pop("fields", None)
+
+    def _promote_legacy_proc_write_step_shape(self, step: dict[str, Any]) -> None:
+        legacy_source = step.get("source")
+        if isinstance(legacy_source, dict):
+            source_table = str(legacy_source.get("table") or "").strip()
+            if source_table and not isinstance(step.get("sources"), list):
+                step["sources"] = [{"table": source_table}]
+
+            source_fields = legacy_source.get("field")
+            if isinstance(source_fields, dict) and not isinstance(step.get("mappings"), list):
+                legacy_mappings: list[dict[str, Any]] = []
+                for target_field, raw_spec in source_fields.items():
+                    normalized_mapping = self._coerce_legacy_proc_field_mapping(
+                        target_field=str(target_field or "").strip(),
+                        raw_spec=raw_spec,
+                    )
+                    if normalized_mapping:
+                        legacy_mappings.append(normalized_mapping)
+                if legacy_mappings:
+                    step["mappings"] = legacy_mappings
+
+            if isinstance(legacy_source.get("filter"), str) and not step.get("filter"):
+                step["filter"] = legacy_source.get("filter")
+
+        legacy_fields = step.get("fields")
+        if isinstance(legacy_fields, list) and not isinstance(step.get("mappings"), list):
+            promoted_fields: list[dict[str, Any]] = []
+            for field_item in legacy_fields:
+                if not isinstance(field_item, dict):
+                    continue
+                target_field = self._normalize_proc_target_field_name(
+                    field_item.get("target_field")
+                    or field_item.get("name")
+                    or field_item.get("field")
+                )
+                source_spec = field_item.get("value")
+                if source_spec is None:
+                    source_spec = field_item.get("source")
+                normalized_mapping = self._coerce_legacy_proc_field_mapping(
+                    target_field=target_field,
+                    raw_spec=source_spec,
+                )
+                if normalized_mapping:
+                    promoted_fields.append(normalized_mapping)
+            if promoted_fields:
+                step["mappings"] = promoted_fields
+
+        source_entries = [item for item in list(step.get("sources") or []) if isinstance(item, dict)]
+        if source_entries and not isinstance(step.get("mappings"), list):
+            promoted_source_fields: list[dict[str, Any]] = []
+            for source_entry in source_entries:
+                source_alias = str(
+                    source_entry.get("alias")
+                    or source_entry.get("table")
+                    or ""
+                ).strip()
+                for field_item in list(source_entry.get("fields") or []):
+                    if not isinstance(field_item, dict):
+                        continue
+                    target_field = self._normalize_proc_target_field_name(
+                        field_item.get("target_field")
+                        or field_item.get("name")
+                        or field_item.get("field")
+                    )
+                    source_spec = field_item.get("value")
+                    if source_spec is None:
+                        source_spec = field_item.get("source")
+                    normalized_mapping = self._coerce_legacy_proc_field_mapping(
+                        target_field=target_field,
+                        raw_spec=source_spec,
+                    )
+                    if not normalized_mapping:
+                        continue
+                    mapping_source = normalized_mapping.get("value", {}).get("source")
+                    if isinstance(mapping_source, dict) and source_alias and not mapping_source.get("alias"):
+                        mapping_source["alias"] = source_alias
+                    promoted_source_fields.append(normalized_mapping)
+            if promoted_source_fields:
+                step["mappings"] = promoted_source_fields
+
+    def _coerce_legacy_proc_field_mapping(
+        self,
+        *,
+        target_field: str,
+        raw_spec: Any,
+    ) -> dict[str, Any] | None:
+        normalized_target = self._normalize_proc_target_field_name(target_field)
+        if not normalized_target:
+            return None
+
+        value_spec: dict[str, Any] | None = None
+        if isinstance(raw_spec, dict):
+            raw_type = str(raw_spec.get("type") or "").strip()
+            if raw_type == "source":
+                raw_field = str(
+                    raw_spec.get("expr")
+                    or raw_spec.get("field")
+                    or raw_spec.get("source_field")
+                    or ""
+                ).strip()
+                if raw_field:
+                    value_spec = {"type": "source", "source": {"field": raw_field}}
+            elif raw_type == "formula":
+                raw_expr = str(raw_spec.get("expr") or raw_spec.get("formula") or "").strip()
+                if raw_expr:
+                    value_spec = {"type": "formula", "expr": raw_expr}
+            elif isinstance(raw_spec.get("formula"), dict):
+                formula_expr = str(raw_spec.get("formula", {}).get("expr") or "").strip()
+                if formula_expr:
+                    value_spec = {"type": "formula", "expr": formula_expr}
+            elif isinstance(raw_spec.get("source"), dict):
+                raw_field = str(
+                    raw_spec.get("source", {}).get("field")
+                    or raw_spec.get("source", {}).get("expr")
+                    or ""
+                ).strip()
+                if raw_field:
+                    value_spec = {"type": "source", "source": {"field": raw_field}}
+            else:
+                raw_field = str(raw_spec.get("field") or raw_spec.get("expr") or "").strip()
+                if raw_field:
+                    value_spec = {"type": "source", "source": {"field": raw_field}}
+        elif isinstance(raw_spec, str):
+            raw_field = raw_spec.strip()
+            if raw_field:
+                value_spec = {"type": "source", "source": {"field": raw_field}}
+
+        if not value_spec:
+            return None
+        return {
+            "target_field": normalized_target,
+            "value": value_spec,
+            "field_write_mode": "overwrite",
+        }
+
+    def _promote_legacy_proc_filter(self, step: dict[str, Any]) -> None:
+        raw_filter = step.get("filter")
+        if isinstance(raw_filter, dict) or not isinstance(raw_filter, str):
+            return
+        sources = [item for item in list(step.get("sources") or []) if isinstance(item, dict)]
+        if not sources:
+            return
+        alias = str(sources[0].get("alias") or "").strip()
+        if not alias:
+            return
+        normalized_filter = self._build_simple_filter_formula(raw_filter, alias=alias)
+        if normalized_filter:
+            step["filter"] = normalized_filter
+
+    def _build_simple_filter_formula(
+        self,
+        raw_filter: str,
+        *,
+        alias: str,
+    ) -> dict[str, Any] | None:
+        text = str(raw_filter or "").strip()
+        if not text:
+            return None
+        match = re.match(
+            r"^(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>==|=|!=)\s*(?P<value>.+?)\s*$",
+            text,
+        )
+        if not match:
+            return None
+
+        field_name = match.group("field").strip()
+        operator = "==" if match.group("op") == "=" else match.group("op")
+        raw_value = match.group("value").strip()
+        if (
+            (raw_value.startswith("'") and raw_value.endswith("'"))
+            or (raw_value.startswith('"') and raw_value.endswith('"'))
+        ):
+            raw_value = raw_value[1:-1]
+
+        return {
+            "type": "formula",
+            "expr": f"(({{ref_filter_1}} {operator} {json.dumps(raw_value, ensure_ascii=False)}))",
+            "bindings": {
+                "ref_filter_1": {
+                    "type": "source",
+                    "source": {"alias": alias, "field": field_name},
+                }
+            },
+        }
 
     def _normalize_proc_mapping_entries(
         self,
@@ -947,6 +1171,11 @@ class FallbackSchemeDesignExecutor:
                 value["type"] = "source"
             elif isinstance(value.get("expr"), str):
                 value["type"] = "formula"
+
+        if str(value.get("type") or "").strip() == "source" and not isinstance(value.get("source"), dict):
+            expr_field = str(value.get("expr") or value.get("field") or "").strip()
+            if expr_field:
+                value["source"] = {"field": expr_field}
 
         source = value.get("source")
         if isinstance(source, dict):
@@ -1240,9 +1469,19 @@ class FallbackSchemeDesignExecutor:
             date_field = str(profile.get("date_field") or "").strip()
             source_name_field = str(profile.get("source_name_field") or "").strip()
             source_name_literal = str(profile.get("source_name_literal") or table_name).strip() or table_name
+            mapped_key_field = self._resolve_target_mapping_source_field(
+                mappings,
+                target_field="biz_key",
+                alias=alias,
+                source_count=len(sources),
+            )
 
-            if key_field:
-                match_sources = self._upsert_match_source(match_sources, alias=alias, key_field=key_field)
+            if mapped_key_field or key_field:
+                match_sources = self._upsert_match_source(
+                    match_sources,
+                    alias=alias,
+                    key_field=mapped_key_field or key_field,
+                )
             if key_field and not self._has_target_mapping(mappings, target_field="biz_key", alias=alias, source_count=len(sources)):
                 mappings.append(
                     {
@@ -1289,6 +1528,33 @@ class FallbackSchemeDesignExecutor:
         step["mappings"] = mappings
         if match_sources:
             match["sources"] = match_sources
+
+    def _resolve_target_mapping_source_field(
+        self,
+        mappings: list[dict[str, Any]],
+        *,
+        target_field: str,
+        alias: str,
+        source_count: int,
+    ) -> str:
+        for mapping in mappings:
+            if str(mapping.get("target_field") or "").strip() != target_field:
+                continue
+            value = mapping.get("value")
+            if not isinstance(value, dict):
+                continue
+            source = value.get("source")
+            if not isinstance(source, dict):
+                continue
+            source_field = str(source.get("field") or "").strip()
+            if not source_field:
+                continue
+            source_alias = str(source.get("alias") or "").strip()
+            if source_alias == alias:
+                return source_field
+            if not source_alias and source_count == 1:
+                return source_field
+        return ""
 
     def _upsert_match_source(
         self,
@@ -2062,7 +2328,10 @@ class SingleShotSchemeDesignExecutor(FallbackSchemeDesignExecutor):
                     user_message=text,
                 )
                 proc_draft = self._normalize_proc_draft(
-                    self._prepare_proc_draft_for_validation(session, proc_result.effective_rule_json)
+                    self._prepare_proc_draft_for_validation(
+                        session,
+                        proc_result.effective_rule_json,
+                    )
                 )
                 proc_draft_text = proc_result.draft_text or None
                 notes = self._format_generation_notes("数据整理", proc_result)
