@@ -155,6 +155,7 @@ class ConfirmSessionInput:
 @dataclass(slots=True)
 class ProcTrialInput:
     proc_rule_json: dict[str, Any]
+    input_plan_json: dict[str, Any] | None = None
     sample_datasets: list[dict[str, Any]] | None = None
     uploaded_files: list[dict[str, Any]] | None = None
 
@@ -1190,6 +1191,7 @@ class SchemeDesignService:
         *,
         auth_token: str,
         session_id: str,
+        input_plan_json: dict[str, Any] | None = None,
     ) -> Optional[SchemeDesignSession]:
         session = await self._get_owned_session(auth_token, session_id, touch=False)
         if session is None:
@@ -1213,6 +1215,7 @@ class SchemeDesignService:
             auth_token=auth_token,
             payload=ProcTrialInput(
                 proc_rule_json=proc_rule_json,
+                input_plan_json=input_plan_json,
                 sample_datasets=target_sample_datasets,
                 uploaded_files=self._build_uploaded_files(session.sample_files),
             ),
@@ -1530,6 +1533,7 @@ class SchemeDesignService:
             auth_token,
             {
                 "proc_rule_json": payload.proc_rule_json,
+                "input_plan_json": payload.input_plan_json or {},
                 "sample_datasets": list(payload.sample_datasets or []),
                 "uploaded_files": list(payload.uploaded_files or []),
             },

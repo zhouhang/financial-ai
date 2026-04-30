@@ -110,6 +110,19 @@ class DingTalkDwsAdapter(NotificationAdapter):
             )
             for item in user_ids
         ]
+        if len(users) > 1:
+            detail = self._get_users_by_ids(user_ids)
+            if detail.success and detail.users:
+                detail_by_id = {user.user_id: user for user in detail.users}
+                users = [detail_by_id.get(user.user_id, user) for user in users]
+                return UserResolveResult(
+                    success=True,
+                    provider=self.provider,
+                    message=f"命中 {len(users)} 个钉钉用户",
+                    raw={"search": search.payload, "detail": detail.raw},
+                    users=users,
+                    resolved_user=None,
+                )
         return UserResolveResult(
             success=True,
             provider=self.provider,
@@ -662,15 +675,53 @@ def _users_from_payload(payload: dict[str, Any]) -> list[NotificationUser]:
         user_id = str(model.get("orgUserId") or model.get("userId") or model.get("userid") or "").strip()
         if not user_id:
             continue
+        departments = _normalize_departments(
+            model.get("deptNameList")
+            or model.get("departmentNames")
+            or model.get("departments")
+            or model.get("department")
+            or model.get("deptName")
+        )
         users.append(
             NotificationUser(
                 user_id=user_id,
                 display_name=str(model.get("orgUserName") or model.get("name") or "").strip(),
                 mobile=str(model.get("orgUserMobile") or model.get("mobile") or "").strip(),
+                organization=str(
+                    model.get("organization")
+                    or model.get("orgName")
+                    or model.get("corpName")
+                    or model.get("tenantName")
+                    or ""
+                ).strip(),
+                departments=departments,
                 extra={"raw": item},
             )
         )
     return users
+
+
+def _normalize_departments(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if isinstance(raw, list):
+        values: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                value = item.strip()
+            elif isinstance(item, dict):
+                value = str(item.get("name") or item.get("deptName") or item.get("departmentName") or "").strip()
+            else:
+                value = str(item or "").strip()
+            if value:
+                values.append(value)
+        return values
+    if isinstance(raw, dict):
+        value = str(raw.get("name") or raw.get("deptName") or raw.get("departmentName") or "").strip()
+        return [value] if value else []
+    return []
 
 
 def _todo_from_detail(detail: dict[str, Any]) -> TodoRecord:

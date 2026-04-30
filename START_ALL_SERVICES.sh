@@ -97,6 +97,10 @@ if [ -f /tmp/recon-workers.pids ]; then
     done < /tmp/recon-workers.pids
     rm -f /tmp/recon-workers.pids
 fi
+# 兜底清理 PID 文件丢失后遗留的旧 recon-worker，避免不同版本 worker 同时消费队列。
+pkill -f "recon_worker.py" 2>/dev/null || true
+# 兜底清理未占用 5173 端口但仍存活的旧 Vite 进程。
+pkill -f "$PROJECT_ROOT/finance-web/node_modules/.bin/vite" 2>/dev/null || true
 sleep 2
 echo "✅ 现有服务已停止"
 

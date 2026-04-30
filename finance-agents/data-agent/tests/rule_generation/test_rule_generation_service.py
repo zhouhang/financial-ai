@@ -26,6 +26,11 @@ from graphs.rule_generation.proc.prompts import build_ir_repair_prompt, build_un
 from graphs.rule_generation.proc.rule_builder import build_proc_rule_skeleton_from_ir
 from graphs.rule_generation.proc.sample_diagnostics import diagnose_proc_sample
 from graphs.rule_generation.proc.understanding import normalize_understanding
+from graphs.rule_generation.input_plan import (
+    execute_input_plan_preview,
+    generate_input_plan_from_proc,
+    validate_input_plan,
+)
 from graphs.rule_generation.service import (
     RuleGenerationService,
     _normalize_generated_proc_rule,
@@ -211,6 +216,122 @@ def _alipay_order_source_payload() -> dict[str, object]:
             }
         ],
     }
+
+
+def test_input_plan_infers_lookup_table_keyset_read() -> None:
+    rule = {
+        "steps": [
+            {
+                "step_id": "create_left_recon_ready",
+                "action": "create_schema",
+                "target_table": "left_recon_ready",
+                "schema": {"columns": [{"name": "订单号", "data_type": "string"}]},
+            },
+            {
+                "step_id": "write_left_recon_ready",
+                "action": "write_dataset",
+                "target_table": "left_recon_ready",
+                "sources": [
+                    {"table": "public.fp_orders", "alias": "fp"},
+                    {"table": "public.alipay_orders", "alias": "alipay"},
+                ],
+                "mappings": [
+                    {
+                        "target_field": "订单号",
+                        "value": {"type": "source", "source": {"alias": "fp", "field": "customer_order_no"}},
+                    },
+                    {
+                        "target_field": "金额",
+                        "value": {
+                            "type": "lookup",
+                            "source_alias": "alipay",
+                            "value_field": "order_amount",
+                            "keys": [
+                                {
+                                    "lookup_field": "merchant_order_no",
+                                    "input": {
+                                        "type": "source",
+                                        "source": {"alias": "fp", "field": "customer_order_no"},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    plan = generate_input_plan_from_proc(
+        rule_json=rule,
+        sources=[_fp_order_source_payload(), _alipay_order_source_payload()],
+        target_table="left_recon_ready",
+    )
+    validation = validate_input_plan(
+        plan,
+        rule_json=rule,
+        sources=[_fp_order_source_payload(), _alipay_order_source_payload()],
+        target_table="left_recon_ready",
+    )
+    preview = execute_input_plan_preview(
+        plan,
+        sources=[_fp_order_source_payload(), _alipay_order_source_payload()],
+    )
+
+    alipay_plan = next(item for item in plan["datasets"] if item["alias"] == "alipay")
+    assert alipay_plan["read_mode"] == "by_key_set"
+    assert alipay_plan["depends_on_alias"] == "fp"
+    assert alipay_plan["key_from_field"] == "customer_order_no"
+    assert alipay_plan["key_to_field"] == "merchant_order_no"
+    assert validation["success"] is True
+    assert preview["success"] is True
+
+
+def test_input_plan_prunes_selected_but_unreferenced_source() -> None:
+    rule = {
+        "steps": [
+            {
+                "step_id": "create_left_recon_ready",
+                "action": "create_schema",
+                "target_table": "left_recon_ready",
+                "schema": {"columns": [{"name": "商户编码", "data_type": "string"}]},
+            },
+            {
+                "step_id": "write_left_recon_ready",
+                "action": "write_dataset",
+                "target_table": "left_recon_ready",
+                "sources": [
+                    {"table": "public.alipay_orders", "alias": "alipay"},
+                    {"table": "public.fp_orders", "alias": "fp"},
+                ],
+                "mappings": [
+                    {
+                        "target_field": "商户编码",
+                        "value": {
+                            "type": "source",
+                            "source": {"alias": "fp", "field": "customer_order_no"},
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    plan = generate_input_plan_from_proc(
+        rule_json=rule,
+        sources=[_alipay_order_source_payload(), _fp_order_source_payload()],
+        target_table="left_recon_ready",
+    )
+    validation = validate_input_plan(
+        plan,
+        rule_json=rule,
+        sources=[_alipay_order_source_payload(), _fp_order_source_payload()],
+        target_table="left_recon_ready",
+    )
+
+    assert [item["alias"] for item in plan["datasets"]] == ["fp"]
+    assert plan["datasets"][0]["read_mode"] == "base"
+    assert validation["success"] is True
 
 
 def _simple_rule() -> dict[str, object]:
@@ -488,6 +609,78 @@ def test_ambiguous_time_field_requires_user_confirmation(monkeypatch: pytest.Mon
     assert result["status"] == "needs_user_input"
     assert result["questions"]
     assert "订单时间" in result["questions"][0]["question"]
+
+
+def test_missing_short_source_field_prompts_user_before_ir_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = RuleGenerationService()
+    source = _alipay_order_source_payload()
+    source["field_label_map"] = {
+        **source["field_label_map"],
+        "refund_amount": "退款金额(元)",
+        "fee_rate": "费率",
+    }
+    source["fields"] = [
+        *source["fields"],
+        {"name": "refund_amount", "label": "退款金额(元)", "data_type": "decimal"},
+        {"name": "fee_rate", "label": "费率", "data_type": "decimal"},
+    ]
+
+    llm_calls = 0
+
+    async def fake_invoke_llm_json(prompt: str, **_: object) -> dict[str, object]:
+        nonlocal llm_calls
+        llm_calls += 1
+        return {
+            "understanding": {
+                "rule_summary": "选择支付宝订单数据但描述了不存在的销售金额字段",
+                "source_references": [
+                    {
+                        "ref_id": "ref_key",
+                        "semantic_name": "客户订单号",
+                        "usage": "match_key",
+                        "must_bind": True,
+                    },
+                    {
+                        "ref_id": "ref_amount",
+                        "semantic_name": "含税销售金额",
+                        "usage": "compare_field",
+                        "must_bind": True,
+                    },
+                ],
+                "output_specs": [
+                    {"output_id": "out_key", "name": "订单号", "kind": "rename", "source_ref_ids": ["ref_key"]},
+                    {"output_id": "out_amount", "name": "金额", "kind": "rename", "source_ref_ids": ["ref_amount"]},
+                ],
+                "business_rules": [],
+            },
+            "assumptions": [],
+            "ambiguities": [],
+        }
+
+    monkeypatch.setattr("graphs.rule_generation.service.invoke_llm_json", fake_invoke_llm_json)
+
+    result = asyncio.run(
+        service.run_proc_side(
+            auth_token="token",
+            payload={
+                "side": "left",
+                "target_table": "left_recon_ready",
+                "rule_text": "客户订单号作为匹配字段\n含税销售金额作为对比字段",
+                "sources": [source],
+            },
+        )
+    )
+
+    assert result["event"] == "needs_user_input"
+    assert result["status"] == "needs_user_input"
+    assert result["phase"] == "validate_ir_structure"
+    assert llm_calls == 1
+    amount_question = next(
+        question for question in result["questions"] if question["mention"] == "含税销售金额"
+    )
+    candidate_labels = [candidate["display_name"] for candidate in amount_question["candidates"]]
+    assert "订单金额(元)" in candidate_labels
+    assert amount_question["role"] == "compare_field"
 
 
 def test_derived_output_specs_are_not_treated_as_source_field_ambiguities() -> None:
@@ -790,6 +983,106 @@ def test_assignment_left_side_output_aliases_trigger_understanding_repair_not_us
     assert {"采购订单ID", "客户订单号", "商户订单号", "订单金额", "订单创建时间"}.issubset(semantic_names)
 
 
+def test_rule_generation_returns_input_plan_and_uses_preview_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = RuleGenerationService()
+    fp_source = _fp_order_source_payload()
+    alipay_source = _alipay_order_source_payload()
+    alipay_source["sample_rows"] = [
+        {"merchant_order_no": "M-001", "order_amount": 88.12, "buyer_info": "buyer_1"},
+        {"merchant_order_no": "M-999", "order_amount": 1.23, "buyer_info": "buyer_2"},
+    ]
+
+    async def fake_invoke_llm_json(prompt: str, **_: object) -> dict[str, object]:
+        return {
+            "understanding": {
+                "rule_summary": "fp订单关联支付宝订单金额",
+                "source_references": [
+                    {
+                        "ref_id": "ref_fp_order_no",
+                        "semantic_name": "客户订单号",
+                        "usage": "lookup_key",
+                        "table_scope": ["public.fp_orders"],
+                        "must_bind": True,
+                    },
+                    {
+                        "ref_id": "ref_alipay_order_no",
+                        "semantic_name": "商户订单号",
+                        "usage": "lookup_key",
+                        "table_scope": ["public.alipay_orders"],
+                        "must_bind": True,
+                    },
+                    {
+                        "ref_id": "ref_amount",
+                        "semantic_name": "订单金额",
+                        "usage": "source_value",
+                        "table_scope": ["public.alipay_orders"],
+                        "must_bind": True,
+                    },
+                ],
+                "output_specs": [
+                    {
+                        "output_id": "out_amount",
+                        "name": "金额",
+                        "kind": "join_derived",
+                        "source_ref_ids": ["ref_fp_order_no", "ref_alipay_order_no", "ref_amount"],
+                    },
+                ],
+                "business_rules": [
+                    {
+                        "rule_id": "join_amount",
+                        "type": "join",
+                        "description": "fp客户订单号关联支付宝商户订单号取订单金额",
+                        "related_ref_ids": ["ref_fp_order_no", "ref_alipay_order_no", "ref_amount"],
+                    }
+                ],
+            },
+            "assumptions": [],
+            "ambiguities": [],
+        }
+
+    captured_sources: list[dict[str, object]] = []
+
+    async def fake_run_proc_sample(**kwargs: object) -> dict[str, object]:
+        captured_sources.extend(kwargs.get("sources") or [])
+        return {
+            "success": True,
+            "ready_for_confirm": True,
+            "backend": "mock",
+            "output_samples": [
+                {
+                    "target_table": "left_recon_ready",
+                    "rows": [{"金额": 88.12}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr("graphs.rule_generation.service.invoke_llm_json", fake_invoke_llm_json)
+    monkeypatch.setattr("graphs.rule_generation.service.run_proc_sample", fake_run_proc_sample)
+
+    result = asyncio.run(
+        service.run_proc_side(
+            auth_token="token",
+            payload={
+                "side": "left",
+                "target_table": "left_recon_ready",
+                "rule_text": "金额=fp订单表的客户订单号关联支付宝订单数据的商户订单号，获取订单金额",
+                "sources": [fp_source, alipay_source],
+            },
+        )
+    )
+
+    assert result["event"] == "graph_completed"
+    assert result["input_plan_json"]["datasets"]
+    alipay_plan = next(item for item in result["input_plan_json"]["datasets"] if item["alias"] == "source_2")
+    assert alipay_plan["read_mode"] == "by_key_set"
+    alipay_sample = next(item for item in captured_sources if item["table_name"] == "public.alipay_orders")
+    assert alipay_sample["sample_rows"] == [
+        {"merchant_order_no": "M-001", "order_amount": 88.12, "buyer_info": "buyer_1"}
+    ]
+
+
 def test_normalize_understanding_builds_structured_expression_and_predicate() -> None:
     understanding = normalize_understanding(
         {
@@ -838,6 +1131,65 @@ def test_normalize_understanding_builds_structured_expression_and_predicate() ->
         "left": {"op": "ref", "ref_id": "ref_buyer"},
         "right": {"op": "constant", "value": "buyer_1"},
     }
+
+
+def test_normalize_understanding_accepts_common_not_empty_predicate_aliases() -> None:
+    understanding = normalize_understanding(
+        {
+            "rule_summary": "只保留客户订单号不为空的数据",
+            "source_references": [
+                {"ref_id": "ref_order_no", "semantic_name": "客户订单号", "usage": "filter_field"},
+            ],
+            "business_rules": [
+                {
+                    "rule_id": "rule_filter",
+                    "type": "filter",
+                    "predicate": {
+                        "op": "is_not_empty",
+                        "field_ref_id": "ref_order_no",
+                    },
+                }
+            ],
+        },
+        rule_text="取客户订单号不为空的数据",
+        target_table="left_recon_ready",
+    )
+
+    assert understanding["business_rules"][0]["predicate"] == {
+        "op": "exists",
+        "operand": {"op": "ref", "ref_id": "ref_order_no"},
+    }
+    result = lint_rule_generation_ir(understanding, field_bindings=[])
+    reasons = {item.get("reason") for item in result.get("errors") or []}
+    assert "business_rule_missing_filter_predicate" not in reasons
+
+
+def test_ir_repair_prompt_turns_missing_filter_predicate_into_required_repair() -> None:
+    prompt = build_ir_repair_prompt(
+        {
+            "rule_text": "取客户订单号不为空的数据",
+            "understanding": {
+                "business_rules": [
+                    {
+                        "rule_id": "rule_filter_1",
+                        "type": "filter",
+                        "description": "过滤出客户订单号不为空的数据。",
+                    }
+                ]
+            },
+        },
+        failures=[
+            {
+                "stage": "lint_ir",
+                "reason": "business_rule_missing_filter_predicate",
+                "rule_id": "rule_filter_1",
+                "message": "business_rule 缺少结构化 predicate。",
+            }
+        ],
+    )
+
+    assert "complete_filter_predicate" in prompt
+    assert "rule_filter_1" in prompt
 
 
 def test_lint_rule_generation_ir_requires_structured_filter_predicate_and_formula_expression() -> None:

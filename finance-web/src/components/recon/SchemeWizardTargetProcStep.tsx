@@ -124,6 +124,7 @@ export interface AiProcSideDraft {
   validations: Array<Record<string, unknown>>;
   warnings: string[];
   procRuleJson?: Record<string, unknown>;
+  inputPlanJson?: Record<string, unknown>;
   procSteps?: Array<Record<string, unknown>>;
   outputRows: ProcSampleRow[];
   outputFieldLabelMap: Record<string, string>;
@@ -986,6 +987,8 @@ function AiSideConfigurationPanel({
   onChangeSourceSelection,
   onChangeRuleDraft,
   onGenerateOutput,
+  onViewProcJson,
+  procJsonPreview,
   onSwitchSide,
 }: {
   side: AiProcSide;
@@ -997,6 +1000,8 @@ function AiSideConfigurationPanel({
   onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
   onChangeRuleDraft: (side: AiProcSide, value: string) => void;
   onGenerateOutput: (side: AiProcSide) => void;
+  onViewProcJson: () => void;
+  procJsonPreview?: string;
   onSwitchSide: (side: AiProcSide) => void;
 }) {
   const isLeft = side === 'left';
@@ -1136,6 +1141,21 @@ function AiSideConfigurationPanel({
             </div>
           )}
         </div>
+        {hasGeneratedOutput ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-border-subtle pt-4">
+            <button
+              type="button"
+              onClick={onViewProcJson}
+              disabled={!procJsonPreview}
+              className="rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              查看 JSON
+            </button>
+            {!procJsonPreview ? (
+              <span className="text-xs text-text-muted">左右侧输出都生成后可查看完整 Proc JSON 和 Input Plan JSON。</span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1282,6 +1302,11 @@ const DEFAULT_RULE_GENERATION_NODES: RuleGenerationNodeTrace[] = [
   ['generate_proc_json', '生成整理规则'],
   ['check_ir_dsl_consistency', '检查规则一致性'],
   ['lint_proc_json', '检查规则可执行性'],
+  ['generate_input_plan', '生成取数计划'],
+  ['validate_input_plan', '校验取数计划'],
+  ['repair_input_plan', '修复取数计划'],
+  ['execute_input_plan_preview', '预览取数计划'],
+  ['confirm_input_plan', '确认取数方式'],
   ['build_sample_inputs', '读取样例数据'],
   ['run_sample', '试跑输出数据'],
   ['diagnose_sample', '诊断试跑结果'],
@@ -1316,6 +1341,11 @@ function formatRuleGenerationProgressMessage(trace: RuleGenerationNodeTrace) {
   if (trace.code === 'semantic_resolution' || trace.code === 'ambiguity_gate') return '正在判断是否有字段或口径需要你确认。';
   if (trace.code === 'generate_proc_json') return '正在生成可执行的数据整理规则。';
   if (trace.code === 'check_ir_dsl_consistency' || trace.code === 'lint_proc_json') return '正在检查整理规则能否稳定执行。';
+  if (trace.code === 'generate_input_plan') return '正在根据整理规则生成正式运行时的取数计划。';
+  if (trace.code === 'validate_input_plan') return '正在检查取数计划能否覆盖基础表和关联表。';
+  if (trace.code === 'repair_input_plan') return `正在修复取数计划，第 ${trace.attempt || 1} 次。`;
+  if (trace.code === 'execute_input_plan_preview') return '正在用取数计划预览输入样例。';
+  if (trace.code === 'confirm_input_plan') return '取数方式需要确认后才能继续。';
   if (trace.code === 'build_sample_inputs') return '正在读取样例数据。';
   if (trace.code === 'run_sample') return '正在用样例数据试跑，验证能否生成输出数据。';
   if (trace.code === 'diagnose_sample') return '试跑结果未达到预期，正在定位原因。';
@@ -1388,6 +1418,8 @@ function AiComplexRuleWorkspace({
   onChangeSourceSelection,
   onChangeRuleDraft,
   onGenerateOutput,
+  onViewProcJson,
+  procJsonPreview,
 }: {
   authToken?: string | null;
   schemeDraft: SchemeDraftLite;
@@ -1397,6 +1429,8 @@ function AiComplexRuleWorkspace({
   onChangeSourceSelection: (side: AiProcSide, sources: SchemeSourceOption[]) => void;
   onChangeRuleDraft: (side: AiProcSide, value: string) => void;
   onGenerateOutput: (side: AiProcSide) => void;
+  onViewProcJson: () => void;
+  procJsonPreview?: string;
 }) {
   const [activeSide, setActiveSide] = useState<'left' | 'right'>('left');
   const leftReady = selectedLeftSources.length > 0;
@@ -1475,6 +1509,8 @@ function AiComplexRuleWorkspace({
           onChangeSourceSelection={onChangeSourceSelection}
           onChangeRuleDraft={onChangeRuleDraft}
           onGenerateOutput={onGenerateOutput}
+          onViewProcJson={onViewProcJson}
+          procJsonPreview={procJsonPreview}
           onSwitchSide={setActiveSide}
         />
         <AiSideConfigurationPanel
@@ -1487,6 +1523,8 @@ function AiComplexRuleWorkspace({
           onChangeSourceSelection={onChangeSourceSelection}
           onChangeRuleDraft={onChangeRuleDraft}
           onGenerateOutput={onGenerateOutput}
+          onViewProcJson={onViewProcJson}
+          procJsonPreview={procJsonPreview}
           onSwitchSide={setActiveSide}
         />
       </div>
@@ -2021,6 +2059,8 @@ export default function SchemeWizardTargetProcStep({
               onChangeSourceSelection={onChangeSourceSelection}
               onChangeRuleDraft={onChangeAiProcRuleDraft}
               onGenerateOutput={onGenerateAiProcOutput}
+              onViewProcJson={onViewProcJson}
+              procJsonPreview={procJsonPreview}
             />
           </div>
         )}

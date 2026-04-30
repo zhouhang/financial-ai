@@ -29,7 +29,6 @@ const OUTPUT_FIELD_ROLE_OPTIONS: OutputFieldSemanticRole[] = [
   'normal',
   'match_key',
   'compare_field',
-  'time_field',
 ];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -73,6 +72,11 @@ function renderFieldOptionLabel(field: FieldItem): string {
   return field.displayName !== field.rawName
     ? `${field.displayName} (${field.rawName})`
     : field.rawName;
+}
+
+function normalizeVisibleOutputFieldRole(role: unknown): OutputFieldSemanticRole {
+  const normalized = normalizeOutputFieldSemanticRole(role);
+  return normalized === 'time_field' ? 'normal' : normalized;
 }
 
 
@@ -341,11 +345,11 @@ export default function SchemeWizardOutputFieldEditor({
                   <span className="text-xs font-medium text-text-secondary">字段角色</span>
                   <div className="relative mt-1.5">
                     <select
-                      value={normalizeOutputFieldSemanticRole(field.semanticRole)}
+                      value={normalizeVisibleOutputFieldRole(field.semanticRole)}
                       onChange={(event) =>
                         replaceField(field.id, (current) => ({
                           ...current,
-                          semanticRole: normalizeOutputFieldSemanticRole(event.target.value),
+                          semanticRole: normalizeVisibleOutputFieldRole(event.target.value),
                         }))
                       }
                       className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
@@ -412,7 +416,7 @@ export default function SchemeWizardOutputFieldEditor({
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-text-muted">
-        <span>先标注匹配字段、对比字段、时间字段，再把输出结构试跑通过。</span>
+        <span>先标注匹配字段、对比字段，再把输出结构试跑通过。对账日期字段会在运行计划中配置。</span>
         {anyLoading ? (
           <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-sky-700">
             正在加载字段元数据…

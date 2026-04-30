@@ -14,8 +14,10 @@ from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
     call_mcp_tool,
     data_source_get,
+    data_source_get_dataset,
     data_source_list_collection_records,
     data_source_trigger_dataset_collection,
+    execution_run_exception_get,
     execution_run_exception_update,
     get_file_validation_rule,
     recon_auto_task_get,
@@ -399,10 +401,16 @@ def _normalize_plan_binding(
         "dataset_source_type": str(item.get("dataset_source_type") or "collection_records").strip() or "collection_records",
         "role_code": role_code,
         "dataset_code": str(item.get("dataset_code") or "").strip(),
+        "dataset_id": str(item.get("dataset_id") or query.get("dataset_id") or "").strip(),
         "dataset_name": str(item.get("dataset_name") or item.get("display_name") or "").strip(),
         "display_name": str(item.get("display_name") or item.get("dataset_name") or "").strip(),
         "source_kind": str(item.get("source_kind") or "").strip(),
         "provider_code": str(item.get("provider_code") or "").strip(),
+        "input_plan_key": str(item.get("input_plan_key") or "").strip(),
+        "input_plan_alias": str(item.get("input_plan_alias") or "").strip(),
+        "input_plan_read_mode": str(item.get("input_plan_read_mode") or "").strip(),
+        "input_plan_target_table": str(item.get("input_plan_target_table") or "").strip(),
+        "input_plan_apply_biz_date_filter": item.get("input_plan_apply_biz_date_filter"),
     }
 
 
@@ -456,11 +464,21 @@ def _build_plan_binding_from_dataset_binding(
         "resource_key": resource_key,
         "required": bool(binding.get("is_required", True)),
         "query": query,
+        "dataset_id": str(mapping_config.get("dataset_id") or binding.get("dataset_id") or query.get("dataset_id") or "").strip(),
         "dataset_source_type": str(mapping_config.get("dataset_source_type") or "collection_records").strip() or "collection_records",
         "role_code": role_code,
         "dataset_code": str(mapping_config.get("dataset_code") or resource_key).strip() or resource_key,
         "source_kind": str(mapping_config.get("source_kind") or binding.get("source_kind") or "").strip(),
         "provider_code": str(mapping_config.get("provider_code") or binding.get("provider_code") or "").strip(),
+        "input_plan_key": str(mapping_config.get("input_plan_key") or binding.get("input_plan_key") or "").strip(),
+        "input_plan_alias": str(mapping_config.get("input_plan_alias") or binding.get("input_plan_alias") or "").strip(),
+        "input_plan_read_mode": str(mapping_config.get("input_plan_read_mode") or binding.get("input_plan_read_mode") or "").strip(),
+        "input_plan_target_table": str(mapping_config.get("input_plan_target_table") or binding.get("input_plan_target_table") or "").strip(),
+        "input_plan_apply_biz_date_filter": (
+            mapping_config.get("input_plan_apply_biz_date_filter")
+            if "input_plan_apply_biz_date_filter" in mapping_config
+            else binding.get("input_plan_apply_biz_date_filter")
+        ),
     }
 
 
@@ -487,23 +505,199 @@ def _is_required_collection_empty(binding: dict[str, Any], collection: dict[str,
     return _get_binding_required(binding) and _collection_record_count(collection) <= 0
 
 
+def _flatten_input_plan_entries(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
+    input_plan = _safe_dict(scheme_meta.get("input_plan_json"))
+    if not input_plan:
+        return []
+    plans = [item for item in _safe_list(input_plan.get("plans")) if isinstance(item, dict)]
+    if not plans and isinstance(input_plan.get("datasets"), list):
+        plans = [input_plan]
+
+    entries: list[dict[str, Any]] = []
+    for raw_plan in plans:
+        plan = _safe_dict(raw_plan)
+        side = str(plan.get("side") or "").strip().lower()
+        target_table = str(plan.get("target_table") or "").strip()
+        for raw_dataset in _safe_list(plan.get("datasets")):
+            if not isinstance(raw_dataset, dict):
+                continue
+            entry = dict(raw_dataset)
+            if side:
+                entry.setdefault("side", side)
+            if target_table:
+                entry.setdefault("target_table", target_table)
+            entries.append(entry)
+    return entries
+
+
+def _entry_resource_keys(entry: dict[str, Any]) -> set[str]:
+    return {
+        value
+        for value in (
+            str(entry.get("resource_key") or "").strip(),
+            str(entry.get("table") or "").strip(),
+            str(entry.get("dataset_code") or "").strip(),
+        )
+        if value
+    }
+
+
+def _binding_resource_keys(binding: dict[str, Any]) -> set[str]:
+    query = _safe_dict(binding.get("query"))
+    return {
+        value
+        for value in (
+            str(binding.get("resource_key") or "").strip(),
+            str(binding.get("table_name") or "").strip(),
+            str(binding.get("dataset_code") or "").strip(),
+            str(query.get("resource_key") or "").strip(),
+        )
+        if value
+    }
+
+
+def _input_plan_entry_matches_binding(entry: dict[str, Any], binding: dict[str, Any]) -> bool:
+    entry_side = str(entry.get("side") or "").strip().lower()
+    binding_side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
+    if binding_side.startswith("left"):
+        binding_side = "left"
+    elif binding_side.startswith("right"):
+        binding_side = "right"
+    if entry_side in {"left", "right"} and binding_side in {"left", "right"} and entry_side != binding_side:
+        return False
+
+    entry_alias = str(entry.get("alias") or "").strip()
+    binding_alias = str(binding.get("input_plan_alias") or "").strip()
+    if entry_alias and binding_alias and entry_alias != binding_alias:
+        return False
+
+    entry_target = str(entry.get("target_table") or "").strip()
+    binding_target = str(binding.get("input_plan_target_table") or "").strip()
+    if entry_target and binding_target and entry_target != binding_target:
+        return False
+
+    entry_source_id = str(entry.get("source_id") or entry.get("data_source_id") or "").strip()
+    binding_source_id = _get_binding_source_id(binding)
+    if entry_source_id and binding_source_id and entry_source_id != binding_source_id:
+        return False
+
+    entry_dataset_id = str(entry.get("dataset_id") or entry.get("id") or "").strip()
+    binding_dataset_id = str(binding.get("dataset_id") or _safe_dict(binding.get("query")).get("dataset_id") or "").strip()
+    if entry_dataset_id and binding_dataset_id and entry_dataset_id == binding_dataset_id:
+        return True
+
+    return bool(_entry_resource_keys(entry) & _binding_resource_keys(binding))
+
+
+def _enrich_binding_with_input_plan(binding: dict[str, Any], scheme_meta: dict[str, Any]) -> dict[str, Any]:
+    if not scheme_meta:
+        return binding
+    matched = next(
+        (entry for entry in _flatten_input_plan_entries(scheme_meta) if _input_plan_entry_matches_binding(entry, binding)),
+        None,
+    )
+    if not matched:
+        return binding
+
+    enriched = dict(binding)
+    enriched["input_plan_alias"] = str(enriched.get("input_plan_alias") or matched.get("alias") or "").strip()
+    enriched["input_plan_read_mode"] = str(enriched.get("input_plan_read_mode") or matched.get("read_mode") or "base").strip() or "base"
+    enriched["input_plan_target_table"] = str(
+        enriched.get("input_plan_target_table") or matched.get("target_table") or ""
+    ).strip()
+    if "input_plan_apply_biz_date_filter" not in enriched or enriched.get("input_plan_apply_biz_date_filter") is None:
+        enriched["input_plan_apply_biz_date_filter"] = matched.get("apply_biz_date_filter", True)
+    if not str(enriched.get("dataset_id") or "").strip():
+        enriched["dataset_id"] = str(matched.get("dataset_id") or matched.get("id") or "").strip()
+    for src_key, dst_key in (
+        ("business_name", "dataset_name"),
+        ("display_name", "display_name"),
+    ):
+        value = str(matched.get(src_key) or "").strip()
+        if value and not str(enriched.get(dst_key) or "").strip():
+            enriched[dst_key] = value
+    return enriched
+
+
+def _binding_apply_biz_date_filter(binding: dict[str, Any]) -> bool:
+    value = binding.get("input_plan_apply_biz_date_filter")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def _is_manual_or_static_dataset(binding: dict[str, Any]) -> bool:
+    extract_config = _safe_dict(binding.get("dataset_extract_config"))
+    collection_config = _safe_dict(binding.get("dataset_collection_config"))
+    metadata = _safe_dict(binding.get("dataset_metadata"))
+    mode_values = {
+        str(extract_config.get(key) or "").strip().lower()
+        for key in ("mode", "source_mode", "execution_mode", "type")
+    }
+    mode_values.update(
+        str(collection_config.get(key) or "").strip().lower()
+        for key in ("mode", "source_mode", "execution_mode", "type")
+    )
+    catalog = _safe_dict(metadata.get("catalog_profile"))
+    mode_values.update(
+        str(catalog.get(key) or "").strip().lower()
+        for key in ("mode", "source_mode", "execution_mode", "type")
+    )
+    origin_type = str(binding.get("dataset_origin_type") or "").strip().lower()
+    dataset_kind = str(binding.get("dataset_kind") or "").strip().lower()
+    non_collectable_modes = {"manual_seed", "sample", "screenshot", "static", "mock", "seed"}
+    return bool(mode_values & non_collectable_modes) or dataset_kind in {"sample", "screenshot"} or origin_type in {"sample"}
+
+
+def _should_trigger_collection_for_binding(binding: dict[str, Any]) -> bool:
+    read_mode = str(binding.get("input_plan_read_mode") or "base").strip().lower() or "base"
+    if read_mode != "base" and not _binding_apply_biz_date_filter(binding):
+        return False
+    if _is_manual_or_static_dataset(binding):
+        return False
+    return True
+
+
 async def _hydrate_binding_source_meta(
     *,
     auth_token: str,
     binding: dict[str, Any],
 ) -> dict[str, Any]:
-    if str(binding.get("source_kind") or "").strip() and str(binding.get("provider_code") or "").strip():
-        return binding
-    source_id = _get_binding_source_id(binding)
-    if not source_id:
-        return binding
-    result = await data_source_get(auth_token, source_id, mode="real")
-    source = _safe_dict(result.get("source"))
-    if not bool(result.get("success")) or not source:
-        return binding
     hydrated = dict(binding)
-    hydrated["source_kind"] = str(hydrated.get("source_kind") or source.get("source_kind") or "").strip()
-    hydrated["provider_code"] = str(hydrated.get("provider_code") or source.get("provider_code") or "").strip()
+    source_id = _get_binding_source_id(binding)
+    if source_id and not (
+        str(binding.get("source_kind") or "").strip()
+        and str(binding.get("provider_code") or "").strip()
+    ):
+        result = await data_source_get(auth_token, source_id, mode="real")
+        source = _safe_dict(result.get("source"))
+        if bool(result.get("success")) and source:
+            hydrated["source_kind"] = str(hydrated.get("source_kind") or source.get("source_kind") or "").strip()
+            hydrated["provider_code"] = str(hydrated.get("provider_code") or source.get("provider_code") or "").strip()
+
+    dataset_id = str(hydrated.get("dataset_id") or _safe_dict(hydrated.get("query")).get("dataset_id") or "").strip()
+    resource_key = _get_binding_resource_key(hydrated)
+    if source_id and (dataset_id or resource_key):
+        dataset_result = await data_source_get_dataset(
+            auth_token,
+            dataset_id=dataset_id,
+            source_id=source_id,
+            resource_key=resource_key,
+            mode="real",
+        )
+        dataset = _safe_dict(dataset_result.get("dataset"))
+        if bool(dataset_result.get("success")) and dataset:
+            hydrated["dataset_id"] = str(hydrated.get("dataset_id") or dataset.get("id") or "").strip()
+            hydrated["dataset_code"] = str(hydrated.get("dataset_code") or dataset.get("dataset_code") or "").strip()
+            hydrated["dataset_name"] = str(hydrated.get("dataset_name") or dataset.get("business_name") or dataset.get("dataset_name") or "").strip()
+            hydrated["display_name"] = str(hydrated.get("display_name") or dataset.get("business_name") or dataset.get("dataset_name") or "").strip()
+            hydrated["dataset_kind"] = str(dataset.get("dataset_kind") or "").strip()
+            hydrated["dataset_origin_type"] = str(dataset.get("origin_type") or "").strip()
+            hydrated["dataset_extract_config"] = _safe_dict(dataset.get("extract_config"))
+            hydrated["dataset_collection_config"] = _safe_dict(dataset.get("collection_config"))
+            hydrated["dataset_metadata"] = _safe_dict(dataset.get("metadata"))
+            hydrated["source_kind"] = str(hydrated.get("source_kind") or dataset.get("source_kind") or "").strip()
+            hydrated["provider_code"] = str(hydrated.get("provider_code") or dataset.get("provider_code") or "").strip()
     return hydrated
 
 
@@ -563,8 +757,9 @@ def _build_recon_inputs_from_ready_collections(
             or raw_query.get("date_field")
             or ""
         ).strip()
-        if biz_date_field:
+        if biz_date_field and _binding_apply_biz_date_filter(binding):
             filters[biz_date_field] = biz_date
+            query["date_field"] = biz_date_field
         if filters:
             query["filters"] = filters
 
@@ -975,6 +1170,7 @@ async def resolve_plan_inputs_node(state: AgentState) -> dict[str, Any]:
         ctx["plan_input_source"] = ""
         return {"recon_ctx": ctx}
 
+    bindings = [_enrich_binding_with_input_plan(item, scheme_meta) for item in bindings]
     bindings = [
         await _hydrate_binding_source_meta(auth_token=auth_token, binding=item)
         for item in bindings
@@ -1029,7 +1225,7 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
         if not source_id or not table_name:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
-        if should_collect_first:
+        if should_collect_first and _should_trigger_collection_for_binding(binding):
             collect_result = await data_source_trigger_dataset_collection(
                 auth_token,
                 source_id,
@@ -1054,11 +1250,13 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             if not collection_success:
                 missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
                 continue
+        list_biz_date = biz_date if _binding_apply_biz_date_filter(binding) else ""
         result = await data_source_list_collection_records(
             auth_token,
             source_id,
+            dataset_id=str(binding.get("dataset_id") or "").strip(),
             resource_key=_get_binding_resource_key(binding),
-            biz_date=biz_date,
+            biz_date=list_biz_date,
             limit=1,
         )
         record_count = int(result.get("record_count") or result.get("count") or 0)
@@ -1807,4 +2005,58 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         "channel_name": str(getattr(channel_config, "name", "") or ""),
         "items": results,
     }
+    return {"recon_ctx": ctx}
+
+
+async def update_rerun_exception_verification_node(state: AgentState) -> dict[str, Any]:
+    """After a rerun, update the original exception's verification status."""
+    ctx = _get_recon_ctx(state)
+    auth_token = str(state.get("auth_token") or "")
+    run_context = _safe_dict(ctx.get("run_context"))
+    exception_id = str(run_context.get("rerun_exception_id") or "").strip()
+    if not auth_token or not exception_id:
+        return {"recon_ctx": ctx}
+
+    run = _safe_dict(ctx.get("execution_run_record"))
+    run_id = str(run.get("id") or "").strip()
+    execution_status = str(run.get("execution_status") or ctx.get("exec_status") or "").strip()
+    if not run_id or execution_status not in {"success", "partial_success"}:
+        return {"recon_ctx": ctx}
+
+    anomalies = [item for item in _safe_list(ctx.get("anomaly_items")) if isinstance(item, dict)]
+    existing_result = await execution_run_exception_get(auth_token, exception_id)
+    existing = _safe_dict(existing_result.get("exception")) if bool(existing_result.get("success")) else {}
+    feedback_json = _merge_feedback(
+        existing.get("feedback_json"),
+        {
+            "verify_run_id": run_id,
+            "verify_trigger_type": "rerun",
+            "verify_anomaly_count": len(anomalies),
+            "verified_at": datetime.now().isoformat(),
+            "rerun_from_run_id": str(run_context.get("rerun_from_run_id") or ""),
+        },
+    )
+
+    if anomalies:
+        patch = {
+            "processing_status": "reopened",
+            "fix_status": "pending",
+            "latest_feedback": f"重新对账验证仍发现 {len(anomalies)} 条差异，请继续处理",
+            "feedback_json": feedback_json,
+            "is_closed": False,
+        }
+    else:
+        patch = {
+            "processing_status": "verified_closed",
+            "fix_status": "fixed",
+            "latest_feedback": "重新对账验证通过，差异已消除",
+            "feedback_json": feedback_json,
+            "is_closed": True,
+        }
+
+    update_result = await execution_run_exception_update(auth_token, exception_id, patch)
+    if bool(update_result.get("success")):
+        ctx["rerun_exception_verification"] = _safe_dict(update_result.get("exception"))
+    else:
+        ctx["rerun_exception_verification_error"] = str(update_result.get("error") or "更新重新对账验证状态失败")
     return {"recon_ctx": ctx}

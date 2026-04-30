@@ -60,6 +60,11 @@ const RULE_GENERATION_NODE_DEFS = [
   ['generate_proc_json', '生成整理规则'],
   ['check_ir_dsl_consistency', '检查规则一致性'],
   ['lint_proc_json', '检查规则可执行性'],
+  ['generate_input_plan', '生成取数计划'],
+  ['validate_input_plan', '校验取数计划'],
+  ['repair_input_plan', '修复取数计划'],
+  ['execute_input_plan_preview', '预览取数计划'],
+  ['confirm_input_plan', '确认取数方式'],
   ['build_sample_inputs', '读取样例数据'],
   ['run_sample', '试跑输出数据'],
   ['diagnose_sample', '诊断试跑结果'],
@@ -648,6 +653,9 @@ function formatBusinessFailureReason(item: Record<string, unknown>): string {
   if (stage === 'check_ir_dsl_consistency' || reason === 'ir_linter_gap') {
     return '规则生成过程出现系统一致性问题，请联系技术处理。';
   }
+  if (stage === 'generate_input_plan' || stage === 'validate_input_plan' || stage === 'execute_input_plan_preview') {
+    return '整理规则已生成，但正式运行时的取数方式还不能确认，请补充说明后重新生成。';
+  }
   if (stage === 'build_sample_inputs') {
     return '样例数据读取失败，请稍后重试或联系技术处理。';
   }
@@ -674,7 +682,9 @@ export function applyRuleGenerationEventToDraft(
 
   if (eventName === 'needs_user_input') {
     nextDraft.status = 'needs_user_input';
-    nextDraft.summary = '规则存在需要确认的字段或业务口径，请修改上方完整规则描述后重新生成。';
+    nextDraft.summary = toText(payload.phase).trim() === 'confirm_input_plan'
+      ? '整理规则已生成，但取数方式需要确认，请补充取数说明后重新生成。'
+      : '规则存在需要确认的字段或业务口径，请修改上方完整规则描述后重新生成。';
     nextDraft.questions = normalizeQuestions(payload.questions);
     nextDraft.failureReasons = [];
     nextDraft.failureDetails = [];
@@ -697,6 +707,7 @@ export function applyRuleGenerationEventToDraft(
       : Object.fromEntries(outputFields.map((field) => [field.outputName, field.outputName]));
     nextDraft.outputColumnHints = outputColumnHints;
     nextDraft.procRuleJson = isRecord(payload.proc_rule_json) ? payload.proc_rule_json : undefined;
+    nextDraft.inputPlanJson = isRecord(payload.input_plan_json) ? payload.input_plan_json : undefined;
     nextDraft.procSteps = isRecord(payload.proc_rule_json) && Array.isArray(payload.proc_rule_json.steps)
       ? payload.proc_rule_json.steps.filter(isRecord)
       : [];
@@ -739,6 +750,11 @@ function formatBusinessEventSummary(payload: Record<string, unknown>, fallback: 
     return fallback || '正在生成输出数据。';
   }
   if (code === 'repair_ir') return '发现规则问题，正在自动修复。';
+  if (code === 'generate_input_plan') return '正在生成正式运行时的取数计划。';
+  if (code === 'validate_input_plan') return '正在校验取数计划。';
+  if (code === 'repair_input_plan') return '正在修复取数计划。';
+  if (code === 'execute_input_plan_preview') return '正在按取数计划预览输入样例。';
+  if (code === 'confirm_input_plan') return '取数方式需要确认。';
   if (code === 'run_sample') return '正在用样例数据试跑输出结果。';
   if (code === 'diagnose_sample') return '试跑结果未达到预期，正在定位原因。';
   return fallback || '正在生成输出数据。';
@@ -774,6 +790,30 @@ export function buildAiSideProcRuleJson(options: {
       ...leftSteps,
       ...rightSteps,
     ],
+  };
+}
+
+export function buildAiSideInputPlanJson(options: {
+  leftPlan?: Record<string, unknown>;
+  rightPlan?: Record<string, unknown>;
+}): Record<string, unknown> | null {
+  const plans: Record<string, unknown>[] = [];
+  if (options.leftPlan) plans.push({ ...options.leftPlan, side: 'left' });
+  if (options.rightPlan) plans.push({ ...options.rightPlan, side: 'right' });
+  if (plans.length === 0) return null;
+  return {
+    version: '1.0',
+    kind: 'scheme_proc_input_plan',
+    plans,
+    summary: {
+      side_count: plans.length,
+      dataset_count: plans.reduce((total, plan) => total + asList(plan.datasets).length, 0),
+      keyset_dataset_count: plans.reduce(
+        (total, plan) =>
+          total + asList(plan.datasets).filter((item) => isRecord(item) && item.read_mode === 'by_key_set').length,
+        0,
+      ),
+    },
   };
 }
 

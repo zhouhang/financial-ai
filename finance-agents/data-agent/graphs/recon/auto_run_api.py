@@ -259,6 +259,12 @@ class ExceptionSyncRequest(BaseModel):
     poll_interval_seconds: float = 2.0
 
 
+class OwnerCandidateSearchRequest(BaseModel):
+    query: str = ""
+    mobile: str = ""
+    channel_config_id: str = ""
+
+
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -273,7 +279,152 @@ def _extract_owner_contact(owner_payload: dict[str, Any]) -> dict[str, Any]:
     return _safe_dict(raw_contact)
 
 
-def _resolve_owner_payload(owner_payload: dict[str, Any], *, adapter: Any) -> dict[str, Any]:
+def _input_plan_base_entries(scheme_meta_json: dict[str, Any]) -> list[dict[str, Any]]:
+    input_plan_json = _safe_dict(scheme_meta_json.get("input_plan_json"))
+    if not input_plan_json:
+        return []
+
+    raw_plans = [item for item in safe_list(input_plan_json.get("plans")) if isinstance(item, dict)]
+    plans = raw_plans or ([input_plan_json] if safe_list(input_plan_json.get("datasets")) else [])
+    entries: list[dict[str, Any]] = []
+    for raw_plan in plans:
+        plan = _safe_dict(raw_plan)
+        side = text(plan.get("side")).lower()
+        for raw_dataset in safe_list(plan.get("datasets")):
+            dataset = _safe_dict(raw_dataset)
+            read_mode = text(dataset.get("read_mode"), "base").lower() or "base"
+            if read_mode != "base" or dataset.get("apply_biz_date_filter") is False:
+                continue
+            entries.append(
+                {
+                    **dataset,
+                    "side": side if side in {"left", "right"} else "",
+                    "label": text(
+                        dataset.get("business_name"),
+                        dataset.get("display_name"),
+                        dataset.get("alias"),
+                        dataset.get("table"),
+                        dataset.get("resource_key"),
+                    ),
+                }
+            )
+    return entries
+
+
+def _binding_resource_keys(binding: dict[str, Any]) -> set[str]:
+    query = _safe_dict(binding.get("query"))
+    mapping_config = _safe_dict(binding.get("mapping_config"))
+    keys = {
+        text(binding.get("resource_key")),
+        text(binding.get("table_name")),
+        text(binding.get("dataset_code")),
+        text(query.get("resource_key")),
+        text(mapping_config.get("resource_key")),
+        text(mapping_config.get("table_name")),
+        text(mapping_config.get("dataset_code")),
+    }
+    keys.discard("")
+    return keys
+
+
+def _input_plan_entry_resource_keys(entry: dict[str, Any]) -> set[str]:
+    keys = {
+        text(entry.get("resource_key")),
+        text(entry.get("table")),
+        text(entry.get("dataset_code")),
+    }
+    keys.discard("")
+    return keys
+
+
+def _binding_matches_input_plan_entry(binding: dict[str, Any], entry: dict[str, Any]) -> bool:
+    entry_side = text(entry.get("side")).lower()
+    binding_side = infer_binding_side(binding)
+    if entry_side and binding_side and entry_side != binding_side:
+        return False
+
+    entry_source_id = text(entry.get("source_id"), entry.get("data_source_id"))
+    binding_source_id = text(binding.get("data_source_id"), binding.get("source_id"))
+    if entry_source_id and binding_source_id and entry_source_id != binding_source_id:
+        return False
+
+    entry_dataset_id = text(entry.get("dataset_id"), entry.get("id"))
+    binding_dataset_id = text(binding.get("dataset_id"), _safe_dict(binding.get("query")).get("dataset_id"))
+    if entry_dataset_id and binding_dataset_id and entry_dataset_id == binding_dataset_id:
+        return True
+
+    return bool(_input_plan_entry_resource_keys(entry) & _binding_resource_keys(binding))
+
+
+def _find_input_plan_base_bindings_missing_date_field(
+    *,
+    scheme_meta_json: dict[str, Any],
+    input_bindings: list[dict[str, Any]],
+) -> list[str]:
+    missing: list[str] = []
+    for entry in _input_plan_base_entries(scheme_meta_json):
+        matched_bindings = [
+            binding for binding in input_bindings if _binding_matches_input_plan_entry(binding, entry)
+        ]
+        has_date_field = any(
+            text(_safe_dict(binding.get("query")).get("date_field"), _safe_dict(binding.get("query")).get("biz_date_field"))
+            for binding in matched_bindings
+        )
+        if not has_date_field:
+            missing.append(text(entry.get("label"), entry.get("alias"), entry.get("table"), "未命名数据集"))
+    return missing
+
+
+def _mask_mobile(value: str) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) >= 7:
+        return f"{digits[:3]}****{digits[-4:]}"
+    if len(digits) >= 4:
+        return f"****{digits[-4:]}"
+    return ""
+
+
+def _short_identifier(value: str) -> str:
+    normalized = str(value or "").strip()
+    return normalized[-6:] if len(normalized) > 6 else normalized
+
+
+def _format_owner_candidate(user: Any, *, fallback_name: str = "") -> dict[str, Any]:
+    display_name = text(getattr(user, "display_name", ""), fallback_name, getattr(user, "user_id", "")).strip()
+    identifier = text(getattr(user, "user_id", "")).strip()
+    organization = text(getattr(user, "organization", "")).strip()
+    departments = [
+        text(item).strip()
+        for item in safe_list(getattr(user, "departments", []))
+        if text(item).strip()
+    ]
+    mobile_masked = _mask_mobile(text(getattr(user, "mobile", "")).strip())
+    label_parts = [display_name]
+    if departments:
+        label_parts.append(" / ".join(departments))
+    if organization:
+        label_parts.append(organization)
+    if mobile_masked:
+        label_parts.append(mobile_masked)
+    short_id = _short_identifier(identifier)
+    if short_id:
+        label_parts.append(f"ID后{len(short_id)}位 {short_id}")
+    return {
+        "display_name": display_name,
+        "identifier": identifier,
+        "organization": organization,
+        "departments": departments,
+        "mobile_masked": mobile_masked,
+        "disambiguation_label": " · ".join(part for part in label_parts if part),
+    }
+
+
+def _resolve_owner_payload(
+    owner_payload: dict[str, Any],
+    *,
+    adapter: Any,
+    organization_label: str,
+) -> dict[str, Any]:
     normalized = dict(owner_payload or {})
     owner_name = text(normalized.get("name") or normalized.get("display_name")).strip()
     owner_identifier = text(normalized.get("identifier") or normalized.get("owner_identifier")).strip()
@@ -294,12 +445,18 @@ def _resolve_owner_payload(owner_payload: dict[str, Any], *, adapter: Any) -> di
     lookup_label = mobile or owner_name
     resolved = adapter.resolve_user(mobile=mobile) if mobile else adapter.resolve_user(keyword=owner_name)
     if not resolved.success:
-        raise ValueError(f"责任人“{lookup_label}”解析失败：{resolved.message or '未找到钉钉用户'}")
+        raise ValueError(
+            f"责任人“{lookup_label}”不在“{organization_label}”组织中，请检查后重试"
+        )
     if resolved.resolved_user is None:
         count = len(resolved.users or [])
         if count > 1:
-            raise ValueError(f"责任人“{lookup_label}”匹配到 {count} 个钉钉用户，请填写更准确的姓名")
-        raise ValueError(f"责任人“{lookup_label}”未匹配到钉钉用户，请检查后重试")
+            raise ValueError(
+                f"责任人“{lookup_label}”在“{organization_label}”组织中匹配到 {count} 个钉钉用户，请填写更准确的姓名"
+            )
+        raise ValueError(
+            f"责任人“{lookup_label}”不在“{organization_label}”组织中，请检查后重试"
+        )
 
     resolved_user = resolved.resolved_user
     normalized["name"] = resolved_user.display_name or owner_name or lookup_label
@@ -310,6 +467,39 @@ def _resolve_owner_payload(owner_payload: dict[str, Any], *, adapter: Any) -> di
     if merged_contact:
         normalized["contact"] = merged_contact
     return normalized
+
+
+def _load_owner_search_adapter(
+    auth_token: str,
+    *,
+    channel_config_id: str = "",
+) -> tuple[Any, str]:
+    user = _get_user_from_token(auth_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="token 无效或已过期，请重新登录")
+    company_id = text(user.get("company_id")).strip()
+    if not company_id:
+        raise HTTPException(status_code=400, detail="当前用户未绑定公司")
+
+    if channel_config_id:
+        channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+        if channel_config is None or text(getattr(channel_config, "company_id", "")).strip() != company_id:
+            raise HTTPException(status_code=400, detail="所选协作通道不存在或不可用")
+    else:
+        channel_config = load_company_channel_config(company_id=company_id)
+        if channel_config is None:
+            raise HTTPException(status_code=400, detail="请先配置可用的协作通道，再查找责任人")
+
+    adapter = get_notification_adapter(
+        provider=text(getattr(channel_config, "provider", "")).strip(),
+        channel_config=channel_config,
+    )
+    organization_label = text(
+        getattr(channel_config, "name", ""),
+        getattr(channel_config, "channel_code", ""),
+        "当前钉钉",
+    )
+    return adapter, organization_label
 
 
 async def _normalize_owner_mapping_identifiers(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -346,11 +536,20 @@ async def _normalize_owner_mapping_identifiers(auth_token: str, payload: dict[st
         provider=text(getattr(channel_config, "provider", "")).strip(),
         channel_config=channel_config,
     )
+    organization_label = text(
+        getattr(channel_config, "name", ""),
+        getattr(channel_config, "channel_code", ""),
+        "当前钉钉",
+    )
 
     try:
         normalized_mapping = dict(owner_mapping)
         if default_owner:
-            normalized_mapping["default_owner"] = _resolve_owner_payload(default_owner, adapter=adapter)
+            normalized_mapping["default_owner"] = _resolve_owner_payload(
+                default_owner,
+                adapter=adapter,
+                organization_label=organization_label,
+            )
         if mappings:
             normalized_items: list[dict[str, Any]] = []
             for item in mappings:
@@ -359,7 +558,11 @@ async def _normalize_owner_mapping_identifiers(auth_token: str, payload: dict[st
                 normalized_item = dict(item)
                 owner_payload = _safe_dict(item.get("owner"))
                 if owner_payload:
-                    normalized_item["owner"] = _resolve_owner_payload(owner_payload, adapter=adapter)
+                    normalized_item["owner"] = _resolve_owner_payload(
+                        owner_payload,
+                        adapter=adapter,
+                        organization_label=organization_label,
+                    )
                 normalized_items.append(normalized_item)
             normalized_mapping["mappings"] = normalized_items
     except ValueError as exc:
@@ -393,15 +596,39 @@ async def _normalize_run_plan_payload_date_fields(
         query = _safe_dict(binding.get("query"))
         if not query:
             query = _safe_dict(_safe_dict(binding.get("filter_config")).get("query"))
-        if side:
-            query = normalize_binding_query_date_field(
-                scheme_meta=scheme_meta_json,
-                binding=binding,
-                query=query,
-                side=side,
-            )
+        mapping_config = _safe_dict(binding.get("mapping_config"))
+        read_mode = text(
+            binding.get("input_plan_read_mode"),
+            mapping_config.get("input_plan_read_mode"),
+            "base",
+        ).lower() or "base"
+        apply_biz_date_filter = (
+            binding.get("input_plan_apply_biz_date_filter")
+            if "input_plan_apply_biz_date_filter" in binding
+            else mapping_config.get("input_plan_apply_biz_date_filter", True)
+        )
+        requires_date_field = read_mode == "base" and apply_biz_date_filter is not False
+        if side and requires_date_field and not text(query.get("date_field"), query.get("biz_date_field")):
+            try:
+                query = normalize_binding_query_date_field(
+                    scheme_meta=scheme_meta_json,
+                    binding=binding,
+                    query=query,
+                    side=side,
+                    strict=True,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         binding["query"] = query
         normalized_bindings.append(binding)
+
+    missing_base_inputs = _find_input_plan_base_bindings_missing_date_field(
+        scheme_meta_json=scheme_meta_json,
+        input_bindings=normalized_bindings,
+    )
+    if missing_base_inputs:
+        labels = "、".join(missing_base_inputs[:5])
+        raise HTTPException(status_code=400, detail=f"请为基础数据集选择对账日期字段：{labels}")
 
     payload["input_bindings_json"] = normalized_bindings
     plan_meta_json = _safe_dict(payload.get("plan_meta_json"))
@@ -734,6 +961,46 @@ async def get_execution_task(
     return {
         **result,
         "task": result.get("run_plan") or {},
+    }
+
+
+@router.post("/owner-candidates/search")
+async def search_owner_candidates(
+    body: OwnerCandidateSearchRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    query = text(body.query).strip()
+    mobile = text(body.mobile).strip()
+    if not (query or mobile):
+        raise HTTPException(status_code=400, detail="请输入责任人姓名或手机号")
+
+    adapter, organization_label = _load_owner_search_adapter(
+        auth_token,
+        channel_config_id=text(body.channel_config_id).strip(),
+    )
+    resolved = adapter.resolve_user(mobile=mobile) if mobile else adapter.resolve_user(keyword=query)
+    if not resolved.success:
+        return {
+            "success": True,
+            "organization": organization_label,
+            "candidates": [],
+            "message": resolved.message or f"未找到匹配的责任人: {mobile or query}",
+        }
+
+    candidates = [
+        _format_owner_candidate(user, fallback_name=query or mobile)
+        for user in (resolved.users or [])
+        if text(getattr(user, "user_id", "")).strip()
+    ]
+    return {
+        "success": True,
+        "organization": organization_label,
+        "candidates": candidates,
+        "message": "ok" if candidates else f"未找到匹配的责任人: {mobile or query}",
     }
 
 

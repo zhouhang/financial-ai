@@ -420,3 +420,78 @@ def test_steps_runtime_supports_to_decimal_function_in_formula_binding(tmp_path:
     output = runtime.tables["输出"]
     assert len(output) == 1
     assert output.iloc[0]["输出金额"] == 90.6
+
+
+def test_steps_runtime_filter_not_is_null_excludes_blank_strings(tmp_path: Path) -> None:
+    uploads_root = Path(__file__).resolve().parents[1] / "uploads/runtime_steps_spec" / tmp_path.name
+    uploads_root.mkdir(parents=True, exist_ok=True)
+
+    source_path = uploads_root / "订单.csv"
+    _write_csv(
+        source_path,
+        [
+            {"客户订单号": "O-001", "含税销售金额": 100},
+            {"客户订单号": "", "含税销售金额": 200},
+            {"客户订单号": "   ", "含税销售金额": 300},
+            {"客户订单号": None, "含税销售金额": 400},
+        ],
+    )
+
+    rule = {
+        "steps": [
+            {
+                "step_id": "create_output",
+                "action": "create_schema",
+                "target_table": "输出",
+                "schema": {
+                    "primary_key": ["客户订单号"],
+                    "columns": [
+                        {"name": "客户订单号", "data_type": "string"},
+                        {"name": "含税销售金额", "data_type": "decimal"},
+                    ],
+                },
+            },
+            {
+                "step_id": "write_output",
+                "depends_on": ["create_output"],
+                "action": "write_dataset",
+                "target_table": "输出",
+                "sources": [{"table": "订单", "alias": "orders"}],
+                "filter": {
+                    "type": "formula",
+                    "expr": "not is_null({order_no})",
+                    "bindings": {
+                        "order_no": {
+                            "type": "source",
+                            "source": {"alias": "orders", "field": "客户订单号"},
+                        }
+                    },
+                },
+                "mappings": [
+                    {
+                        "target_field": "客户订单号",
+                        "value": {"type": "source", "source": {"alias": "orders", "field": "客户订单号"}},
+                        "field_write_mode": "overwrite",
+                    },
+                    {
+                        "target_field": "含税销售金额",
+                        "value": {"type": "source", "source": {"alias": "orders", "field": "含税销售金额"}},
+                        "field_write_mode": "overwrite",
+                    },
+                ],
+                "row_write_mode": "upsert",
+            },
+        ]
+    }
+
+    runtime = StepsProcRuntime(
+        "runtime_filter_non_empty_rule",
+        rule,
+        [{"table_name": "订单", "file_path": str(source_path)}],
+        str(tmp_path / "output"),
+    )
+
+    runtime.execute()
+
+    output = runtime.tables["输出"]
+    assert output["客户订单号"].tolist() == ["O-001"]

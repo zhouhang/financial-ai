@@ -330,6 +330,7 @@ def _materialize_binding_query(binding: dict[str, Any], *, biz_date: str) -> dic
     filters = _safe_dict(resolved_query.get("filters"))
     filters[field_name] = _shift_biz_date(biz_date, offset_days)
     resolved_query["filters"] = filters
+    resolved_query["date_field"] = field_name
     return resolved_query
 
 

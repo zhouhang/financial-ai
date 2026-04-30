@@ -617,6 +617,7 @@ async def execute_proc_rule(
     rule_code: str,
     auth_token: str = "",
     dataset_inputs: list[dict[str, Any]] | None = None,
+    input_plan_json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
         "uploaded_files": uploaded_files,
@@ -626,6 +627,8 @@ async def execute_proc_rule(
         args["auth_token"] = auth_token
     if dataset_inputs is not None:
         args["dataset_inputs"] = dataset_inputs
+    if input_plan_json:
+        args["input_plan_json"] = input_plan_json
     return await call_mcp_tool("proc_execute", args)
 
 

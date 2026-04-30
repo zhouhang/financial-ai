@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -91,6 +92,10 @@ def create_proc_rule_tools() -> list[Tool]:
                         "type": "string",
                         "description": "整理规则编码，用于从 rule_detail 表中获取规则 JSON",
                     },
+                    "input_plan_json": {
+                        "type": "object",
+                        "description": "可选。AI 生成的取数计划，用于在执行 proc 前裁剪关联数据集。",
+                    },
                     "auth_token": {
                         "type": "string",
                         "description": "JWT token，用于校验当前用户和生成下载鉴权链接",
@@ -113,12 +118,241 @@ async def handle_proc_rule_tool_call(name: str, arguments: dict) -> dict:
     return {"success": False, "error": f"未知工具: {name}"}
 
 
+def _load_proc_dataset_inputs(
+    *,
+    dataset_inputs: list[dict],
+    input_plan_json: dict[str, Any],
+) -> dict[str, Any]:
+    entries = _flatten_input_plan_entries(input_plan_json)
+    if entries:
+        return _load_proc_dataset_inputs_by_plan(dataset_inputs=dataset_inputs, entries=entries)
+    return _load_proc_dataset_inputs_direct(dataset_inputs)
+
+
+def _load_proc_dataset_inputs_direct(dataset_inputs: list[dict]) -> dict[str, Any]:
+    from recon.mcp_server.dataset_loader import DatasetLoadError, load_dataset_as_df
+
+    preloaded_frames: dict[str, pd.DataFrame] = {}
+    for item in dataset_inputs:
+        if not isinstance(item, dict):
+            continue
+        table_name = str(item.get("table_name") or "").strip()
+        dataset_ref = item.get("dataset_ref")
+        if not table_name or not isinstance(dataset_ref, dict):
+            continue
+        try:
+            df = load_dataset_as_df(dataset_ref, table_name)
+            preloaded_frames[table_name] = df
+            logger.info("[proc_rule] dataset_inputs 加载 table=%s rows=%d", table_name, len(df))
+        except DatasetLoadError as exc:
+            return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 失败: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[proc_rule] dataset_inputs 加载异常 table=%s", table_name, exc_info=True)
+            return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 异常: {exc}"}
+    return {"success": True, "preloaded_frames": preloaded_frames}
+
+
+def _load_proc_dataset_inputs_by_plan(
+    *,
+    dataset_inputs: list[dict],
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    from recon.mcp_server.dataset_loader import DatasetLoadError, load_dataset_as_df
+
+    input_by_table = {
+        str(item.get("table_name") or "").strip(): item
+        for item in dataset_inputs
+        if isinstance(item, dict) and str(item.get("table_name") or "").strip()
+    }
+    preloaded_frames: dict[str, pd.DataFrame] = {}
+    frames_by_alias: dict[tuple[str, str], pd.DataFrame] = {}
+    pending = list(entries)
+    while pending:
+        progressed = False
+        next_pending: list[dict[str, Any]] = []
+        for entry in pending:
+            table_name = str(entry.get("table") or "").strip()
+            target_table = str(entry.get("target_table") or "").strip()
+            alias = str(entry.get("alias") or table_name).strip()
+            read_mode = str(entry.get("read_mode") or "base").strip()
+            dataset_input = input_by_table.get(table_name)
+            if not dataset_input:
+                return {"success": False, "error": f"input_plan 指向的数据集未提供 dataset_input: {table_name}"}
+            dataset_ref = dataset_input.get("dataset_ref")
+            if not isinstance(dataset_ref, dict):
+                return {"success": False, "error": f"dataset_input[{table_name}] 缺少 dataset_ref"}
+
+            if read_mode == "by_key_set":
+                depends_on_alias = str(entry.get("depends_on_alias") or "").strip()
+                dependency_key = (target_table, depends_on_alias)
+                if dependency_key not in frames_by_alias:
+                    next_pending.append(entry)
+                    continue
+                key_pairs = _normalize_plan_key_pairs(entry)
+                if not key_pairs:
+                    return {"success": False, "error": f"input_plan[{target_table}.{alias}] 缺少 key_pairs"}
+                dependency_df = frames_by_alias[dependency_key]
+                dataset_ref = _dataset_ref_for_keyset(
+                    dataset_ref,
+                    dependency_df=dependency_df,
+                    key_pairs=key_pairs,
+                    apply_biz_date_filter=bool(entry.get("apply_biz_date_filter")),
+                )
+            elif not bool(entry.get("apply_biz_date_filter", True)):
+                dataset_ref = _dataset_ref_without_biz_date_filter(dataset_ref)
+
+            try:
+                df = load_dataset_as_df(dataset_ref, table_name)
+                if read_mode == "by_key_set" and len(_normalize_plan_key_pairs(entry)) > 1:
+                    dependency_df = frames_by_alias[(target_table, str(entry.get("depends_on_alias") or "").strip())]
+                    df = _filter_dataframe_by_composite_key(
+                        df,
+                        dependency_df=dependency_df,
+                        key_pairs=_normalize_plan_key_pairs(entry),
+                    )
+                preloaded_frames[_input_plan_frame_key(target_table, alias, table_name)] = df
+                frames_by_alias[(target_table, alias)] = df
+                logger.info(
+                    "[proc_rule] input_plan 加载 target=%s alias=%s table=%s rows=%d mode=%s",
+                    target_table,
+                    alias,
+                    table_name,
+                    len(df),
+                    read_mode,
+                )
+                progressed = True
+            except DatasetLoadError as exc:
+                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 失败: {exc}"}
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[proc_rule] input_plan 加载异常 table=%s", table_name, exc_info=True)
+                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 异常: {exc}"}
+        if not progressed:
+            unresolved = ", ".join(
+                f"{item.get('target_table')}.{item.get('alias')}" for item in next_pending
+            )
+            return {"success": False, "error": f"input_plan 存在无法解析的依赖: {unresolved}"}
+        pending = next_pending
+    return {"success": True, "preloaded_frames": preloaded_frames}
+
+
+def _input_plan_frame_key(target_table: str, alias: str, table_name: str) -> str:
+    return f"__input_plan__::{target_table}::{alias}::{table_name}"
+
+
+def _flatten_input_plan_entries(input_plan_json: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(input_plan_json, dict):
+        return []
+    if isinstance(input_plan_json.get("datasets"), list):
+        return [item for item in input_plan_json["datasets"] if isinstance(item, dict)]
+    entries: list[dict[str, Any]] = []
+    for plan in list(input_plan_json.get("plans") or []):
+        if isinstance(plan, dict):
+            entries.extend([item for item in list(plan.get("datasets") or []) if isinstance(item, dict)])
+    return entries
+
+
+def _normalize_plan_key_pairs(entry: dict[str, Any]) -> list[dict[str, str]]:
+    pairs = [
+        {
+            "from_field": str(item.get("from_field") or "").strip(),
+            "to_field": str(item.get("to_field") or "").strip(),
+        }
+        for item in list(entry.get("key_pairs") or [])
+        if isinstance(item, dict)
+    ]
+    if not pairs:
+        from_field = str(entry.get("key_from_field") or "").strip()
+        to_field = str(entry.get("key_to_field") or "").strip()
+        if from_field and to_field:
+            pairs.append({"from_field": from_field, "to_field": to_field})
+    return [item for item in pairs if item.get("from_field") and item.get("to_field")]
+
+
+def _dataset_ref_for_keyset(
+    dataset_ref: dict[str, Any],
+    *,
+    dependency_df: pd.DataFrame,
+    key_pairs: list[dict[str, str]],
+    apply_biz_date_filter: bool,
+) -> dict[str, Any]:
+    next_ref = (
+        copy.deepcopy(dataset_ref)
+        if apply_biz_date_filter
+        else _dataset_ref_without_biz_date_filter(dataset_ref)
+    )
+    query = dict(next_ref.get("query") or {})
+    filters = dict(query.get("filters") or {})
+    first_pair = key_pairs[0]
+    from_field = first_pair["from_field"]
+    to_field = first_pair["to_field"]
+    values = []
+    if from_field in dependency_df.columns:
+        values = [
+            str(value).strip()
+            for value in dependency_df[from_field].dropna().tolist()
+            if str(value).strip()
+        ]
+    filters[to_field] = sorted(set(values))
+    query["filters"] = filters
+    next_ref["query"] = query
+    return next_ref
+
+
+def _dataset_ref_without_biz_date_filter(dataset_ref: dict[str, Any]) -> dict[str, Any]:
+    next_ref = copy.deepcopy(dataset_ref)
+    query = dict(next_ref.get("query") or {})
+    date_field = str(query.get("date_field") or query.get("biz_date_field") or "").strip()
+    query.pop("biz_date", None)
+    if date_field and isinstance(query.get("filters"), dict):
+        filters = dict(query.get("filters") or {})
+        filters.pop(date_field, None)
+        query["filters"] = filters
+    next_ref["query"] = query
+    return next_ref
+
+
+def _filter_dataframe_by_composite_key(
+    df: pd.DataFrame,
+    *,
+    dependency_df: pd.DataFrame,
+    key_pairs: list[dict[str, str]],
+) -> pd.DataFrame:
+    if df.empty or dependency_df.empty or not key_pairs:
+        return df.iloc[0:0].copy()
+    key_set = {
+        tuple(_normalize_key(row.get(pair["from_field"])) for pair in key_pairs)
+        for row in dependency_df.to_dict(orient="records")
+    }
+    mask = [
+        tuple(_normalize_key(row.get(pair["to_field"])) for pair in key_pairs) in key_set
+        for row in df.to_dict(orient="records")
+    ]
+    return df[mask].reset_index(drop=True)
+
+
+def _normalize_key(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _summarize_input_plan(input_plan_json: dict[str, Any]) -> dict[str, Any]:
+    entries = _flatten_input_plan_entries(input_plan_json)
+    return {
+        "dataset_count": len(entries),
+        "keyset_dataset_count": len([item for item in entries if str(item.get("read_mode") or "") == "by_key_set"]),
+    }
+
+
 async def _handle_proc_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
     from proc.config.config import OUTPUT_DIR
 
     uploaded_files: list[dict] = list(arguments.get("uploaded_files") or [])
     dataset_inputs: list[dict] = list(arguments.get("dataset_inputs") or [])
+    input_plan_json: dict[str, Any] = (
+        arguments.get("input_plan_json") if isinstance(arguments.get("input_plan_json"), dict) else {}
+    )
     rule_code: str = (arguments.get("rule_code") or "").strip()
     auth_token: str = (arguments.get("auth_token") or "").strip()
 
@@ -141,23 +375,13 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     # ── 从 dataset_inputs 加载 DataFrame ────────────────────────────────────
     preloaded_frames: dict[str, pd.DataFrame] = {}
     if dataset_inputs:
-        from recon.mcp_server.dataset_loader import load_dataset_as_df, DatasetLoadError
-        for item in dataset_inputs:
-            if not isinstance(item, dict):
-                continue
-            table_name = str(item.get("table_name") or "").strip()
-            dataset_ref = item.get("dataset_ref")
-            if not table_name or not isinstance(dataset_ref, dict):
-                continue
-            try:
-                df = load_dataset_as_df(dataset_ref, table_name)
-                preloaded_frames[table_name] = df
-                logger.info("[proc_rule] dataset_inputs 加载 table=%s rows=%d", table_name, len(df))
-            except DatasetLoadError as exc:
-                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 失败: {exc}"}
-            except Exception as exc:
-                logger.error("[proc_rule] dataset_inputs 加载异常 table=%s", table_name, exc_info=True)
-                return {"success": False, "error": f"加载 dataset_inputs[{table_name}] 异常: {exc}"}
+        load_result = _load_proc_dataset_inputs(
+            dataset_inputs=dataset_inputs,
+            input_plan_json=input_plan_json,
+        )
+        if not load_result.get("success"):
+            return load_result
+        preloaded_frames = load_result.get("preloaded_frames") or {}
 
     # ── 确定输出目录（按 rule_code 分子目录）────────────────────────────────
     output_dir = str(Path(OUTPUT_DIR) / rule_code)
@@ -232,6 +456,7 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             "errors": [],
             "message": f"成功生成 {len(generated_files)} 个文件",
             "merged_files": [],
+            "input_plan_summary": _summarize_input_plan(input_plan_json) if input_plan_json else {},
         }
 
     # 对 rules/merge_rules 格式：将 preloaded_frames 写为临时 xlsx，补入 uploaded_files

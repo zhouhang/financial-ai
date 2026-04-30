@@ -71,6 +71,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
     )
     proc_rule_code = str(ctx.get("proc_rule_code") or scheme.get("proc_rule_code") or "").strip()
     embedded_proc_rule = scheme_meta.get("proc_rule_json") if isinstance(scheme_meta, dict) else {}
+    input_plan_json = scheme_meta.get("input_plan_json") if isinstance(scheme_meta, dict) and isinstance(scheme_meta.get("input_plan_json"), dict) else {}
 
     if not proc_rule_code and isinstance(embedded_proc_rule, dict) and embedded_proc_rule:
         try:
@@ -138,6 +139,9 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
             ref_query["biz_date"] = biz_date
         if isinstance(query.get("filters"), dict) and query["filters"]:
             ref_query["filters"] = query["filters"]
+        date_field = str(query.get("date_field") or query.get("biz_date_field") or "").strip()
+        if date_field:
+            ref_query["date_field"] = date_field
         proc_dataset_inputs.append(
             {
                 "table_name": table_name,
@@ -162,6 +166,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         dataset_inputs=proc_dataset_inputs,
         rule_code=proc_rule_code,
         auth_token=auth_token,
+        input_plan_json=input_plan_json,
     )
     if not bool(proc_result.get("success")):
         error_parts = [str(proc_result.get("error") or proc_result.get("message") or "proc 执行失败").strip()]

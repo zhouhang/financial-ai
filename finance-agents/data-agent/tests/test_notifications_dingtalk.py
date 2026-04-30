@@ -85,6 +85,64 @@ def test_resolve_user_by_user_id_does_not_call_contact_get():
     assert executor.calls == []
 
 
+def test_resolve_user_by_keyword_enriches_multiple_matches_with_contact_detail():
+    executor = FakeExecutor(
+        [
+            _result({"userId": ["u-001", "u-002"]}),
+            _result(
+                {
+                    "result": [
+                        {
+                            "orgEmployeeModel": {
+                                "orgUserId": "u-001",
+                                "orgUserName": "张三",
+                                "orgUserMobile": "13800000001",
+                                "orgName": "华东公司",
+                                "deptNameList": ["财务部"],
+                            }
+                        },
+                        {
+                            "orgEmployeeModel": {
+                                "orgUserId": "u-002",
+                                "orgUserName": "张三",
+                                "orgUserMobile": "13900000002",
+                                "orgName": "华南公司",
+                                "deptNameList": ["结算组"],
+                            }
+                        },
+                    ]
+                }
+            ),
+        ]
+    )
+    adapter = DingTalkDwsAdapter(
+        executor=executor,
+        cli_bin="dws",
+        client_id="cid",
+        client_secret="secret",
+        robot_code="robot",
+    )
+
+    result = adapter.resolve_user(keyword="张三")
+
+    assert result.success is True
+    assert result.resolved_user is None
+    assert [user.user_id for user in result.users] == ["u-001", "u-002"]
+    assert result.users[0].organization == "华东公司"
+    assert result.users[0].departments == ["财务部"]
+    assert result.users[0].mobile == "13800000001"
+    assert executor.calls[1]["args"] == [
+        "dws",
+        "contact",
+        "user",
+        "get",
+        "--ids",
+        "u-001,u-002",
+        "-f",
+        "json",
+    ]
+
+
 def test_send_bot_message_requires_robot_code():
     adapter = DingTalkDwsAdapter(
         executor=FakeExecutor([]),

@@ -50,14 +50,10 @@ interface SchemeWizardReconStepProps {
   reconRuleName: string;
   matchFieldPairs: ReconFieldPairDraft[];
   compareFieldPairs: ReconFieldPairDraft[];
-  leftTimeSemantic: string;
-  rightTimeSemantic: string;
   leftMatchFieldOptions?: ReconFieldOption[];
   rightMatchFieldOptions?: ReconFieldOption[];
   leftCompareFieldOptions?: ReconFieldOption[];
   rightCompareFieldOptions?: ReconFieldOption[];
-  leftTimeFieldOptions?: ReconFieldOption[];
-  rightTimeFieldOptions?: ReconFieldOption[];
   leftFieldLabelMap?: Record<string, string>;
   rightFieldLabelMap?: Record<string, string>;
   reconCompatibility?: CompatibilityCheckResult;
@@ -65,8 +61,6 @@ interface SchemeWizardReconStepProps {
     reconRuleName: string;
     matchFieldPairs: ReconFieldPairDraft[];
     compareFieldPairs: ReconFieldPairDraft[];
-    leftTimeSemantic: string;
-    rightTimeSemantic: string;
   }>) => void;
   onTrialRecon: () => void;
   onViewReconJson: () => void;
@@ -279,14 +273,10 @@ export default function SchemeWizardReconStep({
   reconRuleName,
   matchFieldPairs = [],
   compareFieldPairs = [],
-  leftTimeSemantic,
-  rightTimeSemantic,
   leftMatchFieldOptions = [],
   rightMatchFieldOptions = [],
   leftCompareFieldOptions = [],
   rightCompareFieldOptions = [],
-  leftTimeFieldOptions = [],
-  rightTimeFieldOptions = [],
   leftFieldLabelMap,
   rightFieldLabelMap,
   reconCompatibility,
@@ -397,34 +387,6 @@ export default function SchemeWizardReconStep({
         rightFieldLabelMap={rightFieldLabelMap}
         onChange={(pairs) => onStructuredConfigChange?.({ compareFieldPairs: pairs })}
       />
-
-      <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-        <p className="text-sm font-semibold text-text-primary">时间字段</p>
-        <div className="mt-4 grid gap-3 lg:grid-cols-2">
-          <label className="block">
-            <span className="text-xs font-medium text-text-secondary">左时间字段</span>
-            <div className="mt-1.5">
-              <SelectField
-                value={leftTimeSemantic}
-                options={leftTimeFieldOptions}
-                onChange={(value) => onStructuredConfigChange?.({ leftTimeSemantic: value })}
-                placeholder="暂不配置"
-              />
-            </div>
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium text-text-secondary">右时间字段</span>
-            <div className="mt-1.5">
-              <SelectField
-                value={rightTimeSemantic}
-                options={rightTimeFieldOptions}
-                onChange={(value) => onStructuredConfigChange?.({ rightTimeSemantic: value })}
-                placeholder="暂不配置"
-              />
-            </div>
-          </label>
-        </div>
-      </div>
 
       {isTrialingRecon ? (
         <div className="flex items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50/60 px-5 py-4">

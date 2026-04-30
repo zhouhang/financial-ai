@@ -327,6 +327,16 @@ def normalize_predicate_operator(value: Any) -> str:
         "all": "and",
         "any": "or",
         "!": "not",
+        "not_empty": "exists",
+        "not_blank": "exists",
+        "non_empty": "exists",
+        "non_blank": "exists",
+        "is_not_empty": "exists",
+        "is_not_blank": "exists",
+        "not_null": "exists",
+        "non_null": "exists",
+        "is_not_null": "exists",
+        "present": "exists",
     }
     operator = aliases.get(operator, operator)
     return operator if operator in PREDICATE_OPERATORS else ""
@@ -558,6 +568,17 @@ def _normalize_predicate(value: Any) -> dict[str, Any] | None:
                 "op": "ref",
                 "ref_id": _to_text(value.get("ref_id") or value.get("source_ref_id")),
             }
+        if operand is None and _to_text(value.get("field_ref_id")):
+            operand = {
+                "op": "ref",
+                "ref_id": _to_text(value.get("field_ref_id")),
+            }
+        if (
+            isinstance(operand, dict)
+            and operand.get("op") == "constant"
+            and _to_text(operand.get("value")).startswith("ref_")
+        ):
+            operand = {"op": "ref", "ref_id": _to_text(operand.get("value"))}
         if operand is None:
             return None
         return {"op": "exists", "operand": operand}

@@ -176,6 +176,99 @@ def test_check_dataset_ready_collection_failure_blocks_stale_records(monkeypatch
     assert recon_ctx["missing_bindings"][0]["error"] == "先同步失败：upstream timeout"
 
 
+def test_check_dataset_ready_skips_keyset_lookup_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_collect(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("collect", {"auth_token": auth_token, "source_id": source_id, **kwargs}))
+        return {"success": True, "job": {"id": "job-lookup"}}
+
+    async def fake_list(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("list", {"auth_token": auth_token, "source_id": source_id, **kwargs}))
+        return {
+            "success": True,
+            "dataset_id": "dataset-lookup",
+            "resource_key": "lookup_orders",
+            "record_count": 3,
+            "records": [{"item_key": "1"}],
+        }
+
+    monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_collect)
+    monkeypatch.setattr(nodes, "data_source_list_collection_records", fake_list)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "biz_date": "2026-04-25",
+            "run_context": {"trigger_type": "manual"},
+            "plan_input_bindings": [
+                {
+                    "data_source_id": "source-001",
+                    "dataset_id": "dataset-lookup",
+                    "table_name": "lookup_orders",
+                    "resource_key": "lookup_orders",
+                    "required": True,
+                    "input_plan_read_mode": "by_key_set",
+                    "input_plan_apply_biz_date_filter": False,
+                }
+            ],
+        },
+    }
+
+    result = asyncio.run(nodes.check_dataset_ready_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    assert [item[0] for item in calls] == ["list"]
+    assert calls[0][1]["biz_date"] == ""
+    assert recon_ctx["missing_bindings"] == []
+    assert recon_ctx["ready_collections"][0]["collection_records"]["record_count"] == 3
+
+
+def test_check_dataset_ready_skips_manual_seed_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_collect(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        calls.append("collect")
+        return {"success": False, "error": "should not collect"}
+
+    async def fake_list(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        calls.append("list")
+        return {
+            "success": True,
+            "dataset_id": "dataset-seed",
+            "resource_key": "seed_orders",
+            "record_count": 2,
+            "records": [{"item_key": "1"}],
+        }
+
+    monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_collect)
+    monkeypatch.setattr(nodes, "data_source_list_collection_records", fake_list)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "biz_date": "2026-04-25",
+            "run_context": {"trigger_type": "manual"},
+            "plan_input_bindings": [
+                {
+                    "data_source_id": "source-001",
+                    "dataset_id": "dataset-seed",
+                    "table_name": "seed_orders",
+                    "resource_key": "seed_orders",
+                    "required": True,
+                    "dataset_extract_config": {"mode": "manual_seed"},
+                }
+            ],
+        },
+    }
+
+    result = asyncio.run(nodes.check_dataset_ready_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    assert calls == ["list"]
+    assert recon_ctx["missing_bindings"] == []
+
+
 def test_execute_auto_task_run_schedule_collects_before_recon(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -365,3 +458,85 @@ def test_normalize_execution_trigger_type_preserves_manual_and_rerun() -> None:
     assert nodes._normalize_execution_trigger_type("rerun") == "rerun"
     assert nodes._normalize_execution_trigger_type("retry") == "rerun"
     assert nodes._normalize_execution_trigger_type("schedule") == "schedule"
+
+
+def test_update_rerun_exception_verification_closes_resolved_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_get(auth_token: str, exception_id: str) -> dict[str, object]:
+        captured["get"] = {"auth_token": auth_token, "exception_id": exception_id}
+        return {
+            "success": True,
+            "exception": {
+                "id": exception_id,
+                "feedback_json": {"todo_id": "todo-001"},
+            },
+        }
+
+    async def fake_update(auth_token: str, exception_id: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["update"] = {
+            "auth_token": auth_token,
+            "exception_id": exception_id,
+            "payload": payload,
+        }
+        return {"success": True, "exception": {"id": exception_id, **payload}}
+
+    monkeypatch.setattr(nodes, "execution_run_exception_get", fake_get)
+    monkeypatch.setattr(nodes, "execution_run_exception_update", fake_update)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "run_context": {
+                "rerun_exception_id": "exception-001",
+                "rerun_from_run_id": "run-old",
+            },
+            "execution_run_record": {
+                "id": "run-new",
+                "execution_status": "success",
+            },
+            "anomaly_items": [],
+        },
+    }
+
+    result = asyncio.run(nodes.update_rerun_exception_verification_node(state))
+    payload = captured["update"]["payload"]
+
+    assert payload["processing_status"] == "verified_closed"
+    assert payload["fix_status"] == "fixed"
+    assert payload["is_closed"] is True
+    assert payload["feedback_json"]["todo_id"] == "todo-001"
+    assert payload["feedback_json"]["verify_run_id"] == "run-new"
+    assert payload["feedback_json"]["verify_anomaly_count"] == 0
+    assert result["recon_ctx"]["rerun_exception_verification"]["id"] == "exception-001"
+
+
+def test_update_rerun_exception_verification_reopens_when_anomaly_remains(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_get(auth_token: str, exception_id: str) -> dict[str, object]:
+        return {"success": True, "exception": {"id": exception_id, "feedback_json": {}}}
+
+    async def fake_update(auth_token: str, exception_id: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"success": True, "exception": {"id": exception_id, **payload}}
+
+    monkeypatch.setattr(nodes, "execution_run_exception_get", fake_get)
+    monkeypatch.setattr(nodes, "execution_run_exception_update", fake_update)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "run_context": {"rerun_exception_id": "exception-001"},
+            "execution_run_record": {"id": "run-new", "execution_status": "success"},
+            "anomaly_items": [{"anomaly_type": "matched_with_diff"}],
+        },
+    }
+
+    asyncio.run(nodes.update_rerun_exception_verification_node(state))
+    payload = captured["payload"]
+
+    assert payload["processing_status"] == "reopened"
+    assert payload["fix_status"] == "pending"
+    assert payload["is_closed"] is False
+    assert payload["feedback_json"]["verify_anomaly_count"] == 1

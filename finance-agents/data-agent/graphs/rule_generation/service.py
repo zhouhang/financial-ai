@@ -12,6 +12,12 @@ from typing import Any
 
 from graphs.rule_generation.common.events import NODE_LABELS, build_event
 from graphs.rule_generation.common.llm_json import invoke_llm_json
+from graphs.rule_generation.input_plan import (
+    build_input_plan_questions,
+    execute_input_plan_preview,
+    generate_input_plan_from_proc,
+    validate_input_plan,
+)
 from graphs.rule_generation.proc.assertions import assert_proc_output
 from graphs.rule_generation.proc.ir_compiler import compile_understanding_into_rule
 from graphs.rule_generation.proc.ir_dsl_consistency import check_ir_dsl_consistency
@@ -123,6 +129,9 @@ class RuleGenerationService:
                 yield validation_event
                 if not context.get("ir_structure_needs_repair"):
                     break
+                if _set_structure_user_input_questions(context):
+                    yield self._needs_user_input_event(context)
+                    return
                 graph_failed = False
                 async for event in self._repair_ir_and_validate(
                     context,
@@ -221,6 +230,17 @@ class RuleGenerationService:
                     return
                 if context.pop("restart_validation_loop", False):
                     continue
+
+                input_plan_ok = True
+                async for event in self._run_input_plan_subgraph(context):
+                    yield event
+                    if event.get("event") == "needs_user_input":
+                        return
+                    if event.get("event") == "graph_failed":
+                        input_plan_ok = False
+                if not input_plan_ok:
+                    return
+
                 runtime_attempt = int(context.get("sample_ir_repair_count") or 0) + 1
 
                 yield self._node_started(context, "build_sample_inputs", attempt=runtime_attempt)
@@ -348,6 +368,69 @@ class RuleGenerationService:
             events.append(self._graph_failed(context))
             return events
 
+    async def _run_input_plan_subgraph(
+        self,
+        context: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        max_attempts = int(context.get("max_input_plan_repair_attempts") or 3)
+        last_errors: list[dict[str, Any]] = []
+        for attempt in range(1, max(1, max_attempts) + 1):
+            yield self._node_started(context, "generate_input_plan", attempt=attempt)
+            yield await self._run_node(
+                context,
+                "generate_input_plan",
+                self._generate_input_plan,
+                attempt=attempt,
+            )
+
+            yield self._node_started(context, "validate_input_plan", attempt=attempt)
+            yield await self._run_node(
+                context,
+                "validate_input_plan",
+                self._validate_input_plan,
+                attempt=attempt,
+            )
+            validation = context.get("input_plan_validation_result")
+            if not _node_success(validation):
+                last_errors = _safe_list_of_dicts((validation or {}).get("errors"))
+                if attempt < max_attempts:
+                    yield self._node_started(context, "repair_input_plan", attempt=attempt)
+                    yield await self._run_node(
+                        context,
+                        "repair_input_plan",
+                        self._repair_input_plan,
+                        attempt=attempt,
+                    )
+                    continue
+                break
+
+            yield self._node_started(context, "execute_input_plan_preview", attempt=attempt)
+            yield await self._run_node(
+                context,
+                "execute_input_plan_preview",
+                self._execute_input_plan_preview,
+                attempt=attempt,
+            )
+            preview = context.get("input_plan_preview_result")
+            if _node_success(preview):
+                return
+            last_errors = _safe_list_of_dicts((preview or {}).get("errors"))
+            if attempt < max_attempts:
+                yield self._node_started(context, "repair_input_plan", attempt=attempt)
+                yield await self._run_node(
+                    context,
+                    "repair_input_plan",
+                    self._repair_input_plan,
+                    attempt=attempt,
+                )
+
+        context["status"] = "needs_user_input"
+        context["needs_user_input_phase"] = "confirm_input_plan"
+        context["needs_user_input_node_code"] = "confirm_input_plan"
+        context["needs_user_input_message"] = "整理规则已生成，但取数方式需要确认。"
+        context["questions"] = build_input_plan_questions(context.get("input_plan_json") or {}, last_errors)
+        yield self._needs_user_input_event(context)
+
     async def _diagnose_and_repair_runtime(
         self,
         context: dict[str, Any],
@@ -450,6 +533,8 @@ class RuleGenerationService:
         )
         yield validation_event
         if context.get("ir_structure_needs_repair"):
+            if _set_structure_user_input_questions(context):
+                return
             if _can_retry_key(context, retry_key, max_retries):
                 async for event in self._repair_ir_and_validate(
                         context,
@@ -920,6 +1005,110 @@ class RuleGenerationService:
             "errors": result.get("errors") or [],
         }
 
+    async def _generate_input_plan(self, context: dict[str, Any]) -> dict[str, Any]:
+        confirmed_plan = context.get("confirmed_input_plan_json") if isinstance(context.get("confirmed_input_plan_json"), dict) else {}
+        plan = confirmed_plan or generate_input_plan_from_proc(
+            rule_json=context.get("normalized_rule_json") or {},
+            sources=context.get("sources") or [],
+            target_table=str(context.get("target_table") or ""),
+            target_tables=list(context.get("target_tables") or []),
+        )
+        context["input_plan_json"] = plan
+        result = {
+            "success": bool(plan.get("datasets")),
+            "message": "已生成取数计划。" if plan.get("datasets") else "未能生成取数计划。",
+            "summary": plan.get("summary") or {"dataset_count": 0},
+            "errors": [] if plan.get("datasets") else [{"message": "未从 proc JSON 中识别到可取数的数据集。"}],
+        }
+        logger.info(
+            "[rule_generation][input_plan] generated run_id=%s side=%s target=%s success=%s summary=%s",
+            context.get("run_id", ""),
+            context.get("side", ""),
+            context.get("target_table", ""),
+            result["success"],
+            _log_json(result.get("summary") or {}),
+        )
+        context["input_plan_generation_result"] = result
+        if result["success"]:
+            _clear_stage_error(context, "generate_input_plan")
+        else:
+            _replace_stage_error(context, "generate_input_plan", result["errors"])
+        return result
+
+    async def _validate_input_plan(self, context: dict[str, Any]) -> dict[str, Any]:
+        result = validate_input_plan(
+            context.get("input_plan_json") or {},
+            rule_json=context.get("normalized_rule_json") or {},
+            sources=context.get("sources") or [],
+            target_table=str(context.get("target_table") or ""),
+            target_tables=list(context.get("target_tables") or []),
+        )
+        context["input_plan_validation_result"] = result
+        if result.get("success"):
+            _clear_stage_error(context, "validate_input_plan")
+        else:
+            _replace_stage_error(context, "validate_input_plan", result.get("errors") or [])
+        for warning in list(result.get("warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in context.setdefault("warnings", []):
+                context["warnings"].append(text)
+        return result
+
+    async def _repair_input_plan(self, context: dict[str, Any]) -> dict[str, Any]:
+        # Keep repair isolated from IR/proc. The deterministic generator is
+        # intentionally rerun from the current proc JSON; it never mutates proc.
+        plan = generate_input_plan_from_proc(
+            rule_json=context.get("normalized_rule_json") or {},
+            sources=context.get("sources") or [],
+            target_table=str(context.get("target_table") or ""),
+            target_tables=list(context.get("target_tables") or []),
+        )
+        before = _stable_json(context.get("input_plan_json") or {})
+        context["input_plan_json"] = plan
+        changed = before != _stable_json(plan)
+        result = {
+            "success": bool(plan.get("datasets")),
+            "message": "已重新生成取数计划。" if plan.get("datasets") else "取数计划自动修复未完成。",
+            "summary": {"changed": changed, **(plan.get("summary") or {})},
+            "errors": [] if plan.get("datasets") else [{"message": "取数计划自动修复未生成有效结果。"}],
+        }
+        context["input_plan_repair_result"] = result
+        if result["success"]:
+            _clear_stage_error(context, "repair_input_plan")
+        else:
+            _replace_stage_error(context, "repair_input_plan", result["errors"])
+        return result
+
+    async def _execute_input_plan_preview(self, context: dict[str, Any]) -> dict[str, Any]:
+        result = execute_input_plan_preview(
+            context.get("input_plan_json") or {},
+            sources=context.get("sources") or [],
+        )
+        context["input_plan_preview_result"] = result
+        logger.info(
+            "[rule_generation][input_plan] preview run_id=%s side=%s target=%s success=%s summary=%s",
+            context.get("run_id", ""),
+            context.get("side", ""),
+            context.get("target_table", ""),
+            bool(result.get("success")),
+            _log_json(result.get("summary") or {}),
+        )
+        if result.get("success"):
+            context["input_plan_preview_sources"] = result.get("preview_sources") or []
+            _clear_stage_error(context, "execute_input_plan_preview")
+        else:
+            _replace_stage_error(context, "execute_input_plan_preview", result.get("errors") or [])
+        for warning in list(result.get("warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in context.setdefault("warnings", []):
+                context["warnings"].append(text)
+        return {
+            "success": bool(result.get("success")),
+            "message": str(result.get("message") or "取数计划预览完成。"),
+            "summary": result.get("summary") or {},
+            "errors": result.get("errors") or [],
+        }
+
     async def _lint_proc_json(self, context: dict[str, Any]) -> dict[str, Any]:
         result = lint_proc_rule(
             context.get("normalized_rule_json") or {},
@@ -943,7 +1132,8 @@ class RuleGenerationService:
     async def _build_sample_inputs(self, context: dict[str, Any]) -> dict[str, Any]:
         sample_inputs = []
         missing_sources: list[str] = []
-        for source in context.get("sources", []):
+        source_items = context.get("input_plan_preview_sources") or context.get("sources", [])
+        for source in source_items:
             sample_rows = list(source.get("sample_rows") or [])
             if not sample_rows:
                 missing_sources.append(_source_display_name(source))
@@ -973,8 +1163,11 @@ class RuleGenerationService:
             return result
         result = {
             "success": True,
-            "message": "已从数据集自身读取真实样例输入。",
-            "summary": {"sample_dataset_count": len(sample_inputs)},
+            "message": "已按取数计划读取真实样例输入。" if context.get("input_plan_preview_sources") else "已从数据集自身读取真实样例输入。",
+            "summary": {
+                "sample_dataset_count": len(sample_inputs),
+                "sample_origin": "input_plan_preview" if context.get("input_plan_preview_sources") else "dataset_sample_rows",
+            },
         }
         context["sample_input_result"] = result
         _clear_stage_error(context, "build_sample_inputs")
@@ -987,6 +1180,7 @@ class RuleGenerationService:
             sources=context.get("sample_inputs") or context.get("sources") or [],
             expected_target=context["target_table"],
             expected_targets=context.get("target_tables") or [],
+            input_plan_json=context.get("input_plan_json") or {},
         )
         context["sample_result"] = result
         sample_errors = _sample_result_errors(result)
@@ -1067,6 +1261,7 @@ class RuleGenerationService:
             message="AI 生成输出数据完成。",
             status="succeeded",
             proc_rule_json=context.get("normalized_rule_json") or {},
+            input_plan_json=context.get("input_plan_json") or {},
             output_fields=context.get("output_fields") or [],
             output_preview_rows=context.get("output_preview_rows") or [],
             output_samples=(context.get("sample_result") or {}).get("output_samples") or [],
@@ -1080,6 +1275,9 @@ class RuleGenerationService:
                 context.get("ir_lint_result") or {},
                 context.get("ir_dsl_consistency_result") or {},
                 context.get("lint_result") or {},
+                context.get("input_plan_generation_result") or {},
+                context.get("input_plan_validation_result") or {},
+                context.get("input_plan_preview_result") or {},
                 context.get("sample_diagnosis_result") or {},
                 context.get("assert_result") or {},
             ],
@@ -1104,22 +1302,26 @@ class RuleGenerationService:
             status="failed",
             errors=errors,
             proc_rule_json=context.get("normalized_rule_json") or {},
+            input_plan_json=context.get("input_plan_json") or {},
         )
 
     def _needs_user_input_event(self, context: dict[str, Any]) -> dict[str, Any]:
+        phase = str(context.get("needs_user_input_phase") or "ambiguity_gate")
+        node_code = str(context.get("needs_user_input_node_code") or phase)
         return build_event(
             "needs_user_input",
             run_id=context.get("run_id", ""),
             side=context.get("side", ""),
             target_table=context.get("target_table", ""),
-            node_code="ambiguity_gate",
+            node_code=node_code,
             node_status="needs_user_input",
-            message="规则存在需要确认的业务口径。",
+            message=str(context.get("needs_user_input_message") or "规则存在需要确认的业务口径。"),
             status="needs_user_input",
-            phase="ambiguity_gate",
+            phase=phase,
             questions=context.get("questions") or [],
             understanding=context.get("understanding") or {},
             field_bindings=context.get("field_bindings") or [],
+            input_plan_json=context.get("input_plan_json") or {},
             source_references=(context.get("understanding") or {}).get("source_references") or [],
             output_specs=(context.get("understanding") or {}).get("output_specs") or [],
             business_rules=(context.get("understanding") or {}).get("business_rules") or [],
@@ -1143,6 +1345,8 @@ def _initial_context(*, auth_token: str, payload: dict[str, Any], run_id: str) -
         "max_retries": int(payload.get("max_retries") or 2),
         "max_lint_ir_repair_attempts": int(payload.get("max_lint_ir_repair_attempts") or 3),
         "max_sample_ir_repair_attempts": int(payload.get("max_sample_ir_repair_attempts") or 2),
+        "max_input_plan_repair_attempts": int(payload.get("max_input_plan_repair_attempts") or 3),
+        "confirmed_input_plan_json": payload.get("confirmed_input_plan_json") if isinstance(payload.get("confirmed_input_plan_json"), dict) else {},
         "errors": [],
         "warnings": [],
         "trace": [],
@@ -2221,6 +2425,156 @@ def _rule_text_has_hint(rule_text: str, pattern: str) -> bool:
     return bool(re.search(pattern, str(rule_text or ""), flags=re.IGNORECASE))
 
 
+def _set_structure_user_input_questions(context: dict[str, Any]) -> bool:
+    questions = _structure_user_input_questions(
+        context.get("ir_structure_repair_reasons") or [],
+        understanding=context.get("understanding") or {},
+        source_profiles=context.get("source_profiles") or [],
+        rule_text=str(context.get("rule_text") or ""),
+    )
+    if not questions:
+        return False
+    context["questions"] = questions[:3]
+    context["status"] = "needs_user_input"
+    context["needs_user_input_phase"] = "validate_ir_structure"
+    context["needs_user_input_node_code"] = "validate_ir_structure"
+    context["needs_user_input_message"] = "规则里有字段没有匹配到当前数据集，请确认字段后重新生成。"
+    return True
+
+
+def _structure_user_input_questions(
+    issues: list[dict[str, Any]],
+    *,
+    understanding: dict[str, Any],
+    source_profiles: list[dict[str, Any]],
+    rule_text: str,
+) -> list[dict[str, Any]]:
+    references_by_id = {
+        str(reference.get("ref_id") or ""): reference
+        for reference in _safe_list_of_dicts(understanding.get("source_references"))
+    }
+    output_specs = _safe_list_of_dicts(understanding.get("output_specs"))
+    questions: list[dict[str, Any]] = []
+    for index, issue in enumerate(_safe_list_of_dicts(issues), start=1):
+        question = _structure_issue_user_input_question(
+            issue,
+            reference=references_by_id.get(str(issue.get("ref_id") or "")) or {},
+            output_specs=output_specs,
+            source_profiles=source_profiles,
+            rule_text=rule_text,
+            index=index,
+        )
+        if question:
+            questions.append(question)
+    return questions
+
+
+def _structure_issue_user_input_question(
+    issue: dict[str, Any],
+    *,
+    reference: dict[str, Any],
+    output_specs: list[dict[str, Any]],
+    source_profiles: list[dict[str, Any]],
+    rule_text: str,
+    index: int,
+) -> dict[str, Any] | None:
+    if str(issue.get("reason") or "") != "source_reference_unmatched_needs_reclassification":
+        return None
+    semantic_name = str(issue.get("semantic_name") or reference.get("semantic_name") or "").strip()
+    if not semantic_name:
+        return None
+    if not _reference_has_structured_usage(reference, output_specs=output_specs, understanding_rule_text=rule_text):
+        return None
+    if _matching_output_definition_name(semantic_name, output_specs=output_specs, rule_text=rule_text):
+        return None
+    if _source_reference_looks_like_clause(
+        reference or {"semantic_name": semantic_name},
+        _all_candidate_fields(source_profiles),
+    ):
+        return None
+    candidates = _structure_issue_candidate_fields(
+        semantic_name,
+        reference=reference,
+        source_profiles=source_profiles,
+    )
+    binding = {
+        "intent_id": str(issue.get("ref_id") or reference.get("ref_id") or f"structure_field_{index}"),
+        "role": _normalize_source_reference_role(reference.get("usage") or issue.get("usage")),
+        "usage": reference.get("usage") or issue.get("usage") or "source_value",
+        "mention": semantic_name,
+        "must_bind": True,
+        "status": "missing",
+        "candidates": candidates,
+        "evidence": [str(issue.get("message") or f"“{semantic_name}”未匹配到当前数据集字段。")],
+    }
+    return {
+        "id": str(binding["intent_id"]),
+        "type": "field_binding",
+        "role": str(binding["role"]),
+        "mention": semantic_name,
+        "question": _field_binding_question(binding),
+        "candidates": [_field_candidate_payload(candidate) for candidate in candidates[:8]],
+        "evidence": list(binding.get("evidence") or []),
+    }
+
+
+def _reference_has_structured_usage(
+    reference: dict[str, Any],
+    *,
+    output_specs: list[dict[str, Any]],
+    understanding_rule_text: str,
+) -> bool:
+    ref_id = str(reference.get("ref_id") or "").strip()
+    if not ref_id:
+        return False
+    for spec in output_specs:
+        if ref_id in {str(item) for item in list(spec.get("source_ref_ids") or [])}:
+            return True
+    usage = _normalize_source_reference_role(reference.get("usage"))
+    return usage in {"filter_field", "match_key", "compare_field", "time_field", "group_field", "lookup_key"} and bool(
+        str(understanding_rule_text or "").strip()
+    )
+
+
+def _structure_issue_candidate_fields(
+    mention: str,
+    *,
+    reference: dict[str, Any],
+    source_profiles: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    scoped_candidates = _candidate_fields_for_reference(reference or {}, source_profiles)
+    candidates = scoped_candidates or _all_candidate_fields(source_profiles)
+    match_result = _match_field_mention(mention, candidates)
+    suggested = [item for item in list(match_result.get("candidates") or []) if isinstance(item, dict)]
+    if suggested:
+        return _dedupe_field_candidates(suggested)
+    return _rank_field_candidates(mention, candidates)[:8]
+
+
+def _all_candidate_fields(source_profiles: list[dict[str, Any]]) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    for profile in source_profiles:
+        table_name = str(profile.get("table_name") or "")
+        scope_aliases = [
+            str(item).strip()
+            for item in list(profile.get("scope_aliases") or [])
+            if str(item).strip()
+        ]
+        for candidate in list(profile.get("field_candidates") or []):
+            if not isinstance(candidate, dict):
+                continue
+            raw_name = str(candidate.get("name") or "").strip()
+            if not raw_name:
+                continue
+            candidates.append({
+                "name": raw_name,
+                "label": str(candidate.get("label") or raw_name).strip() or raw_name,
+                "table_name": table_name,
+                "scope_aliases": scope_aliases,
+            })
+    return _dedupe_field_candidates(candidates)
+
+
 def _set_ir_lint_questions(context: dict[str, Any], errors: list[dict[str, Any]]) -> None:
     questions: list[dict[str, Any]] = []
     for index, error in enumerate(errors[:3], start=1):
@@ -2347,6 +2701,11 @@ def _clear_runtime_validation_state(context: dict[str, Any]) -> None:
     for key in (
         "lint_result",
         "ir_dsl_consistency_result",
+        "input_plan_json",
+        "input_plan_generation_result",
+        "input_plan_validation_result",
+        "input_plan_preview_result",
+        "input_plan_preview_sources",
         "sample_input_result",
         "sample_result",
         "sample_diagnosis_result",
@@ -2355,7 +2714,18 @@ def _clear_runtime_validation_state(context: dict[str, Any]) -> None:
         "output_preview_rows",
     ):
         context.pop(key, None)
-    for stage in ("lint_proc_json", "check_ir_dsl_consistency", "build_sample_inputs", "run_sample", "diagnose_sample", "assert_output"):
+    for stage in (
+        "lint_proc_json",
+        "check_ir_dsl_consistency",
+        "generate_input_plan",
+        "validate_input_plan",
+        "repair_input_plan",
+        "execute_input_plan_preview",
+        "build_sample_inputs",
+        "run_sample",
+        "diagnose_sample",
+        "assert_output",
+    ):
         _clear_stage_error(context, stage)
 
 
@@ -2386,6 +2756,9 @@ def _all_context_errors(context: dict[str, Any]) -> list[dict[str, Any]]:
     for stage, key in (
         ("check_ir_dsl_consistency", "ir_dsl_consistency_result"),
         ("lint_proc_json", "lint_result"),
+        ("generate_input_plan", "input_plan_generation_result"),
+        ("validate_input_plan", "input_plan_validation_result"),
+        ("execute_input_plan_preview", "input_plan_preview_result"),
         ("build_sample_inputs", "sample_input_result"),
         ("run_sample", "sample_result"),
         ("diagnose_sample", "sample_diagnosis_result"),

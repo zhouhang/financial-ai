@@ -73,6 +73,9 @@ class StepsProcRuntime:
         self._active_alias_frames: dict[str, pd.DataFrame] = {}
         self._lookup_cache: dict[tuple[str, tuple[str, ...]], dict[tuple[Any, ...], dict[str, Any]]] = {}
         self._row_index_cache: dict[str, dict[tuple[Any, ...], int]] = {}
+        self._input_plan_frame_keys = {
+            key for key in self.preloaded_frames.keys() if str(key).startswith("__input_plan__::")
+        }
 
     def execute(self) -> list[dict[str, Any]]:
         steps = list(self.rule_data.get("steps", []) or [])
@@ -249,13 +252,38 @@ class StepsProcRuntime:
     ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
         alias_frames: dict[str, pd.DataFrame] = {}
         alias_tables: dict[str, str] = {}
+        target_table = str(step.get("target_table") or "").strip()
         for source in step.get("sources", []) or []:
             table_name = str(source.get("table") or "").strip()
             alias = str(source.get("alias") or table_name).strip()
-            df = self._ensure_table_loaded(table_name).copy()
+            if self._should_skip_unplanned_source(target_table, alias, table_name, step):
+                logger.info(
+                    "[steps_runtime] input_plan skip unused source: target=%s alias=%s table=%s",
+                    target_table,
+                    alias,
+                    table_name,
+                )
+                continue
+            df = self._ensure_alias_frame_loaded(target_table, alias, table_name).copy()
             alias_frames[alias] = df
             alias_tables[alias] = table_name
         return alias_frames, alias_tables
+
+    def _should_skip_unplanned_source(
+        self,
+        target_table: str,
+        alias: str,
+        table_name: str,
+        step: dict[str, Any],
+    ) -> bool:
+        if not self._input_plan_frame_keys:
+            return False
+        target_prefix = f"__input_plan__::{target_table}::"
+        if not any(key.startswith(target_prefix) for key in self._input_plan_frame_keys):
+            return False
+        if self._input_plan_frame_key(target_table, alias, table_name) in self._input_plan_frame_keys:
+            return False
+        return alias not in _collect_step_used_source_aliases(step)
 
     def _apply_reference_filter(
         self,
@@ -1476,6 +1504,27 @@ class StepsProcRuntime:
         extras = [column for column in df.columns if column not in ordered]
         return df[ordered + extras]
 
+    def _ensure_alias_frame_loaded(
+        self,
+        target_table: str,
+        alias: str,
+        table_name: str,
+    ) -> pd.DataFrame:
+        input_plan_key = self._input_plan_frame_key(target_table, alias, table_name)
+        if input_plan_key in self.preloaded_frames:
+            return self.preloaded_frames[input_plan_key]
+        target_prefix = f"__input_plan__::{target_table}::"
+        if any(key.startswith(target_prefix) for key in self._input_plan_frame_keys):
+            raise ValueError(
+                "input_plan 未加载到当前 source 数据："
+                f"{target_table}.{alias}({table_name})。请重新生成数据整理规则或检查运行计划数据绑定。"
+            )
+        return self._ensure_table_loaded(table_name)
+
+    @staticmethod
+    def _input_plan_frame_key(target_table: str, alias: str, table_name: str) -> str:
+        return f"__input_plan__::{target_table}::{alias}::{table_name}"
+
     def _ensure_table_loaded(self, table_name: str) -> pd.DataFrame:
         if table_name in self.tables:
             return self.tables[table_name]
@@ -1702,6 +1751,8 @@ def _normalize_key(value: Any) -> Any:
 
 def _is_nullish(value: Any) -> bool:
     if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
         return True
     try:
         return bool(pd.isna(value))
@@ -1933,6 +1984,26 @@ def _collect_aliases(node: Any) -> set[str]:
     return aliases
 
 
+def _collect_step_used_source_aliases(step: dict[str, Any]) -> set[str]:
+    aliases: set[str] = set()
+    aliases |= _collect_aliases(step.get("mappings") or [])
+    aliases |= _collect_aliases(step.get("filter") or {})
+    aliases |= _collect_aliases(step.get("reference_filter") or {})
+    for aggregate in step.get("aggregate", []) or []:
+        if not isinstance(aggregate, dict):
+            continue
+        source_alias = str(aggregate.get("source_alias") or "").strip()
+        if source_alias:
+            aliases.add(source_alias)
+    for source_spec in (step.get("match") or {}).get("sources", []) or []:
+        if not isinstance(source_spec, dict):
+            continue
+        alias = str(source_spec.get("alias") or "").strip()
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
 _ALLOWED_AST_NODES = (
     ast.Expression,
     ast.BoolOp,
@@ -2161,9 +2232,15 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         left = _evaluate_formula_ast(node.left, env)
         for operator, comparator_node in zip(node.ops, node.comparators):
             right = _evaluate_formula_ast(comparator_node, env)
-            if _is_nullish(left) or _is_nullish(right):
+            if _comparison_involves_blank_string(left, right):
+                left_for_compare = _normalize_blank_compare_value(left)
+                right_for_compare = _normalize_blank_compare_value(right)
+            elif _is_nullish(left) or _is_nullish(right):
                 return False
-            if not _apply_compare_operator(operator, left, right):
+            else:
+                left_for_compare = left
+                right_for_compare = right
+            if not _apply_compare_operator(operator, left_for_compare, right_for_compare):
                 return False
             left = right
         return True
@@ -2196,3 +2273,19 @@ def _apply_compare_operator(operator: ast.cmpop, left: Any, right: Any) -> bool:
     if isinstance(operator, ast.NotEq):
         return left != right
     raise ValueError(f"不支持的比较运算: {type(operator).__name__}")
+
+
+def _comparison_involves_blank_string(left: Any, right: Any) -> bool:
+    return _is_blank_string(left) or _is_blank_string(right)
+
+
+def _is_blank_string(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _normalize_blank_compare_value(value: Any) -> Any:
+    if _is_nullish(value):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return value

@@ -178,4 +178,98 @@ def test_normalize_owner_mapping_rejects_ambiguous_owner_name(
         )
 
     assert exc.value.status_code == 400
-    assert "匹配到 2 个钉钉用户" in str(exc.value.detail)
+    assert "在“默认钉钉”组织中匹配到 2 个钉钉用户" in str(exc.value.detail)
+
+
+def test_normalize_owner_mapping_keeps_existing_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeAdapter(users=[])
+
+    monkeypatch.setattr(auto_run_api, "load_company_channel_config_by_id", lambda channel_id: _channel_config())
+    monkeypatch.setattr(auto_run_api, "get_notification_adapter", lambda **kwargs: adapter)
+
+    result = asyncio.run(
+        auto_run_api._normalize_owner_mapping_identifiers(
+            _auth_header().replace("Bearer ", ""),
+            {
+                "channel_config_id": "channel-001",
+                "owner_mapping_json": {
+                    "default_owner": {"name": "周行", "identifier": "ding-user-001"}
+                },
+            },
+        )
+    )
+
+    default_owner = result["owner_mapping_json"]["default_owner"]
+    assert default_owner["name"] == "周行"
+    assert default_owner["identifier"] == "ding-user-001"
+    assert adapter.calls == []
+
+
+def test_search_owner_candidates_returns_masked_disambiguation_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeAdapter(
+        users=[
+            NotificationUser(
+                user_id="ding-user-001",
+                display_name="周行",
+                mobile="13800001234",
+                organization="华东公司",
+                departments=["财务部"],
+            ),
+            NotificationUser(
+                user_id="ding-user-002",
+                display_name="周行",
+                mobile="13900005678",
+                organization="华南公司",
+                departments=["结算组"],
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(auto_run_api, "load_company_channel_config_by_id", lambda channel_id: _channel_config())
+    monkeypatch.setattr(auto_run_api, "get_notification_adapter", lambda **kwargs: adapter)
+
+    result = asyncio.run(
+        auto_run_api.search_owner_candidates(
+            auto_run_api.OwnerCandidateSearchRequest(
+                query="周行",
+                channel_config_id="channel-001",
+            ),
+            authorization=_auth_header(),
+        )
+    )
+
+    assert result["success"] is True
+    assert adapter.calls == [{"user_id": "", "mobile": "", "keyword": "周行"}]
+    assert result["candidates"][0]["display_name"] == "周行"
+    assert result["candidates"][0]["identifier"] == "ding-user-001"
+    assert result["candidates"][0]["organization"] == "华东公司"
+    assert result["candidates"][0]["departments"] == ["财务部"]
+    assert result["candidates"][0]["mobile_masked"] == "138****1234"
+    assert "ID后6位 er-001" in result["candidates"][0]["disambiguation_label"]
+
+
+def test_normalize_owner_mapping_rejects_missing_owner_in_organization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeAdapter(users=[], success=False, message="未找到匹配的钉钉用户: 王五")
+
+    monkeypatch.setattr(auto_run_api, "load_company_channel_config_by_id", lambda channel_id: _channel_config())
+    monkeypatch.setattr(auto_run_api, "get_notification_adapter", lambda **kwargs: adapter)
+
+    with pytest.raises(auto_run_api.HTTPException) as exc:
+        asyncio.run(
+            auto_run_api._normalize_owner_mapping_identifiers(
+                _auth_header().replace("Bearer ", ""),
+                {
+                    "channel_config_id": "channel-001",
+                    "owner_mapping_json": {"default_owner": {"name": "王五"}},
+                },
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert str(exc.value.detail) == "责任人“王五”不在“默认钉钉”组织中，请检查后重试"
