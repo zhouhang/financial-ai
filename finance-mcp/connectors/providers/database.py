@@ -20,6 +20,7 @@ _DATASET_CODE_PATTERN = re.compile(r"[^a-z0-9_]+")
 _DATE_ONLY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _POSTGRES_DISCOVER_RELKINDS = ("r", "v", "m", "f", "p")
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
+_DATE_FILTER_MARKER = "__collection_date_filter__"
 
 
 def _normalize_db_type(value: Any) -> str:
@@ -570,8 +571,19 @@ class DatabaseConnector(BaseDataSourceConnector):
         }
         biz_date = str(params.get("biz_date") or arguments.get("biz_date") or "").strip()
         date_field = str(query.get("date_field") or "").strip()
+        date_format = str(
+            query.get("date_format")
+            or params.get("date_format")
+            or query.get("date_value_format")
+            or params.get("date_value_format")
+            or ""
+        ).strip()
         if date_field and biz_date and date_field not in filters:
-            filters[date_field] = biz_date
+            filters[date_field] = {
+                _DATE_FILTER_MARKER: True,
+                "value": biz_date,
+                "date_format": date_format,
+            }
         return schema_name, table_name, filters
 
     def _sync_postgresql(
@@ -605,18 +617,59 @@ class DatabaseConnector(BaseDataSourceConnector):
         clauses: list[pg_sql.Composed] = []
         params: list[Any] = []
         for field_name, value in filters.items():
-            if self._is_date_only_filter_value(value):
-                start, end = self._date_filter_bounds(value)
-                clauses.append(
-                    pg_sql.SQL("{} >= %s AND {} < %s").format(
-                        pg_sql.Identifier(field_name),
-                        pg_sql.Identifier(field_name),
+            filter_value, date_format = self._extract_date_filter_value(field_name, value)
+            if self._is_date_only_filter_value(filter_value):
+                if date_format == "compact_date":
+                    clauses.append(pg_sql.SQL("{} = %s").format(pg_sql.Identifier(field_name)))
+                    params.append(self._compact_date_value(filter_value))
+                elif date_format == "compact_datetime":
+                    start, end = self._compact_datetime_filter_bounds(filter_value)
+                    clauses.append(
+                        pg_sql.SQL("{} >= %s AND {} < %s").format(
+                            pg_sql.Identifier(field_name),
+                            pg_sql.Identifier(field_name),
+                        )
                     )
-                )
-                params.extend([start, end])
+                    params.extend([start, end])
+                elif date_format == "slash_date":
+                    start, end = self._slash_date_filter_bounds(filter_value)
+                    clauses.append(
+                        pg_sql.SQL("{} >= %s AND {} < %s").format(
+                            pg_sql.Identifier(field_name),
+                            pg_sql.Identifier(field_name),
+                        )
+                    )
+                    params.extend([start, end])
+                elif date_format == "slash_datetime":
+                    start, end = self._slash_datetime_filter_bounds(filter_value)
+                    clauses.append(
+                        pg_sql.SQL("{} >= %s AND {} < %s").format(
+                            pg_sql.Identifier(field_name),
+                            pg_sql.Identifier(field_name),
+                        )
+                    )
+                    params.extend([start, end])
+                elif date_format in {"unix_seconds", "unix_millis"}:
+                    start, end = self._unix_filter_bounds(filter_value, date_format=date_format)
+                    clauses.append(
+                        pg_sql.SQL("{} >= %s AND {} < %s").format(
+                            pg_sql.Identifier(field_name),
+                            pg_sql.Identifier(field_name),
+                        )
+                    )
+                    params.extend([start, end])
+                else:
+                    start, end = self._date_filter_bounds(filter_value)
+                    clauses.append(
+                        pg_sql.SQL("{} >= %s AND {} < %s").format(
+                            pg_sql.Identifier(field_name),
+                            pg_sql.Identifier(field_name),
+                        )
+                    )
+                    params.extend([start, end])
             else:
                 clauses.append(pg_sql.SQL("{} = %s").format(pg_sql.Identifier(field_name)))
-                params.append(value)
+                params.append(filter_value)
         return pg_sql.SQL(" AND ").join(clauses), params
 
     def _sync_mysql(
@@ -637,13 +690,34 @@ class DatabaseConnector(BaseDataSourceConnector):
                     clauses: list[str] = []
                     for field_name, value in filters.items():
                         safe_field = field_name.replace("`", "``")
-                        if self._is_date_only_filter_value(value):
-                            start, end = self._date_filter_bounds(value)
-                            clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
-                            params.extend([start, end])
+                        filter_value, date_format = self._extract_date_filter_value(field_name, value)
+                        if self._is_date_only_filter_value(filter_value):
+                            if date_format == "compact_date":
+                                clauses.append(f"`{safe_field}` = %s")
+                                params.append(self._compact_date_value(filter_value))
+                            elif date_format == "compact_datetime":
+                                start, end = self._compact_datetime_filter_bounds(filter_value)
+                                clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                                params.extend([start, end])
+                            elif date_format == "slash_date":
+                                start, end = self._slash_date_filter_bounds(filter_value)
+                                clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                                params.extend([start, end])
+                            elif date_format == "slash_datetime":
+                                start, end = self._slash_datetime_filter_bounds(filter_value)
+                                clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                                params.extend([start, end])
+                            elif date_format in {"unix_seconds", "unix_millis"}:
+                                start, end = self._unix_filter_bounds(filter_value, date_format=date_format)
+                                clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                                params.extend([start, end])
+                            else:
+                                start, end = self._date_filter_bounds(filter_value)
+                                clauses.append(f"`{safe_field}` >= %s AND `{safe_field}` < %s")
+                                params.extend([start, end])
                         else:
                             clauses.append(f"`{safe_field}` = %s")
-                            params.append(value)
+                            params.append(filter_value)
                     sql += f" WHERE {' AND '.join(clauses)}"
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall() or []
@@ -669,13 +743,34 @@ class DatabaseConnector(BaseDataSourceConnector):
                     clauses: list[str] = []
                     for field_name, value in filters.items():
                         safe_field = field_name.replace('"', '""')
-                        if self._is_date_only_filter_value(value):
-                            start, end = self._date_filter_bounds(value)
-                            clauses.append(f'datetime("{safe_field}") >= datetime(?) AND datetime("{safe_field}") < datetime(?)')
-                            params.extend([start, end])
+                        filter_value, date_format = self._extract_date_filter_value(field_name, value)
+                        if self._is_date_only_filter_value(filter_value):
+                            if date_format == "compact_date":
+                                clauses.append(f'"{safe_field}" = ?')
+                                params.append(self._compact_date_value(filter_value))
+                            elif date_format == "compact_datetime":
+                                start, end = self._compact_datetime_filter_bounds(filter_value)
+                                clauses.append(f'"{safe_field}" >= ? AND "{safe_field}" < ?')
+                                params.extend([start, end])
+                            elif date_format == "slash_date":
+                                start, end = self._slash_date_filter_bounds(filter_value)
+                                clauses.append(f'"{safe_field}" >= ? AND "{safe_field}" < ?')
+                                params.extend([start, end])
+                            elif date_format == "slash_datetime":
+                                start, end = self._slash_datetime_filter_bounds(filter_value)
+                                clauses.append(f'"{safe_field}" >= ? AND "{safe_field}" < ?')
+                                params.extend([start, end])
+                            elif date_format in {"unix_seconds", "unix_millis"}:
+                                start, end = self._unix_filter_bounds(filter_value, date_format=date_format)
+                                clauses.append(f'"{safe_field}" >= ? AND "{safe_field}" < ?')
+                                params.extend([start, end])
+                            else:
+                                start, end = self._date_filter_bounds(filter_value)
+                                clauses.append(f'datetime("{safe_field}") >= datetime(?) AND datetime("{safe_field}") < datetime(?)')
+                                params.extend([start, end])
                         else:
                             clauses.append(f'"{safe_field}" = ?')
-                            params.append(value)
+                            params.append(filter_value)
                     sql += f" WHERE {' AND '.join(clauses)}"
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall() or []
@@ -687,6 +782,88 @@ class DatabaseConnector(BaseDataSourceConnector):
 
     def _is_date_only_filter_value(self, value: Any) -> bool:
         return bool(_DATE_ONLY_PATTERN.match(str(value or "").strip()))
+
+    def _is_compact_date_partition_field(self, field_name: Any) -> bool:
+        normalized = str(field_name or "").strip().lower()
+        return normalized in {"pt", "dt", "biz_dt", "bizdate", "biz_date_yyyymmdd", "date_key"}
+
+    def _extract_date_filter_value(self, field_name: Any, value: Any) -> tuple[Any, str]:
+        if isinstance(value, dict) and value.get(_DATE_FILTER_MARKER) is True:
+            filter_value = value.get("value")
+            date_format = self._normalize_date_format(value.get("date_format"), field_name=field_name)
+            return filter_value, date_format
+        return value, self._normalize_date_format("", field_name=field_name)
+
+    def _normalize_date_format(self, value: Any, *, field_name: Any = "") -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "auto": "",
+            "native": "native",
+            "date": "native",
+            "datetime": "native",
+            "timestamp": "native",
+            "iso": "native",
+            "iso_date": "native",
+            "iso_datetime": "native",
+            "yyyy_mm_dd": "native",
+            "yyyy_mm_dd_hh_mm_ss": "native",
+            "yyyymmdd": "compact_date",
+            "compact": "compact_date",
+            "compact_date": "compact_date",
+            "partition_date": "compact_date",
+            "yyyymmddhhmmss": "compact_datetime",
+            "compact_datetime": "compact_datetime",
+            "yyyy/mm/dd": "slash_date",
+            "slash_date": "slash_date",
+            "yyyy/mm/dd hh:mm:ss": "slash_datetime",
+            "slash_datetime": "slash_datetime",
+            "unix": "unix_seconds",
+            "unix_seconds": "unix_seconds",
+            "unix_second": "unix_seconds",
+            "epoch_seconds": "unix_seconds",
+            "unix_millis": "unix_millis",
+            "unix_milliseconds": "unix_millis",
+            "epoch_millis": "unix_millis",
+        }
+        resolved = aliases.get(normalized, normalized)
+        if resolved in {
+            "native",
+            "compact_date",
+            "compact_datetime",
+            "slash_date",
+            "slash_datetime",
+            "unix_seconds",
+            "unix_millis",
+        }:
+            return resolved
+        if self._is_compact_date_partition_field(field_name):
+            return "compact_date"
+        return "native"
+
+    def _compact_date_value(self, value: Any) -> str:
+        return date.fromisoformat(str(value or "").strip()).strftime("%Y%m%d")
+
+    def _compact_datetime_filter_bounds(self, value: Any) -> tuple[str, str]:
+        start_date = date.fromisoformat(str(value or "").strip())
+        return start_date.strftime("%Y%m%d000000"), (start_date + timedelta(days=1)).strftime("%Y%m%d000000")
+
+    def _slash_date_filter_bounds(self, value: Any) -> tuple[str, str]:
+        start_date = date.fromisoformat(str(value or "").strip())
+        return start_date.strftime("%Y/%m/%d"), (start_date + timedelta(days=1)).strftime("%Y/%m/%d")
+
+    def _slash_datetime_filter_bounds(self, value: Any) -> tuple[str, str]:
+        start_date = date.fromisoformat(str(value or "").strip())
+        return start_date.strftime("%Y/%m/%d 00:00:00"), (start_date + timedelta(days=1)).strftime("%Y/%m/%d 00:00:00")
+
+    def _unix_filter_bounds(self, value: Any, *, date_format: str) -> tuple[int, int]:
+        from datetime import datetime, timezone
+
+        start_date = date.fromisoformat(str(value or "").strip())
+        start_ts = int(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+        end_ts = int(datetime.combine(start_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+        if date_format == "unix_millis":
+            return start_ts * 1000, end_ts * 1000
+        return start_ts, end_ts
 
     def _date_filter_bounds(self, value: Any) -> tuple[str, str]:
         start_date = date.fromisoformat(str(value or "").strip())

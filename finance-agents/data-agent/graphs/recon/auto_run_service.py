@@ -45,8 +45,8 @@ _BIZ_DATE_PLACEHOLDER = re.compile(r"\{\{\s*biz_date\s*\}\}")
 _RUN_SUCCESS_STATUSES = {"success", "partial_success", "skipped"}
 
 _ANOMALY_TYPE_LABELS: dict[str, str] = {
-    "source_only": "仅左侧数据存在（右侧缺失）",
-    "target_only": "仅右侧数据存在（左侧缺失）",
+    "source_only": "仅左侧基础表存在（右侧基础表缺失）",
+    "target_only": "仅右侧基础表存在（左侧基础表缺失）",
     "matched_with_diff": "金额或字段存在差异",
     "value_mismatch": "金额或字段存在差异",
     "unknown": "未知异常",
@@ -69,6 +69,121 @@ def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: s
     return _ANOMALY_TYPE_LABELS.get(atype, str(anomaly_type or "未知异常"))
 
 
+def _replace_generic_side_labels(text: str, *, left_name: str = "", right_name: str = "") -> str:
+    value = str(text or "")
+    left = str(left_name or "").strip()
+    right = str(right_name or "").strip()
+    if left:
+        for token in ("源数据", "源文件", "左侧数据", "左侧基础表"):
+            value = value.replace(token, left)
+    if right:
+        for token in ("目标数据", "目标文件", "右侧数据", "右侧基础表"):
+            value = value.replace(token, right)
+    return value
+
+
+def _source_display_name(src: dict[str, Any]) -> str:
+    for key in ("dataset_name", "business_name", "display_name", "name"):
+        value = str(src.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("dataset_code", "resource_key", "table_name", "table"):
+        value = str(src.get(key) or "").strip()
+        if value and not _looks_like_physical_table_name(value):
+            return value
+    return ""
+
+
+def _looks_like_physical_table_name(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "." in text:
+        return True
+    return text.startswith(("ods_", "dwd_", "dws_", "dim_", "fact_"))
+
+
+def _source_identity_values(src: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    query = _safe_dict(src.get("query"))
+    for key in ("dataset_id", "id", "table_name", "resource_key", "dataset_code", "table"):
+        value = str(src.get(key) or "").strip()
+        if value:
+            values.add(value)
+    for key in ("dataset_id", "resource_key"):
+        value = str(query.get(key) or "").strip()
+        if value:
+            values.add(value)
+    return values
+
+
+def _flatten_input_plan_entries_from_meta(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
+    input_plan = _safe_dict(scheme_meta.get("input_plan_json"))
+    if not input_plan:
+        return []
+    plans = [item for item in _safe_list(input_plan.get("plans")) if isinstance(item, dict)]
+    if not plans and isinstance(input_plan.get("datasets"), list):
+        plans = [input_plan]
+
+    entries: list[dict[str, Any]] = []
+    for raw_plan in plans:
+        plan = _safe_dict(raw_plan)
+        side = str(plan.get("side") or "").strip().lower()
+        target_table = str(plan.get("target_table") or "").strip()
+        for raw_dataset in _safe_list(plan.get("datasets")):
+            if not isinstance(raw_dataset, dict):
+                continue
+            entry = dict(raw_dataset)
+            if side:
+                entry.setdefault("side", side)
+            if target_table:
+                entry.setdefault("target_table", target_table)
+            entries.append(entry)
+    return entries
+
+
+def _base_source_names_from_scheme_meta(scheme_meta: dict[str, Any]) -> tuple[str, str]:
+    entries = _flatten_input_plan_entries_from_meta(scheme_meta)
+    sources_by_side = {
+        "left": [s for s in _safe_list(scheme_meta.get("left_sources")) if isinstance(s, dict)],
+        "right": [s for s in _safe_list(scheme_meta.get("right_sources")) if isinstance(s, dict)],
+    }
+    result: dict[str, str] = {}
+    for side in ("left", "right"):
+        base_entries = [
+            entry for entry in entries
+            if str(entry.get("side") or "").strip().lower() == side
+            and str(entry.get("read_mode") or "base").strip().lower() == "base"
+        ]
+        if not base_entries:
+            base_entries = [
+                entry for entry in entries
+                if str(entry.get("target_table") or "").strip() == f"{side}_recon_ready"
+                and str(entry.get("read_mode") or "base").strip().lower() == "base"
+            ]
+        for entry in base_entries:
+            entry_ids = _source_identity_values(entry)
+            matched_source = next(
+                (
+                    source for source in sources_by_side[side]
+                    if entry_ids and entry_ids & _source_identity_values(source)
+                ),
+                {},
+            )
+            name = _source_display_name(matched_source) if matched_source else _source_display_name(entry)
+            if name:
+                result[side] = name
+                break
+
+    def _first_source_name(side: str) -> str:
+        return next(
+            (_source_display_name(source) for source in sources_by_side[side] if _source_display_name(source)),
+            "",
+        )
+
+    return result.get("left") or _first_source_name("left"), result.get("right") or _first_source_name("right")
+
+
 def _build_anomaly_summary(
     anomaly_type: str,
     item: dict[str, Any],
@@ -77,8 +192,8 @@ def _build_anomaly_summary(
     right_name: str = "",
 ) -> str:
     """Build a finance-friendly one-line summary for an anomaly item."""
-    src = str(left_name or "源数据").strip()
-    tgt = str(right_name or "目标数据").strip()
+    src = str(left_name or "左侧基础表").strip()
+    tgt = str(right_name or "右侧基础表").strip()
     atype = str(anomaly_type or "").strip()
     _type_labels: dict[str, str] = {
         "source_only": f"仅 {src} 存在（{tgt} 缺失）",
@@ -111,10 +226,10 @@ def _build_anomaly_summary(
         if field and val_str:
             key_parts.append(f"{field}={val_str}")
 
-    # 差异明细（source_value/target_value 可能为 null，从 raw_record 兜底）
+    # 对比字段：差异记录显示两侧值；单侧存在记录显示现有侧的字段值。
     compare_values = [c for c in list(item.get("compare_values") or []) if isinstance(c, dict)]
     diff_parts: list[str] = []
-    if atype in {"matched_with_diff", "value_mismatch"} and compare_values:
+    if compare_values:
         for cv in compare_values[:3]:
             name = str(cv.get("name") or cv.get("source_field") or "").strip()
             src_field = str(cv.get("source_field") or "").strip()
@@ -126,13 +241,24 @@ def _build_anomaly_summary(
                 left_val = _raw_val(src_field, "left") or None
             if right_val is None and tgt_field:
                 right_val = _raw_val(tgt_field, "right") or None
-            if not name or left_val is None or right_val is None:
+            if not name:
                 continue
-            diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
-            part = f"{name}：{src} {left_val} / {tgt} {right_val}"
-            if diff_str:
-                part += f"（{diff_str}）"
-            diff_parts.append(part)
+            if atype == "source_only":
+                if left_val is not None and str(left_val).strip() not in {"", "None", "null"}:
+                    diff_parts.append(f"{name}：{src} {left_val}")
+                continue
+            if atype == "target_only":
+                if right_val is not None and str(right_val).strip() not in {"", "None", "null"}:
+                    diff_parts.append(f"{name}：{tgt} {right_val}")
+                continue
+            if atype in {"matched_with_diff", "value_mismatch"}:
+                if left_val is None or right_val is None:
+                    continue
+                diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
+                part = f"{name}：{src} {left_val} / {tgt} {right_val}"
+                if diff_str:
+                    part += f"（{diff_str}）"
+                diff_parts.append(part)
 
     parts: list[str] = []
     if key_parts:
@@ -380,7 +506,7 @@ def _build_exception_payloads(task: dict[str, Any], run: dict[str, Any], anomaly
                 "auto_run_id": auto_run_id,
                 "anomaly_key": str(item.get("item_id") or item.get("anomaly_key") or ""),
                 "anomaly_type": str(item.get("anomaly_type") or "unknown"),
-                "summary": str(item.get("summary") or "") or _build_anomaly_summary(str(item.get("anomaly_type") or "unknown"), item),
+                "summary": _build_anomaly_summary(str(item.get("anomaly_type") or "unknown"), item),
                 "detail_json": item,
                 "owner_name": str(owner.get("name") or ""),
                 "owner_identifier": str(owner.get("identifier") or ""),
@@ -513,6 +639,8 @@ _COMMON_FIELD_LABELS: dict[str, str] = {
 def _extract_todo_key_hint(
     exception: dict[str, Any],
     field_labels: dict[str, str] | None = None,
+    left_name: str = "",
+    right_name: str = "",
 ) -> str:
     """Extract a short key identifier from the exception for use in the todo title."""
     fl = {**_COMMON_FIELD_LABELS, **(field_labels or {})}
@@ -542,9 +670,13 @@ def _extract_todo_key_hint(
     # Fallback: extract from summary text (after first ：, before double-space)
     summary = str(exception.get("summary") or "")
     if "：" in summary:
-        after_colon = summary.split("：", 1)[1].strip()
+        after_colon = _replace_generic_side_labels(
+            summary.split("：", 1)[1].strip(),
+            left_name=left_name,
+            right_name=right_name,
+        )
         key_part = after_colon.split("  ")[0].strip()
-        if key_part and len(key_part) <= 60:
+        if key_part and len(key_part) <= 60 and "public." not in key_part:
             return key_part
     return ""
 
@@ -562,9 +694,13 @@ def _compose_reminder_text(
     run_ctx = run.get("run_context_json") if isinstance(run.get("run_context_json"), dict) else {}
     biz_date = str(run.get("biz_date") or run_ctx.get("biz_date") or "")
     anomaly_label = _label_anomaly_type(exception.get("anomaly_type") or "未知", left_name=left_name, right_name=right_name)
-    summary = str(exception.get("summary") or "详见对账结果")
+    summary = _replace_generic_side_labels(
+        str(exception.get("summary") or "详见对账结果"),
+        left_name=left_name,
+        right_name=right_name,
+    )
 
-    key_hint = _extract_todo_key_hint(exception)
+    key_hint = _extract_todo_key_hint(exception, left_name=left_name, right_name=right_name)
     if key_hint:
         todo_title = f"【对账异常】{anomaly_label} | {key_hint}"
     else:
@@ -576,7 +712,6 @@ def _compose_reminder_text(
     lines = [f"任务：{task_name}"]
     if biz_date:
         lines.append(f"业务日期：{biz_date}")
-    lines.append(f"异常类型：{anomaly_label}")
     lines.append(f"异常详情：{summary}")
     lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
     return todo_title, bot_title, "\n\n".join(lines)
@@ -972,17 +1107,7 @@ async def send_exception_reminder(
         scheme_result = await execution_scheme_get(auth_token, scheme_code=scheme_code)
         scheme = _safe_dict(scheme_result.get("scheme"))
         meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
-        def _first_name(sources: list) -> str:
-            for src in sources:
-                if not isinstance(src, dict):
-                    continue
-                for key in ("dataset_name", "business_name", "display_name", "name"):
-                    val = str(src.get(key) or "").strip()
-                    if val:
-                        return val
-            return ""
-        left_name = _first_name(_safe_list(meta.get("left_sources")))
-        right_name = _first_name(_safe_list(meta.get("right_sources")))
+        left_name, right_name = _base_source_names_from_scheme_meta(meta)
 
     owner_name = str(exception.get("owner_name") or "").strip()
     owner_identifier = str(exception.get("owner_identifier") or "").strip()
@@ -1371,22 +1496,21 @@ async def send_execution_run_exception_reminder(
 
     # Extract dataset display names for finance-friendly labels
     scheme_meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
-    def _first_name_local(sources: list) -> str:
-        for src in sources:
-            if not isinstance(src, dict):
-                continue
-            for key in ("dataset_name", "business_name", "display_name", "name"):
-                val = str(src.get(key) or "").strip()
-                if val:
-                    return val
-        return ""
-    left_name = _first_name_local(_safe_list(scheme_meta.get("left_sources")))
-    right_name = _first_name_local(_safe_list(scheme_meta.get("right_sources")))
+    left_name, right_name = _base_source_names_from_scheme_meta(scheme_meta)
     anomaly_type = str(exception.get("anomaly_type") or exception.get("exception_type") or "未知")
     anomaly_label = _label_anomaly_type(anomaly_type, left_name=left_name, right_name=right_name)
-    summary = str(exception.get("summary") or "详见对账结果")
+    summary = _replace_generic_side_labels(
+        str(exception.get("summary") or "详见对账结果"),
+        left_name=left_name,
+        right_name=right_name,
+    )
 
-    key_hint = _extract_todo_key_hint(exception, field_labels=dict(_COMMON_FIELD_LABELS))
+    key_hint = _extract_todo_key_hint(
+        exception,
+        field_labels=dict(_COMMON_FIELD_LABELS),
+        left_name=left_name,
+        right_name=right_name,
+    )
     todo_title = f"【对账异常】{anomaly_label} | {key_hint}" if key_hint else f"【对账异常】{anomaly_label}"
     if biz_date:
         todo_title += f" | {biz_date}"
@@ -1398,7 +1522,6 @@ async def send_execution_run_exception_reminder(
             f"任务：{plan_name}",
             f"业务日期：{biz_date}" if biz_date else "",
             f"对账方案：{scheme_name}" if scheme_name else "",
-            f"异常类型：{anomaly_label}",
             f"异常详情：{summary}",
             "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
         ]

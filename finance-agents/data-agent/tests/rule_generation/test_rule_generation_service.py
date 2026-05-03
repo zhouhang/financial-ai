@@ -56,6 +56,25 @@ def _contains_value_type(value: object, expected_type: str) -> bool:
     return False
 
 
+def test_understanding_prompt_treats_role_fields_as_outputs_generically() -> None:
+    prompt = build_understanding_prompt(
+        {
+            "rule_text": (
+                "订单ID作为匹配字段\n"
+                "金额作为对比字段\n"
+                "店铺名称只取武汉搜卡科技有限公司的数据"
+            ),
+            "target_table": "left_recon_ready",
+            "sources": [_source_payload()],
+        }
+    )
+
+    assert "作为/用于/充当" in prompt
+    assert "业务用途、核对用途、识别用途、比对用途、统计用途或后续规则用途" in prompt
+    assert "必须同时建 source_references 和 output_specs" in prompt
+    assert "纯过滤条件、纯排序条件、纯关联键" in prompt
+
+
 def _source_payload() -> dict[str, object]:
     return {
         "id": "dataset_1",

@@ -117,8 +117,10 @@ def _apply_collection_record_scalar_filter(df: pd.DataFrame, field_name: str, va
     exact_mask = series.map(_normalize_filter_token) == expected
     if isinstance(value, str) and _DATE_ONLY_RE.fullmatch(expected):
         token_series = series.map(_normalize_filter_token)
+        compact_expected = expected.replace("-", "")
         date_prefix_mask = (
             (token_series == expected)
+            | (token_series == compact_expected)
             | token_series.str.startswith(f"{expected} ", na=False)
             | token_series.str.startswith(f"{expected}T", na=False)
         )

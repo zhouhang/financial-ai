@@ -143,14 +143,16 @@ def create_recon_tools() -> list[Tool]:
                         "description": (
                             "统一的输入列表，每个元素通过 input_type 指定来源。"
                             "input_type=file 时需提供 file_path；"
-                            "input_type=dataset 时需提供 dataset_ref.source_type/source_key/query。"
+                            "input_type=dataset 时需提供 dataset_ref.source_type/source_key/query；"
+                            "input_type=memory 时需提供 proc 内存结果 memory_ref。"
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "table_name": {"type": "string"},
-                                "input_type": {"type": "string", "enum": ["file", "dataset"]},
+                                "input_type": {"type": "string", "enum": ["file", "dataset", "memory"]},
                                 "file_path": {"type": "string"},
+                                "memory_ref": {"type": "string"},
                                 "dataset_ref": {
                                     "type": "object",
                                     "description": (
@@ -250,7 +252,7 @@ def _normalize_validated_inputs(
             continue
         table_name = str(item.get("table_name") or "").strip()
         input_type = str(item.get("input_type") or "").strip().lower()
-        if not table_name or input_type not in {"file", "dataset"}:
+        if not table_name or input_type not in {"file", "dataset", "memory"}:
             continue
         if input_type == "file":
             file_path = str(item.get("file_path") or "").strip()
@@ -261,6 +263,20 @@ def _normalize_validated_inputs(
                 "input_type": "file",
                 "file_path": file_path,
             })
+            continue
+        if input_type == "memory":
+            memory_ref = str(item.get("memory_ref") or "").strip()
+            if not memory_ref:
+                return [], f"table_name={table_name} 的 memory_ref 不能为空"
+            memory_input = {
+                "table_name": table_name,
+                "input_type": "memory",
+                "memory_ref": memory_ref,
+            }
+            fallback_file_path = str(item.get("fallback_file_path") or "").strip()
+            if fallback_file_path:
+                memory_input["fallback_file_path"] = fallback_file_path
+            normalized.append(memory_input)
             continue
         dataset_ref = item.get("dataset_ref")
         if not isinstance(dataset_ref, dict):
@@ -343,11 +359,32 @@ def _find_input_by_identification(
 
 
 def _resolve_input_to_df(input_item: dict[str, Any], rule_id: str, table_name: str) -> tuple[pd.DataFrame, str]:
-    """将 file / dataset 输入统一解析为 DataFrame。"""
+    """将 file / dataset / memory 输入统一解析为 DataFrame。"""
     input_type = str(input_item.get("input_type") or "").strip().lower()
     if input_type == "file":
         file_path = str(input_item.get("file_path") or "").strip()
         return _read_file_as_df(file_path), file_path
+    if input_type == "memory":
+        memory_ref = str(input_item.get("memory_ref") or "").strip()
+        if not memory_ref:
+            raise ValueError(f"[{rule_id}] memory_ref 不能为空")
+        from proc.mcp_server.steps_runtime import resolve_proc_memory_frame
+
+        try:
+            df, meta = resolve_proc_memory_frame(memory_ref)
+            display_name = str(meta.get("target_table") or table_name or memory_ref)
+            return df, display_name
+        except (KeyError, TypeError) as exc:
+            fallback_file_path = str(input_item.get("fallback_file_path") or "").strip()
+            if fallback_file_path:
+                logger.warning(
+                    "[recon] [%s] proc 内存结果不可用，回退读取留档文件: table=%s error=%s",
+                    rule_id,
+                    table_name,
+                    exc,
+                )
+                return _read_file_as_df(fallback_file_path), fallback_file_path
+            raise
     if input_type == "dataset":
         dataset_ref = input_item.get("dataset_ref")
         if not isinstance(dataset_ref, dict):
@@ -382,6 +419,13 @@ def _summarize_input_for_log(input_item: dict[str, Any]) -> dict[str, Any]:
             "source_type": source_type,
             "has_source_key": bool(source_key),
             "has_query": has_query,
+        }
+    if input_type == "memory":
+        return {
+            "input_type": "memory",
+            "table_name": table_name,
+            "has_memory_ref": bool(str(input_item.get("memory_ref") or "").strip()),
+            "has_fallback_file": bool(str(input_item.get("fallback_file_path") or "").strip()),
         }
     return {
         "input_type": input_type or "unknown",
@@ -1567,6 +1611,6 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                 enc = chardet.detect(f.read()).get("encoding", "gbk")
             return pd.read_csv(path, encoding=enc)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")

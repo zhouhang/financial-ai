@@ -401,22 +401,24 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     rule_data: dict = validation_result.get("rule", {})
 
     if rule_data.get("steps"):
-        from proc.mcp_server.steps_runtime import execute_steps_rule
+        from proc.mcp_server.steps_runtime import execute_steps_rule_with_frames, register_proc_frame_outputs
 
         try:
-            generated_files = execute_steps_rule(
+            generated_files, frame_outputs = execute_steps_rule_with_frames(
                 rule_code=rule_code,
                 rule_data=rule_data,
                 validated_files=uploaded_files,
                 output_dir=output_dir,
                 preloaded_frames=preloaded_frames if preloaded_frames else None,
             )
+            memory_outputs = register_proc_frame_outputs(rule_code=rule_code, frame_outputs=frame_outputs)
         except Exception as e:
             logger.error(f"[proc_rule] steps 规则执行失败: {e}", exc_info=True)
             return {
                 "success": False,
                 "rule_code": rule_code,
                 "generated_files": [],
+                "memory_outputs": [],
                 "generated_count": 0,
                 "errors": [str(e)],
                 "message": f"steps 规则执行失败: {e}",
@@ -452,6 +454,7 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             "success": True,
             "rule_code": rule_code,
             "generated_files": generated_files,
+            "memory_outputs": memory_outputs,
             "generated_count": len(generated_files),
             "errors": [],
             "message": f"成功生成 {len(generated_files)} 个文件",
@@ -468,7 +471,9 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             tmp = tempfile.NamedTemporaryFile(
                 suffix=".xlsx", prefix=f"{tname}_", dir=output_dir, delete=False
             )
-            df.to_excel(tmp.name, index=False, engine="openpyxl")
+            from proc.mcp_server.steps_runtime import _write_excel
+
+            _write_excel(df, Path(tmp.name))
             tmp.close()
             uploaded_files.append({
                 "file_name": Path(tmp.name).name,
@@ -780,7 +785,7 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                 enc = chardet.detect(f.read()).get("encoding", "gbk")
             return pd.read_csv(path, encoding=enc)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 
@@ -1537,14 +1542,20 @@ def _write_excel(df: pd.DataFrame, field_mappings: list[dict], output_path: str)
         if fm.get("is_computed")
     }
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sheet1")
-        if computed_cols:
-            from openpyxl.styles import PatternFill
-            ws = writer.sheets["Sheet1"]
-            light_yellow = PatternFill(start_color="FFFFD700", end_color="FFFFD700", fill_type="solid")
-            header_row = {cell.value: cell.column for cell in ws[1]}
-            for col_name, col_idx in header_row.items():
-                if col_name in computed_cols:
-                    for row_idx in range(2, ws.max_row + 1):
-                        ws.cell(row=row_idx, column=col_idx).fill = light_yellow
+    from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill
+    from proc.mcp_server.steps_runtime import _write_excel as _write_steps_excel
+
+    _write_steps_excel(df, Path(output_path))
+    if not computed_cols:
+        return
+
+    workbook = load_workbook(output_path)
+    ws = workbook["Sheet1"]
+    light_yellow = PatternFill(start_color="FFFFD700", end_color="FFFFD700", fill_type="solid")
+    header_row = {cell.value: cell.column for cell in ws[1]}
+    for col_name, col_idx in header_row.items():
+        if col_name in computed_cols:
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = light_yellow
+    workbook.save(output_path)

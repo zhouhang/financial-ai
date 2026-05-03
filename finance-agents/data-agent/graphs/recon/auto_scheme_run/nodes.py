@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import uuid
+from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Any
 
+import psycopg2
+import psycopg2.extras
+
+from config import DATABASE_URL
 from graphs.recon.binding_date_fields import normalize_binding_query_date_field
 from models import AgentState
 from services.notifications import get_notification_adapter
@@ -15,6 +22,7 @@ from tools.mcp_client import (
     call_mcp_tool,
     data_source_get,
     data_source_get_dataset,
+    data_source_get_sync_job,
     data_source_list_collection_records,
     data_source_trigger_dataset_collection,
     execution_run_exception_get,
@@ -36,12 +44,14 @@ _FAILED_STAGE_LABELS: dict[str, str] = {
 
 
 _ANOMALY_TYPE_LABELS: dict[str, str] = {
-    "source_only": "仅源数据存在（目标数据缺失）",
-    "target_only": "仅目标数据存在（源数据缺失）",
+    "source_only": "仅左侧基础表存在（右侧基础表缺失）",
+    "target_only": "仅右侧基础表存在（左侧基础表缺失）",
     "matched_with_diff": "金额或字段存在差异",
     "value_mismatch": "金额或字段存在差异",
     "unknown": "未知异常",
 }
+
+_DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
 
 
 def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
@@ -64,6 +74,19 @@ def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: s
     return _ANOMALY_TYPE_LABELS.get(atype, str(anomaly_type or "未知异常"))
 
 
+def _replace_generic_side_labels(text: str, *, left_name: str = "", right_name: str = "") -> str:
+    value = str(text or "")
+    left = str(left_name or "").strip()
+    right = str(right_name or "").strip()
+    if left:
+        for token in ("源数据", "源文件", "左侧数据", "左侧基础表"):
+            value = value.replace(token, left)
+    if right:
+        for token in ("目标数据", "目标文件", "右侧数据", "右侧基础表"):
+            value = value.replace(token, right)
+    return value
+
+
 def _build_anomaly_summary(
     anomaly_type: str,
     item: dict[str, Any],
@@ -73,8 +96,8 @@ def _build_anomaly_summary(
     field_labels: dict[str, str] | None = None,
 ) -> str:
     """Build a finance-friendly one-line summary for an anomaly item."""
-    src = str(left_name or "左侧数据").strip()
-    tgt = str(right_name or "右侧数据").strip()
+    src = str(left_name or "左侧基础表").strip()
+    tgt = str(right_name or "右侧基础表").strip()
     atype = str(anomaly_type or "").strip()
     fl = field_labels or {}
 
@@ -100,23 +123,34 @@ def _build_anomaly_summary(
         if display_field and value is not None and str(value).strip():
             key_parts.append(f"{display_field}={value}")
 
-    # ── 差异明细（matched_with_diff / value_mismatch 专用）───────────────────────
+    # ── 对比字段：差异记录显示两侧值；单侧存在记录显示现有侧的字段值 ────────────────
     compare_values = [c for c in _safe_list(item.get("compare_values")) if isinstance(c, dict)]
     diff_parts: list[str] = []
-    if atype in {"matched_with_diff", "value_mismatch"} and compare_values:
+    if compare_values:
         for cv in compare_values[:3]:
             raw_field = str(cv.get("source_field") or "").strip()
             name = str(cv.get("name") or fl.get(raw_field) or raw_field).strip()
             left_val = cv.get("source_value")
             right_val = cv.get("target_value")
             diff_val = cv.get("diff_value")
-            if not name or left_val is None or right_val is None:
+            if not name:
                 continue
-            diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
-            part = f"{name}：{src} {left_val} / {tgt} {right_val}"
-            if diff_str:
-                part += f"（{diff_str}）"
-            diff_parts.append(part)
+            if atype == "source_only":
+                if left_val is not None and str(left_val).strip() not in {"", "None", "null"}:
+                    diff_parts.append(f"{name}：{src} {left_val}")
+                continue
+            if atype == "target_only":
+                if right_val is not None and str(right_val).strip() not in {"", "None", "null"}:
+                    diff_parts.append(f"{name}：{tgt} {right_val}")
+                continue
+            if atype in {"matched_with_diff", "value_mismatch"}:
+                if left_val is None or right_val is None:
+                    continue
+                diff_str = f"差额 {diff_val}" if diff_val is not None and str(diff_val).strip() not in {"", "0", "0.0"} else ""
+                part = f"{name}：{src} {left_val} / {tgt} {right_val}"
+                if diff_str:
+                    part += f"（{diff_str}）"
+                diff_parts.append(part)
 
     parts: list[str] = []
     if key_parts:
@@ -133,14 +167,77 @@ def _source_display_name(src: dict[str, Any]) -> str:
     """Extract the most human-friendly name from a source/binding dict.
 
     Checks in priority order: dataset_name → business_name → display_name → name → dataset_code.
-    Skips raw table identifiers that look like DB table paths (contain dots or underscores only).
+    Skips raw table identifiers so finance-facing messages do not expose physical table names.
     """
     for key in ("dataset_name", "business_name", "display_name", "name"):
         val = str(src.get(key) or "").strip()
         if val:
             return val
-    # Last resort: dataset_code / resource_key — only if no better name found
-    return str(src.get("dataset_code") or src.get("resource_key") or "").strip()
+    for key in ("dataset_code", "resource_key", "table_name", "table"):
+        val = str(src.get(key) or "").strip()
+        if val and not _looks_like_physical_table_name(val):
+            return val
+    return ""
+
+
+def _looks_like_physical_table_name(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "." in text:
+        return True
+    return text.startswith(("ods_", "dwd_", "dws_", "dim_", "fact_"))
+
+
+def _source_identity_values(src: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    query = _safe_dict(src.get("query"))
+    for key in ("dataset_id", "id", "table_name", "resource_key", "dataset_code", "table"):
+        value = str(src.get(key) or "").strip()
+        if value:
+            values.add(value)
+    for key in ("dataset_id", "resource_key"):
+        value = str(query.get(key) or "").strip()
+        if value:
+            values.add(value)
+    return values
+
+
+def _base_source_names_from_input_plan(scheme_meta: dict[str, Any]) -> tuple[str, str]:
+    entries = _flatten_input_plan_entries(scheme_meta)
+    if not entries:
+        return "", ""
+    sources_by_side = {
+        "left": [s for s in _safe_list(scheme_meta.get("left_sources")) if isinstance(s, dict)],
+        "right": [s for s in _safe_list(scheme_meta.get("right_sources")) if isinstance(s, dict)],
+    }
+    result: dict[str, str] = {}
+    for side in ("left", "right"):
+        base_entries = [
+            entry for entry in entries
+            if str(entry.get("side") or "").strip().lower() == side
+            and str(entry.get("read_mode") or "base").strip().lower() == "base"
+        ]
+        if not base_entries:
+            base_entries = [
+                entry for entry in entries
+                if str(entry.get("target_table") or "").strip() == f"{side}_recon_ready"
+                and str(entry.get("read_mode") or "base").strip().lower() == "base"
+            ]
+        for entry in base_entries:
+            entry_ids = _source_identity_values(entry)
+            matched_source = next(
+                (
+                    source for source in sources_by_side[side]
+                    if entry_ids and entry_ids & _source_identity_values(source)
+                ),
+                {},
+            )
+            name = _source_display_name(matched_source) if matched_source else _source_display_name(entry)
+            if name:
+                result[side] = name
+                break
+    return result.get("left", ""), result.get("right", "")
 
 
 def _build_field_label_map(scheme_meta: dict[str, Any]) -> dict[str, str]:
@@ -195,11 +292,20 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
     """Return (left_name, right_name) from ctx for use in anomaly summaries.
 
     Priority:
-    1. scheme_meta_json.left_sources / right_sources (most explicit)
-    2. ready_collections binding side + dataset_name
-    3. plan_input_bindings side + dataset_name
+    1. ready_collections binding dataset_name (runtime hydrated, most reliable)
+    2. plan_input_bindings dataset_name
+    3. scheme_meta_json input_plan base source / left_sources / right_sources
     4. ("", "") — caller falls back to generic labels
     """
+    def _normalize_side(value: Any, target_table: Any = "") -> str:
+        text = str(value or "").strip().lower()
+        target = str(target_table or "").strip().lower()
+        if text == "left" or text.startswith("left_") or target == "left_recon_ready":
+            return "left"
+        if text == "right" or text.startswith("right_") or target == "right_recon_ready":
+            return "right"
+        return ""
+
     def _first_name(sources: list[Any]) -> str:
         for src in sources:
             if not isinstance(src, dict):
@@ -209,11 +315,50 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
                 return name
         return ""
 
-    # 1. scheme_meta_json
+    def _collection_items() -> list[dict[str, Any]]:
+        items = [v for v in _safe_list(ctx.get("ready_collections")) if isinstance(v, dict)]
+        if items:
+            return items
+        source_collection_json = _safe_dict(ctx.get("source_collection_json"))
+        return [v for v in _safe_list(source_collection_json.get("collections")) if isinstance(v, dict)]
+
+    # 1. ready_collections / source_collection_json binding side + dataset_name
+    side_map: dict[str, str] = {}
+    for collection in _collection_items():
+        binding = _safe_dict(collection.get("binding"))
+        side = _normalize_side(
+            binding.get("side") or binding.get("role_code"),
+            binding.get("input_plan_target_table") or binding.get("target_table"),
+        )
+        name = _source_display_name(binding)
+        if side in {"left", "right"} and name and side not in side_map:
+            side_map[side] = name
+    if "left" in side_map or "right" in side_map:
+        return side_map.get("left", ""), side_map.get("right", "")
+
+    # 2. plan_input_bindings
+    for binding in _safe_list(ctx.get("plan_input_bindings")):
+        if not isinstance(binding, dict):
+            continue
+        side = _normalize_side(
+            binding.get("side") or binding.get("role_code"),
+            binding.get("input_plan_target_table") or binding.get("target_table"),
+        )
+        name = _source_display_name(binding)
+        if side in {"left", "right"} and name and side not in side_map:
+            side_map[side] = name
+    if "left" in side_map or "right" in side_map:
+        return side_map.get("left", ""), side_map.get("right", "")
+
+    # 3. scheme_meta_json
     scheme = _safe_dict(ctx.get("scheme"))
     scheme_meta = _safe_dict(
         scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta")
     )
+    base_left, base_right = _base_source_names_from_input_plan(scheme_meta)
+    if base_left or base_right:
+        return base_left, base_right
+
     left_sources = [s for s in _safe_list(scheme_meta.get("left_sources")) if isinstance(s, dict)]
     right_sources = [s for s in _safe_list(scheme_meta.get("right_sources")) if isinstance(s, dict)]
     if left_sources or right_sources:
@@ -221,30 +366,6 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
         right = _first_name(right_sources)
         if left or right:
             return left, right
-
-    # 2. ready_collections binding side + dataset_name
-    side_map: dict[str, str] = {}
-    for collection in _safe_list(ctx.get("ready_collections")):
-        if not isinstance(collection, dict):
-            continue
-        binding = _safe_dict(collection.get("binding"))
-        side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-        name = _source_display_name(binding)
-        if side in {"left", "right"} and name and side not in side_map:
-            side_map[side] = name
-    if "left" in side_map or "right" in side_map:
-        return side_map.get("left", ""), side_map.get("right", "")
-
-    # 3. plan_input_bindings
-    for binding in _safe_list(ctx.get("plan_input_bindings")):
-        if not isinstance(binding, dict):
-            continue
-        side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-        name = _source_display_name(binding)
-        if side in {"left", "right"} and name and side not in side_map:
-            side_map[side] = name
-    if "left" in side_map or "right" in side_map:
-        return side_map.get("left", ""), side_map.get("right", "")
 
     return "", ""
 
@@ -275,6 +396,13 @@ def _safe_list(value: Any) -> list[Any]:
 
 def _merge_feedback(existing: Any, patch: Any) -> dict[str, Any]:
     return {**_safe_dict(existing), **_safe_dict(patch)}
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
@@ -658,6 +786,110 @@ def _should_trigger_collection_for_binding(binding: dict[str, Any]) -> bool:
     return True
 
 
+def _sync_job_id(job: Any) -> str:
+    job_dict = _safe_dict(job)
+    return str(job_dict.get("sync_job_id") or job_dict.get("id") or "").strip()
+
+
+def _sync_job_status(job: Any) -> str:
+    job_dict = _safe_dict(job)
+    return str(job_dict.get("status") or job_dict.get("job_status") or "").strip().lower()
+
+
+def _sync_job_error(job: Any) -> str:
+    job_dict = _safe_dict(job)
+    return str(
+        job_dict.get("error_message")
+        or job_dict.get("last_error_message")
+        or job_dict.get("error")
+        or ""
+    ).strip()
+
+
+async def _wait_dataset_collection_job(
+    *,
+    auth_token: str,
+    sync_job_id: str,
+    timeout_seconds: int = 300,
+    poll_interval_seconds: float = 2.0,
+) -> dict[str, Any]:
+    if not sync_job_id:
+        return {"success": False, "error": "采集任务未返回 sync_job_id，无法确认采集结果"}
+
+    deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 1)
+    last_job: dict[str, Any] = {}
+    last_error = ""
+    while True:
+        result = await data_source_get_sync_job(auth_token, sync_job_id, mode="real")
+        if bool(result.get("success")):
+            last_job = _safe_dict(result.get("job"))
+            status = _sync_job_status(last_job)
+            if status in {"success", "succeeded", "completed", "done"}:
+                return {"success": True, "job": last_job}
+            if status in {"failed", "error", "cancelled", "canceled"}:
+                return {
+                    "success": False,
+                    "job": last_job,
+                    "error": _sync_job_error(last_job) or "采集任务执行失败",
+                }
+        else:
+            last_error = str(result.get("error") or result.get("detail") or "").strip()
+
+        if asyncio.get_running_loop().time() >= deadline:
+            return {
+                "success": False,
+                "job": last_job,
+                "error": last_error or "采集任务执行超时，请稍后重试",
+            }
+        await asyncio.sleep(poll_interval_seconds)
+
+
+async def _trigger_and_wait_collection(
+    *,
+    auth_token: str,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+    trigger_mode: str,
+) -> dict[str, Any]:
+    collect_result = await data_source_trigger_dataset_collection(
+        auth_token,
+        source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        trigger_mode=trigger_mode,
+        background=True,
+        mode="real",
+    )
+    if not bool(collect_result.get("success")):
+        return collect_result
+
+    job = _safe_dict(collect_result.get("job"))
+    status = _sync_job_status(job)
+    if not bool(collect_result.get("queued")) and status not in {"queued", "pending", "running"}:
+        return collect_result
+
+    wait_result = await _wait_dataset_collection_job(
+        auth_token=auth_token,
+        sync_job_id=_sync_job_id(job),
+    )
+    if bool(wait_result.get("success")):
+        return {
+            **collect_result,
+            "job": _safe_dict(wait_result.get("job")) or job,
+            "queued": bool(collect_result.get("queued")),
+        }
+    return {
+        **collect_result,
+        "success": False,
+        "job": _safe_dict(wait_result.get("job")) or job,
+        "error": str(wait_result.get("error") or "采集任务执行失败"),
+        "queued": bool(collect_result.get("queued")),
+    }
+
+
 async def _hydrate_binding_source_meta(
     *,
     auth_token: str,
@@ -751,15 +983,16 @@ def _build_recon_inputs_from_ready_collections(
 
         raw_query = _safe_dict(binding.get("query"))
         filters = _safe_dict(raw_query.get("filters"))
-        # Keep simple and explicit: bind biz_date to configured date field when provided.
         biz_date_field = str(
             raw_query.get("biz_date_field")
             or raw_query.get("date_field")
             or ""
         ).strip()
-        if biz_date_field and _binding_apply_biz_date_filter(binding):
-            filters[biz_date_field] = biz_date
-            query["date_field"] = biz_date_field
+        if biz_date and _binding_apply_biz_date_filter(binding):
+            query["biz_date"] = biz_date
+            if biz_date_field:
+                filters[biz_date_field] = biz_date
+                query["date_field"] = biz_date_field
         if filters:
             query["filters"] = filters
 
@@ -1226,14 +1459,13 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
         if should_collect_first and _should_trigger_collection_for_binding(binding):
-            collect_result = await data_source_trigger_dataset_collection(
-                auth_token,
-                source_id,
+            collect_result = await _trigger_and_wait_collection(
+                auth_token=auth_token,
+                source_id=source_id,
                 dataset_id=str(binding.get("dataset_id") or "").strip(),
                 resource_key=_get_binding_resource_key(binding),
                 biz_date=biz_date,
                 trigger_mode=collection_trigger_mode,
-                mode="real",
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(
@@ -1265,6 +1497,7 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             "dataset_id": str(result.get("dataset_id") or binding.get("dataset_id") or ""),
             "resource_key": str(result.get("resource_key") or _get_binding_resource_key(binding)),
             "record_count": record_count or len(records),
+            "sample_records": records[:1],
         }
         if bool(result.get("success")) and not _is_required_collection_empty(binding, collection):
             ready_binding = {**binding, "dataset_source_type": "collection_records"}
@@ -1439,14 +1672,111 @@ def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str,
     return owner_name, owner_identifier, owner_contact_json, owner_available
 
 
+def _lookup_local_user(user_id: str) -> dict[str, Any]:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        return {}
+    try:
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, username, email, phone, role, company_id, department_id
+                    FROM users
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (normalized,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as exc:
+        logger.warning("[auto_scheme_run] 查询发起人用户失败 user_id=%s err=%s", normalized, exc)
+        return {}
+
+
+def _resolve_run_initiator(ctx: dict[str, Any]) -> dict[str, Any]:
+    run_context = _safe_dict(ctx.get("run_context"))
+    trigger_user = _safe_dict(run_context.get("trigger_user"))
+    if trigger_user:
+        user_id = str(trigger_user.get("user_id") or trigger_user.get("id") or "").strip()
+        username = str(trigger_user.get("username") or "").strip()
+        raw_contact = _safe_dict(
+            trigger_user.get("contact_json")
+            or trigger_user.get("contact")
+            or trigger_user.get("owner_contact_json")
+        )
+        mobile = str(
+            trigger_user.get("mobile")
+            or trigger_user.get("phone")
+            or trigger_user.get("telephone")
+            or raw_contact.get("mobile")
+            or raw_contact.get("phone")
+            or raw_contact.get("telephone")
+            or ""
+        ).strip()
+        dingtalk_user_id = str(
+            trigger_user.get("dingtalk_user_id")
+            or trigger_user.get("ding_user_id")
+            or trigger_user.get("unionid")
+            or raw_contact.get("dingtalk_user_id")
+            or raw_contact.get("ding_user_id")
+            or raw_contact.get("unionid")
+            or ""
+        ).strip()
+        if user_id:
+            local_user = _lookup_local_user(user_id)
+            if local_user:
+                local_mobile = str(local_user.get("phone") or "").strip()
+                return {
+                    "name": str(local_user.get("username") or username or ""),
+                    "identifier": dingtalk_user_id,
+                    "contact_json": {
+                        "phone": local_mobile or mobile,
+                        "local_user_id": user_id,
+                    },
+                    "source": "trigger_user",
+                }
+            return {
+                "name": username,
+                "identifier": dingtalk_user_id,
+                "contact_json": {"phone": mobile, "local_user_id": user_id},
+                "source": "trigger_user",
+            }
+        if username:
+            return {
+                "name": username,
+                "identifier": dingtalk_user_id,
+                "contact_json": {"phone": mobile},
+                "source": "trigger_user",
+            }
+
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    created_by = str(run_plan.get("created_by") or "").strip()
+    if created_by:
+        local_user = _lookup_local_user(created_by)
+        return {
+            "name": str(local_user.get("username") or ""),
+            "identifier": "",
+            "contact_json": {
+                "phone": str(local_user.get("phone") or ""),
+                "local_user_id": created_by,
+            },
+            "source": "run_plan_created_by",
+        }
+    return {"name": "", "identifier": "", "contact_json": {}, "source": "missing"}
+
+
 def _extract_todo_key_hint(
     exception: dict[str, Any],
     field_labels: dict[str, str] | None = None,
+    left_name: str = "",
+    right_name: str = "",
 ) -> str:
     """Extract a short key identifier from the exception for use in the todo title.
 
-    Priority: join_key fields → first ：-separated segment of summary.
-    Returns a compact string like "业务单号=ORD-001" or empty string.
+    Priority: join_key fields + compare values → first ：-separated segment of summary.
+    Returns a compact string like "业务单号=ORD-001、金额=17" or empty string.
     """
     fl = field_labels or {}
     atype = str(exception.get("anomaly_type") or "").strip()
@@ -1470,15 +1800,36 @@ def _extract_todo_key_hint(
             if field and val_str:
                 display_field = fl.get(field) or field
                 parts.append(f"{display_field}={val_str}")
+        compare_values = [
+            c for c in _safe_list(detail.get("compare_values") or exception.get("compare_values"))
+            if isinstance(c, dict)
+        ]
+        for cv in compare_values[:2]:
+            if atype == "target_only":
+                field = str(cv.get("target_field") or "").strip()
+                value = cv.get("target_value")
+            else:
+                field = str(cv.get("source_field") or "").strip()
+                value = cv.get("source_value")
+            val_str = str(value).strip() if value is not None and str(value).strip() not in {"None", "null", ""} else ""
+            if field and val_str:
+                display_field = fl.get(field) or field
+                text = f"{display_field}={val_str}"
+                if text not in parts:
+                    parts.append(text)
         if parts:
             return "、".join(parts)
 
     # Fallback: extract from summary text (after first ：, before double-space)
     summary = str(exception.get("summary") or "")
     if "：" in summary:
-        after_colon = summary.split("：", 1)[1].strip()
+        after_colon = _replace_generic_side_labels(
+            summary.split("：", 1)[1].strip(),
+            left_name=left_name,
+            right_name=right_name,
+        )
         key_part = after_colon.split("  ")[0].strip()
-        if key_part and len(key_part) <= 60:
+        if key_part and len(key_part) <= 60 and "public." not in key_part:
             return key_part
     return ""
 
@@ -1502,22 +1853,34 @@ def _compose_execution_exception_reminder_text(
 
     # Extract dataset names from scheme_meta_json for user-friendly labels
     meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
-    left_name = next(
-        (_source_display_name(s) for s in _safe_list(meta.get("left_sources")) if isinstance(s, dict) and _source_display_name(s)),
-        ""
-    )
-    right_name = next(
-        (_source_display_name(s) for s in _safe_list(meta.get("right_sources")) if isinstance(s, dict) and _source_display_name(s)),
-        ""
-    )
+    left_name, right_name = _base_source_names_from_input_plan(meta)
+    if not left_name:
+        left_name = next(
+            (_source_display_name(s) for s in _safe_list(meta.get("left_sources")) if isinstance(s, dict) and _source_display_name(s)),
+            ""
+        )
+    if not right_name:
+        right_name = next(
+            (_source_display_name(s) for s in _safe_list(meta.get("right_sources")) if isinstance(s, dict) and _source_display_name(s)),
+            ""
+        )
 
     field_labels = _build_field_label_map(meta)
     anomaly_type = str(exception.get("anomaly_type") or "unknown").strip()
     anomaly_label = _label_anomaly_type(anomaly_type, left_name=left_name, right_name=right_name)
-    summary = str(exception.get("summary") or "详见对账结果")
+    summary = _replace_generic_side_labels(
+        str(exception.get("summary") or "详见对账结果"),
+        left_name=left_name,
+        right_name=right_name,
+    )
 
     # Todo title: include key field so finance staff can identify the record directly
-    key_hint = _extract_todo_key_hint(exception, field_labels=field_labels)
+    key_hint = _extract_todo_key_hint(
+        exception,
+        field_labels=field_labels,
+        left_name=left_name,
+        right_name=right_name,
+    )
     if key_hint:
         todo_title = f"【对账异常】{anomaly_label} | {key_hint}"
     else:
@@ -1530,12 +1893,171 @@ def _compose_execution_exception_reminder_text(
         f"任务：{plan_name}",
         f"业务日期：{biz_date}" if biz_date else "",
         f"对账方案：{scheme_name}" if scheme_name else "",
-        f"异常类型：{anomaly_label}",
         f"异常详情：{summary}",
         "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
     ]
     bot_content = "\n\n".join(line for line in lines if line)
     return todo_title, bot_title, bot_content
+
+
+def _format_anomaly_type_stats(
+    anomalies: list[dict[str, Any]],
+    *,
+    left_name: str = "",
+    right_name: str = "",
+) -> list[str]:
+    counts = Counter(str(item.get("anomaly_type") or "unknown") for item in anomalies)
+    if not counts:
+        return ["无异常"]
+    return [
+        f"{_label_anomaly_type(atype, left_name=left_name, right_name=right_name)}：{count} 条"
+        for atype, count in counts.most_common()
+    ]
+
+
+def _format_recon_result_summary_lines(summary: dict[str, Any], *, left_name: str = "", right_name: str = "") -> list[str]:
+    left = str(left_name or "左侧基础表").strip()
+    right = str(right_name or "右侧基础表").strip()
+    source_only = _safe_int(summary.get("source_only"), 0)
+    target_only = _safe_int(summary.get("target_only"), 0)
+    matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
+    matched_exact = _safe_int(summary.get("matched_exact"), 0)
+    return [
+        f"- 仅 {left} 存在（{right} 缺失）：{source_only} 条",
+        f"- 仅 {right} 存在（{left} 缺失）：{target_only} 条",
+        f"- 金额/字段差异：{matched_with_diff} 条",
+        f"- 完全匹配：{matched_exact} 条",
+    ]
+
+
+def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
+    meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
+    policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
+    limit = _safe_int(
+        policy.get("explosion_threshold")
+        or policy.get("max_detail_reminders")
+        or os.getenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT"),
+        _DEFAULT_NOTIFY_EXPLOSION_LIMIT,
+    )
+    limit = max(1, limit)
+    return {
+        "explosion_threshold": limit,
+        "explosion_sample_limit": limit,
+    }
+
+
+def _get_nested_value(payload: Any, path: str) -> Any:
+    current: Any = payload
+    for part in str(path or "").split("."):
+        if not part:
+            continue
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _extract_collection_date_sample(binding: dict[str, Any], collection: dict[str, Any]) -> str:
+    query = _safe_dict(binding.get("query"))
+    date_field = str(query.get("date_field") or query.get("biz_date_field") or "").strip()
+    if not date_field:
+        return ""
+    for row in _safe_list(collection.get("records") or collection.get("rows") or collection.get("sample_records")):
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
+        value = _get_nested_value(payload, date_field)
+        if value is not None and str(value).strip() not in {"", "None", "null"}:
+            return str(value).strip()
+    return ""
+
+
+def _date_field_format_hint(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未取到样例"
+    if len(text) == 8 and text.isdigit():
+        return "yyyyMMdd"
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        return "yyyy-MM-dd"
+    return "按样例值识别"
+
+
+def _format_date_binding_lines(ctx: dict[str, Any]) -> list[str]:
+    ready = [v for v in _safe_list(ctx.get("ready_collections")) if isinstance(v, dict)]
+    if not ready:
+        ready = [v for v in _safe_list(_safe_dict(ctx.get("source_collection_json")).get("collections")) if isinstance(v, dict)]
+    lines: list[str] = []
+    for item in ready:
+        binding = _safe_dict(item.get("binding"))
+        collection = _safe_dict(item.get("collection_records"))
+        query = _safe_dict(binding.get("query"))
+        date_field = str(query.get("date_field") or query.get("biz_date_field") or "").strip()
+        if not date_field:
+            continue
+        sample = _extract_collection_date_sample(binding, collection)
+        side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
+        side_label = "左侧" if side == "left" else "右侧" if side == "right" else "数据集"
+        display_name = _binding_display_name(binding)
+        display_date_field = str(query.get("display_date_field") or date_field).strip()
+        sample_text = sample or "未取到样例"
+        lines.append(
+            f"{side_label} {display_name}：日期字段 {display_date_field}（{date_field}），"
+            f"格式 {_date_field_format_hint(sample)}，样例 {sample_text}"
+        )
+    return lines
+
+
+def _compose_run_summary_notification_text(
+    *,
+    ctx: dict[str, Any],
+    anomalies: list[dict[str, Any]],
+    threshold: int,
+    explosion: bool,
+) -> tuple[str, str]:
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    scheme = _safe_dict(ctx.get("scheme"))
+    plan_name = str(
+        run_plan.get("plan_name")
+        or run_plan.get("name")
+        or scheme.get("scheme_name")
+        or scheme.get("name")
+        or "自动对账任务"
+    ).strip()
+    scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
+    biz_date = str(ctx.get("biz_date") or _safe_dict(ctx.get("run_context")).get("biz_date") or "").strip()
+    left_name, right_name = _resolve_side_names(ctx)
+    summary = _safe_dict(ctx.get("recon_result_summary_json") or _safe_dict(ctx.get("execution_run_record")).get("recon_result_summary_json"))
+
+    total = len(anomalies)
+    status = "异常数过高，已暂停逐条催办" if explosion else "执行完成"
+    title = f"{plan_name} 对账结果汇总"
+    lines = [
+        f"任务：{plan_name}",
+        f"对账方案：{scheme_name}" if scheme_name else "",
+        f"业务日期：{biz_date}" if biz_date else "",
+        f"执行结果：{status}",
+        f"异常总数：{total} 条",
+    ]
+    if threshold:
+        lines.append(f"爆炸保护阈值：{threshold} 条")
+    if summary:
+        lines.append("对账结果摘要：")
+        lines.extend(_format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name))
+    else:
+        lines.append("异常统计：")
+        lines.extend(f"- {line}" for line in _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name))
+    date_lines = _format_date_binding_lines(ctx)
+    if date_lines:
+        lines.append("对账日期字段：")
+        lines.extend(f"- {line}" for line in date_lines)
+    if explosion:
+        lines.append("请优先检查对账方案、匹配字段、对账日期字段和值格式，确认是否配置导致异常数异常放大。")
+    else:
+        lines.append("如异常数量或类型不符合预期，请检查方案配置或数据日期范围。")
+    content = "\n".join(line for line in lines if line)
+    return title, content
 
 
 def _resolve_exception_mobile(exception: dict[str, Any]) -> str:
@@ -1592,18 +2114,19 @@ async def _mark_execution_exception_status(
         return exception
 
     feedback_json = _merge_feedback(exception.get("feedback_json"), feedback_patch or {})
-    update_result = await execution_run_exception_update(
-        auth_token,
-        exception_id,
-        {
-            "owner_name": owner_name,
-            "owner_identifier": owner_identifier,
-            "owner_contact_json": owner_contact_json,
-            "reminder_status": reminder_status,
-            "latest_feedback": latest_feedback,
-            "feedback_json": feedback_json,
-        },
-    )
+    patch: dict[str, Any] = {
+        "reminder_status": reminder_status,
+        "latest_feedback": latest_feedback,
+        "feedback_json": feedback_json,
+    }
+    if owner_name is not None:
+        patch["owner_name"] = owner_name
+    if owner_identifier is not None:
+        patch["owner_identifier"] = owner_identifier
+    if owner_contact_json is not None:
+        patch["owner_contact_json"] = owner_contact_json
+
+    update_result = await execution_run_exception_update(auth_token, exception_id, patch)
     if bool(update_result.get("success")):
         updated = _safe_dict(update_result.get("exception"))
         if updated:
@@ -1756,6 +2279,109 @@ async def _send_execution_run_exception_reminder(
     }
 
 
+async def _send_run_summary_notification(
+    *,
+    ctx: dict[str, Any],
+    auth_token: str,
+    channel_config: Any | None,
+    anomalies: list[dict[str, Any]],
+    threshold: int,
+    explosion: bool,
+) -> dict[str, Any]:
+    if channel_config is None:
+        return {"status": "skipped", "reason": "channel_missing", "error": "运行计划未配置协作通道"}
+
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    plan_meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
+    summary_recipient = _safe_dict(plan_meta.get("summary_recipient"))
+    recipient_channel_id = str(summary_recipient.get("channel_config_id") or "").strip()
+    channel_id = str(getattr(channel_config, "id", "") or "").strip()
+    if summary_recipient and recipient_channel_id and recipient_channel_id != channel_id:
+        return {
+            "status": "skipped",
+            "reason": "summary_recipient_channel_mismatch",
+            "error": "对账汇总接收人与当前协作通道不一致，请重新保存运行计划",
+            "summary_recipient": summary_recipient,
+        }
+
+    initiator = _resolve_run_initiator(ctx)
+    recipient = summary_recipient or initiator
+    identifier = str(
+        recipient.get("user_id")
+        or recipient.get("identifier")
+        or recipient.get("provider_user_id")
+        or ""
+    ).strip()
+    name = str(recipient.get("display_name") or recipient.get("name") or "").strip()
+    contact = _safe_dict(recipient.get("contact_json") or recipient.get("contact"))
+    mobile = str(contact.get("mobile") or contact.get("phone") or contact.get("telephone") or "").strip()
+    if not any([identifier, mobile, name]):
+        return {"status": "skipped", "reason": "summary_recipient_missing", "error": "未找到可通知的对账汇总接收人"}
+
+    adapter = get_notification_adapter(
+        provider=str(getattr(channel_config, "provider", "") or ""),
+        channel_config=channel_config,
+    )
+    resolved = None
+    last_error = ""
+    if identifier:
+        result = adapter.resolve_user(user_id=identifier)
+        if result.success:
+            resolved = result.resolved_user or (result.users[0] if result.users else None)
+        last_error = result.message
+    if resolved is None and mobile:
+        result = adapter.resolve_user(mobile=mobile)
+        if result.success:
+            resolved = result.resolved_user or (result.users[0] if result.users else None)
+        last_error = result.message
+    if resolved is None and name:
+        result = adapter.resolve_user(keyword=name)
+        if result.success:
+            resolved = result.resolved_user or (result.users[0] if result.users else None)
+        last_error = result.message
+    if resolved is None:
+        return {
+            "status": "skipped",
+            "reason": "summary_recipient_unresolved",
+            "error": last_error or "对账汇总接收人无法解析为可触达用户",
+            "summary_recipient": recipient,
+        }
+
+    title, content = _compose_run_summary_notification_text(
+        ctx=ctx,
+        anomalies=anomalies,
+        threshold=threshold,
+        explosion=explosion,
+    )
+    run = _safe_dict(ctx.get("execution_run_record"))
+    result = adapter.send_bot_message(
+        title=title,
+        content=content,
+        to_user_id=str(resolved.user_id or ""),
+        content_type="text",
+    )
+    if not result.success:
+        return {
+            "status": "failed",
+            "reason": "send_failed",
+            "error": str(result.message or "发送对账结果汇总失败"),
+            "summary_recipient": recipient,
+        }
+    return {
+        "status": "sent",
+        "reason": "",
+        "error": "",
+        "summary_recipient": {
+            "name": str(resolved.display_name or name),
+            "identifier": str(resolved.user_id or identifier),
+            "mobile": str(resolved.mobile or mobile),
+            "source": "plan_meta" if summary_recipient else str(initiator.get("source") or ""),
+        },
+        "message_id": str(result.message_id or ""),
+        "run_id": str(run.get("id") or ""),
+    }
+
+
 async def _mark_created_exceptions_skipped(
     *,
     auth_token: str,
@@ -1803,6 +2429,20 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "identifier": owner_identifier,
         "contact_json": owner_contact_json,
     }
+    notify_policy = _resolve_notify_policy(run_plan)
+    explosion_threshold = int(notify_policy["explosion_threshold"])
+    explosion_sample_limit = int(notify_policy["explosion_sample_limit"])
+    total_anomaly_count = len(anomalies)
+    notify_explosion = total_anomaly_count > explosion_threshold
+    anomalies_to_create = anomalies
+    if notify_explosion:
+        anomalies_to_create = anomalies[:explosion_sample_limit]
+    ctx["auto_notify_policy"] = {
+        **notify_policy,
+        "anomaly_count": total_anomaly_count,
+        "explosion": notify_explosion,
+        "created_exception_sample_limit": len(anomalies_to_create),
+    }
 
     # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
     left_name, right_name = _resolve_side_names(ctx)
@@ -1814,7 +2454,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
     created = 0
     created_exceptions: list[dict[str, Any]] = []
-    for idx, item in enumerate(anomalies, start=1):
+    for idx, item in enumerate(anomalies_to_create, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
         payload = {
@@ -1823,7 +2463,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             "scheme_code": scheme_code,
             "anomaly_key": anomaly_key,
             "anomaly_type": atype,
-            "summary": str(item.get("summary") or "") or _build_anomaly_summary(
+            "summary": _build_anomaly_summary(
                 atype, item, left_name=left_name, right_name=right_name, field_labels=field_labels
             ),
             "detail_json": item,
@@ -1845,26 +2485,45 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
+    if notify_explosion:
+        ctx["exception_creation_limited"] = True
+        ctx["exception_total_count"] = total_anomaly_count
+        ctx["exception_created_sample_count"] = created
     return {"recon_ctx": ctx}
 
 
 async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    policy = _safe_dict(ctx.get("auto_notify_policy")) or _resolve_notify_policy(run_plan)
+    threshold = int(policy.get("explosion_threshold") or _DEFAULT_NOTIFY_EXPLOSION_LIMIT)
+    anomalies = [item for item in _safe_list(ctx.get("anomaly_items")) if isinstance(item, dict)]
+    explosion = bool(policy.get("explosion")) or len(anomalies) > threshold
     created_exceptions = [item for item in _safe_list(ctx.get("created_exceptions")) if isinstance(item, dict)]
+    channel_config_id = str(run_plan.get("channel_config_id") or "").strip()
+    channel_config = load_company_channel_config_by_id(channel_id=channel_config_id) if channel_config_id else None
+    summary_result = await _send_run_summary_notification(
+        ctx=ctx,
+        auth_token=auth_token,
+        channel_config=channel_config,
+        anomalies=anomalies,
+        threshold=threshold,
+        explosion=explosion,
+    )
+
     if not created_exceptions:
         ctx["auto_notify_status"] = "skipped_no_exception"
         ctx["auto_notify_result"] = {
-            "total": 0,
+            "total": len(anomalies),
             "sent": 0,
             "failed": 0,
             "skipped": 0,
             "items": [],
+            "summary_notification": summary_result,
         }
         return {"recon_ctx": ctx}
 
-    run_plan = _safe_dict(ctx.get("run_plan"))
-    channel_config_id = str(run_plan.get("channel_config_id") or "").strip()
     if not channel_config_id:
         updated_refs = await _mark_created_exceptions_skipped(
             auth_token=auth_token,
@@ -1881,6 +2540,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "failed": 0,
             "skipped": len(created_exceptions),
             "channel_config_id": "",
+            "summary_notification": summary_result,
             "items": [
                 {
                     "exception_id": str(item.get("exception_id") or ""),
@@ -1892,7 +2552,6 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         }
         return {"recon_ctx": ctx}
 
-    channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
     if channel_config is None:
         updated_refs = await _mark_created_exceptions_skipped(
             auth_token=auth_token,
@@ -1909,11 +2568,58 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "failed": 0,
             "skipped": len(created_exceptions),
             "channel_config_id": channel_config_id,
+            "summary_notification": summary_result,
             "items": [
                 {
                     "exception_id": str(item.get("exception_id") or ""),
                     "status": "skipped",
                     "reason": "channel_config_not_found",
+                }
+                for item in updated_refs
+            ],
+        }
+        return {"recon_ctx": ctx}
+
+    if explosion:
+        summary_status = str(summary_result.get("status") or "").strip()
+        summary_error = str(summary_result.get("error") or summary_result.get("reason") or "").strip()
+        summary_sent = summary_status == "sent"
+        latest_feedback = (
+            "异常数量超过阈值，已发送汇总给发起人，跳过逐条责任人催办"
+            if summary_sent
+            else f"异常数量超过阈值，已跳过逐条责任人催办；发起人汇总通知发送失败：{summary_error or '未知原因'}"
+        )
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=created_exceptions,
+            reminder_status="summary_only",
+            latest_feedback=latest_feedback,
+            feedback_patch={
+                "auto_notify_skipped_reason": "anomaly_explosion",
+                "anomaly_count": len(anomalies),
+                "explosion_threshold": threshold,
+                "summary_notification": summary_result,
+            },
+        )
+        ctx["created_exceptions"] = updated_refs
+        ctx["auto_notify_status"] = "summary_only" if summary_sent else "summary_failed"
+        ctx["auto_notify_result"] = {
+            "total": len(anomalies),
+            "created_exception_sample_count": len(created_exceptions),
+            "sent": 0,
+            "failed": 0,
+            "skipped": len(created_exceptions),
+            "channel_config_id": channel_config_id,
+            "provider": str(getattr(channel_config, "provider", "") or ""),
+            "channel_name": str(getattr(channel_config, "name", "") or ""),
+            "explosion": True,
+            "explosion_threshold": threshold,
+            "summary_notification": summary_result,
+            "items": [
+                {
+                    "exception_id": str(item.get("exception_id") or ""),
+                    "status": "skipped",
+                    "reason": "anomaly_explosion",
                 }
                 for item in updated_refs
             ],
@@ -1979,6 +2685,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "channel_config_id": channel_config_id,
             "provider": str(getattr(channel_config, "provider", "") or ""),
             "error": str(exc),
+            "summary_notification": summary_result,
             "items": results,
         }
         return {"recon_ctx": ctx}
@@ -2003,6 +2710,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         "channel_config_id": channel_config_id,
         "provider": str(getattr(channel_config, "provider", "") or ""),
         "channel_name": str(getattr(channel_config, "name", "") or ""),
+        "summary_notification": summary_result,
         "items": results,
     }
     return {"recon_ctx": ctx}

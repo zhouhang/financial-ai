@@ -460,6 +460,325 @@ def test_normalize_execution_trigger_type_preserves_manual_and_rerun() -> None:
     assert nodes._normalize_execution_trigger_type("schedule") == "schedule"
 
 
+def test_exception_reminder_uses_base_dataset_names_and_hides_type_line() -> None:
+    scheme = {
+        "scheme_name": "店铺对账",
+        "scheme_meta_json": {
+            "left_sources": [
+                {
+                    "dataset_id": "lookup-dataset",
+                    "dataset_name": "支付宝订单数据",
+                    "resource_key": "public.alipay_order_detail",
+                },
+                {
+                    "dataset_id": "base-dataset",
+                    "dataset_name": "FP订单表",
+                    "resource_key": "public.ods_yxst_fp_orders_di_o",
+                },
+            ],
+            "right_sources": [
+                {
+                    "dataset_id": "right-dataset",
+                    "dataset_name": "交易订单明细表",
+                    "resource_key": "public.ods_yxst_trd_order_di_o",
+                }
+            ],
+            "input_plan_json": {
+                "plans": [
+                    {
+                        "side": "left",
+                        "target_table": "left_recon_ready",
+                        "datasets": [
+                            {
+                                "dataset_id": "lookup-dataset",
+                                "resource_key": "public.alipay_order_detail",
+                                "read_mode": "by_key_set",
+                            },
+                            {
+                                "dataset_id": "base-dataset",
+                                "resource_key": "public.ods_yxst_fp_orders_di_o",
+                                "read_mode": "base",
+                            },
+                        ],
+                    },
+                    {
+                        "side": "right",
+                        "target_table": "right_recon_ready",
+                        "datasets": [
+                            {
+                                "dataset_id": "right-dataset",
+                                "resource_key": "public.ods_yxst_trd_order_di_o",
+                                "read_mode": "base",
+                            }
+                        ],
+                    },
+                ]
+            },
+        },
+    }
+    exception = {
+        "anomaly_type": "source_only",
+        "summary": "仅 左侧数据 存在（右侧数据 缺失）",
+        "detail_json": {
+            "join_key": [{"source_field": "order_no", "source_value": "SO-001"}],
+        },
+    }
+
+    todo_title, _, bot_content = nodes._compose_execution_exception_reminder_text(
+        run_plan={"plan_name": "每天9点半对账"},
+        scheme=scheme,
+        biz_date="2026-05-02",
+        exception=exception,
+    )
+
+    assert "FP订单表" in todo_title
+    assert "交易订单明细表" in todo_title
+    assert "支付宝订单数据" not in todo_title
+    assert "异常类型" not in bot_content
+    assert "左侧数据" not in bot_content
+    assert "右侧数据" not in bot_content
+    assert "源数据" not in bot_content
+    assert "目标数据" not in bot_content
+    assert "异常详情：仅 FP订单表 存在（交易订单明细表 缺失）" in bot_content
+
+
+def test_legacy_exception_reminder_replaces_source_target_labels() -> None:
+    todo_title, _, bot_content = auto_run_service._compose_reminder_text(
+        {"task_name": "Tally"},
+        {"biz_date": "2026-05-02"},
+        {
+            "anomaly_type": "target_only",
+            "summary": "仅 目标数据 存在（源数据 缺失）",
+            "detail_json": {
+                "join_key": [{"target_field": "order_no", "target_value": "SO-002"}],
+            },
+        },
+        left_name="FP订单表",
+        right_name="交易订单明细表",
+    )
+
+    assert "交易订单明细表" in todo_title
+    assert "FP订单表" in todo_title
+    assert "异常类型" not in bot_content
+    assert "源数据" not in bot_content
+    assert "目标数据" not in bot_content
+    assert "异常详情：仅 交易订单明细表 存在（FP订单表 缺失）" in bot_content
+
+
+def test_exception_summary_rebuilds_from_context_and_includes_compare_field() -> None:
+    item = {
+        "anomaly_type": "target_only",
+        "summary": "仅 public.ods_yxst_trd_order_di_o 存在（public.ods_jd_sold_fuyou_mongo_o 缺失）：订单ID=800266249859653",
+        "join_key": [
+            {
+                "source_field": "订单ID",
+                "target_field": "订单ID",
+                "source_value": None,
+                "target_value": "800266249859653",
+            }
+        ],
+        "compare_values": [
+            {
+                "name": "金额",
+                "source_field": "金额",
+                "target_field": "金额",
+                "source_value": None,
+                "target_value": "99.90",
+            }
+        ],
+        "raw_record": {"订单ID": "800266249859653", "金额": "99.90"},
+    }
+
+    summary = nodes._build_anomaly_summary(
+        "target_only",
+        item,
+        left_name="福游京东店铺订单",
+        right_name="交易订单明细表",
+        field_labels={"订单ID": "订单ID", "金额": "金额"},
+    )
+
+    assert "public." not in summary
+    assert "左侧独有" not in summary
+    assert "右侧独有" not in summary
+    assert "交易订单明细表" in summary
+    assert "福游京东店铺订单" in summary
+    assert "订单ID=800266249859653" in summary
+    assert "金额：交易订单明细表 99.90" in summary
+
+
+def test_summary_only_notification_uses_base_dataset_names() -> None:
+    _, content = nodes._compose_run_summary_notification_text(
+        ctx={
+            "run_plan": {"plan_name": "每天9点半对账"},
+            "scheme": {
+                "scheme_name": "店铺对账",
+                "scheme_meta_json": {
+                    "input_plan_json": {
+                        "plans": [
+                            {
+                                "side": "left",
+                                "target_table": "left_recon_ready",
+                                "datasets": [
+                                    {
+                                        "table": "public.ods_jd_sold_fuyou_mongo_o",
+                                        "resource_key": "public.ods_jd_sold_fuyou_mongo_o",
+                                        "read_mode": "base",
+                                    }
+                                ],
+                            },
+                            {
+                                "side": "right",
+                                "target_table": "right_recon_ready",
+                                "datasets": [
+                                    {
+                                        "table": "public.ods_yxst_trd_order_di_o",
+                                        "resource_key": "public.ods_yxst_trd_order_di_o",
+                                        "read_mode": "base",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                },
+            },
+            "biz_date": "2026-05-02",
+            "recon_result_summary_json": {
+                "source_only": 1,
+                "target_only": 2,
+                "matched_with_diff": 3,
+                "matched_exact": 4,
+            },
+            "ready_collections": [
+                {
+                    "binding": {
+                        "role_code": "left_1",
+                        "input_plan_target_table": "left_recon_ready",
+                        "dataset_name": "福游京东店铺订单",
+                        "resource_key": "public.ods_jd_sold_fuyou_mongo_o",
+                        "query": {"date_field": "pt", "display_date_field": "分区日期"},
+                    },
+                    "collection_records": {"records": [{"payload": {"pt": "20260502"}}]},
+                },
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "input_plan_target_table": "right_recon_ready",
+                        "dataset_name": "交易订单明细表",
+                        "resource_key": "public.ods_yxst_trd_order_di_o",
+                        "query": {"date_field": "order_time", "display_date_field": "订单时间"},
+                    },
+                    "collection_records": {"records": [{"payload": {"order_time": "2026-05-02 10:00:00"}}]},
+                },
+            ],
+        },
+        anomalies=[
+            {"anomaly_type": "source_only"},
+            {"anomaly_type": "target_only"},
+            {"anomaly_type": "matched_with_diff"},
+        ],
+        threshold=10,
+        explosion=True,
+    )
+
+    assert "异常类型" not in content
+    assert "左侧独有" not in content
+    assert "右侧独有" not in content
+    assert "源数据" not in content
+    assert "目标数据" not in content
+    assert "public." not in content
+    assert "异常统计" not in content
+    assert "仅 福游京东店铺订单 存在（交易订单明细表 缺失）" in content
+    assert "仅 交易订单明细表 存在（福游京东店铺订单 缺失）" in content
+    assert content.count("仅 福游京东店铺订单 存在（交易订单明细表 缺失）") == 1
+    assert content.count("仅 交易订单明细表 存在（福游京东店铺订单 缺失）") == 1
+
+
+def test_summary_only_notification_uses_source_collection_names_when_ready_ctx_missing() -> None:
+    _, content = nodes._compose_run_summary_notification_text(
+        ctx={
+            "run_plan": {"plan_name": "搜卡京东订单对账 2026-05-03"},
+            "scheme": {
+                "scheme_name": "搜卡京东订单对账",
+                "scheme_meta_json": {
+                    "input_plan_json": {
+                        "plans": [
+                            {
+                                "side": "left",
+                                "target_table": "left_recon_ready",
+                                "datasets": [
+                                    {
+                                        "table": "public.ods_jd_sold_fuyou_mongo_o",
+                                        "resource_key": "public.ods_jd_sold_fuyou_mongo_o",
+                                        "read_mode": "base",
+                                    }
+                                ],
+                            },
+                            {
+                                "side": "right",
+                                "target_table": "right_recon_ready",
+                                "datasets": [
+                                    {
+                                        "table": "public.ods_yxst_trd_order_di_o",
+                                        "resource_key": "public.ods_yxst_trd_order_di_o",
+                                        "read_mode": "base",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                },
+            },
+            "biz_date": "2026-05-02",
+            "recon_result_summary_json": {
+                "source_only": 31,
+                "target_only": 74522,
+                "matched_with_diff": 0,
+                "matched_exact": 0,
+            },
+            "source_collection_json": {
+                "collections": [
+                    {
+                        "binding": {
+                            "role_code": "left_1",
+                            "input_plan_target_table": "left_recon_ready",
+                            "dataset_name": "福游京东店铺订单",
+                            "resource_key": "public.ods_jd_sold_fuyou_mongo_o",
+                            "query": {"date_field": "pt", "display_date_field": "PT"},
+                        },
+                        "collection_records": {"sample_records": [{"payload": {"pt": "20260502"}}]},
+                    },
+                    {
+                        "binding": {
+                            "role_code": "right_1",
+                            "input_plan_target_table": "right_recon_ready",
+                            "dataset_name": "交易订单明细表",
+                            "resource_key": "public.ods_yxst_trd_order_di_o",
+                            "query": {"date_field": "create_date", "display_date_field": "创建日期"},
+                        },
+                        "collection_records": {
+                            "sample_records": [
+                                {"payload": {"create_date": "2026-05-02T01:02:10.540000+08:00"}}
+                            ]
+                        },
+                    },
+                ]
+            },
+        },
+        anomalies=[
+            {"anomaly_type": "target_only"} for _ in range(2)
+        ] + [{"anomaly_type": "source_only"}],
+        threshold=50,
+        explosion=True,
+    )
+
+    assert "public." not in content
+    assert "异常统计" not in content
+    assert "- 仅 福游京东店铺订单 存在（交易订单明细表 缺失）：31 条" in content
+    assert "- 仅 交易订单明细表 存在（福游京东店铺订单 缺失）：74522 条" in content
+    assert content.count("仅 福游京东店铺订单 存在（交易订单明细表 缺失）") == 1
+    assert content.count("仅 交易订单明细表 存在（福游京东店铺订单 缺失）") == 1
+
+
 def test_update_rerun_exception_verification_closes_resolved_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

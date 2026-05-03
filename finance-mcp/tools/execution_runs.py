@@ -797,7 +797,7 @@ def _read_preview_dataframe(file_path: str) -> pd.DataFrame:
                 encoding = chardet.detect(file.read()).get("encoding", "gbk")
             return pd.read_csv(path, encoding=encoding)
     if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
     raise ValueError(f"不支持的试跑输入文件格式: {suffix}")
 
 
@@ -807,7 +807,7 @@ def _read_output_dataframe(file_path: str) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path, encoding="utf-8-sig")
     if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
     raise ValueError(f"不支持的试跑输出文件格式: {suffix}")
 
 
@@ -2515,9 +2515,9 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             }
 
         temp_output_dir = tempfile.mkdtemp(prefix="proc_trial_output_")
-        from proc.mcp_server.steps_runtime import execute_steps_rule
+        from proc.mcp_server.steps_runtime import execute_steps_rule_to_frames
 
-        generated_files = execute_steps_rule(
+        frame_outputs = execute_steps_rule_to_frames(
             rule_code="draft_proc_trial",
             rule_data=normalized_rule,
             validated_files=validated_files,
@@ -2528,12 +2528,15 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
         output_samples: list[dict[str, Any]] = []
         output_targets: set[str] = set()
         output_warnings: list[str] = []
-        for item in generated_files:
+        for item in frame_outputs:
             target_table = _as_text(item.get("target_table"))
             output_file = _as_text(item.get("output_file"))
             output_targets.add(target_table)
             preview_rows: list[dict[str, Any]] = []
-            if output_file:
+            output_df = item.get("dataframe")
+            if isinstance(output_df, pd.DataFrame):
+                preview_rows = _dataframe_to_preview_rows(output_df, limit=None)
+            elif output_file:
                 try:
                     preview_rows = _dataframe_to_preview_rows(_read_output_dataframe(output_file), limit=None)
                 except Exception as exc:  # noqa: BLE001
@@ -2546,6 +2549,7 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
                     "row_count": _as_int(item.get("row_count"), 0, minimum=0),
                     "rows": preview_rows,
                     "output_file": output_file,
+                    "output_mode": "memory" if isinstance(output_df, pd.DataFrame) else "file",
                 }
             )
 
