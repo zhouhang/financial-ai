@@ -19,6 +19,7 @@
 11. **017_drop_raw_snapshot_collection_tables.sql** - 删除旧 raw/snapshot/checkpoint 表
 12. **018_drop_sync_jobs_idempotency_index.sql** - 删除采集任务级幂等索引，任务只保留审计记录，幂等由采集数据层处理
 13. **020_execution_runs_trigger_type_manual_rerun.sql** - 为 execution_runs.trigger_type 增加 manual / rerun 语义
+14. **021_drop_dataset_verified_status.sql** - 删除数据集语义验证状态字段，发布即代表语义已确认
 
 ## 使用方法
 

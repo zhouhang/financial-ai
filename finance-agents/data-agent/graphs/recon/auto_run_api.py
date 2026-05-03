@@ -89,6 +89,29 @@ def _get_user_from_token(token: str) -> dict[str, Any] | None:
     }
 
 
+def _build_trigger_user_context(user: dict[str, Any] | None) -> dict[str, Any]:
+    if not user:
+        return {}
+    return {
+        "user_id": str(user.get("user_id") or ""),
+        "username": str(user.get("username") or ""),
+        "role": str(user.get("role") or ""),
+        "company_id": str(user.get("company_id") or ""),
+        "department_id": str(user.get("department_id") or ""),
+    }
+
+
+def _merge_trigger_user_context(
+    run_context: dict[str, Any] | None,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(run_context or {})
+    trigger_user = _build_trigger_user_context(user)
+    if trigger_user and not isinstance(merged.get("trigger_user"), dict):
+        merged["trigger_user"] = trigger_user
+    return merged
+
+
 class AutoTaskCreateRequest(BaseModel):
     task_name: str
     rule_code: str
@@ -212,6 +235,7 @@ class ExecutionTaskCreateRequest(BaseModel):
     biz_date_offset: str = "previous_day"
     input_bindings_json: list[dict[str, Any]] = Field(default_factory=list)
     channel_config_id: str = ""
+    summary_recipient: dict[str, Any] = Field(default_factory=dict)
     owner_mapping_json: dict[str, Any] = Field(default_factory=dict)
     plan_meta_json: dict[str, Any] = Field(default_factory=dict)
     is_enabled: bool = True
@@ -225,6 +249,7 @@ class ExecutionTaskUpdateRequest(BaseModel):
     biz_date_offset: Optional[str] = None
     input_bindings_json: Optional[list[dict[str, Any]]] = None
     channel_config_id: Optional[str] = None
+    summary_recipient: Optional[dict[str, Any]] = None
     owner_mapping_json: Optional[dict[str, Any]] = None
     plan_meta_json: Optional[dict[str, Any]] = None
     is_enabled: Optional[bool] = None
@@ -569,6 +594,121 @@ async def _normalize_owner_mapping_identifiers(auth_token: str, payload: dict[st
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     payload["owner_mapping_json"] = normalized_mapping
+    return payload
+
+
+def _resolve_summary_recipient_payload(
+    recipient_payload: dict[str, Any],
+    *,
+    adapter: Any,
+    organization_label: str,
+    channel_config: Any,
+    channel_config_id: str,
+) -> dict[str, Any]:
+    recipient = dict(recipient_payload or {})
+    display_name = text(recipient.get("display_name") or recipient.get("name")).strip()
+    user_id = text(
+        recipient.get("user_id")
+        or recipient.get("identifier")
+        or recipient.get("provider_user_id")
+    ).strip()
+    mobile = text(recipient.get("mobile") or recipient.get("phone")).strip()
+    query = text(recipient.get("query") or display_name).strip()
+
+    if not (user_id or mobile or query):
+        raise ValueError("请填写对账汇总接收人的姓名、手机号或平台用户 ID")
+
+    if user_id:
+        resolved = adapter.resolve_user(user_id=user_id)
+    elif mobile:
+        resolved = adapter.resolve_user(mobile=mobile)
+    else:
+        resolved = adapter.resolve_user(keyword=query)
+
+    if not resolved.success:
+        lookup_label = mobile or query or user_id
+        raise ValueError(f"对账汇总接收人“{lookup_label}”不在“{organization_label}”组织中，请检查后重试")
+
+    resolved_user = resolved.resolved_user or (resolved.users[0] if len(resolved.users or []) == 1 else None)
+    if resolved_user is None:
+        count = len(resolved.users or [])
+        lookup_label = mobile or query or user_id
+        if count > 1:
+            raise ValueError(
+                f"对账汇总接收人“{lookup_label}”在“{organization_label}”组织中匹配到 {count} 个用户，请选择明确候选人"
+            )
+        raise ValueError(f"对账汇总接收人“{lookup_label}”不在“{organization_label}”组织中，请检查后重试")
+
+    return {
+        "channel_config_id": channel_config_id,
+        "provider": text(getattr(channel_config, "provider", "")).strip(),
+        "user_id": text(getattr(resolved_user, "user_id", "")).strip(),
+        "display_name": text(display_name, getattr(resolved_user, "display_name", ""), query).strip(),
+        "department": " / ".join(
+            text(item).strip()
+            for item in safe_list(getattr(resolved_user, "departments", []))
+            if text(item).strip()
+        ),
+        "mobile_last4": "".join(ch for ch in text(getattr(resolved_user, "mobile", ""), mobile) if ch.isdigit())[-4:],
+        "organization": text(getattr(resolved_user, "organization", ""), organization_label).strip(),
+        "resolved_by": "manual_user_id" if user_id else "mobile" if mobile else "keyword",
+    }
+
+
+async def _normalize_summary_recipient(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    channel_config_id = text(payload.get("channel_config_id")).strip()
+    raw_recipient = _safe_dict(payload.pop("summary_recipient", None))
+    plan_meta = _safe_dict(payload.get("plan_meta_json"))
+
+    if not channel_config_id:
+        if "summary_recipient" in plan_meta:
+            next_meta = dict(plan_meta)
+            next_meta.pop("summary_recipient", None)
+            payload["plan_meta_json"] = next_meta
+        return payload
+
+    user = _get_user_from_token(auth_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="token 无效或已过期，请重新登录")
+    company_id = text(user.get("company_id")).strip()
+    if not company_id:
+        raise HTTPException(status_code=400, detail="当前用户未绑定公司")
+
+    channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+    if channel_config is None or text(getattr(channel_config, "company_id", "")).strip() != company_id:
+        raise HTTPException(status_code=400, detail="所选协作通道不存在或不可用")
+
+    if not raw_recipient:
+        existing = _safe_dict(plan_meta.get("summary_recipient"))
+        existing_channel_id = text(existing.get("channel_config_id")).strip()
+        if existing and existing_channel_id == channel_config_id:
+            return payload
+        raise HTTPException(status_code=400, detail="请选择对账汇总接收人，确保每次对账结果能通知到配置人")
+
+    adapter = get_notification_adapter(
+        provider=text(getattr(channel_config, "provider", "")).strip(),
+        channel_config=channel_config,
+    )
+    organization_label = text(
+        getattr(channel_config, "name", ""),
+        getattr(channel_config, "channel_code", ""),
+        "当前协作通道",
+    )
+    try:
+        normalized_recipient = _resolve_summary_recipient_payload(
+            raw_recipient,
+            adapter=adapter,
+            organization_label=organization_label,
+            channel_config=channel_config,
+            channel_config_id=channel_config_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload["plan_meta_json"] = {
+        **plan_meta,
+        "summary_recipient": normalized_recipient,
+    }
     return payload
 
 
@@ -1013,6 +1153,7 @@ async def create_execution_task_api(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump())
+    payload = await _normalize_summary_recipient(auth_token, payload)
     payload = await _normalize_owner_mapping_identifiers(auth_token, payload)
     result = await execution_run_plan_create(auth_token, payload)
     if not result.get("success"):
@@ -1033,6 +1174,7 @@ async def update_execution_task_api(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
     payload = await _normalize_run_plan_payload_date_fields(auth_token, body.model_dump(exclude_none=True))
+    payload = await _normalize_summary_recipient(auth_token, payload)
     payload = await _normalize_owner_mapping_identifiers(auth_token, payload)
     result = await execution_run_plan_update(auth_token, plan_id, payload)
     if not result.get("success"):
@@ -1130,7 +1272,10 @@ async def rerun_execution_run_api(
         run_plan_code=str(prepare_result.get("run_plan_code") or ""),
         biz_date=str(prepare_result.get("biz_date") or ""),
         trigger_mode="rerun",
-        run_context=dict(prepare_result.get("run_context") or {}),
+        run_context=_merge_trigger_user_context(
+            dict(prepare_result.get("run_context") or {}),
+            user,
+        ),
     )
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
@@ -1359,7 +1504,7 @@ async def execute_run_plan(
         run_plan_code=run_plan_code,
         biz_date=str(body.biz_date or ""),
         trigger_mode=str(body.trigger_mode or "schedule"),
-        run_context=dict(body.run_context or {}),
+        run_context=_merge_trigger_user_context(body.run_context, user),
     )
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))

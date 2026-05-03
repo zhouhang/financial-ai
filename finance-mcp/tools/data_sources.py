@@ -65,7 +65,6 @@ SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "llm_gene
 SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
 SEMANTIC_SAMPLE_ROW_LIMIT = 10
 PUBLISH_STATUS_VALUES = {"published", "unpublished", "draft", "archived"}
-VERIFIED_STATUS_VALUES = {"verified", "unverified", "rejected", "unknown"}
 DATASET_CANDIDATE_SCENES = {"recon", "proc", "insight"}
 DATASET_CANDIDATE_ROLES = {"left", "right", "source", "target"}
 DATASET_CANDIDATE_BATCH_SIZE = 200
@@ -1224,13 +1223,6 @@ def _normalize_publish_status(value: Any, *, default: str = "unpublished") -> st
     return status
 
 
-def _normalize_verified_status(value: Any, *, default: str = "unverified") -> str:
-    status = str(value or "").strip().lower() or default
-    if status not in VERIFIED_STATUS_VALUES:
-        return default
-    return status
-
-
 def _normalize_scene_type(value: Any) -> str:
     scene_type = str(value or "").strip().lower()
     if not scene_type:
@@ -1362,24 +1354,39 @@ def _collection_key_value_is_empty(value: Any) -> bool:
     return value is None or (isinstance(value, str) and value.strip() == "")
 
 
+def _compact_collection_key_values(key_values: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for field, value in key_values.items():
+        if _collection_key_value_is_empty(value):
+            parts.append(f"{field}=空")
+        else:
+            text = str(value).strip()
+            parts.append(f"{field}={text[:24]}{'...' if len(text) > 24 else ''}")
+    return "，".join(parts)
+
+
 def _build_collection_records(
     *,
     rows: list[dict[str, Any]],
     key_fields: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not key_fields:
         raise ValueError("数据集缺少 key_fields，无法生成采集记录唯一标识")
 
     records: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
+    empty_key_rows: list[tuple[int, dict[str, Any]]] = []
+    duplicate_key_rows: list[tuple[int, int, dict[str, Any]]] = []
     for index, row in enumerate(rows):
         key_values = {field: row.get(field) for field in key_fields}
         if all(_collection_key_value_is_empty(value) for value in key_values.values()):
-            raise ValueError(f"第 {index + 1} 行 key_fields 值全为空，采集失败")
+            empty_key_rows.append((index + 1, key_values))
+            continue
         item_key = _hash_payload({"key_fields": key_fields, "values": key_values})
         if item_key in seen:
+            duplicate_key_rows.append((index + 1, seen[item_key], key_values))
             continue
-        seen.add(item_key)
+        seen[item_key] = index + 1
         records.append(
             {
                 "item_key": item_key,
@@ -1388,7 +1395,42 @@ def _build_collection_records(
                 "payload": row,
             }
         )
-    return records
+
+    if empty_key_rows and not records:
+        sample = "；".join(
+            f"第 {row_number} 行（{_compact_collection_key_values(key_values)}）"
+            for row_number, key_values in empty_key_rows[:5]
+        )
+        raise ValueError(
+            "唯一标识字段存在空值，无法保证数据级幂等："
+            f"{' + '.join(key_fields)} 在 {len(empty_key_rows)} 行中全为空。"
+            f"示例：{sample}。请更换为订单号、流水号等稳定非空字段，或先修复源数据。"
+        )
+
+    if duplicate_key_rows:
+        sample = "；".join(
+            f"第 {row_number} 行与第 {first_row_number} 行重复（{_compact_collection_key_values(key_values)}）"
+            for row_number, first_row_number, key_values in duplicate_key_rows[:5]
+        )
+        raise ValueError(
+            "唯一标识字段不唯一，采集会覆盖明细数据："
+            f"{' + '.join(key_fields)} 在 {len(duplicate_key_rows)} 行中重复。"
+            f"示例：{sample}。请增加订单号、流水号、明细行号等字段组成真正唯一标识。"
+        )
+    skipped_summary: dict[str, Any] = {}
+    if empty_key_rows:
+        skipped_summary = {
+            "skipped_empty_key_count": len(empty_key_rows),
+            "skipped_empty_key_samples": [
+                {
+                    "row_number": row_number,
+                    "key_values": key_values,
+                    "message": _compact_collection_key_values(key_values),
+                }
+                for row_number, key_values in empty_key_rows[:5]
+            ],
+        }
+    return records, skipped_summary
 
 
 def _collection_schedule_time(config: dict[str, Any]) -> str:
@@ -1406,6 +1448,15 @@ def _collection_date_field(config: dict[str, Any]) -> str:
         config.get("date_field")
         or config.get("collection_date_field")
         or config.get("physical_date_field")
+    )
+
+
+def _collection_date_format(config: dict[str, Any]) -> str:
+    return _safe_text(
+        config.get("date_format")
+        or config.get("date_value_format")
+        or config.get("collection_date_format")
+        or config.get("physical_date_format")
     )
 
 
@@ -2056,10 +2107,6 @@ def _build_dataset_base_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
         or catalog_profile.get("status"),
         default="unpublished",
     )
-    verified_status = _normalize_verified_status(
-        dataset_row.get("verified_status") or catalog_profile.get("verified_status"),
-        default="unverified",
-    )
     object_type = (
         _safe_text(dataset_row.get("object_type"))
         or _safe_text(catalog_profile.get("object_type"))
@@ -2112,7 +2159,6 @@ def _build_dataset_base_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
         "business_object_type": _safe_text(dataset_row.get("business_object_type"))
         or _safe_text(catalog_profile.get("business_object_type")),
         "grain": _safe_text(dataset_row.get("grain")) or _safe_text(catalog_profile.get("grain")),
-        "verified_status": verified_status,
         "schema_name": schema_name,
         "object_name": object_name,
         "object_type": object_type,
@@ -2191,7 +2237,6 @@ def _summarize_datasets(dataset_rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_status: dict[str, int] = {}
     by_health: dict[str, int] = {}
     by_publish_status: dict[str, int] = {}
-    by_verified_status: dict[str, int] = {}
     enabled_count = 0
     active_count = 0
     published_count = 0
@@ -2202,14 +2247,9 @@ def _summarize_datasets(dataset_rows: list[dict[str, Any]]) -> dict[str, Any]:
             row.get("publish_status") or _extract_catalog_profile(row).get("publish_status"),
             default="unpublished",
         )
-        verified_status = _normalize_verified_status(
-            row.get("verified_status") or _extract_catalog_profile(row).get("verified_status"),
-            default="unverified",
-        )
         by_status[status] = by_status.get(status, 0) + 1
         by_health[health_status] = by_health.get(health_status, 0) + 1
         by_publish_status[publish_status] = by_publish_status.get(publish_status, 0) + 1
-        by_verified_status[verified_status] = by_verified_status.get(verified_status, 0) + 1
         if bool(row.get("is_enabled", True)):
             enabled_count += 1
         if status == "active":
@@ -2224,7 +2264,6 @@ def _summarize_datasets(dataset_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_status": by_status,
         "by_health_status": by_health,
         "by_publish_status": by_publish_status,
-        "by_verified_status": by_verified_status,
         "last_sync_at": _pick_latest_iso([row.get("last_sync_at") for row in dataset_rows]),
         "last_checked_at": _pick_latest_iso([row.get("last_checked_at") for row in dataset_rows]),
     }
@@ -2292,7 +2331,6 @@ def _list_datasets_with_compat(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 50,
@@ -2313,7 +2351,6 @@ def _list_datasets_with_compat(
         "object_type": object_type,
         "publish_status": publish_status,
         "business_object_type": business_object_type,
-        "verified_status": verified_status,
         "only_published": only_published,
         "limit": max(500, min(page * page_size + page_size, 2000)),
         "page": page,
@@ -2339,7 +2376,6 @@ def _query_datasets_with_compat(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 50,
@@ -2362,7 +2398,6 @@ def _query_datasets_with_compat(
         "object_type": object_type,
         "publish_status": publish_status,
         "business_object_type": business_object_type,
-        "verified_status": verified_status,
         "only_published": only_published,
         "page": page,
         "page_size": page_size,
@@ -2551,7 +2586,6 @@ def _dataset_matches_filters(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
 ) -> bool:
     view = _build_dataset_base_view(dataset_row)
@@ -2564,8 +2598,6 @@ def _dataset_matches_filters(
     if object_type and _safe_text(view.get("object_type")).lower() != object_type:
         return False
     if business_object_type and _safe_text(view.get("business_object_type")).lower() != business_object_type:
-        return False
-    if verified_status and _safe_text(view.get("verified_status")).lower() != verified_status:
         return False
     if keyword:
         search_text = _safe_text(view.get("search_text"))
@@ -2590,7 +2622,6 @@ def _sort_datasets(dataset_rows: list[dict[str, Any]], sort_by: str) -> list[dic
         "last_used_at",
         "last_sync_at",
         "publish_status",
-        "verified_status",
     }:
         field = "updated_at"
         reverse = True
@@ -2645,12 +2676,6 @@ def _score_dataset_candidate(
     if view.get("status") == "active" and bool(view.get("enabled")):
         score += 20.0
         reasons.append("可用状态")
-    if view.get("verified_status") == "verified":
-        score += 20.0
-        reasons.append("已验证")
-    elif view.get("verified_status") == "unverified":
-        score += 8.0
-        reasons.append("未验证")
     usage_count = int(view.get("usage_count") or 0)
     if usage_count > 0:
         score += min(10.0, usage_count / 5.0)
@@ -2705,7 +2730,6 @@ def _build_catalog_patch(arguments: dict[str, Any], *, publish_status_default: s
         "business_domain",
         "business_object_type",
         "grain",
-        "verified_status",
         "usage_count",
         "last_used_at",
         "search_text",
@@ -2716,7 +2740,6 @@ def _build_catalog_patch(arguments: dict[str, Any], *, publish_status_default: s
     if isinstance(arguments.get("collection_config"), dict):
         patch["collection_config"] = dict(arguments.get("collection_config") or {})
     patch["publish_status"] = _normalize_publish_status(patch.get("publish_status"), default=publish_status_default)
-    patch["verified_status"] = _normalize_verified_status(patch.get("verified_status"), default="unverified")
     patch["schema_name"] = _safe_text(patch.get("schema_name"))
     patch["object_name"] = _safe_text(patch.get("object_name"))
     patch["object_type"] = _safe_text(patch.get("object_type"))
@@ -2742,8 +2765,6 @@ def _upsert_dataset_with_profile(dataset_row: dict[str, Any], *, catalog_patch: 
     if semantic_profile:
         if catalog_patch.get("publish_status"):
             semantic_profile["publish_status"] = catalog_patch.get("publish_status")
-        if catalog_patch.get("verified_status"):
-            semantic_profile["verified_status"] = catalog_patch.get("verified_status")
     meta["catalog_profile"] = next_catalog_profile
     if semantic_profile:
         meta["semantic_profile"] = semantic_profile
@@ -2775,7 +2796,6 @@ def _upsert_dataset_with_profile(dataset_row: dict[str, Any], *, catalog_patch: 
         "business_domain": catalog_patch.get("business_domain"),
         "business_object_type": catalog_patch.get("business_object_type"),
         "grain": catalog_patch.get("grain"),
-        "verified_status": catalog_patch.get("verified_status"),
         "usage_count": catalog_patch.get("usage_count"),
         "last_used_at": catalog_patch.get("last_used_at"),
         "search_text": catalog_patch.get("search_text"),
@@ -3248,7 +3268,6 @@ def create_tools() -> list[Tool]:
                     "object_type": {"type": "string"},
                     "publish_status": {"type": "string"},
                     "business_object_type": {"type": "string"},
-                    "verified_status": {"type": "string"},
                     "only_published": {"type": "boolean"},
                     "page": {"type": "integer"},
                     "page_size": {"type": "integer"},
@@ -3368,7 +3387,6 @@ def create_tools() -> list[Tool]:
                     "business_domain": {"type": "string"},
                     "business_object_type": {"type": "string"},
                     "grain": {"type": "string"},
-                    "verified_status": {"type": "string"},
                     "search_text": {"type": "string"},
                     "usage_count": {"type": "integer"},
                     "last_used_at": {"type": "string"},
@@ -4028,7 +4046,6 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
     object_type = _safe_text(arguments.get("object_type")).lower()
     publish_status = _safe_text(arguments.get("publish_status")).lower()
     business_object_type = _safe_text(arguments.get("business_object_type")).lower()
-    verified_status = _safe_text(arguments.get("verified_status")).lower()
     only_published = _normalize_bool(arguments.get("only_published"), default=False)
     page = max(1, int(arguments.get("page") or 1))
     page_size = max(1, min(int(arguments.get("page_size") or arguments.get("limit") or 50), 200))
@@ -4051,7 +4068,6 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
         object_type=object_type,
         publish_status=publish_status,
         business_object_type=business_object_type,
-        verified_status=verified_status,
         only_published=only_published,
         page=page,
         page_size=page_size,
@@ -4075,7 +4091,6 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
             object_type=object_type,
             publish_status=publish_status,
             business_object_type=business_object_type,
-            verified_status=verified_status,
             only_published=only_published,
             page=page,
             page_size=page_size,
@@ -4092,7 +4107,6 @@ async def _handle_data_source_list_datasets(arguments: dict[str, Any]) -> dict[s
                 object_type=object_type,
                 publish_status=publish_status,
                 business_object_type=business_object_type,
-                verified_status=verified_status,
                 only_published=only_published,
             )
         ]
@@ -4234,7 +4248,6 @@ async def _handle_data_source_upsert_dataset(arguments: dict[str, Any]) -> dict[
         "business_domain": arguments.get("business_domain"),
         "business_object_type": arguments.get("business_object_type"),
         "grain": arguments.get("grain"),
-        "verified_status": arguments.get("verified_status"),
         "usage_count": arguments.get("usage_count"),
         "last_used_at": arguments.get("last_used_at"),
         "search_text": arguments.get("search_text"),
@@ -4637,7 +4650,6 @@ async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any])
         "object_type": _safe_text(filters.get("object_type")).lower(),
         "publish_status": _safe_text(filters.get("publish_status")).lower(),
         "business_object_type": _safe_text(filters.get("business_object_type")).lower(),
-        "verified_status": _safe_text(filters.get("verified_status")).lower(),
         "only_published": only_published,
         "sort_by": "last_used_desc",
         "lightweight": False,
@@ -4695,7 +4707,6 @@ async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any])
             object_type=_safe_text(filters.get("object_type")).lower(),
             publish_status=_safe_text(filters.get("publish_status")).lower(),
             business_object_type=_safe_text(filters.get("business_object_type")).lower(),
-            verified_status=_safe_text(filters.get("verified_status")).lower(),
             only_published=only_published,
             page=1,
             page_size=max(2000, page_size),
@@ -4740,8 +4751,6 @@ async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any])
         if view.get("status") != "active":
             continue
         if not bool(view.get("enabled")):
-            continue
-        if _safe_text(view.get("verified_status")) not in {"verified", "unverified"}:
             continue
         if keyword and not _contains_tokens(_safe_text(view.get("search_text")), keyword):
             continue
@@ -5248,8 +5257,9 @@ async def _execute_sync_job(
         collection_context = _collection_context_from_args(arguments)
         collection_summary: dict[str, Any] = {}
         collection_records: list[dict[str, Any]] = []
+        collection_validation: dict[str, Any] = {}
         if collection_context:
-            collection_records = _build_collection_records(
+            collection_records, collection_validation = _build_collection_records(
                 rows=rows,
                 key_fields=list(collection_context.get("key_fields") or []),
             )
@@ -5319,6 +5329,7 @@ async def _execute_sync_job(
                     "biz_date": str(collection_context.get("biz_date") or ""),
                     "key_fields": list(collection_context.get("key_fields") or []),
                     "record_count": collection_summary.get("upserted_count", 0),
+                    **collection_validation,
                 }
             )
         checkpoint_after = _build_checkpoint_after(
@@ -5340,6 +5351,8 @@ async def _execute_sync_job(
                 "collection_inserted": int(collection_summary.get("inserted_count") or 0),
                 "collection_updated": int(collection_summary.get("updated_count") or 0),
                 "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
+                "collection_skipped_empty_key": int(collection_validation.get("skipped_empty_key_count") or 0),
+                "collection_skipped_empty_key_samples": collection_validation.get("skipped_empty_key_samples") or [],
             },
             checkpoint_after=checkpoint_after,
         )
@@ -5498,10 +5511,13 @@ async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, An
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
     params = dict(arguments.get("params") or {})
     query = dict(params.get("query") or {})
+    date_field = _collection_date_field(config)
+    date_format = _collection_date_format(config)
     query.update(
         {
             "resource_key": resource_key,
-            "date_field": _collection_date_field(config),
+            "date_field": date_field,
+            "date_format": date_format,
         }
     )
     params.update(
@@ -5511,7 +5527,8 @@ async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, An
             "dataset_id": _safe_text(dataset_row.get("id")),
             "dataset_code": _safe_text(dataset_row.get("dataset_code")),
             "collection_config": config,
-            "date_field": _collection_date_field(config),
+            "date_field": date_field,
+            "date_format": date_format,
             "key_fields": key_fields,
             "query": query,
         }

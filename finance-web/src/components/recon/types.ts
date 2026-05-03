@@ -83,6 +83,7 @@ export interface ReconTaskListItem {
   leftTimeSemantic: string;
   rightTimeSemantic: string;
   channelConfigId: string;
+  summaryRecipient: string;
   ownerSummary: string;
   status: 'enabled' | 'paused';
   updatedAt: string;

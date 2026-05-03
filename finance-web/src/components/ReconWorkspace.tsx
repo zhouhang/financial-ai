@@ -266,6 +266,8 @@ interface PlanDraft {
   bizDateOffset: string;
   dateFieldByInputKey: Record<string, string>;
   channelConfigId: string;
+  summaryRecipientName: string;
+  summaryRecipientIdentifier: string;
   ownerSummary: string;
   ownerIdentifier: string;
 }
@@ -348,6 +350,8 @@ const EMPTY_PLAN_DRAFT: PlanDraft = {
   bizDateOffset: 'T-1',
   dateFieldByInputKey: {},
   channelConfigId: '',
+  summaryRecipientName: '',
+  summaryRecipientIdentifier: '',
   ownerSummary: '',
   ownerIdentifier: '',
 };
@@ -1115,6 +1119,18 @@ function mapTask(item: unknown, schemeNameByCode: Map<string, string>): ReconTas
   const enabled = toBool(raw.is_enabled, true);
   const schemeCode = toText(raw.scheme_code);
   const planMeta = firstNonEmptyRecord(raw.plan_meta_json, raw.plan_meta, raw.meta);
+  const summaryRecipient = asRecord(planMeta.summary_recipient);
+  const ownerSummary = summarizeOwnerMapping(raw.owner_mapping_json);
+  const ownerMapping = asRecord(raw.owner_mapping_json);
+  const defaultOwner = asRecord(ownerMapping.default_owner);
+  const summaryRecipientDisplay = (() => {
+    const displayName = toText(summaryRecipient.display_name || summaryRecipient.name);
+    if (displayName && displayName !== toText(summaryRecipient.user_id)) return displayName;
+    const summaryUserId = toText(summaryRecipient.user_id);
+    const ownerIdentifier = toText(defaultOwner.identifier || defaultOwner.owner_identifier);
+    if (summaryUserId && summaryUserId === ownerIdentifier && ownerSummary) return ownerSummary;
+    return displayName || summaryUserId;
+  })();
   return {
     id: toText(raw.id),
     planCode: toText(raw.plan_code),
@@ -1127,7 +1143,8 @@ function mapTask(item: unknown, schemeNameByCode: Map<string, string>): ReconTas
     leftTimeSemantic: toText(planMeta.left_time_semantic),
     rightTimeSemantic: toText(planMeta.right_time_semantic),
     channelConfigId: toText(raw.channel_config_id),
-    ownerSummary: summarizeOwnerMapping(raw.owner_mapping_json),
+    summaryRecipient: summaryRecipientDisplay,
+    ownerSummary,
     status: enabled ? 'enabled' : 'paused',
     updatedAt: toText(raw.updated_at),
     createdAt: toText(raw.created_at),
@@ -3085,6 +3102,8 @@ export default function ReconWorkspace({
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmittingScheme, setIsSubmittingScheme] = useState(false);
   const [isSubmittingPlan, setIsSubmittingPlan] = useState(false);
+  const [summaryRecipientCandidates, setSummaryRecipientCandidates] = useState<OwnerCandidate[]>([]);
+  const [summaryRecipientSearchMessage, setSummaryRecipientSearchMessage] = useState('');
   const [ownerCandidates, setOwnerCandidates] = useState<OwnerCandidate[]>([]);
   const [ownerSearchMessage, setOwnerSearchMessage] = useState('');
   const [isTrialingProc, setIsTrialingProc] = useState(false);
@@ -3508,6 +3527,8 @@ export default function ReconWorkspace({
   const openCreatePlanModal = useCallback(
     (scheme: ReconSchemeListItem | null = null) => {
       setModalError(null);
+      setSummaryRecipientCandidates([]);
+      setSummaryRecipientSearchMessage('');
       setOwnerCandidates([]);
       setOwnerSearchMessage('');
       const resolvedScheme = scheme || schemes[0] || null;
@@ -3530,6 +3551,10 @@ export default function ReconWorkspace({
     setWizardReconJsonView('recon');
     setWizardJsonCopyState(null);
     setSelectedExceptionDetail(null);
+    setSummaryRecipientCandidates([]);
+    setSummaryRecipientSearchMessage('');
+    setOwnerCandidates([]);
+    setOwnerSearchMessage('');
     setModalState(null);
     setDesignSessionId('');
     setProcCompatibility(emptyCompatibilityResult());
@@ -5001,13 +5026,13 @@ export default function ReconWorkspace({
     wizardDraftState,
   ]);
 
-  const searchOwnerCandidates = useCallback(async () => {
-    const query = planDraft.ownerSummary.trim();
+  const searchNotificationCandidates = useCallback(async (query: string) => {
     if (!authToken) {
-      throw new Error('请先登录后再保存责任人。');
+      throw new Error('请先登录后再查找人员。');
     }
-    if (!query) {
-      throw new Error('请输入责任人姓名。');
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      throw new Error('请输入姓名或手机号。');
     }
     if (!planDraft.channelConfigId.trim()) {
       throw new Error('请先选择协作通道。');
@@ -5020,7 +5045,7 @@ export default function ReconWorkspace({
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        query,
+        query: normalizedQuery,
         channel_config_id: planDraft.channelConfigId.trim(),
       }),
     });
@@ -5035,7 +5060,15 @@ export default function ReconWorkspace({
       candidates,
       message: String(data.message || ''),
     };
-  }, [authToken, planDraft.channelConfigId, planDraft.ownerSummary]);
+  }, [authToken, planDraft.channelConfigId]);
+
+  const searchOwnerCandidates = useCallback(async () => {
+    return searchNotificationCandidates(planDraft.ownerSummary.trim());
+  }, [planDraft.ownerSummary, searchNotificationCandidates]);
+
+  const searchSummaryRecipientCandidates = useCallback(async () => {
+    return searchNotificationCandidates(planDraft.summaryRecipientName.trim());
+  }, [planDraft.summaryRecipientName, searchNotificationCandidates]);
 
   const handleCreatePlan = useCallback(async () => {
     const schemeCode = planDraft.schemeCode.trim();
@@ -5045,6 +5078,10 @@ export default function ReconWorkspace({
     }
     if (!schemeCode) {
       setModalError('请先选择所属方案。');
+      return;
+    }
+    if (planDraft.channelConfigId.trim() && !planDraft.summaryRecipientName.trim()) {
+      setModalError('请填写对账汇总接收人。');
       return;
     }
     if (!planDraft.ownerSummary.trim()) {
@@ -5094,6 +5131,32 @@ export default function ReconWorkspace({
     setModalError(null);
 
     try {
+      let summaryRecipientNameForSubmit = planDraft.summaryRecipientName.trim();
+      let summaryRecipientIdentifierForSubmit = planDraft.summaryRecipientIdentifier.trim();
+      if (planDraft.channelConfigId.trim() && !summaryRecipientIdentifierForSubmit) {
+        setSummaryRecipientSearchMessage('');
+        setSummaryRecipientCandidates([]);
+        const recipientSearch = await searchSummaryRecipientCandidates();
+        if (recipientSearch.candidates.length === 0) {
+          setSummaryRecipientSearchMessage(recipientSearch.message || '未找到匹配的对账汇总接收人，请检查姓名或手机号。');
+          return;
+        }
+        if (recipientSearch.candidates.length > 1) {
+          setSummaryRecipientCandidates(recipientSearch.candidates);
+          setSummaryRecipientSearchMessage(`匹配到 ${recipientSearch.candidates.length} 位同名候选人，请根据部门或手机号后四位选择后再保存。`);
+          return;
+        }
+        const [candidate] = recipientSearch.candidates;
+        summaryRecipientNameForSubmit = candidate.display_name || summaryRecipientNameForSubmit;
+        summaryRecipientIdentifierForSubmit = candidate.identifier;
+        setPlanDraft((prev) => ({
+          ...prev,
+          summaryRecipientName: summaryRecipientNameForSubmit,
+          summaryRecipientIdentifier: summaryRecipientIdentifierForSubmit,
+        }));
+        setSummaryRecipientSearchMessage('已自动匹配到明确对账汇总接收人。');
+      }
+
       let ownerSummaryForSubmit = planDraft.ownerSummary.trim();
       let ownerIdentifierForSubmit = planDraft.ownerIdentifier.trim();
       if (!ownerIdentifierForSubmit) {
@@ -5134,6 +5197,12 @@ export default function ReconWorkspace({
           biz_date_offset: planDraft.bizDateOffset.trim() || 'T-1',
           input_bindings_json: inputBindings,
           channel_config_id: planDraft.channelConfigId.trim(),
+          summary_recipient: planDraft.channelConfigId.trim() && summaryRecipientNameForSubmit
+            ? {
+                display_name: summaryRecipientNameForSubmit,
+                user_id: summaryRecipientIdentifierForSubmit,
+              }
+            : {},
           owner_mapping_json: ownerSummaryForSubmit
             ? {
                 default_owner: {
@@ -5162,7 +5231,7 @@ export default function ReconWorkspace({
     } finally {
       setIsSubmittingPlan(false);
     }
-  }, [authToken, closeModal, loadCenterData, planDraft, schemes, searchOwnerCandidates]);
+  }, [authToken, closeModal, loadCenterData, planDraft, schemes, searchOwnerCandidates, searchSummaryRecipientCandidates]);
 
   const handleDeleteScheme = useCallback(
     async (scheme: ReconSchemeListItem) => {
@@ -5694,9 +5763,11 @@ export default function ReconWorkspace({
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
-                <p className="mt-1 line-clamp-2 text-sm leading-6 text-text-secondary">
-                  {resolveChannelProviderLabel(item.channelConfigId)} · {item.ownerSummary || '--'}
-                </p>
+                <div className="mt-1 space-y-0.5 text-sm leading-5 text-text-secondary">
+                  <p>{resolveChannelProviderLabel(item.channelConfigId)}</p>
+                  <p>对账汇总接收人：{item.summaryRecipient || '--'}</p>
+                  <p>责任人：{item.ownerSummary || '--'}</p>
+                </div>
               </div>
               <span className="truncate text-sm text-text-secondary">{item.schemeName || '--'}</span>
               <span className="text-sm text-text-secondary">
@@ -6307,8 +6378,11 @@ export default function ReconWorkspace({
                     setPlanDraft((prev) => ({
                       ...prev,
                       channelConfigId: event.target.value,
+                      summaryRecipientIdentifier: '',
                       ownerIdentifier: '',
                     }));
+                    setSummaryRecipientCandidates([]);
+                    setSummaryRecipientSearchMessage('');
                     setOwnerCandidates([]);
                     setOwnerSearchMessage('');
                   }}
@@ -6322,6 +6396,71 @@ export default function ReconWorkspace({
                   ))}
                 </select>
               </label>
+              <label className="block">
+                <span className="text-xs font-medium text-text-secondary">对账汇总接收人</span>
+                <input
+                  value={planDraft.summaryRecipientName}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setPlanDraft((prev) => ({
+                      ...prev,
+                      summaryRecipientName: value,
+                      summaryRecipientIdentifier: '',
+                    }));
+                    setSummaryRecipientCandidates([]);
+                    setSummaryRecipientSearchMessage('');
+                  }}
+                  className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                  placeholder="例如：张三或手机号"
+                />
+                {planDraft.summaryRecipientIdentifier ? (
+                  <p className="mt-1.5 text-xs text-emerald-700">已选择明确接收人，每次对账结果汇总会发送给此人。</p>
+                ) : (
+                  <p className="mt-1.5 text-xs text-text-muted">保存时自动校验；同名时会提示选择候选人。</p>
+                )}
+              </label>
+            </div>
+
+            {summaryRecipientSearchMessage ? (
+              <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                {summaryRecipientSearchMessage}
+              </div>
+            ) : null}
+
+            {summaryRecipientCandidates.length > 0 ? (
+              <div className="grid gap-2">
+                {summaryRecipientCandidates.map((candidate) => {
+                  const selected = planDraft.summaryRecipientIdentifier === candidate.identifier;
+                  return (
+                    <button
+                      key={`summary-${candidate.identifier}`}
+                      type="button"
+                      onClick={() => {
+                        setPlanDraft((prev) => ({
+                          ...prev,
+                          summaryRecipientName: candidate.display_name || prev.summaryRecipientName,
+                          summaryRecipientIdentifier: candidate.identifier,
+                        }));
+                        setSummaryRecipientSearchMessage('已选择明确对账汇总接收人，请再次点击保存运行计划。');
+                      }}
+                      className={cn(
+                        'rounded-2xl border px-4 py-3 text-left text-sm transition',
+                        selected
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                          : 'border-border bg-surface text-text-primary hover:border-sky-200',
+                      )}
+                    >
+                      <div className="font-medium">{candidate.display_name || '未命名用户'}</div>
+                      <div className="mt-1 text-xs text-text-secondary">
+                        {formatOwnerCandidateHint(candidate)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <div className="grid gap-4 md:grid-cols-2">
               <label className="block">
                 <span className="text-xs font-medium text-text-secondary">责任人</span>
                 <input
@@ -6426,6 +6565,7 @@ export default function ReconWorkspace({
                 disabled={
                   isSubmittingPlan ||
                   !planDraft.schemeCode.trim() ||
+                  (Boolean(planDraft.channelConfigId.trim()) && !planDraft.summaryRecipientName.trim()) ||
                   !planDraft.ownerSummary.trim()
                 }
                 className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
@@ -6584,6 +6724,7 @@ export default function ReconWorkspace({
               <DetailRow label="运行计划" value={formatScheduleLabel(task.scheduleType, task.scheduleExpr)} />
               <DetailRow label="对账周期" value={formatBizDateOffsetLabel(task.bizDateOffset)} />
               <DetailRow label="协作通道" value={resolveChannelProviderLabel(task.channelConfigId)} />
+              <DetailRow label="对账汇总接收人" value={task.summaryRecipient || '--'} />
               <DetailRow label="责任人" value={task.ownerSummary || '--'} />
               <DetailRow label="创建时间" value={formatDateTime(task.createdAt)} />
               <DetailRow label="更新时间" value={formatDateTime(task.updatedAt)} />

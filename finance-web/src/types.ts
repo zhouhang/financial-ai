@@ -204,7 +204,6 @@ export interface DataSourceDatasetSummary {
   object_name?: string;
   object_type?: string;
   publish_status?: 'published' | 'unpublished' | 'deprecated' | string;
-  verified_status?: 'verified' | 'unverified' | 'rejected' | string;
   business_domain?: string;
   business_object_type?: string;
   grain?: string;

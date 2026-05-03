@@ -179,13 +179,43 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         ctx["proc_result"] = proc_result
         return {"recon_ctx": ctx}
 
-    proc_recon_inputs: list[dict[str, Any]] = []
+    generated_file_by_target: dict[str, str] = {}
     for item in list(proc_result.get("generated_files") or []):
         if not isinstance(item, dict):
             continue
         target_table = str(item.get("target_table") or "").strip()
         output_file = str(item.get("output_file") or "").strip()
-        if not target_table or not output_file:
+        if target_table and output_file:
+            generated_file_by_target[target_table] = output_file
+
+    proc_recon_inputs: list[dict[str, Any]] = []
+    for item in list(proc_result.get("memory_outputs") or []):
+        if not isinstance(item, dict):
+            continue
+        target_table = str(item.get("target_table") or "").strip()
+        memory_ref = str(item.get("memory_ref") or "").strip()
+        if not target_table or not memory_ref:
+            continue
+        proc_recon_inputs.append(
+            {
+                "table_name": target_table,
+                "input_type": "memory",
+                "payload": {
+                    "memory_ref": memory_ref,
+                    "row_count": item.get("row_count"),
+                    "fallback_file_path": generated_file_by_target.get(target_table, ""),
+                },
+            }
+        )
+
+    for item in list(proc_result.get("generated_files") or []):
+        if not isinstance(item, dict):
+            continue
+        target_table = str(item.get("target_table") or "").strip()
+        output_file = str(item.get("output_file") or "").strip()
+        if not target_table or not output_file or any(
+            existing.get("table_name") == target_table for existing in proc_recon_inputs
+        ):
             continue
         proc_recon_inputs.append(
             {
@@ -199,7 +229,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
 
     if not proc_recon_inputs:
         ctx["prepare_status"] = "error"
-        ctx["prepare_message"] = "proc 未生成可供 recon 使用的输出文件"
+        ctx["prepare_message"] = "proc 未生成可供 recon 使用的整理结果"
         ctx["exec_status"] = "error"
         ctx["exec_error"] = ctx["prepare_message"]
         ctx["failed_stage"] = "prepare"
@@ -209,7 +239,10 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
     ctx["recon_inputs"] = proc_recon_inputs
     ctx["proc_result"] = proc_result
     ctx["prepare_status"] = "success"
-    ctx["prepare_message"] = f"已生成 {len(proc_recon_inputs)} 个整理结果，供后续对账使用。"
+    if any(str(item.get("input_type") or "").lower() == "memory" for item in proc_recon_inputs):
+        ctx["prepare_message"] = f"已生成 {len(proc_recon_inputs)} 个内存整理结果，供后续对账使用。"
+    else:
+        ctx["prepare_message"] = f"已生成 {len(proc_recon_inputs)} 个整理结果文件，供后续对账使用。"
     return {"recon_ctx": ctx}
 
 

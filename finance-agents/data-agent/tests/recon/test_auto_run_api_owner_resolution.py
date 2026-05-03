@@ -106,6 +106,7 @@ def test_create_execution_task_resolves_owner_identifier_before_save(
         plan_name="店铺对账 T-1",
         scheme_code="scheme_001",
         channel_config_id="channel-001",
+        summary_recipient={"name": "周行"},
         owner_mapping_json={"default_owner": {"name": "周行"}},
     )
 
@@ -115,9 +116,14 @@ def test_create_execution_task_resolves_owner_identifier_before_save(
 
     default_owner = captured["owner_mapping_json"]["default_owner"]
     assert result["success"] is True
-    assert adapter.calls == [{"user_id": "", "mobile": "", "keyword": "周行"}]
+    assert adapter.calls == [
+        {"user_id": "", "mobile": "", "keyword": "周行"},
+        {"user_id": "", "mobile": "", "keyword": "周行"},
+    ]
     assert default_owner["name"] == "周行"
     assert default_owner["identifier"] == "ding-user-001"
+    assert captured["plan_meta_json"]["summary_recipient"]["display_name"] == "周行"
+    assert captured["plan_meta_json"]["summary_recipient"]["user_id"] == "ding-user-001"
 
 
 def test_create_auto_task_resolves_owner_identifier_before_save(

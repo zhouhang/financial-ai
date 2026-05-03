@@ -154,8 +154,6 @@ interface PhysicalCatalogFilterState {
   keyword: string;
   schema: string;
   objectType: string;
-  publishStatus: string;
-  verifiedStatus: string;
   page: number;
   pageSize: number;
 }
@@ -211,10 +209,10 @@ interface EditableDatasetSemantic {
   businessObjectType: string;
   // Reserved for future grain-aware matching. Kept in payload, hidden in current publish UI.
   grain: string;
-  verifiedStatus: string;
   publishStatus: string;
   uniqueIdentifierRawNames: string[];
   collectionDateField: string;
+  collectionDateFormat: string;
   collectionScheduleFrequency: string;
   collectionScheduleTime: string;
   fieldRows: EditableDatasetSemanticFieldRow[];
@@ -317,6 +315,95 @@ function formatSampleCellValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isCompactDatePartitionField(fieldName: string): boolean {
+  return ['pt', 'dt', 'biz_dt', 'bizdate', 'biz_date_yyyymmdd', 'date_key'].includes(
+    fieldName.trim().toLowerCase(),
+  );
+}
+
+function normalizeCollectionDateFormat(value: unknown, fieldName = ''): string {
+  const normalized = String(value ?? '').trim().toLowerCase().replaceAll('-', '_');
+  if (['native', 'date', 'datetime', 'timestamp', 'iso', 'iso_date', 'iso_datetime', 'yyyy_mm_dd'].includes(normalized)) {
+    return 'native';
+  }
+  if (['compact', 'yyyymmdd', 'compact_date', 'partition_date'].includes(normalized)) {
+    return 'compact_date';
+  }
+  if (['yyyymmddhhmmss', 'compact_datetime'].includes(normalized)) {
+    return 'compact_datetime';
+  }
+  if (['slash_date', 'yyyy/mm/dd'].includes(normalized)) {
+    return 'slash_date';
+  }
+  if (['slash_datetime', 'yyyy/mm/dd hh:mm:ss'].includes(normalized)) {
+    return 'slash_datetime';
+  }
+  if (['unix', 'unix_seconds', 'epoch_seconds'].includes(normalized)) {
+    return 'unix_seconds';
+  }
+  if (['unix_millis', 'unix_milliseconds', 'epoch_millis'].includes(normalized)) {
+    return 'unix_millis';
+  }
+  if (isCompactDatePartitionField(fieldName)) return 'compact_date';
+  return 'native';
+}
+
+function inferCollectionDateFormat(fieldName: string, sampleValues: string[]): string {
+  if (isCompactDatePartitionField(fieldName)) return 'compact_date';
+  const samples = sampleValues.map((item) => item.trim()).filter(Boolean);
+  const first = samples[0] ?? '';
+  if (/^\d{8}$/.test(first)) return 'compact_date';
+  if (/^\d{14}$/.test(first)) return 'compact_datetime';
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(first)) return 'slash_date';
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?$/.test(first)) return 'slash_datetime';
+  if (/^\d{13}$/.test(first)) return 'unix_millis';
+  if (/^\d{10}$/.test(first)) return 'unix_seconds';
+  return 'native';
+}
+
+function collectionDateFormatLabel(format: string): string {
+  const normalized = normalizeCollectionDateFormat(format);
+  if (normalized === 'compact_date') return 'YYYYMMDD 文本/分区字段';
+  if (normalized === 'compact_datetime') return 'YYYYMMDDHHmmss 文本时间';
+  if (normalized === 'slash_date') return 'YYYY/MM/DD 文本日期';
+  if (normalized === 'slash_datetime') return 'YYYY/MM/DD HH:mm:ss 文本时间';
+  if (normalized === 'unix_seconds') return 'Unix 秒时间戳';
+  if (normalized === 'unix_millis') return 'Unix 毫秒时间戳';
+  return '数据库日期/时间字段';
+}
+
+function formatCollectionFilterDisplay(dateField: string, bizDate: string, format = ''): string {
+  const field = dateField.trim();
+  const dateValue = bizDate.trim();
+  const dateFormat = normalizeCollectionDateFormat(format, field);
+  if (!field || !dateValue) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+    if (dateFormat === 'compact_date') {
+      return `${field} = ${dateValue.replaceAll('-', '')}`;
+    }
+    if (dateFormat === 'compact_datetime') {
+      const compactDate = dateValue.replaceAll('-', '');
+      return `${field} >= ${compactDate}000000 且 < 下日 000000`;
+    }
+    if (dateFormat === 'slash_date') {
+      const slashDate = dateValue.replaceAll('-', '/');
+      return `${field} >= ${slashDate} 且 < 下一日`;
+    }
+    if (dateFormat === 'slash_datetime') {
+      const slashDate = dateValue.replaceAll('-', '/');
+      return `${field} >= ${slashDate} 00:00:00 且 < 下一日 00:00:00`;
+    }
+    if (dateFormat === 'unix_seconds') return `${field} >= 当日 00:00:00 秒时间戳 且 < 下一日`;
+    if (dateFormat === 'unix_millis') return `${field} >= 当日 00:00:00 毫秒时间戳 且 < 下一日`;
+    const nextDate = new Date(`${dateValue}T00:00:00`);
+    if (!Number.isNaN(nextDate.getTime())) {
+      nextDate.setDate(nextDate.getDate() + 1);
+      return `${field} >= ${dateValue} 且 < ${nextDate.toISOString().slice(0, 10)}`;
+    }
+  }
+  return `${field} = ${dateValue}`;
 }
 
 function normalizeDiscoverSummary(raw: unknown): DataSourceListItem['discover_summary'] | undefined {
@@ -534,21 +621,6 @@ function readDatasetPublishStatus(dataset: DataSourceDatasetSummary): string {
     return normalized;
   }
   return 'unpublished';
-}
-
-function readDatasetVerifiedStatus(dataset: DataSourceDatasetSummary): string {
-  const semanticRecord = readDatasetSemanticRecord(dataset);
-  const normalized = (
-    asString(dataset.verified_status) ??
-    asString(semanticRecord.verified_status) ??
-    'unverified'
-  )
-    .trim()
-    .toLowerCase();
-  if (normalized === 'verified' || normalized === 'unverified' || normalized === 'rejected') {
-    return normalized;
-  }
-  return 'unverified';
 }
 
 function readDatasetBusinessObjectType(dataset: DataSourceDatasetSummary): string {
@@ -1060,10 +1132,10 @@ function buildEditableDatasetSemanticState(
     businessName: semantic.businessName || dataset.business_name || dataset.dataset_name,
     businessObjectType: readDatasetBusinessObjectType(dataset),
     grain: readDatasetGrain(dataset),
-    verifiedStatus: readDatasetVerifiedStatus(dataset),
     publishStatus: readDatasetPublishStatus(dataset),
     uniqueIdentifierRawNames,
     collectionDateField: asString(collectionConfig.date_field) ?? '',
+    collectionDateFormat: normalizeCollectionDateFormat(collectionConfig.date_format, asString(collectionConfig.date_field) ?? ''),
     collectionScheduleFrequency: asString(collectionSchedule.frequency) ?? 'daily',
     collectionScheduleTime: asString(collectionSchedule.time) ?? '08:30',
     fieldRows,
@@ -1376,7 +1448,6 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
     object_name: asString(value.object_name),
     object_type: asString(value.object_type),
     publish_status: asString(value.publish_status),
-    verified_status: asString(value.verified_status),
     business_domain: asString(value.business_domain),
     business_object_type: asString(value.business_object_type),
     grain: asString(value.grain),
@@ -1732,8 +1803,6 @@ function createDefaultPhysicalCatalogFilterState(): PhysicalCatalogFilterState {
     keyword: '',
     schema: 'all',
     objectType: 'all',
-    publishStatus: 'all',
-    verifiedStatus: 'all',
     page: 1,
     pageSize: 20,
   };
@@ -1745,13 +1814,6 @@ function publishStatusLabel(status: string): string {
   if (status === 'draft') return '草稿';
   if (status === 'archived') return '已归档';
   if (status === 'deprecated') return '已废弃';
-  return status || '未知';
-}
-
-function verifiedStatusLabel(status: string): string {
-  if (status === 'verified') return '已验证';
-  if (status === 'unverified') return '未验证';
-  if (status === 'rejected') return '已驳回';
   return status || '未知';
 }
 
@@ -2074,7 +2136,12 @@ export default function DataConnectionsPanel({
           ...current,
           ...patch,
         };
-        if (patch.keyword !== undefined || patch.schema !== undefined || patch.objectType !== undefined || patch.publishStatus !== undefined || patch.verifiedStatus !== undefined || patch.pageSize !== undefined) {
+        if (
+          patch.keyword !== undefined ||
+          patch.schema !== undefined ||
+          patch.objectType !== undefined ||
+          patch.pageSize !== undefined
+        ) {
           next.page = 1;
         }
         return {
@@ -2217,8 +2284,6 @@ export default function DataConnectionsPanel({
         if (filter.keyword.trim()) params.set('keyword', filter.keyword.trim());
         if (filter.schema !== 'all') params.set('schema_name', filter.schema);
         if (filter.objectType !== 'all') params.set('object_type', filter.objectType);
-        if (filter.publishStatus !== 'all') params.set('publish_status', filter.publishStatus);
-        if (filter.verifiedStatus !== 'all') params.set('verified_status', filter.verifiedStatus);
         params.set('page', String(Math.max(1, filter.page || 1)));
         params.set('page_size', String(Math.max(5, filter.pageSize || 20)));
         params.set('include_heavy', 'false');
@@ -3995,9 +4060,13 @@ export default function DataConnectionsPanel({
   const setEditingDatasetCollectionDateField = useCallback((rawName: string) => {
     setEditingDatasetSemantic((prev) => {
       if (!prev) return prev;
+      const targetRow = prev.fieldRows.find((row) => row.rawName === rawName);
       return {
         ...prev,
         collectionDateField: rawName,
+        collectionDateFormat: rawName
+          ? inferCollectionDateFormat(rawName, targetRow?.sampleValues ?? [])
+          : 'native',
         fieldRows: prev.fieldRows.map((row) => {
           if (row.rawName !== rawName) return row;
           return {
@@ -4017,7 +4086,6 @@ export default function DataConnectionsPanel({
       if (!prev) return prev;
       return {
         ...prev,
-        verifiedStatus: 'verified',
         fieldRows: prev.fieldRows.map((row) => ({
           ...row,
           displayName: row.displayName.trim() || row.rawName,
@@ -4034,7 +4102,6 @@ export default function DataConnectionsPanel({
     const businessName = editingDatasetSemantic.businessName.trim() || editingDatasetSemantic.datasetName;
     const businessObjectType = editingDatasetSemantic.businessObjectType.trim();
     const grain = editingDatasetSemantic.grain.trim();
-    const verifiedStatus = editingDatasetSemantic.verifiedStatus || 'unverified';
     const keyFields = normalizeUniqueIdentifierRawNames(
       editingDatasetSemantic.uniqueIdentifierRawNames,
       editingDatasetSemantic.fieldRows,
@@ -4057,15 +4124,12 @@ export default function DataConnectionsPanel({
                 ? 1
                 : 0.5,
           sample_values: row.sampleValues.filter((item) => item.trim().length > 0),
-          confirmed_by_user: row.confirmedByUser,
+          confirmed_by_user: true,
         };
       })
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
     const fieldLabelMap = Object.fromEntries(normalizedFields.map((row) => [row.raw_name, row.display_name]));
-    const pendingFieldNames = editingDatasetSemantic.fieldRows
-      .filter((row) => row.pending && !row.confirmedByUser)
-      .map((row) => row.rawName.trim())
-      .filter(Boolean);
+    const pendingFieldNames: string[] = [];
     const updatedAt = new Date().toISOString();
     const semanticProfile = {
       version: 1,
@@ -4073,7 +4137,6 @@ export default function DataConnectionsPanel({
       business_name: businessName,
       business_object_type: businessObjectType,
       grain,
-      verified_status: verifiedStatus,
       publish_status: 'published',
       field_label_map: fieldLabelMap,
       key_fields: keyFields,
@@ -4085,6 +4148,11 @@ export default function DataConnectionsPanel({
     const collectionConfig = {
       mode: editingDatasetSemantic.collectionDateField.trim() ? 'date_field' : 'manual',
       date_field: editingDatasetSemantic.collectionDateField.trim(),
+      date_format: inferCollectionDateFormat(
+        editingDatasetSemantic.collectionDateField,
+        editingDatasetSemantic.fieldRows.find((row) => row.rawName === editingDatasetSemantic.collectionDateField)
+          ?.sampleValues ?? [],
+      ),
       schedule: {
         enabled: true,
         frequency: editingDatasetSemantic.collectionScheduleFrequency || 'daily',
@@ -4102,7 +4170,6 @@ export default function DataConnectionsPanel({
           business_name: businessName,
           business_object_type: businessObjectType,
           grain,
-          verified_status: verifiedStatus,
           publish_status: 'published',
           key_fields: keyFields,
           field_label_map: fieldLabelMap,
@@ -4126,18 +4193,17 @@ export default function DataConnectionsPanel({
               businessName,
               businessObjectType,
               grain,
-              verifiedStatus,
               publishStatus: 'published',
               uniqueIdentifierRawNames: keyFields,
               collectionDateField: collectionConfig.date_field,
+              collectionDateFormat: collectionConfig.date_format,
               collectionScheduleFrequency: collectionConfig.schedule.frequency,
               collectionScheduleTime: collectionConfig.schedule.time,
               fieldRows: prev.fieldRows.map((row) => ({
                 ...row,
                 displayName: fieldLabelMap[row.rawName] || row.displayName,
-                confirmedByUser:
-                  normalizedFields.find((field) => field.raw_name === row.rawName)?.confirmed_by_user ?? row.confirmedByUser,
-                pending: pendingFieldNames.includes(row.rawName),
+                confirmedByUser: true,
+                pending: false,
               })),
             }
           : prev,
@@ -4174,7 +4240,6 @@ export default function DataConnectionsPanel({
             object_type: editingDatasetSemantic.objectType,
             business_object_type: businessObjectType,
             grain,
-            verified_status: verifiedStatus,
             collection_config: collectionConfig,
           }),
         },
@@ -5742,42 +5807,6 @@ export default function DataConnectionsPanel({
                             <ChevronDown className="h-4 w-4" />
                           </span>
                         </div>
-                        <div className="relative">
-                          <select
-                            value={physicalFilter.publishStatus}
-                            onChange={(event) =>
-                              activeSource &&
-                              updatePhysicalCatalogFilter(activeSource.id, { publishStatus: event.target.value })
-                            }
-                            className="w-full appearance-none rounded-xl border border-border bg-surface py-2 pl-3 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                          >
-                            <option value="all">全部发布状态</option>
-                            <option value="published">已发布</option>
-                            <option value="unpublished">未发布</option>
-                            <option value="deprecated">已废弃</option>
-                          </select>
-                          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
-                            <ChevronDown className="h-4 w-4" />
-                          </span>
-                        </div>
-                        <div className="relative">
-                          <select
-                            value={physicalFilter.verifiedStatus}
-                            onChange={(event) =>
-                              activeSource &&
-                              updatePhysicalCatalogFilter(activeSource.id, { verifiedStatus: event.target.value })
-                            }
-                            className="w-full appearance-none rounded-xl border border-border bg-surface py-2 pl-3 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                          >
-                            <option value="all">全部验证状态</option>
-                            <option value="verified">已验证</option>
-                            <option value="unverified">未验证</option>
-                            <option value="rejected">已驳回</option>
-                          </select>
-                          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
-                            <ChevronDown className="h-4 w-4" />
-                          </span>
-                        </div>
                       </div>
                     </div>
 
@@ -5812,7 +5841,6 @@ export default function DataConnectionsPanel({
                                 const semanticInfo = readDatasetSemanticInfo(dataset);
                                 const { schemaName, objectName } = parseSchemaAndObjectName(dataset);
                                 const publishStatus = readDatasetPublishStatus(dataset);
-                                const verifiedStatus = readDatasetVerifiedStatus(dataset);
                                 const objectType = readDatasetObjectType(dataset);
                                 const objectLabel = `${schemaName}.${objectName}`;
                                 const businessName = semanticInfo.businessName || dataset.business_name || '未命名';
@@ -5861,11 +5889,6 @@ export default function DataConnectionsPanel({
                                             title={objectType}
                                           >
                                             {objectType}
-                                          </span>
-                                          <span
-                                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(verifiedStatus)}`}
-                                          >
-                                            {verifiedStatusLabel(verifiedStatus)}
                                           </span>
                                           <span
                                             className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
@@ -6008,9 +6031,6 @@ export default function DataConnectionsPanel({
                 <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(readDatasetPublishStatus(selectedPhysicalDetail))}`}>
                   {publishStatusLabel(readDatasetPublishStatus(selectedPhysicalDetail))}
                 </span>
-                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(readDatasetVerifiedStatus(selectedPhysicalDetail))}`}>
-                  {verifiedStatusLabel(readDatasetVerifiedStatus(selectedPhysicalDetail))}
-                </span>
               </div>
             )}
 
@@ -6139,11 +6159,6 @@ export default function DataConnectionsPanel({
                     >
                       {publishStatusLabel(editingDatasetSemantic.publishStatus)}
                     </span>
-                    <span
-                      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(editingDatasetSemantic.verifiedStatus)}`}
-                    >
-                      {verifiedStatusLabel(editingDatasetSemantic.verifiedStatus)}
-                    </span>
                   </div>
                   <p className="mt-1 truncate text-sm text-text-primary">{editingDatasetSemantic.datasetName}</p>
                   <p className="mt-1 truncate text-xs text-text-secondary">
@@ -6190,32 +6205,6 @@ export default function DataConnectionsPanel({
                     />
                   </label>
 
-                  <label className="block rounded-2xl border border-border bg-surface-secondary px-4 py-3 sm:col-span-2">
-                    <span className="text-xs text-text-muted">验证状态</span>
-                    <div className="relative mt-2">
-                      <select
-                        value={editingDatasetSemantic.verifiedStatus}
-                        onChange={(event) =>
-                          setEditingDatasetSemantic((prev) =>
-                            prev
-                              ? {
-                                  ...prev,
-                                  verifiedStatus: event.target.value,
-                                }
-                              : prev,
-                        )
-                      }
-                      className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    >
-                        <option value="verified">已验证</option>
-                        <option value="unverified">未验证</option>
-                        <option value="rejected">已驳回</option>
-                      </select>
-                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
-                        <ChevronDown className="h-4 w-4" />
-                      </span>
-                    </div>
-                  </label>
                 </div>
 
                 <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
@@ -6254,7 +6243,7 @@ export default function DataConnectionsPanel({
                     <span className="text-sm font-medium text-text-primary">采集配置</span>
                   </div>
                   <p className="mt-1 text-xs text-text-secondary">
-                    优先选择更新时间字段，确保能采集到新增和更新的数据；没有更新时间字段时选择创建时间字段，至少能采集到新创建的数据。
+                    有 update_time / updated_at / modified_at 时优先选它，可以采集新增和更新；没有更新时间字段时选择 create_time / created_at，只能稳定采集新创建的数据。
                   </p>
                   <p className="mt-1 text-xs text-blue-700">
                     发布后系统会按采集计划独立采集数据，写入数据资产层，供对账和后续 AI 数据统计使用。
@@ -6582,7 +6571,38 @@ export default function DataConnectionsPanel({
                               jobs.map((job) => {
                                 const status = asString(job.status) || asString(job.job_status) || 'unknown';
                                 const metrics = asRecord(job.metrics) ?? {};
-                                const rowCount = asNumber(metrics.collection_upserted) ?? asNumber(metrics.row_count) ?? '';
+                                const requestPayload = asRecord(job.request_payload) ?? {};
+                                const queryPayload = asRecord(requestPayload.query) ?? {};
+                                const sourceRowCount = asNumber(metrics.row_count);
+                                const collectionInputCount = asNumber(metrics.collection_input);
+                                const collectionUpsertedCount = asNumber(metrics.collection_upserted);
+                                const collectionInsertedCount = asNumber(metrics.collection_inserted);
+                                const collectionUpdatedCount = asNumber(metrics.collection_updated);
+                                const collectionUnchangedCount = asNumber(metrics.collection_unchanged);
+                                const collectionSkippedEmptyKeyCount = asNumber(metrics.collection_skipped_empty_key);
+                                const skippedEmptyKeySamples = Array.isArray(metrics.collection_skipped_empty_key_samples)
+                                  ? metrics.collection_skipped_empty_key_samples
+                                      .map((item) => asRecord(item))
+                                      .filter((item): item is Record<string, unknown> => Boolean(item))
+                                  : [];
+                                const dateField =
+                                  asString(requestPayload.date_field) || asString(queryPayload.date_field) || '';
+                                const dateFormat =
+                                  asString(requestPayload.date_format) || asString(queryPayload.date_format) || '';
+                                const bizDate = asString(requestPayload.biz_date) || '';
+                                const filterDisplay = formatCollectionFilterDisplay(dateField, bizDate, dateFormat);
+                                const hasSourceRows = typeof sourceRowCount === 'number' && sourceRowCount > 0;
+                                const keyFields = Array.isArray(requestPayload.key_fields)
+                                  ? requestPayload.key_fields
+                                      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                                      .filter(Boolean)
+                                  : [];
+                                const isZeroSourceResult = sourceRowCount === 0;
+                                const isCompressedByKey =
+                                  hasSourceRows &&
+                                  typeof collectionInputCount === 'number' &&
+                                  collectionInputCount > 0 &&
+                                  collectionInputCount < sourceRowCount;
                                 return (
                                   <div key={asString(job.id) || JSON.stringify(job)} className="rounded-xl border border-border bg-surface px-3 py-2">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -6593,9 +6613,73 @@ export default function DataConnectionsPanel({
                                         {formatTime(asString(job.completed_at) || asString(job.created_at))}
                                       </span>
                                     </div>
-                                    <p className="mt-1 text-xs text-text-secondary">
-                                      {rowCount !== '' ? `采集 ${rowCount} 条` : '未返回采集行数'}
-                                    </p>
+                                    <div className="mt-2 grid gap-2 text-xs text-text-secondary sm:grid-cols-2">
+                                      <p>
+                                        源表读取：
+                                        <span className="font-medium text-text-primary">
+                                          {typeof sourceRowCount === 'number' ? sourceRowCount : '未返回'}
+                                        </span>
+                                        条
+                                      </p>
+                                      <p>
+                                        资产记录：
+                                        <span className="font-medium text-text-primary">
+                                          {typeof collectionUpsertedCount === 'number' ? collectionUpsertedCount : '未返回'}
+                                        </span>
+                                        条
+                                      </p>
+                                      {typeof collectionInsertedCount === 'number' && (
+                                        <p>新增：{collectionInsertedCount} 条</p>
+                                      )}
+                                      {typeof collectionUpdatedCount === 'number' && (
+                                        <p>更新：{collectionUpdatedCount} 条</p>
+                                      )}
+                                      {typeof collectionUnchangedCount === 'number' && (
+                                        <p>未变化：{collectionUnchangedCount} 条</p>
+                                      )}
+                                      {typeof collectionSkippedEmptyKeyCount === 'number' && collectionSkippedEmptyKeyCount > 0 && (
+                                        <p>跳过异常行：{collectionSkippedEmptyKeyCount} 条</p>
+                                      )}
+                                      {dateField && <p>采集时间字段：{dateField}</p>}
+                                      {dateFormat && <p>字段格式：{collectionDateFormatLabel(dateFormat)}</p>}
+                                      {bizDate && <p>采集日期：{bizDate}</p>}
+                                    </div>
+                                    {typeof collectionSkippedEmptyKeyCount === 'number' && collectionSkippedEmptyKeyCount > 0 && (
+                                      <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                                        <p>
+                                          已跳过 {collectionSkippedEmptyKeyCount} 条唯一标识全空的源数据，避免写入无法幂等更新的脏数据。
+                                        </p>
+                                        {skippedEmptyKeySamples.length > 0 && (
+                                          <p className="mt-1">
+                                            示例：
+                                            {skippedEmptyKeySamples
+                                              .map((item) => {
+                                                const rowNumber = asNumber(item.row_number);
+                                                const message = asString(item.message) || '';
+                                                return `第 ${rowNumber ?? '-'} 行（${message || '唯一标识为空'}）`;
+                                              })
+                                              .join('；')}
+                                          </p>
+                                        )}
+                                      </div>
+                                    )}
+                                    {filterDisplay && (
+                                      <p className="mt-2 rounded-lg bg-surface-secondary px-2 py-1 text-xs text-text-secondary">
+                                        本次过滤：{filterDisplay}
+                                      </p>
+                                    )}
+                                    {isZeroSourceResult && (
+                                      <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                                        源表在本次采集日期范围内没有数据。请检查采集时间字段是否选对，或源表是否已经产出当天数据。
+                                      </p>
+                                    )}
+                                    {isCompressedByKey && (
+                                      <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                                        源表读取 {sourceRowCount} 条，但按唯一标识
+                                        {keyFields.length > 0 ? `（${keyFields.join(' + ')}）` : ''}
+                                        去重后只有 {collectionInputCount} 条。请检查唯一标识是否应选择订单号、流水号等更细粒度字段。
+                                      </p>
+                                    )}
                                     {asString(job.error_message) && (
                                       <p className="mt-1 text-xs text-red-600">失败原因：{asString(job.error_message)}</p>
                                     )}

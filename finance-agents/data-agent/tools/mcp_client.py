@@ -1818,7 +1818,6 @@ def _mock_build_dataset(
         "business_domain": "finance",
         "business_object_type": "",
         "grain": "",
-        "verified_status": "unverified",
         "schema_name": schema_name,
         "object_name": object_name,
         "object_type": object_type,
@@ -2641,7 +2640,6 @@ def _mock_list_data_source_datasets(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 50,
@@ -2671,7 +2669,6 @@ def _mock_list_data_source_datasets(
     normalized_object_type = str(object_type or "").strip().lower()
     normalized_publish_status = str(publish_status or "").strip().lower()
     normalized_business_object_type = str(business_object_type or "").strip().lower()
-    normalized_verified_status = str(verified_status or "").strip().lower()
 
     def _matches(row: dict[str, Any]) -> bool:
         if only_published and str(row.get("publish_status") or "").lower() != "published":
@@ -2685,8 +2682,6 @@ def _mock_list_data_source_datasets(
         if normalized_business_object_type and (
             str(row.get("business_object_type") or "").lower() != normalized_business_object_type
         ):
-            return False
-        if normalized_verified_status and str(row.get("verified_status") or "").lower() != normalized_verified_status:
             return False
         if normalized_keyword:
             haystack = " ".join(
@@ -3409,15 +3404,6 @@ async def data_source_get_sync_job(
         return {"success": False, "error": "sync_job_id 不能为空"}
 
     normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
-    if normalized_mode == "mock" or _is_mock_source_id(source_id):
-        return _mock_list_collection_records(
-            auth_token,
-            source_id,
-            dataset_id=dataset_id,
-            resource_key=resource_key,
-            biz_date=biz_date,
-            limit=limit,
-        )
     if normalized_mode == "mock":
         return _mock_get_sync_job(auth_token, sync_job_id)
 
@@ -3660,7 +3646,6 @@ async def data_source_list_datasets(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 50,
@@ -3684,7 +3669,6 @@ async def data_source_list_datasets(
             object_type=object_type,
             publish_status=publish_status,
             business_object_type=business_object_type,
-            verified_status=verified_status,
             only_published=only_published,
             page=page,
             page_size=page_size,
@@ -3701,7 +3685,6 @@ async def data_source_list_datasets(
         "object_type": object_type,
         "publish_status": publish_status,
         "business_object_type": business_object_type,
-        "verified_status": verified_status,
         "only_published": bool(only_published),
         "page": max(1, int(page or 1)),
         "page_size": max(1, min(int(page_size or 50), 200)),
@@ -3726,7 +3709,6 @@ async def data_source_list_datasets(
             object_type=object_type,
             publish_status=publish_status,
             business_object_type=business_object_type,
-            verified_status=verified_status,
             only_published=only_published,
             page=page,
             page_size=page_size,
@@ -3955,7 +3937,6 @@ def _mock_update_dataset_publish_status(
         "business_domain",
         "business_object_type",
         "grain",
-        "verified_status",
         "search_text",
         "last_used_at",
     ):
@@ -3977,7 +3958,6 @@ def _mock_update_dataset_publish_status(
             "business_domain": str(target.get("business_domain") or ""),
             "business_object_type": str(target.get("business_object_type") or ""),
             "grain": str(target.get("grain") or ""),
-            "verified_status": str(target.get("verified_status") or "unverified"),
             "usage_count": int(target.get("usage_count") or 0),
             "last_used_at": str(target.get("last_used_at") or ""),
             "search_text": str(target.get("search_text") or ""),
@@ -4012,7 +3992,6 @@ def _mock_list_dataset_candidates(
         object_type=str((filters or {}).get("object_type") or ""),
         publish_status="published",
         business_object_type=str((filters or {}).get("business_object_type") or ""),
-        verified_status=str((filters or {}).get("verified_status") or ""),
         only_published=True,
         page=1,
         page_size=2000,
@@ -4029,17 +4008,8 @@ def _mock_list_dataset_candidates(
             continue
         if not bool(row.get("enabled", True)):
             continue
-        verified = str(row.get("verified_status") or "unverified").lower()
-        if verified not in {"verified", "unverified"}:
-            continue
         score = 45.0 + 20.0
         reasons = ["已发布", "可用状态"]
-        if verified == "verified":
-            score += 20.0
-            reasons.append("已验证")
-        else:
-            score += 8.0
-            reasons.append("未验证")
         if required_fields:
             schema_fields = {
                 str(item).lower()

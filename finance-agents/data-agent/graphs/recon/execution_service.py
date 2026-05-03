@@ -242,6 +242,16 @@ def _candidate_columns_for_field(field: str, role: str) -> list[str]:
     return [field_name, f"target_{field_name}", f"target.{field_name}", f"官网.{field_name}"]
 
 
+def _candidate_side_only_columns(field: str, role: str) -> list[str]:
+    """Build candidate names for source_only/target_only sheets after export renaming."""
+    field_name = str(field or "").strip()
+    if not field_name:
+        return []
+    if role == "source":
+        return [field_name, f"source_{field_name}", f"source.{field_name}", f"合单.{field_name}"]
+    return [field_name, f"target_{field_name}", f"target.{field_name}", f"官网.{field_name}"]
+
+
 def _candidate_diff_columns(compare_name: str, source_field: str, target_field: str) -> list[str]:
     """Build candidate diff column names."""
     name = str(compare_name or "").strip()
@@ -317,7 +327,7 @@ def _extract_anomaly_items_from_output(
             try:
                 import pandas as pd  # local import for optional dependency handling
 
-                workbook = pd.read_excel(output_file, sheet_name=None)
+                workbook = pd.read_excel(output_file, sheet_name=None, dtype=object)
                 if isinstance(workbook, dict):
                     sheet_to_type: dict[str, str] = {}
                     for anomaly_type, names in sheet_name_map.items():
@@ -376,6 +386,16 @@ def _extract_anomaly_items_from_output(
                                     normalized_row,
                                     _candidate_diff_columns(compare_name, source_field, target_field),
                                 )
+                                if anomaly_type == "source_only" and source_value is None and source_field:
+                                    source_value = _resolve_row_value(
+                                        normalized_row,
+                                        _candidate_side_only_columns(source_field, "source"),
+                                    )
+                                if anomaly_type == "target_only" and target_value is None and target_field:
+                                    target_value = _resolve_row_value(
+                                        normalized_row,
+                                        _candidate_side_only_columns(target_field, "target"),
+                                    )
                                 compare_values.append(
                                     {
                                         "name": compare_name,
@@ -673,9 +693,18 @@ def _normalize_recon_input_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(dataset_ref, dict) and "dataset_ref" not in payload:
         payload["dataset_ref"] = dataset_ref
 
+    memory_ref = str(item.get("memory_ref") or "").strip()
+    if memory_ref and "memory_ref" not in payload:
+        payload["memory_ref"] = memory_ref
+
     input_type = str(item.get("input_type") or "").strip().lower()
     if not input_type:
-        input_type = "file" if payload.get("file_path") else "dataset"
+        if payload.get("file_path"):
+            input_type = "file"
+        elif payload.get("memory_ref"):
+            input_type = "memory"
+        else:
+            input_type = "dataset"
 
     return {
         "table_name": table_name,
@@ -802,6 +831,23 @@ def build_execution_request(
                     "input_type": "dataset",
                     "dataset_ref": dataset_ref,
                 }
+            )
+            continue
+
+        if input_type == "memory":
+            memory_ref = str(payload.get("memory_ref") or "").strip()
+            if not memory_ref:
+                continue
+            fallback_file_path = str(payload.get("fallback_file_path") or "").strip()
+            memory_input = {
+                "table_name": table_name,
+                "input_type": "memory",
+                "memory_ref": memory_ref,
+            }
+            if fallback_file_path:
+                memory_input["fallback_file_path"] = fallback_file_path
+            validated_inputs.append(
+                memory_input
             )
             continue
 

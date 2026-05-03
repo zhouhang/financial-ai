@@ -49,7 +49,6 @@ _UNIFIED_DATASET_CATALOG_COLUMNS = (
     "business_domain",
     "business_object_type",
     "grain",
-    "verified_status",
     "usage_count",
     "last_used_at",
     "search_text",
@@ -60,7 +59,7 @@ _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
     resource_key, dataset_kind, origin_type,
     schema_name, object_name, object_type,
     publish_status, business_domain, business_object_type, grain,
-    verified_status, usage_count, last_used_at, search_text,
+    usage_count, last_used_at, search_text,
     extract_config, schema_summary, sync_strategy,
     status, is_enabled, health_status,
     last_checked_at, last_sync_at, last_error_message, meta,
@@ -3173,7 +3172,6 @@ def upsert_unified_data_source_dataset(
     business_domain: str | None = None,
     business_object_type: str | None = None,
     grain: str | None = None,
-    verified_status: str = "unverified",
     usage_count: int = 0,
     last_used_at: str | None = None,
     search_text: str | None = None,
@@ -3213,11 +3211,6 @@ def upsert_unified_data_source_dataset(
         allowed=("unpublished", "published", "deprecated"),
         default="unpublished",
     )
-    resolved_verified_status = _normalize_catalog_status(
-        verified_status,
-        allowed=("unverified", "verified", "rejected"),
-        default="unverified",
-    )
     resolved_search_text = str(search_text or "").strip() or _build_dataset_search_text(
         dataset_name=dataset_name,
         dataset_code=dataset_code,
@@ -3240,7 +3233,7 @@ def upsert_unified_data_source_dataset(
                         resource_key, dataset_kind, origin_type,
                         schema_name, object_name, object_type,
                         publish_status, business_domain, business_object_type, grain,
-                        verified_status, usage_count, last_used_at, search_text,
+                        usage_count, last_used_at, search_text,
                         extract_config, schema_summary, sync_strategy,
                         status, is_enabled, health_status,
                         last_checked_at, last_sync_at, last_error_message, meta
@@ -3249,7 +3242,7 @@ def upsert_unified_data_source_dataset(
                         %s, %s, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s, %s, %s, %s,
+                        %s, %s, %s,
                         %s::jsonb, %s::jsonb, %s::jsonb,
                         %s, %s, %s,
                         %s, %s, %s, %s::jsonb
@@ -3267,7 +3260,6 @@ def upsert_unified_data_source_dataset(
                         business_domain = EXCLUDED.business_domain,
                         business_object_type = EXCLUDED.business_object_type,
                         grain = EXCLUDED.grain,
-                        verified_status = EXCLUDED.verified_status,
                         usage_count = GREATEST(data_source_datasets.usage_count, EXCLUDED.usage_count),
                         last_used_at = COALESCE(EXCLUDED.last_used_at, data_source_datasets.last_used_at),
                         search_text = EXCLUDED.search_text,
@@ -3299,7 +3291,6 @@ def upsert_unified_data_source_dataset(
                         resolved_business_domain,
                         resolved_business_object_type,
                         resolved_grain,
-                        resolved_verified_status,
                         max(0, int(usage_count or 0)),
                         last_used_at,
                         resolved_search_text,
@@ -3400,7 +3391,6 @@ def query_unified_data_source_datasets(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 500,
@@ -3421,7 +3411,7 @@ def query_unified_data_source_datasets(
             resource_key, dataset_kind, origin_type,
             schema_name, object_name, object_type,
             publish_status, business_domain, business_object_type, grain,
-            verified_status, usage_count, last_used_at, search_text,
+            usage_count, last_used_at, search_text,
             status, is_enabled, health_status,
             last_checked_at, last_sync_at, last_error_message, meta,
             created_at, updated_at
@@ -3457,9 +3447,6 @@ def query_unified_data_source_datasets(
                 if business_object_type:
                     sql += " AND business_object_type = %s"
                     params.append(business_object_type)
-                if verified_status:
-                    sql += " AND verified_status = %s"
-                    params.append(verified_status)
                 if keyword:
                     keyword_pattern = f"%{keyword.strip().lower()}%"
                     sql += """
@@ -3531,7 +3518,6 @@ def list_unified_data_source_datasets(
     object_type: str = "",
     publish_status: str = "",
     business_object_type: str = "",
-    verified_status: str = "",
     only_published: bool = False,
     page: int = 1,
     page_size: int = 500,
@@ -3549,7 +3535,6 @@ def list_unified_data_source_datasets(
         object_type=object_type,
         publish_status=publish_status,
         business_object_type=business_object_type,
-        verified_status=verified_status,
         only_published=only_published,
         page=page,
         page_size=page_size,
@@ -3673,7 +3658,6 @@ def update_unified_data_source_dataset_catalog(
     business_domain: str | None = None,
     business_object_type: str | None = None,
     grain: str | None = None,
-    verified_status: str | None = None,
     schema_name: str | None = None,
     object_name: str | None = None,
     object_type: str | None = None,
@@ -3683,8 +3667,6 @@ def update_unified_data_source_dataset_catalog(
     """更新数据集目录业务化字段。"""
     updates: list[str] = []
     params: list[Any] = []
-    normalized_publish_status = None
-    normalized_verified_status = None
     if publish_status is not None:
         normalized_publish_status = _normalize_catalog_status(
             publish_status,
@@ -3702,14 +3684,6 @@ def update_unified_data_source_dataset_catalog(
     if grain is not None:
         updates.append("grain = %s")
         params.append(str(grain or "").strip())
-    if verified_status is not None:
-        normalized_verified_status = _normalize_catalog_status(
-            verified_status,
-            allowed=("unverified", "verified", "rejected"),
-            default="unverified",
-        )
-        updates.append("verified_status = %s")
-        params.append(normalized_verified_status)
     if schema_name is not None:
         updates.append("schema_name = %s")
         params.append(str(schema_name or "").strip())

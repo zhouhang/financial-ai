@@ -1450,9 +1450,6 @@ function AiComplexRuleWorkspace({
             两侧都完成后再进入第三步配置对账逻辑。
           </p>
         </div>
-        <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
-          当前为 UI 预览
-        </span>
       </div>
 
       <div className="mt-5 rounded-2xl border border-border bg-white/75 p-2">

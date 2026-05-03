@@ -527,7 +527,6 @@ class DataSourceDatasetUpsertRequest(BaseModel):
     business_domain: str = ""
     business_object_type: str = ""
     grain: str = ""
-    verified_status: str = ""
     usage_count: int | None = None
     last_used_at: str = ""
     search_text: str = ""
@@ -564,7 +563,6 @@ class DataSourceDatasetPublishRequest(BaseModel):
     business_domain: str = ""
     business_object_type: str = ""
     grain: str = ""
-    verified_status: str = ""
     search_text: str = ""
     usage_count: int | None = None
     last_used_at: str = ""
@@ -1222,7 +1220,6 @@ async def list_data_source_datasets(
     object_type: str = Query("", description="按对象类型过滤"),
     publish_status: str = Query("", description="按发布状态过滤"),
     business_object_type: str = Query("", description="按业务对象类型过滤"),
-    verified_status: str = Query("", description="按验证状态过滤"),
     only_published: bool = Query(False, description="仅返回已发布数据集"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(50, ge=1, le=200, description="每页数量"),
@@ -1246,7 +1243,6 @@ async def list_data_source_datasets(
         object_type=object_type,
         publish_status=publish_status,
         business_object_type=business_object_type,
-        verified_status=verified_status,
         only_published=only_published,
         page=page,
         page_size=page_size if page_size else limit,

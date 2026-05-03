@@ -16,7 +16,12 @@ MCP_ROOT = REPO_ROOT / "finance-mcp"
 if str(MCP_ROOT) not in sys.path:
     sys.path.append(str(MCP_ROOT))
 
-from proc.mcp_server.steps_runtime import StepsProcRuntime
+from proc.mcp_server.steps_runtime import (
+    StepsProcRuntime,
+    execute_steps_rule_to_frames,
+    register_proc_frame_outputs,
+    resolve_proc_memory_frame,
+)
 
 
 def _load_dataset_loader_module():
@@ -120,6 +125,174 @@ def test_steps_runtime_skips_unreferenced_source_missing_from_input_plan(tmp_pat
 
     assert list(alias_frames.keys()) == ["fp"]
     assert alias_frames["fp"].iloc[0]["id"] == "base-only"
+
+
+def test_steps_runtime_preserves_excel_formula_style_text_identifiers(tmp_path: Path) -> None:
+    runtime = StepsProcRuntime(
+        "test_rule",
+        {
+            "steps": [
+                {
+                    "action": "create_schema",
+                    "target_table": "ready",
+                    "schema": {
+                        "columns": [
+                            {"name": "订单ID", "data_type": "string"},
+                            {"name": "金额", "data_type": "decimal"},
+                        ]
+                    },
+                },
+                {
+                    "action": "write_dataset",
+                    "target_table": "ready",
+                    "sources": [{"alias": "orders", "table": "public.orders"}],
+                    "row_write_mode": "upsert",
+                    "mappings": [
+                        {
+                            "target_field": "订单ID",
+                            "value": {
+                                "type": "source",
+                                "source": {"alias": "orders", "field": "order_id"},
+                            },
+                        },
+                        {
+                            "target_field": "金额",
+                            "value": {
+                                "type": "source",
+                                "source": {"alias": "orders", "field": "amount"},
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        [],
+        str(tmp_path),
+        preloaded_frames={
+            "public.orders": pd.DataFrame(
+                [
+                    {"order_id": '="348909180462"', "amount": 100},
+                    {"order_id": r'=\"330493844625\"', "amount": -3},
+                ]
+            ),
+        },
+    )
+
+    exports = runtime.execute()
+
+    exported = pd.read_excel(exports[0]["output_file"], dtype=object)
+    assert exported["订单ID"].tolist() == ["348909180462", "330493844625"]
+    assert exported.iloc[0]["金额"] == 100
+
+
+def test_steps_runtime_returns_memory_frames_without_excel_roundtrip(tmp_path: Path) -> None:
+    rule = {
+        "steps": [
+            {
+                "action": "create_schema",
+                "target_table": "ready",
+                "schema": {
+                    "columns": [
+                        {"name": "订单ID", "data_type": "string"},
+                        {"name": "金额", "data_type": "decimal"},
+                    ]
+                },
+            },
+            {
+                "action": "write_dataset",
+                "target_table": "ready",
+                "sources": [{"alias": "orders", "table": "public.orders"}],
+                "row_write_mode": "upsert",
+                "mappings": [
+                    {
+                        "target_field": "订单ID",
+                        "value": {
+                            "type": "source",
+                            "source": {"alias": "orders", "field": "order_id"},
+                        },
+                    },
+                    {
+                        "target_field": "金额",
+                        "value": {
+                            "type": "source",
+                            "source": {"alias": "orders", "field": "amount"},
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    outputs = execute_steps_rule_to_frames(
+        "test_rule",
+        rule,
+        [],
+        str(tmp_path),
+        preloaded_frames={
+            "public.orders": pd.DataFrame([{"order_id": '="348909180462"', "amount": 100}])
+        },
+    )
+
+    assert list(tmp_path.glob("*.xlsx")) == []
+    assert outputs[0]["target_table"] == "ready"
+    assert outputs[0]["row_count"] == 1
+    assert outputs[0]["dataframe"].iloc[0]["订单ID"] == "348909180462"
+
+
+def test_recon_resolves_proc_memory_frame_outputs(tmp_path: Path) -> None:
+    frame_outputs = [
+        {
+            "target_table": "ready",
+            "row_count": 1,
+            "dataframe": pd.DataFrame([{"订单ID": "348909180462", "金额": 100}]),
+        }
+    ]
+    memory_outputs = register_proc_frame_outputs(rule_code="test_rule", frame_outputs=frame_outputs)
+
+    resolved_df, meta = resolve_proc_memory_frame(memory_outputs[0]["memory_ref"])
+
+    assert meta["target_table"] == "ready"
+    assert resolved_df.to_dict(orient="records") == [{"订单ID": "348909180462", "金额": 100}]
+
+
+def test_recon_execution_request_keeps_proc_memory_inputs() -> None:
+    from graphs.recon.execution_service import build_execution_request
+
+    request, error = build_execution_request(
+        rule_code="recon_rule",
+        rule_id="",
+        auth_token="token",
+        recon_inputs=[
+            {
+                "table_name": "left_recon_ready",
+                "input_type": "memory",
+                "payload": {
+                    "memory_ref": "proc_frame:test:left:1",
+                    "fallback_file_path": "/tmp/left.xlsx",
+                },
+            },
+            {
+                "table_name": "right_recon_ready",
+                "input_type": "memory",
+                "payload": {"memory_ref": "proc_frame:test:right:1"},
+            },
+        ],
+    )
+
+    assert error is None
+    assert request["validated_inputs"] == [
+        {
+            "table_name": "left_recon_ready",
+            "input_type": "memory",
+            "memory_ref": "proc_frame:test:left:1",
+            "fallback_file_path": "/tmp/left.xlsx",
+        },
+        {
+            "table_name": "right_recon_ready",
+            "input_type": "memory",
+            "memory_ref": "proc_frame:test:right:1",
+        },
+    ]
 
 
 def test_collection_record_filter_normalizes_common_external_field_types() -> None:

@@ -4,6 +4,7 @@ import ast
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 VALID_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
 VALID_FIELD_WRITE_MODES = {"overwrite", "increment"}
+MEMORY_FRAME_TTL_SECONDS = 30 * 60
+MEMORY_FRAME_MAX_ENTRIES = 64
+
+_MEMORY_FRAME_REGISTRY: dict[str, dict[str, Any]] = {}
 
 
 class _FastPathNotSupported(RuntimeError):
@@ -43,6 +48,106 @@ def execute_steps_rule(
 ) -> list[dict[str, Any]]:
     runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
     return runtime.execute()
+
+
+def execute_steps_rule_to_frames(
+    rule_code: str,
+    rule_data: dict[str, Any],
+    validated_files: list[dict[str, Any]],
+    output_dir: str,
+    preloaded_frames: dict[str, pd.DataFrame] | None = None,
+) -> list[dict[str, Any]]:
+    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
+    runtime.execute_to_frames()
+    return runtime.export_frame_outputs()
+
+
+def execute_steps_rule_with_frames(
+    rule_code: str,
+    rule_data: dict[str, Any],
+    validated_files: list[dict[str, Any]],
+    output_dir: str,
+    preloaded_frames: dict[str, pd.DataFrame] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
+    runtime.execute_to_frames()
+    frame_outputs = runtime.export_frame_outputs()
+    generated_files = runtime.export_tables()
+    return generated_files, frame_outputs
+
+
+def register_proc_frame_outputs(
+    *,
+    rule_code: str,
+    frame_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    now = time.time()
+    _cleanup_memory_frame_registry(now)
+    memory_outputs: list[dict[str, Any]] = []
+    for item in frame_outputs:
+        df = item.get("dataframe")
+        if not isinstance(df, pd.DataFrame):
+            continue
+        target_table = str(item.get("target_table") or "").strip()
+        if not target_table:
+            continue
+        memory_ref = f"proc_frame:{rule_code}:{target_table}:{uuid.uuid4().hex}"
+        row_count = int(item.get("row_count") or len(df))
+        _MEMORY_FRAME_REGISTRY[memory_ref] = {
+            "created_at": now,
+            "expires_at": now + MEMORY_FRAME_TTL_SECONDS,
+            "rule_code": rule_code,
+            "target_table": target_table,
+            "row_count": row_count,
+            "dataframe": df.copy(),
+        }
+        memory_outputs.append(
+            {
+                "target_table": target_table,
+                "input_type": "memory",
+                "memory_ref": memory_ref,
+                "row_count": row_count,
+                "expires_in_seconds": MEMORY_FRAME_TTL_SECONDS,
+            }
+        )
+    _cleanup_memory_frame_registry(now)
+    return memory_outputs
+
+
+def resolve_proc_memory_frame(memory_ref: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    now = time.time()
+    _cleanup_memory_frame_registry(now)
+    ref = str(memory_ref or "").strip()
+    item = _MEMORY_FRAME_REGISTRY.get(ref)
+    if not item:
+        raise KeyError("proc 内存结果不存在或已过期")
+    if float(item.get("expires_at") or 0) < now:
+        _MEMORY_FRAME_REGISTRY.pop(ref, None)
+        raise KeyError("proc 内存结果已过期")
+    df = item.get("dataframe")
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("proc 内存结果格式无效")
+    meta = {key: value for key, value in item.items() if key != "dataframe"}
+    return df.copy(), meta
+
+
+def _cleanup_memory_frame_registry(now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    expired_refs = [
+        ref
+        for ref, item in _MEMORY_FRAME_REGISTRY.items()
+        if float(item.get("expires_at") or 0) < current
+    ]
+    for ref in expired_refs:
+        _MEMORY_FRAME_REGISTRY.pop(ref, None)
+    if len(_MEMORY_FRAME_REGISTRY) <= MEMORY_FRAME_MAX_ENTRIES:
+        return
+    ordered_refs = sorted(
+        _MEMORY_FRAME_REGISTRY,
+        key=lambda ref: float(_MEMORY_FRAME_REGISTRY[ref].get("created_at") or 0),
+    )
+    for ref in ordered_refs[: max(0, len(_MEMORY_FRAME_REGISTRY) - MEMORY_FRAME_MAX_ENTRIES)]:
+        _MEMORY_FRAME_REGISTRY.pop(ref, None)
 
 
 class StepsProcRuntime:
@@ -78,6 +183,16 @@ class StepsProcRuntime:
         }
 
     def execute(self) -> list[dict[str, Any]]:
+        self.execute_to_frames()
+        exports = self.export_tables()
+        logger.info(
+            "[steps_runtime] steps 规则执行完成: rule_code=%s, exported=%s",
+            self.rule_code,
+            [(item.get("target_table"), item.get("row_count")) for item in exports],
+        )
+        return exports
+
+    def execute_to_frames(self) -> None:
         steps = list(self.rule_data.get("steps", []) or [])
         logger.info(
             "[steps_runtime] 开始执行 steps 规则: rule_code=%s, step_count=%s, input_tables=%s",
@@ -124,13 +239,11 @@ class StepsProcRuntime:
                 ]
                 raise ValueError(f"steps 依赖无法解析，可能存在循环依赖: {', '.join(unresolved)}")
             pending_steps = next_pending
-        exports = self._export_tables()
         logger.info(
-            "[steps_runtime] steps 规则执行完成: rule_code=%s, exported=%s",
+            "[steps_runtime] steps 规则内存执行完成: rule_code=%s, materialized=%s",
             self.rule_code,
-            [(item.get("target_table"), item.get("row_count")) for item in exports],
+            [(name, len(self.tables[name])) for name in self.materialized_targets if name in self.tables],
         )
-        return exports
 
     def _execute_step(self, step: dict[str, Any]) -> None:
         action = str(step.get("action") or "").strip()
@@ -1594,7 +1707,7 @@ class StepsProcRuntime:
             return (_coerce_number(current_value) or 0) + (_coerce_number(new_value) or 0)
         return new_value
 
-    def _export_tables(self) -> list[dict[str, Any]]:
+    def export_tables(self) -> list[dict[str, Any]]:
         exports: list[dict[str, Any]] = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         for table_name in self.materialized_targets:
@@ -1617,6 +1730,26 @@ class StepsProcRuntime:
                 }
             )
         return exports
+
+    def export_frame_outputs(self) -> list[dict[str, Any]]:
+        outputs: list[dict[str, Any]] = []
+        for table_name in self.materialized_targets:
+            df = self.tables.get(table_name)
+            if df is None:
+                continue
+            schema = self.schemas.get(table_name)
+            if schema and not schema.export_enabled:
+                continue
+            export_df = _normalize_excel_text_dataframe(self._build_export_dataframe(table_name, df))
+            outputs.append(
+                {
+                    "rule_id": table_name,
+                    "target_table": table_name,
+                    "row_count": int(len(df)),
+                    "dataframe": export_df.copy(),
+                }
+            )
+        return outputs
 
     def _build_export_dataframe(self, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
         schema = self.schemas.get(table_name)
@@ -1726,13 +1859,46 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                 encoding = chardet.detect(file.read()).get("encoding", "gbk")
             return pd.read_csv(path, encoding=encoding)
     if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
     raise ValueError(f"不支持的文件格式: {suffix}")
 
 
+def _normalize_excel_text_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    return df.map(_normalize_excel_text_value)
+
+
 def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
+    export_df = _normalize_excel_text_dataframe(df)
+    formula_text_cells = _formula_like_text_cell_positions(export_df)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sheet1")
+        export_df.to_excel(writer, index=False, sheet_name="Sheet1")
+        if formula_text_cells:
+            worksheet = writer.sheets["Sheet1"]
+            for row_index, column_index in formula_text_cells:
+                cell = worksheet.cell(row=row_index + 2, column=column_index + 1)
+                cell.data_type = "s"
+
+
+_EXCEL_QUOTED_TEXT_RE = re.compile(r'^=\s*(?:"(?P<quoted>.*)"|\\"(?P<escaped>.*)\\")\s*$')
+
+
+def _normalize_excel_text_value(value: Any) -> Any:
+    """Preserve external-system text identifiers that arrive as Excel formulas."""
+    if not isinstance(value, str):
+        return value
+    match = _EXCEL_QUOTED_TEXT_RE.fullmatch(value.strip())
+    if not match:
+        return value
+    return match.group("quoted") if match.group("quoted") is not None else match.group("escaped")
+
+
+def _formula_like_text_cell_positions(df: pd.DataFrame) -> set[tuple[int, int]]:
+    positions: set[tuple[int, int]] = set()
+    for row_index, row in enumerate(df.itertuples(index=False, name=None)):
+        for column_index, value in enumerate(row):
+            if isinstance(value, str) and value[:1] in {"=", "+", "-", "@"}:
+                positions.add((row_index, column_index))
+    return positions
 
 
 def _normalize_key(value: Any) -> Any:
