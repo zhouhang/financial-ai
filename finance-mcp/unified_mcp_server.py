@@ -293,6 +293,7 @@ _EXECUTION_TOOL_NAMES = {
     "execution_run_get",
     "execution_run_create",
     "execution_run_update",
+    "execution_run_delete",
     "execution_run_exceptions",
     "execution_run_exception_get",
     "execution_run_exception_create",

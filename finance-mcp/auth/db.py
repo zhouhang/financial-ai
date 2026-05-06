@@ -6685,6 +6685,37 @@ def list_execution_runs(
         return []
 
 
+def delete_execution_run(*, company_id: str, run_id: str) -> dict | None:
+    """删除执行记录。
+
+    execution_run_exceptions.run_id 使用 ON DELETE CASCADE，删除运行记录会同步清理异常。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM execution_runs
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                              trigger_type, entry_mode, execution_status,
+                              failed_stage, failed_reason,
+                              run_context_json, source_snapshot_json, subtasks_json,
+                              proc_result_json, recon_result_summary_json, artifacts_json,
+                              anomaly_count, started_at, finished_at, created_at, updated_at
+                    """,
+                    (run_id, company_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"删除 execution_runs 失败 (company_id={company_id}, run_id={run_id}): {e}")
+        return None
+
+
 def create_execution_run_exception(
     *,
     company_id: str,

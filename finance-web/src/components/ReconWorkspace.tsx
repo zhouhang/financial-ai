@@ -315,7 +315,7 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(0,2.3fr) minmax(200px,1.1fr) minmax(180px,0.9fr) minmax(120px,0.7fr) minmax(280px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.9fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(188px,auto)';
+  'minmax(0,2.7fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -5338,6 +5338,46 @@ export default function ReconWorkspace({
     [authToken, loadCenterData],
   );
 
+  const handleDeleteRun = useCallback(
+    async (run: ReconCenterRunItem) => {
+      if (!authToken) {
+        setCenterNotice(null);
+        setCenterError('请先登录后再删除运行记录。');
+        return;
+      }
+      if (!window.confirm(`确定要删除运行记录「${run.planName || run.id}」吗？此操作会同步删除该运行记录下的异常。`)) {
+        return;
+      }
+      try {
+        setCenterError(null);
+        setCenterNotice(null);
+        const response = await fetchReconAutoApi(`/runs/${encodeURIComponent(run.id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data.detail || data.message || '删除运行记录失败'));
+        }
+        setRuns((prev) => prev.filter((item) => item.id !== run.id));
+        setExceptionsByRunId((prev) => {
+          const next = { ...prev };
+          delete next[run.id];
+          return next;
+        });
+        if (modalState?.kind === 'run-exceptions' && modalState.run.id === run.id) {
+          closeModal();
+        }
+        setCenterNotice(`运行记录「${run.planName || run.id}」已删除。`);
+        await loadCenterData();
+      } catch (error) {
+        setCenterNotice(null);
+        setCenterError(error instanceof Error ? error.message : '删除运行记录失败');
+      }
+    },
+    [authToken, closeModal, loadCenterData, modalState],
+  );
+
   const handleToggleTask = useCallback(
     async (taskId: string, currentEnabled: boolean) => {
       if (!authToken) {
@@ -5869,6 +5909,14 @@ export default function ReconWorkspace({
                   >
                     <AlertCircle className="h-4 w-4" />
                     异常看板
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteRun(item)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition hover:border-red-200 hover:text-red-600"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    删除
                   </button>
                 </div>
               </div>

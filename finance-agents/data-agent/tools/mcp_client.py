@@ -986,6 +986,13 @@ async def execution_run_update(auth_token: str, run_id: str, payload: dict[str, 
     )
 
 
+async def execution_run_delete(auth_token: str, run_id: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_delete",
+        {"auth_token": auth_token, "run_id": run_id},
+    )
+
+
 async def execution_run_exceptions(
     auth_token: str,
     run_id: str,

@@ -375,6 +375,18 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="execution_run_delete",
+            description="删除执行记录，并级联清理该运行记录下的异常。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "run_id": {"type": "string"},
+                },
+                "required": ["auth_token", "run_id"],
+            },
+        ),
+        Tool(
             name="execution_run_exceptions",
             description="按 run_id 查询执行异常列表。",
             inputSchema={
@@ -546,6 +558,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _run_create(arguments)
         if name == "execution_run_update":
             return _run_update(arguments)
+        if name == "execution_run_delete":
+            return _run_delete(arguments)
         if name == "execution_run_exceptions":
             return _run_exceptions(arguments)
         if name == "execution_run_exception_get":
@@ -2306,6 +2320,20 @@ def _run_update(arguments: dict[str, Any]) -> dict[str, Any]:
     if not item:
         return {"success": False, "error": "执行记录不存在或更新失败"}
     return {"success": True, "run": item}
+
+
+def _run_delete(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    run_id = str(arguments.get("run_id") or "").strip()
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+    item = auth_db.delete_execution_run(
+        company_id=str(user.get("company_id") or ""),
+        run_id=run_id,
+    )
+    if not item:
+        return {"success": False, "error": "执行记录不存在或删除失败"}
+    return {"success": True, "run": item, "message": "运行记录已删除"}
 
 
 def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:

@@ -344,6 +344,8 @@ def _diagnose_zero_match_comparisons(
         source_values = [row.get(field) for row in source_rows if isinstance(row, dict)]
         loose_same_field = any(_loose_equal(value, constant_value) for value in source_values)
         strict_same_field = any(value == constant_value for value in source_values)
+        if strict_same_field:
+            continue
         if loose_same_field and not strict_same_field:
             repair_recommended = True
             evidence.append({
