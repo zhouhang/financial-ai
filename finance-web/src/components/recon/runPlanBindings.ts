@@ -91,7 +91,6 @@ export function resolveDatasetSourceType(source: {
     extractConfig.physical_storage,
     schemaSummary.storage,
     schemaSummary.physical_storage,
-    schemaSummary.source,
   ).toLowerCase();
   if (storage === 'platform_order_lines') return 'platform_order_lines';
   if (storage && storage !== 'dataset_collection_records' && storage !== 'collection_records') {

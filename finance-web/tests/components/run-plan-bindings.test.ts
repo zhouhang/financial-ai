@@ -27,4 +27,18 @@ describe('resolveDatasetSourceType', () => {
       schemaSummary: {},
     })).toBe('collection_records');
   });
+
+  it('does not treat openapi schema provenance as a dataset source type', () => {
+    expect(resolveDatasetSourceType({
+      extractConfig: {},
+      schemaSummary: { source: 'openapi' },
+    })).toBe('collection_records');
+  });
+
+  it('does not treat manual schema provenance as a dataset source type', () => {
+    expect(resolveDatasetSourceType({
+      extractConfig: {},
+      schemaSummary: { source: 'manual' },
+    })).toBe('collection_records');
+  });
 });
