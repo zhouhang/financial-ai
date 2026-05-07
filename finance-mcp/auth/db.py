@@ -4639,8 +4639,10 @@ def upsert_platform_order_lines(
                             latest_seen_at = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE platform_order_lines.source_modified_at IS NULL
-                           OR EXCLUDED.source_modified_at IS NULL
-                           OR EXCLUDED.source_modified_at >= platform_order_lines.source_modified_at
+                           OR (
+                               EXCLUDED.source_modified_at IS NOT NULL
+                               AND EXCLUDED.source_modified_at >= platform_order_lines.source_modified_at
+                           )
                         RETURNING (xmax = 0) AS inserted
                         """,
                         (

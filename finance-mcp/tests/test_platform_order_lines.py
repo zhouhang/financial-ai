@@ -73,6 +73,7 @@ def test_upsert_platform_order_lines_preserves_latest_payload(monkeypatch):
     assert "INSERT INTO platform_order_lines" in executed_sql[0]
     assert "ON CONFLICT (company_id, shop_connection_id, tid, oid)" in executed_sql[0]
     assert "EXCLUDED.source_modified_at >= platform_order_lines.source_modified_at" in executed_sql[0]
+    assert "OR EXCLUDED.source_modified_at IS NULL" not in executed_sql[0]
     assert any("T1" in str(params) and "O1" in str(params) for params in params_seen)
 
 
