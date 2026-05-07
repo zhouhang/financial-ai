@@ -1334,6 +1334,61 @@ def _dataset_uses_platform_order_lines(dataset_row: dict[str, Any] | None) -> bo
     return _dataset_storage_value(dataset_row) == "platform_order_lines"
 
 
+COLLECTION_DRIVER_DB_QUERY = "db_query"
+COLLECTION_DRIVER_TAOBAO_ORDER_API = "taobao_order_api"
+COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT = "alipay_bill_download_import"
+
+
+def _collection_config_value(dataset_row: dict[str, Any] | None, *keys: str) -> str:
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    containers: list[dict[str, Any]] = []
+    collection_config = _dataset_collection_config(dataset)
+    if collection_config:
+        containers.append(collection_config)
+    for container_key in ("extract_config", "schema_summary", "meta", "sync_strategy"):
+        value = dataset.get(container_key)
+        if isinstance(value, dict):
+            containers.append(value)
+
+    for container in containers:
+        for key in keys:
+            text = _safe_text(container.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _resolve_collection_driver(
+    source_row: dict[str, Any] | None,
+    dataset_row: dict[str, Any] | None,
+) -> str:
+    source = source_row if isinstance(source_row, dict) else {}
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    explicit = _collection_config_value(
+        dataset,
+        "collection_driver",
+        "driver",
+        "collector",
+        "collection_type",
+    ).lower()
+    if explicit:
+        return explicit
+
+    storage = _dataset_storage_value(dataset)
+    if storage == "platform_order_lines":
+        return COLLECTION_DRIVER_TAOBAO_ORDER_API
+
+    source_kind = _safe_text(source.get("source_kind") or dataset.get("source_kind")).lower()
+    provider_code = _safe_text(source.get("provider_code") or dataset.get("provider_code")).lower()
+    if source_kind == "database":
+        return COLLECTION_DRIVER_DB_QUERY
+    if source_kind == "platform_oauth" and provider_code in {"taobao", "tmall"}:
+        return COLLECTION_DRIVER_TAOBAO_ORDER_API
+    if source_kind == "platform_oauth" and provider_code == "alipay":
+        return COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
+    return ""
+
+
 def _dataset_collection_key_fields(dataset_row: dict[str, Any] | None) -> list[str]:
     if not dataset_row:
         return []
