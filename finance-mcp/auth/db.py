@@ -4548,7 +4548,9 @@ def get_latest_source_dataset_checkpoint(
 
 
 def _clean_decimal_text(value: Any) -> str | None:
-    text = str(value or "").strip()
+    if value is None:
+        return None
+    text = str(value).strip()
     return text if text else None
 
 
@@ -4636,6 +4638,9 @@ def upsert_platform_order_lines(
                             source_modified_at = EXCLUDED.source_modified_at,
                             latest_seen_at = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
+                        WHERE platform_order_lines.source_modified_at IS NULL
+                           OR EXCLUDED.source_modified_at IS NULL
+                           OR EXCLUDED.source_modified_at >= platform_order_lines.source_modified_at
                         RETURNING (xmax = 0) AS inserted
                         """,
                         (
@@ -4675,6 +4680,8 @@ def upsert_platform_order_lines(
                         ),
                     )
                     row = cur.fetchone() or {}
+                    if not row:
+                        continue
                     if bool(row.get("inserted")):
                         inserted_count += 1
                     else:
