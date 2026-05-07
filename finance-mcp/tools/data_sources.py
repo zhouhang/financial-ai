@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,8 @@ from mcp import Tool
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from connectors.factory import build_connector
+from platforms.base import PlatformAppConfig, PlatformTokenBundle
+from platforms.factory import build_connector as build_platform_connector
 from security_utils import UPLOAD_ROOT
 from tools.platform_connections import handle_tool_call as handle_platform_tool_call
 
@@ -70,6 +72,7 @@ DATASET_CANDIDATE_ROLES = {"left", "right", "source", "target"}
 DATASET_CANDIDATE_BATCH_SIZE = 200
 DATASET_CANDIDATE_MAX_SCAN_PAGES = 200
 _SEMANTIC_ENV_CACHE: dict[str, str] | None = None
+TAOBAO_TZ = timezone(timedelta(hours=8))
 
 
 def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
@@ -1296,7 +1299,37 @@ def _dataset_collection_config(dataset_row: dict[str, Any] | None) -> dict[str, 
         return {}
     profile = _extract_catalog_profile(dataset_row)
     config = profile.get("collection_config")
-    return dict(config) if isinstance(config, dict) else {}
+    if isinstance(config, dict) and config:
+        return dict(config)
+    extract_config = dataset_row.get("extract_config")
+    return dict(extract_config) if isinstance(extract_config, dict) else {}
+
+
+def _dataset_storage_value(dataset_row: dict[str, Any] | None) -> str:
+    if not dataset_row:
+        return ""
+    candidates: list[Any] = []
+    for container_key in ("extract_config", "schema_summary", "meta"):
+        container = dataset_row.get(container_key)
+        if isinstance(container, dict):
+            candidates.extend(
+                [
+                    container.get("storage"),
+                    container.get("physical_storage"),
+                    container.get("source"),
+                ]
+            )
+    config = _dataset_collection_config(dataset_row)
+    candidates.extend([config.get("storage"), config.get("physical_storage"), config.get("source")])
+    for value in candidates:
+        normalized = _safe_text(value).lower()
+        if normalized:
+            return normalized
+    return ""
+
+
+def _dataset_uses_platform_order_lines(dataset_row: dict[str, Any] | None) -> bool:
+    return _dataset_storage_value(dataset_row) == "platform_order_lines"
 
 
 def _dataset_collection_key_fields(dataset_row: dict[str, Any] | None) -> list[str]:
@@ -3095,6 +3128,206 @@ def _build_checkpoint_after(
         }
     )
     return checkpoint_after
+
+
+def _parse_collection_datetime(value: Any) -> datetime | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    for parser in (
+        lambda item: datetime.fromisoformat(item),
+        lambda item: datetime.strptime(item, "%Y-%m-%d %H:%M:%S"),
+        lambda item: datetime.strptime(item, "%Y-%m-%d"),
+    ):
+        try:
+            parsed = parser(normalized)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=TAOBAO_TZ)
+        return parsed.astimezone(TAOBAO_TZ)
+    return None
+
+
+def _format_taobao_window_datetime(value: datetime) -> str:
+    return value.astimezone(TAOBAO_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _resolve_taobao_collection_window(
+    *,
+    dataset_row: dict[str, Any],
+    params: dict[str, Any],
+    checkpoint_before: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    sync_strategy = dict(dataset_row.get("sync_strategy") or {})
+    normalized_params = dict(params or {})
+    mode = _safe_text(normalized_params.get("force_mode") or normalized_params.get("mode")).lower()
+    checkpoint = dict(checkpoint_before or {})
+    biz_date_text = _safe_text(normalized_params.get("biz_date"))
+    resolved_now = now or datetime.now(TAOBAO_TZ)
+    if resolved_now.tzinfo is None:
+        resolved_now = resolved_now.replace(tzinfo=TAOBAO_TZ)
+
+    if mode == "initial" or biz_date_text:
+        biz_date = date.fromisoformat(biz_date_text) if biz_date_text else resolved_now.astimezone(TAOBAO_TZ).date()
+        return {
+            "mode": "initial",
+            "window_start": datetime.combine(biz_date, time.min, tzinfo=TAOBAO_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "window_end": datetime.combine(biz_date, time(23, 59, 59), tzinfo=TAOBAO_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "biz_date": biz_date.isoformat(),
+        }
+
+    explicit_start = _parse_collection_datetime(
+        normalized_params.get("window_start")
+        or normalized_params.get("start_time")
+        or normalized_params.get("start_modified")
+    )
+    explicit_end = _parse_collection_datetime(
+        normalized_params.get("window_end")
+        or normalized_params.get("end_time")
+        or normalized_params.get("end_modified")
+    )
+    if explicit_start and explicit_end:
+        return {
+            "mode": "incremental",
+            "window_start": _format_taobao_window_datetime(explicit_start),
+            "window_end": _format_taobao_window_datetime(explicit_end),
+            "biz_date": "",
+        }
+
+    checkpoint_start = _parse_collection_datetime(
+        checkpoint.get("last_window_end")
+        or checkpoint.get("window_end")
+        or checkpoint.get("last_synced_at")
+    )
+    lookback_minutes = max(0, int(sync_strategy.get("lookback_minutes") or 0))
+    if checkpoint_start:
+        start = checkpoint_start - timedelta(minutes=lookback_minutes)
+    else:
+        start = resolved_now.astimezone(TAOBAO_TZ) - timedelta(hours=2, minutes=lookback_minutes)
+    end = explicit_end or resolved_now.astimezone(TAOBAO_TZ)
+    return {
+        "mode": "incremental",
+        "window_start": _format_taobao_window_datetime(start),
+        "window_end": _format_taobao_window_datetime(end),
+        "biz_date": "",
+    }
+
+
+def _app_config_from_record(record: dict[str, Any], *, company_id: str, platform_code: str) -> PlatformAppConfig:
+    extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+    return PlatformAppConfig(
+        id=_safe_text(record.get("id")),
+        company_id=_safe_text(record.get("company_id")) or company_id,
+        platform_code=_safe_text(record.get("platform_code")) or platform_code,
+        app_name=_safe_text(record.get("app_name")),
+        app_key=_safe_text(record.get("app_key")),
+        app_secret=_safe_text(record.get("app_secret")),
+        app_type=_safe_text(record.get("app_type")) or "system",
+        auth_base_url=_safe_text(record.get("auth_base_url")),
+        token_url=_safe_text(record.get("token_url")),
+        refresh_url=_safe_text(record.get("refresh_url")),
+        redirect_uri=_safe_text(extra.get("redirect_uri")),
+        scopes=list(record.get("scopes_config") or []),
+        extra=dict(extra),
+        status=_safe_text(record.get("status")) or "active",
+        auth_mode=_safe_text(extra.get("mode") or record.get("auth_mode")) or "mock",
+    )
+
+
+def _run_platform_order_collection(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    collection_config: dict[str, Any],
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    platform_code = _safe_text(collection_config.get("platform_code")) or "taobao"
+    shop_connection_id = _safe_text(collection_config.get("shop_connection_id"))
+    if not shop_connection_id and resource_key.startswith("taobao_order_lines:"):
+        shop_connection_id = resource_key.split(":", 1)[1]
+    if not shop_connection_id:
+        raise ValueError("平台订单数据集缺少 shop_connection_id")
+
+    app_record = auth_db.get_platform_app(
+        company_id=company_id,
+        platform_code=platform_code,
+        include_secrets=True,
+    )
+    if not app_record:
+        raise ValueError("平台应用配置不存在")
+    shop = auth_db.get_shop_connection_by_id(shop_connection_id)
+    if not shop or _safe_text(shop.get("company_id")) != company_id:
+        raise ValueError("店铺连接不存在")
+    authorization = auth_db.get_current_shop_authorization(
+        shop_connection_id=shop_connection_id,
+        include_secrets=True,
+    )
+    if not authorization:
+        raise ValueError("店铺授权不存在")
+
+    token_bundle = PlatformTokenBundle(
+        access_token=_safe_text(authorization.get("access_token")),
+        refresh_token=_safe_text(authorization.get("refresh_token")),
+        scope_text=_safe_text(authorization.get("scope_text")),
+        raw_payload=dict(authorization.get("raw_auth_payload") or {}),
+    )
+    collection_window = dict(params.get("platform_order_collection") or {})
+    page_size = int((params.get("sync_strategy") or {}).get("page_size") or params.get("page_size") or 100)
+    connector = build_platform_connector(
+        _app_config_from_record(app_record, company_id=company_id, platform_code=platform_code)
+    )
+    result = connector.fetch_order_lines(
+        token_bundle=token_bundle,
+        mode=_safe_text(collection_window.get("mode")) or "incremental",
+        window_start=_safe_text(collection_window.get("window_start")),
+        window_end=_safe_text(collection_window.get("window_end")),
+        page_size=page_size,
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        shop_connection_id=shop_connection_id,
+        shop_name=_safe_text(shop.get("external_shop_name")),
+        external_shop_id=_safe_text(collection_config.get("external_shop_id") or shop.get("external_shop_id")),
+    )
+    rows = [row for row in result.get("rows") or [] if isinstance(row, dict)]
+    collection_summary = auth_db.upsert_platform_order_lines(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        shop_connection_id=shop_connection_id,
+        platform_code=platform_code,
+        external_shop_id=_safe_text(collection_config.get("external_shop_id") or shop.get("external_shop_id")),
+        rows=rows,
+    )
+    collection_summary.update(
+        {
+            "dataset_id": dataset_id,
+            "dataset_code": dataset_code,
+            "biz_date": _safe_text(collection_window.get("biz_date")),
+            "record_count": collection_summary.get("upserted_count", 0),
+            "storage": "platform_order_lines",
+        }
+    )
+    return {
+        **result,
+        "success": bool(result.get("success", True)),
+        "healthy": bool(result.get("healthy", result.get("success", True))),
+        "rows": rows,
+        "collection_summary": collection_summary,
+        "next_checkpoint": {
+            "last_window_start": _safe_text(collection_window.get("window_start")),
+            "last_window_end": _safe_text(collection_window.get("window_end")),
+            "last_synced_at": _now_iso(),
+            "last_row_count": int(collection_summary.get("upserted_count") or 0),
+        },
+        "message": _safe_text(result.get("message")) or "平台订单采集成功",
+    }
 
 
 async def _run_connector_sync(
@@ -5252,13 +5485,28 @@ async def _execute_sync_job(
     job_id = _safe_text(job.get("id"))
     attempt_id = _safe_text(attempt.get("id"))
     try:
-        result = await _run_connector_sync(runtime_source, arguments)
+        params = dict(arguments.get("params") or {})
+        platform_order_context = dict(params.get("platform_order_collection") or {})
+        if platform_order_context:
+            result = _run_platform_order_collection(
+                company_id=company_id,
+                source_id=source_id,
+                dataset_id=_safe_text(params.get("dataset_id")),
+                dataset_code=_safe_text(params.get("dataset_code")),
+                resource_key=resource_key,
+                collection_config=dict(params.get("collection_config") or {}),
+                params=params,
+            )
+        else:
+            result = await _run_connector_sync(runtime_source, arguments)
         rows = _sync_rows_from_payload(result)
         collection_context = _collection_context_from_args(arguments)
         collection_summary: dict[str, Any] = {}
         collection_records: list[dict[str, Any]] = []
         collection_validation: dict[str, Any] = {}
-        if collection_context:
+        if platform_order_context:
+            collection_summary = dict(result.get("collection_summary") or {})
+        elif collection_context:
             collection_records, collection_validation = _build_collection_records(
                 rows=rows,
                 key_fields=list(collection_context.get("key_fields") or []),
@@ -5311,7 +5559,7 @@ async def _execute_sync_job(
                 "message": message,
             }
 
-        if collection_context:
+        if collection_context and not platform_order_context:
             collection_summary = auth_db.upsert_dataset_collection_records(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -5412,9 +5660,15 @@ async def _execute_sync_job(
         return {"success": False, "source_id": source_id, "error": message}
 
 
-async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
+async def _handle_data_source_trigger_sync(
+    arguments: dict[str, Any],
+    *,
+    trusted_company_id: str = "",
+) -> dict[str, Any]:
+    company_id = _safe_text(trusted_company_id)
+    if not company_id:
+        user = _require_user(arguments.get("auth_token", ""))
+        company_id = str(user["company_id"])
     source_id = _source_id_from_args(arguments)
     source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
     if not source_row:
@@ -5445,7 +5699,12 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
 
     resource_key = _resource_key_from_args(arguments)
     window_start, window_end = _window_from_args(arguments)
-    checkpoint_before: dict[str, Any] = {}
+    params = dict(arguments.get("params") or {})
+    checkpoint_before = (
+        dict(params.get("checkpoint_before"))
+        if isinstance(params.get("checkpoint_before"), dict)
+        else {}
+    )
     job = auth_db.create_unified_sync_job(
         company_id=company_id,
         data_source_id=source_id,
@@ -5454,7 +5713,7 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
         idempotency_key=_safe_text(arguments.get("idempotency_key")),
         window_start=window_start,
         window_end=window_end,
-        request_payload=dict(arguments.get("params") or {}),
+        request_payload=params,
         checkpoint_before=checkpoint_before,
     )
     if not job:
@@ -5497,8 +5756,68 @@ async def _handle_data_source_trigger_sync(arguments: dict[str, Any]) -> dict[st
 
 async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
-    company_id = str(user["company_id"])
-    source_id = _source_id_from_args(arguments)
+    return await trigger_dataset_collection_for_company(
+        company_id=str(user["company_id"]),
+        source_id=_source_id_from_args(arguments),
+        dataset_id=_dataset_id_from_args(arguments),
+        resource_key=_resource_key_from_args(arguments),
+        dataset_code=_sanitize_dataset_code(arguments.get("dataset_code")),
+        trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
+        idempotency_key=_safe_text(arguments.get("idempotency_key")),
+        background=_normalize_bool(arguments.get("background"), default=False),
+        params=dict(arguments.get("params") or {}),
+        passthrough_arguments={**arguments, "auth_token": arguments.get("auth_token", "")},
+    )
+
+
+async def trigger_dataset_collection_for_company(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str = "",
+    dataset_code: str = "",
+    trigger_mode: str = "manual",
+    idempotency_key: str = "",
+    background: bool = False,
+    params: dict[str, Any] | None = None,
+    passthrough_arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    await asyncio.sleep(0)
+    return await _trigger_dataset_collection_resolved(
+        company_id=company_id,
+        source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+        trigger_mode=trigger_mode,
+        idempotency_key=idempotency_key,
+        background=background,
+        params=dict(params or {}),
+        passthrough_arguments=dict(passthrough_arguments or {}),
+    )
+
+
+async def _trigger_dataset_collection_resolved(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    trigger_mode: str,
+    idempotency_key: str,
+    background: bool,
+    params: dict[str, Any],
+    passthrough_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    arguments = {
+        **passthrough_arguments,
+        "source_id": source_id,
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "resource_key": resource_key,
+    }
     dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
     if not dataset_row:
         return {"success": False, "error": "发布数据集不存在"}
@@ -5507,12 +5826,24 @@ async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, An
     biz_date = _collection_biz_date_from_args(arguments)
     config = _dataset_collection_config(dataset_row)
     key_fields = _dataset_collection_key_fields(dataset_row)
-    if not key_fields:
+    uses_platform_order_lines = _dataset_uses_platform_order_lines(dataset_row)
+    if not key_fields and not uses_platform_order_lines:
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
-    params = dict(arguments.get("params") or {})
     query = dict(params.get("query") or {})
     date_field = _collection_date_field(config)
     date_format = _collection_date_format(config)
+    checkpoint_before = auth_db.get_latest_source_dataset_checkpoint(
+        company_id=company_id,
+        data_source_id=source_id,
+        resource_key=resource_key,
+    )
+    if uses_platform_order_lines:
+        collection_window = _resolve_taobao_collection_window(
+            dataset_row=dataset_row,
+            params=params,
+            checkpoint_before=checkpoint_before,
+        )
+        params["platform_order_collection"] = collection_window
     query.update(
         {
             "resource_key": resource_key,
@@ -5531,18 +5862,28 @@ async def _handle_data_source_trigger_dataset_collection(arguments: dict[str, An
             "date_format": date_format,
             "key_fields": key_fields,
             "query": query,
+            "checkpoint_before": checkpoint_before,
+            "sync_strategy": dict(dataset_row.get("sync_strategy") or {}),
         }
     )
+    if uses_platform_order_lines and params.get("platform_order_collection"):
+        window_start = _safe_text(params["platform_order_collection"].get("window_start"))
+        window_end = _safe_text(params["platform_order_collection"].get("window_end"))
+    else:
+        window_start, window_end = _window_from_args(arguments)
 
     payload = {
         **arguments,
         "source_id": source_id,
         "resource_key": resource_key,
-        "idempotency_key": "",
-        "background": _normalize_bool(arguments.get("background"), default=False),
+        "idempotency_key": idempotency_key,
+        "trigger_mode": trigger_mode,
+        "background": background,
+        "window_start": window_start,
+        "window_end": window_end,
         "params": params,
     }
-    result = await _handle_data_source_trigger_sync(payload)
+    result = await _handle_data_source_trigger_sync(payload, trusted_company_id=company_id)
     if isinstance(result.get("job"), dict):
         result["job"]["collection_scope"] = "dataset"
     return {
@@ -5614,22 +5955,39 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
         if _safe_text(job.get("resource_key")) == resource_key
     ][:limit]
     jobs = _enrich_jobs_with_latest_attempts(company_id, jobs)
-    stats = auth_db.get_dataset_collection_record_stats(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
-        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")) or None,
-        resource_key=resource_key,
-    )
-    collection_records = auth_db.list_dataset_collection_records(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
-        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")) or None,
-        resource_key=resource_key,
-        limit=sample_limit,
-        offset=0,
-    )
+    dataset_id = _safe_text((dataset_row or {}).get("id")) or None
+    dataset_code = _safe_text((dataset_row or {}).get("dataset_code")) or None
+    if _dataset_uses_platform_order_lines(dataset_row):
+        stats = auth_db.get_platform_order_line_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+        )
+        collection_records = auth_db.list_platform_order_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=sample_limit,
+            offset=0,
+        )
+    else:
+        stats = auth_db.get_dataset_collection_record_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+        )
+        collection_records = auth_db.list_dataset_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            limit=sample_limit,
+            offset=0,
+        )
     sample_rows = [
         dict(item.get("payload") or {})
         for item in collection_records
@@ -5668,25 +6026,43 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
 
     limit = max(1, min(int(arguments.get("limit") or 100), 1000))
     offset = max(0, int(arguments.get("offset") or 0))
-    records = auth_db.list_dataset_collection_records(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=dataset_id,
-        dataset_code=dataset_code,
-        resource_key=resource_key or None,
-        biz_date=_safe_text(arguments.get("biz_date")) or None,
-        item_key=_safe_text(arguments.get("item_key")) or None,
-        limit=limit,
-        offset=offset,
-    )
-    stats = auth_db.get_dataset_collection_record_stats(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=dataset_id,
-        dataset_code=dataset_code,
-        resource_key=resource_key or None,
-        biz_date=_safe_text(arguments.get("biz_date")) or None,
-    )
+    if _dataset_uses_platform_order_lines(dataset_row):
+        records = auth_db.list_platform_order_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key or None,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+            filters={"tid": _safe_text(arguments.get("item_key")) or None},
+            limit=limit,
+            offset=offset,
+        )
+        stats = auth_db.get_platform_order_line_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+        )
+    else:
+        records = auth_db.list_dataset_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key or None,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+            item_key=_safe_text(arguments.get("item_key")) or None,
+            limit=limit,
+            offset=offset,
+        )
+        stats = auth_db.get_dataset_collection_record_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key or None,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+        )
     return {
         "success": True,
         "source_id": source_id,
@@ -5712,6 +6088,27 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
         return {"success": False, "error": "数据源不存在"}
 
     dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if _dataset_uses_platform_order_lines(dataset_row):
+        records = auth_db.list_platform_order_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
+            resource_key=_safe_text((dataset_row or {}).get("resource_key")) or _resource_key_from_args(arguments),
+            limit=max(1, min(limit, 100)),
+            offset=0,
+        )
+        rows = [
+            dict(item.get("payload") or item)
+            for item in records
+            if isinstance(item, dict)
+        ]
+        return {
+            "success": True,
+            "source_id": source_id,
+            "count": len(rows),
+            "rows": rows,
+            "message": "已返回平台订单明细样例",
+        }
     collection_rows = _load_dataset_sample_rows_from_collection_records(
         company_id=company_id,
         data_source_id=source_id,

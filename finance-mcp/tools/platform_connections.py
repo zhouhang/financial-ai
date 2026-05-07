@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -641,6 +642,27 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
                     company_id=company_id,
                     connection=connection,
                 )
+                if taobao_source and taobao_dataset:
+                    from tools import data_sources
+
+                    for job_payload in _build_taobao_initial_collection_jobs(
+                        source_id=str(taobao_source["id"]),
+                        dataset_id=str(taobao_dataset["id"]),
+                        resource_key=str(taobao_dataset.get("resource_key") or ""),
+                        sync_strategy=dict(taobao_dataset.get("sync_strategy") or TAOBAO_ORDER_SYNC_STRATEGY),
+                    ):
+                        asyncio.create_task(
+                            data_sources.trigger_dataset_collection_for_company(
+                                company_id=company_id,
+                                source_id=str(job_payload.get("source_id") or ""),
+                                dataset_id=str(job_payload.get("dataset_id") or ""),
+                                resource_key=str(job_payload.get("resource_key") or ""),
+                                trigger_mode=str(job_payload.get("trigger_mode") or "initial"),
+                                idempotency_key=str(job_payload.get("idempotency_key") or ""),
+                                background=bool(job_payload.get("background", True)),
+                                params=dict(job_payload.get("params") or {}),
+                            )
+                        )
             except Exception as dataset_exc:  # noqa: BLE001
                 dataset_warning = str(dataset_exc)
                 logger.error(

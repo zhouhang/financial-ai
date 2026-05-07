@@ -103,6 +103,7 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
         "datasets": [],
         "sync_sources": [],
         "callbacks": [],
+        "scheduled": [],
     }
 
     monkeypatch.setattr(
@@ -205,6 +206,12 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
         lambda connection: {**connection, "last_sync_at": None, "last_status": "idle"},
     )
 
+    def fake_create_task(coro: Any) -> None:
+        calls["scheduled"].append(coro)
+        coro.close()
+
+    monkeypatch.setattr(platform_connections.asyncio, "create_task", fake_create_task)
+
     result = await platform_connections._handle_auth_callback(
         {"platform_code": "taobao", "state": "state-1", "code": "code-1", "mode": "mock"}
     )
@@ -222,6 +229,7 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
     assert dataset_call["sync_strategy"]["schedule_expr"] == "0 */2 * * *"
     assert dataset_call["sync_strategy"]["initial_days"] == 90
     assert calls["callbacks"][0]["callback_payload"]["taobao_order_dataset_id"] == "dataset-1"
+    assert len(calls["scheduled"]) == 90
 
 
 def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() -> None:
