@@ -7035,7 +7035,7 @@ export default function DataConnectionsPanel({
             </div>
             {platform.platform_code === 'taobao' && (
               <p className="mt-2 text-xs leading-5 text-text-secondary">
-                一个淘宝/天猫店铺授权后会生成一个订单明细数据集，每 2 小时同步订单变更。
+                一个淘宝/天猫店铺授权后会生成一个订单明细数据集，首次仅初始化 T-1 订单，之后每 2 小时同步订单变更。
               </p>
             )}
             <div className="mt-4 flex flex-wrap gap-2">
