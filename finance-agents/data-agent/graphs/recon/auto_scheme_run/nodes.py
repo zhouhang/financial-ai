@@ -418,10 +418,10 @@ def _dataset_meta_containers(dataset: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _dataset_source_type_from_meta(dataset: dict[str, Any], fallback: str) -> str:
     containers = _dataset_meta_containers(dataset)
-    explicit = _first_text_from_dicts(containers, "dataset_source_type", "source_type", "loader")
+    explicit = _first_text_from_dicts(containers, "dataset_source_type")
     if explicit:
         return explicit
-    storage = _first_text_from_dicts(containers, "storage", "physical_storage", "source").lower()
+    storage = _first_text_from_dicts(containers, "storage", "physical_storage").lower()
     if storage == "platform_order_lines":
         return "platform_order_lines"
     if storage and storage not in {"dataset_collection_records", "collection_records"}:

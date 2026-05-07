@@ -86,6 +86,48 @@ async def test_hydrate_binding_preserves_dataset_source_type_from_dataset(
     assert hydrated["provider_code"] == "alipay"
 
 
+@pytest.mark.anyio
+async def test_hydrate_binding_keeps_collection_records_for_openapi_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_dataset(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "success": True,
+            "dataset": {
+                "id": "dataset-api-1",
+                "dataset_code": "api_orders",
+                "business_name": "API 订单",
+                "source_kind": "api",
+                "provider_code": "",
+                "extract_config": {},
+                "schema_summary": {
+                    "source": "openapi",
+                    "columns": [],
+                },
+            },
+        }
+
+    async def fake_get_source(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"success": False}
+
+    monkeypatch.setattr(nodes, "data_source_get", fake_get_source)
+    monkeypatch.setattr(nodes, "data_source_get_dataset", fake_get_dataset)
+
+    hydrated = await nodes._hydrate_binding_source_meta(
+        auth_token="token",
+        binding={
+            "data_source_id": "source-api-1",
+            "dataset_id": "dataset-api-1",
+            "resource_key": "GET /orders",
+            "table_name": "api_orders",
+            "dataset_source_type": "collection_records",
+        },
+    )
+
+    assert hydrated["dataset_source_type"] == "collection_records"
+    assert "collection_driver" not in hydrated
+
+
 def test_build_recon_inputs_uses_hydrated_dataset_source_type() -> None:
     inputs = nodes._build_recon_inputs_from_ready_collections(
         [
