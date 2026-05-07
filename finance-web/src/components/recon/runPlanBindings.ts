@@ -17,6 +17,7 @@ export interface RunPlanSourceDraft {
   resourceKey?: string;
   fieldLabelMap?: Record<string, string>;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 export interface RunPlanSchemeMetaSummary {
@@ -274,6 +275,10 @@ export function buildRunPlanBinding(
   const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
   if (!sourceId || !tableName) return null;
 
+  const datasetSourceType =
+    toText(asRecord(source.extractConfig).storage) === 'platform_order_lines'
+      ? 'platform_order_lines'
+      : 'collection_records';
   const query: Record<string, unknown> = {};
   if (tableName) {
     query.resource_key = tableName;
@@ -289,12 +294,15 @@ export function buildRunPlanBinding(
     data_source_id: sourceId,
     table_name: tableName,
     resource_key: tableName,
-    dataset_source_type: 'collection_records',
+    dataset_source_type: datasetSourceType,
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     role_code: `${side}_${index + 1}`,
     side,
     query,
+    mapping_config: {
+      dataset_source_type: datasetSourceType,
+    },
   };
 }
 

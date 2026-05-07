@@ -586,6 +586,12 @@ def _build_plan_binding_from_dataset_binding(
         scheme_meta=_safe_dict(scheme_meta),
     )
 
+    dataset_source_type = str(
+        mapping_config.get("dataset_source_type")
+        or filter_config.get("dataset_source_type")
+        or "collection_records"
+    ).strip() or "collection_records"
+
     return {
         "data_source_id": source_id,
         "table_name": table_name,
@@ -593,7 +599,12 @@ def _build_plan_binding_from_dataset_binding(
         "required": bool(binding.get("is_required", True)),
         "query": query,
         "dataset_id": str(mapping_config.get("dataset_id") or binding.get("dataset_id") or query.get("dataset_id") or "").strip(),
-        "dataset_source_type": str(mapping_config.get("dataset_source_type") or "collection_records").strip() or "collection_records",
+        "dataset_source_type": dataset_source_type,
+        "dataset_ref": {
+            "source_type": dataset_source_type,
+            "source_key": source_id,
+            "query": query,
+        },
         "role_code": role_code,
         "dataset_code": str(mapping_config.get("dataset_code") or resource_key).strip() or resource_key,
         "source_kind": str(mapping_config.get("source_kind") or binding.get("source_kind") or "").strip(),
@@ -1500,7 +1511,8 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             "sample_records": records[:1],
         }
         if bool(result.get("success")) and not _is_required_collection_empty(binding, collection):
-            ready_binding = {**binding, "dataset_source_type": "collection_records"}
+            dataset_source_type = str(binding.get("dataset_source_type") or "collection_records").strip() or "collection_records"
+            ready_binding = {**binding, "dataset_source_type": dataset_source_type}
             ready_collections.append({"binding": ready_binding, "collection_records": collection})
         else:
             error = str(result.get("error") or "暂无采集记录，请先采集数据")

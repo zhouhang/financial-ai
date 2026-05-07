@@ -820,10 +820,11 @@ async def execute_auto_task_run(
         record_count = int(collection_result.get("record_count") or collection_result.get("count") or 0)
         records = _safe_list(collection_result.get("records") or collection_result.get("rows"))
         if collection_result.get("success") and (record_count > 0 or records):
+            dataset_source_type = str(binding.get("dataset_source_type") or "collection_records").strip() or "collection_records"
             source_collections.append(
                 {
                     **binding,
-                    "dataset_source_type": "collection_records",
+                    "dataset_source_type": dataset_source_type,
                     "collection_records": {
                         "dataset_id": str(collection_result.get("dataset_id") or binding.get("dataset_id") or ""),
                         "resource_key": str(collection_result.get("resource_key") or binding["resource_key"]),
