@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from platforms.base import BasePlatformConnector, PlatformAppConfig
+from platforms.connectors.alipay import AlipayConnector
 from platforms.connectors.douyin_shop import DouyinShopConnector
 from platforms.connectors.taobao import TaobaoConnector, TmallConnector
 
 
 def build_connector(app_config: PlatformAppConfig) -> BasePlatformConnector:
+    if app_config.platform_code == "alipay":
+        return AlipayConnector(app_config)
     if app_config.platform_code == "taobao":
         return TaobaoConnector(app_config)
     if app_config.platform_code == "tmall":
