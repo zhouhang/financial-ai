@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -82,6 +83,20 @@ def test_taobao_initial_collection_uses_t_minus_1_only() -> None:
     assert jobs[0]["idempotency_key"].endswith(":2026-05-06")
     assert jobs[-1]["params"]["biz_date"] == "2026-05-06"
     assert all(job["trigger_mode"] == "initial" for job in jobs)
+
+
+def test_taobao_initial_collection_defaults_to_t_minus_1_when_initial_days_missing() -> None:
+    jobs = platform_connections._build_taobao_initial_collection_jobs(
+        source_id="source-1",
+        dataset_id="dataset-1",
+        resource_key="taobao_order_lines:shop-1",
+        sync_strategy={"initial_end_offset_days": 1},
+        anchor_date=date(2026, 5, 7),
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["params"]["biz_date"] == "2026-05-06"
+    assert jobs[0]["idempotency_key"].endswith(":2026-05-06")
 
 
 @pytest.mark.anyio

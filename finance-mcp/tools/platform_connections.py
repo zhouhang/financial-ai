@@ -378,7 +378,7 @@ def _build_taobao_initial_collection_jobs(
 ) -> list[dict[str, Any]]:
     """构建淘宝/天猫 T-1 初始化采集任务 payload。"""
     resolved_anchor = anchor_date or datetime.now(timezone(timedelta(hours=8))).date()
-    initial_days = max(1, int(sync_strategy.get("initial_days") or 90))
+    initial_days = max(1, int(sync_strategy.get("initial_days") or 1))
     end_offset_days = max(1, int(sync_strategy.get("initial_end_offset_days") or 1))
     end_biz_date = resolved_anchor - timedelta(days=end_offset_days)
     start_biz_date = end_biz_date - timedelta(days=initial_days - 1)
