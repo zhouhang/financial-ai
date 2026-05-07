@@ -689,6 +689,24 @@ def _is_required_collection_empty(binding: dict[str, Any], collection: dict[str,
     return _get_binding_required(binding) and _collection_record_count(collection) <= 0
 
 
+def _uses_driver_managed_dataset_loader(binding: dict[str, Any]) -> bool:
+    source_type = str(binding.get("dataset_source_type") or "collection_records").strip()
+    return bool(source_type) and source_type not in {"collection_records", "platform_order_lines"}
+
+
+def _collection_count_from_result(result: dict[str, Any]) -> int:
+    summary = _safe_dict(result.get("collection_summary"))
+    for container in (summary, result):
+        for key in ("record_count", "row_count", "upserted_count", "inserted_count"):
+            try:
+                value = int(container.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return 0
+
+
 def _flatten_input_plan_entries(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
     input_plan = _safe_dict(scheme_meta.get("input_plan_json"))
     if not input_plan:
@@ -1560,6 +1578,29 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
                         ),
                         "dataset_source_type": str(binding.get("dataset_source_type") or ""),
                         "error": f"先同步失败：{collection_error}",
+                    }
+                )
+                continue
+            if _uses_driver_managed_dataset_loader(binding):
+                ready_binding = {
+                    **binding,
+                    "dataset_source_type": str(binding.get("dataset_source_type") or "collection_records").strip()
+                    or "collection_records",
+                }
+                ready_collections.append(
+                    {
+                        "binding": ready_binding,
+                        "collection_records": {
+                            "dataset_id": str(binding.get("dataset_id") or ""),
+                            "resource_key": _get_binding_resource_key(binding),
+                            "record_count": _collection_count_from_result(collect_result),
+                            "sample_records": [],
+                            "collection_driver": str(
+                                collect_result.get("collection_driver")
+                                or binding.get("collection_driver")
+                                or ""
+                            ),
+                        },
                     }
                 )
                 continue

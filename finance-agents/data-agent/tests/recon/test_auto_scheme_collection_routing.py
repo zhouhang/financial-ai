@@ -211,3 +211,56 @@ def test_check_dataset_ready_collection_failure_keeps_collection_context(
     assert missing_binding["dataset_source_type"] == "alipay_bill_lines"
     assert collection_attempt["collection_driver"] == "alipay_bill_download_import"
     assert collection_attempt["dataset_source_type"] == "alipay_bill_lines"
+
+
+def test_check_dataset_ready_trusts_driver_managed_parsed_table_after_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_collect(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "success": True,
+            "job": {"id": "job-alipay-1"},
+            "collection_driver": "alipay_bill_download_import",
+            "collection_summary": {
+                "record_count": 12,
+                "storage": "alipay_bill_lines",
+            },
+        }
+
+    async def fake_list(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("parsed-table datasets should not probe dataset_collection_records")
+
+    monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_collect)
+    monkeypatch.setattr(nodes, "data_source_list_collection_records", fake_list)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "biz_date": "2026-05-06",
+            "run_context": {"trigger_type": "schedule"},
+            "plan_input_bindings": [
+                {
+                    "data_source_id": "source-alipay-1",
+                    "dataset_id": "dataset-alipay-1",
+                    "resource_key": "alipay_bill_lines:merchant-1",
+                    "table_name": "alipay_bill_lines",
+                    "required": True,
+                    "collection_driver": "alipay_bill_download_import",
+                    "dataset_source_type": "alipay_bill_lines",
+                    "query": {"date_field": "bill_date"},
+                }
+            ],
+        },
+    }
+
+    result = asyncio.run(nodes.check_dataset_ready_node(state))
+    bind_result = nodes.bind_ready_collection_node(result)
+    recon_ctx = bind_result["recon_ctx"]
+
+    assert recon_ctx["missing_bindings"] == []
+    ready = recon_ctx["ready_collections"][0]
+    assert ready["collection_records"]["record_count"] == 12
+    dataset_ref = recon_ctx["recon_inputs"][0]["payload"]["dataset_ref"]
+    assert dataset_ref["source_type"] == "alipay_bill_lines"
+    assert dataset_ref["source_key"] == "source-alipay-1"
+    assert dataset_ref["query"]["date_field"] == "bill_date"
