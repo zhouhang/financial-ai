@@ -63,35 +63,23 @@ def test_build_taobao_order_line_dataset_payload_is_shop_scoped() -> None:
         "schedule_expr": "0 */2 * * *",
         "lookback_minutes": 10,
         "page_size": 100,
-        "initial_days": 90,
+        "initial_days": 1,
         "initial_end_offset_days": 1,
     }
 
 
-def test_build_taobao_initial_collection_job_payloads_has_90_days() -> None:
+def test_taobao_initial_collection_uses_t_minus_1_only() -> None:
     jobs = platform_connections.build_taobao_initial_collection_job_payloads(
-        company_id="company-1",
-        data_source_id="source-1",
-        dataset_id="dataset-1",
-        shop_connection_id="shop-1",
+        company_id="00000000-0000-0000-0000-000000000001",
+        data_source_id="00000000-0000-0000-0000-000000000002",
+        dataset_id="00000000-0000-0000-0000-000000000003",
+        shop_connection_id="00000000-0000-0000-0000-000000000004",
         anchor_date="2026-05-07",
     )
 
-    assert len(jobs) == 90
-    assert jobs[0] == {
-        "source_id": "source-1",
-        "dataset_id": "dataset-1",
-        "resource_key": "taobao_order_lines:shop-1",
-        "trigger_mode": "initial",
-        "idempotency_key": "taobao-initial:dataset-1:2026-02-06",
-        "background": True,
-        "params": {
-            "dataset_id": "dataset-1",
-            "resource_key": "taobao_order_lines:shop-1",
-            "biz_date": "2026-02-06",
-            "force_mode": "initial",
-        },
-    }
+    assert len(jobs) == 1
+    assert jobs[0]["params"]["biz_date"] == "2026-05-06"
+    assert jobs[0]["idempotency_key"].endswith(":2026-05-06")
     assert jobs[-1]["params"]["biz_date"] == "2026-05-06"
     assert all(job["trigger_mode"] == "initial" for job in jobs)
 
@@ -227,7 +215,7 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
     assert dataset_call["data_source_id"] == "source-1"
     assert dataset_call["resource_key"] == "taobao_order_lines:shop-abcdef123456"
     assert dataset_call["sync_strategy"]["schedule_expr"] == "0 */2 * * *"
-    assert dataset_call["sync_strategy"]["initial_days"] == 90
+    assert dataset_call["sync_strategy"]["initial_days"] == 1
     assert calls["callbacks"][0]["callback_payload"]["taobao_order_dataset_id"] == "dataset-1"
     assert len(calls["scheduled"]) == 1
 

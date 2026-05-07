@@ -7110,7 +7110,7 @@ export default function DataConnectionsPanel({
               </p>
               {selectedPlatform.platform_code === 'taobao' && (
                 <p className="mt-2 text-xs text-text-secondary">
-                  授权成功后，Tally 会初始化最近 90 天订单，并每 2 小时自动同步订单变更。第一版仅采集订单对账所需字段，不采集收货地址、手机号等与对账无关的敏感信息，也不会自动拉取单笔订单详情。
+                  一个淘宝/天猫店铺授权后会生成一个订单明细数据集，首次仅初始化 T-1 订单，之后每 2 小时同步订单变更。
                 </p>
               )}
             </div>

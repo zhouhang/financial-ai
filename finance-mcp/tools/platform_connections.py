@@ -31,7 +31,7 @@ TAOBAO_ORDER_SYNC_STRATEGY: dict[str, Any] = {
     "schedule_expr": "0 */2 * * *",
     "lookback_minutes": 10,
     "page_size": 100,
-    "initial_days": 90,
+    "initial_days": 1,
     "initial_end_offset_days": 1,
 }
 
@@ -349,7 +349,7 @@ def build_taobao_initial_collection_job_payloads(
     shop_connection_id: str,
     anchor_date: str | date | datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """构建淘宝/天猫 90 天初始化采集任务 payload；本任务只生成，不触发。"""
+    """构建淘宝/天猫 T-1 初始化采集任务 payload；本任务只生成，不触发。"""
     if isinstance(anchor_date, datetime):
         resolved_anchor = anchor_date.date()
     elif isinstance(anchor_date, date):
@@ -376,7 +376,7 @@ def _build_taobao_initial_collection_jobs(
     sync_strategy: dict[str, Any],
     anchor_date: date | None = None,
 ) -> list[dict[str, Any]]:
-    """构建按 T-90 到 T-1 排序的淘宝/天猫初始化采集任务 payload。"""
+    """构建淘宝/天猫 T-1 初始化采集任务 payload。"""
     resolved_anchor = anchor_date or datetime.now(timezone(timedelta(hours=8))).date()
     initial_days = max(1, int(sync_strategy.get("initial_days") or 90))
     end_offset_days = max(1, int(sync_strategy.get("initial_end_offset_days") or 1))
@@ -453,7 +453,7 @@ async def _run_taobao_initial_collection_jobs(
     company_id: str,
     jobs: list[dict[str, Any]],
 ) -> None:
-    """按日期顺序串行执行淘宝/天猫 90 天初始化采集任务。"""
+    """按日期顺序串行执行淘宝/天猫 T-1 初始化采集任务。"""
     from tools import data_sources
 
     for job_payload in jobs:
