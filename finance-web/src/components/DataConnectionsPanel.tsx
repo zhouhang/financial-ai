@@ -7033,6 +7033,11 @@ export default function DataConnectionsPanel({
               <p>异常店铺：{platform.error_shop_count ?? 0}</p>
               <p>最近同步：{formatTime(platform.last_sync_at)}</p>
             </div>
+            {platform.platform_code === 'taobao' && (
+              <p className="mt-2 text-xs leading-5 text-text-secondary">
+                一个淘宝/天猫店铺授权后会生成一个订单明细数据集，每 2 小时同步订单变更。
+              </p>
+            )}
             <div className="mt-4 flex flex-wrap gap-2">
               <button
                 type="button"
@@ -7101,8 +7106,13 @@ export default function DataConnectionsPanel({
             <div>
               <h4 className="text-sm font-semibold text-text-primary">固定数据集</h4>
               <p className="mt-1 text-xs text-text-secondary">
-                平台授权完成后，系统会自动生成可供规则绑定的数据集目录。
+                平台授权完成后，系统会按店铺生成可供规则绑定的数据集目录。
               </p>
+              {selectedPlatform.platform_code === 'taobao' && (
+                <p className="mt-2 text-xs text-text-secondary">
+                  授权成功后，Tally 会初始化最近 90 天订单，并每 2 小时自动同步订单变更。第一版仅采集订单对账所需字段，不采集收货地址、手机号等与对账无关的敏感信息，也不会自动拉取单笔订单详情。
+                </p>
+              )}
             </div>
             <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}`}>
               {getStatusLabel(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}
