@@ -1262,7 +1262,9 @@ def _source_id_from_args(arguments: dict[str, Any]) -> str:
 
 
 def _dataset_id_from_args(arguments: dict[str, Any]) -> str:
-    return str(arguments.get("dataset_id") or arguments.get("id") or "").strip()
+    params = arguments.get("params") or {}
+    params_dataset_id = params.get("dataset_id") if isinstance(params, dict) else ""
+    return str(arguments.get("dataset_id") or params_dataset_id or arguments.get("id") or "").strip()
 
 
 def _resource_key_from_args(arguments: dict[str, Any]) -> str:
@@ -3246,6 +3248,7 @@ def _run_platform_order_collection(
     resource_key: str,
     collection_config: dict[str, Any],
     params: dict[str, Any],
+    checkpoint_before: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     platform_code = _safe_text(collection_config.get("platform_code")) or "taobao"
     shop_connection_id = _safe_text(collection_config.get("shop_connection_id"))
@@ -3254,13 +3257,6 @@ def _run_platform_order_collection(
     if not shop_connection_id:
         raise ValueError("平台订单数据集缺少 shop_connection_id")
 
-    app_record = auth_db.get_platform_app(
-        company_id=company_id,
-        platform_code=platform_code,
-        include_secrets=True,
-    )
-    if not app_record:
-        raise ValueError("平台应用配置不存在")
     shop = auth_db.get_shop_connection_by_id(shop_connection_id)
     if not shop or _safe_text(shop.get("company_id")) != company_id:
         raise ValueError("店铺连接不存在")
@@ -3268,8 +3264,26 @@ def _run_platform_order_collection(
         shop_connection_id=shop_connection_id,
         include_secrets=True,
     )
-    if not authorization:
+    if not authorization or _safe_text(authorization.get("auth_status")) != "authorized":
         raise ValueError("店铺授权不存在")
+    app_id = _safe_text(authorization.get("platform_app_id"))
+    app_record = (
+        auth_db.get_platform_app_by_id(
+            platform_app_id=app_id,
+            company_id=company_id,
+            include_secrets=True,
+        )
+        if app_id
+        else None
+    )
+    if not app_record:
+        app_record = auth_db.get_platform_app(
+            company_id=company_id,
+            platform_code=platform_code,
+            include_secrets=True,
+        )
+    if not app_record:
+        raise ValueError("平台应用配置不存在")
 
     token_bundle = PlatformTokenBundle(
         access_token=_safe_text(authorization.get("access_token")),
@@ -3321,6 +3335,7 @@ def _run_platform_order_collection(
         "rows": rows,
         "collection_summary": collection_summary,
         "next_checkpoint": {
+            **dict(checkpoint_before or {}),
             "last_window_start": _safe_text(collection_window.get("window_start")),
             "last_window_end": _safe_text(collection_window.get("window_end")),
             "last_synced_at": _now_iso(),
@@ -5486,8 +5501,18 @@ async def _execute_sync_job(
     attempt_id = _safe_text(attempt.get("id"))
     try:
         params = dict(arguments.get("params") or {})
-        platform_order_context = dict(params.get("platform_order_collection") or {})
-        if platform_order_context:
+        dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+        uses_platform_order_lines = _dataset_uses_platform_order_lines(dataset_row)
+        if uses_platform_order_lines:
+            params.setdefault("collection_config", _dataset_collection_config(dataset_row))
+            params.setdefault("dataset_id", _safe_text((dataset_row or {}).get("id")))
+            params.setdefault("dataset_code", _safe_text((dataset_row or {}).get("dataset_code")))
+            if not isinstance(params.get("platform_order_collection"), dict):
+                params["platform_order_collection"] = _resolve_taobao_collection_window(
+                    dataset_row=dataset_row or {},
+                    params=params,
+                    checkpoint_before=checkpoint_before,
+                )
             result = _run_platform_order_collection(
                 company_id=company_id,
                 source_id=source_id,
@@ -5496,6 +5521,7 @@ async def _execute_sync_job(
                 resource_key=resource_key,
                 collection_config=dict(params.get("collection_config") or {}),
                 params=params,
+                checkpoint_before=checkpoint_before,
             )
         else:
             result = await _run_connector_sync(runtime_source, arguments)
@@ -5504,7 +5530,7 @@ async def _execute_sync_job(
         collection_summary: dict[str, Any] = {}
         collection_records: list[dict[str, Any]] = []
         collection_validation: dict[str, Any] = {}
-        if platform_order_context:
+        if uses_platform_order_lines:
             collection_summary = dict(result.get("collection_summary") or {})
         elif collection_context:
             collection_records, collection_validation = _build_collection_records(
@@ -5559,7 +5585,7 @@ async def _execute_sync_job(
                 "message": message,
             }
 
-        if collection_context and not platform_order_context:
+        if collection_context and not uses_platform_order_lines:
             collection_summary = auth_db.upsert_dataset_collection_records(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -5717,6 +5743,22 @@ async def _handle_data_source_trigger_sync(
         checkpoint_before=checkpoint_before,
     )
     if not job:
+        idempotency_key = _safe_text(arguments.get("idempotency_key"))
+        if idempotency_key:
+            existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
+                company_id=company_id,
+                data_source_id=source_id,
+                idempotency_key=idempotency_key,
+            )
+            if existing_job:
+                return {
+                    "success": True,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(existing_job),
+                    "reused": True,
+                    "queued": False,
+                    "message": "采集任务已存在，已复用幂等任务",
+                }
         return {"success": False, "error": "创建同步任务失败"}
 
     attempt = auth_db.create_unified_sync_job_attempt(

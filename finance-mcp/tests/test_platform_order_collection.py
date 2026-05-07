@@ -131,9 +131,14 @@ async def test_execute_sync_job_routes_platform_order_rows_to_order_line_storage
     calls: dict[str, Any] = {"upsert_dataset_collection_records": 0}
 
     monkeypatch.setattr(
-        data_sources,
-        "_run_platform_order_collection",
-        lambda **kwargs: {
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _platform_order_dataset(),
+    )
+
+    def fake_run_platform_order_collection(**kwargs: Any) -> dict[str, Any]:
+        calls["platform_order_kwargs"] = kwargs
+        return {
             "success": True,
             "healthy": True,
             "rows": [{"tid": "T1", "oid": "O1"}],
@@ -149,8 +154,9 @@ async def test_execute_sync_job_routes_platform_order_rows_to_order_line_storage
             },
             "next_checkpoint": {"last_window_end": "2026-05-06 23:59:59"},
             "message": "平台订单采集成功",
-        },
-    )
+        }
+
+    monkeypatch.setattr(data_sources, "_run_platform_order_collection", fake_run_platform_order_collection)
     monkeypatch.setattr(
         data_sources.auth_db,
         "upsert_dataset_collection_records",
@@ -184,18 +190,22 @@ async def test_execute_sync_job_routes_platform_order_rows_to_order_line_storage
                 "dataset_id": "dataset-1",
                 "dataset_code": "taobao_order_lines_shop_1",
                 "collection_config": {"storage": "platform_order_lines"},
-                "platform_order_collection": {"mode": "initial"},
             }
         },
         job={"id": "job-1", "current_attempt": 1},
         attempt={"id": "attempt-1"},
-        checkpoint_before={},
+        checkpoint_before={"last_window_end": "2026-05-05 23:59:59", "custom": "keep"},
         window_start="2026-05-06 00:00:00",
         window_end="2026-05-06 23:59:59",
     )
 
     assert result["success"] is True
     assert calls["upsert_dataset_collection_records"] == 0
+    assert calls["platform_order_kwargs"]["checkpoint_before"] == {
+        "last_window_end": "2026-05-05 23:59:59",
+        "custom": "keep",
+    }
+    assert calls["platform_order_kwargs"]["params"]["platform_order_collection"]["mode"] == "incremental"
     assert result["collection_summary"]["upserted_count"] == 1
     assert calls["attempt"]["metrics"]["collection_upserted"] == 1
 
@@ -208,14 +218,14 @@ async def test_run_platform_order_collection_uses_connector_and_upserts_lines(
 
     monkeypatch.setattr(
         data_sources.auth_db,
-        "get_platform_app",
+        "get_platform_app_by_id",
         lambda **kwargs: {
-            "id": "app-1",
+            "id": kwargs["platform_app_id"],
             "company_id": kwargs["company_id"],
-            "platform_code": kwargs["platform_code"],
-            "app_name": "Taobao",
-            "app_key": "key",
-            "app_secret": "secret",
+            "platform_code": "taobao",
+            "app_name": "Taobao by id",
+            "app_key": "key-by-id",
+            "app_secret": "secret-by-id",
             "app_type": "system",
             "auth_base_url": "",
             "token_url": "",
@@ -224,6 +234,11 @@ async def test_run_platform_order_collection_uses_connector_and_upserts_lines(
             "extra": {"mode": "mock"},
             "status": "active",
         },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_app",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should use app by id")),
     )
     monkeypatch.setattr(
         data_sources.auth_db,
@@ -242,6 +257,7 @@ async def test_run_platform_order_collection_uses_connector_and_upserts_lines(
         lambda **kwargs: {
             "access_token": "access-token",
             "refresh_token": "refresh-token",
+            "platform_app_id": "app-by-id",
             "auth_status": "authorized",
             "scope_text": "trade",
             "raw_auth_payload": {"source": "test"},
@@ -282,13 +298,93 @@ async def test_run_platform_order_collection_uses_connector_and_upserts_lines(
                 "biz_date": "2026-05-06",
             }
         },
+        checkpoint_before={"last_window_end": "2026-05-05 23:59:59", "custom": "keep"},
     )
 
     assert result["success"] is True
     assert result["collection_summary"]["upserted_count"] == 1
+    assert result["next_checkpoint"]["custom"] == "keep"
     assert connector_calls["fetch_order_lines"]["company_id"] == "company-1"
     assert connector_calls["fetch_order_lines"]["data_source_id"] == "source-1"
     assert connector_calls["fetch_order_lines"]["mode"] == "initial"
+
+
+def test_run_platform_order_collection_rejects_unauthorized_shop(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_connection_id: {
+            "id": shop_connection_id,
+            "company_id": "company-1",
+            "platform_code": "taobao",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_current_shop_authorization",
+        lambda **kwargs: {"auth_status": "expired", "platform_app_id": "app-1"},
+    )
+
+    with pytest.raises(ValueError, match="店铺授权不存在"):
+        data_sources._run_platform_order_collection(
+            company_id="company-1",
+            source_id="source-1",
+            dataset_id="dataset-1",
+            dataset_code="taobao_order_lines_shop_1",
+            resource_key="taobao_order_lines:shop-1",
+            collection_config=_platform_order_dataset()["extract_config"],
+            params={"platform_order_collection": {"mode": "incremental"}},
+        )
+
+
+@pytest.mark.anyio
+async def test_trigger_sync_reuses_existing_idempotent_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "source_kind": "platform_oauth",
+            "status": "active",
+            "is_enabled": True,
+            "provider_code": "taobao",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_runtime_source",
+        lambda source_row, include_secret=False: {
+            "source_kind": "platform_oauth",
+            "provider_code": "taobao",
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "find_unified_sync_job_by_idempotency_key",
+        lambda **kwargs: {
+            "id": "job-existing",
+            "company_id": kwargs["company_id"],
+            "data_source_id": kwargs["data_source_id"],
+            "idempotency_key": kwargs["idempotency_key"],
+            "job_status": "success",
+        },
+    )
+
+    result = await data_sources._handle_data_source_trigger_sync(
+        {
+            "source_id": "source-1",
+            "resource_key": "taobao_order_lines:shop-1",
+            "idempotency_key": "taobao-initial:dataset-1:2026-05-06",
+            "params": {},
+        },
+        trusted_company_id="company-1",
+    )
+
+    assert result["success"] is True
+    assert result["reused"] is True
+    assert result["job"]["id"] == "job-existing"
 
 
 @pytest.mark.anyio

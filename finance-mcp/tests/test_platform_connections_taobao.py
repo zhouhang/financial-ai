@@ -229,7 +229,7 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
     assert dataset_call["sync_strategy"]["schedule_expr"] == "0 */2 * * *"
     assert dataset_call["sync_strategy"]["initial_days"] == 90
     assert calls["callbacks"][0]["callback_payload"]["taobao_order_dataset_id"] == "dataset-1"
-    assert len(calls["scheduled"]) == 90
+    assert len(calls["scheduled"]) == 1
 
 
 def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() -> None:
@@ -386,3 +386,47 @@ async def test_taobao_callback_keeps_auth_success_when_dataset_creation_fails(mo
     assert result["warning"] == "dataset failed"
     assert callbacks[0]["status"] == "authorized"
     assert callbacks[0]["callback_payload"]["taobao_order_dataset_warning"] == "dataset failed"
+
+
+@pytest.mark.anyio
+async def test_taobao_initial_collection_jobs_run_sequentially(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeDataSources:
+        @staticmethod
+        async def trigger_dataset_collection_for_company(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {"success": True}
+
+    import tools
+
+    monkeypatch.setattr(tools, "data_sources", FakeDataSources, raising=False)
+
+    jobs = [
+        {
+            "source_id": "source-1",
+            "dataset_id": "dataset-1",
+            "resource_key": "taobao_order_lines:shop-1",
+            "trigger_mode": "initial",
+            "idempotency_key": "day-1",
+            "background": True,
+            "params": {"biz_date": "2026-05-05"},
+        },
+        {
+            "source_id": "source-1",
+            "dataset_id": "dataset-1",
+            "resource_key": "taobao_order_lines:shop-1",
+            "trigger_mode": "initial",
+            "idempotency_key": "day-2",
+            "background": True,
+            "params": {"biz_date": "2026-05-06"},
+        },
+    ]
+
+    await platform_connections._run_taobao_initial_collection_jobs(
+        company_id="company-1",
+        jobs=jobs,
+    )
+
+    assert [call["idempotency_key"] for call in calls] == ["day-1", "day-2"]
+    assert all(call["background"] is False for call in calls)
