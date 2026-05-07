@@ -359,7 +359,11 @@ async def test_trigger_sync_reuses_existing_idempotent_job(monkeypatch) -> None:
             "provider_code": "taobao",
         },
     )
-    monkeypatch.setattr(data_sources.auth_db, "create_unified_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_sync_job",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should reuse before create")),
+    )
     monkeypatch.setattr(
         data_sources.auth_db,
         "find_unified_sync_job_by_idempotency_key",

@@ -4399,10 +4399,26 @@ async def _handle_data_source_scheduler_list_collection_plans(arguments: dict[st
         )
         for row in rows:
             config = _dataset_collection_config(row)
-            schedule_time = _collection_schedule_time(config)
-            if not schedule_time:
+            sync_strategy = dict(row.get("sync_strategy") or {})
+            schedule_type = _safe_text(
+                sync_strategy.get("schedule_type")
+                or config.get("schedule_type")
+                or config.get("scheduleType")
+            ).lower()
+            schedule_expr = _safe_text(
+                sync_strategy.get("schedule_expr")
+                or sync_strategy.get("schedule_expression")
+                or config.get("schedule_expr")
+                or config.get("schedule_expression")
+            )
+            if not schedule_type:
+                schedule_time = _collection_schedule_time(config)
+                if schedule_time:
+                    schedule_type = "daily"
+                    schedule_expr = schedule_time
+            if schedule_type not in {"daily", "weekly", "monthly", "cron"} or not schedule_expr:
                 continue
-            date_field = _collection_date_field(config)
+            date_field = _safe_text(sync_strategy.get("date_field")) or _collection_date_field(config)
             if not date_field:
                 continue
             source_id = _safe_text(row.get("data_source_id"))
@@ -4420,8 +4436,8 @@ async def _handle_data_source_scheduler_list_collection_plans(arguments: dict[st
                     "dataset_code": _safe_text(row.get("dataset_code")),
                     "dataset_name": dataset_view.get("business_name") or row.get("dataset_name"),
                     "resource_key": _safe_text(row.get("resource_key")) or "default",
-                    "schedule_type": "daily",
-                    "schedule_expr": schedule_time,
+                    "schedule_type": schedule_type,
+                    "schedule_expr": schedule_expr,
                     "date_field": date_field,
                     "display_date_field": _collection_display_date_field(config),
                     "collection_config": config,
@@ -5726,6 +5742,22 @@ async def _handle_data_source_trigger_sync(
     resource_key = _resource_key_from_args(arguments)
     window_start, window_end = _window_from_args(arguments)
     params = dict(arguments.get("params") or {})
+    idempotency_key = _safe_text(arguments.get("idempotency_key"))
+    if idempotency_key:
+        existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
+            company_id=company_id,
+            data_source_id=source_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing_job:
+            return {
+                "success": True,
+                "source_id": source_id,
+                "job": _attach_aliases_to_job(existing_job),
+                "reused": True,
+                "queued": False,
+                "message": "采集任务已存在，已复用幂等任务",
+            }
     checkpoint_before = (
         dict(params.get("checkpoint_before"))
         if isinstance(params.get("checkpoint_before"), dict)
@@ -5736,14 +5768,13 @@ async def _handle_data_source_trigger_sync(
         data_source_id=source_id,
         trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
         resource_key=resource_key,
-        idempotency_key=_safe_text(arguments.get("idempotency_key")),
+        idempotency_key=idempotency_key,
         window_start=window_start,
         window_end=window_end,
         request_payload=params,
         checkpoint_before=checkpoint_before,
     )
     if not job:
-        idempotency_key = _safe_text(arguments.get("idempotency_key"))
         if idempotency_key:
             existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
                 company_id=company_id,
