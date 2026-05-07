@@ -46,6 +46,13 @@ class PlatformShopProfile:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class PlatformOrderSyncResult:
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    next_cursor: str = ""
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
 class BasePlatformConnector(ABC):
     platform_code: str
 
@@ -83,3 +90,20 @@ class BasePlatformConnector(ABC):
         callback_payload: dict[str, Any] | None = None,
     ) -> PlatformShopProfile:
         raise NotImplementedError
+
+    def fetch_order_lines(
+        self,
+        *,
+        token_bundle: PlatformTokenBundle,
+        mode: str,
+        window_start: str,
+        window_end: str,
+        page_size: int,
+        company_id: str,
+        data_source_id: str,
+        dataset_id: str,
+        shop_connection_id: str,
+        shop_name: str,
+        external_shop_id: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError(f"{self.platform_code} 暂不支持订单采集")
