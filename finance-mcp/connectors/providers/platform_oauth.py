@@ -72,6 +72,16 @@ class PlatformOAuthConnector(BaseDataSourceConnector):
 
     def discover_datasets(self, arguments: dict[str, Any]) -> dict[str, Any]:
         provider_code = str(self.ctx.provider_code or "").strip().lower()
+        if provider_code in {"taobao", "tmall"}:
+            return {
+                "success": True,
+                "source_id": self.ctx.source_id,
+                "provider_code": provider_code,
+                "datasets": [],
+                "dataset_count": 0,
+                "message": "淘宝/天猫数据集将在店铺授权成功后按店铺创建，请先完成授权。",
+            }
+
         templates = _PLATFORM_FIXED_DATASET_OVERRIDES.get(provider_code) or _DEFAULT_FIXED_DATASETS
         datasets: list[dict[str, Any]] = []
         for item in templates:
