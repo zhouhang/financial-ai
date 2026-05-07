@@ -70,6 +70,22 @@ function normalizeReadMode(value: unknown): string {
   return toText(value, 'base').trim().toLowerCase() || 'base';
 }
 
+export function resolveDatasetSourceType(source: {
+  extractConfig?: Record<string, unknown>;
+  schemaSummary?: Record<string, unknown>;
+}): 'platform_order_lines' | 'collection_records' {
+  const extractConfig = asRecord(source.extractConfig);
+  const schemaSummary = asRecord(source.schemaSummary);
+  const storage = firstText(
+    extractConfig.storage,
+    extractConfig.physical_storage,
+    schemaSummary.storage,
+    schemaSummary.physical_storage,
+    schemaSummary.source,
+  ).toLowerCase();
+  return storage === 'platform_order_lines' ? 'platform_order_lines' : 'collection_records';
+}
+
 function buildInputDatasetKey(input: {
   side: string;
   targetTable: string;
@@ -275,10 +291,7 @@ export function buildRunPlanBinding(
   const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
   if (!sourceId || !tableName) return null;
 
-  const datasetSourceType =
-    toText(asRecord(source.extractConfig).storage) === 'platform_order_lines'
-      ? 'platform_order_lines'
-      : 'collection_records';
+  const datasetSourceType = resolveDatasetSourceType(source);
   const query: Record<string, unknown> = {};
   if (tableName) {
     query.resource_key = tableName;

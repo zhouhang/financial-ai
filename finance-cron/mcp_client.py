@@ -279,6 +279,7 @@ async def data_source_trigger_dataset_collection(
     resource_key: str,
     biz_date: str,
     trigger_mode: str = "schedule",
+    idempotency_key: str = "",
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -289,6 +290,8 @@ async def data_source_trigger_dataset_collection(
         "biz_date": biz_date,
         "trigger_mode": trigger_mode,
     }
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
     if params:
         payload["params"] = params
     return await call_mcp_tool("data_source_trigger_dataset_collection", payload)

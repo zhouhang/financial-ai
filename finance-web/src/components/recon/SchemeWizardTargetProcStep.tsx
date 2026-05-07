@@ -71,6 +71,7 @@ export interface SchemeSourceOption {
   resourceKey?: string;
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 export interface ProcSampleRow {
@@ -433,6 +434,7 @@ function normalizeCandidateDataset(
     || normalizeFieldLabelMap(value.fieldLabelMap)
     || normalizeFieldLabelMap(semanticProfile.field_label_map);
   const schemaSummary = asRecord(value.schema_summary);
+  const extractConfig = asRecord(value.extract_config);
   const semanticFields = asList(value.semantic_fields);
   const normalizedSchemaSummary = Object.keys(schemaSummary).length > 0
     ? schemaSummary
@@ -460,6 +462,7 @@ function normalizeCandidateDataset(
     resourceKey: toText(value.resource_key).trim(),
     datasetKind: toText(value.dataset_kind).trim(),
     schemaSummary: normalizedSchemaSummary,
+    extractConfig,
   };
 }
 

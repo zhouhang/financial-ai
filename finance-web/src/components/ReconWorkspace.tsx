@@ -63,6 +63,7 @@ import {
 import {
   buildRunPlanBindings,
   extractRunPlanInputDatasets,
+  resolveDatasetSourceType,
   type RunPlanInputDatasetDraft,
 } from './recon/runPlanBindings';
 import {
@@ -120,6 +121,7 @@ interface SchemeSourceOption {
   resourceKey?: string;
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface SchemeSourceDraft {
@@ -137,6 +139,7 @@ interface SchemeSourceDraft {
   datasetCode?: string;
   resourceKey?: string;
   datasetKind?: string;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface SchemeDraft {
@@ -1286,6 +1289,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      extractConfig: firstNonEmptyRecord(value.extract_config, value.extractConfig),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -1310,6 +1314,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      extractConfig: firstNonEmptyRecord(value.extract_config, value.extractConfig),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -4959,6 +4964,7 @@ export default function ReconWorkspace({
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
         schema_summary: item.schemaSummary,
+        extract_config: item.extractConfig,
       }));
       const rightDatasetBindings = selectedRightSources.map((item, index) => ({
         side: 'right',
@@ -4977,6 +4983,7 @@ export default function ReconWorkspace({
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
         schema_summary: item.schemaSummary,
+        extract_config: item.extractConfig,
       }));
       const datasetBindingsJson = [
         ...leftDatasetBindings.map((item, index) => ({
@@ -4990,7 +4997,10 @@ export default function ReconWorkspace({
           side: 'left',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'collection_records',
+          dataset_source_type: resolveDatasetSourceType({
+            extractConfig: item.extract_config,
+            schemaSummary: item.schema_summary,
+          }),
         })),
         ...rightDatasetBindings.map((item, index) => ({
           role_code: `right_${index + 1}`,
@@ -5003,7 +5013,10 @@ export default function ReconWorkspace({
           side: 'right',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'collection_records',
+          dataset_source_type: resolveDatasetSourceType({
+            extractConfig: item.extract_config,
+            schemaSummary: item.schema_summary,
+          }),
         })),
       ];
       const response = await fetchReconAutoApi('/schemes', {

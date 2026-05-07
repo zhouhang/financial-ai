@@ -232,6 +232,102 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
     assert len(calls["scheduled"]) == 1
 
 
+@pytest.mark.anyio
+async def test_taobao_callback_redacts_raw_auth_payload(monkeypatch) -> None:
+    authorizations: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_auth_session_by_state",
+        lambda state: {
+            "id": "session-1",
+            "company_id": "company-1",
+            "platform_code": "taobao",
+            "status": "pending",
+            "redirect_uri": "http://localhost/callback",
+            "return_path": "/connections",
+        },
+    )
+    monkeypatch.setattr(
+        platform_connections,
+        "_load_app_config",
+        lambda *args, **kwargs: PlatformAppConfig(
+            id="app-1",
+            company_id="company-1",
+            platform_code="taobao",
+            app_name="Taobao",
+            app_key="key",
+            app_secret="secret",
+            app_type="system",
+            auth_base_url="",
+            token_url="",
+            refresh_url="",
+            redirect_uri="http://localhost/callback",
+            auth_mode="real",
+        ),
+    )
+
+    class FakeConnector:
+        def exchange_code_for_token(self, **kwargs: Any) -> PlatformTokenBundle:
+            return PlatformTokenBundle(
+                access_token="access-secret",
+                refresh_token="refresh-secret",
+                raw_payload={
+                    "access_token": "access-secret",
+                    "refresh_token": "refresh-secret",
+                    "session_key": "session-secret",
+                    "taobao_user_id": "seller-1",
+                    "taobao_user_nick": "旗舰店",
+                },
+            )
+
+        def fetch_shop_profile(self, **kwargs: Any) -> PlatformShopProfile:
+            return PlatformShopProfile(
+                external_shop_id="seller-1",
+                external_shop_name="旗舰店",
+                external_seller_id="seller-1",
+                auth_subject_name="旗舰店",
+            )
+
+    monkeypatch.setattr(platform_connections, "build_connector", lambda app_config: FakeConnector())
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "upsert_shop_connection",
+        lambda **kwargs: {"id": "shop-1", **kwargs},
+    )
+
+    def fake_create_shop_authorization(**kwargs: Any) -> dict[str, Any]:
+        authorizations.append(kwargs)
+        return {"id": "authorization-1", **kwargs}
+
+    monkeypatch.setattr(platform_connections.auth_db, "create_shop_authorization", fake_create_shop_authorization)
+    monkeypatch.setattr(platform_connections.auth_db, "upsert_sync_source", lambda **kwargs: {"id": "sync-1"})
+    monkeypatch.setattr(
+        platform_connections,
+        "_upsert_taobao_order_line_dataset",
+        lambda **kwargs: ({"id": "source-1"}, {"id": "dataset-1", "resource_key": "taobao_order_lines:shop-1"}),
+    )
+    monkeypatch.setattr(platform_connections.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(platform_connections.auth_db, "update_auth_session_callback", lambda **kwargs: None)
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_id: {"id": shop_id, "company_id": "company-1", "platform_code": "taobao", "status": "active"},
+    )
+    monkeypatch.setattr(platform_connections, "_build_shop_view", lambda connection: connection)
+
+    result = await platform_connections._handle_auth_callback(
+        {"platform_code": "taobao", "state": "state-1", "code": "code-1", "mode": "real"}
+    )
+
+    assert result["success"] is True
+    raw_payload = authorizations[0]["raw_auth_payload"]
+    assert raw_payload["access_token"] == "***REDACTED***"
+    assert raw_payload["refresh_token"] == "***REDACTED***"
+    assert raw_payload["session_key"] == "***REDACTED***"
+    assert raw_payload["taobao_user_id"] == "seller-1"
+
+
 def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() -> None:
     from connectors.providers import platform_oauth
 

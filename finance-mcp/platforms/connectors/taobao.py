@@ -97,6 +97,27 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+_TOKEN_SECRET_KEYS = {
+    "access_token",
+    "refresh_token",
+    "session_key",
+    "top_session",
+    "sub_taobao_user_id",
+    "sub_taobao_user_nick",
+}
+
+
+def _safe_token_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in payload.items():
+        normalized_key = str(key or "").strip()
+        if normalized_key.lower() in _TOKEN_SECRET_KEYS:
+            cleaned[normalized_key] = "***REDACTED***"
+        else:
+            cleaned[normalized_key] = value
+    return cleaned
+
+
 def _coerce_list(value: Any, child_key: str) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
@@ -176,7 +197,7 @@ class TaobaoConnector(BasePlatformConnector):
             refresh_expires_in=int(data.get("refresh_expires_in") or data.get("re_expires_in") or 0)
             or None,
             scope_text=str(data.get("scope") or ""),
-            raw_payload=data,
+            raw_payload=_safe_token_payload(data),
         )
 
     def refresh_token(self, *, refresh_token: str) -> PlatformTokenBundle:
@@ -213,7 +234,41 @@ class TaobaoConnector(BasePlatformConnector):
                 shop_type=str(payload.get("mock_shop_type") or "normal"),
                 metadata={"mode": "mock", "platform": "taobao"},
         )
-        raise NotImplementedError("淘宝真实店铺信息查询待接入")
+        payload = token_bundle.raw_payload
+        shop_id = str(
+            _first_present(
+                payload.get("taobao_user_id"),
+                payload.get("seller_id"),
+                payload.get("user_id"),
+                payload.get("uid"),
+            )
+            or ""
+        ).strip()
+        shop_name = str(
+            _first_present(
+                payload.get("taobao_user_nick"),
+                payload.get("seller_nick"),
+                payload.get("nick"),
+                payload.get("user_nick"),
+                shop_id,
+            )
+            or ""
+        ).strip()
+        seller_id = str(_first_present(payload.get("seller_id"), shop_id) or "").strip()
+        if not shop_id:
+            raise RuntimeError("淘宝 token 响应缺少 taobao_user_id，无法绑定店铺")
+        return PlatformShopProfile(
+            external_shop_id=shop_id,
+            external_shop_name=shop_name or shop_id,
+            external_seller_id=seller_id,
+            auth_subject_name=shop_name or shop_id,
+            shop_type="normal",
+            metadata={
+                "mode": "real",
+                "platform": "taobao",
+                "source": "oauth_token",
+            },
+        )
 
     def _sign_params(self, params: dict[str, Any]) -> str:
         sign_method = str(params.get("sign_method") or "hmac").lower()

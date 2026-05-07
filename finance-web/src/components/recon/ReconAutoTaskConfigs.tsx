@@ -9,6 +9,7 @@ import {
   normalizeChannelConfig,
 } from '../../collaborationChannelDrafts';
 import { sourceKindLabel } from '../../dataSourceConfig';
+import { resolveDatasetSourceType } from './runPlanBindings';
 import type {
   CollaborationChannelListItem,
   CollaborationProvider,
@@ -53,6 +54,8 @@ interface DatasetOption {
   datasetCode: string;
   resourceKey: string;
   fields: string[];
+  schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface BindingQueryDraft {
@@ -207,6 +210,8 @@ function normalizeDatasetOptions(
       resourceKey:
         asString(value.resource_key).trim() || datasetCode || datasetName || normalizedDatasetId,
       fields: fieldNames,
+      schemaSummary,
+      extractConfig,
     });
   }
 
@@ -1094,7 +1099,10 @@ export default function ReconAutoTaskConfigs({
         data_source_id: option.sourceId,
         table_name: slot.tableName,
         resource_key: option.resourceKey || 'default',
-        dataset_source_type: 'collection_records',
+        dataset_source_type: resolveDatasetSourceType({
+          extractConfig: option.extractConfig,
+          schemaSummary: option.schemaSummary,
+        }),
         query: {
           biz_date_filter: {
             field: dateField,

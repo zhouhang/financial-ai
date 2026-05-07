@@ -45,6 +45,15 @@ TAOBAO_ORDER_EXTRACT_CONFIG: dict[str, Any] = {
     },
 }
 
+_RAW_AUTH_SECRET_KEYS = {
+    "access_token",
+    "refresh_token",
+    "session_key",
+    "top_session",
+    "sub_taobao_user_id",
+    "sub_taobao_user_nick",
+}
+
 
 def create_tools() -> list[Tool]:
     return [
@@ -174,6 +183,17 @@ def _normalize_mode(mode: Any) -> str:
 def _normalize_platform_code(platform_code: Any) -> str:
     normalized = str(platform_code or "").strip()
     return "taobao" if normalized == "tmall" else normalized
+
+
+def _safe_raw_auth_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in dict(payload or {}).items():
+        normalized_key = str(key or "").strip()
+        if normalized_key.lower() in _RAW_AUTH_SECRET_KEYS:
+            cleaned[normalized_key] = "***REDACTED***"
+        else:
+            cleaned[normalized_key] = value
+    return cleaned
 
 
 def _platform_name(platform_code: str) -> str:
@@ -655,7 +675,7 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
             scope_text=token_bundle.scope_text,
             auth_status="authorized",
             last_error="",
-            raw_auth_payload=token_bundle.raw_payload,
+            raw_auth_payload=_safe_raw_auth_payload(token_bundle.raw_payload),
         )
         source_types = ["orders"] if platform_code == "taobao" else ["orders", "refunds", "settlements", "bills"]
         for source_type in source_types:

@@ -97,6 +97,55 @@ def test_normalize_trade_rows_flattens_child_orders():
     assert "receiver_mobile" not in row["payload"]
 
 
+def test_real_fetch_shop_profile_uses_token_identity_payload():
+    connector = TaobaoConnector(_config())
+
+    profile = connector.fetch_shop_profile(
+        token_bundle=PlatformTokenBundle(
+            access_token="session-key",
+            raw_payload={
+                "taobao_user_id": 123456,
+                "taobao_user_nick": "旗舰店",
+                "seller_id": "seller-001",
+            },
+        )
+    )
+
+    assert profile.external_shop_id == "123456"
+    assert profile.external_shop_name == "旗舰店"
+    assert profile.external_seller_id == "seller-001"
+    assert profile.auth_subject_name == "旗舰店"
+    assert profile.metadata["source"] == "oauth_token"
+
+
+def test_real_token_exchange_redacts_raw_payload_secrets(monkeypatch):
+    connector = TaobaoConnector(_config())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                b'{"access_token":"access-secret","refresh_token":"refresh-secret",'
+                b'"session_key":"session-secret","taobao_user_id":"123","taobao_user_nick":"shop"}'
+            )
+
+    monkeypatch.setattr("platforms.connectors.taobao.urlopen", lambda *args, **kwargs: FakeResponse())
+
+    token = connector.exchange_code_for_token(code="code-1")
+
+    assert token.access_token == "access-secret"
+    assert token.refresh_token == "refresh-secret"
+    assert token.raw_payload["access_token"] == "***REDACTED***"
+    assert token.raw_payload["refresh_token"] == "***REDACTED***"
+    assert token.raw_payload["session_key"] == "***REDACTED***"
+    assert token.raw_payload["taobao_user_id"] == "123"
+
+
 def test_sync_orders_calls_incremental_method_without_detail_fetch(monkeypatch):
     connector = TaobaoConnector(_config())
     calls: list[dict[str, object]] = []

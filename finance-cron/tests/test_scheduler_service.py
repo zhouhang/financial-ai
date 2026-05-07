@@ -134,3 +134,37 @@ def test_execute_run_plan_job_avoids_duplicate_slot(monkeypatch):
 
     assert len(triggered) == 1
     assert triggered[0][0] == "plan_001"
+
+
+def test_execute_collection_job_passes_slot_idempotency_key(monkeypatch):
+    triggered: list[dict[str, object]] = []
+
+    async def fake_trigger_collection(auth_token: str, **kwargs: object):
+        triggered.append({"auth_token": auth_token, **kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(
+        scheduler_service,
+        "data_source_trigger_dataset_collection",
+        fake_trigger_collection,
+    )
+
+    async def _run() -> None:
+        service = scheduler_service.FinanceCronSchedulerService(
+            scheduler_service.FinanceCronConfig(refresh_interval_seconds=30)
+        )
+        await service.execute_collection_job(
+            company_id="company_001",
+            source_id="source_001",
+            dataset_id="dataset_001",
+            resource_key="taobao_order_lines:shop_001",
+            schedule_type="cron",
+            schedule_expr="0 */2 * * *",
+        )
+
+    asyncio.run(_run())
+
+    assert len(triggered) == 1
+    call = triggered[0]
+    schedule_slot = str((call["params"] or {}).get("schedule_slot"))
+    assert call["idempotency_key"] == f"collection:source_001:dataset_001:{schedule_slot}"
