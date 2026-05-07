@@ -5555,12 +5555,13 @@ def _fail_sync_job(
     attempt_id: str,
     checkpoint_before: dict[str, Any],
     message: str,
+    collection_driver: str = "",
 ) -> None:
     auth_db.update_unified_sync_job_attempt(
         attempt_id=attempt_id,
         attempt_status="failed",
         error_message=message,
-        metrics={},
+        metrics={"collection_driver": collection_driver},
         checkpoint_after=checkpoint_before,
     )
     auth_db.update_unified_sync_job_status(
@@ -5569,6 +5570,19 @@ def _fail_sync_job(
         error_message=message,
         checkpoint_after=checkpoint_before,
         finish_job=True,
+    )
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        sync_job_id=job_id,
+        event_type="sync_failed",
+        event_level="error",
+        event_message=message,
+        event_payload={
+            "rows": 0,
+            "resource_key": resource_key,
+            "collection_driver": collection_driver,
+        },
     )
     auth_db.update_unified_data_source_health(
         data_source_id=source_id,
@@ -5663,7 +5677,12 @@ async def _execute_sync_job(
                 attempt_id=attempt_id,
                 attempt_status="failed",
                 error_message=message,
-                metrics={"row_count": len(rows), "data_hash": data_hash, "collection_upserted": 0},
+                metrics={
+                    "row_count": len(rows),
+                    "data_hash": data_hash,
+                    "collection_upserted": 0,
+                    "collection_driver": collection_driver,
+                },
                 checkpoint_after=checkpoint_before,
             )
             auth_db.update_unified_sync_job_status(
@@ -5750,6 +5769,7 @@ async def _execute_sync_job(
                 "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
                 "collection_skipped_empty_key": int(collection_validation.get("skipped_empty_key_count") or 0),
                 "collection_skipped_empty_key_samples": collection_validation.get("skipped_empty_key_samples") or [],
+                "collection_driver": collection_driver,
             },
             checkpoint_after=checkpoint_after,
         )
@@ -5807,6 +5827,7 @@ async def _execute_sync_job(
             attempt_id=attempt_id,
             checkpoint_before=checkpoint_before,
             message=message,
+            collection_driver=locals().get("collection_driver", ""),
         )
         return {
             "success": False,

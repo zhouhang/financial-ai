@@ -139,6 +139,7 @@ async def test_execute_sync_job_routes_alipay_to_registered_driver(monkeypatch) 
     assert driver_call["source_id"] == "source-alipay-1"
     assert driver_call["dataset_id"] == "dataset-alipay-1"
     assert driver_call["resource_key"] == "alipay_bill_lines:merchant-1"
+    assert calls["attempt_update"]["metrics"]["collection_driver"] == "alipay_bill_download_import"
     assert calls["event"]["event_payload"]["collection_driver"] == "alipay_bill_download_import"
 
 
@@ -177,6 +178,11 @@ async def test_execute_sync_job_reports_unavailable_alipay_driver(monkeypatch) -
         lambda **kwargs: calls.setdefault("source_health", kwargs),
     )
     monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_data_source_event",
+        lambda **kwargs: calls.setdefault("event", kwargs),
+    )
+    monkeypatch.setattr(
         data_sources,
         "_update_dataset_health_by_resource",
         lambda **kwargs: calls.setdefault("dataset_health", kwargs),
@@ -206,5 +212,9 @@ async def test_execute_sync_job_reports_unavailable_alipay_driver(monkeypatch) -
     )
 
     assert result["success"] is False
+    assert result["collection_driver"] == "alipay_bill_download_import"
     assert "支付宝采集器尚未注册" in result["error"]
+    assert calls["attempt_update"]["metrics"]["collection_driver"] == "alipay_bill_download_import"
     assert calls["job_update"]["job_status"] == "failed"
+    assert calls["event"]["event_type"] == "sync_failed"
+    assert calls["event"]["event_payload"]["collection_driver"] == "alipay_bill_download_import"
