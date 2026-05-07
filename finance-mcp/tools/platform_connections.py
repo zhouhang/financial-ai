@@ -170,6 +170,11 @@ def _normalize_mode(mode: Any) -> str:
     return normalized if normalized in {"mock", "real"} else "mock"
 
 
+def _normalize_platform_code(platform_code: Any) -> str:
+    normalized = str(platform_code or "").strip()
+    return "taobao" if normalized == "tmall" else normalized
+
+
 def _platform_name(platform_code: str) -> str:
     matched = next((item["platform_name"] for item in SUPPORTED_PLATFORMS if item["platform_code"] == platform_code), "")
     return matched or platform_code
@@ -333,25 +338,47 @@ def build_taobao_initial_collection_job_payloads(
     else:
         resolved_anchor = datetime.now(timezone.utc).date()
 
-    initial_days = int(TAOBAO_ORDER_SYNC_STRATEGY["initial_days"])
-    end_offset_days = int(TAOBAO_ORDER_SYNC_STRATEGY["initial_end_offset_days"])
-    first_biz_date = resolved_anchor - timedelta(days=end_offset_days)
+    return _build_taobao_initial_collection_jobs(
+        source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=f"taobao_order_lines:{shop_connection_id}",
+        sync_strategy=TAOBAO_ORDER_SYNC_STRATEGY,
+        anchor_date=resolved_anchor,
+    )
+
+
+def _build_taobao_initial_collection_jobs(
+    *,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    sync_strategy: dict[str, Any],
+    anchor_date: date | None = None,
+) -> list[dict[str, Any]]:
+    """构建按 T-90 到 T-1 排序的淘宝/天猫初始化采集任务 payload。"""
+    resolved_anchor = anchor_date or datetime.now(timezone(timedelta(hours=8))).date()
+    initial_days = max(1, int(sync_strategy.get("initial_days") or 90))
+    end_offset_days = max(1, int(sync_strategy.get("initial_end_offset_days") or 1))
+    end_biz_date = resolved_anchor - timedelta(days=end_offset_days)
+    start_biz_date = end_biz_date - timedelta(days=initial_days - 1)
     jobs: list[dict[str, Any]] = []
     for day_offset in range(initial_days):
-        biz_date = first_biz_date - timedelta(days=day_offset)
+        biz_date = start_biz_date + timedelta(days=day_offset)
         biz_date_text = biz_date.isoformat()
         jobs.append(
             {
-                "company_id": company_id,
-                "data_source_id": data_source_id,
+                "source_id": source_id,
                 "dataset_id": dataset_id,
-                "shop_connection_id": shop_connection_id,
-                "platform_code": "taobao",
-                "source_type": "orders",
-                "collection_mode": "initial",
-                "api_method": "taobao.trades.sold.get",
-                "biz_date": biz_date_text,
-                "date_range": {"start_date": biz_date_text, "end_date": biz_date_text},
+                "resource_key": resource_key,
+                "trigger_mode": "initial",
+                "idempotency_key": f"taobao-initial:{dataset_id}:{biz_date_text}",
+                "background": True,
+                "params": {
+                    "dataset_id": dataset_id,
+                    "resource_key": resource_key,
+                    "biz_date": biz_date_text,
+                    "force_mode": "initial",
+                },
             }
         )
     return jobs
@@ -431,7 +458,7 @@ def _build_shop_view(connection: dict[str, Any]) -> dict[str, Any]:
 async def _handle_list_connections(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
-    platform_code = str(arguments.get("platform_code") or "").strip()
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
     shops_all = [
         _build_shop_view(connection)
         for connection in auth_db.list_shop_connections(company_id=company_id)
@@ -474,7 +501,7 @@ async def _handle_list_connections(arguments: dict[str, Any]) -> dict[str, Any]:
 async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
-    platform_code = str(arguments.get("platform_code") or "").strip()
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
     if platform_code not in {item["platform_code"] for item in SUPPORTED_PLATFORMS}:
         return {"success": False, "error": f"暂不支持的平台: {platform_code}"}
 
@@ -520,7 +547,7 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
 
 
 async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
-    platform_code = str(arguments.get("platform_code") or "").strip()
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
     state = str(arguments.get("state") or "").strip()
     code = str(arguments.get("code") or "").strip()
     error = str(arguments.get("error") or "").strip()
@@ -530,7 +557,7 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
     auth_session = auth_db.get_auth_session_by_state(state)
     if auth_session is None:
         return {"success": False, "error": "授权会话不存在或已失效"}
-    if str(auth_session.get("platform_code") or "") != platform_code:
+    if _normalize_platform_code(auth_session.get("platform_code")) != platform_code:
         return {"success": False, "error": "平台与授权会话不匹配"}
     if str(auth_session.get("status") or "") != "pending":
         return {"success": False, "error": "授权会话已处理，请勿重复提交"}
@@ -607,22 +634,34 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         taobao_source: dict[str, Any] | None = None
         taobao_dataset: dict[str, Any] | None = None
+        dataset_warning = ""
         if platform_code == "taobao":
-            taobao_source, taobao_dataset = _upsert_taobao_order_line_dataset(
-                company_id=company_id,
-                connection=connection,
-            )
+            try:
+                taobao_source, taobao_dataset = _upsert_taobao_order_line_dataset(
+                    company_id=company_id,
+                    connection=connection,
+                )
+            except Exception as dataset_exc:  # noqa: BLE001
+                dataset_warning = str(dataset_exc)
+                logger.error(
+                    "淘宝/天猫授权成功但订单数据集创建失败: company_id=%s shop_connection_id=%s error=%s",
+                    company_id,
+                    connection.get("id"),
+                    dataset_warning,
+                    exc_info=True,
+                )
         auth_db.update_auth_session_callback(
             session_id=str(auth_session["id"]),
             status="authorized",
             callback_code=code,
-            callback_error="",
+            callback_error=dataset_warning,
             callback_payload={
                 **callback_payload,
                 "shop_connection_id": str(connection["id"]),
                 "shop_authorization_id": str((authorization or {}).get("id") or ""),
                 "taobao_data_source_id": str((taobao_source or {}).get("id") or ""),
                 "taobao_order_dataset_id": str((taobao_dataset or {}).get("id") or ""),
+                "taobao_order_dataset_warning": dataset_warning,
             },
         )
         detail = _build_shop_view(
@@ -635,6 +674,7 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
             "shop": detail,
             "connection": detail,
             "message": f"{_platform_name(platform_code)}授权成功",
+            "warning": dataset_warning,
             "return_path": str(auth_session.get("return_path") or "/"),
             "mode": app_config.auth_mode,
         }

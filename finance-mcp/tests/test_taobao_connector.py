@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from platforms.base import PlatformAppConfig, PlatformTokenBundle
-from platforms.connectors.taobao import TaobaoConnector
+from platforms.connectors.taobao import TaobaoConnector, TmallConnector
+from platforms.factory import build_connector
 
 
 def _config() -> PlatformAppConfig:
@@ -125,3 +126,41 @@ def test_sync_orders_calls_incremental_method_without_detail_fetch(monkeypatch):
     assert calls[0]["params"]["fields"]
     assert all(call["method"] != "taobao.trade.fullinfo.get" for call in calls)
     assert all(call["method"] != "taobao.trade.amount.get" for call in calls)
+
+
+def test_normalize_trade_rows_preserves_numeric_zero_values():
+    connector = TaobaoConnector(_config())
+
+    rows = connector.normalize_trade_rows(
+        trades=[
+            {
+                "tid": "T0",
+                "status": "TRADE_FINISHED",
+                "payment": 0,
+                "total_fee": 0,
+                "discount_fee": 0,
+                "post_fee": 0,
+                "pay_time": "2026-05-06 12:30:00",
+                "orders": {"order": [{"oid": "O0", "payment": 0, "total_fee": 0, "num": 0}]},
+            }
+        ],
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        shop_name="A店",
+        external_shop_id="tb-shop-001",
+    )
+
+    assert rows[0]["payment"] == "0.00"
+    assert rows[0]["order_payment"] == "0.00"
+    assert rows[0]["quantity"] == "0"
+
+
+def test_factory_keeps_tmall_legacy_connector():
+    config = _config()
+    config.platform_code = "tmall"
+
+    connector = build_connector(config)
+
+    assert isinstance(connector, TmallConnector)

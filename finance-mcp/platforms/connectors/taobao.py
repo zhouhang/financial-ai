@@ -64,7 +64,9 @@ def _biz_date_from_trade(trade: dict[str, Any]) -> str:
 
 
 def _money(value: Any) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return ""
+    text = str(value).strip()
     if not text:
         return ""
     try:
@@ -74,13 +76,25 @@ def _money(value: Any) -> str:
 
 
 def _quantity(value: Any) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return ""
+    text = str(value).strip()
     if not text:
         return ""
     try:
         return str(Decimal(text))
     except (InvalidOperation, ValueError):
         return text
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
 
 
 def _coerce_list(value: Any, child_key: str) -> list[dict[str, Any]]:
@@ -283,13 +297,15 @@ class TaobaoConnector(BasePlatformConnector):
                     "modified": _parse_top_datetime(order.get("modified") or trade.get("modified")),
                     "end_time": _parse_top_datetime(trade.get("end_time")),
                     "alipay_no": str(trade.get("alipay_no") or ""),
-                    "payment": _money(trade.get("payment") or trade.get("received_payment")),
-                    "order_payment": _money(order.get("payment") or order.get("divide_order_fee")),
+                    "payment": _money(_first_present(trade.get("payment"), trade.get("received_payment"))),
+                    "order_payment": _money(
+                        _first_present(order.get("payment"), order.get("divide_order_fee"))
+                    ),
                     "total_fee": _money(trade.get("total_fee")),
                     "order_total_fee": _money(order.get("total_fee")),
                     "discount_fee": _money(trade.get("discount_fee")),
                     "order_discount_fee": _money(
-                        order.get("discount_fee") or order.get("part_mjz_discount")
+                        _first_present(order.get("discount_fee"), order.get("part_mjz_discount"))
                     ),
                     "post_fee": _money(trade.get("post_fee")),
                     "commission_fee": _money(trade.get("commission_fee")),

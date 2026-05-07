@@ -17,18 +17,8 @@ _DEFAULT_FIXED_DATASETS = (
 )
 
 _PLATFORM_FIXED_DATASET_OVERRIDES: dict[str, tuple[dict[str, str], ...]] = {
-    "taobao": (
-        {"resource_key": "tb_trades", "dataset_name": "淘宝交易单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_payments", "dataset_name": "淘宝支付单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_refunds", "dataset_name": "淘宝退款单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_settlements", "dataset_name": "淘宝结算单", "dataset_kind": "api_endpoint"},
-    ),
-    "tmall": (
-        {"resource_key": "tm_orders", "dataset_name": "天猫订单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_payments", "dataset_name": "天猫支付单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_refunds", "dataset_name": "天猫退款单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_settlements", "dataset_name": "天猫结算单", "dataset_kind": "api_endpoint"},
-    ),
+    "taobao": (),
+    "tmall": (),
     "douyin_shop": (
         {"resource_key": "dy_orders", "dataset_name": "抖店订单", "dataset_kind": "api_endpoint"},
         {"resource_key": "dy_payments", "dataset_name": "抖店支付单", "dataset_kind": "api_endpoint"},

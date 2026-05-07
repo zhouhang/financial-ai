@@ -79,19 +79,21 @@ def test_build_taobao_initial_collection_job_payloads_has_90_days() -> None:
 
     assert len(jobs) == 90
     assert jobs[0] == {
-        "company_id": "company-1",
-        "data_source_id": "source-1",
+        "source_id": "source-1",
         "dataset_id": "dataset-1",
-        "shop_connection_id": "shop-1",
-        "platform_code": "taobao",
-        "source_type": "orders",
-        "collection_mode": "initial",
-        "api_method": "taobao.trades.sold.get",
-        "biz_date": "2026-05-06",
-        "date_range": {"start_date": "2026-05-06", "end_date": "2026-05-06"},
+        "resource_key": "taobao_order_lines:shop-1",
+        "trigger_mode": "initial",
+        "idempotency_key": "taobao-initial:dataset-1:2026-02-06",
+        "background": True,
+        "params": {
+            "dataset_id": "dataset-1",
+            "resource_key": "taobao_order_lines:shop-1",
+            "biz_date": "2026-02-06",
+            "force_mode": "initial",
+        },
     }
-    assert jobs[-1]["biz_date"] == "2026-02-06"
-    assert all(job["source_type"] == "orders" for job in jobs)
+    assert jobs[-1]["params"]["biz_date"] == "2026-05-06"
+    assert all(job["trigger_mode"] == "initial" for job in jobs)
 
 
 @pytest.mark.anyio
@@ -223,6 +225,11 @@ async def test_taobao_callback_upserts_order_dataset_and_orders_source(monkeypat
 
 
 def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() -> None:
+    from connectors.providers import platform_oauth
+
+    assert platform_oauth._PLATFORM_FIXED_DATASET_OVERRIDES["taobao"] == ()
+    assert platform_oauth._PLATFORM_FIXED_DATASET_OVERRIDES["tmall"] == ()
+
     for provider_code in ("taobao", "tmall"):
         connector = PlatformOAuthConnector(
             ConnectorContext(
@@ -240,3 +247,134 @@ def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() ->
         assert result["datasets"] == []
         assert result["dataset_count"] == 0
         assert "授权成功后" in result["message"]
+
+
+@pytest.mark.anyio
+async def test_tmall_auth_session_request_is_accepted_as_taobao(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1"},
+    )
+    monkeypatch.setattr(
+        platform_connections,
+        "_load_app_config",
+        lambda company_id, platform_code, **kwargs: PlatformAppConfig(
+            id="app-1",
+            company_id=company_id,
+            platform_code=platform_code,
+            app_name="Taobao",
+            app_key="key",
+            app_secret="secret",
+            app_type="system",
+            auth_base_url="",
+            token_url="",
+            refresh_url="",
+            redirect_uri="http://localhost/callback",
+            auth_mode="mock",
+        ),
+    )
+
+    class FakeConnector:
+        def build_auth_url(self, *, state: str) -> str:
+            return ""
+
+    monkeypatch.setattr(platform_connections, "build_connector", lambda app_config: FakeConnector())
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "create_auth_session",
+        lambda **kwargs: {"id": "session-1", "state_token": kwargs["state_token"], **kwargs},
+    )
+
+    result = await platform_connections._handle_create_auth_session(
+        {"auth_token": "token", "platform_code": "tmall", "mode": "mock"}
+    )
+
+    assert result["success"] is True
+    assert result["platform_code"] == "taobao"
+
+
+@pytest.mark.anyio
+async def test_taobao_callback_keeps_auth_success_when_dataset_creation_fails(monkeypatch) -> None:
+    callbacks: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_auth_session_by_state",
+        lambda state: {
+            "id": "session-1",
+            "company_id": "company-1",
+            "platform_code": "taobao",
+            "status": "pending",
+            "redirect_uri": "http://localhost/callback",
+            "return_path": "/connections",
+        },
+    )
+    monkeypatch.setattr(
+        platform_connections,
+        "_load_app_config",
+        lambda *args, **kwargs: PlatformAppConfig(
+            id="app-1",
+            company_id="company-1",
+            platform_code="taobao",
+            app_name="Taobao",
+            app_key="key",
+            app_secret="secret",
+            app_type="system",
+            auth_base_url="",
+            token_url="",
+            refresh_url="",
+            redirect_uri="http://localhost/callback",
+            auth_mode="mock",
+        ),
+    )
+
+    class FakeConnector:
+        def exchange_code_for_token(self, **kwargs: Any) -> PlatformTokenBundle:
+            return PlatformTokenBundle(access_token="access", refresh_token="refresh")
+
+        def fetch_shop_profile(self, **kwargs: Any) -> PlatformShopProfile:
+            return PlatformShopProfile(
+                external_shop_id="seller-1",
+                external_shop_name="旗舰店",
+                external_seller_id="seller-user-1",
+                auth_subject_name="旗舰店",
+            )
+
+    monkeypatch.setattr(platform_connections, "build_connector", lambda app_config: FakeConnector())
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "upsert_shop_connection",
+        lambda **kwargs: {"id": "shop-1", **kwargs},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "create_shop_authorization",
+        lambda **kwargs: {"id": "authorization-1", **kwargs},
+    )
+    monkeypatch.setattr(platform_connections.auth_db, "upsert_sync_source", lambda **kwargs: {"id": "sync-1"})
+    monkeypatch.setattr(
+        platform_connections,
+        "_upsert_taobao_order_line_dataset",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("dataset failed")),
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "update_auth_session_callback",
+        lambda **kwargs: callbacks.append(kwargs),
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_id: {"id": shop_id, "company_id": "company-1", "platform_code": "taobao", "status": "active"},
+    )
+    monkeypatch.setattr(platform_connections, "_build_shop_view", lambda connection: connection)
+
+    result = await platform_connections._handle_auth_callback(
+        {"platform_code": "taobao", "state": "state-1", "code": "code-1", "mode": "mock"}
+    )
+
+    assert result["success"] is True
+    assert result["warning"] == "dataset failed"
+    assert callbacks[0]["status"] == "authorized"
+    assert callbacks[0]["callback_payload"]["taobao_order_dataset_warning"] == "dataset failed"
