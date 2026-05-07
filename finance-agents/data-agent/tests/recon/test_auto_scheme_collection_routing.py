@@ -14,6 +14,15 @@ AUTO_SCHEME_DIR = RECON_DIR / "auto_scheme_run"
 
 if str(DATA_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(DATA_AGENT_ROOT))
+else:
+    sys.path.remove(str(DATA_AGENT_ROOT))
+    sys.path.insert(0, str(DATA_AGENT_ROOT))
+
+tools_module = sys.modules.get("tools")
+if tools_module is not None:
+    module_paths = [Path(item).resolve() for item in getattr(tools_module, "__path__", [])]
+    if DATA_AGENT_ROOT.resolve() / "tools" not in module_paths:
+        sys.modules.pop("tools", None)
 
 
 def _ensure_package(name: str, path: Path) -> types.ModuleType:
