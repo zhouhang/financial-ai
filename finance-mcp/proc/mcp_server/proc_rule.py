@@ -76,7 +76,8 @@ def create_proc_rule_tools() -> list[Tool]:
                         "type": "array",
                         "description": (
                             "直接从采集记录加载的数据集列表，每个元素格式：\n"
-                            "{ table_name: 表名, dataset_ref: { source_type: 'collection_records', "
+                            "{ table_name: 表名, dataset_ref: { source_type: 'collection_records' 或 "
+                            "'platform_order_lines', "
                             "source_key: 数据源ID, query: { dataset_id, biz_date, resource_key, filters } } }"
                         ),
                         "items": {
