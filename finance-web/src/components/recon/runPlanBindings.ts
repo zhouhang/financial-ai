@@ -73,9 +73,19 @@ function normalizeReadMode(value: unknown): string {
 export function resolveDatasetSourceType(source: {
   extractConfig?: Record<string, unknown>;
   schemaSummary?: Record<string, unknown>;
-}): 'platform_order_lines' | 'collection_records' {
+}): string {
   const extractConfig = asRecord(source.extractConfig);
   const schemaSummary = asRecord(source.schemaSummary);
+  const explicit = firstText(
+    extractConfig.dataset_source_type,
+    extractConfig.source_type,
+    extractConfig.loader,
+    schemaSummary.dataset_source_type,
+    schemaSummary.source_type,
+    schemaSummary.loader,
+  ).toLowerCase();
+  if (explicit) return explicit;
+
   const storage = firstText(
     extractConfig.storage,
     extractConfig.physical_storage,
@@ -83,7 +93,11 @@ export function resolveDatasetSourceType(source: {
     schemaSummary.physical_storage,
     schemaSummary.source,
   ).toLowerCase();
-  return storage === 'platform_order_lines' ? 'platform_order_lines' : 'collection_records';
+  if (storage === 'platform_order_lines') return 'platform_order_lines';
+  if (storage && storage !== 'dataset_collection_records' && storage !== 'collection_records') {
+    return storage;
+  }
+  return 'collection_records';
 }
 
 function buildInputDatasetKey(input: {
