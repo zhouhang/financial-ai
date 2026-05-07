@@ -344,6 +344,9 @@ def ensure_unified_data_source_schema() -> list[str]:
     if any(_table_exists(table_name) for table_name in legacy_collection_tables):
         _execute_sql_script(_migration_path("017_drop_raw_snapshot_collection_tables.sql"))
         applied.append("017_drop_raw_snapshot_collection_tables.sql")
+    if not _table_exists("platform_order_lines"):
+        _execute_sql_script(_migration_path("022_platform_order_lines.sql"))
+        applied.append("022_platform_order_lines.sql")
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -1263,6 +1266,44 @@ def get_platform_app(
         logger.error(
             f"查询 platform_apps 失败 (company_id={company_id}, platform_code={platform_code}, app_key={app_key}): {e}"
         )
+        return None
+
+
+def get_platform_app_by_id(
+    *,
+    platform_app_id: str,
+    company_id: str,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按 ID 查询平台应用配置，并限制公司边界。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, platform_code, app_name, app_key, app_secret,
+                           app_type, auth_base_url, token_url, refresh_url,
+                           scopes_config, extra, status, created_at, updated_at
+                    FROM platform_apps
+                    WHERE id = %s
+                      AND company_id = %s
+                      AND status <> 'deleted'
+                    LIMIT 1
+                    """,
+                    (platform_app_id, company_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                result = _normalize_record(dict(row))
+                if include_secrets:
+                    result["app_secret"] = open_secret(result.get("app_secret") or "")
+                else:
+                    result["app_secret"] = ""
+                return result
+    except Exception as e:
+        logger.error(f"按 ID 查询 platform_apps 失败 (id={platform_app_id}, company_id={company_id}): {e}")
         return None
 
 
@@ -4466,6 +4507,311 @@ def update_unified_sync_job_status(
     except Exception as e:
         logger.error(f"更新 sync_jobs 状态失败 (sync_job_id={sync_job_id}, status={job_status}): {e}")
         return None
+
+
+def get_latest_source_dataset_checkpoint(
+    *,
+    company_id: str,
+    data_source_id: str,
+    resource_key: str,
+) -> dict:
+    """读取某数据源+资源最近一次成功同步后的 checkpoint。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT checkpoint_after
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status = 'success'
+                      AND checkpoint_after IS NOT NULL
+                      AND checkpoint_after <> '{}'::jsonb
+                    ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id, resource_key),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                checkpoint = row.get("checkpoint_after")
+                return checkpoint if isinstance(checkpoint, dict) else {}
+    except Exception as e:
+        logger.error(
+            f"查询最近同步 checkpoint 失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}): {e}"
+        )
+        return {}
+
+
+def _clean_decimal_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if text else None
+
+
+def _clean_timestamp_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if text else None
+
+
+def upsert_platform_order_lines(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    shop_connection_id: str,
+    platform_code: str,
+    external_shop_id: str,
+    rows: list[dict] | None = None,
+) -> dict:
+    """按店铺订单行唯一键 upsert 电商平台订单明细。"""
+    items = rows or []
+    if not items:
+        return {"input_count": 0, "upserted_count": 0, "inserted_count": 0, "updated_count": 0}
+
+    conn_manager = get_conn()
+    inserted_count = 0
+    updated_count = 0
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                for item in items:
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else dict(item)
+                    cur.execute(
+                        """
+                        INSERT INTO platform_order_lines (
+                            company_id, data_source_id, dataset_id, shop_connection_id,
+                            platform_code, external_shop_id, biz_date, tid, oid,
+                            trade_status, order_status, refund_status,
+                            pay_time, modified, end_time, alipay_no,
+                            payment, order_payment, total_fee, order_total_fee,
+                            discount_fee, order_discount_fee, post_fee, commission_fee,
+                            sku_id, outer_sku_id, outer_iid, num_iid,
+                            title, sku_properties_name, quantity,
+                            payload, source_modified_at
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s::jsonb, %s
+                        )
+                        ON CONFLICT (company_id, shop_connection_id, tid, oid)
+                        DO UPDATE SET
+                            data_source_id = EXCLUDED.data_source_id,
+                            dataset_id = EXCLUDED.dataset_id,
+                            platform_code = EXCLUDED.platform_code,
+                            external_shop_id = EXCLUDED.external_shop_id,
+                            biz_date = EXCLUDED.biz_date,
+                            trade_status = EXCLUDED.trade_status,
+                            order_status = EXCLUDED.order_status,
+                            refund_status = EXCLUDED.refund_status,
+                            pay_time = EXCLUDED.pay_time,
+                            modified = EXCLUDED.modified,
+                            end_time = EXCLUDED.end_time,
+                            alipay_no = EXCLUDED.alipay_no,
+                            payment = EXCLUDED.payment,
+                            order_payment = EXCLUDED.order_payment,
+                            total_fee = EXCLUDED.total_fee,
+                            order_total_fee = EXCLUDED.order_total_fee,
+                            discount_fee = EXCLUDED.discount_fee,
+                            order_discount_fee = EXCLUDED.order_discount_fee,
+                            post_fee = EXCLUDED.post_fee,
+                            commission_fee = EXCLUDED.commission_fee,
+                            sku_id = EXCLUDED.sku_id,
+                            outer_sku_id = EXCLUDED.outer_sku_id,
+                            outer_iid = EXCLUDED.outer_iid,
+                            num_iid = EXCLUDED.num_iid,
+                            title = EXCLUDED.title,
+                            sku_properties_name = EXCLUDED.sku_properties_name,
+                            quantity = EXCLUDED.quantity,
+                            payload = EXCLUDED.payload,
+                            source_modified_at = EXCLUDED.source_modified_at,
+                            latest_seen_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING (xmax = 0) AS inserted
+                        """,
+                        (
+                            company_id,
+                            data_source_id,
+                            dataset_id,
+                            shop_connection_id,
+                            platform_code,
+                            external_shop_id,
+                            item.get("biz_date"),
+                            str(item.get("tid") or ""),
+                            str(item.get("oid") or ""),
+                            str(item.get("trade_status") or ""),
+                            str(item.get("order_status") or ""),
+                            str(item.get("refund_status") or ""),
+                            _clean_timestamp_text(item.get("pay_time")),
+                            _clean_timestamp_text(item.get("modified")),
+                            _clean_timestamp_text(item.get("end_time")),
+                            str(item.get("alipay_no") or ""),
+                            _clean_decimal_text(item.get("payment")),
+                            _clean_decimal_text(item.get("order_payment")),
+                            _clean_decimal_text(item.get("total_fee")),
+                            _clean_decimal_text(item.get("order_total_fee")),
+                            _clean_decimal_text(item.get("discount_fee")),
+                            _clean_decimal_text(item.get("order_discount_fee")),
+                            _clean_decimal_text(item.get("post_fee")),
+                            _clean_decimal_text(item.get("commission_fee")),
+                            str(item.get("sku_id") or ""),
+                            str(item.get("outer_sku_id") or ""),
+                            str(item.get("outer_iid") or ""),
+                            str(item.get("num_iid") or ""),
+                            str(item.get("title") or ""),
+                            str(item.get("sku_properties_name") or ""),
+                            _clean_decimal_text(item.get("quantity")),
+                            psycopg2.extras.Json(_json_safe_payload(payload)),
+                            _clean_timestamp_text(item.get("modified")),
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+                    if bool(row.get("inserted")):
+                        inserted_count += 1
+                    else:
+                        updated_count += 1
+            conn.commit()
+            return {
+                "input_count": len(items),
+                "upserted_count": inserted_count + updated_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+            }
+    except Exception as e:
+        logger.error(
+            f"写入 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}, rows={len(items)}): {e}"
+        )
+        raise
+
+
+def list_platform_order_lines(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+    filters: dict | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询电商订单明细行，返回结构化字段和 payload。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, data_source_id, dataset_id, shop_connection_id,
+                           platform_code, external_shop_id, biz_date, tid, oid,
+                           trade_status, order_status, refund_status,
+                           pay_time, modified, end_time, alipay_no,
+                           payment, order_payment, total_fee, order_total_fee,
+                           discount_fee, order_discount_fee, post_fee, commission_fee,
+                           sku_id, outer_sku_id, outer_iid, num_iid,
+                           title, sku_properties_name, quantity, payload,
+                           first_seen_at, latest_seen_at, created_at, updated_at
+                    FROM platform_order_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                if resource_key and resource_key.startswith("taobao_order_lines:"):
+                    sql += " AND shop_connection_id = %s"
+                    params.append(resource_key.split(":", 1)[1])
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                for field, value in dict(filters or {}).items():
+                    if value in (None, "", []):
+                        continue
+                    if field not in {
+                        "tid",
+                        "oid",
+                        "trade_status",
+                        "order_status",
+                        "refund_status",
+                        "alipay_no",
+                        "sku_id",
+                        "outer_sku_id",
+                        "outer_iid",
+                    }:
+                        continue
+                    if isinstance(value, list):
+                        sql += f" AND {field} = ANY(%s)"
+                        params.append([str(item) for item in value])
+                    else:
+                        sql += f" AND {field} = %s"
+                        params.append(str(value))
+                sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
+                cur.execute(sql, tuple(params))
+                return [_normalize_record(dict(row)) for row in cur.fetchall() or []]
+    except Exception as e:
+        logger.error(f"查询 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}")
+        return []
+
+
+def get_platform_order_line_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计电商订单明细行。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(DISTINCT biz_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM platform_order_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(f"统计 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}")
+        return {}
 
 
 
