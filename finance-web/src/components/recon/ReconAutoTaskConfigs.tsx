@@ -180,8 +180,8 @@ function normalizeDatasetOptions(
     if (status === 'deleted' || isEnabled === false) continue;
 
     const normalizedDatasetId = datasetId || datasetCode || datasetName;
-    const schemaSummary = asRecord(value.schema_summary);
-    const extractConfig = asRecord(value.extract_config);
+    const schemaSummary = asRecord(value.schema_summary) ?? undefined;
+    const extractConfig = asRecord(value.extract_config) ?? undefined;
     const schemaColumns = Array.isArray(schemaSummary?.columns) ? schemaSummary.columns : [];
     const apiParameters = Array.isArray(extractConfig?.parameters) ? extractConfig.parameters : [];
     const fieldNames = Array.from(
