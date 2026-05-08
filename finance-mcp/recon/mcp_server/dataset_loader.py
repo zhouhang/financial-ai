@@ -59,6 +59,7 @@ _PLATFORM_ALIPAY_BILL_LINES_QUERY_ALLOWED_KEYS = {
     "dataset_id",
     "resource_key",
     "biz_date",
+    "bill_date",
     "bill_type",
     "filters",
     "order_by",
@@ -947,6 +948,8 @@ def _load_platform_alipay_bill_line_rows(
         where_parts.append(f"{_safe_identifier(dataset_col)} = %s")
         params.append(dataset_id)
 
+    bill_type_col = _first_existing_column(columns, ["bill_type"])
+    resource_bill_type = ""
     resource_key = str(query.get("resource_key") or "").strip()
     if resource_key:
         resource_parts = resource_key.split(":", 2)
@@ -960,29 +963,33 @@ def _load_platform_alipay_bill_line_rows(
                 "platform_alipay_bill_lines query.resource_key 必须为 "
                 "alipay_bill:<bill_type>:<shop_connection_id>"
             )
-        bill_type_col = _first_existing_column(columns, ["bill_type"])
         shop_col = _first_existing_column(columns, ["shop_connection_id"])
         if not bill_type_col or not shop_col:
             raise DatasetLoadError(
                 "platform_alipay_bill_lines 缺少 bill_type 或 shop_connection_id 字段，"
                 "无法按 resource_key 过滤。"
             )
+        resource_bill_type = resource_parts[1].strip()
         where_parts.append(f"{_safe_identifier(bill_type_col)} = %s")
-        params.append(resource_parts[1].strip())
+        params.append(resource_bill_type)
         where_parts.append(f"{_safe_identifier(shop_col)} = %s")
         params.append(resource_parts[2].strip())
 
-    bill_type = str(query.get("bill_type") or "").strip()
-    if bill_type:
-        bill_type_col = _first_existing_column(columns, ["bill_type"])
+    requested_bill_type = str(query.get("bill_type") or "").strip()
+    if resource_bill_type and requested_bill_type and requested_bill_type != resource_bill_type:
+        raise DatasetLoadError(
+            "platform_alipay_bill_lines query.resource_key 中的 bill_type "
+            f"({resource_bill_type}) 与 query.bill_type ({requested_bill_type}) 不一致。"
+        )
+    if requested_bill_type and not resource_bill_type:
         if not bill_type_col:
             raise DatasetLoadError(
                 "platform_alipay_bill_lines 缺少 bill_type 字段，无法按账单类型过滤。"
             )
         where_parts.append(f"{_safe_identifier(bill_type_col)} = %s")
-        params.append(bill_type)
+        params.append(requested_bill_type)
 
-    biz_date = str(query.get("biz_date") or "").strip()
+    biz_date = str(query.get("biz_date") or query.get("bill_date") or "").strip()
     if biz_date:
         biz_date_col = _first_existing_column(
             columns,
