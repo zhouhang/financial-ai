@@ -4862,7 +4862,10 @@ export default function DataConnectionsPanel({
             headers: authHeaders,
             body: JSON.stringify({
               resource_key: resourceKey,
+              background: true,
+              trigger_mode: 'initial',
               params: {
+                dataset_id: detail.dataset.id,
                 resource_key: resourceKey,
                 query: { resource_key: resourceKey },
               },

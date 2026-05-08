@@ -2243,6 +2243,69 @@ def test_semantic_status_waits_for_generation_when_collection_running_with_sampl
     assert status["can_retry"] is False
 
 
+@pytest.mark.anyio
+async def test_collection_detail_ignores_non_initial_running_job_for_initialization_status(
+    monkeypatch,
+) -> None:
+    dataset = _alipay_bill_dataset(
+        meta={
+            "semantic_profile": {
+                "status": "generated_with_samples",
+                "fields": [{"raw_name": "source_row_key", "display_name": "账单行唯一键"}],
+            }
+        }
+    )
+    running_job = {
+        "id": "job-incremental",
+        "data_source_id": "source-alipay-1",
+        "resource_key": "alipay_bill:trade:shop-alipay-1",
+        "job_status": "running",
+        "trigger_mode": "scheduled",
+    }
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [running_job])
+    monkeypatch.setattr(data_sources, "_enrich_jobs_with_latest_attempts", lambda company_id, jobs: jobs)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_alipay_bill_line_stats",
+        lambda **kwargs: {"total_count": 3, "biz_date_count": 1},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        lambda **kwargs: [{"payload": {"source_row_key": "row-1"}}],
+    )
+
+    result = await data_sources._handle_data_source_get_dataset_collection_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+        }
+    )
+
+    assert result["sample_limit"] == 20
+    assert result["collection_status"]["status"] == "succeeded"
+    assert result["collection_status"]["is_running"] is False
+    assert result["semantic_status"]["status"] == "succeeded"
+    assert result["semantic_status"]["can_refresh"] is True
+
+
 def test_platform_shop_detail_does_not_publish_dataset_by_itself() -> None:
     dataset = _alipay_bill_dataset(id="dataset-alipay-1")
     dataset["publish_status"] = "unpublished"

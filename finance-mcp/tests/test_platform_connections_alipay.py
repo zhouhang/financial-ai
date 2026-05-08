@@ -556,3 +556,21 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
     assert callback_payload["alipay_fund_bill_dataset_id"] == "dataset-0"
     assert callback_payload["alipay_trade_bill_dataset_id"] == "dataset-1"
     assert callback_payload["alipay_dataset_warning"] == ""
+
+
+def test_build_alipay_bill_dataset_payload_starts_unpublished() -> None:
+    payload = platform_connections.build_alipay_bill_dataset_payload(
+        company_id="company-1",
+        data_source_id="source-1",
+        shop_connection_id="shop-alipay-1",
+        merchant_name="福游网络",
+        external_shop_id="2088",
+        bill_kind="trade",
+        bill_type="trade",
+        dataset_label="支付宝交易账单",
+        business_object_type="alipay_trade_bill",
+        grain="alipay_bill_line",
+    )
+
+    assert payload["resource_key"] == "alipay_bill:trade:shop-alipay-1"
+    assert payload["publish_status"] == "unpublished"

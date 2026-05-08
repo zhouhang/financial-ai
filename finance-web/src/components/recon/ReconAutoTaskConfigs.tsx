@@ -880,7 +880,7 @@ export default function ReconAutoTaskConfigs({
 
         const datasetResultGroups = await Promise.all(
           sources.map(async (source) => {
-            const response = await fetch(`/api/data-sources/${source.id}/datasets`, {
+            const response = await fetch(`/api/data-sources/${source.id}/datasets?only_published=true`, {
               headers: { Authorization: `Bearer ${authToken}` },
             });
 

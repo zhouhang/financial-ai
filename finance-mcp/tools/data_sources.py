@@ -7190,7 +7190,7 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
         return {"success": False, "error": "缺少 resource_key"}
 
     limit = max(1, min(int(arguments.get("limit") or 10), 50))
-    sample_limit = max(1, min(int(arguments.get("sample_limit") or 10), 50))
+    sample_limit = max(1, min(int(arguments.get("sample_limit") or 20), 50))
     jobs = [
         job
         for job in auth_db.list_unified_sync_jobs(
@@ -7201,6 +7201,11 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
         if _safe_text(job.get("resource_key")) == resource_key
     ][:limit]
     jobs = _enrich_jobs_with_latest_attempts(company_id, jobs)
+    initial_jobs = [
+        job
+        for job in jobs
+        if _safe_text(job.get("trigger_mode")).lower() in {"", "initial"}
+    ]
     dataset_id = _safe_text((dataset_row or {}).get("id")) or None
     dataset_code = _safe_text((dataset_row or {}).get("dataset_code")) or None
     if _dataset_uses_platform_order_lines(dataset_row):
@@ -7260,7 +7265,7 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             for item in collection_records
             if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
-    collection_status = _build_collection_status_detail(jobs, stats, len(sample_rows))
+    collection_status = _build_collection_status_detail(initial_jobs, stats, len(sample_rows))
     total_count = 0
     if isinstance(stats, dict):
         try:

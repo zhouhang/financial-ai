@@ -54,7 +54,7 @@ def test_build_taobao_order_line_dataset_payload_is_shop_scoped() -> None:
     assert payload["resource_key"] == "taobao_order_lines:shop-abcdef123456"
     assert payload["dataset_kind"] == "api_endpoint"
     assert payload["origin_type"] == "fixed"
-    assert payload["publish_status"] == "published"
+    assert payload["publish_status"] == "unpublished"
     assert payload["business_domain"] == "ecommerce"
     assert payload["business_object_type"] == "platform_order"
     assert payload["grain"] == "shop_order_line"

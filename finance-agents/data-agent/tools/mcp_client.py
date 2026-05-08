@@ -3588,7 +3588,7 @@ async def data_source_get_dataset_collection_detail(
     dataset_id: str = "",
     resource_key: str = "",
     limit: int = 10,
-    sample_limit: int = 10,
+    sample_limit: int = 20,
     mode: str = "",
 ) -> dict[str, Any]:
     if not auth_token:
