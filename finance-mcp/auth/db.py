@@ -55,6 +55,46 @@ _UNIFIED_DATASET_CATALOG_COLUMNS = (
     "search_text",
 )
 
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_COLUMNS = (
+    "company_id",
+    "data_source_id",
+    "dataset_id",
+    "shop_connection_id",
+    "external_shop_id",
+    "bill_type",
+    "bill_date",
+    "source_file_name",
+    "source_row_number",
+    "source_row_key",
+    "alipay_trade_no",
+    "merchant_order_no",
+    "business_order_no",
+    "amount",
+    "income_amount",
+    "expense_amount",
+    "trade_time",
+    "payload",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_CONSTRAINTS = (
+    "platform_alipay_bill_lines_company_id_fkey",
+    "platform_alipay_bill_lines_data_source_id_fkey",
+    "platform_alipay_bill_lines_dataset_id_fkey",
+    "platform_alipay_bill_lines_shop_connection_id_fkey",
+    "platform_alipay_bill_lines_unique_bill_row",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES = (
+    "idx_platform_alipay_bill_lines_dataset_date",
+    "idx_platform_alipay_bill_lines_source_dataset_date",
+    "idx_platform_alipay_bill_lines_shop_type_date",
+    "idx_platform_alipay_bill_lines_alipay_trade_no",
+    "idx_platform_alipay_bill_lines_merchant_order_no",
+    "idx_platform_alipay_bill_lines_business_order_no",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER = "update_platform_alipay_bill_lines_updated_at"
+
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
     id, company_id, data_source_id, dataset_code, dataset_name,
     resource_key, dataset_kind, origin_type,
@@ -281,6 +321,118 @@ def _column_exists(table_name: str, column_name: str, *, schema: str = "public")
         raise
 
 
+def _constraint_definition(
+    table_name: str,
+    constraint_name: str,
+    *,
+    schema: str = "public",
+) -> str:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(c.oid)
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = %s
+                      AND t.relname = %s
+                      AND c.conname = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name, constraint_name),
+                )
+                row = cur.fetchone()
+                return str(row[0] or "") if row else ""
+    except Exception as e:
+        logger.error(
+            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
+        )
+        raise
+
+
+def _constraint_exists(table_name: str, constraint_name: str, *, schema: str = "public") -> bool:
+    return bool(_constraint_definition(table_name, constraint_name, schema=schema))
+
+
+def _index_exists(index_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        WHERE n.nspname = %s
+                          AND i.relname = %s
+                          AND i.relkind IN ('i', 'I')
+                    )
+                    """,
+                    (schema, index_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(f"检查索引是否存在失败 (schema={schema}, index={index_name}): {e}")
+        raise
+
+
+def _trigger_exists(table_name: str, trigger_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_trigger tr
+                        JOIN pg_class t ON t.oid = tr.tgrelid
+                        JOIN pg_namespace n ON n.oid = t.relnamespace
+                        WHERE n.nspname = %s
+                          AND t.relname = %s
+                          AND tr.tgname = %s
+                          AND NOT tr.tgisinternal
+                    )
+                    """,
+                    (schema, table_name, trigger_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(
+            f"检查触发器是否存在失败 (schema={schema}, table={table_name}, trigger={trigger_name}): {e}"
+        )
+        raise
+
+
+def _platform_alipay_bill_lines_schema_ready() -> bool:
+    table_name = "platform_alipay_bill_lines"
+    if not _table_exists(table_name):
+        return False
+
+    return (
+        all(
+            _column_exists(table_name, column_name)
+            for column_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_COLUMNS
+        )
+        and all(
+            _constraint_exists(table_name, constraint_name)
+            for constraint_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_CONSTRAINTS
+        )
+        and all(
+            _index_exists(index_name)
+            for index_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES
+        )
+        and _trigger_exists(table_name, _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER)
+    )
+
+
 def _execute_sql_script(script_path: Path) -> None:
     sql = script_path.read_text(encoding="utf-8").strip()
     if not sql:
@@ -348,7 +500,7 @@ def ensure_unified_data_source_schema() -> list[str]:
     if not _table_exists("platform_order_lines"):
         _execute_sql_script(_migration_path("022_platform_order_lines.sql"))
         applied.append("022_platform_order_lines.sql")
-    if not _table_exists("platform_alipay_bill_lines"):
+    if not _platform_alipay_bill_lines_schema_ready():
         _execute_sql_script(_migration_path("025_platform_alipay_bill_lines.sql"))
         applied.append("025_platform_alipay_bill_lines.sql")
 
@@ -378,43 +530,13 @@ def ensure_unified_data_source_schema() -> list[str]:
             f"missing_dataset_catalog_columns={remaining_missing_dataset_catalog_columns}, "
             f"missing_data_source_datasets={not _table_exists('data_source_datasets')}"
         )
+    if not _platform_alipay_bill_lines_schema_ready():
+        raise RuntimeError("支付宝账单行 schema 仍不完整，自动迁移后仍缺少必要列、约束、索引或触发器")
 
     _UNIFIED_DATA_SOURCE_SCHEMA_READY = True
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
     return applied
-
-
-def _constraint_definition(
-    table_name: str,
-    constraint_name: str,
-    *,
-    schema: str = "public",
-) -> str:
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT pg_get_constraintdef(c.oid)
-                    FROM pg_constraint c
-                    JOIN pg_class t ON t.oid = c.conrelid
-                    JOIN pg_namespace n ON n.oid = t.relnamespace
-                    WHERE n.nspname = %s
-                      AND t.relname = %s
-                      AND c.conname = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name, constraint_name),
-                )
-                row = cur.fetchone()
-                return str(row[0] or "") if row else ""
-    except Exception as e:
-        logger.error(
-            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
-        )
-        raise
 
 
 def ensure_execution_run_trigger_types_schema() -> list[str]:

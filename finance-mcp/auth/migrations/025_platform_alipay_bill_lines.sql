@@ -24,6 +24,31 @@ CREATE TABLE IF NOT EXISTS public.platform_alipay_bill_lines (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
+ALTER TABLE public.platform_alipay_bill_lines
+    ADD COLUMN IF NOT EXISTS id uuid DEFAULT public.uuid_generate_v4(),
+    ADD COLUMN IF NOT EXISTS company_id uuid,
+    ADD COLUMN IF NOT EXISTS data_source_id uuid,
+    ADD COLUMN IF NOT EXISTS dataset_id uuid,
+    ADD COLUMN IF NOT EXISTS shop_connection_id uuid,
+    ADD COLUMN IF NOT EXISTS external_shop_id character varying(128) DEFAULT ''::character varying,
+    ADD COLUMN IF NOT EXISTS bill_type character varying(64),
+    ADD COLUMN IF NOT EXISTS bill_date date,
+    ADD COLUMN IF NOT EXISTS source_file_name text DEFAULT ''::text,
+    ADD COLUMN IF NOT EXISTS source_row_number integer,
+    ADD COLUMN IF NOT EXISTS source_row_key character varying(128),
+    ADD COLUMN IF NOT EXISTS alipay_trade_no character varying(128) DEFAULT ''::character varying,
+    ADD COLUMN IF NOT EXISTS merchant_order_no character varying(128) DEFAULT ''::character varying,
+    ADD COLUMN IF NOT EXISTS business_order_no character varying(128) DEFAULT ''::character varying,
+    ADD COLUMN IF NOT EXISTS amount numeric(18, 2),
+    ADD COLUMN IF NOT EXISTS income_amount numeric(18, 2),
+    ADD COLUMN IF NOT EXISTS expense_amount numeric(18, 2),
+    ADD COLUMN IF NOT EXISTS trade_time timestamp with time zone,
+    ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS first_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS latest_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP;
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platform_alipay_bill_lines_company_id_fkey') THEN
