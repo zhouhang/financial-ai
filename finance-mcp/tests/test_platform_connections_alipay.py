@@ -508,7 +508,15 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         "merchant_trade_bill_line",
     ]
     assert all(
-        dataset["extract_config"]["storage"] == "dataset_collection_records"
+        dataset["extract_config"]["storage"] == "platform_alipay_bill_lines"
+        for dataset in calls["datasets"]
+    )
+    assert all(
+        dataset["schema_summary"]["storage"] == "platform_alipay_bill_lines"
+        for dataset in calls["datasets"]
+    )
+    assert all(
+        dataset["schema_summary"]["source"] == "alipay_bill_lines"
         for dataset in calls["datasets"]
     )
     assert all(

@@ -577,7 +577,7 @@ def build_alipay_bill_dataset_payload(
         "business_object_type": business_object_type,
         "grain": grain,
         "extract_config": {
-            "storage": "dataset_collection_records",
+            "storage": "platform_alipay_bill_lines",
             "platform_code": "alipay",
             "shop_connection_id": shop_connection_id,
             "external_shop_id": str(external_shop_id or ""),
@@ -588,8 +588,8 @@ def build_alipay_bill_dataset_payload(
             "key_fields": key_fields,
         },
         "schema_summary": {
-            "source": "alipay_bills",
-            "storage": "dataset_collection_records",
+            "source": "alipay_bill_lines",
+            "storage": "platform_alipay_bill_lines",
             "columns": [],
             "key_fields": key_fields,
         },
