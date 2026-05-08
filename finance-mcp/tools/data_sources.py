@@ -867,10 +867,21 @@ def _apply_platform_semantic_profile_overrides(
     for item in next_profile.get("fields") or []:
         if not isinstance(item, dict):
             continue
-        field_item = _apply_platform_semantic_preset(
-            dataset_row=dataset_row,
-            field_item=dict(item),
+        current_item = dict(item)
+        current_source = _normalize_semantic_field_source(
+            current_item.get("source"),
+            default="rule_fallback",
         )
+        if bool(current_item.get("confirmed_by_user")) or current_source in {
+            "manual_confirmed",
+            "manual_updated",
+        }:
+            field_item = current_item
+        else:
+            field_item = _apply_platform_semantic_preset(
+                dataset_row=dataset_row,
+                field_item=current_item,
+            )
         raw_name = _safe_text(field_item.get("raw_name"))
         if not raw_name:
             continue
@@ -887,7 +898,14 @@ def _apply_platform_semantic_profile_overrides(
         for item in next_profile.get("key_fields") or []
         if _safe_text(item)
     ]
-    if storage == "platform_order_lines":
+    preserve_manual_key_fields = (
+        _normalize_semantic_status(next_profile.get("status"), default="generated_basic") == "manual_updated"
+        and _semantic_profile_has_manual_field_overrides(next_profile)
+        and bool(key_fields)
+    )
+    if preserve_manual_key_fields:
+        pass
+    elif storage == "platform_order_lines":
         key_fields = [field for field in ["tid", "oid"] if field in field_label_map]
     elif storage == "platform_alipay_bill_lines" and "source_row_key" in field_label_map:
         key_fields = ["source_row_key"]
@@ -2092,6 +2110,7 @@ def _persist_dataset_semantic_profile(
 
 def _merge_existing_semantic_profile(
     *,
+    dataset_row: dict[str, Any],
     generated_profile: dict[str, Any],
     existing_profile: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2186,13 +2205,20 @@ def _merge_existing_semantic_profile(
             generated_field.get("source"),
             default="rule_fallback",
         )
+        generated_is_platform_preset = generated_source == "platform_preset"
         preserve_field = (
             bool(existing_field and existing_field.get("confirmed_by_user"))
             or existing_source in {"manual_confirmed", "manual_updated"}
-            or (existing_source == "llm_generated" and generated_source != "llm_generated")
+            or (
+                existing_source == "llm_generated"
+                and generated_source != "llm_generated"
+                and not generated_is_platform_preset
+            )
         )
         if not preserve_field and not (
-            preserve_cached_llm_profile and existing_source == "llm_generated"
+            preserve_cached_llm_profile
+            and existing_source == "llm_generated"
+            and not generated_is_platform_preset
         ):
             continue
 
@@ -2241,7 +2267,10 @@ def _merge_existing_semantic_profile(
     merged_profile["field_label_map"] = next_field_label_map
     merged_profile["fields"] = merged_fields
     merged_profile["low_confidence_fields"] = low_confidence_fields
-    return merged_profile
+    return _apply_platform_semantic_profile_overrides(
+        dataset_row=dataset_row,
+        profile=merged_profile,
+    )
 
 
 def _refresh_dataset_semantic_profile(
@@ -2264,6 +2293,7 @@ def _refresh_dataset_semantic_profile(
     if sample_source:
         semantic_profile.setdefault("generated_from", {})["sample_source"] = sample_source
     semantic_profile = _merge_existing_semantic_profile(
+        dataset_row=dataset_row,
         generated_profile=semantic_profile,
         existing_profile=_extract_semantic_profile(dataset_row),
     )
