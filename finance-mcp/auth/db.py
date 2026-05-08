@@ -5418,9 +5418,12 @@ def list_platform_alipay_bill_lines(
                         params.append(str(value))
 
                 safe_offset = max(0, int(offset or 0))
-                safe_limit = max(1, min(int(limit or 100), 1000))
-                sql += " ORDER BY bill_date DESC, updated_at DESC, id DESC OFFSET %s LIMIT %s"
-                params.extend([safe_offset, safe_limit])
+                sql += " ORDER BY bill_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(safe_offset)
+                if limit is not None:
+                    safe_limit = max(1, min(int(limit or 100), 1000))
+                    sql += " LIMIT %s"
+                    params.append(safe_limit)
                 cur.execute(sql, tuple(params))
                 return [_normalize_record(dict(row)) for row in cur.fetchall() or []]
     except Exception as e:

@@ -293,6 +293,48 @@ def test_list_platform_alipay_bill_lines_filters_resource_key(monkeypatch):
     )
 
 
+def test_list_platform_alipay_bill_lines_limit_none_keeps_offset_without_limit(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+        def fetchall(self):
+            return []
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    rows = auth_db.list_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        offset=7,
+        limit=None,
+    )
+
+    assert rows == []
+    assert "OFFSET %s" in str(captured["sql"])
+    assert "LIMIT %s" not in str(captured["sql"])
+    assert captured["params"] == ("company-001", "source-001", 7)
+
+
 def test_list_platform_alipay_bill_lines_conflicting_resource_shop_returns_empty(monkeypatch):
     captured = {"execute_count": 0}
 
