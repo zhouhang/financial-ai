@@ -268,6 +268,7 @@ interface PlatformDatasetCollectionStatus {
   message: string;
   canInitialize: boolean;
   canRetryInitialize: boolean;
+  isRunning: boolean | null;
   latestJob: Record<string, unknown> | null;
 }
 
@@ -304,10 +305,17 @@ interface EditableDatasetSemanticFieldRow {
   sampleValues: string[];
 }
 
+interface SampleTableColumn {
+  rawName: string;
+  displayName: string;
+}
+
 const PLATFORM_FIXED_DATASET_FALLBACK = ['订单', '支付单', '退款单', '结算单'];
 const ALIPAY_FIXED_DATASET_FALLBACK = ['资金账单', '交易账单'];
 const ALIPAY_AUTH_COLLECTION_COPY =
   '一个支付宝商户授权后会生成资金账单和交易账单两个数据集，每天 10:30 采集 T-1 账单。';
+const PLATFORM_COLLECTION_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'initializing'];
+const PLATFORM_SEMANTIC_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'refreshing'];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object') return null;
@@ -369,6 +377,44 @@ function buildSampleTableColumns(rows: Record<string, unknown>[], maxColumns = 1
   return columns;
 }
 
+function buildSemanticSampleTableColumns(
+  fieldGroups: PlatformDatasetFieldGroup[],
+  rows: Record<string, unknown>[],
+  maxColumns = 12,
+): SampleTableColumn[] {
+  const columns: SampleTableColumn[] = [];
+  const seen = new Set<string>();
+  const orderedGroups = [
+    ...fieldGroups.filter((group) => group.key.trim().toLowerCase() !== 'system'),
+    ...fieldGroups.filter((group) => group.key.trim().toLowerCase() === 'system'),
+  ];
+
+  orderedGroups.forEach((group) => {
+    group.fields.forEach((field) => {
+      const rawName = rawFieldName(field).trim();
+      if (!rawName || seen.has(rawName) || columns.length >= maxColumns) return;
+      seen.add(rawName);
+      columns.push({
+        rawName,
+        displayName: displayFieldName(field).trim() || rawName,
+      });
+    });
+  });
+
+  const fallbackColumns = buildSampleTableColumns(rows, maxColumns);
+  if (columns.length === 0) {
+    return fallbackColumns.map((column) => ({ rawName: column, displayName: column }));
+  }
+
+  fallbackColumns.forEach((column) => {
+    if (seen.has(column) || columns.length >= maxColumns) return;
+    seen.add(column);
+    columns.push({ rawName: column, displayName: column });
+  });
+
+  return columns;
+}
+
 function formatSampleCellValue(value: unknown): string {
   if (value === null || value === undefined) return '-';
   if (typeof value === 'string') return value.trim() || '-';
@@ -391,6 +437,15 @@ function platformDatasetStatusClass(status: string): string {
   if (['failed', 'error'].includes(normalized)) return 'bg-red-50 text-red-700';
   if (['missing', 'not_started', 'none'].includes(normalized)) return 'bg-amber-50 text-amber-700';
   return 'bg-surface-accent text-blue-600';
+}
+
+function isPlatformCollectionRunning(collectionStatus: PlatformDatasetCollectionStatus): boolean {
+  if (collectionStatus.isRunning !== null) return collectionStatus.isRunning;
+  return PLATFORM_COLLECTION_RUNNING_STATUSES.includes(collectionStatus.status.trim().toLowerCase());
+}
+
+function isPlatformSemanticRunning(semanticStatus: PlatformDatasetSemanticStatus): boolean {
+  return PLATFORM_SEMANTIC_RUNNING_STATUSES.includes(semanticStatus.status.trim().toLowerCase());
 }
 
 function displayFieldName(field: Record<string, unknown>): string {
@@ -1643,6 +1698,7 @@ function normalizePlatformDatasetDetail(
         '',
       canInitialize: asBoolean(collectionStatusRaw.can_initialize) ?? false,
       canRetryInitialize: asBoolean(collectionStatusRaw.can_retry_initialize) ?? false,
+      isRunning: asBoolean(collectionStatusRaw.is_running) ?? null,
       latestJob: asRecord(collectionStatusRaw.latest_job),
     },
     semanticStatus: {
@@ -4566,6 +4622,7 @@ export default function DataConnectionsPanel({
           message: '',
           canInitialize: false,
           canRetryInitialize: false,
+          isRunning: true,
           latestJob: null,
         },
         semanticStatus: {
@@ -4639,6 +4696,13 @@ export default function DataConnectionsPanel({
   const refreshPlatformDatasetSemantic = useCallback(
     async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
       setShopDatasetActionError('');
+      if (
+        isPlatformCollectionRunning(detail.collectionStatus) ||
+        isPlatformSemanticRunning(detail.semanticStatus) ||
+        (!detail.semanticStatus.canRefresh && !detail.semanticStatus.canRetry)
+      ) {
+        return;
+      }
       const refreshedDataset = await refreshDatasetSemanticSuggestions(detail.source, detail.dataset);
       if (refreshedDataset) {
         await loadPlatformShopDatasetDetails(shop, true);
@@ -7982,20 +8046,17 @@ export default function DataConnectionsPanel({
                   detail.dataset.dataset_code;
                 const collectionStatus = detail.collectionStatus.status || 'unknown';
                 const semanticStatus = detail.semanticStatus.status || 'unknown';
-                const isCollectionRunning = ['running', 'queued', 'pending', 'loading', 'initializing'].includes(
-                  collectionStatus.toLowerCase(),
-                );
-                const isSemanticRunning = ['running', 'queued', 'pending', 'loading', 'refreshing'].includes(
-                  semanticStatus.toLowerCase(),
-                );
+                const isCollectionRunning = isPlatformCollectionRunning(detail.collectionStatus);
+                const isSemanticRunning = isPlatformSemanticRunning(detail.semanticStatus);
                 const canRetryCollection =
                   !isCollectionRunning &&
                   (detail.collectionStatus.canInitialize || detail.collectionStatus.canRetryInitialize);
                 const canRefreshSemantic =
+                  !isCollectionRunning &&
                   !isSemanticRunning &&
                   (detail.semanticStatus.canRefresh || detail.semanticStatus.canRetry);
                 const previewRows = detail.rows.slice(0, 20);
-                const previewColumns = buildSampleTableColumns(previewRows, 12);
+                const previewColumns = buildSemanticSampleTableColumns(detail.fieldGroups, previewRows, 12);
 
                 return (
                   <div key={`${detail.sourceId}-${detail.dataset.id}`} className="rounded-xl border border-border bg-surface px-4 py-3">
@@ -8135,8 +8196,12 @@ export default function DataConnectionsPanel({
                                 <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
                                   <tr>
                                     {previewColumns.map((column) => (
-                                      <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">
-                                        {column}
+                                      <th
+                                        key={column.rawName}
+                                        className="whitespace-nowrap px-3 py-2 font-medium"
+                                        title={column.rawName}
+                                      >
+                                        {column.displayName}
                                       </th>
                                     ))}
                                   </tr>
@@ -8146,11 +8211,11 @@ export default function DataConnectionsPanel({
                                     <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
                                       {previewColumns.map((column) => (
                                         <td
-                                          key={`${rowIndex}-${column}`}
+                                          key={`${rowIndex}-${column.rawName}`}
                                           className="max-w-56 truncate px-3 py-2"
-                                          title={formatSampleCellValue(row[column])}
+                                          title={formatSampleCellValue(row[column.rawName])}
                                         >
-                                          {formatPreviewCell(row[column])}
+                                          {formatPreviewCell(row[column.rawName])}
                                         </td>
                                       ))}
                                     </tr>
