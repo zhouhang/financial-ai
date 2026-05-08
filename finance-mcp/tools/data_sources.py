@@ -4362,17 +4362,20 @@ def _enrich_jobs_with_latest_attempts(company_id: str, jobs: list[dict[str, Any]
 
 def _normalize_job_status_for_detail(job: dict[str, Any] | None) -> dict[str, Any]:
     raw_status = _safe_text((job or {}).get("job_status") or (job or {}).get("status")).lower()
-    if raw_status in {"running", "processing", "in_progress", "queued", "pending"}:
+    if raw_status in {"queued", "pending", "scheduled"}:
+        status = "queued"
+    elif raw_status in {"running", "processing", "in_progress"}:
         status = "running"
     elif raw_status in {"success", "succeeded", "completed", "done"}:
         status = "succeeded"
-    elif raw_status in {"failed", "failure", "error", "cancelled", "canceled"}:
+    elif raw_status in {"failed", "error", "cancelled", "canceled"}:
         status = "failed"
     else:
         status = "unknown"
     return {
         "status": status,
         "raw_status": raw_status,
+        "is_queued": status == "queued",
         "is_running": status == "running",
         "is_succeeded": status == "succeeded",
         "is_failed": status == "failed",
@@ -4394,30 +4397,41 @@ def _build_collection_status_detail(
             except (TypeError, ValueError):
                 continue
 
-    if job_status["is_running"]:
-        status = "running"
-        message = "采集任务正在运行"
+    if job_status["is_queued"]:
+        status = "queued"
+        message = "等待初始化"
         can_initialize = False
         can_retry_initialize = False
+        is_running = True
+    elif job_status["is_running"]:
+        status = "running"
+        message = "初始化中"
+        can_initialize = False
+        can_retry_initialize = False
+        is_running = True
     elif total_count > 0 or job_status["is_succeeded"]:
         status = "succeeded"
         message = "已采集真实样本"
         can_initialize = False
         can_retry_initialize = False
+        is_running = False
     elif job_status["is_failed"]:
         status = "failed"
-        message = "最近一次采集失败，可重试初始化"
+        message = _safe_text((latest_job or {}).get("error_message")) or "初始化失败"
         can_initialize = False
         can_retry_initialize = True
+        is_running = False
     else:
-        status = "empty"
-        message = "暂无采集样本"
+        status = "not_started"
+        message = "尚未初始化"
         can_initialize = True
         can_retry_initialize = False
+        is_running = False
 
     return {
         "status": status,
         "message": message,
+        "is_running": is_running,
         "can_initialize": can_initialize,
         "can_retry_initialize": can_retry_initialize,
         "latest_job": _attach_aliases_to_job(latest_job) if latest_job else None,
@@ -7239,10 +7253,16 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
     collection_status = _build_collection_status_detail(jobs, stats, len(sample_rows))
+    total_count = 0
+    if isinstance(stats, dict):
+        try:
+            total_count = int(stats.get("total_count") or 0)
+        except (TypeError, ValueError):
+            total_count = 0
     semantic_status = _build_semantic_status_detail(
         dataset_row,
-        has_sample_rows=bool(sample_rows),
-        collection_running=collection_status.get("status") == "running",
+        has_sample_rows=len(sample_rows) > 0 or total_count > 0,
+        collection_running=bool(collection_status.get("is_running")),
     )
 
     return {

@@ -2192,6 +2192,8 @@ async def test_collection_detail_marks_running_job_as_non_actionable(
     assert result["sample_limit"] == 20
     assert result["row_count"] == 0
     assert result["collection_status"]["status"] == "running"
+    assert result["collection_status"]["message"] == "初始化中"
+    assert result["collection_status"]["is_running"] is True
     assert result["collection_status"]["can_initialize"] is False
     assert result["collection_status"]["can_retry_initialize"] is False
     assert result["semantic_status"]["status"] == "waiting_for_samples"
@@ -2201,3 +2203,28 @@ async def test_collection_detail_marks_running_job_as_non_actionable(
         "raw_bill",
         "system",
     ]
+
+
+def test_build_collection_status_detail_distinguishes_queued_and_not_started() -> None:
+    queued = data_sources._build_collection_status_detail(
+        [
+            {
+                "id": "job-queued",
+                "job_status": "queued",
+                "resource_key": "alipay_bill:trade:shop-alipay-1",
+            }
+        ],
+        {"total_count": 0},
+        0,
+    )
+    not_started = data_sources._build_collection_status_detail([], {"total_count": 0}, 0)
+
+    assert queued["status"] == "queued"
+    assert queued["message"] == "等待初始化"
+    assert queued["is_running"] is True
+    assert queued["can_initialize"] is False
+    assert queued["can_retry_initialize"] is False
+    assert not_started["status"] == "not_started"
+    assert not_started["message"] == "尚未初始化"
+    assert not_started["is_running"] is False
+    assert not_started["can_initialize"] is True
