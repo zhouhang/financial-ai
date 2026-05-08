@@ -1463,6 +1463,42 @@ def _collection_context_from_args(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_alipay_driver_collection_summary(
+    *,
+    summary: dict[str, Any],
+    dataset_row: dict[str, Any] | None,
+    params: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized = dict(summary or {})
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    normalized["storage"] = "platform_alipay_bill_lines"
+
+    def fill_text(key: str, *values: Any) -> None:
+        if _safe_text(normalized.get(key)):
+            return
+        for value in values:
+            text = _safe_text(value)
+            if text:
+                normalized[key] = text
+                return
+
+    fill_text("dataset_id", params.get("dataset_id"), dataset.get("id"))
+    fill_text("dataset_code", params.get("dataset_code"), dataset.get("dataset_code"))
+    bill_date = _safe_text(
+        normalized.get("bill_date")
+        or normalized.get("biz_date")
+        or params.get("bill_date")
+        or params.get("biz_date")
+    )
+    if bill_date:
+        fill_text("bill_date", bill_date)
+        fill_text("biz_date", bill_date)
+    if normalized.get("record_count") is None or normalized.get("record_count") == "":
+        normalized["record_count"] = normalized.get("upserted_count") or len(rows)
+    return normalized
+
+
 def _collection_key_value_is_empty(value: Any) -> bool:
     return value is None or (isinstance(value, str) and value.strip() == "")
 
@@ -6076,17 +6112,32 @@ async def _execute_sync_job(
             result = await _run_connector_sync(runtime_source, arguments)
         rows = _sync_rows_from_payload(result)
         collection_context = _collection_context_from_args(arguments)
-        collection_summary: dict[str, Any] = {}
         collection_records: list[dict[str, Any]] = []
         collection_validation: dict[str, Any] = {}
-        collection_storage = _safe_text((result.get("collection_summary") or {}).get("storage"))
-        uses_driver_managed_storage = collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API or (
+        result_collection_summary = (
+            result.get("collection_summary") if isinstance(result.get("collection_summary"), dict) else {}
+        )
+        collection_summary: dict[str, Any] = dict(result_collection_summary)
+        collection_storage = _safe_text(result_collection_summary.get("storage"))
+        uses_alipay_driver_managed_storage = (
             collection_driver == COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
-            and bool(collection_storage)
-            and collection_storage != "dataset_collection_records"
+            and (
+                _dataset_uses_platform_alipay_bill_lines(dataset_row)
+                or (bool(collection_storage) and collection_storage != "dataset_collection_records")
+            )
+        )
+        uses_driver_managed_storage = (
+            collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API
+            or uses_alipay_driver_managed_storage
         )
         if uses_driver_managed_storage:
-            collection_summary = dict(result.get("collection_summary") or {})
+            if uses_alipay_driver_managed_storage:
+                collection_summary = _normalize_alipay_driver_collection_summary(
+                    summary=collection_summary,
+                    dataset_row=dataset_row,
+                    params=params,
+                    rows=rows,
+                )
         elif collection_context:
             collection_records, collection_validation = _build_collection_records(
                 rows=rows,
@@ -6115,6 +6166,7 @@ async def _execute_sync_job(
                 checkpoint_after=checkpoint_before,
                 finish_job=True,
             )
+            original_files = result.get("original_files") or collection_summary.get("original_files") or []
             auth_db.create_unified_data_source_event(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -6125,7 +6177,8 @@ async def _execute_sync_job(
                 event_payload={
                     "rows": len(rows),
                     "resource_key": resource_key,
-                    "original_files": result.get("original_files") or [],
+                    "original_files": original_files,
+                    "collection_summary": collection_summary,
                     "collection_driver": collection_driver,
                 },
             )
@@ -6148,6 +6201,8 @@ async def _execute_sync_job(
                 "reused": False,
                 "error": message,
                 "message": message,
+                "collection_summary": collection_summary,
+                "original_files": original_files,
                 "collection_driver": collection_driver,
             }
 

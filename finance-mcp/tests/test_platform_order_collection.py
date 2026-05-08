@@ -419,6 +419,190 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
 
 
 @pytest.mark.anyio
+async def test_execute_sync_job_keeps_alipay_bill_driver_managed_when_summary_missing_storage(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {"upsert_dataset_collection_records": 0}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _alipay_bill_dataset(),
+    )
+
+    def fake_run_alipay_bill_download_import(**kwargs: Any) -> dict[str, Any]:
+        calls["alipay_kwargs"] = kwargs
+        return {
+            "success": True,
+            "healthy": True,
+            "rows": [
+                {
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-06",
+                    "source_row_key": "row-1",
+                    "amount": "12.30",
+                },
+                {
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-06",
+                    "source_row_key": "row-2",
+                    "amount": "45.60",
+                },
+            ],
+            "collection_summary": {},
+            "message": "支付宝账单采集成功",
+        }
+
+    def fail_generic_upsert(**kwargs: Any) -> None:
+        calls["upsert_dataset_collection_records"] += 1
+        raise AssertionError("Alipay bill download-import must not generic-upsert rows")
+
+    monkeypatch.setattr(
+        data_sources,
+        "_run_alipay_bill_download_import",
+        fake_run_alipay_bill_download_import,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_dataset_collection_records",
+        fail_generic_upsert,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_attempt",
+        lambda **kwargs: calls.setdefault("attempt", kwargs),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_status",
+        lambda **kwargs: {"id": kwargs["sync_job_id"], "job_status": kwargs["job_status"]},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_data_source_event",
+        lambda **kwargs: calls.setdefault("event", kwargs),
+    )
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_health", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_update_dataset_health_by_resource", lambda **kwargs: None)
+
+    result = await data_sources._execute_sync_job(
+        company_id="company-1",
+        source_id="source-alipay-1",
+        resource_key="alipay_bill:trade:shop-alipay-1",
+        runtime_source={"source_kind": "platform_oauth", "provider_code": "alipay"},
+        arguments={
+            "params": {
+                "dataset_id": "dataset-alipay-1",
+                "dataset_code": "alipay_trade_bill_shop_1",
+                "biz_date": "2026-05-06",
+            }
+        },
+        job={"id": "job-1", "current_attempt": 1},
+        attempt={"id": "attempt-1"},
+        checkpoint_before={},
+        window_start=None,
+        window_end=None,
+    )
+
+    assert result["success"] is True
+    assert calls["upsert_dataset_collection_records"] == 0
+    assert result["collection_summary"]["storage"] == "platform_alipay_bill_lines"
+    assert result["collection_summary"]["dataset_id"] == "dataset-alipay-1"
+    assert result["collection_summary"]["dataset_code"] == "alipay_trade_bill_shop_1"
+    assert result["collection_summary"]["biz_date"] == "2026-05-06"
+    assert result["collection_summary"]["bill_date"] == "2026-05-06"
+    assert result["collection_summary"]["record_count"] == 2
+    assert calls["attempt"]["metrics"]["collection_upserted"] == 0
+    assert calls["event"]["event_payload"]["collection_summary"]["storage"] == (
+        "platform_alipay_bill_lines"
+    )
+
+
+@pytest.mark.anyio
+async def test_execute_sync_job_failure_includes_collection_summary_diagnostics(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+    collection_summary = {
+        "storage": "platform_alipay_bill_lines",
+        "dataset_id": "dataset-alipay-1",
+        "dataset_code": "alipay_trade_bill_shop_1",
+        "biz_date": "2026-05-06",
+        "bill_date": "2026-05-06",
+        "record_count": 0,
+        "original_files": [{"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}],
+    }
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _alipay_bill_dataset(),
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_run_alipay_bill_download_import",
+        lambda **kwargs: {
+            "success": False,
+            "healthy": False,
+            "rows": [],
+            "collection_summary": collection_summary,
+            "message": "账单未就绪",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_attempt",
+        lambda **kwargs: calls.setdefault("attempt", kwargs),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_status",
+        lambda **kwargs: {"id": kwargs["sync_job_id"], "job_status": kwargs["job_status"]},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_data_source_event",
+        lambda **kwargs: calls.setdefault("event", kwargs),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {"id": sync_job_id, "job_status": "failed"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_health", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_update_dataset_health_by_resource", lambda **kwargs: None)
+
+    result = await data_sources._execute_sync_job(
+        company_id="company-1",
+        source_id="source-alipay-1",
+        resource_key="alipay_bill:trade:shop-alipay-1",
+        runtime_source={"source_kind": "platform_oauth", "provider_code": "alipay"},
+        arguments={
+            "params": {
+                "dataset_id": "dataset-alipay-1",
+                "dataset_code": "alipay_trade_bill_shop_1",
+                "biz_date": "2026-05-06",
+            }
+        },
+        job={"id": "job-1", "current_attempt": 1},
+        attempt={"id": "attempt-1"},
+        checkpoint_before={},
+        window_start=None,
+        window_end=None,
+    )
+
+    assert result["success"] is False
+    assert result["collection_summary"]["storage"] == "platform_alipay_bill_lines"
+    assert result["original_files"] == [{"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}]
+    assert calls["event"]["event_payload"]["collection_summary"]["storage"] == (
+        "platform_alipay_bill_lines"
+    )
+    assert calls["event"]["event_payload"]["original_files"] == [
+        {"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}
+    ]
+
+
+@pytest.mark.anyio
 async def test_run_platform_order_collection_reads_service_provider_app_by_id(
     monkeypatch,
 ) -> None:
