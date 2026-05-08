@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -1662,7 +1662,7 @@ function normalizePlatformFieldGroups(raw: unknown): PlatformDatasetFieldGroup[]
       return {
         key: key || label || 'fields',
         label: label || key || '字段',
-        defaultOpen: asBoolean(value.default_open) ?? true,
+        defaultOpen: asBoolean(value.default_open) ?? asBoolean(value.defaultOpen) ?? true,
         fields,
       };
     })
@@ -1676,8 +1676,8 @@ function normalizePlatformDatasetDetail(
 ): PlatformShopDatasetDetail {
   const value = asRecord(raw) ?? {};
   const nextDataset = normalizeDataset(value.dataset) ?? dataset;
-  const collectionStatusRaw = asRecord(value.collection_status) ?? {};
-  const semanticStatusRaw = asRecord(value.semantic_status) ?? {};
+  const collectionStatusRaw = asRecord(value.collection_status) ?? asRecord(value.collectionStatus) ?? {};
+  const semanticStatusRaw = asRecord(value.semantic_status) ?? asRecord(value.semanticStatus) ?? {};
   const rows = Array.isArray(value.rows)
     ? value.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item))).slice(0, 20)
     : [];
@@ -1696,10 +1696,13 @@ function normalizePlatformDatasetDetail(
         asString(collectionStatusRaw.message) ??
         asString(collectionStatusRaw.error_message) ??
         '',
-      canInitialize: asBoolean(collectionStatusRaw.can_initialize) ?? false,
-      canRetryInitialize: asBoolean(collectionStatusRaw.can_retry_initialize) ?? false,
-      isRunning: asBoolean(collectionStatusRaw.is_running) ?? null,
-      latestJob: asRecord(collectionStatusRaw.latest_job),
+      canInitialize: asBoolean(collectionStatusRaw.can_initialize) ?? asBoolean(collectionStatusRaw.canInitialize) ?? false,
+      canRetryInitialize:
+        asBoolean(collectionStatusRaw.can_retry_initialize) ??
+        asBoolean(collectionStatusRaw.canRetryInitialize) ??
+        false,
+      isRunning: asBoolean(collectionStatusRaw.is_running) ?? asBoolean(collectionStatusRaw.isRunning) ?? null,
+      latestJob: asRecord(collectionStatusRaw.latest_job) ?? asRecord(collectionStatusRaw.latestJob),
     },
     semanticStatus: {
       status:
@@ -1711,10 +1714,10 @@ function normalizePlatformDatasetDetail(
         asString(semanticStatusRaw.message) ??
         asString(semanticStatusRaw.error_message) ??
         '',
-      canRefresh: asBoolean(semanticStatusRaw.can_refresh) ?? false,
-      canRetry: asBoolean(semanticStatusRaw.can_retry) ?? false,
+      canRefresh: asBoolean(semanticStatusRaw.can_refresh) ?? asBoolean(semanticStatusRaw.canRefresh) ?? false,
+      canRetry: asBoolean(semanticStatusRaw.can_retry) ?? asBoolean(semanticStatusRaw.canRetry) ?? false,
     },
-    fieldGroups: normalizePlatformFieldGroups(value.field_groups),
+    fieldGroups: normalizePlatformFieldGroups(value.field_groups ?? value.fieldGroups),
     rows,
     loading: false,
     error: '',
@@ -2214,6 +2217,10 @@ export default function DataConnectionsPanel({
   const [datasetSemanticError, setDatasetSemanticError] = useState('');
   const [datasetSemanticNotice, setDatasetSemanticNotice] = useState('');
   const [refreshingDatasetSemantic, setRefreshingDatasetSemantic] = useState(false);
+  const [platformDatasetCollectionActionIds, setPlatformDatasetCollectionActionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const platformDatasetCollectionActionIdsRef = useRef<Set<string>>(new Set());
   const [collectionDetailDialog, setCollectionDetailDialog] = useState<DatasetCollectionDetailDialogState | null>(null);
   const [datasetViewTabsBySource, setDatasetViewTabsBySource] = useState<Record<string, DatasetViewTab>>({});
   const [physicalCatalogFiltersBySource, setPhysicalCatalogFiltersBySource] = useState<
@@ -4715,6 +4722,10 @@ export default function DataConnectionsPanel({
   const retryPlatformDatasetCollection = useCallback(
     async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
       setShopDatasetActionError('');
+      const actionId = `${detail.sourceId}:${detail.dataset.id}`;
+      if (platformDatasetCollectionActionIdsRef.current.has(actionId)) {
+        return;
+      }
       if (isPlatformCollectionRunning(detail.collectionStatus)) {
         return;
       }
@@ -4725,6 +4736,8 @@ export default function DataConnectionsPanel({
         setShopDatasetActionError('当前环境未连接后端初始化接口。');
         return;
       }
+      platformDatasetCollectionActionIdsRef.current = new Set(platformDatasetCollectionActionIdsRef.current).add(actionId);
+      setPlatformDatasetCollectionActionIds(platformDatasetCollectionActionIdsRef.current);
       try {
         const resourceKey = detail.dataset.resource_key || detail.dataset.dataset_code;
         const response = await fetch(
@@ -4749,6 +4762,11 @@ export default function DataConnectionsPanel({
         setExpandedShopDatasetId(shop.id);
       } catch (error) {
         setShopDatasetActionError(error instanceof Error ? error.message : '初始化数据集失败');
+      } finally {
+        const nextActionIds = new Set(platformDatasetCollectionActionIdsRef.current);
+        nextActionIds.delete(actionId);
+        platformDatasetCollectionActionIdsRef.current = nextActionIds;
+        setPlatformDatasetCollectionActionIds(nextActionIds);
       }
     },
     [authHeaders, authToken, draftSourceIdSet, loadPlatformShopDatasetDetails],
@@ -8054,8 +8072,11 @@ export default function DataConnectionsPanel({
                 const semanticStatus = detail.semanticStatus.status || 'unknown';
                 const isCollectionRunning = isPlatformCollectionRunning(detail.collectionStatus);
                 const isSemanticRunning = isPlatformSemanticRunning(detail.semanticStatus);
+                const collectionActionId = `${detail.sourceId}:${detail.dataset.id}`;
+                const isCollectionActionBusy = platformDatasetCollectionActionIds.has(collectionActionId);
                 const canRetryCollection =
                   !isCollectionRunning &&
+                  !isCollectionActionBusy &&
                   (detail.collectionStatus.canInitialize || detail.collectionStatus.canRetryInitialize);
                 const canRefreshSemantic =
                   !isCollectionRunning &&
@@ -8089,13 +8110,18 @@ export default function DataConnectionsPanel({
                         </div>
                       </div>
                       <div className="flex flex-wrap justify-end gap-2">
-                        {canRetryCollection && (
+                        {(canRetryCollection || isCollectionActionBusy) && (
                           <button
                             type="button"
                             onClick={() => void retryPlatformDatasetCollection(shop, detail)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                            disabled={isCollectionActionBusy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
                           >
-                            <RefreshCw className="h-3.5 w-3.5" />
+                            {isCollectionActionBusy ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            )}
                             初始化重试
                           </button>
                         )}
@@ -8657,6 +8683,7 @@ export default function DataConnectionsPanel({
                     }
                     if (mode === 'platform' && selectedPlatform) {
                       void fetchShops(selectedPlatform.platform_code);
+                      void fetchRemoteSources();
                       return;
                     }
                     void fetchPlatforms();
