@@ -3614,6 +3614,18 @@ async def data_source_get_dataset_collection_detail(
             "success": True,
             "source_id": source_id,
             "resource_key": resource_key,
+            "collection_status": {
+                "status": "not_started",
+                "message": "当前环境尚未接入采集详情",
+                "can_initialize": False,
+            },
+            "semantic_status": {
+                "status": "waiting_for_samples",
+                "message": "等待真实样本",
+                "can_refresh": False,
+            },
+            "field_groups": [],
+            "sample_limit": max(1, min(sample_limit, 50)),
             "jobs": [],
             "rows": [],
             "count": 0,
