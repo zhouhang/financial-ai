@@ -1,7 +1,8 @@
 """认证模块的数据库操作"""
 
-import logging
+import hashlib
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -4721,6 +4722,14 @@ def _clean_timestamp_text(value: Any) -> str | None:
 _ALIPAY_AMOUNT_RAW_KEYS = ("金额", "发生金额", "账务金额", "交易金额", "订单金额")
 _ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额")
 _ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额")
+_ALIPAY_TRADE_NO_RAW_KEYS = ("支付宝交易号", "支付宝流水号", "账务流水号")
+_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS = ("商户订单号", "商户订单号/商家订单号")
+_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号")
+_ALIPAY_IDENTIFIER_RAW_KEY_SETS = {
+    "alipay_trade_no": _ALIPAY_TRADE_NO_RAW_KEYS,
+    "merchant_order_no": _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
+    "business_order_no": _ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
+}
 _ALIPAY_TRADE_TIME_RAW_KEYS = (
     "入账时间",
     "创建时间",
@@ -4785,11 +4794,35 @@ def _alipay_raw_payload(item: dict[str, Any]) -> dict[str, Any]:
         *_ALIPAY_AMOUNT_RAW_KEYS,
         *_ALIPAY_INCOME_RAW_KEYS,
         *_ALIPAY_EXPENSE_RAW_KEYS,
+        *_ALIPAY_TRADE_NO_RAW_KEYS,
+        *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
+        *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
         *_ALIPAY_TRADE_TIME_RAW_KEYS,
     )
     if any(key in payload for key in raw_keys):
         return dict(payload)
     return {}
+
+
+def _fallback_alipay_bill_source_row_key(
+    *,
+    bill_type: str,
+    bill_date: str,
+    source_file_name: str,
+    source_row_number: int | None,
+    raw: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    source = {
+        "bill_type": bill_type,
+        "bill_date": bill_date,
+        "source_file_name": source_file_name,
+        "source_row_number": source_row_number,
+        "raw": _json_safe_value(raw),
+        "payload": _json_safe_value(payload),
+    }
+    text = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _alipay_bill_payload(item: dict[str, Any]) -> dict[str, Any]:
@@ -4839,7 +4872,11 @@ def _alipay_bill_payload(item: dict[str, Any]) -> dict[str, Any]:
         "business_order_no",
     )
     for field in promoted_text_fields:
-        text = _first_non_empty_text(item.get(field), result.get(field))
+        text = _first_non_empty_text(
+            item.get(field),
+            result.get(field),
+            _first_payload_text(raw, *_ALIPAY_IDENTIFIER_RAW_KEY_SETS.get(field, ())),
+        )
         if text:
             result[field] = text
 
@@ -5180,6 +5217,48 @@ def upsert_platform_alipay_bill_lines(
                         payload.get("trade_time"),
                         _first_payload_text(raw, *_ALIPAY_TRADE_TIME_RAW_KEYS),
                     )
+                    source_file_name = _first_non_empty_text(
+                        item.get("source_file_name"),
+                        payload.get("source_file_name"),
+                    )
+                    source_row_number = _safe_int_or_none(
+                        item.get("source_row_number") or payload.get("source_row_number")
+                    )
+                    source_row_key = _first_non_empty_text(
+                        item.get("source_row_key"),
+                        payload.get("source_row_key"),
+                    )
+                    if not source_row_key:
+                        source_row_key = _fallback_alipay_bill_source_row_key(
+                            bill_type=bill_type,
+                            bill_date=bill_date,
+                            source_file_name=source_file_name,
+                            source_row_number=source_row_number,
+                            raw=raw,
+                            payload=payload,
+                        )
+                        payload["source_row_key"] = source_row_key
+                    alipay_trade_no = _first_non_empty_text(
+                        item.get("alipay_trade_no"),
+                        payload.get("alipay_trade_no"),
+                        _first_payload_text(raw, *_ALIPAY_TRADE_NO_RAW_KEYS),
+                    )
+                    merchant_order_no = _first_non_empty_text(
+                        item.get("merchant_order_no"),
+                        payload.get("merchant_order_no"),
+                        _first_payload_text(raw, *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS),
+                    )
+                    business_order_no = _first_non_empty_text(
+                        item.get("business_order_no"),
+                        payload.get("business_order_no"),
+                        _first_payload_text(raw, *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS),
+                    )
+                    if alipay_trade_no:
+                        payload["alipay_trade_no"] = alipay_trade_no
+                    if merchant_order_no:
+                        payload["merchant_order_no"] = merchant_order_no
+                    if business_order_no:
+                        payload["business_order_no"] = business_order_no
                     cur.execute(
                         """
                         INSERT INTO platform_alipay_bill_lines (
@@ -5222,12 +5301,12 @@ def upsert_platform_alipay_bill_lines(
                             external_shop_id,
                             bill_type,
                             bill_date,
-                            _first_non_empty_text(item.get("source_file_name"), payload.get("source_file_name")),
-                            _safe_int_or_none(item.get("source_row_number") or payload.get("source_row_number")),
-                            _first_non_empty_text(item.get("source_row_key"), payload.get("source_row_key")),
-                            _first_non_empty_text(item.get("alipay_trade_no"), payload.get("alipay_trade_no")),
-                            _first_non_empty_text(item.get("merchant_order_no"), payload.get("merchant_order_no")),
-                            _first_non_empty_text(item.get("business_order_no"), payload.get("business_order_no")),
+                            source_file_name,
+                            source_row_number,
+                            source_row_key,
+                            alipay_trade_no,
+                            merchant_order_no,
+                            business_order_no,
                             _clean_decimal_text(amount),
                             _clean_decimal_text(income_amount),
                             _clean_decimal_text(expense_amount),
@@ -5270,6 +5349,21 @@ def list_platform_alipay_bill_lines(
     offset: int = 0,
 ) -> list[dict]:
     """查询支付宝账单明细行，返回结构化字段和 payload。"""
+    resource_bill_type = ""
+    resource_shop_connection_id = ""
+    if resource_key and resource_key.startswith("alipay_bill:"):
+        resource_parts = resource_key.split(":")
+        if len(resource_parts) >= 2:
+            resource_bill_type = resource_parts[1].strip()
+        if len(resource_parts) >= 3:
+            resource_shop_connection_id = resource_parts[2].strip()
+    if (
+        shop_connection_id
+        and resource_shop_connection_id
+        and str(shop_connection_id).strip() != resource_shop_connection_id
+    ):
+        return []
+
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -5291,15 +5385,6 @@ def list_platform_alipay_bill_lines(
                 if dataset_id:
                     sql += " AND dataset_id = %s"
                     params.append(dataset_id)
-
-                resource_bill_type = ""
-                resource_shop_connection_id = ""
-                if resource_key and resource_key.startswith("alipay_bill:"):
-                    resource_parts = resource_key.split(":")
-                    if len(resource_parts) >= 2:
-                        resource_bill_type = resource_parts[1].strip()
-                    if len(resource_parts) >= 3:
-                        resource_shop_connection_id = resource_parts[2].strip()
 
                 if resource_bill_type:
                     sql += " AND bill_type = %s"
