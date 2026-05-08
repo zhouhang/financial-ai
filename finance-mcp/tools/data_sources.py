@@ -851,6 +851,54 @@ def _apply_platform_semantic_preset(
     return next_item
 
 
+def _apply_platform_semantic_profile_overrides(
+    *,
+    dataset_row: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    storage = _platform_semantic_storage_key(dataset_row)
+    if not storage:
+        return profile
+
+    next_profile = dict(profile)
+    fields: list[dict[str, Any]] = []
+    field_label_map: dict[str, str] = {}
+    low_confidence_fields: list[str] = []
+    for item in next_profile.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        field_item = _apply_platform_semantic_preset(
+            dataset_row=dataset_row,
+            field_item=dict(item),
+        )
+        raw_name = _safe_text(field_item.get("raw_name"))
+        if not raw_name:
+            continue
+        fields.append(field_item)
+        field_label_map[raw_name] = _safe_text(field_item.get("display_name")) or raw_name
+        if (
+            float(field_item.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD
+            and not bool(field_item.get("confirmed_by_user"))
+        ):
+            low_confidence_fields.append(raw_name)
+
+    key_fields = [
+        _safe_text(item)
+        for item in next_profile.get("key_fields") or []
+        if _safe_text(item)
+    ]
+    if storage == "platform_order_lines":
+        key_fields = [field for field in ["tid", "oid"] if field in field_label_map]
+    elif storage == "platform_alipay_bill_lines" and "source_row_key" in field_label_map:
+        key_fields = ["source_row_key"]
+
+    next_profile["fields"] = fields
+    next_profile["field_label_map"] = field_label_map
+    next_profile["low_confidence_fields"] = low_confidence_fields
+    next_profile["key_fields"] = key_fields
+    return next_profile
+
+
 def _collect_sample_values(
     sample_rows: list[dict[str, Any]],
     field_name: str,
@@ -1156,7 +1204,9 @@ def _build_llm_semantic_profile(
     if not llm_used:
         return None
 
-    return {
+    return _apply_platform_semantic_profile_overrides(
+        dataset_row=dataset_row,
+        profile={
         **dict(base_profile),
         "status": "llm_generated",
         "business_name": business_name,
@@ -1175,7 +1225,8 @@ def _build_llm_semantic_profile(
             "fallback_field_count": max(0, len(merged_fields) - len(llm_fields_by_name)),
         },
         "updated_at": _now_iso(),
-    }
+        },
+    )
 
 
 def _build_semantic_profile(
@@ -1274,6 +1325,10 @@ def _build_semantic_profile(
         },
         "updated_at": _now_iso(),
     }
+    base_profile = _apply_platform_semantic_profile_overrides(
+        dataset_row=dataset_row,
+        profile=base_profile,
+    )
     llm_config = _get_semantic_llm_config() if allow_llm else None
     if llm_config:
         llm_profile = _build_llm_semantic_profile(

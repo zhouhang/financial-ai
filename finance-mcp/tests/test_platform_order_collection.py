@@ -346,6 +346,121 @@ async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypat
 
 
 @pytest.mark.anyio
+async def test_refresh_semantic_profile_preserves_alipay_presets_when_llm_enabled(
+    monkeypatch,
+) -> None:
+    persisted: dict[str, Any] = {}
+    dataset = _alipay_bill_dataset(id="dataset-alipay-1")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "name": "支付宝授权连接",
+            "source_kind": "platform_oauth",
+            "provider_code": "alipay",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        lambda **kwargs: [
+            {
+                "payload": {
+                    "source_row_key": "row-1",
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-07",
+                    "alipay_trade_no": "202605070001",
+                    "income_amount": "88.00",
+                    "raw": {
+                        "支付宝交易号": "202605070001",
+                        "收入": "88.00",
+                    },
+                }
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not read generic records")),
+    )
+
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        persisted["meta"] = meta
+        next_dataset = dict(dataset)
+        next_dataset["meta"] = meta
+        return next_dataset
+
+    def fake_call_semantic_llm(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "business_name": "LLM 支付宝账单",
+            "business_description": "LLM generated",
+            "key_fields": ["alipay_trade_no"],
+            "fields": [
+                {
+                    "raw_name": "source_row_key",
+                    "display_name": "LLM 行键",
+                    "semantic_type": "text",
+                    "business_role": "name",
+                    "description": "wrong",
+                    "confidence": 0.99,
+                },
+                {
+                    "raw_name": "alipay_trade_no",
+                    "display_name": "LLM 交易号",
+                    "semantic_type": "text",
+                    "business_role": "name",
+                    "description": "wrong",
+                    "confidence": 0.99,
+                },
+                {
+                    "raw_name": "raw.收入",
+                    "display_name": "LLM 收款",
+                    "semantic_type": "text",
+                    "business_role": "name",
+                    "description": "wrong",
+                    "confidence": 0.99,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_dataset_meta", fake_update_dataset_meta)
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_data_source_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources,
+        "_get_semantic_llm_config",
+        lambda: {"provider": "test", "model": "semantic-test", "base_url": "http://example", "api_key": "key"},
+    )
+    monkeypatch.setattr(data_sources, "_call_semantic_llm", fake_call_semantic_llm)
+
+    result = await data_sources._handle_data_source_refresh_dataset_semantic_profile(
+        {"auth_token": "token", "dataset_id": "dataset-alipay-1", "sample_limit": 20}
+    )
+
+    assert result["success"] is True
+    assert result["sample_source"] == "platform_alipay_bill_lines"
+    profile = persisted["meta"]["semantic_profile"]
+    assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
+    assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
+    assert profile["field_label_map"]["raw.收入"] == "收入"
+    source_row_key = next(item for item in profile["fields"] if item["raw_name"] == "source_row_key")
+    raw_income = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
+    assert source_row_key["source"] == "platform_preset"
+    assert source_row_key["field_source"] == "system"
+    assert raw_income["source"] == "platform_preset"
+    assert raw_income["field_source"] == "raw_bill"
+    assert profile["key_fields"] == ["source_row_key"]
+
+
+@pytest.mark.anyio
 async def test_trigger_dataset_collection_for_company_does_not_require_auth_token(
     monkeypatch,
 ) -> None:
