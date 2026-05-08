@@ -1676,6 +1676,8 @@ function normalizePlatformDetailDataset(
   const value = asRecord(raw);
   if (!value) return fallbackDataset;
   const base = normalizeDataset(value) ?? fallbackDataset;
+  const explicitDatasetCode = asString(value.dataset_code) ?? asString(value.datasetCode);
+  const explicitDatasetName = asString(value.dataset_name) ?? asString(value.datasetName);
 
   return {
     ...base,
@@ -1686,15 +1688,13 @@ function normalizePlatformDetailDataset(
       asString((base as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id) ??
       asString((fallbackDataset as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id),
     dataset_code:
-      asString(value.dataset_code) ??
-      asString(value.datasetCode) ??
-      base.dataset_code ??
-      fallbackDataset.dataset_code,
+      explicitDatasetCode ??
+      fallbackDataset.dataset_code ??
+      base.dataset_code,
     dataset_name:
-      asString(value.dataset_name) ??
-      asString(value.datasetName) ??
-      base.dataset_name ??
-      fallbackDataset.dataset_name,
+      explicitDatasetName ??
+      fallbackDataset.dataset_name ??
+      base.dataset_name,
     resource_key:
       asString(value.resource_key) ??
       asString(value.resourceKey) ??
@@ -2439,8 +2439,8 @@ export default function DataConnectionsPanel({
     }
   }, [authHeaders, authToken]);
 
-  const fetchRemoteSources = useCallback(async () => {
-    if (!authToken) return;
+  const fetchRemoteSources = useCallback(async (): Promise<DataSourceListItem[]> => {
+    if (!authToken) return [];
     setLoadingSources(true);
     setSourcesError('');
     try {
@@ -2450,7 +2450,7 @@ export default function DataConnectionsPanel({
       });
       if (response.status === 404 || response.status === 405 || response.status === 501) {
         setRemoteSources([]);
-        return;
+        return [];
       }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -2463,10 +2463,15 @@ export default function DataConnectionsPanel({
         : Array.isArray(data?.items)
         ? data.items
         : [];
-      setRemoteSources(list.map((item: unknown) => normalizeSourceItem(item)).filter(Boolean) as DataSourceListItem[]);
+      const nextSources = list
+        .map((item: unknown) => normalizeSourceItem(item))
+        .filter(Boolean) as DataSourceListItem[];
+      setRemoteSources(nextSources);
+      return nextSources;
     } catch (error) {
       setRemoteSources([]);
       setSourcesError(error instanceof Error ? error.message : '加载数据源列表失败');
+      return [];
     } finally {
       setLoadingSources(false);
     }
@@ -2917,8 +2922,8 @@ export default function DataConnectionsPanel({
   }, [authHeaders, authToken]);
 
   const fetchShops = useCallback(
-    async (platformCode: PlatformCode) => {
-      if (!authToken) return;
+    async (platformCode: PlatformCode): Promise<ShopConnection[]> => {
+      if (!authToken) return [];
       setLoadingShops(true);
       setShopError('');
       try {
@@ -2936,10 +2941,13 @@ export default function DataConnectionsPanel({
           : Array.isArray(data?.shops)
           ? data.shops
           : [];
-        setShops(list);
+        const nextShops = list as ShopConnection[];
+        setShops(nextShops);
+        return nextShops;
       } catch (error) {
         setShops([]);
         setShopError(error instanceof Error ? error.message : '加载店铺列表失败');
+        return [];
       } finally {
         setLoadingShops(false);
       }
@@ -4657,10 +4665,13 @@ export default function DataConnectionsPanel({
   );
 
   const findPlatformShopDatasets = useCallback(
-    (shop: ShopConnection): Array<{ source: DataSourceListItem; dataset: DataSourceDatasetSummary }> => {
+    (
+      shop: ShopConnection,
+      sourcesOverride: DataSourceListItem[] = remoteSources,
+    ): Array<{ source: DataSourceListItem; dataset: DataSourceDatasetSummary }> => {
       const shopId = shop.id.trim();
       const platformCode = shop.platform_code.trim().toLowerCase();
-      return remoteSources.flatMap((source) => {
+      return sourcesOverride.flatMap((source) => {
         if (source.source_kind !== 'platform_oauth') return [];
         if (source.provider_code.trim().toLowerCase() !== platformCode) return [];
         return (source.datasets ?? [])
@@ -4680,7 +4691,7 @@ export default function DataConnectionsPanel({
   );
 
   const loadPlatformShopDatasetDetails = useCallback(
-    async (shop: ShopConnection, forceReload = false) => {
+    async (shop: ShopConnection, forceReload = false, sourcesOverride?: DataSourceListItem[]) => {
       setShopDatasetActionError('');
       if (expandedShopDatasetId === shop.id && !forceReload) {
         setExpandedShopDatasetId(null);
@@ -4688,7 +4699,7 @@ export default function DataConnectionsPanel({
       }
       setExpandedShopDatasetId(shop.id);
 
-      const matches = findPlatformShopDatasets(shop);
+      const matches = findPlatformShopDatasets(shop, sourcesOverride);
       if (matches.length === 0) {
         setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: [] }));
         return;
@@ -4780,10 +4791,13 @@ export default function DataConnectionsPanel({
       return;
     }
     if (mode === 'platform' && selectedPlatform) {
-      await Promise.all([fetchShops(selectedPlatform.platform_code), fetchRemoteSources()]);
-      const expandedShop = shops.find((shop) => shop.id === expandedShopDatasetId);
+      const [nextShops, nextSources] = await Promise.all([
+        fetchShops(selectedPlatform.platform_code),
+        fetchRemoteSources(),
+      ]);
+      const expandedShop = nextShops.find((shop) => shop.id === expandedShopDatasetId);
       if (expandedShop) {
-        await loadPlatformShopDatasetDetails(expandedShop, true);
+        await loadPlatformShopDatasetDetails(expandedShop, true, nextSources);
       }
       return;
     }
@@ -4799,7 +4813,6 @@ export default function DataConnectionsPanel({
     mode,
     selectedConnectionView,
     selectedPlatform,
-    shops,
   ]);
 
   const refreshPlatformDatasetSemantic = useCallback(
