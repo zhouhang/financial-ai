@@ -1351,6 +1351,63 @@ def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> boo
     )
 
 
+COLLECTION_DRIVER_DB_QUERY = "db_query"
+COLLECTION_DRIVER_TAOBAO_ORDER_API = "taobao_order_api"
+COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT = "alipay_bill_download_import"
+
+
+def _collection_config_value(dataset_row: dict[str, Any] | None, *keys: str) -> str:
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    containers: list[dict[str, Any]] = []
+    collection_config = _dataset_collection_config(dataset)
+    if collection_config:
+        containers.append(collection_config)
+    for container_key in ("extract_config", "schema_summary", "meta", "sync_strategy"):
+        value = dataset.get(container_key)
+        if isinstance(value, dict):
+            containers.append(value)
+
+    for container in containers:
+        for key in keys:
+            text = _safe_text(container.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _resolve_collection_driver(
+    source_row: dict[str, Any] | None,
+    dataset_row: dict[str, Any] | None,
+) -> str:
+    source = source_row if isinstance(source_row, dict) else {}
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    explicit = _collection_config_value(
+        dataset,
+        "collection_driver",
+        "driver",
+        "collector",
+        "collection_type",
+    ).lower()
+    if explicit:
+        return explicit
+
+    storage = _dataset_storage_value(dataset)
+    if storage == "platform_order_lines":
+        return COLLECTION_DRIVER_TAOBAO_ORDER_API
+    if _dataset_uses_alipay_bill_records(dataset):
+        return COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
+
+    source_kind = _safe_text(source.get("source_kind") or dataset.get("source_kind")).lower()
+    provider_code = _safe_text(source.get("provider_code") or dataset.get("provider_code")).lower()
+    if source_kind == "database":
+        return COLLECTION_DRIVER_DB_QUERY
+    if source_kind == "platform_oauth" and provider_code in {"taobao", "tmall"}:
+        return COLLECTION_DRIVER_TAOBAO_ORDER_API
+    if source_kind == "platform_oauth" and provider_code == "alipay":
+        return COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
+    return ""
+
+
 def _dataset_collection_key_fields(dataset_row: dict[str, Any] | None) -> list[str]:
     if not dataset_row:
         return []
@@ -3728,6 +3785,45 @@ def _run_platform_order_collection(
     }
 
 
+def _run_alipay_bill_download_import(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    collection_config: dict[str, Any],
+    params: dict[str, Any],
+    checkpoint_before: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Delegate to the Alipay collector implemented by the platform auth workstream."""
+    try:
+        from platforms.connectors.alipay import run_alipay_bill_download_import
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("支付宝账单下载导入采集器未注册，回退到当前账单采集实现: %s", exc)
+        return _run_alipay_bill_collection(
+            company_id=company_id,
+            source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            collection_config=collection_config,
+            params=params,
+            checkpoint_before=checkpoint_before,
+        )
+
+    return run_alipay_bill_download_import(
+        company_id=company_id,
+        source_id=source_id,
+        dataset_id=dataset_id,
+        dataset_code=dataset_code,
+        resource_key=resource_key,
+        collection_config=collection_config,
+        params=params,
+        checkpoint_before=dict(checkpoint_before or {}),
+    )
+
+
 async def _run_connector_sync(
     source: dict[str, Any],
     arguments: dict[str, Any],
@@ -5854,12 +5950,13 @@ def _fail_sync_job(
     attempt_id: str,
     checkpoint_before: dict[str, Any],
     message: str,
+    collection_driver: str = "",
 ) -> None:
     auth_db.update_unified_sync_job_attempt(
         attempt_id=attempt_id,
         attempt_status="failed",
         error_message=message,
-        metrics={},
+        metrics={"collection_driver": collection_driver},
         checkpoint_after=checkpoint_before,
     )
     auth_db.update_unified_sync_job_status(
@@ -5868,6 +5965,19 @@ def _fail_sync_job(
         error_message=message,
         checkpoint_after=checkpoint_before,
         finish_job=True,
+    )
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        sync_job_id=job_id,
+        event_type="sync_failed",
+        event_level="error",
+        event_message=message,
+        event_payload={
+            "rows": 0,
+            "resource_key": resource_key,
+            "collection_driver": collection_driver,
+        },
     )
     auth_db.update_unified_data_source_health(
         data_source_id=source_id,
@@ -5901,9 +6011,8 @@ async def _execute_sync_job(
     try:
         params = dict(arguments.get("params") or {})
         dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
-        uses_platform_order_lines = _dataset_uses_platform_order_lines(dataset_row)
-        uses_alipay_bill_records = _dataset_uses_alipay_bill_records(dataset_row)
-        if uses_platform_order_lines:
+        collection_driver = _resolve_collection_driver(runtime_source, dataset_row)
+        if collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API:
             params.setdefault("collection_config", _dataset_collection_config(dataset_row))
             params.setdefault("dataset_id", _safe_text((dataset_row or {}).get("id")))
             params.setdefault("dataset_code", _safe_text((dataset_row or {}).get("dataset_code")))
@@ -5923,7 +6032,7 @@ async def _execute_sync_job(
                 params=params,
                 checkpoint_before=checkpoint_before,
             )
-        elif uses_alipay_bill_records:
+        elif collection_driver == COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT:
             config = _dataset_collection_config(dataset_row)
             bill_date = _resolve_alipay_bill_date(params)
             params.setdefault("collection_config", config)
@@ -5937,7 +6046,7 @@ async def _execute_sync_job(
                 "source_row_key",
             ]
             arguments = {**arguments, "params": params}
-            result = _run_alipay_bill_collection(
+            result = _run_alipay_bill_download_import(
                 company_id=company_id,
                 source_id=source_id,
                 dataset_id=_safe_text(params.get("dataset_id")),
@@ -5954,7 +6063,13 @@ async def _execute_sync_job(
         collection_summary: dict[str, Any] = {}
         collection_records: list[dict[str, Any]] = []
         collection_validation: dict[str, Any] = {}
-        if uses_platform_order_lines:
+        collection_storage = _safe_text((result.get("collection_summary") or {}).get("storage"))
+        uses_driver_managed_storage = collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API or (
+            collection_driver == COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
+            and bool(collection_storage)
+            and collection_storage != "dataset_collection_records"
+        )
+        if uses_driver_managed_storage:
             collection_summary = dict(result.get("collection_summary") or {})
         elif collection_context:
             collection_records, collection_validation = _build_collection_records(
@@ -5969,7 +6084,12 @@ async def _execute_sync_job(
                 attempt_id=attempt_id,
                 attempt_status="failed",
                 error_message=message,
-                metrics={"row_count": len(rows), "data_hash": data_hash, "collection_upserted": 0},
+                metrics={
+                    "row_count": len(rows),
+                    "data_hash": data_hash,
+                    "collection_upserted": 0,
+                    "collection_driver": collection_driver,
+                },
                 checkpoint_after=checkpoint_before,
             )
             auth_db.update_unified_sync_job_status(
@@ -5990,6 +6110,7 @@ async def _execute_sync_job(
                     "rows": len(rows),
                     "resource_key": resource_key,
                     "original_files": result.get("original_files") or [],
+                    "collection_driver": collection_driver,
                 },
             )
             auth_db.update_unified_data_source_health(
@@ -6011,9 +6132,10 @@ async def _execute_sync_job(
                 "reused": False,
                 "error": message,
                 "message": message,
+                "collection_driver": collection_driver,
             }
 
-        if collection_context and not uses_platform_order_lines:
+        if collection_context and not uses_driver_managed_storage:
             collection_summary = auth_db.upsert_dataset_collection_records(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -6055,6 +6177,7 @@ async def _execute_sync_job(
                 "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
                 "collection_skipped_empty_key": int(collection_validation.get("skipped_empty_key_count") or 0),
                 "collection_skipped_empty_key_samples": collection_validation.get("skipped_empty_key_samples") or [],
+                "collection_driver": collection_driver,
             },
             checkpoint_after=checkpoint_after,
         )
@@ -6077,6 +6200,7 @@ async def _execute_sync_job(
                 "resource_key": resource_key,
                 "collection_summary": collection_summary,
                 "original_files": result.get("original_files") or collection_summary.get("original_files") or [],
+                "collection_driver": collection_driver,
             },
         )
         auth_db.update_unified_data_source_health(
@@ -6099,6 +6223,7 @@ async def _execute_sync_job(
             "collection_summary": collection_summary,
             "reused": False,
             "message": "同步成功并写入采集记录",
+            "collection_driver": collection_driver,
         }
     except Exception as exc:  # noqa: BLE001
         message = str(exc) or "采集任务执行异常"
@@ -6111,8 +6236,14 @@ async def _execute_sync_job(
             attempt_id=attempt_id,
             checkpoint_before=checkpoint_before,
             message=message,
+            collection_driver=locals().get("collection_driver", ""),
         )
-        return {"success": False, "source_id": source_id, "error": message}
+        return {
+            "success": False,
+            "source_id": source_id,
+            "error": message,
+            "collection_driver": locals().get("collection_driver", ""),
+        }
 
 
 async def _handle_data_source_trigger_sync(
@@ -6311,9 +6442,18 @@ async def _trigger_dataset_collection_resolved(
     resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
     biz_date = _collection_biz_date_from_args(arguments)
     config = _dataset_collection_config(dataset_row)
+    collection_driver = _resolve_collection_driver({}, dataset_row)
+    if not collection_driver:
+        source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id) or {}
+        collection_driver = _resolve_collection_driver(source_row, dataset_row)
+    params["collection_driver"] = collection_driver
     key_fields = _dataset_collection_key_fields(dataset_row)
-    uses_platform_order_lines = _dataset_uses_platform_order_lines(dataset_row)
-    if not key_fields and not uses_platform_order_lines:
+    uses_platform_order_lines = collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API
+    uses_driver_managed_storage = collection_driver in {
+        COLLECTION_DRIVER_TAOBAO_ORDER_API,
+        COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT,
+    }
+    if not key_fields and not uses_driver_managed_storage:
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
     query = dict(params.get("query") or {})
     date_field = _collection_date_field(config)
@@ -6378,6 +6518,7 @@ async def _trigger_dataset_collection_resolved(
         "dataset_code": _safe_text(dataset_row.get("dataset_code")),
         "resource_key": resource_key,
         "biz_date": biz_date,
+        "collection_driver": collection_driver,
     }
 
 
