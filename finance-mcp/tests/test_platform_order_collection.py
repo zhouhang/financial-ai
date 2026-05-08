@@ -2241,3 +2241,19 @@ def test_semantic_status_waits_for_generation_when_collection_running_with_sampl
     assert status["message"] == "初始化中，暂不可刷新语义"
     assert status["can_refresh"] is False
     assert status["can_retry"] is False
+
+
+def test_platform_shop_detail_does_not_publish_dataset_by_itself() -> None:
+    dataset = _alipay_bill_dataset(id="dataset-alipay-1")
+    dataset["publish_status"] = "unpublished"
+    dataset["meta"] = {
+        "semantic_profile": {
+            "status": "generated_with_samples",
+            "fields": [{"raw_name": "source_row_key", "display_name": "账单行唯一键"}],
+        }
+    }
+
+    view = data_sources._build_dataset_view(dataset)
+
+    assert view["publish_status"] == "unpublished"
+    assert view["semantic_status"] == "generated_with_samples"
