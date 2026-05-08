@@ -8,6 +8,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from auth import db as auth_db
 
 
+def test_upsert_platform_alipay_bill_lines_empty_rows_returns_zero_counts(monkeypatch):
+    def raise_if_called():
+        raise AssertionError("get_conn should not be called for empty rows")
+
+    monkeypatch.setattr(auth_db, "get_conn", raise_if_called)
+
+    summary = auth_db.upsert_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        external_shop_id="alipay-shop-001",
+        bill_type="trade",
+        bill_date="2026-05-06",
+        rows=[],
+    )
+
+    assert summary == {
+        "input_count": 0,
+        "upserted_count": 0,
+        "inserted_count": 0,
+        "updated_count": 0,
+    }
+
+
 def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
     executed_sql: list[str] = []
     params_seen: list[tuple] = []
@@ -304,3 +329,62 @@ def test_list_platform_alipay_bill_lines_conflicting_resource_shop_returns_empty
 
     assert rows == []
     assert captured["execute_count"] == 0
+
+
+def test_get_platform_alipay_bill_line_stats_filters_dataset_shop_and_date(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+        def fetchone(self):
+            return {
+                "total_count": 3,
+                "biz_date_count": 1,
+                "first_seen_at": "2026-05-06T00:00:00",
+                "latest_seen_at": "2026-05-06T12:00:00",
+            }
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    result = auth_db.get_platform_alipay_bill_line_stats(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        biz_date="2026-05-06",
+    )
+
+    assert result["total_count"] == 3
+    assert result["biz_date_count"] == 1
+    assert "FROM platform_alipay_bill_lines" in str(captured["sql"])
+    assert "data_source_id = %s" in str(captured["sql"])
+    assert "dataset_id = %s" in str(captured["sql"])
+    assert "shop_connection_id = %s" in str(captured["sql"])
+    assert "bill_date = %s" in str(captured["sql"])
+    assert "COUNT(DISTINCT bill_date)" in str(captured["sql"])
+    assert captured["params"] == (
+        "company-001",
+        "source-001",
+        "dataset-001",
+        "shop-001",
+        "2026-05-06",
+    )
