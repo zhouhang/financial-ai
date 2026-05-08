@@ -2228,3 +2228,16 @@ def test_build_collection_status_detail_distinguishes_queued_and_not_started() -
     assert not_started["message"] == "尚未初始化"
     assert not_started["is_running"] is False
     assert not_started["can_initialize"] is True
+
+
+def test_semantic_status_waits_for_generation_when_collection_running_with_samples() -> None:
+    status = data_sources._build_semantic_status_detail(
+        _alipay_bill_dataset(meta={}),
+        has_sample_rows=True,
+        collection_running=True,
+    )
+
+    assert status["status"] == "waiting_for_generation"
+    assert status["message"] == "初始化中，暂不可刷新语义"
+    assert status["can_refresh"] is False
+    assert status["can_retry"] is False

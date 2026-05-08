@@ -4465,6 +4465,14 @@ def _build_semantic_status_detail(
             "can_retry": bool(has_sample_rows) and not collection_running,
             "raw_status": semantic_status,
         }
+    if collection_running and has_sample_rows:
+        return {
+            "status": "waiting_for_generation",
+            "message": "初始化中，暂不可刷新语义",
+            "can_refresh": False,
+            "can_retry": False,
+            "raw_status": semantic_status or "missing",
+        }
     if collection_running or not has_sample_rows:
         return {
             "status": "waiting_for_samples",
