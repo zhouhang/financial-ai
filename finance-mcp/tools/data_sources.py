@@ -1342,6 +1342,10 @@ def _dataset_uses_platform_order_lines(dataset_row: dict[str, Any] | None) -> bo
     return _dataset_storage_value(dataset_row) == "platform_order_lines"
 
 
+def _dataset_uses_platform_alipay_bill_lines(dataset_row: dict[str, Any] | None) -> bool:
+    return _dataset_storage_value(dataset_row) in {"platform_alipay_bill_lines", "alipay_bill_lines"}
+
+
 def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> bool:
     config = _dataset_collection_config(dataset_row)
     resource_key = _safe_text((dataset_row or {}).get("resource_key"))
@@ -3603,7 +3607,7 @@ def _run_alipay_bill_collection(
                 "error": message,
                 "message": message,
                 "collection_summary": {
-                    "storage": "dataset_collection_records",
+                    "storage": "platform_alipay_bill_lines",
                     "platform_code": "alipay",
                     "bill_type": bill_type,
                     "bill_date": bill_date,
@@ -3622,23 +3626,35 @@ def _run_alipay_bill_collection(
         fetch_result = connector.fetch_bill_rows(**fetch_kwargs)
 
     rows, original_files = _normalize_bill_fetch_result(fetch_result)
-    summary = {
-        "storage": "dataset_collection_records",
-        "platform_code": "alipay",
-        "bill_type": bill_type,
-        "bill_date": bill_date,
-        "record_count": len(rows),
-        "original_files": original_files,
-        "dataset_id": dataset_id,
-        "dataset_code": dataset_code,
-        "biz_date": bill_date,
-    }
+    collection_summary = auth_db.upsert_platform_alipay_bill_lines(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        shop_connection_id=shop_connection_id,
+        external_shop_id=_safe_text(collection_config.get("external_shop_id") or shop.get("external_shop_id")),
+        bill_type=bill_type,
+        bill_date=bill_date,
+        rows=rows,
+    )
+    collection_summary.update(
+        {
+            "storage": "platform_alipay_bill_lines",
+            "platform_code": "alipay",
+            "bill_type": bill_type,
+            "bill_date": bill_date,
+            "record_count": len(rows),
+            "original_files": original_files,
+            "dataset_id": dataset_id,
+            "dataset_code": dataset_code,
+            "biz_date": bill_date,
+        }
+    )
     return {
         "success": True,
         "healthy": True,
         "rows": rows,
         "original_files": original_files,
-        "collection_summary": summary,
+        "collection_summary": collection_summary,
         "next_checkpoint": {
             **dict(checkpoint_before or {}),
             "last_bill_date": bill_date,

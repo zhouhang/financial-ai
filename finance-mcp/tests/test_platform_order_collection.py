@@ -47,7 +47,7 @@ def _alipay_bill_dataset(**overrides: Any) -> dict[str, Any]:
         "dataset_code": "alipay_trade_bill_shop_1",
         "resource_key": "alipay_bill:trade:shop-alipay-1",
         "extract_config": {
-            "storage": "dataset_collection_records",
+            "storage": "platform_alipay_bill_lines",
             "platform_code": "alipay",
             "shop_connection_id": "shop-alipay-1",
             "bill_type": "trade",
@@ -62,7 +62,10 @@ def _alipay_bill_dataset(**overrides: Any) -> dict[str, Any]:
             "bill_type": "trade",
             "date_field": "bill_date",
         },
-        "schema_summary": {"storage": "dataset_collection_records"},
+        "schema_summary": {
+            "source": "alipay_bill_lines",
+            "storage": "platform_alipay_bill_lines",
+        },
         "meta": {"merchant_display_name": "福游网络"},
     }
     dataset.update(overrides)
@@ -315,10 +318,10 @@ async def test_execute_sync_job_routes_platform_order_rows_to_order_line_storage
 
 
 @pytest.mark.anyio
-async def test_execute_sync_job_routes_alipay_bill_rows_to_collection_records(
+async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_line_storage(
     monkeypatch,
 ) -> None:
-    calls: dict[str, Any] = {}
+    calls: dict[str, Any] = {"upsert_dataset_collection_records": 0}
 
     monkeypatch.setattr(
         data_sources.auth_db,
@@ -326,7 +329,7 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_collection_records(
         lambda company_id, dataset_id: _alipay_bill_dataset(),
     )
 
-    def fake_run_alipay_bill_collection(**kwargs: Any) -> dict[str, Any]:
+    def fake_run_alipay_bill_download_import(**kwargs: Any) -> dict[str, Any]:
         calls["alipay_kwargs"] = kwargs
         return {
             "success": True,
@@ -340,15 +343,33 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_collection_records(
                 }
             ],
             "original_files": [{"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}],
+            "collection_summary": {
+                "storage": "platform_alipay_bill_lines",
+                "platform_code": "alipay",
+                "bill_type": "trade",
+                "bill_date": "2026-05-06",
+                "input_count": 1,
+                "upserted_count": 1,
+                "inserted_count": 1,
+                "updated_count": 0,
+                "dataset_id": "dataset-alipay-1",
+                "dataset_code": "alipay_trade_bill_shop_1",
+                "biz_date": "2026-05-06",
+                "record_count": 1,
+                "original_files": [{"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}],
+            },
             "message": "支付宝账单采集成功",
         }
 
-    monkeypatch.setattr(data_sources, "_run_alipay_bill_collection", fake_run_alipay_bill_collection)
+    monkeypatch.setattr(
+        data_sources,
+        "_run_alipay_bill_download_import",
+        fake_run_alipay_bill_download_import,
+    )
     monkeypatch.setattr(
         data_sources.auth_db,
         "upsert_dataset_collection_records",
-        lambda **kwargs: calls.setdefault("upsert_dataset_collection_records", kwargs)
-        or {"input_count": len(kwargs["records"]), "upserted_count": len(kwargs["records"])},
+        lambda **kwargs: calls.__setitem__("upsert_dataset_collection_records", 1),
     )
     monkeypatch.setattr(
         data_sources.auth_db,
@@ -388,15 +409,10 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_collection_records(
     )
 
     assert result["success"] is True
+    assert calls["upsert_dataset_collection_records"] == 0
     assert calls["alipay_kwargs"]["params"]["bill_date"] == "2026-05-06"
-    upsert = calls["upsert_dataset_collection_records"]
-    assert upsert["dataset_id"] == "dataset-alipay-1"
-    assert upsert["biz_date"] == "2026-05-06"
-    assert upsert["records"][0]["item_key_values"] == {
-        "bill_type": "trade",
-        "bill_date": "2026-05-06",
-        "source_row_key": "row-1",
-    }
+    assert result["collection_summary"]["storage"] == "platform_alipay_bill_lines"
+    assert calls["attempt"]["metrics"]["collection_upserted"] == 1
     assert calls["event"]["event_payload"]["original_files"] == [
         {"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}
     ]
@@ -790,6 +806,11 @@ def test_run_alipay_bill_collection_uses_current_merchant_token(monkeypatch) -> 
             ]
 
     monkeypatch.setattr(data_sources, "build_platform_connector", lambda app_config: FakeConnector())
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_platform_alipay_bill_lines",
+        lambda **kwargs: {"input_count": len(kwargs["rows"]), "upserted_count": len(kwargs["rows"])},
+    )
 
     result = data_sources._run_alipay_bill_collection(
         company_id="company-1",
@@ -807,6 +828,104 @@ def test_run_alipay_bill_collection_uses_current_merchant_token(monkeypatch) -> 
     assert calls["fetch_bill_rows"]["bill_date"] == "2026-05-06"
     assert calls["fetch_bill_rows"]["merchant_display_name"] == "福游网络"
     assert result["collection_summary"]["record_count"] == 1
+
+
+def test_run_alipay_bill_collection_upserts_platform_bill_lines(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+    collection_config = _alipay_bill_dataset()["extract_config"]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_connection_id: {
+            "id": shop_connection_id,
+            "company_id": "company-1",
+            "platform_code": "alipay",
+            "external_shop_id": "merchant-1",
+            "external_shop_name": "福游网络",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_current_shop_authorization",
+        lambda **kwargs: {
+            "id": "auth-alipay-1",
+            "platform_app_id": "app-alipay-1",
+            "auth_status": "authorized",
+            "access_token": "current-app-auth-token",
+            "refresh_token": "refresh-token",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_platform_app_for_authorization",
+        lambda **kwargs: {
+            "id": "app-alipay-1",
+            "company_id": data_sources.SERVICE_PROVIDER_COMPANY_ID,
+            "platform_code": "alipay",
+            "app_name": "Tally Alipay",
+            "app_key": "app-id",
+            "app_secret": "private-key",
+            "app_type": "isv",
+            "auth_base_url": "",
+            "token_url": "",
+            "refresh_url": "",
+            "scopes_config": [],
+            "extra": {"mode": "mock"},
+            "status": "active",
+        },
+    )
+
+    class FakeConnector:
+        def fetch_bill_rows(self, **kwargs: Any) -> dict[str, Any]:
+            calls["fetch_bill_rows"] = kwargs
+            return {
+                "rows": [
+                    {
+                        "bill_type": "trade",
+                        "bill_date": "2026-05-06",
+                        "source_row_key": "row-1",
+                        "amount": "12.30",
+                    }
+                ],
+                "original_files": [{"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}],
+            }
+
+    monkeypatch.setattr(data_sources, "build_platform_connector", lambda app_config: FakeConnector())
+
+    def fake_upsert_platform_alipay_bill_lines(**kwargs: Any) -> dict[str, int]:
+        calls["upsert_platform_alipay_bill_lines"] = kwargs
+        return {"input_count": len(kwargs["rows"]), "upserted_count": len(kwargs["rows"])}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_platform_alipay_bill_lines",
+        fake_upsert_platform_alipay_bill_lines,
+    )
+
+    result = data_sources._run_alipay_bill_collection(
+        company_id="company-1",
+        source_id="source-alipay-1",
+        dataset_id="dataset-alipay-1",
+        dataset_code="alipay_trade_bill_shop_1",
+        resource_key="alipay_bill:trade:shop-alipay-1",
+        collection_config=collection_config,
+        params={"biz_date": "2026-05-06"},
+        checkpoint_before={"last_bill_date": "2026-05-05", "custom": "keep"},
+    )
+
+    assert result["success"] is True
+    assert result["collection_summary"]["storage"] == "platform_alipay_bill_lines"
+    assert result["collection_summary"]["record_count"] == 1
+    assert result["next_checkpoint"]["custom"] == "keep"
+    upsert = calls["upsert_platform_alipay_bill_lines"]
+    assert upsert["company_id"] == "company-1"
+    assert upsert["data_source_id"] == "source-alipay-1"
+    assert upsert["dataset_id"] == "dataset-alipay-1"
+    assert upsert["shop_connection_id"] == "shop-alipay-1"
+    assert upsert["external_shop_id"] == "merchant-1"
+    assert upsert["bill_type"] == "trade"
+    assert upsert["bill_date"] == "2026-05-06"
 
 
 def test_run_alipay_bill_collection_refreshes_expiring_token_before_fetch(monkeypatch) -> None:
