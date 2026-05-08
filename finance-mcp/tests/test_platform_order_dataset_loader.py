@@ -186,3 +186,46 @@ def test_load_alipay_bill_lines_alias_from_dataset_ref(monkeypatch):
 
     assert list(df["merchant_order_no"]) == ["M002"]
     assert list(df["amount"]) == ["8.00"]
+
+
+def test_load_alipay_bill_lines_alias_accepts_date_field_metadata(monkeypatch):
+    def fake_columns(table_name: str) -> set[str]:
+        assert table_name == "platform_alipay_bill_lines"
+        return {
+            "company_id",
+            "data_source_id",
+            "dataset_id",
+            "shop_connection_id",
+            "bill_type",
+            "bill_date",
+            "payload",
+            "updated_at",
+        }
+
+    def fake_query(*, source_key: str, query: dict):
+        assert source_key == "source-alipay-001"
+        assert query["dataset_id"] == "dataset-alipay-001"
+        assert query["resource_key"] == "alipay_bill:trade:shop-alipay-001"
+        assert query["bill_date"] == "2026-05-06"
+        assert query["date_field"] == "bill_date"
+        return [{"payload": {"merchant_order_no": "M004", "amount": "10.00"}}]
+
+    monkeypatch.setattr(dataset_loader, "_table_columns", fake_columns)
+    monkeypatch.setattr(dataset_loader, "_load_platform_alipay_bill_line_rows", fake_query)
+
+    df = dataset_loader.load_dataset_as_df(
+        {
+            "source_type": "alipay_bill_lines",
+            "source_key": "source-alipay-001",
+            "query": {
+                "dataset_id": "dataset-alipay-001",
+                "resource_key": "alipay_bill:trade:shop-alipay-001",
+                "bill_date": "2026-05-06",
+                "date_field": "bill_date",
+            },
+        },
+        "支付宝交易账单",
+    )
+
+    assert list(df["merchant_order_no"]) == ["M004"]
+    assert list(df["amount"]) == ["10.00"]

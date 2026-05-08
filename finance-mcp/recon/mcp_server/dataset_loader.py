@@ -60,6 +60,7 @@ _PLATFORM_ALIPAY_BILL_LINES_QUERY_ALLOWED_KEYS = {
     "resource_key",
     "biz_date",
     "bill_date",
+    "date_field",
     "bill_type",
     "filters",
     "order_by",
