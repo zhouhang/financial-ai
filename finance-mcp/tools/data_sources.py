@@ -6669,6 +6669,20 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             limit=sample_limit,
             offset=0,
         )
+    elif _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        stats = auth_db.get_platform_alipay_bill_line_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+        )
+        collection_records = auth_db.list_platform_alipay_bill_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=sample_limit,
+            offset=0,
+        )
     else:
         stats = auth_db.get_dataset_collection_record_stats(
             company_id=company_id,
@@ -6741,6 +6755,23 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
             dataset_id=dataset_id,
             biz_date=_safe_text(arguments.get("biz_date")) or None,
         )
+    elif _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        records = auth_db.list_platform_alipay_bill_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key or None,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+            filters={"source_row_key": _safe_text(arguments.get("item_key")) or None},
+            limit=limit,
+            offset=offset,
+        )
+        stats = auth_db.get_platform_alipay_bill_line_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+        )
     else:
         records = auth_db.list_dataset_collection_records(
             company_id=company_id,
@@ -6806,6 +6837,30 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             "count": len(rows),
             "rows": rows,
             "message": "已返回平台订单明细样例",
+        }
+    if _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        records = auth_db.list_platform_alipay_bill_lines(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
+            resource_key=(
+                _safe_text((dataset_row or {}).get("resource_key"))
+                or _resource_key_from_args(arguments)
+            ),
+            limit=max(1, min(limit, 100)),
+            offset=0,
+        )
+        rows = [
+            dict(item.get("payload") or item)
+            for item in records
+            if isinstance(item, dict)
+        ]
+        return {
+            "success": True,
+            "source_id": source_id,
+            "count": len(rows),
+            "rows": rows,
+            "message": "已返回支付宝账单样例",
         }
     collection_rows = _load_dataset_sample_rows_from_collection_records(
         company_id=company_id,

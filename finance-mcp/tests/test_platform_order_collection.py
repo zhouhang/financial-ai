@@ -72,6 +72,19 @@ def _alipay_bill_dataset(**overrides: Any) -> dict[str, Any]:
     return dataset
 
 
+def _alipay_platform_source(**overrides: Any) -> dict[str, Any]:
+    source = {
+        "id": "source-alipay-1",
+        "company_id": "company-1",
+        "source_kind": "platform_oauth",
+        "provider_code": "alipay",
+        "status": "active",
+        "is_enabled": True,
+    }
+    source.update(overrides)
+    return source
+
+
 def _authorized_shop(monkeypatch, authorization: dict[str, Any]) -> None:
     monkeypatch.setattr(
         data_sources.auth_db,
@@ -1362,3 +1375,192 @@ async def test_collection_detail_routes_platform_order_dataset_to_order_line_hel
     assert result["success"] is True
     assert result["collection_stats"] == {"total_count": 2}
     assert result["rows"] == [{"tid": "T1"}, {"tid": "T2"}]
+
+
+@pytest.mark.anyio
+async def test_list_collection_records_reads_alipay_platform_bill_lines(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _alipay_bill_dataset(id=dataset_id),
+    )
+
+    def fake_list_platform_alipay_bill_lines(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_platform_alipay_bill_lines"] = kwargs
+        return [{"payload": {"source_row_key": "row-1", "amount": "12.30"}}]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        fake_list_platform_alipay_bill_lines,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_alipay_bill_line_stats",
+        lambda **kwargs: {"total_count": 1, "biz_date_count": 1},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+
+    result = await data_sources._handle_data_source_list_collection_records(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+            "biz_date": "2026-05-06",
+            "item_key": "row-1",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["records"][0]["payload"]["source_row_key"] == "row-1"
+    assert result["stats"]["total_count"] == 1
+    assert calls["list_platform_alipay_bill_lines"]["filters"] == {
+        "source_row_key": "row-1"
+    }
+    assert calls["list_platform_alipay_bill_lines"]["biz_date"] == "2026-05-06"
+
+
+@pytest.mark.anyio
+async def test_preview_reads_alipay_platform_bill_lines(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _alipay_bill_dataset(id=dataset_id),
+    )
+
+    def fake_list_platform_alipay_bill_lines(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_platform_alipay_bill_lines"] = kwargs
+        return [{"payload": {"source_row_key": "row-1", "amount": "12.30"}}]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        fake_list_platform_alipay_bill_lines,
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+
+    result = await data_sources._handle_data_source_preview(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+            "limit": 10,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["rows"] == [{"source_row_key": "row-1", "amount": "12.30"}]
+    assert result["message"] == "已返回支付宝账单样例"
+    assert calls["list_platform_alipay_bill_lines"]["dataset_id"] == "dataset-alipay-1"
+
+
+@pytest.mark.anyio
+async def test_collection_detail_reads_alipay_platform_bill_lines(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: _alipay_bill_dataset(id=dataset_id),
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(
+        data_sources,
+        "_enrich_jobs_with_latest_attempts",
+        lambda company_id, jobs: jobs,
+    )
+
+    def fake_list_platform_alipay_bill_lines(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_platform_alipay_bill_lines"] = kwargs
+        return [{"payload": {"source_row_key": "row-1", "amount": "12.30"}}]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        fake_list_platform_alipay_bill_lines,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_alipay_bill_line_stats",
+        lambda **kwargs: {"total_count": 1, "biz_date_count": 1},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_dataset_collection_record_stats",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+
+    result = await data_sources._handle_data_source_get_dataset_collection_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+            "sample_limit": 10,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["collection_stats"]["total_count"] == 1
+    assert result["collection_records"][0]["payload"]["source_row_key"] == "row-1"
+    assert result["rows"] == [{"source_row_key": "row-1", "amount": "12.30"}]
+    assert calls["list_platform_alipay_bill_lines"]["resource_key"] == (
+        "alipay_bill:trade:shop-alipay-1"
+    )
