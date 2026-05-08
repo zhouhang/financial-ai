@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -17,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Store,
   Trash2,
 } from 'lucide-react';
@@ -255,6 +256,41 @@ interface DatasetCollectionDetailDialogState {
   detail: Record<string, unknown> | null;
 }
 
+interface PlatformDatasetFieldGroup {
+  key: string;
+  label: string;
+  defaultOpen: boolean;
+  fields: Record<string, unknown>[];
+}
+
+interface PlatformDatasetCollectionStatus {
+  status: string;
+  message: string;
+  canInitialize: boolean;
+  canRetryInitialize: boolean;
+  latestJob: Record<string, unknown> | null;
+}
+
+interface PlatformDatasetSemanticStatus {
+  status: string;
+  message: string;
+  canRefresh: boolean;
+  canRetry: boolean;
+}
+
+interface PlatformShopDatasetDetail {
+  sourceId: string;
+  source: DataSourceListItem;
+  dataset: DataSourceDatasetSummary;
+  collectionStatus: PlatformDatasetCollectionStatus;
+  semanticStatus: PlatformDatasetSemanticStatus;
+  fieldGroups: PlatformDatasetFieldGroup[];
+  rows: Record<string, unknown>[];
+  loading: boolean;
+  error: string;
+  loadedAt: string;
+}
+
 interface EditableDatasetSemanticFieldRow {
   id: string;
   rawName: string;
@@ -342,6 +378,46 @@ function formatSampleCellValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function platformDatasetStatusClass(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (['succeeded', 'success', 'completed', 'generated', 'generated_with_samples', 'ready'].includes(normalized)) {
+    return 'bg-green-50 text-green-700';
+  }
+  if (['running', 'queued', 'pending', 'loading', 'initializing', 'refreshing'].includes(normalized)) {
+    return 'bg-blue-50 text-blue-700';
+  }
+  if (['failed', 'error'].includes(normalized)) return 'bg-red-50 text-red-700';
+  if (['missing', 'not_started', 'none'].includes(normalized)) return 'bg-amber-50 text-amber-700';
+  return 'bg-surface-accent text-blue-600';
+}
+
+function displayFieldName(field: Record<string, unknown>): string {
+  return (
+    asString(field.display_name) ??
+    asString(field.displayName) ??
+    asString(field.label) ??
+    asString(field.business_name) ??
+    rawFieldName(field) ??
+    '字段'
+  );
+}
+
+function rawFieldName(field: Record<string, unknown>): string {
+  return (
+    asString(field.raw_name) ??
+    asString(field.rawName) ??
+    asString(field.field_name) ??
+    asString(field.name) ??
+    asString(field.key) ??
+    ''
+  );
+}
+
+function formatPreviewCell(value: unknown): string {
+  const formatted = formatSampleCellValue(value);
+  return formatted.length > 80 ? `${formatted.slice(0, 80)}...` : formatted;
 }
 
 function isCompactDatePartitionField(fieldName: string): boolean {
@@ -1516,6 +1592,80 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
   };
 }
 
+function normalizePlatformFieldGroups(raw: unknown): PlatformDatasetFieldGroup[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const value = asRecord(item);
+      if (!value) return null;
+      const key = asString(value.key) ?? asString(value.group_key) ?? '';
+      const label = asString(value.label) ?? asString(value.name) ?? key;
+      const fields = Array.isArray(value.fields)
+        ? value.fields.filter((field): field is Record<string, unknown> => Boolean(asRecord(field)))
+        : [];
+      if (!key && !label && fields.length === 0) return null;
+      return {
+        key: key || label || 'fields',
+        label: label || key || '字段',
+        defaultOpen: asBoolean(value.default_open) ?? true,
+        fields,
+      };
+    })
+    .filter((item): item is PlatformDatasetFieldGroup => Boolean(item));
+}
+
+function normalizePlatformDatasetDetail(
+  source: DataSourceListItem,
+  dataset: DataSourceDatasetSummary,
+  raw: unknown,
+): PlatformShopDatasetDetail {
+  const value = asRecord(raw) ?? {};
+  const nextDataset = normalizeDataset(value.dataset) ?? dataset;
+  const collectionStatusRaw = asRecord(value.collection_status) ?? {};
+  const semanticStatusRaw = asRecord(value.semantic_status) ?? {};
+  const rows = Array.isArray(value.rows)
+    ? value.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item))).slice(0, 20)
+    : [];
+
+  return {
+    sourceId: source.id,
+    source,
+    dataset: nextDataset,
+    collectionStatus: {
+      status:
+        asString(collectionStatusRaw.status) ??
+        asString(collectionStatusRaw.state) ??
+        asString(nextDataset.status) ??
+        'unknown',
+      message:
+        asString(collectionStatusRaw.message) ??
+        asString(collectionStatusRaw.error_message) ??
+        '',
+      canInitialize: asBoolean(collectionStatusRaw.can_initialize) ?? false,
+      canRetryInitialize: asBoolean(collectionStatusRaw.can_retry_initialize) ?? false,
+      latestJob: asRecord(collectionStatusRaw.latest_job),
+    },
+    semanticStatus: {
+      status:
+        asString(semanticStatusRaw.status) ??
+        asString(nextDataset.semantic_status) ??
+        asString(readDatasetSemanticRecord(nextDataset).status) ??
+        'unknown',
+      message:
+        asString(semanticStatusRaw.message) ??
+        asString(semanticStatusRaw.error_message) ??
+        '',
+      canRefresh: asBoolean(semanticStatusRaw.can_refresh) ?? false,
+      canRetry: asBoolean(semanticStatusRaw.can_retry) ?? false,
+    },
+    fieldGroups: normalizePlatformFieldGroups(value.field_groups),
+    rows,
+    loading: false,
+    error: '',
+    loadedAt: new Date().toISOString(),
+  };
+}
+
 function normalizeEvent(raw: unknown): DataSourceEventSummary | null {
   const value = asRecord(raw);
   if (!value) return null;
@@ -1971,6 +2121,9 @@ export default function DataConnectionsPanel({
   const [shopError, setShopError] = useState<string>('');
   const [platformAppConfigs, setPlatformAppConfigs] = useState<Record<string, PlatformAppConfigFormState>>({});
   const [actioningShopId, setActioningShopId] = useState<string | null>(null);
+  const [expandedShopDatasetId, setExpandedShopDatasetId] = useState<string | null>(null);
+  const [shopDatasetDetails, setShopDatasetDetails] = useState<Record<string, PlatformShopDatasetDetail[]>>({});
+  const [shopDatasetActionError, setShopDatasetActionError] = useState('');
   const [callbackPayload, setCallbackPayload] = useState<AuthCallbackPayload | null>(initialCallback);
   const [launchingAuthPlatform, setLaunchingAuthPlatform] = useState<PlatformCode | null>(null);
   const [alipayAuthDialog, setAlipayAuthDialog] = useState<AlipayAuthDialogState | null>(null);
@@ -2042,6 +2195,9 @@ export default function DataConnectionsPanel({
     setDatasetActionNotice('');
     setShops([]);
     setShopError('');
+    setExpandedShopDatasetId(null);
+    setShopDatasetDetails({});
+    setShopDatasetActionError('');
   }, [selectedConnectionView, selectedSourceKind, selectedCollaborationProvider]);
 
   useEffect(() => {
@@ -4361,6 +4517,171 @@ export default function DataConnectionsPanel({
       await refreshDatasetSemanticSuggestions(source, nextDataset);
     },
     [authToken, draftSourceIdSet, refreshDatasetSemanticSuggestions, requestDatasetDetail, updateDatasetInState],
+  );
+
+  const findPlatformShopDatasets = useCallback(
+    (shop: ShopConnection): Array<{ source: DataSourceListItem; dataset: DataSourceDatasetSummary }> => {
+      const shopId = shop.id.trim();
+      const platformCode = shop.platform_code.trim().toLowerCase();
+      return remoteSources.flatMap((source) => {
+        if (source.source_kind !== 'platform_oauth') return [];
+        if (source.provider_code.trim().toLowerCase() !== platformCode) return [];
+        return (source.datasets ?? [])
+          .filter((dataset) => {
+            const resourceKey = (dataset.resource_key || dataset.dataset_code || '').trim();
+            if (platformCode === 'taobao') return resourceKey === `taobao_order_lines:${shopId}`;
+            if (platformCode === 'alipay') {
+              const parts = resourceKey.split(':');
+              return parts.length >= 3 && parts[0] === 'alipay_bill' && parts[2] === shopId;
+            }
+            return false;
+          })
+          .map((dataset) => ({ source, dataset }));
+      });
+    },
+    [remoteSources],
+  );
+
+  const loadPlatformShopDatasetDetails = useCallback(
+    async (shop: ShopConnection, forceReload = false) => {
+      setShopDatasetActionError('');
+      if (expandedShopDatasetId === shop.id && !forceReload) {
+        setExpandedShopDatasetId(null);
+        return;
+      }
+      setExpandedShopDatasetId(shop.id);
+
+      const matches = findPlatformShopDatasets(shop);
+      if (matches.length === 0) {
+        setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: [] }));
+        return;
+      }
+
+      const loadingDetails: PlatformShopDatasetDetail[] = matches.map(({ source, dataset }) => ({
+        sourceId: source.id,
+        source,
+        dataset,
+        collectionStatus: {
+          status: 'loading',
+          message: '',
+          canInitialize: false,
+          canRetryInitialize: false,
+          latestJob: null,
+        },
+        semanticStatus: {
+          status: 'loading',
+          message: '',
+          canRefresh: false,
+          canRetry: false,
+        },
+        fieldGroups: [],
+        rows: [],
+        loading: true,
+        error: '',
+        loadedAt: '',
+      }));
+      setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: loadingDetails }));
+
+      if (!authToken) {
+        setShopDatasetDetails((prev) => ({
+          ...prev,
+          [shop.id]: loadingDetails.map((detail) => ({
+            ...detail,
+            loading: false,
+            error: '当前环境未连接后端数据集详情接口。',
+          })),
+        }));
+        return;
+      }
+
+      const loadedDetails = await Promise.all(
+        matches.map(async ({ source, dataset }) => {
+          const resourceKey = dataset.resource_key || dataset.dataset_code;
+          const baseDetail = loadingDetails.find(
+            (detail) => detail.sourceId === source.id && detail.dataset.id === dataset.id,
+          );
+          if (draftSourceIdSet.has(source.id)) {
+            return {
+              ...(baseDetail as PlatformShopDatasetDetail),
+              loading: false,
+              error: '草稿连接尚未创建后端数据集。',
+            };
+          }
+          try {
+            const params = new URLSearchParams({
+              resource_key: resourceKey,
+              limit: '10',
+              sample_limit: '20',
+            });
+            const response = await fetch(
+              `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/collection-detail?${params.toString()}`,
+              { headers: authHeaders },
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(String(data?.detail || data?.message || '获取数据集详情失败'));
+            }
+            return normalizePlatformDatasetDetail(source, dataset, data);
+          } catch (error) {
+            return {
+              ...(baseDetail as PlatformShopDatasetDetail),
+              loading: false,
+              error: error instanceof Error ? error.message : '获取数据集详情失败',
+            };
+          }
+        }),
+      );
+      setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: loadedDetails }));
+    },
+    [authHeaders, authToken, draftSourceIdSet, expandedShopDatasetId, findPlatformShopDatasets],
+  );
+
+  const refreshPlatformDatasetSemantic = useCallback(
+    async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
+      setShopDatasetActionError('');
+      const refreshedDataset = await refreshDatasetSemanticSuggestions(detail.source, detail.dataset);
+      if (refreshedDataset) {
+        await loadPlatformShopDatasetDetails(shop, true);
+        setExpandedShopDatasetId(shop.id);
+      }
+    },
+    [loadPlatformShopDatasetDetails, refreshDatasetSemanticSuggestions],
+  );
+
+  const retryPlatformDatasetCollection = useCallback(
+    async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
+      setShopDatasetActionError('');
+      if (!authToken || draftSourceIdSet.has(detail.sourceId)) {
+        setShopDatasetActionError('当前环境未连接后端初始化接口。');
+        return;
+      }
+      try {
+        const resourceKey = detail.dataset.resource_key || detail.dataset.dataset_code;
+        const response = await fetch(
+          `/api/data-sources/${detail.sourceId}/datasets/${encodeURIComponent(detail.dataset.id)}/collection`,
+          {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({
+              resource_key: resourceKey,
+              params: {
+                resource_key: resourceKey,
+                query: { resource_key: resourceKey },
+              },
+            }),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '初始化数据集失败'));
+        }
+        await loadPlatformShopDatasetDetails(shop, true);
+        setExpandedShopDatasetId(shop.id);
+      } catch (error) {
+        setShopDatasetActionError(error instanceof Error ? error.message : '初始化数据集失败');
+      }
+    },
+    [authHeaders, authToken, draftSourceIdSet, loadPlatformShopDatasetDetails],
   );
 
   const openDatasetCollectionDetail = useCallback(
@@ -7636,6 +7957,221 @@ export default function DataConnectionsPanel({
     </div>
   );
 
+  const renderPlatformDatasetDetail = (shop: ShopConnection) => {
+    if (expandedShopDatasetId !== shop.id) return null;
+    const details = shopDatasetDetails[shop.id] ?? [];
+
+    return (
+      <tr className="border-t border-border-subtle bg-surface-secondary/70">
+        <td colSpan={6} className="px-4 py-4">
+          {shopDatasetActionError && (
+            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+              {shopDatasetActionError}
+            </div>
+          )}
+          {details.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface px-3 py-3 text-sm text-text-secondary">
+              未找到该店铺的固定数据集。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {details.map((detail) => {
+                const datasetName =
+                  detail.dataset.business_name ||
+                  detail.dataset.dataset_name ||
+                  detail.dataset.dataset_code;
+                const collectionStatus = detail.collectionStatus.status || 'unknown';
+                const semanticStatus = detail.semanticStatus.status || 'unknown';
+                const isCollectionRunning = ['running', 'queued', 'pending', 'loading', 'initializing'].includes(
+                  collectionStatus.toLowerCase(),
+                );
+                const isSemanticRunning = ['running', 'queued', 'pending', 'loading', 'refreshing'].includes(
+                  semanticStatus.toLowerCase(),
+                );
+                const canRetryCollection =
+                  !isCollectionRunning &&
+                  (detail.collectionStatus.canInitialize || detail.collectionStatus.canRetryInitialize);
+                const canRefreshSemantic =
+                  !isSemanticRunning &&
+                  (detail.semanticStatus.canRefresh || detail.semanticStatus.canRetry);
+                const previewRows = detail.rows.slice(0, 20);
+                const previewColumns = buildSampleTableColumns(previewRows, 12);
+
+                return (
+                  <div key={`${detail.sourceId}-${detail.dataset.id}`} className="rounded-xl border border-border bg-surface px-4 py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-text-primary">{datasetName}</p>
+                          <span className="text-xs text-text-muted">
+                            {detail.dataset.resource_key || detail.dataset.dataset_code}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(collectionStatus)}`}>
+                            初始化：{collectionStatus}
+                          </span>
+                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(semanticStatus)}`}>
+                            语义：{semanticStatus}
+                          </span>
+                          {detail.loadedAt && (
+                            <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 text-text-secondary">
+                              {formatTime(detail.loadedAt)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {canRetryCollection && (
+                          <button
+                            type="button"
+                            onClick={() => void retryPlatformDatasetCollection(shop, detail)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            初始化重试
+                          </button>
+                        )}
+                        {canRefreshSemantic && (
+                          <button
+                            type="button"
+                            onClick={() => void refreshPlatformDatasetSemantic(shop, detail)}
+                            disabled={refreshingDatasetSemantic}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {refreshingDatasetSemantic ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3.5 w-3.5" />
+                            )}
+                            {detail.semanticStatus.canRetry ? '重新生成语义' : '刷新语义'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => void startEditDatasetSemantic(detail.source, detail.dataset)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          管理发布
+                        </button>
+                      </div>
+                    </div>
+
+                    {detail.loading ? (
+                      <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        正在加载数据集详情
+                      </div>
+                    ) : detail.error ? (
+                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                        {detail.error}
+                      </div>
+                    ) : (
+                      <div className="mt-3 space-y-3">
+                        {(detail.collectionStatus.message || detail.semanticStatus.message) && (
+                          <div className="grid gap-2 text-xs text-text-secondary md:grid-cols-2">
+                            {detail.collectionStatus.message && (
+                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                初始化：{detail.collectionStatus.message}
+                              </p>
+                            )}
+                            {detail.semanticStatus.message && (
+                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                语义：{detail.semanticStatus.message}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        <div>
+                          <p className="text-xs font-medium text-text-secondary">字段结构</p>
+                          {detail.fieldGroups.length === 0 ? (
+                            <p className="mt-2 rounded-lg border border-dashed border-border px-3 py-2 text-sm text-text-secondary">
+                              暂无字段结构。
+                            </p>
+                          ) : (
+                            <div className="mt-2 grid gap-2 lg:grid-cols-3">
+                              {detail.fieldGroups.map((group) => (
+                                <div key={group.key} className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-xs font-medium text-text-primary">{group.label}</p>
+                                    <span className="text-xs text-text-muted">{group.fields.length}</span>
+                                  </div>
+                                  <div className="mt-2 flex max-h-28 flex-wrap gap-1.5 overflow-auto">
+                                    {group.fields.length === 0 ? (
+                                      <span className="text-xs text-text-muted">暂无字段</span>
+                                    ) : (
+                                      group.fields.map((field, index) => {
+                                        const rawName = rawFieldName(field);
+                                        const displayName = displayFieldName(field);
+                                        return (
+                                          <span
+                                            key={`${group.key}-${rawName || index}`}
+                                            className="inline-flex max-w-full items-center gap-1 rounded-md bg-surface px-2 py-1 text-xs text-text-secondary"
+                                            title={rawName && rawName !== displayName ? rawName : displayName}
+                                          >
+                                            <span className="truncate">{displayName}</span>
+                                          </span>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-medium text-text-secondary">真实数据预览</p>
+                          <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-border bg-surface">
+                            {previewRows.length === 0 ? (
+                              <p className="px-3 py-3 text-sm text-text-secondary">暂无真实数据。</p>
+                            ) : previewColumns.length === 0 ? (
+                              <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>
+                            ) : (
+                              <table className="min-w-full divide-y divide-border text-left text-xs">
+                                <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                                  <tr>
+                                    {previewColumns.map((column) => (
+                                      <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">
+                                        {column}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border text-text-primary">
+                                  {previewRows.map((row, rowIndex) => (
+                                    <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                      {previewColumns.map((column) => (
+                                        <td
+                                          key={`${rowIndex}-${column}`}
+                                          className="max-w-56 truncate px-3 py-2"
+                                          title={formatSampleCellValue(row[column])}
+                                        >
+                                          {formatPreviewCell(row[column])}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
   const renderPlatformDetails = () => {
     if (!selectedPlatform) return null;
     const appConfig =
@@ -7779,39 +8315,50 @@ export default function DataConnectionsPanel({
               </thead>
               <tbody>
                 {shops.map((shop) => (
-                  <tr key={shop.id} className="border-t border-border-subtle text-text-primary">
-                    <td className="px-4 py-3">{shop.external_shop_name}</td>
-                    <td className="px-4 py-3 text-text-secondary">{shop.external_shop_id}</td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs font-medium text-blue-600">
-                        {getStatusLabel(shop.auth_status)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-text-secondary">{formatTime(shop.token_expires_at)}</td>
-                    <td className="px-4 py-3 text-text-secondary">{formatTime(shop.last_sync_at)}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void handleReauthorize(shop)}
-                          disabled={actioningShopId === shop.id}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
-                        >
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          重授权
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleDisable(shop)}
-                          disabled={actioningShopId === shop.id}
-                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
-                        >
-                          <Ban className="h-3.5 w-3.5" />
-                          停用
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                  <Fragment key={shop.id}>
+                    <tr className="border-t border-border-subtle text-text-primary">
+                      <td className="px-4 py-3">{shop.external_shop_name}</td>
+                      <td className="px-4 py-3 text-text-secondary">{shop.external_shop_id}</td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs font-medium text-blue-600">
+                          {getStatusLabel(shop.auth_status)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-text-secondary">{formatTime(shop.token_expires_at)}</td>
+                      <td className="px-4 py-3 text-text-secondary">{formatTime(shop.last_sync_at)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void loadPlatformShopDatasetDetails(shop)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                          >
+                            <Database className="h-3.5 w-3.5" />
+                            数据集
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleReauthorize(shop)}
+                            disabled={actioningShopId === shop.id}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            重授权
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDisable(shop)}
+                            disabled={actioningShopId === shop.id}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
+                          >
+                            <Ban className="h-3.5 w-3.5" />
+                            停用
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {renderPlatformDatasetDetail(shop)}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
