@@ -161,7 +161,180 @@ _BUSINESS_NAME_HINTS: list[tuple[tuple[str, ...], str]] = [
     (("stock",), "库存明细"),
     (("invoice",), "发票明细"),
 ]
-_SEMANTIC_FIELD_SOURCE_VALUES = {"rule_fallback", "llm_generated", "manual_confirmed", "manual_updated"}
+_SEMANTIC_FIELD_SOURCE_VALUES = {
+    "rule_fallback",
+    "llm_generated",
+    "manual_confirmed",
+    "manual_updated",
+    "platform_preset",
+}
+PLATFORM_SEMANTIC_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    "platform_order_lines": {
+        "tid": {
+            "display_name": "主订单号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.98,
+        },
+        "oid": {
+            "display_name": "子订单号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.98,
+        },
+        "biz_date": {
+            "display_name": "业务日期",
+            "semantic_type": "date",
+            "business_role": "time",
+            "confidence": 0.98,
+        },
+        "pay_time": {
+            "display_name": "付款时间",
+            "semantic_type": "datetime",
+            "business_role": "time",
+            "confidence": 0.98,
+        },
+        "modified": {
+            "display_name": "更新时间",
+            "semantic_type": "datetime",
+            "business_role": "time",
+            "confidence": 0.96,
+        },
+        "trade_status": {
+            "display_name": "主订单状态",
+            "semantic_type": "status",
+            "business_role": "status",
+            "confidence": 0.96,
+        },
+        "order_status": {
+            "display_name": "子订单状态",
+            "semantic_type": "status",
+            "business_role": "status",
+            "confidence": 0.96,
+        },
+        "refund_status": {
+            "display_name": "退款状态",
+            "semantic_type": "status",
+            "business_role": "status",
+            "confidence": 0.96,
+        },
+        "payment": {
+            "display_name": "主订单实付金额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.98,
+        },
+        "order_payment": {
+            "display_name": "子订单实付金额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.98,
+        },
+        "total_fee": {
+            "display_name": "主订单商品总额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.96,
+        },
+        "order_total_fee": {
+            "display_name": "子订单商品总额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.96,
+        },
+        "alipay_no": {
+            "display_name": "支付宝交易号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.96,
+        },
+        "title": {
+            "display_name": "商品标题",
+            "semantic_type": "text",
+            "business_role": "name",
+            "confidence": 0.96,
+        },
+        "quantity": {
+            "display_name": "购买数量",
+            "semantic_type": "number",
+            "business_role": "quantity",
+            "confidence": 0.96,
+        },
+    },
+    "platform_alipay_bill_lines": {
+        "source_row_key": {
+            "display_name": "账单行唯一键",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.98,
+        },
+        "bill_type": {
+            "display_name": "账单类型",
+            "semantic_type": "category",
+            "business_role": "category",
+            "confidence": 0.96,
+        },
+        "bill_date": {
+            "display_name": "账单日期",
+            "semantic_type": "date",
+            "business_role": "time",
+            "confidence": 0.98,
+        },
+        "alipay_trade_no": {
+            "display_name": "支付宝交易号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.98,
+        },
+        "merchant_order_no": {
+            "display_name": "商户订单号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.98,
+        },
+        "business_order_no": {
+            "display_name": "业务订单号",
+            "semantic_type": "identifier",
+            "business_role": "identifier",
+            "confidence": 0.96,
+        },
+        "amount": {
+            "display_name": "发生金额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.96,
+        },
+        "income_amount": {
+            "display_name": "收入金额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.98,
+        },
+        "expense_amount": {
+            "display_name": "支出金额",
+            "semantic_type": "amount",
+            "business_role": "amount",
+            "confidence": 0.98,
+        },
+        "trade_time": {
+            "display_name": "交易时间",
+            "semantic_type": "datetime",
+            "business_role": "time",
+            "confidence": 0.96,
+        },
+    },
+}
+PLATFORM_SYSTEM_FIELDS = {
+    "source_row_key",
+    "source_file_name",
+    "source_row_number",
+    "data_source_id",
+    "dataset_id",
+    "shop_connection_id",
+    "resource_key",
+    "created_at",
+    "updated_at",
+}
 _FIELD_TOKEN_LABELS: dict[str, str] = {
     "account": "账户",
     "actual": "实付",
@@ -632,6 +805,52 @@ def _guess_field_semantic(
     }
 
 
+def _platform_semantic_storage_key(dataset_row: dict[str, Any]) -> str:
+    if _dataset_uses_platform_order_lines(dataset_row):
+        return "platform_order_lines"
+    if _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        return "platform_alipay_bill_lines"
+    return ""
+
+
+def _apply_platform_semantic_preset(
+    *,
+    dataset_row: dict[str, Any],
+    field_item: dict[str, Any],
+) -> dict[str, Any]:
+    raw_name = _safe_text(field_item.get("raw_name"))
+    storage = _platform_semantic_storage_key(dataset_row)
+    preset = dict((PLATFORM_SEMANTIC_PRESETS.get(storage) or {}).get(raw_name) or {})
+    if not storage:
+        return field_item
+
+    if raw_name.startswith("raw."):
+        raw_label = raw_name.split(".", 1)[1]
+        preset = {
+            "display_name": raw_label,
+            "semantic_type": "unknown",
+            "business_role": "normal",
+            "confidence": 0.92,
+            **preset,
+        }
+        field_source = "raw_bill"
+    elif raw_name in PLATFORM_SYSTEM_FIELDS:
+        field_source = "system"
+    else:
+        field_source = "normalized"
+
+    next_item = {
+        **field_item,
+        **{key: value for key, value in preset.items() if value not in ("", None)},
+        "raw_name": raw_name,
+        "field_source": field_source,
+        "source": "platform_preset",
+    }
+    if not _safe_text(next_item.get("description")):
+        next_item["description"] = f"{next_item.get('display_name') or raw_name}字段。"
+    return next_item
+
+
 def _collect_sample_values(
     sample_rows: list[dict[str, Any]],
     field_name: str,
@@ -988,9 +1207,13 @@ def _build_semantic_profile(
             "sample_values": sample_values,
             "confirmed_by_user": False,
         }
+        field_item = _apply_platform_semantic_preset(
+            dataset_row=dataset_row,
+            field_item=field_item,
+        )
         field_items.append(field_item)
-        field_label_map[name] = _safe_text(semantic.get("display_name")) or name
-        if float(semantic.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD:
+        field_label_map[name] = _safe_text(field_item.get("display_name")) or name
+        if float(field_item.get("confidence") or 0.0) < SEMANTIC_FIELD_CONFIDENCE_THRESHOLD:
             low_confidence_fields.append(name)
 
     key_fields: list[str] = []
@@ -1001,6 +1224,12 @@ def _build_semantic_profile(
             key_fields.append(raw_name)
         if len(key_fields) >= 6:
             break
+
+    storage = _platform_semantic_storage_key(dataset_row)
+    if storage == "platform_order_lines":
+        key_fields = [field for field in ["tid", "oid"] if field in field_label_map]
+    elif storage == "platform_alipay_bill_lines" and "source_row_key" in field_label_map:
+        key_fields = ["source_row_key"]
 
     business_name = _guess_business_name(dataset_row, source_row=source_row)
     business_description = (
@@ -1021,6 +1250,7 @@ def _build_semantic_profile(
         "resource_key": _safe_text(dataset_row.get("resource_key")),
         "schema_hash": _hash_payload(schema_summary),
         "sample_hash": _hash_payload(sample_rows[:SEMANTIC_SAMPLE_ROW_LIMIT]) if has_sample_rows else "",
+        "sample_source": "semantic_refresh",
         "has_sample_rows": has_sample_rows,
     }
     semantic_status = _normalize_semantic_status(
@@ -1713,6 +1943,72 @@ def _load_dataset_sample_rows_from_collection_records(
     return _extract_collection_payload_rows(records, limit=limit)
 
 
+def _flatten_platform_sample_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    raw = payload.get("raw")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            raw_name = f"raw.{_safe_text(key)}"
+            if raw_name.strip() and raw_name not in payload:
+                payload[raw_name] = value
+    return payload
+
+
+def _load_dataset_semantic_sample_rows(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_row: dict[str, Any],
+    resource_key: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str]:
+    dataset_id = _safe_text(dataset_row.get("id")) or None
+    dataset_code = _safe_text(dataset_row.get("dataset_code")) or None
+    normalized_limit = max(1, min(limit, 100))
+
+    if _dataset_uses_platform_order_lines(dataset_row):
+        records = auth_db.list_platform_order_lines(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=normalized_limit,
+            offset=0,
+        )
+        rows = [
+            _flatten_platform_sample_payload(dict(item.get("payload") or {}))
+            for item in records
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+        return rows, "platform_order_lines" if rows else "none"
+
+    if _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        records = auth_db.list_platform_alipay_bill_lines(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=normalized_limit,
+            offset=0,
+        )
+        rows = [
+            _flatten_platform_sample_payload(dict(item.get("payload") or {}))
+            for item in records
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+        return rows, "platform_alipay_bill_lines" if rows else "none"
+
+    rows = _load_dataset_sample_rows_from_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id or "",
+        dataset_code=dataset_code or "",
+        resource_key=resource_key,
+        limit=normalized_limit,
+    )
+    return rows, "collection_records" if rows else "none"
+
+
 def _collection_record_filter_matches(row_value: Any, expected_value: Any) -> bool:
     actual = str(row_value or "").strip()
     expected = str(expected_value or "").strip()
@@ -1899,6 +2195,7 @@ def _refresh_dataset_semantic_profile(
     source_row: dict[str, Any] | None,
     sample_rows: list[dict[str, Any]] | None = None,
     status: str = "",
+    sample_source: str = "",
     allow_llm: bool = False,
 ) -> dict[str, Any] | None:
     rows = [row for row in (sample_rows or []) if isinstance(row, dict)]
@@ -1909,6 +2206,8 @@ def _refresh_dataset_semantic_profile(
         status=status or ("generated_with_samples" if rows else "generated_basic"),
         allow_llm=allow_llm,
     )
+    if sample_source:
+        semantic_profile.setdefault("generated_from", {})["sample_source"] = sample_source
     semantic_profile = _merge_existing_semantic_profile(
         generated_profile=semantic_profile,
         existing_profile=_extract_semantic_profile(dataset_row),
@@ -5127,17 +5426,20 @@ async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[s
 
     sample_limit = max(1, min(int(arguments.get("sample_limit") or SEMANTIC_SAMPLE_ROW_LIMIT), 100))
     resource_key = _safe_text(dataset_row.get("resource_key")) or "default"
-    sample_rows = _load_dataset_sample_rows_from_collection_records(
+    sample_rows, sample_source = _load_dataset_semantic_sample_rows(
         company_id=company_id,
         data_source_id=source_id,
-        dataset_id=_safe_text(dataset_row.get("id")),
-        dataset_code=_safe_text(dataset_row.get("dataset_code")),
+        dataset_row=dataset_row,
         resource_key=resource_key,
         limit=sample_limit,
     )
-    sample_source = "collection_records" if sample_rows else "none"
 
-    if not sample_rows and str(source_row.get("source_kind") or "") not in AGENT_ASSISTED_KINDS:
+    if (
+        not sample_rows
+        and not _dataset_uses_platform_order_lines(dataset_row)
+        and not _dataset_uses_platform_alipay_bill_lines(dataset_row)
+        and str(source_row.get("source_kind") or "") not in AGENT_ASSISTED_KINDS
+    ):
         try:
             runtime_source = _load_runtime_source(source_row, include_secret=True)
             connector = build_connector(runtime_source)
@@ -5168,6 +5470,7 @@ async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[s
         source_row=source_row,
         sample_rows=sample_rows,
         status="generated_with_samples" if sample_rows else "generated_basic",
+        sample_source=sample_source,
         allow_llm=True,
     )
     if not refreshed:

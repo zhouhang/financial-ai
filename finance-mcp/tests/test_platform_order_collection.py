@@ -199,6 +199,153 @@ def test_resolve_taobao_collection_window_force_initial_uses_biz_date() -> None:
 
 
 @pytest.mark.anyio
+async def test_refresh_semantic_profile_reads_platform_order_lines(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+    persisted: dict[str, Any] = {}
+    dataset = _platform_order_dataset()
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "name": "淘宝授权连接",
+            "source_kind": "platform_oauth",
+            "provider_code": "taobao",
+        },
+    )
+
+    def fake_list_platform_order_lines(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_platform_order_lines"] = kwargs
+        return [
+            {
+                "payload": {
+                    "tid": "T1001",
+                    "oid": "O1001",
+                    "biz_date": "2026-05-07",
+                    "pay_time": "2026-05-07 10:02:03",
+                    "payment": "88.00",
+                    "order_payment": "88.00",
+                    "title": "测试商品",
+                }
+            }
+        ]
+
+    monkeypatch.setattr(data_sources.auth_db, "list_platform_order_lines", fake_list_platform_order_lines)
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not read generic records")),
+    )
+
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        persisted["meta"] = meta
+        next_dataset = dict(dataset)
+        next_dataset["meta"] = meta
+        return next_dataset
+
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_dataset_meta", fake_update_dataset_meta)
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_data_source_event", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_get_semantic_llm_config", lambda: None)
+
+    result = await data_sources._handle_data_source_refresh_dataset_semantic_profile(
+        {"auth_token": "token", "dataset_id": "dataset-1", "sample_limit": 20}
+    )
+
+    assert result["success"] is True
+    assert result["sample_source"] == "platform_order_lines"
+    assert calls["list_platform_order_lines"]["dataset_id"] == "dataset-1"
+    assert calls["list_platform_order_lines"]["resource_key"] == "taobao_order_lines:shop-1"
+    profile = persisted["meta"]["semantic_profile"]
+    assert profile["generated_from"]["sample_source"] == "platform_order_lines"
+    assert profile["field_label_map"]["tid"] == "主订单号"
+    assert profile["field_label_map"]["order_payment"] == "子订单实付金额"
+    assert profile["key_fields"] == ["tid", "oid"]
+
+
+@pytest.mark.anyio
+async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypatch) -> None:
+    persisted: dict[str, Any] = {}
+    dataset = _alipay_bill_dataset(id="dataset-alipay-1")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "name": "支付宝授权连接",
+            "source_kind": "platform_oauth",
+            "provider_code": "alipay",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        lambda **kwargs: [
+            {
+                "payload": {
+                    "source_row_key": "row-1",
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-07",
+                    "alipay_trade_no": "202605070001",
+                    "merchant_order_no": "M1001",
+                    "income_amount": "88.00",
+                    "raw": {
+                        "支付宝交易号": "202605070001",
+                        "商户订单号": "M1001",
+                        "收入": "88.00",
+                        "入账时间": "2026-05-07 10:03:04",
+                    },
+                }
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not read generic records")),
+    )
+
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        persisted["meta"] = meta
+        next_dataset = dict(dataset)
+        next_dataset["meta"] = meta
+        return next_dataset
+
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_dataset_meta", fake_update_dataset_meta)
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_data_source_event", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_get_semantic_llm_config", lambda: None)
+
+    result = await data_sources._handle_data_source_refresh_dataset_semantic_profile(
+        {"auth_token": "token", "dataset_id": "dataset-alipay-1", "sample_limit": 20}
+    )
+
+    assert result["success"] is True
+    assert result["sample_source"] == "platform_alipay_bill_lines"
+    profile = persisted["meta"]["semantic_profile"]
+    assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
+    assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
+    assert profile["field_label_map"]["raw.支付宝交易号"] == "支付宝交易号"
+    assert profile["field_label_map"]["raw.收入"] == "收入"
+    raw_field = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
+    assert raw_field["field_source"] == "raw_bill"
+    assert raw_field["source"] == "platform_preset"
+    assert profile["key_fields"] == ["source_row_key"]
+
+
+@pytest.mark.anyio
 async def test_trigger_dataset_collection_for_company_does_not_require_auth_token(
     monkeypatch,
 ) -> None:
