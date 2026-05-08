@@ -348,6 +348,9 @@ def ensure_unified_data_source_schema() -> list[str]:
     if not _table_exists("platform_order_lines"):
         _execute_sql_script(_migration_path("022_platform_order_lines.sql"))
         applied.append("022_platform_order_lines.sql")
+    if not _table_exists("platform_alipay_bill_lines"):
+        _execute_sql_script(_migration_path("025_platform_alipay_bill_lines.sql"))
+        applied.append("025_platform_alipay_bill_lines.sql")
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
