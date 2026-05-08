@@ -4715,6 +4715,12 @@ export default function DataConnectionsPanel({
   const retryPlatformDatasetCollection = useCallback(
     async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
       setShopDatasetActionError('');
+      if (isPlatformCollectionRunning(detail.collectionStatus)) {
+        return;
+      }
+      if (!detail.collectionStatus.canInitialize && !detail.collectionStatus.canRetryInitialize) {
+        return;
+      }
       if (!authToken || draftSourceIdSet.has(detail.sourceId)) {
         setShopDatasetActionError('当前环境未连接后端初始化接口。');
         return;
