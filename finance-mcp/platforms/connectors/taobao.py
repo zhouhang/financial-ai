@@ -97,6 +97,50 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+def _seconds_until(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    now = datetime.now(timezone.utc)
+    try:
+        numeric = int(Decimal(text))
+    except (InvalidOperation, ValueError):
+        numeric = 0
+    if numeric:
+        if numeric > 10_000_000_000:
+            expires_at = datetime.fromtimestamp(numeric / 1000, tz=timezone.utc)
+        elif numeric > 1_000_000_000:
+            expires_at = datetime.fromtimestamp(numeric, tz=timezone.utc)
+        else:
+            return max(0, numeric)
+        return max(0, int((expires_at - now).total_seconds()))
+    try:
+        normalized = text.replace("Z", "+00:00")
+        expires_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=TAOBAO_TZ)
+    return max(0, int((expires_at.astimezone(timezone.utc) - now).total_seconds()))
+
+
+def _parse_token_result(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 _TOKEN_SECRET_KEYS = {
     "access_token",
     "refresh_token",
@@ -211,7 +255,70 @@ class TaobaoConnector(BasePlatformConnector):
                 scope_text="item,trade,refund",
                 raw_payload={"mode": "mock", "refresh_token": refresh_token},
             )
-        raise NotImplementedError("淘宝真实 refresh token 流程待接入")
+        current_refresh_token = str(refresh_token or "").strip()
+        if not current_refresh_token:
+            raise RuntimeError("淘宝 refresh token 为空，请重新授权")
+        payload: dict[str, Any] = {
+            "method": "taobao.top.auth.token.refresh",
+            "app_key": self.app_config.app_key,
+            "timestamp": datetime.now(TAOBAO_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "format": "json",
+            "v": "2.0",
+            "sign_method": "hmac",
+            "refresh_token": current_refresh_token,
+        }
+        payload["sign"] = self._sign_params(payload)
+        body = urlencode(payload).encode("utf-8")
+        req = Request(str(self.app_config.refresh_url or TAOBAO_ROUTER_URL), data=body, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
+        try:
+            with urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            logger.error(f"淘宝 refresh token 失败: {exc}")
+            raise RuntimeError(f"淘宝 refresh token 失败: {exc}") from exc
+        if "error_response" in data:
+            error = data["error_response"] if isinstance(data.get("error_response"), dict) else {}
+            message = str(error.get("sub_msg") or error.get("msg") or error or "淘宝 refresh token 失败")
+            raise RuntimeError(message)
+        response = data.get("top_auth_token_refresh_response")
+        response_payload = response if isinstance(response, dict) else data
+        token_payload = _parse_token_result(
+            response_payload.get("token_result") if isinstance(response_payload, dict) else None
+        )
+        if not token_payload and isinstance(response_payload, dict):
+            token_payload = dict(response_payload)
+        access_token = str(
+            _first_present(
+                token_payload.get("access_token"),
+                token_payload.get("session_key"),
+                token_payload.get("top_session"),
+            )
+            or ""
+        )
+        if not access_token:
+            raise RuntimeError("淘宝 refresh token 响应缺少 access_token")
+        new_refresh_token = str(token_payload.get("refresh_token") or current_refresh_token)
+        return PlatformTokenBundle(
+            access_token=access_token,
+            refresh_token=new_refresh_token,
+            expires_in=_seconds_until(
+                _first_present(
+                    token_payload.get("expires_in"),
+                    token_payload.get("expire_in"),
+                    token_payload.get("expire_time"),
+                )
+            ),
+            refresh_expires_in=_seconds_until(
+                _first_present(
+                    token_payload.get("refresh_expires_in"),
+                    token_payload.get("re_expires_in"),
+                    token_payload.get("refresh_token_valid_time"),
+                )
+            ),
+            scope_text=str(token_payload.get("scope") or ""),
+            raw_payload=_safe_token_payload(token_payload),
+        )
 
     def fetch_shop_profile(
         self,

@@ -24,6 +24,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
+_AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -434,6 +435,27 @@ def ensure_execution_run_trigger_types_schema() -> list[str]:
 
     _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
     logger.info("execution_runs.trigger_type 约束已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_auth_sessions_extra_schema() -> list[str]:
+    """确保 auth_sessions.extra 元数据字段存在。"""
+    global _AUTH_SESSIONS_EXTRA_SCHEMA_READY
+    if _AUTH_SESSIONS_EXTRA_SCHEMA_READY:
+        return []
+    if not _table_exists("auth_sessions"):
+        return []
+    if _column_exists("auth_sessions", "extra"):
+        _AUTH_SESSIONS_EXTRA_SCHEMA_READY = True
+        return []
+
+    migration_name = "024_auth_sessions_extra.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _column_exists("auth_sessions", "extra"):
+        raise RuntimeError("auth_sessions.extra 字段升级失败，extra 仍不可用")
+
+    _AUTH_SESSIONS_EXTRA_SCHEMA_READY = True
+    logger.info("auth_sessions.extra 字段已自动补齐: %s", migration_name)
     return [migration_name]
 
 
@@ -1273,9 +1295,11 @@ def get_platform_app_by_id(
     *,
     platform_app_id: str,
     company_id: str,
+    owner_company_id: str | None = None,
     include_secrets: bool = False,
 ) -> dict | None:
-    """按 ID 查询平台应用配置，并限制公司边界。"""
+    """按 ID 查询平台应用配置，并限制应用归属公司边界。"""
+    lookup_company_id = owner_company_id or company_id
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1291,7 +1315,7 @@ def get_platform_app_by_id(
                       AND status <> 'deleted'
                     LIMIT 1
                     """,
-                    (platform_app_id, company_id),
+                    (platform_app_id, lookup_company_id),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -1303,7 +1327,7 @@ def get_platform_app_by_id(
                     result["app_secret"] = ""
                 return result
     except Exception as e:
-        logger.error(f"按 ID 查询 platform_apps 失败 (id={platform_app_id}, company_id={company_id}): {e}")
+        logger.error(f"按 ID 查询 platform_apps 失败 (id={platform_app_id}, company_id={lookup_company_id}): {e}")
         return None
 
 
@@ -1918,8 +1942,10 @@ def create_auth_session(
     shop_connection_id: str | None = None,
     return_path: str = "",
     redirect_uri: str = "",
+    extra: dict | None = None,
 ) -> dict | None:
     """创建授权会话。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1928,11 +1954,11 @@ def create_auth_session(
                     """
                     INSERT INTO auth_sessions (
                         company_id, platform_code, operator_user_id, shop_connection_id,
-                        state_token, return_path, redirect_uri, status, expires_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                        state_token, return_path, redirect_uri, status, expires_at, extra
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s::jsonb)
                     RETURNING id, company_id, platform_code, operator_user_id, shop_connection_id,
                               state_token, return_path, redirect_uri, status, expires_at,
-                              callback_code, callback_error, callback_payload,
+                              callback_code, callback_error, callback_payload, extra,
                               created_at, updated_at, completed_at
                     """,
                     (
@@ -1944,6 +1970,7 @@ def create_auth_session(
                         return_path,
                         redirect_uri,
                         expires_at,
+                        psycopg2.extras.Json(extra or {}),
                     ),
                 )
                 row = cur.fetchone()
@@ -1958,6 +1985,7 @@ def create_auth_session(
 
 def get_auth_session_by_state(state_token: str) -> dict | None:
     """按 state token 查询授权会话。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1966,7 +1994,7 @@ def get_auth_session_by_state(state_token: str) -> dict | None:
                     """
                     SELECT id, company_id, platform_code, operator_user_id, shop_connection_id,
                            state_token, return_path, redirect_uri, status, expires_at,
-                           callback_code, callback_error, callback_payload,
+                           callback_code, callback_error, callback_payload, extra,
                            created_at, updated_at, completed_at
                     FROM auth_sessions
                     WHERE state_token = %s
@@ -1990,6 +2018,7 @@ def update_auth_session_callback(
     callback_payload: dict | None = None,
 ) -> dict | None:
     """更新授权回调结果。status 通常为 authorized/failed/expired/cancelled。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -2010,7 +2039,7 @@ def update_auth_session_callback(
                     WHERE id = %s
                     RETURNING id, company_id, platform_code, operator_user_id, shop_connection_id,
                               state_token, return_path, redirect_uri, status, expires_at,
-                              callback_code, callback_error, callback_payload,
+                              callback_code, callback_error, callback_payload, extra,
                               created_at, updated_at, completed_at
                     """,
                     (
@@ -2038,6 +2067,11 @@ def list_auth_sessions(
     limit: int = 50,
 ) -> list[dict]:
     """查询授权会话列表。"""
+    ensure_auth_sessions_extra_schema()
+    try:
+        safe_limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        safe_limit = 50
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -2045,7 +2079,7 @@ def list_auth_sessions(
                 sql = """
                     SELECT id, company_id, platform_code, operator_user_id, shop_connection_id,
                            state_token, return_path, redirect_uri, status, expires_at,
-                           callback_code, callback_error, callback_payload,
+                           callback_code, callback_error, callback_payload, extra,
                            created_at, updated_at, completed_at
                     FROM auth_sessions
                     WHERE company_id = %s
@@ -2058,7 +2092,7 @@ def list_auth_sessions(
                     sql += " AND status = %s"
                     params.append(status)
                 sql += " ORDER BY created_at DESC LIMIT %s"
-                params.append(limit)
+                params.append(safe_limit)
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
                 return [_normalize_record(dict(row)) for row in rows]

@@ -37,6 +37,7 @@ from tools.platform_connections import handle_tool_call as handle_platform_tool_
 
 logger = logging.getLogger("tools.data_sources")
 CONNECTOR_SYNC_TIMEOUT_SECONDS = int(os.getenv("CONNECTOR_SYNC_TIMEOUT_SECONDS", "180"))
+SERVICE_PROVIDER_COMPANY_ID = "00000000-0000-0000-0000-00000000dd01"
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -73,6 +74,7 @@ DATASET_CANDIDATE_BATCH_SIZE = 200
 DATASET_CANDIDATE_MAX_SCAN_PAGES = 200
 _SEMANTIC_ENV_CACHE: dict[str, str] | None = None
 TAOBAO_TZ = timezone(timedelta(hours=8))
+PLATFORM_TOKEN_REFRESH_THRESHOLD = timedelta(minutes=30)
 
 
 def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
@@ -1156,6 +1158,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _compute_expire_at(seconds: int | None) -> str | None:
+    if not seconds:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=int(seconds))).isoformat()
+
+
 def _json_safe(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -1332,6 +1340,15 @@ def _dataset_storage_value(dataset_row: dict[str, Any] | None) -> str:
 
 def _dataset_uses_platform_order_lines(dataset_row: dict[str, Any] | None) -> bool:
     return _dataset_storage_value(dataset_row) == "platform_order_lines"
+
+
+def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> bool:
+    config = _dataset_collection_config(dataset_row)
+    resource_key = _safe_text((dataset_row or {}).get("resource_key"))
+    return (
+        _safe_text(config.get("platform_code")) == "alipay"
+        and resource_key.startswith("alipay_bill:")
+    )
 
 
 def _dataset_collection_key_fields(dataset_row: dict[str, Any] | None) -> list[str]:
@@ -3239,6 +3256,342 @@ def _app_config_from_record(record: dict[str, Any], *, company_id: str, platform
     )
 
 
+def _parse_auth_datetime(value: Any) -> datetime | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _authorization_needs_refresh(authorization: dict[str, Any]) -> bool:
+    expires_at = _parse_auth_datetime(authorization.get("token_expires_at"))
+    if expires_at is None:
+        return False
+    return expires_at <= datetime.now(timezone.utc) + PLATFORM_TOKEN_REFRESH_THRESHOLD
+
+
+def _resolve_alipay_bill_date(
+    params: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    payload = dict(params or {})
+    explicit = _safe_text(payload.get("biz_date") or payload.get("bill_date"))
+    if explicit:
+        return explicit[:10]
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    shanghai_today = current.astimezone(TAOBAO_TZ).date()
+    return (shanghai_today - timedelta(days=1)).isoformat()
+
+
+def _is_token_expired_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "invalid session",
+        "session expired",
+        "sessionkey",
+        "session key",
+        "access token",
+        "access_token",
+        "token expired",
+        "授权已过期",
+        "授权过期",
+        "session过期",
+        "令牌过期",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _mark_authorization_reauth_required(authorization: dict[str, Any], reason: str) -> None:
+    authorization_id = _safe_text(authorization.get("id"))
+    if not authorization_id:
+        return
+    auth_db.update_shop_authorization_status(
+        authorization_id=authorization_id,
+        auth_status="reauth_required",
+        last_error=reason[:500],
+    )
+
+
+def _refresh_shop_authorization(
+    *,
+    connector: Any,
+    authorization: dict[str, Any],
+    reason: str,
+) -> PlatformTokenBundle:
+    authorization_id = _safe_text(authorization.get("id"))
+    refresh_token = _safe_text(authorization.get("refresh_token"))
+    if not authorization_id or not refresh_token:
+        message = f"{reason}: refresh token 缺失，请重新授权"
+        _mark_authorization_reauth_required(authorization, message)
+        raise ValueError("店铺授权已失效，请重新授权")
+    try:
+        refreshed = connector.refresh_token(refresh_token=refresh_token)
+    except Exception as exc:
+        message = f"{reason}: {exc}"
+        _mark_authorization_reauth_required(authorization, message)
+        raise ValueError("店铺授权已失效，请重新授权") from exc
+    if not _safe_text(refreshed.access_token):
+        message = f"{reason}: refresh 响应缺少 access token"
+        _mark_authorization_reauth_required(authorization, message)
+        raise ValueError("店铺授权已失效，请重新授权")
+    updated = auth_db.update_shop_authorization_tokens(
+        authorization_id=authorization_id,
+        access_token=refreshed.access_token,
+        refresh_token=refreshed.refresh_token or refresh_token,
+        token_expires_at=_compute_expire_at(refreshed.expires_in),
+        refresh_expires_at=_compute_expire_at(refreshed.refresh_expires_in),
+        scope_text=refreshed.scope_text or None,
+        auth_status="authorized",
+        raw_auth_payload=refreshed.raw_payload,
+    )
+    if isinstance(updated, dict):
+        authorization.update(updated)
+    else:
+        authorization.update(
+            {
+                "access_token": refreshed.access_token,
+                "refresh_token": refreshed.refresh_token or refresh_token,
+                "scope_text": refreshed.scope_text or authorization.get("scope_text"),
+                "raw_auth_payload": refreshed.raw_payload or authorization.get("raw_auth_payload"),
+            }
+        )
+    return PlatformTokenBundle(
+        access_token=refreshed.access_token,
+        refresh_token=refreshed.refresh_token or refresh_token,
+        scope_text=refreshed.scope_text or _safe_text(authorization.get("scope_text")),
+        raw_payload=dict(refreshed.raw_payload or authorization.get("raw_auth_payload") or {}),
+    )
+
+
+def _load_platform_app_for_authorization(
+    *,
+    company_id: str,
+    platform_code: str,
+    authorization: dict[str, Any],
+) -> dict[str, Any]:
+    app_id = _safe_text(authorization.get("platform_app_id"))
+    app_record = (
+        auth_db.get_platform_app_by_id(
+            platform_app_id=app_id,
+            company_id=company_id,
+            owner_company_id=SERVICE_PROVIDER_COMPANY_ID,
+            include_secrets=True,
+        )
+        if app_id
+        else None
+    )
+    if not app_record:
+        app_record = auth_db.get_platform_app(
+            company_id=SERVICE_PROVIDER_COMPANY_ID,
+            platform_code=platform_code,
+            include_secrets=True,
+        )
+    if not app_record and app_id:
+        app_record = auth_db.get_platform_app_by_id(
+            platform_app_id=app_id,
+            company_id=company_id,
+            include_secrets=True,
+        )
+    if not app_record:
+        app_record = auth_db.get_platform_app(
+            company_id=company_id,
+            platform_code=platform_code,
+            include_secrets=True,
+        )
+    if not app_record:
+        raise ValueError("平台应用配置不存在")
+    return app_record
+
+
+def _alipay_bill_output_dir(
+    *,
+    shop_connection_id: str,
+    bill_type: str,
+    bill_date: str,
+) -> Path:
+    root = (UPLOAD_ROOT / "platform" / "alipay").resolve()
+    target = (root / shop_connection_id / bill_type / bill_date).resolve()
+    target.relative_to(root)
+    return target
+
+
+def _normalize_bill_fetch_result(result: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if isinstance(result, dict):
+        rows = [row for row in result.get("rows") or [] if isinstance(row, dict)]
+        files = [
+            file_info
+            for file_info in (result.get("files") or result.get("original_files") or [])
+            if isinstance(file_info, dict)
+        ]
+        return rows, files
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)], []
+    return [], []
+
+
+def _is_alipay_bill_not_ready_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "bill not exist",
+        "bill does not exist",
+        "not generated",
+        "no bill",
+        "账单不存在",
+        "账单未生成",
+        "未生成账单",
+        "无账单",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _run_alipay_bill_collection(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    collection_config: dict[str, Any],
+    params: dict[str, Any],
+    checkpoint_before: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    bill_type = _safe_text(collection_config.get("bill_type"))
+    if not bill_type and resource_key.startswith("alipay_bill:"):
+        parts = resource_key.split(":")
+        if len(parts) >= 2:
+            bill_type = parts[1]
+    shop_connection_id = _safe_text(collection_config.get("shop_connection_id"))
+    if not shop_connection_id and resource_key.startswith("alipay_bill:"):
+        parts = resource_key.split(":")
+        if len(parts) >= 3:
+            shop_connection_id = parts[2]
+    if not bill_type:
+        raise ValueError("支付宝账单数据集缺少 bill_type")
+    if not shop_connection_id:
+        raise ValueError("支付宝账单数据集缺少 shop_connection_id")
+
+    bill_date = _resolve_alipay_bill_date(params)
+    params["bill_date"] = bill_date
+    params["biz_date"] = bill_date
+
+    shop = auth_db.get_shop_connection_by_id(shop_connection_id)
+    if not shop or _safe_text(shop.get("company_id")) != company_id:
+        raise ValueError("支付宝商户连接不存在")
+    authorization = auth_db.get_current_shop_authorization(
+        shop_connection_id=shop_connection_id,
+        include_secrets=True,
+    )
+    if not authorization or _safe_text(authorization.get("auth_status")) != "authorized":
+        raise ValueError("支付宝商户授权不存在")
+    app_record = _load_platform_app_for_authorization(
+        company_id=company_id,
+        platform_code="alipay",
+        authorization=authorization,
+    )
+    connector = build_platform_connector(
+        _app_config_from_record(app_record, company_id=company_id, platform_code="alipay")
+    )
+    token_bundle = PlatformTokenBundle(
+        access_token=_safe_text(authorization.get("access_token")),
+        refresh_token=_safe_text(authorization.get("refresh_token")),
+        scope_text=_safe_text(authorization.get("scope_text")),
+        raw_payload=dict(authorization.get("raw_auth_payload") or {}),
+    )
+    if _authorization_needs_refresh(authorization):
+        token_bundle = _refresh_shop_authorization(
+            connector=connector,
+            authorization=authorization,
+            reason="支付宝商户授权 token 即将过期",
+        )
+
+    output_dir = _alipay_bill_output_dir(
+        shop_connection_id=shop_connection_id,
+        bill_type=bill_type,
+        bill_date=bill_date,
+    )
+    fetch_kwargs = {
+        "app_auth_token": token_bundle.access_token,
+        "bill_type": bill_type,
+        "bill_date": bill_date,
+        "merchant_display_name": _safe_text(shop.get("external_shop_name")),
+        "shop_connection_id": shop_connection_id,
+        "output_dir": output_dir,
+    }
+    try:
+        fetch_result = connector.fetch_bill_rows(**fetch_kwargs)
+    except Exception as exc:
+        if _is_alipay_bill_not_ready_error(exc):
+            message = f"支付宝 {bill_date} {bill_type} 账单未生成"
+            return {
+                "success": False,
+                "healthy": False,
+                "rows": [],
+                "error": message,
+                "message": message,
+                "collection_summary": {
+                    "storage": "dataset_collection_records",
+                    "platform_code": "alipay",
+                    "bill_type": bill_type,
+                    "bill_date": bill_date,
+                    "record_count": 0,
+                    "original_files": [],
+                },
+            }
+        if not _is_token_expired_error(exc):
+            raise
+        token_bundle = _refresh_shop_authorization(
+            connector=connector,
+            authorization=authorization,
+            reason=f"支付宝账单接口返回授权失效: {exc}",
+        )
+        fetch_kwargs["app_auth_token"] = token_bundle.access_token
+        fetch_result = connector.fetch_bill_rows(**fetch_kwargs)
+
+    rows, original_files = _normalize_bill_fetch_result(fetch_result)
+    summary = {
+        "storage": "dataset_collection_records",
+        "platform_code": "alipay",
+        "bill_type": bill_type,
+        "bill_date": bill_date,
+        "record_count": len(rows),
+        "original_files": original_files,
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "biz_date": bill_date,
+    }
+    return {
+        "success": True,
+        "healthy": True,
+        "rows": rows,
+        "original_files": original_files,
+        "collection_summary": summary,
+        "next_checkpoint": {
+            **dict(checkpoint_before or {}),
+            "last_bill_date": bill_date,
+            "last_synced_at": _now_iso(),
+            "last_row_count": len(rows),
+        },
+        "message": "支付宝账单采集成功",
+    }
+
+
 def _run_platform_order_collection(
     *,
     company_id: str,
@@ -3271,11 +3624,24 @@ def _run_platform_order_collection(
         auth_db.get_platform_app_by_id(
             platform_app_id=app_id,
             company_id=company_id,
+            owner_company_id=SERVICE_PROVIDER_COMPANY_ID,
             include_secrets=True,
         )
         if app_id
         else None
     )
+    if not app_record:
+        app_record = auth_db.get_platform_app(
+            company_id=SERVICE_PROVIDER_COMPANY_ID,
+            platform_code=platform_code,
+            include_secrets=True,
+        )
+    if not app_record and app_id:
+        app_record = auth_db.get_platform_app_by_id(
+            platform_app_id=app_id,
+            company_id=company_id,
+            include_secrets=True,
+        )
     if not app_record:
         app_record = auth_db.get_platform_app(
             company_id=company_id,
@@ -3296,19 +3662,36 @@ def _run_platform_order_collection(
     connector = build_platform_connector(
         _app_config_from_record(app_record, company_id=company_id, platform_code=platform_code)
     )
-    result = connector.fetch_order_lines(
-        token_bundle=token_bundle,
-        mode=_safe_text(collection_window.get("mode")) or "incremental",
-        window_start=_safe_text(collection_window.get("window_start")),
-        window_end=_safe_text(collection_window.get("window_end")),
-        page_size=page_size,
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=dataset_id,
-        shop_connection_id=shop_connection_id,
-        shop_name=_safe_text(shop.get("external_shop_name")),
-        external_shop_id=_safe_text(collection_config.get("external_shop_id") or shop.get("external_shop_id")),
-    )
+    if _authorization_needs_refresh(authorization):
+        token_bundle = _refresh_shop_authorization(
+            connector=connector,
+            authorization=authorization,
+            reason="店铺授权 token 即将过期",
+        )
+
+    fetch_kwargs = {
+        "mode": _safe_text(collection_window.get("mode")) or "incremental",
+        "window_start": _safe_text(collection_window.get("window_start")),
+        "window_end": _safe_text(collection_window.get("window_end")),
+        "page_size": page_size,
+        "company_id": company_id,
+        "data_source_id": source_id,
+        "dataset_id": dataset_id,
+        "shop_connection_id": shop_connection_id,
+        "shop_name": _safe_text(shop.get("external_shop_name")),
+        "external_shop_id": _safe_text(collection_config.get("external_shop_id") or shop.get("external_shop_id")),
+    }
+    try:
+        result = connector.fetch_order_lines(token_bundle=token_bundle, **fetch_kwargs)
+    except Exception as exc:
+        if not _is_token_expired_error(exc):
+            raise
+        token_bundle = _refresh_shop_authorization(
+            connector=connector,
+            authorization=authorization,
+            reason=f"订单接口返回授权失效: {exc}",
+        )
+        result = connector.fetch_order_lines(token_bundle=token_bundle, **fetch_kwargs)
     rows = [row for row in result.get("rows") or [] if isinstance(row, dict)]
     collection_summary = auth_db.upsert_platform_order_lines(
         company_id=company_id,
@@ -5519,6 +5902,7 @@ async def _execute_sync_job(
         params = dict(arguments.get("params") or {})
         dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
         uses_platform_order_lines = _dataset_uses_platform_order_lines(dataset_row)
+        uses_alipay_bill_records = _dataset_uses_alipay_bill_records(dataset_row)
         if uses_platform_order_lines:
             params.setdefault("collection_config", _dataset_collection_config(dataset_row))
             params.setdefault("dataset_id", _safe_text((dataset_row or {}).get("id")))
@@ -5536,6 +5920,30 @@ async def _execute_sync_job(
                 dataset_code=_safe_text(params.get("dataset_code")),
                 resource_key=resource_key,
                 collection_config=dict(params.get("collection_config") or {}),
+                params=params,
+                checkpoint_before=checkpoint_before,
+            )
+        elif uses_alipay_bill_records:
+            config = _dataset_collection_config(dataset_row)
+            bill_date = _resolve_alipay_bill_date(params)
+            params.setdefault("collection_config", config)
+            params.setdefault("dataset_id", _safe_text((dataset_row or {}).get("id")))
+            params.setdefault("dataset_code", _safe_text((dataset_row or {}).get("dataset_code")))
+            params["bill_date"] = bill_date
+            params["biz_date"] = bill_date
+            params["key_fields"] = _dataset_collection_key_fields(dataset_row) or [
+                "bill_type",
+                "bill_date",
+                "source_row_key",
+            ]
+            arguments = {**arguments, "params": params}
+            result = _run_alipay_bill_collection(
+                company_id=company_id,
+                source_id=source_id,
+                dataset_id=_safe_text(params.get("dataset_id")),
+                dataset_code=_safe_text(params.get("dataset_code")),
+                resource_key=resource_key,
+                collection_config=config,
                 params=params,
                 checkpoint_before=checkpoint_before,
             )
@@ -5578,7 +5986,11 @@ async def _execute_sync_job(
                 event_type="sync_failed",
                 event_level="error",
                 event_message=message,
-                event_payload={"rows": len(rows), "resource_key": resource_key},
+                event_payload={
+                    "rows": len(rows),
+                    "resource_key": resource_key,
+                    "original_files": result.get("original_files") or [],
+                },
             )
             auth_db.update_unified_data_source_health(
                 data_source_id=source_id,
@@ -5664,6 +6076,7 @@ async def _execute_sync_job(
                 "rows": len(rows),
                 "resource_key": resource_key,
                 "collection_summary": collection_summary,
+                "original_files": result.get("original_files") or collection_summary.get("original_files") or [],
             },
         )
         auth_db.update_unified_data_source_health(

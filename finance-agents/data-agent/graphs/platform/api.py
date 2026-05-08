@@ -14,18 +14,20 @@ import logging
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from starlette.responses import RedirectResponse
 
 from tools.mcp_client import (
     platform_create_auth_session,
     platform_disable_shop,
+    platform_get_app_config,
     platform_get_shop_detail,
     platform_handle_auth_callback,
     platform_list_connections,
     platform_list_shops,
     platform_reauthorize_shop,
+    platform_upsert_app_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,44 @@ class PlatformShopsResponse(BaseModel):
 
 class CreateAuthSessionRequest(BaseModel):
     return_path: str = "/"
+    mode: str = ""
+    merchant_display_name: str = ""
+
+
+class PlatformAppConfig(BaseModel):
+    id: str = ""
+    platform_code: str = ""
+    platform_name: str = ""
+    app_name: str = ""
+    app_key: str = ""
+    app_secret: str = ""
+    has_app_secret: bool = False
+    has_app_public_cert: bool = False
+    has_alipay_public_cert: bool = False
+    has_alipay_root_cert: bool = False
+    redirect_uri: str = ""
+    auth_base_url: str = ""
+    token_url: str = ""
+    refresh_url: str = ""
+    status: str = ""
+
+
+class PlatformAppConfigResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    platform_code: str
+    configured: bool = False
+    config: PlatformAppConfig = Field(default_factory=PlatformAppConfig)
+    message: str = ""
+
+
+class UpsertPlatformAppConfigRequest(BaseModel):
+    app_key: str = ""
+    app_secret: str = ""
+    redirect_uri: str = ""
+    app_public_cert: str = ""
+    alipay_public_cert: str = ""
+    alipay_root_cert: str = ""
     mode: str = ""
 
 
@@ -186,6 +226,70 @@ async def get_platform_shops(
     )
 
 
+@router.get(
+    "/platform-connections/{platform_code}/app-config",
+    response_model=PlatformAppConfigResponse,
+)
+async def get_platform_app_config(
+    platform_code: str,
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await platform_get_app_config(auth_token, platform_code, mode=mode)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取平台应用配置失败"))
+
+    return PlatformAppConfigResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "mock"),
+        platform_code=str(result.get("platform_code") or platform_code),
+        configured=bool(result.get("configured")),
+        config=result.get("config") or {},
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.put(
+    "/platform-connections/{platform_code}/app-config",
+    response_model=PlatformAppConfigResponse,
+)
+async def upsert_platform_app_config(
+    platform_code: str,
+    body: UpsertPlatformAppConfigRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await platform_upsert_app_config(
+        auth_token,
+        platform_code,
+        app_key=body.app_key,
+        app_secret=body.app_secret,
+        redirect_uri=body.redirect_uri,
+        app_public_cert=body.app_public_cert,
+        alipay_public_cert=body.alipay_public_cert,
+        alipay_root_cert=body.alipay_root_cert,
+        mode="real",
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "保存平台应用配置失败"))
+
+    return PlatformAppConfigResponse(
+        success=True,
+        mode=str(result.get("mode") or "real"),
+        platform_code=str(result.get("platform_code") or platform_code),
+        configured=bool(result.get("configured")),
+        config=result.get("config") or {},
+        message=str(result.get("message") or "平台应用配置已保存。"),
+    )
+
+
 @router.post(
     "/platform-connections/{platform_code}/auth-sessions",
     response_model=CreateAuthSessionResponse,
@@ -204,6 +308,7 @@ async def create_platform_auth_session(
         platform_code,
         return_path=body.return_path,
         mode=body.mode,
+        merchant_display_name=body.merchant_display_name,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "创建授权会话失败"))
@@ -223,6 +328,7 @@ async def create_platform_auth_session(
 @router.get("/platform-auth/callback/{platform_code}")
 async def handle_platform_auth_callback(
     platform_code: str,
+    request: Request,
     code: str = Query("", description="授权码"),
     state: str = Query("", description="授权会话状态"),
     error: str = Query("", description="授权错误码"),
@@ -236,6 +342,7 @@ async def handle_platform_auth_callback(
         error=error,
         error_description=error_description,
         mode=mode,
+        callback_payload=dict(request.query_params),
     )
 
     success = bool(result.get("success"))
@@ -365,5 +472,3 @@ def _build_callback_redirect_url(
             "",
         )
     )
-
-

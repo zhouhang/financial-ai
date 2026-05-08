@@ -18,11 +18,11 @@ from platforms.factory import build_connector
 
 logger = logging.getLogger("tools.platform_connections")
 
+SERVICE_PROVIDER_COMPANY_ID = "00000000-0000-0000-0000-00000000dd01"
+
 SUPPORTED_PLATFORMS: tuple[dict[str, str], ...] = (
     {"platform_code": "taobao", "platform_name": "淘宝/天猫", "status": "supported"},
-    {"platform_code": "douyin_shop", "platform_name": "抖店", "status": "supported"},
-    {"platform_code": "kuaishou", "platform_name": "快手小店", "status": "planned"},
-    {"platform_code": "jd", "platform_name": "京东", "status": "planned"},
+    {"platform_code": "alipay", "platform_name": "支付宝", "status": "supported"},
 )
 
 TAOBAO_ORDER_SYNC_STRATEGY: dict[str, Any] = {
@@ -45,6 +45,32 @@ TAOBAO_ORDER_EXTRACT_CONFIG: dict[str, Any] = {
     },
 }
 
+ALIPAY_BILL_SYNC_STRATEGY: dict[str, Any] = {
+    "mode": "daily_t_minus_1",
+    "schedule_type": "cron",
+    "schedule_expr": "30 10 * * *",
+    "initial_days": 1,
+    "initial_end_offset_days": 1,
+    "date_field": "bill_date",
+}
+
+ALIPAY_BILL_DATASETS: tuple[dict[str, str], ...] = (
+    {
+        "bill_kind": "fund",
+        "bill_type": "signcustomer",
+        "label": "支付宝资金账单",
+        "business_object_type": "platform_fund_bill",
+        "grain": "merchant_bill_line",
+    },
+    {
+        "bill_kind": "trade",
+        "bill_type": "trade",
+        "label": "支付宝交易账单",
+        "business_object_type": "platform_trade_bill",
+        "grain": "merchant_trade_bill_line",
+    },
+)
+
 _RAW_AUTH_SECRET_KEYS = {
     "access_token",
     "refresh_token",
@@ -52,6 +78,8 @@ _RAW_AUTH_SECRET_KEYS = {
     "top_session",
     "sub_taobao_user_id",
     "sub_taobao_user_nick",
+    "app_auth_token",
+    "app_refresh_token",
 }
 
 
@@ -81,9 +109,42 @@ def create_tools() -> list[Tool]:
                     "return_path": {"type": "string"},
                     "redirect_uri": {"type": "string"},
                     "shop_connection_id": {"type": "string"},
+                    "merchant_display_name": {"type": "string", "description": "支付宝商户显示名称"},
                     "mode": {"type": "string", "description": "mock 或 real"},
                 },
                 "required": ["auth_token", "platform_code"],
+            },
+        ),
+        Tool(
+            name="platform_get_app_config",
+            description="获取平台应用配置状态（不返回 AppSecret 明文）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "platform_code": {"type": "string"},
+                    "mode": {"type": "string", "description": "mock 或 real"},
+                },
+                "required": ["auth_token", "platform_code"],
+            },
+        ),
+        Tool(
+            name="platform_upsert_app_config",
+            description="保存平台应用配置，用于真实 OAuth 授权。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "platform_code": {"type": "string"},
+                    "app_key": {"type": "string"},
+                    "app_secret": {"type": "string"},
+                    "redirect_uri": {"type": "string"},
+                    "app_public_cert": {"type": "string"},
+                    "alipay_public_cert": {"type": "string"},
+                    "alipay_root_cert": {"type": "string"},
+                    "mode": {"type": "string", "description": "mock 或 real"},
+                },
+                "required": ["auth_token", "platform_code", "app_key", "redirect_uri"],
             },
         ),
         Tool(
@@ -152,6 +213,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return await _handle_list_connections(arguments)
     if name == "platform_create_auth_session":
         return await _handle_create_auth_session(arguments)
+    if name == "platform_get_app_config":
+        return await _handle_get_app_config(arguments)
+    if name == "platform_upsert_app_config":
+        return await _handle_upsert_app_config(arguments)
     if name == "platform_handle_auth_callback":
         return await _handle_auth_callback(arguments)
     if name == "platform_reauthorize_shop":
@@ -177,7 +242,7 @@ def _require_user(auth_token: str) -> dict[str, Any]:
 
 def _normalize_mode(mode: Any) -> str:
     normalized = str(mode or "").strip().lower()
-    return normalized if normalized in {"mock", "real"} else "mock"
+    return normalized if normalized in {"mock", "real"} else "real"
 
 
 def _normalize_platform_code(platform_code: Any) -> str:
@@ -199,6 +264,56 @@ def _safe_raw_auth_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
 def _platform_name(platform_code: str) -> str:
     matched = next((item["platform_name"] for item in SUPPORTED_PLATFORMS if item["platform_code"] == platform_code), "")
     return matched or platform_code
+
+
+def _supported_platform_codes() -> set[str]:
+    return {item["platform_code"] for item in SUPPORTED_PLATFORMS}
+
+
+def _platform_app_owner_company_id() -> str:
+    return SERVICE_PROVIDER_COMPANY_ID
+
+
+def _can_configure_service_provider_app(user: dict[str, Any]) -> bool:
+    role = str(user.get("role") or user.get("user_role") or "").strip().lower()
+    return role in {"admin", "owner", "super_admin"}
+
+
+def _public_app_config(record: dict[str, Any] | None, *, platform_code: str) -> dict[str, Any]:
+    extra = record.get("extra") if isinstance((record or {}).get("extra"), dict) else {}
+    return {
+        "id": str((record or {}).get("id") or ""),
+        "platform_code": platform_code,
+        "platform_name": _platform_name(platform_code),
+        "app_name": str((record or {}).get("app_name") or ""),
+        "app_key": str((record or {}).get("app_key") or ""),
+        "app_secret": "",
+        "has_app_secret": bool(str((record or {}).get("app_secret") or "").strip()),
+        "has_app_public_cert": bool(str(extra.get("app_public_cert") or "").strip()),
+        "has_alipay_public_cert": bool(str(extra.get("alipay_public_cert") or "").strip()),
+        "has_alipay_root_cert": bool(str(extra.get("alipay_root_cert") or "").strip()),
+        "redirect_uri": str(extra.get("redirect_uri") or ""),
+        "auth_base_url": str((record or {}).get("auth_base_url") or ""),
+        "token_url": str((record or {}).get("token_url") or ""),
+        "refresh_url": str((record or {}).get("refresh_url") or ""),
+        "status": str((record or {}).get("status") or ""),
+    }
+
+
+def _default_app_urls(platform_code: str) -> dict[str, str]:
+    if platform_code == "taobao":
+        return {
+            "auth_base_url": "https://oauth.taobao.com/authorize",
+            "token_url": "https://oauth.taobao.com/token",
+            "refresh_url": "",
+        }
+    if platform_code == "alipay":
+        return {
+            "auth_base_url": "https://openauth.alipay.com/oauth2/appToAppAuth.htm",
+            "token_url": "https://openapi.alipay.com/gateway.do",
+            "refresh_url": "https://openapi.alipay.com/gateway.do",
+        }
+    return {"auth_base_url": "", "token_url": "", "refresh_url": ""}
 
 
 def _build_mock_app_config(company_id: str, platform_code: str, redirect_uri: str = "") -> PlatformAppConfig:
@@ -237,6 +352,15 @@ def _build_mock_app_config(company_id: str, platform_code: str, redirect_uri: st
     )
 
 
+def _is_mock_app_record(record: dict[str, Any] | None) -> bool:
+    if not record:
+        return False
+    extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+    if str(extra.get("mode") or "").strip().lower() == "mock":
+        return True
+    return str(record.get("app_key") or "").strip().lower().startswith("mock_")
+
+
 def _load_app_config(
     company_id: str,
     platform_code: str,
@@ -244,19 +368,27 @@ def _load_app_config(
     mode: str,
     redirect_uri: str = "",
 ) -> PlatformAppConfig:
+    owner_company_id = _platform_app_owner_company_id()
     record = auth_db.get_platform_app(
-        company_id=company_id,
+        company_id=owner_company_id,
         platform_code=platform_code,
         include_secrets=True,
     )
+    requested_mode = _normalize_mode(mode)
     if record is None:
+        if requested_mode != "mock":
+            if platform_code == "alipay":
+                raise ValueError("平台应用未配置，请先配置支付宝 AppID、应用私钥、证书和回调地址")
+            raise ValueError("平台应用未配置，请先配置淘宝/天猫 AppKey、AppSecret 和回调地址")
         return _build_mock_app_config(company_id, platform_code, redirect_uri=redirect_uri)
-    auth_mode = _normalize_mode(
-        mode or ((record.get("extra") or {}).get("mode") if isinstance(record.get("extra"), dict) else "")
-    )
+    if requested_mode != "mock" and _is_mock_app_record(record):
+        if platform_code == "alipay":
+            raise ValueError("平台应用未配置，请先配置支付宝 AppID、应用私钥、证书和回调地址")
+        raise ValueError("平台应用未配置，请先配置淘宝/天猫 AppKey、AppSecret 和回调地址")
+    auth_mode = requested_mode
     return PlatformAppConfig(
         id=str(record.get("id") or ""),
-        company_id=str(record.get("company_id") or "") or None,
+        company_id=str(record.get("company_id") or "") or owner_company_id,
         platform_code=str(record.get("platform_code") or platform_code),
         app_name=str(record.get("app_name") or ""),
         app_key=str(record.get("app_key") or ""),
@@ -285,6 +417,14 @@ def _dataset_code_suffix(shop_connection_id: str) -> str:
         for ch in str(shop_connection_id or "").strip().lower()
     ).strip("_")
     return (suffix or "shop")[:12]
+
+
+def _alipay_dataset_code_suffix(shop_connection_id: str) -> str:
+    suffix = "".join(
+        ch if ch.isalnum() else "_"
+        for ch in str(shop_connection_id or "").strip().lower()
+    ).strip("_")
+    return (suffix or "merchant")[:32]
 
 
 def _source_code_suffix(shop_connection_id: str) -> str:
@@ -405,6 +545,145 @@ def _build_taobao_initial_collection_jobs(
     return jobs
 
 
+def build_alipay_bill_dataset_payload(
+    *,
+    company_id: str,
+    data_source_id: str,
+    shop_connection_id: str,
+    merchant_name: str,
+    external_shop_id: str,
+    bill_kind: str,
+    bill_type: str,
+    dataset_label: str,
+    business_object_type: str,
+    grain: str,
+) -> dict[str, Any]:
+    """构建支付宝账单数据集目录 payload。"""
+    display_merchant_name = str(merchant_name or "").strip() or "未命名商户"
+    normalized_bill_kind = str(bill_kind or "").strip() or "bill"
+    normalized_bill_type = str(bill_type or "").strip() or normalized_bill_kind
+    resource_key = f"alipay_bill:{normalized_bill_type}:{shop_connection_id}"
+    key_fields = ["bill_type", "bill_date", "source_row_key"]
+    return {
+        "company_id": company_id,
+        "data_source_id": data_source_id,
+        "dataset_code": f"alipay_{normalized_bill_kind}_bill_{_alipay_dataset_code_suffix(shop_connection_id)}",
+        "dataset_name": f"{dataset_label} - {display_merchant_name}"[:255],
+        "resource_key": resource_key,
+        "dataset_kind": "api_endpoint",
+        "origin_type": "fixed",
+        "publish_status": "published",
+        "business_domain": "ecommerce",
+        "business_object_type": business_object_type,
+        "grain": grain,
+        "extract_config": {
+            "storage": "dataset_collection_records",
+            "platform_code": "alipay",
+            "shop_connection_id": shop_connection_id,
+            "external_shop_id": str(external_shop_id or ""),
+            "bill_kind": normalized_bill_kind,
+            "bill_type": normalized_bill_type,
+            "date_field": "bill_date",
+            "collection_date_field": "bill_date",
+            "key_fields": key_fields,
+        },
+        "schema_summary": {
+            "source": "alipay_bills",
+            "storage": "dataset_collection_records",
+            "columns": [],
+            "key_fields": key_fields,
+        },
+        "semantic_profile": {
+            "business_name": f"{dataset_label} - {display_merchant_name}"[:255],
+            "business_description": "支付宝授权商户账单采集数据集",
+            "key_fields": key_fields,
+        },
+        "sync_strategy": dict(ALIPAY_BILL_SYNC_STRATEGY),
+        "status": "active",
+        "is_enabled": True,
+        "health_status": "unknown",
+        "meta": {
+            "platform_code": "alipay",
+            "shop_connection_id": shop_connection_id,
+            "merchant_name": display_merchant_name,
+            "external_shop_id": str(external_shop_id or ""),
+            "bill_kind": normalized_bill_kind,
+            "bill_type": normalized_bill_type,
+            "key_fields": key_fields,
+        },
+    }
+
+
+def build_alipay_initial_collection_job_payloads(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    shop_connection_id: str,
+    bill_kind: str,
+    bill_type: str,
+    anchor_date: str | date | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """构建支付宝 T-1 初始化账单采集任务 payload；本任务只生成，不触发。"""
+    if isinstance(anchor_date, datetime):
+        resolved_anchor = anchor_date.date()
+    elif isinstance(anchor_date, date):
+        resolved_anchor = anchor_date
+    elif anchor_date:
+        resolved_anchor = date.fromisoformat(str(anchor_date))
+    else:
+        resolved_anchor = datetime.now(timezone.utc).date()
+
+    return _build_alipay_initial_collection_jobs(
+        source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=f"alipay_bill:{bill_type}:{shop_connection_id}",
+        bill_type=bill_type,
+        sync_strategy=ALIPAY_BILL_SYNC_STRATEGY,
+        anchor_date=resolved_anchor,
+    )
+
+
+def _build_alipay_initial_collection_jobs(
+    *,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    bill_type: str,
+    sync_strategy: dict[str, Any],
+    anchor_date: date | None = None,
+) -> list[dict[str, Any]]:
+    """构建支付宝 T-1 初始化账单采集任务 payload。"""
+    resolved_anchor = anchor_date or datetime.now(timezone(timedelta(hours=8))).date()
+    initial_days = max(1, int(sync_strategy.get("initial_days") or 1))
+    end_offset_days = max(1, int(sync_strategy.get("initial_end_offset_days") or 1))
+    end_bill_date = resolved_anchor - timedelta(days=end_offset_days)
+    start_bill_date = end_bill_date - timedelta(days=initial_days - 1)
+    jobs: list[dict[str, Any]] = []
+    for day_offset in range(initial_days):
+        bill_date = start_bill_date + timedelta(days=day_offset)
+        bill_date_text = bill_date.isoformat()
+        jobs.append(
+            {
+                "source_id": source_id,
+                "dataset_id": dataset_id,
+                "resource_key": resource_key,
+                "trigger_mode": "initial",
+                "idempotency_key": f"alipay-initial:{dataset_id}:{bill_type}:{bill_date_text}",
+                "background": True,
+                "params": {
+                    "dataset_id": dataset_id,
+                    "resource_key": resource_key,
+                    "bill_type": bill_type,
+                    "bill_date": bill_date_text,
+                    "biz_date": bill_date_text,
+                    "force_mode": "initial",
+                },
+            }
+        )
+    return jobs
+
+
 def _upsert_taobao_order_line_dataset(
     *,
     company_id: str,
@@ -448,6 +727,57 @@ def _upsert_taobao_order_line_dataset(
     return source, dataset
 
 
+def _upsert_alipay_bill_datasets(
+    *,
+    company_id: str,
+    connection: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    shop_connection_id = str(connection.get("id") or "")
+    merchant_name = str(connection.get("external_shop_name") or "")
+    source = auth_db.upsert_unified_data_source(
+        company_id=company_id,
+        code=f"platform_oauth_alipay_{_source_code_suffix(shop_connection_id)}",
+        name=f"支付宝授权 - {merchant_name or shop_connection_id}"[:255],
+        source_kind="platform_oauth",
+        domain_type="ecommerce",
+        provider_code="alipay",
+        execution_mode="deterministic",
+        description="支付宝商户 OAuth 授权账单数据源",
+        status="active",
+        is_enabled=True,
+        health_status="unknown",
+        last_error_message="",
+        meta={
+            "platform_code": "alipay",
+            "shop_connection_id": shop_connection_id,
+            "external_shop_id": str(connection.get("external_shop_id") or ""),
+            "merchant_name": merchant_name,
+        },
+    )
+    if source is None:
+        raise ValueError("保存支付宝数据源失败")
+
+    datasets: dict[str, dict[str, Any]] = {}
+    for spec in ALIPAY_BILL_DATASETS:
+        dataset_payload = build_alipay_bill_dataset_payload(
+            company_id=company_id,
+            data_source_id=str(source["id"]),
+            shop_connection_id=shop_connection_id,
+            merchant_name=merchant_name,
+            external_shop_id=str(connection.get("external_shop_id") or ""),
+            bill_kind=spec["bill_kind"],
+            bill_type=spec["bill_type"],
+            dataset_label=spec["label"],
+            business_object_type=spec["business_object_type"],
+            grain=spec["grain"],
+        )
+        dataset = auth_db.upsert_unified_data_source_dataset(**dataset_payload)
+        if dataset is None:
+            raise ValueError(f"保存{spec['label']}数据集失败")
+        datasets[spec["bill_kind"]] = dataset
+    return source, datasets.get("fund"), datasets.get("trade")
+
+
 async def _run_taobao_initial_collection_jobs(
     *,
     company_id: str,
@@ -471,6 +801,45 @@ async def _run_taobao_initial_collection_jobs(
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "淘宝/天猫初始化采集任务执行失败: company_id=%s dataset_id=%s resource_key=%s error=%s",
+                company_id,
+                job_payload.get("dataset_id"),
+                job_payload.get("resource_key"),
+                exc,
+                exc_info=True,
+            )
+
+
+def _schedule_alipay_initial_collection_jobs(
+    *,
+    company_id: str,
+    jobs: list[dict[str, Any]],
+) -> None:
+    """创建支付宝 T-1 初始化账单采集任务；Task 6 接入专用采集器后再执行。"""
+    for job_payload in jobs:
+        try:
+            params = dict(job_payload.get("params") or {})
+            bill_date = str(params.get("bill_date") or params.get("biz_date") or "")
+            scheduled_job = auth_db.create_unified_sync_job(
+                company_id=company_id,
+                data_source_id=str(job_payload.get("source_id") or ""),
+                trigger_mode=str(job_payload.get("trigger_mode") or "initial"),
+                resource_key=str(job_payload.get("resource_key") or ""),
+                idempotency_key=str(job_payload.get("idempotency_key") or ""),
+                window_start=bill_date or None,
+                window_end=bill_date or None,
+                request_payload={
+                    "dataset_id": str(job_payload.get("dataset_id") or ""),
+                    "resource_key": str(job_payload.get("resource_key") or ""),
+                    "background": bool(job_payload.get("background")),
+                    "params": params,
+                    "deferred_until": "alipay_bill_collector",
+                },
+            )
+            if scheduled_job is None:
+                raise ValueError("创建支付宝初始化采集任务失败")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "支付宝初始化采集任务创建失败: company_id=%s dataset_id=%s resource_key=%s error=%s",
                 company_id,
                 job_payload.get("dataset_id"),
                 job_payload.get("resource_key"),
@@ -534,7 +903,10 @@ async def _handle_list_connections(arguments: dict[str, Any]) -> dict[str, Any]:
             if str(shop.get("status") or "") in {"reauth_required", "sync_error", "token_expired", "error", "failed"}
             or str(shop.get("last_status") or "") in {"error", "failed"}
         ]
-        configured_app = auth_db.get_platform_app(company_id=company_id, platform_code=platform["platform_code"])
+        configured_app = auth_db.get_platform_app(
+            company_id=_platform_app_owner_company_id(),
+            platform_code=platform["platform_code"],
+        )
         summaries.append(
             {
                 **platform,
@@ -550,16 +922,132 @@ async def _handle_list_connections(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "platforms": summaries, "connections": shops_all, "count": len(summaries), "mode": _normalize_mode(arguments.get("mode"))}
 
 
+async def _handle_get_app_config(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
+    if platform_code not in _supported_platform_codes():
+        return {"success": False, "platform_code": platform_code, "error": f"暂不支持的平台: {platform_code}"}
+
+    record = auth_db.get_platform_app(
+        company_id=_platform_app_owner_company_id(),
+        platform_code=platform_code,
+        include_secrets=True,
+    )
+    return {
+        "success": True,
+        "platform_code": platform_code,
+        "configured": record is not None and not _is_mock_app_record(record),
+        "config": _public_app_config(record, platform_code=platform_code),
+        "mode": _normalize_mode(arguments.get("mode")),
+    }
+
+
+async def _handle_upsert_app_config(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    if not _can_configure_service_provider_app(user):
+        platform_code = _normalize_platform_code(arguments.get("platform_code"))
+        return {"success": False, "platform_code": platform_code, "error": "无权配置服务商应用"}
+    operator_company_id = str(user["company_id"])
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
+    if platform_code not in _supported_platform_codes():
+        return {"success": False, "platform_code": platform_code, "error": f"暂不支持的平台: {platform_code}"}
+
+    app_key = str(arguments.get("app_key") or "").strip()
+    redirect_uri = str(arguments.get("redirect_uri") or "").strip()
+    incoming_secret = str(arguments.get("app_secret") or "").strip()
+    if not app_key:
+        app_key_label = "AppID" if platform_code == "alipay" else "AppKey"
+        return {"success": False, "platform_code": platform_code, "error": f"{app_key_label} 不能为空"}
+    if not redirect_uri:
+        return {"success": False, "platform_code": platform_code, "error": "回调地址不能为空"}
+
+    existing = auth_db.get_platform_app(
+        company_id=_platform_app_owner_company_id(),
+        platform_code=platform_code,
+        include_secrets=True,
+    )
+    app_secret = incoming_secret or str((existing or {}).get("app_secret") or "").strip()
+    if not app_secret:
+        if platform_code == "alipay":
+            return {"success": False, "platform_code": platform_code, "error": "应用私钥不能为空"}
+        return {"success": False, "platform_code": platform_code, "error": "AppSecret 不能为空"}
+
+    default_urls = _default_app_urls(platform_code)
+    extra = dict((existing or {}).get("extra") if isinstance((existing or {}).get("extra"), dict) else {})
+    if platform_code == "alipay":
+        cert_fields = {
+            "app_public_cert": "应用公钥证书",
+            "alipay_public_cert": "支付宝公钥证书",
+            "alipay_root_cert": "支付宝根证书",
+        }
+        for field_name, field_label in cert_fields.items():
+            cert_value = str(arguments.get(field_name) or "").strip() or str(extra.get(field_name) or "").strip()
+            if not cert_value:
+                return {"success": False, "platform_code": platform_code, "error": f"{field_label}不能为空"}
+            extra[field_name] = cert_value
+    extra.update(
+        {
+            "mode": "real",
+            "redirect_uri": redirect_uri,
+            "owner_scope": "service_provider",
+            "configured_by_company_id": operator_company_id,
+        }
+    )
+    record = auth_db.upsert_platform_app(
+        company_id=_platform_app_owner_company_id(),
+        platform_code=platform_code,
+        app_key=app_key,
+        app_secret=app_secret,
+        app_name=str(arguments.get("app_name") or (existing or {}).get("app_name") or _platform_name(platform_code)),
+        app_type=str(arguments.get("app_type") or (existing or {}).get("app_type") or "isv"),
+        auth_base_url=str(arguments.get("auth_base_url") or (existing or {}).get("auth_base_url") or default_urls["auth_base_url"]),
+        token_url=str(arguments.get("token_url") or (existing or {}).get("token_url") or default_urls["token_url"]),
+        refresh_url=str(arguments.get("refresh_url") or (existing or {}).get("refresh_url") or default_urls["refresh_url"]),
+        scopes_config=list((existing or {}).get("scopes_config") or []),
+        extra=extra,
+        status="active",
+        include_secrets=True,
+    )
+    if record is None:
+        return {"success": False, "platform_code": platform_code, "error": "保存平台应用配置失败"}
+    return {
+        "success": True,
+        "platform_code": platform_code,
+        "configured": True,
+        "config": _public_app_config(record, platform_code=platform_code),
+        "mode": "real",
+        "message": "平台应用配置已保存。",
+    }
+
+
 async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
     platform_code = _normalize_platform_code(arguments.get("platform_code"))
-    if platform_code not in {item["platform_code"] for item in SUPPORTED_PLATFORMS}:
+    if platform_code not in _supported_platform_codes():
         return {"success": False, "error": f"暂不支持的平台: {platform_code}"}
 
     mode = _normalize_mode(arguments.get("mode"))
+    merchant_display_name = str(arguments.get("merchant_display_name") or "").strip()
+    session_extra: dict[str, Any] = {}
+    if platform_code == "alipay":
+        if not merchant_display_name:
+            return {
+                "success": False,
+                "platform_code": platform_code,
+                "mode": mode,
+                "error": "支付宝授权需要填写商户显示名称",
+            }
+        session_extra = {
+            "merchant_display_name": merchant_display_name,
+            "connection_label": merchant_display_name,
+            "subject_type": "alipay_merchant",
+        }
     redirect_uri = str(arguments.get("redirect_uri") or "").strip()
-    app_config = _load_app_config(company_id, platform_code, mode=mode, redirect_uri=redirect_uri)
+    try:
+        app_config = _load_app_config(company_id, platform_code, mode=mode, redirect_uri=redirect_uri)
+    except ValueError as exc:
+        return {"success": False, "platform_code": platform_code, "mode": mode, "error": str(exc)}
     connector = build_connector(app_config)
     state_token = str(uuid.uuid4())
     auth_session = auth_db.create_auth_session(
@@ -571,6 +1059,7 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
         return_path=str(arguments.get("return_path") or "/"),
         redirect_uri=app_config.redirect_uri,
         expires_at=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        extra=session_extra,
     )
     if auth_session is None:
         return {"success": False, "error": "创建授权会话失败"}
@@ -639,8 +1128,9 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
             redirect_uri=str(auth_session.get("redirect_uri") or ""),
         )
         connector = build_connector(app_config)
+        exchange_code = code if platform_code == "alipay" else (code or f"mock_{state[-8:]}")
         token_bundle = connector.exchange_code_for_token(
-            code=code or f"mock_{state[-8:]}",
+            code=exchange_code,
             auth_session=auth_session,
             callback_payload=callback_payload,
         )
@@ -686,6 +1176,9 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         taobao_source: dict[str, Any] | None = None
         taobao_dataset: dict[str, Any] | None = None
+        alipay_source: dict[str, Any] | None = None
+        alipay_fund_dataset: dict[str, Any] | None = None
+        alipay_trade_dataset: dict[str, Any] | None = None
         dataset_warning = ""
         if platform_code == "taobao":
             try:
@@ -716,6 +1209,42 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
                     dataset_warning,
                     exc_info=True,
                 )
+        if platform_code == "alipay":
+            try:
+                alipay_source, alipay_fund_dataset, alipay_trade_dataset = _upsert_alipay_bill_datasets(
+                    company_id=company_id,
+                    connection=connection,
+                )
+                alipay_jobs: list[dict[str, Any]] = []
+                for spec, dataset in (
+                    (ALIPAY_BILL_DATASETS[0], alipay_fund_dataset),
+                    (ALIPAY_BILL_DATASETS[1], alipay_trade_dataset),
+                ):
+                    if not alipay_source or not dataset:
+                        continue
+                    alipay_jobs.extend(
+                        _build_alipay_initial_collection_jobs(
+                            source_id=str(alipay_source["id"]),
+                            dataset_id=str(dataset["id"]),
+                            resource_key=str(dataset.get("resource_key") or ""),
+                            bill_type=spec["bill_type"],
+                            sync_strategy=dict(dataset.get("sync_strategy") or ALIPAY_BILL_SYNC_STRATEGY),
+                        )
+                    )
+                if alipay_jobs:
+                    _schedule_alipay_initial_collection_jobs(
+                        company_id=company_id,
+                        jobs=alipay_jobs,
+                    )
+            except Exception as dataset_exc:  # noqa: BLE001
+                dataset_warning = str(dataset_exc)
+                logger.error(
+                    "支付宝授权成功但账单数据集创建失败: company_id=%s shop_connection_id=%s error=%s",
+                    company_id,
+                    connection.get("id"),
+                    dataset_warning,
+                    exc_info=True,
+                )
         auth_db.update_auth_session_callback(
             session_id=str(auth_session["id"]),
             status="authorized",
@@ -728,6 +1257,10 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
                 "taobao_data_source_id": str((taobao_source or {}).get("id") or ""),
                 "taobao_order_dataset_id": str((taobao_dataset or {}).get("id") or ""),
                 "taobao_order_dataset_warning": dataset_warning,
+                "alipay_data_source_id": str((alipay_source or {}).get("id") or ""),
+                "alipay_fund_bill_dataset_id": str((alipay_fund_dataset or {}).get("id") or ""),
+                "alipay_trade_bill_dataset_id": str((alipay_trade_dataset or {}).get("id") or ""),
+                "alipay_dataset_warning": dataset_warning,
             },
         )
         detail = _build_shop_view(

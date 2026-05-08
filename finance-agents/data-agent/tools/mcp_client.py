@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=None)
 _RESULT_WAIT_TIMEOUT = 180.0  # 等待 SSE 结果超时秒数
-_PLATFORM_CONNECTION_MODE = os.getenv("PLATFORM_CONNECTION_MODE", "mock").strip().lower() or "mock"
+_PLATFORM_CONNECTION_MODE = os.getenv("PLATFORM_CONNECTION_MODE", "real").strip().lower() or "real"
 _DATA_SOURCE_CONNECTION_MODE = (
     os.getenv("DATA_SOURCE_CONNECTION_MODE")
     or os.getenv("DATA_SOURCE_MODE")
@@ -1085,19 +1085,26 @@ async def execution_recon_rule_compatibility_check(
 # ══════════════════════════════════════════════════════════════════════════════
 
 _MOCK_PLATFORM_NAME_MAP: dict[str, str] = {
-    "taobao": "淘宝",
-    "tmall": "天猫",
+    "taobao": "淘宝/天猫",
+    "tmall": "淘宝/天猫",
+    "alipay": "支付宝",
     "douyin_shop": "抖店",
     "kuaishou": "快手小店",
     "jd": "京东",
 }
-_MOCK_PLATFORM_ORDER: tuple[str, ...] = ("taobao", "tmall", "douyin_shop", "kuaishou", "jd")
+_MOCK_PLATFORM_ORDER: tuple[str, ...] = ("taobao", "alipay")
 _MOCK_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 _MOCK_CONNECTIONS_BY_USER: dict[str, list[dict[str, Any]]] = {}
 
 
+def _normalize_platform_code(platform_code: str) -> str:
+    normalized = str(platform_code or "").strip()
+    return "taobao" if normalized == "tmall" else normalized
+
+
 def _platform_name(platform_code: str) -> str:
-    return _MOCK_PLATFORM_NAME_MAP.get(platform_code, platform_code)
+    normalized = _normalize_platform_code(platform_code)
+    return _MOCK_PLATFORM_NAME_MAP.get(normalized, normalized)
 
 
 def _normalize_mode(mode: str = "", *, default_mode: str | None = None) -> str:
@@ -1105,7 +1112,7 @@ def _normalize_mode(mode: str = "", *, default_mode: str | None = None) -> str:
     if normalized in {"mock", "real"}:
         return normalized
     resolved_default = default_mode if default_mode in {"mock", "real"} else _PLATFORM_CONNECTION_MODE
-    return resolved_default if resolved_default in {"mock", "real"} else "mock"
+    return resolved_default if resolved_default in {"mock", "real"} else "real"
 
 
 def _is_mock_source_id(source_id: str) -> bool:
@@ -1157,19 +1164,6 @@ def _mock_seed_connections(user_key: str) -> list[dict[str, Any]]:
             "created_at": None,
             "updated_at": None,
         },
-        {
-            "id": "mock-douyin-shop-001",
-            "company_id": "",
-            "platform_code": "douyin_shop",
-            "platform_name": _platform_name("douyin_shop"),
-            "external_shop_id": "douyin_shop_001",
-            "external_shop_name": "测试抖店A",
-            "status": "authorized",
-            "token_status": "active",
-            "last_sync_at": None,
-            "created_at": None,
-            "updated_at": None,
-        },
     ]
     _MOCK_CONNECTIONS_BY_USER[user_key] = seeded
     return seeded
@@ -1183,12 +1177,12 @@ def _mock_group_platforms(connections: list[dict[str, Any]]) -> list[dict[str, A
             "authorized_shop_count": 0,
             "error_shop_count": 0,
             "last_sync_at": None,
-            "status": "connected" if code in {"taobao", "tmall", "douyin_shop"} else "planned",
+            "status": "connected" if code == "taobao" else "supported",
         }
         for code in _MOCK_PLATFORM_ORDER
     }
     for row in connections:
-        code = str(row.get("platform_code") or "")
+        code = _normalize_platform_code(str(row.get("platform_code") or ""))
         if not code:
             continue
         if code not in grouped:
@@ -1209,8 +1203,11 @@ def _mock_group_platforms(connections: list[dict[str, Any]]) -> list[dict[str, A
 def _mock_list_connections(auth_token: str, platform_code: str = "") -> dict[str, Any]:
     user_key = _auth_user_key(auth_token)
     all_rows = _mock_seed_connections(user_key)
-    normalized_platform = str(platform_code or "").strip()
-    rows = [row for row in all_rows if not normalized_platform or row.get("platform_code") == normalized_platform]
+    normalized_platform = _normalize_platform_code(str(platform_code or ""))
+    rows = [
+        row for row in all_rows
+        if not normalized_platform or _normalize_platform_code(str(row.get("platform_code") or "")) == normalized_platform
+    ]
     platforms = _mock_group_platforms(rows if normalized_platform else all_rows)
     return {
         "success": True,
@@ -1223,15 +1220,16 @@ def _mock_list_connections(auth_token: str, platform_code: str = "") -> dict[str
 
 def _mock_list_shops(auth_token: str, platform_code: str) -> dict[str, Any]:
     user_key = _auth_user_key(auth_token)
+    normalized_platform = _normalize_platform_code(platform_code)
     rows = [
         row for row in _mock_seed_connections(user_key)
-        if row.get("platform_code") == platform_code
+        if _normalize_platform_code(str(row.get("platform_code") or "")) == normalized_platform
     ]
     return {
         "success": True,
         "mode": "mock",
-        "platform_code": platform_code,
-        "platform_name": _platform_name(platform_code),
+        "platform_code": normalized_platform,
+        "platform_name": _platform_name(normalized_platform),
         "shops": rows,
         "count": len(rows),
     }
@@ -1242,23 +1240,24 @@ def _mock_create_auth_session(
     platform_code: str,
     return_path: str,
 ) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_code(platform_code)
     user_key = _auth_user_key(auth_token)
     session_id = str(uuid.uuid4())
     state = session_id
     _MOCK_AUTH_SESSIONS[state] = {
         "session_id": session_id,
         "user_key": user_key,
-        "platform_code": platform_code,
+        "platform_code": normalized_platform,
         "return_path": return_path or "/",
     }
     auth_url = (
-        f"/api/platform-auth/callback/{platform_code}"
+        f"/api/platform-auth/callback/{normalized_platform}"
         f"?state={quote(state)}&code=mock_code_{session_id[:8]}&mode=mock"
     )
     return {
         "success": True,
         "mode": "mock",
-        "platform_code": platform_code,
+        "platform_code": normalized_platform,
         "session_id": session_id,
         "state": state,
         "auth_url": auth_url,
@@ -1273,11 +1272,12 @@ def _mock_handle_auth_callback(
     error: str = "",
     error_description: str = "",
 ) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_code(platform_code)
     if error:
         return {
             "success": False,
             "mode": "mock",
-            "platform_code": platform_code,
+            "platform_code": normalized_platform,
             "error": error,
             "message": error_description or "授权失败，请重试",
             "return_path": "/",
@@ -1288,7 +1288,7 @@ def _mock_handle_auth_callback(
         return {
             "success": False,
             "mode": "mock",
-            "platform_code": platform_code,
+            "platform_code": normalized_platform,
             "error": "invalid_state",
             "message": "授权会话已失效，请重新发起授权",
             "return_path": "/",
@@ -1296,15 +1296,18 @@ def _mock_handle_auth_callback(
 
     user_key = str(session.get("user_key") or "anonymous")
     connections = _mock_seed_connections(user_key)
-    index = len([r for r in connections if r.get("platform_code") == platform_code]) + 1
-    connection_id = f"mock-{platform_code}-shop-{index:03d}"
+    index = len([
+        r for r in connections
+        if _normalize_platform_code(str(r.get("platform_code") or "")) == normalized_platform
+    ]) + 1
+    connection_id = f"mock-{normalized_platform}-shop-{index:03d}"
     new_row = {
         "id": connection_id,
         "company_id": "",
-        "platform_code": platform_code,
-        "platform_name": _platform_name(platform_code),
-        "external_shop_id": f"{platform_code}_shop_{index:03d}",
-        "external_shop_name": f"测试{_platform_name(platform_code)}店铺{index}",
+        "platform_code": normalized_platform,
+        "platform_name": _platform_name(normalized_platform),
+        "external_shop_id": f"{normalized_platform}_shop_{index:03d}",
+        "external_shop_name": f"测试{_platform_name(normalized_platform)}店铺{index}",
         "status": "authorized",
         "token_status": "active",
         "last_sync_at": None,
@@ -1316,8 +1319,8 @@ def _mock_handle_auth_callback(
     return {
         "success": True,
         "mode": "mock",
-        "platform_code": platform_code,
-        "message": f"{_platform_name(platform_code)}授权成功",
+        "platform_code": normalized_platform,
+        "message": f"{_platform_name(normalized_platform)}授权成功",
         "return_path": session.get("return_path") or "/",
         "connection": new_row,
         "code": code,
@@ -1352,6 +1355,66 @@ def _mock_get_shop_detail(auth_token: str, connection_id: str) -> dict[str, Any]
                 },
             }
     return {"success": False, "mode": "mock", "error": "not_found", "message": "店铺连接不存在"}
+
+
+def _mock_get_app_config(platform_code: str) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_code(platform_code)
+    redirect_uri = (
+        f"https://tally.example.com/api/platform-auth/callback/{normalized_platform}"
+        if normalized_platform == "taobao"
+        else ""
+    )
+    return {
+        "success": True,
+        "mode": "mock",
+        "platform_code": normalized_platform,
+        "configured": False,
+        "config": {
+            "id": "",
+            "platform_code": normalized_platform,
+            "platform_name": _platform_name(normalized_platform),
+            "app_name": "",
+            "app_key": "",
+            "app_secret": "",
+            "has_app_secret": False,
+            "has_app_public_cert": False,
+            "has_alipay_public_cert": False,
+            "has_alipay_root_cert": False,
+            "redirect_uri": redirect_uri,
+            "auth_base_url": "",
+            "token_url": "",
+            "refresh_url": "",
+            "status": "",
+        },
+    }
+
+
+def _mock_upsert_app_config(platform_code: str, app_key: str, redirect_uri: str) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_code(platform_code)
+    return {
+        "success": True,
+        "mode": "mock",
+        "platform_code": normalized_platform,
+        "configured": True,
+        "message": "平台应用配置已保存。",
+        "config": {
+            "id": f"mock-{normalized_platform}-app",
+            "platform_code": normalized_platform,
+            "platform_name": _platform_name(normalized_platform),
+            "app_name": _platform_name(normalized_platform),
+            "app_key": app_key,
+            "app_secret": "",
+            "has_app_secret": True,
+            "has_app_public_cert": normalized_platform == "alipay",
+            "has_alipay_public_cert": normalized_platform == "alipay",
+            "has_alipay_root_cert": normalized_platform == "alipay",
+            "redirect_uri": redirect_uri,
+            "auth_base_url": "",
+            "token_url": "",
+            "refresh_url": "",
+            "status": "active",
+        },
+    }
 
 
 async def platform_list_connections(
@@ -1414,12 +1477,81 @@ async def platform_list_shops(
     }
 
 
+async def platform_get_app_config(
+    auth_token: str,
+    platform_code: str,
+    *,
+    mode: str = "",
+) -> dict[str, Any]:
+    """获取平台应用配置状态，不返回 AppSecret 明文。"""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not platform_code:
+        return {"success": False, "error": "platform_code 不能为空"}
+
+    normalized_platform = _normalize_platform_code(platform_code)
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == "mock":
+        return _mock_get_app_config(normalized_platform)
+
+    result = await call_mcp_tool(
+        "platform_get_app_config",
+        {"auth_token": auth_token, "platform_code": normalized_platform, "mode": normalized_mode},
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return {"success": False, "mode": normalized_mode, "error": "平台应用配置接口暂未接入"}
+    return result
+
+
+async def platform_upsert_app_config(
+    auth_token: str,
+    platform_code: str,
+    *,
+    app_key: str = "",
+    app_secret: str = "",
+    redirect_uri: str = "",
+    app_public_cert: str = "",
+    alipay_public_cert: str = "",
+    alipay_root_cert: str = "",
+    mode: str = "",
+) -> dict[str, Any]:
+    """保存平台应用配置，用于后续真实 OAuth 授权。"""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not platform_code:
+        return {"success": False, "error": "platform_code 不能为空"}
+
+    normalized_platform = _normalize_platform_code(platform_code)
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == "mock":
+        return _mock_upsert_app_config(normalized_platform, app_key=app_key, redirect_uri=redirect_uri)
+
+    result = await call_mcp_tool(
+        "platform_upsert_app_config",
+        {
+            "auth_token": auth_token,
+            "platform_code": normalized_platform,
+            "mode": normalized_mode,
+            "app_key": app_key,
+            "app_secret": app_secret,
+            "redirect_uri": redirect_uri,
+            "app_public_cert": app_public_cert,
+            "alipay_public_cert": alipay_public_cert,
+            "alipay_root_cert": alipay_root_cert,
+        },
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return {"success": False, "mode": normalized_mode, "error": "平台应用配置接口暂未接入"}
+    return result
+
+
 async def platform_create_auth_session(
     auth_token: str,
     platform_code: str,
     *,
     return_path: str = "/",
     mode: str = "",
+    merchant_display_name: str = "",
 ) -> dict[str, Any]:
     """创建平台授权会话，返回授权 URL。"""
     if not auth_token:
@@ -1431,15 +1563,16 @@ async def platform_create_auth_session(
     if normalized_mode == "mock":
         return _mock_create_auth_session(auth_token, platform_code, return_path)
 
-    result = await call_mcp_tool(
-        "platform_create_auth_session",
-        {
-            "auth_token": auth_token,
-            "platform_code": platform_code,
-            "return_path": return_path,
-            "mode": normalized_mode,
-        },
-    )
+    payload = {
+        "auth_token": auth_token,
+        "platform_code": platform_code,
+        "return_path": return_path,
+        "mode": normalized_mode,
+    }
+    if str(merchant_display_name or "").strip():
+        payload["merchant_display_name"] = str(merchant_display_name or "").strip()
+
+    result = await call_mcp_tool("platform_create_auth_session", payload)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_create_auth_session(auth_token, platform_code, return_path)
     return result
@@ -1453,6 +1586,7 @@ async def platform_handle_auth_callback(
     error: str = "",
     error_description: str = "",
     mode: str = "",
+    callback_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """处理平台授权回调。"""
     if not platform_code:
@@ -1468,17 +1602,18 @@ async def platform_handle_auth_callback(
             error_description=error_description,
         )
 
-    result = await call_mcp_tool(
-        "platform_handle_auth_callback",
-        {
-            "platform_code": platform_code,
-            "code": code,
-            "state": state,
-            "error": error,
-            "error_description": error_description,
-            "mode": normalized_mode,
-        },
-    )
+    payload = {
+        "platform_code": platform_code,
+        "code": code,
+        "state": state,
+        "error": error,
+        "error_description": error_description,
+        "mode": normalized_mode,
+    }
+    if callback_payload is not None:
+        payload["callback_payload"] = dict(callback_payload)
+
+    result = await call_mcp_tool("platform_handle_auth_callback", payload)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_handle_auth_callback(
             platform_code=platform_code,

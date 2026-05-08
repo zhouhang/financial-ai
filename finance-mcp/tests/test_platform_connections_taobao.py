@@ -18,15 +18,26 @@ from platforms.base import PlatformAppConfig, PlatformShopProfile, PlatformToken
 from tools import platform_connections
 
 
+def test_service_provider_app_company_id_is_fixed() -> None:
+    assert platform_connections.SERVICE_PROVIDER_COMPANY_ID == "00000000-0000-0000-0000-00000000dd01"
+
+
 def test_public_platforms_collapse_taobao_and_tmall() -> None:
     platforms = platform_connections.SUPPORTED_PLATFORMS
 
+    assert [item["platform_code"] for item in platforms] == ["taobao", "alipay"]
     assert {
         "platform_code": "taobao",
         "platform_name": "淘宝/天猫",
         "status": "supported",
     } in platforms
+    assert {
+        "platform_code": "alipay",
+        "platform_name": "支付宝",
+        "status": "supported",
+    } in platforms
     assert not any(item["platform_code"] == "tmall" for item in platforms)
+    assert not any(item["platform_code"] in {"douyin_shop", "kuaishou", "jd"} for item in platforms)
 
 
 def test_build_taobao_order_line_dataset_payload_is_shop_scoped() -> None:
@@ -357,11 +368,67 @@ def test_platform_oauth_discover_returns_helpful_empty_for_taobao_and_tmall() ->
 
 
 @pytest.mark.anyio
+async def test_taobao_auth_session_uses_service_provider_app_config(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "customer-company-1", "user_id": "user-1"},
+    )
+
+    def fake_get_platform_app(**kwargs: Any) -> dict[str, Any] | None:
+        calls.append(kwargs)
+        if kwargs["company_id"] != platform_connections.SERVICE_PROVIDER_COMPANY_ID:
+            return None
+        return {
+            "id": "app-1",
+            "company_id": kwargs["company_id"],
+            "platform_code": kwargs["platform_code"],
+            "app_name": "Tally Taobao",
+            "app_key": "tally-app-key",
+            "app_secret": "tally-app-secret",
+            "app_type": "isv",
+            "auth_base_url": "https://oauth.taobao.com/authorize",
+            "token_url": "https://oauth.taobao.com/token",
+            "refresh_url": "",
+            "scopes_config": [],
+            "extra": {"redirect_uri": "https://tally.example.com/api/platform-auth/callback/taobao"},
+            "status": "active",
+        }
+
+    monkeypatch.setattr(platform_connections.auth_db, "get_platform_app", fake_get_platform_app)
+
+    class FakeConnector:
+        def __init__(self, app_config: PlatformAppConfig):
+            assert app_config.company_id == platform_connections.SERVICE_PROVIDER_COMPANY_ID
+            assert app_config.app_key == "tally-app-key"
+
+        def build_auth_url(self, *, state: str) -> str:
+            return f"https://oauth.taobao.com/authorize?state={state}"
+
+    monkeypatch.setattr(platform_connections, "build_connector", lambda app_config: FakeConnector(app_config))
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "create_auth_session",
+        lambda **kwargs: {"id": "session-1", "state_token": kwargs["state_token"], **kwargs},
+    )
+
+    result = await platform_connections._handle_create_auth_session(
+        {"auth_token": "token", "platform_code": "taobao", "mode": "real"}
+    )
+
+    assert result["success"] is True
+    assert result["session"]["company_id"] == "customer-company-1"
+    assert calls[0]["company_id"] == platform_connections.SERVICE_PROVIDER_COMPANY_ID
+
+
+@pytest.mark.anyio
 async def test_tmall_auth_session_request_is_accepted_as_taobao(monkeypatch) -> None:
     monkeypatch.setattr(
         platform_connections,
         "_require_user",
-        lambda auth_token: {"company_id": "company-1", "user_id": "user-1"},
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
     )
     monkeypatch.setattr(
         platform_connections,
@@ -399,6 +466,270 @@ async def test_tmall_auth_session_request_is_accepted_as_taobao(monkeypatch) -> 
 
     assert result["success"] is True
     assert result["platform_code"] == "taobao"
+
+
+@pytest.mark.anyio
+async def test_taobao_auth_session_defaults_to_real_app_config(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_platform_app",
+        lambda **kwargs: {
+            "id": "app-1",
+            "company_id": kwargs["company_id"],
+            "platform_code": kwargs["platform_code"],
+            "app_name": "Taobao App",
+            "app_key": "real-app-key",
+            "app_secret": "real-app-secret",
+            "app_type": "isv",
+            "auth_base_url": "https://oauth.taobao.com/authorize",
+            "token_url": "https://oauth.taobao.com/token",
+            "refresh_url": "",
+            "scopes_config": [],
+            "extra": {"redirect_uri": "https://tally.example.com/api/platform-auth/callback/taobao"},
+            "status": "active",
+        },
+    )
+
+    class FakeConnector:
+        def __init__(self, app_config: PlatformAppConfig):
+            captured["auth_mode"] = app_config.auth_mode
+            captured["redirect_uri"] = app_config.redirect_uri
+
+        def build_auth_url(self, *, state: str) -> str:
+            return f"https://oauth.taobao.com/authorize?state={state}"
+
+    monkeypatch.setattr(platform_connections, "build_connector", lambda app_config: FakeConnector(app_config))
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "create_auth_session",
+        lambda **kwargs: {"id": "session-1", "state_token": kwargs["state_token"], **kwargs},
+    )
+
+    result = await platform_connections._handle_create_auth_session(
+        {"auth_token": "token", "platform_code": "taobao"}
+    )
+
+    assert result["success"] is True
+    assert result["auth_mode"] == "real"
+    assert result["mode"] == "real"
+    assert result["requires_mock_authorize"] is False
+    assert result["auth_url"].startswith("https://oauth.taobao.com/authorize?")
+    assert captured["auth_mode"] == "real"
+
+
+@pytest.mark.anyio
+async def test_taobao_auth_session_requires_configured_real_app_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(platform_connections.auth_db, "get_platform_app", lambda **kwargs: None)
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "upsert_platform_app",
+        lambda **kwargs: pytest.fail("real auth session must not create a mock app implicitly"),
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "create_auth_session",
+        lambda **kwargs: pytest.fail("auth session should not be created without a real app"),
+    )
+
+    result = await platform_connections._handle_create_auth_session(
+        {"auth_token": "token", "platform_code": "taobao"}
+    )
+
+    assert result["success"] is False
+    assert "平台应用未配置" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_alipay_auth_session_requires_merchant_display_name(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+
+    result = await platform_connections._handle_create_auth_session(
+        {"auth_token": "token", "platform_code": "alipay", "mode": "real"}
+    )
+
+    assert result["success"] is False
+    assert result["platform_code"] == "alipay"
+    assert "支付宝授权需要填写商户显示名称" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_platform_app_config_is_saved_as_service_provider_config(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "customer-company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(platform_connections.auth_db, "get_platform_app", lambda **kwargs: None)
+
+    def fake_upsert_platform_app(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "id": "app-1",
+            "company_id": kwargs["company_id"],
+            "platform_code": kwargs["platform_code"],
+            "app_name": kwargs["app_name"],
+            "app_key": kwargs["app_key"],
+            "app_secret": kwargs["app_secret"],
+            "app_type": kwargs["app_type"],
+            "auth_base_url": kwargs["auth_base_url"],
+            "token_url": kwargs["token_url"],
+            "refresh_url": kwargs["refresh_url"],
+            "scopes_config": kwargs["scopes_config"],
+            "extra": kwargs["extra"],
+            "status": kwargs["status"],
+        }
+
+    monkeypatch.setattr(platform_connections.auth_db, "upsert_platform_app", fake_upsert_platform_app)
+
+    result = await platform_connections._handle_upsert_app_config(
+        {
+            "auth_token": "token",
+            "platform_code": "taobao",
+            "app_key": "tally-app-key",
+            "app_secret": "tally-app-secret",
+            "redirect_uri": "https://tally.example.com/api/platform-auth/callback/taobao",
+        }
+    )
+
+    assert result["success"] is True
+    assert captured["company_id"] == platform_connections.SERVICE_PROVIDER_COMPANY_ID
+    assert captured["extra"]["owner_scope"] == "service_provider"
+    assert captured["extra"]["configured_by_company_id"] == "customer-company-1"
+
+
+@pytest.mark.anyio
+async def test_platform_app_config_can_be_saved_without_returning_secret(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+
+    def fake_upsert_platform_app(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "id": "app-1",
+            "company_id": kwargs["company_id"],
+            "platform_code": kwargs["platform_code"],
+            "app_name": kwargs["app_name"],
+            "app_key": kwargs["app_key"],
+            "app_secret": kwargs["app_secret"],
+            "app_type": kwargs["app_type"],
+            "auth_base_url": kwargs["auth_base_url"],
+            "token_url": kwargs["token_url"],
+            "refresh_url": kwargs["refresh_url"],
+            "scopes_config": kwargs["scopes_config"],
+            "extra": kwargs["extra"],
+            "status": kwargs["status"],
+        }
+
+    monkeypatch.setattr(platform_connections.auth_db, "get_platform_app", lambda **kwargs: None)
+    monkeypatch.setattr(platform_connections.auth_db, "upsert_platform_app", fake_upsert_platform_app)
+
+    result = await platform_connections._handle_upsert_app_config(
+        {
+            "auth_token": "token",
+            "platform_code": "taobao",
+            "app_key": "real-app-key",
+            "app_secret": "real-app-secret",
+            "redirect_uri": "https://tally.example.com/api/platform-auth/callback/taobao",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["configured"] is True
+    assert result["config"]["platform_code"] == "taobao"
+    assert result["config"]["app_key"] == "real-app-key"
+    assert result["config"]["app_secret"] == ""
+    assert result["config"]["has_app_secret"] is True
+    assert captured["app_secret"] == "real-app-secret"
+    assert captured["extra"]["mode"] == "real"
+    assert captured["extra"]["redirect_uri"] == "https://tally.example.com/api/platform-auth/callback/taobao"
+
+
+@pytest.mark.anyio
+async def test_platform_app_config_reuses_existing_secret_when_secret_blank(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_platform_app",
+        lambda **kwargs: {
+            "id": "app-1",
+            "company_id": "company-1",
+            "platform_code": "taobao",
+            "app_name": "Old app",
+            "app_key": "old-key",
+            "app_secret": "existing-secret",
+            "app_type": "isv",
+            "auth_base_url": "https://old.example.com/authorize",
+            "token_url": "https://old.example.com/token",
+            "refresh_url": "",
+            "scopes_config": [],
+            "extra": {"mode": "real", "redirect_uri": "https://old.example.com/callback"},
+            "status": "active",
+        },
+    )
+
+    def fake_upsert_platform_app(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "id": "app-1",
+            "company_id": kwargs["company_id"],
+            "platform_code": kwargs["platform_code"],
+            "app_name": kwargs["app_name"],
+            "app_key": kwargs["app_key"],
+            "app_secret": kwargs["app_secret"],
+            "app_type": kwargs["app_type"],
+            "auth_base_url": kwargs["auth_base_url"],
+            "token_url": kwargs["token_url"],
+            "refresh_url": kwargs["refresh_url"],
+            "scopes_config": kwargs["scopes_config"],
+            "extra": kwargs["extra"],
+            "status": kwargs["status"],
+        }
+
+    monkeypatch.setattr(platform_connections.auth_db, "upsert_platform_app", fake_upsert_platform_app)
+
+    result = await platform_connections._handle_upsert_app_config(
+        {
+            "auth_token": "token",
+            "platform_code": "taobao",
+            "app_key": "new-key",
+            "app_secret": "",
+            "redirect_uri": "https://new.example.com/callback",
+        }
+    )
+
+    assert result["success"] is True
+    assert captured["app_secret"] == "existing-secret"
+    assert captured["app_key"] == "new-key"
+    assert captured["extra"]["redirect_uri"] == "https://new.example.com/callback"
 
 
 @pytest.mark.anyio

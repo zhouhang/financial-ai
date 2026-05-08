@@ -131,6 +131,7 @@ export type DataConnectionView = 'data_sources' | 'collaboration_channels';
 export type PlatformCode =
   | 'taobao'
   | 'tmall'
+  | 'alipay'
   | 'douyin_shop'
   | 'kuaishou'
   | 'jd'

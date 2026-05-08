@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs
 import sys
 from pathlib import Path
 
@@ -144,6 +145,52 @@ def test_real_token_exchange_redacts_raw_payload_secrets(monkeypatch):
     assert token.raw_payload["refresh_token"] == "***REDACTED***"
     assert token.raw_payload["session_key"] == "***REDACTED***"
     assert token.raw_payload["taobao_user_id"] == "123"
+
+
+def test_real_refresh_token_calls_top_refresh_api_and_redacts_secrets(monkeypatch):
+    connector = TaobaoConnector(_config())
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                b'{"top_auth_token_refresh_response":{"token_result":'
+                b'"{\\\"access_token\\\":\\\"new-access\\\",'
+                b'\\\"refresh_token\\\":\\\"new-refresh\\\",'
+                b'\\\"expire_time\\\":4102416000000,'
+                b'\\\"refresh_token_valid_time\\\":4102502400000,'
+                b'\\\"user_id\\\":\\\"123\\\",\\\"user_nick\\\":\\\"shop\\\"}"}}'
+            )
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["data"] = req.data.decode("utf-8")
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("platforms.connectors.taobao.urlopen", fake_urlopen)
+
+    token = connector.refresh_token(refresh_token="old-refresh")
+
+    params = parse_qs(str(captured["data"]))
+    assert captured["url"] == "https://eco.taobao.com/router/rest"
+    assert params["method"] == ["taobao.top.auth.token.refresh"]
+    assert params["app_key"] == ["app-key"]
+    assert params["refresh_token"] == ["old-refresh"]
+    assert "session" not in params
+    assert token.access_token == "new-access"
+    assert token.refresh_token == "new-refresh"
+    assert token.expires_in and token.expires_in > 0
+    assert token.refresh_expires_in and token.refresh_expires_in > 0
+    assert token.raw_payload["access_token"] == "***REDACTED***"
+    assert token.raw_payload["refresh_token"] == "***REDACTED***"
+    assert token.raw_payload["user_id"] == "123"
 
 
 def test_sync_orders_calls_incremental_method_without_detail_fetch(monkeypatch):

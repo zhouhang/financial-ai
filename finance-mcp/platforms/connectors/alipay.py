@@ -10,6 +10,7 @@ import json
 import logging
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -324,21 +325,47 @@ class AlipayConnector(BasePlatformConnector):
         bill_date: str,
         merchant_display_name: str,
         shop_connection_id: str,
-    ) -> list[dict[str, Any]]:
+        output_dir: str | Path | None = None,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         download_url = self.query_bill_download_url(
             app_auth_token=app_auth_token,
             bill_type=bill_type,
             bill_date=bill_date,
         )
         content = self.download_bill_file(bill_download_url=download_url)
+        file_name = "download.zip" if zipfile.is_zipfile(io.BytesIO(content)) else "download.csv"
+        files: list[dict[str, Any]] = []
+        if output_dir:
+            target_dir = Path(output_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / file_name
+            target_path.write_bytes(content)
+            files.append(
+                {
+                    "file_name": file_name,
+                    "path": str(target_path),
+                    "size_bytes": len(content),
+                }
+            )
         return self.parse_bill_file(
             content=content,
-            file_name="alipay_bill.zip",
+            file_name=file_name,
             bill_type=bill_type,
             bill_date=bill_date,
             merchant_display_name=merchant_display_name,
             shop_connection_id=shop_connection_id,
-        )
+        ) if not output_dir else {
+            "success": True,
+            "rows": self.parse_bill_file(
+                content=content,
+                file_name=file_name,
+                bill_type=bill_type,
+                bill_date=bill_date,
+                merchant_display_name=merchant_display_name,
+                shop_connection_id=shop_connection_id,
+            ),
+            "files": files,
+        }
 
     def parse_bill_file(
         self,

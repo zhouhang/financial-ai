@@ -241,7 +241,7 @@ def test_list_platform_order_lines_filters_by_dataset_and_biz_date(monkeypatch):
     assert "2026-05-06" in captured["params"]
 
 
-def test_get_platform_app_by_id_filters_company_and_opens_secret(monkeypatch):
+def test_get_platform_app_by_id_filters_owner_company_and_opens_secret(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeCursor:
@@ -296,6 +296,61 @@ def test_get_platform_app_by_id_filters_company_and_opens_secret(monkeypatch):
     assert "id = %s" in str(captured["sql"])
     assert "company_id = %s" in str(captured["sql"])
     assert captured["params"] == ("app-001", "company-001")
+
+
+def test_get_platform_app_by_id_allows_service_provider_owner_for_customer_runtime(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+        def fetchone(self):
+            return {
+                "id": "app-001",
+                "company_id": "00000000-0000-0000-0000-00000000dd01",
+                "platform_code": "taobao",
+                "app_name": "Tally 淘宝应用",
+                "app_key": "app-key",
+                "app_secret": "sealed-secret",
+                "app_type": "isv",
+                "auth_base_url": "",
+                "token_url": "",
+                "refresh_url": "",
+                "scopes_config": [],
+                "extra": {"redirect_uri": "https://example.com/callback"},
+                "status": "active",
+            }
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+    monkeypatch.setattr(auth_db, "open_secret", lambda value: f"opened:{value}")
+
+    app = auth_db.get_platform_app_by_id(
+        platform_app_id="app-001",
+        company_id="customer-company-1",
+        owner_company_id="00000000-0000-0000-0000-00000000dd01",
+        include_secrets=True,
+    )
+
+    assert app["app_secret"] == "opened:sealed-secret"
+    assert captured["params"] == ("app-001", "00000000-0000-0000-0000-00000000dd01")
 
 
 def test_get_platform_order_line_stats_filters_dataset_and_shop(monkeypatch):

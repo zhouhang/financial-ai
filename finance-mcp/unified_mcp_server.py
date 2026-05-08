@@ -212,6 +212,8 @@ _RECON_TOOL_NAMES = {
 _PLATFORM_TOOL_NAMES = {
     "platform_list_connections",
     "platform_create_auth_session",
+    "platform_get_app_config",
+    "platform_upsert_app_config",
     "platform_handle_auth_callback",
     "platform_reauthorize_shop",
     "platform_disable_shop",

@@ -21,6 +21,7 @@
 13. **020_execution_runs_trigger_type_manual_rerun.sql** - 为 execution_runs.trigger_type 增加 manual / rerun 语义
 14. **021_drop_dataset_verified_status.sql** - 删除数据集语义验证状态字段，发布即代表语义已确认
 15. **022_platform_order_lines.sql** - 电商平台订单明细物理表，用于高频订单采集数据集
+16. **024_auth_sessions_extra.sql** - 为平台授权会话增加 extra 元数据，用于记录支付宝商户显示名称等授权上下文
 
 ## 使用方法
 
