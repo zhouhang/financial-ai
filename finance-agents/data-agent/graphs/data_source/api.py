@@ -607,6 +607,7 @@ class DataSourceDatasetCollectionTriggerRequest(BaseModel):
     resource_key: str = ""
     biz_date: str = ""
     background: bool = True
+    trigger_mode: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
     mode: str = ""
 
@@ -1187,6 +1188,7 @@ async def trigger_dataset_collection(
         resource_key=body.resource_key,
         biz_date=body.biz_date or _default_collection_biz_date(),
         background=body.background,
+        trigger_mode=body.trigger_mode,
         params=body.params,
         mode=body.mode,
     )

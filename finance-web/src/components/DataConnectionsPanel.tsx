@@ -4917,7 +4917,7 @@ export default function DataConnectionsPanel({
         const params = new URLSearchParams({
           resource_key: dataset.resource_key || dataset.dataset_code,
           limit: '10',
-          sample_limit: '10',
+          sample_limit: '20',
         });
         const response = await fetch(
           `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/collection-detail?${params.toString()}`,
@@ -4994,7 +4994,7 @@ export default function DataConnectionsPanel({
     const params = new URLSearchParams({
       resource_key: collectionDetailDialog.resourceKey,
       limit: '10',
-      sample_limit: '10',
+      sample_limit: '20',
     });
     try {
       const response = await fetch(
