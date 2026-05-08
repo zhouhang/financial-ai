@@ -2047,3 +2047,157 @@ async def test_collection_detail_reads_alipay_platform_bill_lines(
     assert calls["list_platform_alipay_bill_lines"]["resource_key"] == (
         "alipay_bill:trade:shop-alipay-1"
     )
+
+
+@pytest.mark.anyio
+async def test_collection_detail_returns_platform_field_groups_and_twenty_rows(
+    monkeypatch,
+) -> None:
+    semantic_profile = {
+        "status": "generated_with_samples",
+        "generated_from": {"has_sample_rows": True},
+        "fields": [
+            {
+                "raw_name": "alipay_trade_no",
+                "display_name": "支付宝交易号",
+                "semantic_type": "identifier",
+                "field_source": "normalized",
+            },
+            {
+                "raw_name": "raw.收入",
+                "display_name": "收入",
+                "semantic_type": "amount",
+                "field_source": "raw_bill",
+            },
+            {
+                "raw_name": "source_row_key",
+                "display_name": "账单行唯一键",
+                "semantic_type": "identifier",
+                "field_source": "system",
+            },
+        ],
+    }
+    dataset = _alipay_bill_dataset(meta={"semantic_profile": semantic_profile})
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(data_sources, "_enrich_jobs_with_latest_attempts", lambda company_id, jobs: jobs)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_alipay_bill_line_stats",
+        lambda **kwargs: {"total_count": 20, "biz_date_count": 1},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_platform_alipay_bill_lines",
+        lambda **kwargs: [
+            {
+                "payload": {
+                    "source_row_key": f"row-{idx}",
+                    "alipay_trade_no": f"2026050800{idx:02d}",
+                    "raw": {"收入": f"{idx}.00"},
+                }
+            }
+            for idx in range(1, 21)
+        ],
+    )
+
+    result = await data_sources._handle_data_source_get_dataset_collection_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+            "sample_limit": 20,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["sample_limit"] == 20
+    assert result["row_count"] == 20
+    assert result["collection_status"]["status"] == "succeeded"
+    assert result["semantic_status"]["status"] == "succeeded"
+    assert [group["key"] for group in result["field_groups"]] == [
+        "normalized",
+        "raw_bill",
+        "system",
+    ]
+    assert [group["fields"][0]["raw_name"] for group in result["field_groups"]] == [
+        "alipay_trade_no",
+        "raw.收入",
+        "source_row_key",
+    ]
+    assert result["rows"][0]["raw.收入"] == "1.00"
+
+
+@pytest.mark.anyio
+async def test_collection_detail_marks_running_job_as_non_actionable(
+    monkeypatch,
+) -> None:
+    dataset = _alipay_bill_dataset(meta={})
+    running_job = {
+        "id": "job-running",
+        "data_source_id": "source-alipay-1",
+        "resource_key": "alipay_bill:trade:shop-alipay-1",
+        "job_status": "running",
+    }
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [running_job])
+    monkeypatch.setattr(data_sources, "_enrich_jobs_with_latest_attempts", lambda company_id, jobs: jobs)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_platform_alipay_bill_line_stats",
+        lambda **kwargs: {"total_count": 0, "biz_date_count": 0},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_platform_alipay_bill_lines", lambda **kwargs: [])
+
+    result = await data_sources._handle_data_source_get_dataset_collection_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-alipay-1",
+            "dataset_id": "dataset-alipay-1",
+            "sample_limit": 20,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["sample_limit"] == 20
+    assert result["row_count"] == 0
+    assert result["collection_status"]["status"] == "running"
+    assert result["collection_status"]["can_initialize"] is False
+    assert result["collection_status"]["can_retry_initialize"] is False
+    assert result["semantic_status"]["status"] == "waiting_for_samples"
+    assert result["semantic_status"]["can_refresh"] is False
+    assert [group["key"] for group in result["field_groups"]] == [
+        "normalized",
+        "raw_bill",
+        "system",
+    ]

@@ -4360,6 +4360,144 @@ def _enrich_jobs_with_latest_attempts(company_id: str, jobs: list[dict[str, Any]
     return enriched_jobs
 
 
+def _normalize_job_status_for_detail(job: dict[str, Any] | None) -> dict[str, Any]:
+    raw_status = _safe_text((job or {}).get("job_status") or (job or {}).get("status")).lower()
+    if raw_status in {"running", "processing", "in_progress", "queued", "pending"}:
+        status = "running"
+    elif raw_status in {"success", "succeeded", "completed", "done"}:
+        status = "succeeded"
+    elif raw_status in {"failed", "failure", "error", "cancelled", "canceled"}:
+        status = "failed"
+    else:
+        status = "unknown"
+    return {
+        "status": status,
+        "raw_status": raw_status,
+        "is_running": status == "running",
+        "is_succeeded": status == "succeeded",
+        "is_failed": status == "failed",
+    }
+
+
+def _build_collection_status_detail(
+    jobs: list[dict[str, Any]],
+    stats: dict[str, Any] | None,
+    row_count: int,
+) -> dict[str, Any]:
+    latest_job = jobs[0] if jobs else None
+    job_status = _normalize_job_status_for_detail(latest_job)
+    total_count = row_count
+    if isinstance(stats, dict):
+        for key in ("total_count", "row_count", "count"):
+            try:
+                total_count = max(total_count, int(stats.get(key) or 0))
+            except (TypeError, ValueError):
+                continue
+
+    if job_status["is_running"]:
+        status = "running"
+        message = "采集任务正在运行"
+        can_initialize = False
+        can_retry_initialize = False
+    elif total_count > 0 or job_status["is_succeeded"]:
+        status = "succeeded"
+        message = "已采集真实样本"
+        can_initialize = False
+        can_retry_initialize = False
+    elif job_status["is_failed"]:
+        status = "failed"
+        message = "最近一次采集失败，可重试初始化"
+        can_initialize = False
+        can_retry_initialize = True
+    else:
+        status = "empty"
+        message = "暂无采集样本"
+        can_initialize = True
+        can_retry_initialize = False
+
+    return {
+        "status": status,
+        "message": message,
+        "can_initialize": can_initialize,
+        "can_retry_initialize": can_retry_initialize,
+        "latest_job": _attach_aliases_to_job(latest_job) if latest_job else None,
+        "row_count": row_count,
+        "total_count": total_count,
+    }
+
+
+def _build_semantic_status_detail(
+    dataset_row: dict[str, Any] | None,
+    has_sample_rows: bool,
+    collection_running: bool,
+) -> dict[str, Any]:
+    semantic_flat = _flatten_semantic_profile(dataset_row or {})
+    semantic_status = _safe_text(semantic_flat.get("semantic_status"))
+    has_fields = bool(semantic_flat.get("semantic_fields"))
+
+    if semantic_status in {"generated_with_samples", "llm_generated", "manual_updated"} and has_fields:
+        return {
+            "status": "succeeded",
+            "message": "已生成语义结构",
+            "can_refresh": bool(has_sample_rows) and not collection_running,
+            "can_retry": False,
+            "raw_status": semantic_status,
+        }
+    if semantic_status == "generated_basic" and has_fields:
+        return {
+            "status": "basic",
+            "message": "已生成基础语义结构",
+            "can_refresh": bool(has_sample_rows) and not collection_running,
+            "can_retry": bool(has_sample_rows) and not collection_running,
+            "raw_status": semantic_status,
+        }
+    if collection_running or not has_sample_rows:
+        return {
+            "status": "waiting_for_samples",
+            "message": "等待采集样本后生成语义结构",
+            "can_refresh": False,
+            "can_retry": False,
+            "raw_status": semantic_status or "missing",
+        }
+    return {
+        "status": "ready_to_generate",
+        "message": "可基于样本生成语义结构",
+        "can_refresh": True,
+        "can_retry": False,
+        "raw_status": semantic_status or "missing",
+    }
+
+
+def _build_dataset_semantic_field_groups(dataset_row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    group_order = [
+        ("normalized", "标准字段", True),
+        ("raw_bill", "原始账单字段", True),
+        ("system", "系统字段", False),
+    ]
+    groups: dict[str, dict[str, Any]] = {
+        key: {"key": key, "label": label, "default_open": default_open, "fields": []}
+        for key, label, default_open in group_order
+    }
+    for item in _flatten_semantic_profile(dataset_row or {}).get("semantic_fields") or []:
+        if not isinstance(item, dict):
+            continue
+        field = dict(item)
+        raw_name = _safe_text(field.get("raw_name") or field.get("name"))
+        field_source = _safe_text(field.get("field_source")).lower()
+        if not field_source:
+            if raw_name.startswith("raw."):
+                field_source = "raw_bill"
+            elif raw_name in PLATFORM_SYSTEM_FIELDS:
+                field_source = "system"
+            else:
+                field_source = "normalized"
+        if field_source not in groups:
+            field_source = "normalized"
+        field["field_source"] = field_source
+        groups[field_source]["fields"].append(field)
+    return [groups[key] for key, _, _ in group_order]
+
+
 def create_tools() -> list[Tool]:
     source_id_schema = {
         "source_id": {"type": "string"},
@@ -7088,11 +7226,24 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             limit=sample_limit,
             offset=0,
         )
-    sample_rows = [
-        dict(item.get("payload") or {})
-        for item in collection_records
-        if isinstance(item, dict) and isinstance(item.get("payload"), dict)
-    ]
+    if _dataset_uses_platform_order_lines(dataset_row) or _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        sample_rows = [
+            _flatten_platform_sample_payload(dict(item.get("payload") or {}))
+            for item in collection_records
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+    else:
+        sample_rows = [
+            dict(item.get("payload") or {})
+            for item in collection_records
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+    collection_status = _build_collection_status_detail(jobs, stats, len(sample_rows))
+    semantic_status = _build_semantic_status_detail(
+        dataset_row,
+        has_sample_rows=bool(sample_rows),
+        collection_running=collection_status.get("status") == "running",
+    )
 
     return {
         "success": True,
@@ -7100,9 +7251,13 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
         "resource_key": resource_key,
         "dataset": _build_dataset_view(dataset_row) if dataset_row else None,
         "collection_stats": stats,
+        "collection_status": collection_status,
+        "semantic_status": semantic_status,
+        "field_groups": _build_dataset_semantic_field_groups(dataset_row),
         "collection_records": collection_records,
         "jobs": [_attach_aliases_to_job(job) for job in jobs],
         "rows": sample_rows,
+        "sample_limit": sample_limit,
         "count": len(jobs),
         "row_count": len(sample_rows),
         "message": "已获取采集详情",
