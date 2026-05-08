@@ -1669,13 +1669,87 @@ function normalizePlatformFieldGroups(raw: unknown): PlatformDatasetFieldGroup[]
     .filter((item): item is PlatformDatasetFieldGroup => Boolean(item));
 }
 
+function normalizePlatformDetailDataset(
+  raw: unknown,
+  fallbackDataset: DataSourceDatasetSummary,
+): DataSourceDatasetSummary {
+  const value = asRecord(raw);
+  if (!value) return fallbackDataset;
+  const base = normalizeDataset(value) ?? fallbackDataset;
+
+  return {
+    ...base,
+    id: asString(value.id) ?? base.id ?? fallbackDataset.id,
+    data_source_id:
+      asString(value.data_source_id) ??
+      asString(value.dataSourceId) ??
+      asString((base as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id) ??
+      asString((fallbackDataset as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id),
+    dataset_code:
+      asString(value.dataset_code) ??
+      asString(value.datasetCode) ??
+      base.dataset_code ??
+      fallbackDataset.dataset_code,
+    dataset_name:
+      asString(value.dataset_name) ??
+      asString(value.datasetName) ??
+      base.dataset_name ??
+      fallbackDataset.dataset_name,
+    resource_key:
+      asString(value.resource_key) ??
+      asString(value.resourceKey) ??
+      base.resource_key ??
+      fallbackDataset.resource_key ??
+      fallbackDataset.dataset_code,
+    business_name:
+      asString(value.business_name) ??
+      asString(value.businessName) ??
+      base.business_name ??
+      fallbackDataset.business_name,
+    business_description:
+      asString(value.business_description) ??
+      asString(value.businessDescription) ??
+      base.business_description ??
+      fallbackDataset.business_description,
+    publish_status:
+      asString(value.publish_status) ??
+      asString(value.publishStatus) ??
+      base.publish_status ??
+      fallbackDataset.publish_status,
+    semantic_status:
+      asString(value.semantic_status) ??
+      asString(value.semanticStatus) ??
+      base.semantic_status ??
+      fallbackDataset.semantic_status,
+    last_error_message:
+      asStringOrNull(value.last_error_message) ??
+      asStringOrNull(value.lastErrorMessage) ??
+      base.last_error_message ??
+      fallbackDataset.last_error_message,
+    field_label_map:
+      asStringRecord(value.field_label_map) ??
+      asStringRecord(value.fieldLabelMap) ??
+      base.field_label_map ??
+      fallbackDataset.field_label_map,
+    semantic_fields:
+      (Array.isArray(value.semantic_fields)
+        ? value.semantic_fields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+        : undefined) ??
+      (Array.isArray(value.semanticFields)
+        ? value.semanticFields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+        : undefined) ??
+      base.semantic_fields ??
+      fallbackDataset.semantic_fields,
+  } as DataSourceDatasetSummary;
+}
+
 function normalizePlatformDatasetDetail(
   source: DataSourceListItem,
   dataset: DataSourceDatasetSummary,
   raw: unknown,
 ): PlatformShopDatasetDetail {
   const value = asRecord(raw) ?? {};
-  const nextDataset = normalizeDataset(value.dataset) ?? dataset;
+  const nextDataset = normalizePlatformDetailDataset(value.dataset, dataset);
   const collectionStatusRaw = asRecord(value.collection_status) ?? asRecord(value.collectionStatus) ?? {};
   const semanticStatusRaw = asRecord(value.semantic_status) ?? asRecord(value.semanticStatus) ?? {};
   const rows = Array.isArray(value.rows)
@@ -4699,6 +4773,34 @@ export default function DataConnectionsPanel({
     },
     [authHeaders, authToken, draftSourceIdSet, expandedShopDatasetId, findPlatformShopDatasets],
   );
+
+  const refreshCurrentConnectionView = useCallback(async () => {
+    if (selectedConnectionView === 'collaboration_channels') {
+      await fetchCollaborationChannels();
+      return;
+    }
+    if (mode === 'platform' && selectedPlatform) {
+      await Promise.all([fetchShops(selectedPlatform.platform_code), fetchRemoteSources()]);
+      const expandedShop = shops.find((shop) => shop.id === expandedShopDatasetId);
+      if (expandedShop) {
+        await loadPlatformShopDatasetDetails(expandedShop, true);
+      }
+      return;
+    }
+    await fetchPlatforms();
+    await fetchRemoteSources();
+  }, [
+    expandedShopDatasetId,
+    fetchCollaborationChannels,
+    fetchPlatforms,
+    fetchRemoteSources,
+    fetchShops,
+    loadPlatformShopDatasetDetails,
+    mode,
+    selectedConnectionView,
+    selectedPlatform,
+    shops,
+  ]);
 
   const refreshPlatformDatasetSemantic = useCallback(
     async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
@@ -8676,19 +8778,7 @@ export default function DataConnectionsPanel({
                   )}
                 <button
                   type="button"
-                  onClick={() => {
-                    if (selectedConnectionView === 'collaboration_channels') {
-                      void fetchCollaborationChannels();
-                      return;
-                    }
-                    if (mode === 'platform' && selectedPlatform) {
-                      void fetchShops(selectedPlatform.platform_code);
-                      void fetchRemoteSources();
-                      return;
-                    }
-                    void fetchPlatforms();
-                    void fetchRemoteSources();
-                  }}
+                  onClick={() => void refreshCurrentConnectionView()}
                   className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary transition-colors hover:bg-surface-tertiary"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
