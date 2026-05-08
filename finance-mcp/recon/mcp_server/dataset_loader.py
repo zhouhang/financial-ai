@@ -55,6 +55,15 @@ _PLATFORM_ORDER_LINES_QUERY_ALLOWED_KEYS = {
     "order_by",
     "limit",
 }
+_PLATFORM_ALIPAY_BILL_LINES_QUERY_ALLOWED_KEYS = {
+    "dataset_id",
+    "resource_key",
+    "biz_date",
+    "bill_type",
+    "filters",
+    "order_by",
+    "limit",
+}
 
 
 class DatasetLoadError(RuntimeError):
@@ -904,6 +913,194 @@ def _load_platform_order_line_rows(
                 conn.close()
 
 
+def _load_platform_alipay_bill_line_rows(
+    *,
+    source_key: str,
+    query: dict[str, Any],
+) -> list[dict[str, Any]]:
+    columns = _table_columns("platform_alipay_bill_lines")
+    if not columns:
+        raise DatasetLoadError(
+            "未找到 platform_alipay_bill_lines 表，请先完成支付宝账单采集能力部署。"
+        )
+
+    data_source_col = _first_existing_column(columns, ["data_source_id", "source_id"])
+    payload_col = _first_existing_column(
+        columns,
+        ["payload", "record_payload", "payload_json", "item_payload", "data"],
+    )
+    if not data_source_col or not payload_col:
+        raise DatasetLoadError(
+            "platform_alipay_bill_lines 缺少 data_source_id/source_id 或 payload 字段。"
+        )
+
+    where_parts = [f"{_safe_identifier(data_source_col)} = %s"]
+    params: list[Any] = [source_key]
+
+    dataset_id = str(query.get("dataset_id") or "").strip()
+    if dataset_id:
+        dataset_col = _first_existing_column(columns, ["dataset_id", "data_source_dataset_id"])
+        if not dataset_col:
+            raise DatasetLoadError(
+                "platform_alipay_bill_lines 缺少 dataset_id 字段，无法按数据集过滤。"
+            )
+        where_parts.append(f"{_safe_identifier(dataset_col)} = %s")
+        params.append(dataset_id)
+
+    resource_key = str(query.get("resource_key") or "").strip()
+    if resource_key:
+        resource_parts = resource_key.split(":", 2)
+        if (
+            len(resource_parts) != 3
+            or resource_parts[0] != "alipay_bill"
+            or not resource_parts[1].strip()
+            or not resource_parts[2].strip()
+        ):
+            raise DatasetLoadError(
+                "platform_alipay_bill_lines query.resource_key 必须为 "
+                "alipay_bill:<bill_type>:<shop_connection_id>"
+            )
+        bill_type_col = _first_existing_column(columns, ["bill_type"])
+        shop_col = _first_existing_column(columns, ["shop_connection_id"])
+        if not bill_type_col or not shop_col:
+            raise DatasetLoadError(
+                "platform_alipay_bill_lines 缺少 bill_type 或 shop_connection_id 字段，"
+                "无法按 resource_key 过滤。"
+            )
+        where_parts.append(f"{_safe_identifier(bill_type_col)} = %s")
+        params.append(resource_parts[1].strip())
+        where_parts.append(f"{_safe_identifier(shop_col)} = %s")
+        params.append(resource_parts[2].strip())
+
+    bill_type = str(query.get("bill_type") or "").strip()
+    if bill_type:
+        bill_type_col = _first_existing_column(columns, ["bill_type"])
+        if not bill_type_col:
+            raise DatasetLoadError(
+                "platform_alipay_bill_lines 缺少 bill_type 字段，无法按账单类型过滤。"
+            )
+        where_parts.append(f"{_safe_identifier(bill_type_col)} = %s")
+        params.append(bill_type)
+
+    biz_date = str(query.get("biz_date") or "").strip()
+    if biz_date:
+        biz_date_col = _first_existing_column(
+            columns,
+            ["bill_date", "biz_date", "business_date", "data_date"],
+        )
+        if not biz_date_col:
+            raise DatasetLoadError(
+                "platform_alipay_bill_lines 缺少 bill_date 字段，无法按业务日期过滤。"
+            )
+        where_parts.append(f"{_safe_identifier(biz_date_col)} = %s")
+        params.append(biz_date)
+
+    filters = query.get("filters")
+    if isinstance(filters, dict):
+        for field, value in filters.items():
+            field_name = str(field or "").strip()
+            if not field_name or field_name not in columns or field_name == payload_col:
+                continue
+            if not _is_collection_filter_value(value):
+                raise DatasetLoadError(
+                    f"platform_alipay_bill_lines query.filters 字段 '{field_name}' 仅支持标量值或标量数组"
+                )
+            _append_db_filter_condition(
+                where_parts=where_parts,
+                params=params,
+                field_name=field_name,
+                value=value,
+                coerce_filters_to_text=True,
+            )
+
+    order_by = query.get("order_by")
+    if isinstance(order_by, str):
+        order_by = [order_by]
+    if order_by is None:
+        order_by = []
+    if not isinstance(order_by, list):
+        raise DatasetLoadError("platform_alipay_bill_lines query.order_by 必须是字符串或数组")
+
+    order_parts: list[str] = []
+    for item in order_by:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        parts = token.split()
+        field_name = parts[0]
+        direction = parts[1].upper() if len(parts) > 1 else "ASC"
+        if field_name not in columns:
+            raise DatasetLoadError(f"platform_alipay_bill_lines 表中不存在排序字段: {field_name}")
+        if direction not in {"ASC", "DESC"}:
+            raise DatasetLoadError(
+                f"platform_alipay_bill_lines query.order_by 仅支持 ASC/DESC，当前: {direction}"
+            )
+        order_parts.append(f"{_safe_identifier(field_name)} {direction}")
+    if not order_parts:
+        updated_col = _first_existing_column(columns, ["updated_at", "latest_seen_at", "created_at", "id"])
+        if updated_col:
+            order_parts.append(f"{_safe_identifier(updated_col)} DESC")
+
+    limit = query.get("limit")
+    if limit is not None:
+        if not isinstance(limit, int) or limit <= 0:
+            raise DatasetLoadError("platform_alipay_bill_lines query.limit 必须是正整数")
+    limit_sql = f" LIMIT {limit}" if isinstance(limit, int) and limit > 0 else ""
+
+    promoted_columns = [
+        "bill_type",
+        "bill_date",
+        "source_file_name",
+        "source_row_number",
+        "source_row_key",
+        "alipay_trade_no",
+        "merchant_order_no",
+        "business_order_no",
+        "amount",
+        "income_amount",
+        "expense_amount",
+        "trade_time",
+    ]
+    select_parts = [f"{_safe_identifier(payload_col)} AS payload"]
+    select_parts.extend(
+        f"{_safe_identifier(column_name)} AS {_safe_identifier(column_name)}"
+        for column_name in promoted_columns
+        if column_name in columns
+    )
+
+    sql = f"SELECT {', '.join(select_parts)} FROM platform_alipay_bill_lines"
+    sql += " WHERE " + " AND ".join(where_parts)
+    if order_parts:
+        sql += " ORDER BY " + ", ".join(order_parts)
+    sql += limit_sql
+
+    conn = None
+    cur = None
+    try:
+        import psycopg2.extras
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        return [dict(row) for row in cur.fetchall() or []]
+    except Exception as exc:
+        logger.error(
+            "[recon][dataset] source_key=%s platform_alipay_bill_lines 查询失败",
+            source_key,
+            exc_info=True,
+        )
+        raise DatasetLoadError(
+            "platform_alipay_bill_lines 查询失败，请检查支付宝账单采集记录。"
+        ) from exc
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        finally:
+            if conn is not None:
+                conn.close()
+
+
 def _load_from_collection_records(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
     """Load dataset from collected dataset_collection_records rows."""
     source_type, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
@@ -993,6 +1190,80 @@ def _load_from_platform_order_lines(dataset_ref: dict[str, Any], table_name: str
     return df.reset_index(drop=True)
 
 
+def _load_from_platform_alipay_bill_lines(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
+    """Load dataset from published platform_alipay_bill_lines rows."""
+    _, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
+    extra_keys = sorted(set(query.keys()) - _PLATFORM_ALIPAY_BILL_LINES_QUERY_ALLOWED_KEYS)
+    if extra_keys:
+        raise DatasetLoadError(
+            f"source_key={source_key} query 含不支持字段。"
+            f"仅支持: {', '.join(sorted(_PLATFORM_ALIPAY_BILL_LINES_QUERY_ALLOWED_KEYS))}"
+        )
+
+    columns = _table_columns("platform_alipay_bill_lines")
+    if not columns:
+        raise DatasetLoadError(
+            "未找到 platform_alipay_bill_lines 表，请先完成支付宝账单采集能力部署。"
+        )
+
+    rows = _load_platform_alipay_bill_line_rows(source_key=source_key, query=query)
+    promoted_columns = [
+        "bill_type",
+        "bill_date",
+        "source_file_name",
+        "source_row_number",
+        "source_row_key",
+        "alipay_trade_no",
+        "merchant_order_no",
+        "business_order_no",
+        "amount",
+        "income_amount",
+        "expense_amount",
+        "trade_time",
+    ]
+    payload_rows: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        merged = dict(payload)
+        for column_name in promoted_columns:
+            if column_name in row:
+                merged.setdefault(column_name, row.get(column_name))
+        payload_rows.append(merged)
+
+    if not payload_rows:
+        raise DatasetLoadError(
+            f"source_key={source_key} 暂无支付宝账单明细。请先采集数据后再执行对账。"
+        )
+
+    df = pd.DataFrame(payload_rows)
+
+    filters = query.get("filters")
+    if filters is None:
+        filters = {}
+    if not isinstance(filters, dict):
+        raise DatasetLoadError("platform_alipay_bill_lines query.filters 必须是对象")
+    for field, value in filters.items():
+        field_name = str(field or "").strip()
+        if not field_name:
+            continue
+        if field_name not in df.columns:
+            if field_name in columns:
+                continue
+            raise DatasetLoadError(f"platform_alipay_bill_lines 数据中不存在过滤字段: {field_name}")
+        if not _is_collection_filter_value(value):
+            raise DatasetLoadError(
+                f"platform_alipay_bill_lines query.filters 字段 '{field_name}' 仅支持标量值或标量数组"
+            )
+        df = _apply_collection_record_scalar_filter(df, field_name, value)
+
+    if df.empty:
+        raise DatasetLoadError(f"source_key={source_key} 支付宝账单明细过滤后为空。请检查 query 条件。")
+
+    return df.reset_index(drop=True)
+
+
 def load_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
     """Load dataset by source_type using source_key + query conditions."""
     source_type, _, _ = _require_dataset_protocol(dataset_ref, table_name)
@@ -1011,3 +1282,5 @@ def load_dataset_as_df(dataset_ref: dict[str, Any], table_name: str) -> pd.DataF
 
 register_dataset_loader("collection_records", _load_from_collection_records)
 register_dataset_loader("platform_order_lines", _load_from_platform_order_lines)
+register_dataset_loader("platform_alipay_bill_lines", _load_from_platform_alipay_bill_lines)
+register_dataset_loader("alipay_bill_lines", _load_from_platform_alipay_bill_lines)
