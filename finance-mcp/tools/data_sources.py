@@ -4047,15 +4047,17 @@ def _merge_dataset_schema_columns(
     schema_summary = dict(dataset_row.get("schema_summary") or {})
     merged_columns: list[dict[str, Any]] = []
     seen: set[str] = set()
+    replace_columns = _dataset_uses_platform_alipay_bill_lines(dataset_row)
 
-    for item in schema_summary.get("columns") or []:
-        if not isinstance(item, dict):
-            continue
-        name = _safe_text(item.get("name"))
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        merged_columns.append(dict(item))
+    if not replace_columns:
+        for item in schema_summary.get("columns") or []:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_text(item.get("name"))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged_columns.append(dict(item))
 
     for item in columns:
         name = _safe_text(item.get("name"))
@@ -4070,7 +4072,10 @@ def _merge_dataset_schema_columns(
             }
         )
 
-    if len(merged_columns) == len(schema_summary.get("columns") or []):
+    existing_columns = [
+        item for item in (schema_summary.get("columns") or []) if isinstance(item, dict)
+    ]
+    if merged_columns == existing_columns:
         return dataset_row
     schema_summary["columns"] = merged_columns
     updated = auth_db.upsert_unified_data_source_dataset(

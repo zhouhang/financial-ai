@@ -436,6 +436,46 @@ def test_parse_empty_signcustomer_bill_returns_columns_without_summary_rows():
     ]
 
 
+def test_parse_signcustomer_zip_ignores_summary_csv_columns():
+    connector = AlipayConnector(_config())
+    detail_csv = (
+        "#支付宝账务明细查询\n"
+        "账务流水号,业务流水号,商户订单号,业务基础订单号,业务订单号,业务账单来源,业务描述,收入金额（+元）\n"
+        "#-----------------------------------------账务明细列表结束------------------------------------,,,,,,,\n"
+        "#收入合计：0笔，共0.00元,,,,,,,\n"
+    ).encode("gbk")
+    summary_csv = (
+        "#支付宝账务汇总查询\n"
+        "类型,收入笔数,收入金额（+元）,支出笔数,支出金额（-元）,总金额（元）\n"
+        "合计,0,0.00,0,0.00,0.00\n"
+    ).encode("gbk")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("detail.csv", detail_csv)
+        zf.writestr("summary.csv", summary_csv)
+
+    parsed = connector.parse_bill_file(
+        content=buffer.getvalue(),
+        file_name="fund.zip",
+        bill_type="signcustomer",
+        bill_date="2026-05-08",
+        merchant_display_name="福游网络",
+        shop_connection_id="shop-1",
+    )
+
+    assert parsed["rows"] == []
+    assert [column["name"] for column in parsed["columns"]] == [
+        "账务流水号",
+        "业务流水号",
+        "商户订单号",
+        "业务基础订单号",
+        "业务订单号",
+        "业务账单来源",
+        "业务描述",
+        "收入金额（+元）",
+    ]
+
+
 def test_build_alipay_row_key_is_hash_even_with_business_identifier():
     row_key = build_alipay_row_key(
         bill_type="signcustomer",

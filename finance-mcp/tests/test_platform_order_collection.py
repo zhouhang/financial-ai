@@ -1041,6 +1041,10 @@ async def test_execute_sync_job_generates_alipay_semantic_from_bill_header_when_
         schema_summary={
             "source": "alipay_bill_lines",
             "storage": "platform_alipay_bill_lines",
+            "columns": [
+                {"name": "旧字段", "data_type": "text", "nullable": True},
+                {"name": "#支付宝账务汇总查询", "data_type": "text", "nullable": True},
+            ],
         }
     )
 
@@ -1147,6 +1151,9 @@ async def test_execute_sync_job_generates_alipay_semantic_from_bill_header_when_
         "账务流水号",
         "商户订单号",
         "收入金额（+元）",
+    ]
+    assert "#支付宝账务汇总查询" not in [
+        column["name"] for column in calls["dataset_schema"]["columns"]
     ]
     profile = calls["semantic_profile"]["meta"]["semantic_profile"]
     assert profile["status"] == "generated_basic"
