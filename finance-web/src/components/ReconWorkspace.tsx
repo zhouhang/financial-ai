@@ -63,6 +63,7 @@ import {
 import {
   buildRunPlanBindings,
   extractRunPlanInputDatasets,
+  resolveDatasetSourceType,
   type RunPlanInputDatasetDraft,
 } from './recon/runPlanBindings';
 import {
@@ -120,6 +121,7 @@ interface SchemeSourceOption {
   resourceKey?: string;
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface SchemeSourceDraft {
@@ -137,6 +139,7 @@ interface SchemeSourceDraft {
   datasetCode?: string;
   resourceKey?: string;
   datasetKind?: string;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface SchemeDraft {
@@ -315,7 +318,7 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(0,2.3fr) minmax(200px,1.1fr) minmax(180px,0.9fr) minmax(120px,0.7fr) minmax(280px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.9fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(188px,auto)';
+  'minmax(0,2.7fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -1207,6 +1210,53 @@ function mapRunException(item: unknown): ReconRunExceptionDetail {
   };
 }
 
+function getRunContext(item: ReconCenterRunItem): Record<string, unknown> {
+  return asRecord(item.raw.run_context_json);
+}
+
+function isRerunTrigger(item: ReconCenterRunItem): boolean {
+  return item.triggerType.trim().toLowerCase() === 'rerun';
+}
+
+function findRerunRun(
+  refreshedRuns: ReconCenterRunItem[],
+  originalRun: ReconCenterRunItem,
+  rerunRequestedAt: number,
+  existingRunIds: Set<string>,
+): ReconCenterRunItem | null {
+  const newestFirst = [...refreshedRuns].sort((left, right) => {
+    const leftTimestamp = Math.max(
+      toSortableTimestamp(toText(left.raw.created_at)),
+      toSortableTimestamp(left.startedAt),
+    );
+    const rightTimestamp = Math.max(
+      toSortableTimestamp(toText(right.raw.created_at)),
+      toSortableTimestamp(right.startedAt),
+    );
+    return rightTimestamp - leftTimestamp;
+  });
+  const directMatch = newestFirst.find((item) => (
+    isRerunTrigger(item)
+    && toText(getRunContext(item).rerun_from_run_id) === originalRun.id
+    && !existingRunIds.has(item.id)
+  ));
+  if (directMatch) return directMatch;
+
+  return newestFirst.find((item) => {
+    const runTimestamp = Math.max(
+      toSortableTimestamp(toText(item.raw.created_at)),
+      toSortableTimestamp(item.startedAt),
+    );
+    return (
+      isRerunTrigger(item)
+      && item.planCode === originalRun.planCode
+      && item.id !== originalRun.id
+      && !existingRunIds.has(item.id)
+      && runTimestamp >= rerunRequestedAt
+    );
+  }) || null;
+}
+
 function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
   for (const value of values) {
     if (typeof value === 'object' && value !== null) {
@@ -1239,6 +1289,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      extractConfig: firstNonEmptyRecord(value.extract_config, value.extractConfig),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -1263,6 +1314,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
         normalizeFieldLabelMap(value.field_label_map) || normalizeFieldLabelMap(semanticProfile.field_label_map),
       keyFields: explicitKeyFields.length ? explicitKeyFields : normalizeStringList(semanticProfile.key_fields),
       schemaSummary: firstNonEmptyRecord(value.schema_summary, value.schemaSummary),
+      extractConfig: firstNonEmptyRecord(value.extract_config, value.extractConfig),
       sourceId: toText(value.data_source_id, toText(value.source_id, toText(sourceRecord.id))),
       sourceName: toText(value.data_source_name, toText(value.source_name, toText(sourceRecord.name))),
       sourceKind:
@@ -3075,6 +3127,10 @@ export default function ReconWorkspace({
   const [loadingExceptionsRunId, setLoadingExceptionsRunId] = useState<string | null>(null);
   const [centerError, setCenterError] = useState<string | null>(null);
   const [centerNotice, setCenterNotice] = useState<string | null>(null);
+  const [rerunNotice, setRerunNotice] = useState<{
+    message: string;
+    runId?: string;
+  } | null>(null);
   const [schemeDeleteGuard, setSchemeDeleteGuard] = useState<{
     schemeId: string;
     message: string;
@@ -3086,6 +3142,7 @@ export default function ReconWorkspace({
     }>;
   } | null>(null);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [focusedRunId, setFocusedRunId] = useState<string | null>(null);
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
@@ -3120,6 +3177,7 @@ export default function ReconWorkspace({
     status: 'success' | 'error';
   } | null>(null);
   const taskRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const runRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const aiProcAbortControllersRef = useRef<Partial<Record<AiProcSide, AbortController>>>({});
   const aiProcGenerationSeqRef = useRef<Record<AiProcSide, number>>({ left: 0, right: 0 });
   const schemeDraft = useMemo<SchemeDraft>(() => buildLegacySchemeDraftSnapshot(wizardDraftState), [wizardDraftState]);
@@ -3326,12 +3384,12 @@ export default function ReconWorkspace({
     [],
   );
 
-  const loadCenterData = useCallback(async () => {
+  const loadCenterData = useCallback(async (): Promise<ReconCenterRunItem[]> => {
     if (!authToken) {
       applyCenterPayload([], [], [], {
         notice: '登录后可查看对账方案、对账任务和运行记录。',
       });
-      return;
+      return [];
     }
 
     setLoadingCenter(true);
@@ -3378,10 +3436,14 @@ export default function ReconWorkspace({
       const nextRuns = asList(runData.runs).map((item) =>
         mapRun(item, backendSchemeNameByCode, backendTaskNameByCode),
       );
+      setFocusedRunId((current) => (
+        current && !nextRuns.some((item) => item.id === current) ? null : current
+      ));
       applyCenterPayload(nextSchemes, nextTasks, nextRuns, {
         notice: null,
         exceptionsByRunId: {},
       });
+      return nextRuns;
     } catch (error) {
       setSchemes([]);
       setTasks([]);
@@ -3391,6 +3453,8 @@ export default function ReconWorkspace({
       setCenterError(error instanceof Error ? error.message : '对账中心加载失败');
       setSchemeDeleteGuard(null);
       setFocusedTaskId(null);
+      setFocusedRunId(null);
+      return [];
     } finally {
       setLoadingCenter(false);
     }
@@ -3420,6 +3484,25 @@ export default function ReconWorkspace({
       window.clearTimeout(timer);
     };
   }, [activeTab, focusedTaskId, tasks]);
+
+  useEffect(() => {
+    if (activeTab !== 'runs' || !focusedRunId) return;
+    const target = runRowRefs.current[focusedRunId];
+    if (!target) return;
+
+    target.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'center',
+    });
+
+    const timer = window.setTimeout(() => {
+      setFocusedRunId((current) => (current === focusedRunId ? null : current));
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [activeTab, focusedRunId, runs]);
 
   const loadRunExceptions = useCallback(
     async (runId: string) => {
@@ -4881,6 +4964,7 @@ export default function ReconWorkspace({
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
         schema_summary: item.schemaSummary,
+        extract_config: item.extractConfig,
       }));
       const rightDatasetBindings = selectedRightSources.map((item, index) => ({
         side: 'right',
@@ -4899,6 +4983,7 @@ export default function ReconWorkspace({
         key_fields: item.keyFields,
         field_label_map: item.fieldLabelMap,
         schema_summary: item.schemaSummary,
+        extract_config: item.extractConfig,
       }));
       const datasetBindingsJson = [
         ...leftDatasetBindings.map((item, index) => ({
@@ -4912,7 +4997,10 @@ export default function ReconWorkspace({
           side: 'left',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'collection_records',
+          dataset_source_type: resolveDatasetSourceType({
+            extractConfig: item.extract_config,
+            schemaSummary: item.schema_summary,
+          }),
         })),
         ...rightDatasetBindings.map((item, index) => ({
           role_code: `right_${index + 1}`,
@@ -4925,7 +5013,10 @@ export default function ReconWorkspace({
           side: 'right',
           dataset_code: item.dataset_code,
           table_name: item.resource_key,
-          dataset_source_type: 'collection_records',
+          dataset_source_type: resolveDatasetSourceType({
+            extractConfig: item.extract_config,
+            schemaSummary: item.schema_summary,
+          }),
         })),
       ];
       const response = await fetchReconAutoApi('/schemes', {
@@ -5265,6 +5356,7 @@ export default function ReconWorkspace({
       try {
         setCenterError(null);
         setCenterNotice(null);
+        setRerunNotice(null);
         const response = await fetchReconAutoApi(`/schemes/${encodeURIComponent(scheme.id)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${authToken}` },
@@ -5338,6 +5430,47 @@ export default function ReconWorkspace({
     [authToken, loadCenterData],
   );
 
+  const handleDeleteRun = useCallback(
+    async (run: ReconCenterRunItem) => {
+      if (!authToken) {
+        setCenterNotice(null);
+        setCenterError('请先登录后再删除运行记录。');
+        return;
+      }
+      if (!window.confirm(`确定要删除运行记录「${run.planName || run.id}」吗？此操作会同步删除该运行记录下的异常。`)) {
+        return;
+      }
+      try {
+        setCenterError(null);
+        setCenterNotice(null);
+        setRerunNotice(null);
+        const response = await fetchReconAutoApi(`/runs/${encodeURIComponent(run.id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data.detail || data.message || '删除运行记录失败'));
+        }
+        setRuns((prev) => prev.filter((item) => item.id !== run.id));
+        setExceptionsByRunId((prev) => {
+          const next = { ...prev };
+          delete next[run.id];
+          return next;
+        });
+        if (modalState?.kind === 'run-exceptions' && modalState.run.id === run.id) {
+          closeModal();
+        }
+        setCenterNotice(`运行记录「${run.planName || run.id}」已删除。`);
+        await loadCenterData();
+      } catch (error) {
+        setCenterNotice(null);
+        setCenterError(error instanceof Error ? error.message : '删除运行记录失败');
+      }
+    },
+    [authToken, closeModal, loadCenterData, modalState],
+  );
+
   const handleToggleTask = useCallback(
     async (taskId: string, currentEnabled: boolean) => {
       if (!authToken) {
@@ -5379,14 +5512,25 @@ export default function ReconWorkspace({
   );
 
   const handleRerunValidation = useCallback(
-    async (originalRunId: string, exceptionId = '') => {
+    async (originalRunId: string) => {
       if (!authToken) {
         setCenterError('请先登录后再重新对账验证。');
         return;
       }
+      if (rerunningRunId) {
+        return;
+      }
+      const originalRun = runs.find((item) => item.id === originalRunId);
+      if (!originalRun) {
+        setCenterError('未找到原运行记录，请刷新运行记录后重试。');
+        return;
+      }
+      const rerunRequestedAt = Date.now();
+      const existingRunIds = new Set(runs.map((item) => item.id));
       setRerunningRunId(originalRunId);
       setCenterError(null);
       setCenterNotice(null);
+      setRerunNotice(null);
       setModalError(null);
       try {
         const response = await fetchReconAutoApi('/runs/rerun', {
@@ -5397,8 +5541,7 @@ export default function ReconWorkspace({
           },
           body: JSON.stringify({
             original_run_id: originalRunId,
-            exception_id: exceptionId,
-            reason: exceptionId ? '前端按异常重新对账验证' : '前端按运行重新对账验证',
+            reason: '前端按运行记录重新对账',
           }),
         });
         const data = await response.json().catch(() => ({}));
@@ -5411,9 +5554,20 @@ export default function ReconWorkspace({
           }
           throw new Error(String(detail || data.message || '重新对账验证失败'));
         }
-        await loadCenterData();
+        const refreshedRuns = await loadCenterData();
+        const rerunRun = findRerunRun(refreshedRuns, originalRun, rerunRequestedAt, existingRunIds);
         setActiveTab('runs');
-        setCenterNotice(toText(data.message) || '重新对账验证已提交，请稍后刷新查看最新状态。');
+        if (rerunRun) {
+          setFocusedRunId(rerunRun.id);
+          setRerunNotice({
+            message: '已发起重新对账，并新增运行记录。',
+            runId: rerunRun.id,
+          });
+        } else {
+          setRerunNotice({
+            message: '已发起重新对账，系统正在生成新的运行记录，请稍后刷新运行记录查看。',
+          });
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : '重新对账验证失败';
         setCenterError(message);
@@ -5422,8 +5576,33 @@ export default function ReconWorkspace({
         setRerunningRunId((prev) => (prev === originalRunId ? null : prev));
       }
     },
-    [authToken, loadCenterData],
+    [authToken, loadCenterData, rerunningRunId, runs],
   );
+
+  const handleOpenRerunRun = useCallback((runId: string) => {
+    setSelectedExceptionDetail(null);
+    closeModal();
+    setActiveTab('runs');
+    setFocusedRunId(runId);
+  }, [closeModal]);
+
+  const renderRerunNotice = useCallback(() => {
+    if (!rerunNotice) return null;
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+        <span>{rerunNotice.message}</span>
+        {rerunNotice.runId ? (
+          <button
+            type="button"
+            onClick={() => handleOpenRerunRun(rerunNotice.runId || '')}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-surface px-3 py-1.5 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+          >
+            前往查看
+          </button>
+        ) : null}
+      </div>
+    );
+  }, [handleOpenRerunRun, rerunNotice]);
 
   const schemeStepOneReady = Boolean(schemeDraft.name.trim());
   const aiProcGenerationBusy =
@@ -5829,8 +6008,14 @@ export default function ReconWorkspace({
           return (
             <div
               key={item.id}
+              ref={(node) => {
+                runRowRefs.current[item.id] = node;
+              }}
               data-testid={`execution-run-row-${item.id}`}
-              className="grid items-center gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
+              className={cn(
+                'grid items-center gap-6 border-b border-border-subtle px-5 py-4 transition last:border-b-0',
+                focusedRunId === item.id && 'bg-emerald-50/70',
+              )}
               style={{ gridTemplateColumns: RUN_LIST_TEMPLATE }}
             >
               <div className="min-w-0">
@@ -5855,7 +6040,7 @@ export default function ReconWorkspace({
                   <button
                     type="button"
                     onClick={() => void handleRerunValidation(item.id)}
-                    disabled={rerunningRunId === item.id}
+                    disabled={Boolean(rerunningRunId)}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <RefreshCw className={cn('h-4 w-4', rerunningRunId === item.id && 'animate-spin')} />
@@ -5869,6 +6054,14 @@ export default function ReconWorkspace({
                   >
                     <AlertCircle className="h-4 w-4" />
                     异常看板
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteRun(item)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition hover:border-red-200 hover:text-red-600"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    删除
                   </button>
                 </div>
               </div>
@@ -6747,7 +6940,7 @@ export default function ReconWorkspace({
             <button
               type="button"
               onClick={() => void handleRerunValidation(run.id)}
-              disabled={rerunningRunId === run.id}
+              disabled={Boolean(rerunningRunId)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <RefreshCw className={cn('h-4 w-4', rerunningRunId === run.id && 'animate-spin')} />
@@ -6761,6 +6954,7 @@ export default function ReconWorkspace({
               {modalError}
             </div>
           ) : null}
+          {renderRerunNotice()}
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">所属方案</p>
@@ -6844,15 +7038,6 @@ export default function ReconWorkspace({
                       >
                         <Eye className="h-3.5 w-3.5" />
                         查看详情
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleRerunValidation(run.id, item.id)}
-                        disabled={rerunningRunId === run.id}
-                        className="mt-3 ml-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <RefreshCw className={cn('h-3.5 w-3.5', rerunningRunId === run.id && 'animate-spin')} />
-                        {rerunningRunId === run.id ? '验证中...' : '重新对账验证'}
                       </button>
                     </div>
                     <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
@@ -6948,6 +7133,8 @@ export default function ReconWorkspace({
               {centerNotice}
             </div>
           ) : null}
+
+          {renderRerunNotice()}
 
           {loadingCenter ? (
             <div className="flex min-h-[260px] flex-col items-center justify-center rounded-[28px] border border-dashed border-border bg-surface px-6 py-10 text-center">
@@ -7053,17 +7240,6 @@ export default function ReconWorkspace({
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-6 py-4">
-              {selectedExceptionRun ? (
-                <button
-                  type="button"
-                  onClick={() => void handleRerunValidation(selectedExceptionRun.id, selectedExceptionDetail.id)}
-                  disabled={rerunningRunId === selectedExceptionRun.id}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <RefreshCw className={cn('h-4 w-4', rerunningRunId === selectedExceptionRun.id && 'animate-spin')} />
-                  {rerunningRunId === selectedExceptionRun.id ? '验证中...' : '重新对账验证'}
-                </button>
-              ) : null}
               <button
                 type="button"
                 onClick={() => setSelectedExceptionDetail(null)}

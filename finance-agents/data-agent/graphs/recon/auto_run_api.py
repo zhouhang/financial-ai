@@ -35,6 +35,7 @@ from tools.mcp_client import (
     execution_run_exception_get,
     execution_run_exception_update,
     execution_run_exceptions,
+    execution_run_delete,
     execution_run_get,
     execution_run_list,
     execution_run_plan_create,
@@ -1234,6 +1235,20 @@ async def get_execution_run_api(
     result = await execution_run_get(auth_token, run_id)
     if not result.get("success"):
         raise HTTPException(status_code=404, detail=result.get("error", "运行记录不存在"))
+    return result
+
+
+@router.delete("/runs/{run_id}")
+async def delete_execution_run_api(
+    run_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await execution_run_delete(auth_token, run_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "删除运行记录失败"))
     return result
 
 

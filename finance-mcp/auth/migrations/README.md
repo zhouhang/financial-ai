@@ -15,11 +15,22 @@
 7. **007_data_source_datasets_and_health.sql** - 数据集目录模型（data_source_datasets）与 source/dataset 健康状态字段
 8. **008_recon_auto_tasks_rule_id.sql** - 为 recon_auto_tasks 增量补齐 rule_id 字段
 9. **009_execution_scheme_run_model.sql** - 对账方案与运行计划模型（execution_schemes / execution_run_plans / execution_runs / execution_run_exceptions）
-10. **016_dataset_collection_records.sql** - 采集资产层明细记录，替代旧 raw/snapshot 主链路
-11. **017_drop_raw_snapshot_collection_tables.sql** - 删除旧 raw/snapshot/checkpoint 表
-12. **018_drop_sync_jobs_idempotency_index.sql** - 删除采集任务级幂等索引，任务只保留审计记录，幂等由采集数据层处理
-13. **020_execution_runs_trigger_type_manual_rerun.sql** - 为 execution_runs.trigger_type 增加 manual / rerun 语义
-14. **021_drop_dataset_verified_status.sql** - 删除数据集语义验证状态字段，发布即代表语义已确认
+10. **010_execution_run_plans_add_monthly_schedule.sql** - 为运行计划增加月度调度配置
+11. **011_rule_detail_supported_entry_modes.sql** - 为规则详情增加支持的入口模式
+12. **012_ods_yxst_trd_order_di_o_structure.sql** - 新增有赞订单 ODS 明细结构
+13. **013_data_source_dataset_catalog_fields.sql** - 补齐数据集目录发布与检索字段
+14. **014_expand_dataset_bindings_scope_role_constraints.sql** - 扩展数据集绑定范围与角色约束
+15. **015_remove_file_count_from_file_validation_rules.sql** - 删除文件校验规则中的 file_count 字段
+16. **016_dataset_collection_records.sql** - 采集资产层明细记录，替代旧 raw/snapshot 主链路
+17. **017_drop_raw_snapshot_collection_tables.sql** - 删除旧 raw/snapshot/checkpoint 表
+18. **018_drop_sync_jobs_idempotency_index.sql** - 删除采集任务级幂等索引，任务只保留审计记录，幂等由采集数据层处理
+19. **019_recon_execution_queue.sql** - 新增对账执行队列表
+20. **020_execution_runs_trigger_type_manual_rerun.sql** - 为 execution_runs.trigger_type 增加 manual / rerun 语义
+21. **021_drop_dataset_verified_status.sql** - 删除数据集语义验证状态字段，发布即代表语义已确认
+22. **022_platform_order_lines.sql** - 电商平台订单明细物理表，用于高频订单采集数据集
+23. **023_tally_service_provider_company.sql** - 初始化 Tally 服务商公司
+24. **024_auth_sessions_extra.sql** - 为平台授权会话增加 extra 元数据，用于记录支付宝商户显示名称等授权上下文
+25. **025_platform_alipay_bill_lines.sql** - 支付宝账单行物理表，用于支付宝授权采集后的资金账单和交易账单
 
 ## 使用方法
 

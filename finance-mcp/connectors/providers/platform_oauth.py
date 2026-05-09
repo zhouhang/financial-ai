@@ -17,18 +17,8 @@ _DEFAULT_FIXED_DATASETS = (
 )
 
 _PLATFORM_FIXED_DATASET_OVERRIDES: dict[str, tuple[dict[str, str], ...]] = {
-    "taobao": (
-        {"resource_key": "tb_trades", "dataset_name": "淘宝交易单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_payments", "dataset_name": "淘宝支付单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_refunds", "dataset_name": "淘宝退款单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tb_settlements", "dataset_name": "淘宝结算单", "dataset_kind": "api_endpoint"},
-    ),
-    "tmall": (
-        {"resource_key": "tm_orders", "dataset_name": "天猫订单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_payments", "dataset_name": "天猫支付单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_refunds", "dataset_name": "天猫退款单", "dataset_kind": "api_endpoint"},
-        {"resource_key": "tm_settlements", "dataset_name": "天猫结算单", "dataset_kind": "api_endpoint"},
-    ),
+    "taobao": (),
+    "tmall": (),
     "douyin_shop": (
         {"resource_key": "dy_orders", "dataset_name": "抖店订单", "dataset_kind": "api_endpoint"},
         {"resource_key": "dy_payments", "dataset_name": "抖店支付单", "dataset_kind": "api_endpoint"},
@@ -72,6 +62,16 @@ class PlatformOAuthConnector(BaseDataSourceConnector):
 
     def discover_datasets(self, arguments: dict[str, Any]) -> dict[str, Any]:
         provider_code = str(self.ctx.provider_code or "").strip().lower()
+        if provider_code in {"taobao", "tmall"}:
+            return {
+                "success": True,
+                "source_id": self.ctx.source_id,
+                "provider_code": provider_code,
+                "datasets": [],
+                "dataset_count": 0,
+                "message": "淘宝/天猫数据集将在店铺授权成功后按店铺创建，请先完成授权。",
+            }
+
         templates = _PLATFORM_FIXED_DATASET_OVERRIDES.get(provider_code) or _DEFAULT_FIXED_DATASETS
         datasets: list[dict[str, Any]] = []
         for item in templates:

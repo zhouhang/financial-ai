@@ -61,10 +61,44 @@ def test_resolve_user_by_keyword_queries_search_without_contact_detail_lookup():
     assert result.resolved_user is not None
     assert result.resolved_user.user_id == "01205058704740"
     assert result.resolved_user.display_name == "周行"
-    assert executor.calls[0]["args"] == ["dws", "contact", "user", "search", "--query", "周行", "-f", "json"]
+    assert executor.calls[0]["args"] == ["dws", "contact", "user", "search", "--keyword", "周行", "-f", "json"]
     assert len(executor.calls) == 1
     assert executor.calls[0]["env"]["DWS_CLIENT_ID"] == "cid"
     assert executor.calls[0]["env"]["DWS_CLIENT_SECRET"] == "secret"
+
+
+def test_resolve_user_by_keyword_extracts_ids_from_current_dws_result_list():
+    executor = FakeExecutor(
+        [
+            _result(
+                {
+                    "result": [
+                        {
+                            "name": "周行",
+                            "nick": "周行",
+                            "openDingTalkId": "open-001",
+                            "userId": "01205058704740",
+                        }
+                    ],
+                    "success": True,
+                }
+            ),
+        ]
+    )
+    adapter = DingTalkDwsAdapter(
+        executor=executor,
+        cli_bin="dws",
+        client_id="cid",
+        client_secret="secret",
+        robot_code="robot",
+    )
+
+    result = adapter.resolve_user(keyword="周行")
+
+    assert result.success is True
+    assert result.resolved_user is not None
+    assert result.resolved_user.user_id == "01205058704740"
+    assert result.resolved_user.display_name == "周行"
 
 
 def test_resolve_user_by_user_id_does_not_call_contact_get():

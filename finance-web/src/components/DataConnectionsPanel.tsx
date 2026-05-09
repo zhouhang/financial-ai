@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -17,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Store,
   Trash2,
 } from 'lucide-react';
@@ -48,6 +49,8 @@ import type {
 } from '../types';
 
 type DataConnectionsMode = 'overview' | 'platform' | 'callback';
+
+const DISPLAY_PLATFORM_CODES = new Set<string>(['taobao', 'alipay']);
 
 interface DataConnectionsPanelProps {
   authToken?: string | null;
@@ -171,6 +174,26 @@ interface ApiDiscoveryFormState {
   manualJsonText: string;
 }
 
+interface PlatformAppConfigFormState {
+  appKey: string;
+  appSecret: string;
+  redirectUri: string;
+  merchantAuthMode: string;
+  merchantAuthPcUrl: string;
+  merchantAuthQrUrl: string;
+  appPublicCert: string;
+  alipayPublicCert: string;
+  alipayRootCert: string;
+  hasAppSecret: boolean;
+  hasAppPublicCert: boolean;
+  hasAlipayPublicCert: boolean;
+  hasAlipayRootCert: boolean;
+  loading: boolean;
+  saving: boolean;
+  error: string;
+  notice: string;
+}
+
 interface DatasetSemanticInfo {
   businessName?: string;
   keyFields: string[];
@@ -192,6 +215,32 @@ interface TargetedDiscoverDialogState {
 interface PhysicalCatalogDetailDialogState {
   sourceId: string;
   datasetId: string;
+}
+
+interface AlipayAuthDialogState {
+  merchantDisplayName: string;
+  error: string;
+}
+
+interface PlatformPendingAuthorization {
+  id: string;
+  platform_code: string;
+  claim_code: string;
+  status: string;
+  app_id?: string;
+  source?: string;
+  external_shop_id?: string;
+  external_seller_id?: string;
+  merchant_display_name?: string;
+  expires_at?: string | null;
+  created_at?: string | null;
+  last_error?: string;
+}
+
+interface AlipayClaimFormState {
+  pendingAuthorizationId: string;
+  claimCode: string;
+  merchantDisplayName: string;
 }
 
 interface EditableDatasetSemantic {
@@ -231,6 +280,42 @@ interface DatasetCollectionDetailDialogState {
   detail: Record<string, unknown> | null;
 }
 
+interface PlatformDatasetFieldGroup {
+  key: string;
+  label: string;
+  defaultOpen: boolean;
+  fields: Record<string, unknown>[];
+}
+
+interface PlatformDatasetCollectionStatus {
+  status: string;
+  message: string;
+  canInitialize: boolean;
+  canRetryInitialize: boolean;
+  isRunning: boolean | null;
+  latestJob: Record<string, unknown> | null;
+}
+
+interface PlatformDatasetSemanticStatus {
+  status: string;
+  message: string;
+  canRefresh: boolean;
+  canRetry: boolean;
+}
+
+interface PlatformShopDatasetDetail {
+  sourceId: string;
+  source: DataSourceListItem;
+  dataset: DataSourceDatasetSummary;
+  collectionStatus: PlatformDatasetCollectionStatus;
+  semanticStatus: PlatformDatasetSemanticStatus;
+  fieldGroups: PlatformDatasetFieldGroup[];
+  rows: Record<string, unknown>[];
+  loading: boolean;
+  error: string;
+  loadedAt: string;
+}
+
 interface EditableDatasetSemanticFieldRow {
   id: string;
   rawName: string;
@@ -244,7 +329,17 @@ interface EditableDatasetSemanticFieldRow {
   sampleValues: string[];
 }
 
+interface SampleTableColumn {
+  rawName: string;
+  displayName: string;
+}
+
 const PLATFORM_FIXED_DATASET_FALLBACK = ['订单', '支付单', '退款单', '结算单'];
+const ALIPAY_FIXED_DATASET_FALLBACK = ['资金账单', '交易账单'];
+const ALIPAY_AUTH_COLLECTION_COPY =
+  '一个支付宝商户授权后会生成资金账单和交易账单两个数据集，每天 10:30 采集 T-1 账单。';
+const PLATFORM_COLLECTION_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'initializing'];
+const PLATFORM_SEMANTIC_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'refreshing'];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object') return null;
@@ -306,6 +401,35 @@ function buildSampleTableColumns(rows: Record<string, unknown>[], maxColumns = 1
   return columns;
 }
 
+function buildSemanticSampleTableColumns(
+  fieldGroups: PlatformDatasetFieldGroup[],
+  rows: Record<string, unknown>[],
+  maxColumns = 12,
+): SampleTableColumn[] {
+  const columns: SampleTableColumn[] = [];
+  const seen = new Set<string>();
+  const businessGroups = fieldGroups.filter((group) => group.key.trim().toLowerCase() !== 'system');
+
+  businessGroups.forEach((group) => {
+    group.fields.forEach((field) => {
+      const rawName = rawFieldName(field).trim();
+      if (!rawName || seen.has(rawName) || columns.length >= maxColumns) return;
+      seen.add(rawName);
+      columns.push({
+        rawName,
+        displayName: displayFieldName(field).trim() || rawName,
+      });
+    });
+  });
+
+  if (columns.length > 0) return columns;
+
+  return buildSampleTableColumns(rows, maxColumns).map((column) => ({
+    rawName: column,
+    displayName: column,
+  }));
+}
+
 function formatSampleCellValue(value: unknown): string {
   if (value === null || value === undefined) return '-';
   if (typeof value === 'string') return value.trim() || '-';
@@ -315,6 +439,55 @@ function formatSampleCellValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function platformDatasetStatusClass(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (['succeeded', 'success', 'completed', 'generated', 'generated_with_samples', 'ready'].includes(normalized)) {
+    return 'bg-green-50 text-green-700';
+  }
+  if (['running', 'queued', 'pending', 'loading', 'initializing', 'refreshing'].includes(normalized)) {
+    return 'bg-blue-50 text-blue-700';
+  }
+  if (['failed', 'error'].includes(normalized)) return 'bg-red-50 text-red-700';
+  if (['missing', 'not_started', 'none'].includes(normalized)) return 'bg-amber-50 text-amber-700';
+  return 'bg-surface-accent text-blue-600';
+}
+
+function isPlatformCollectionRunning(collectionStatus: PlatformDatasetCollectionStatus): boolean {
+  if (collectionStatus.isRunning !== null) return collectionStatus.isRunning;
+  return PLATFORM_COLLECTION_RUNNING_STATUSES.includes(collectionStatus.status.trim().toLowerCase());
+}
+
+function isPlatformSemanticRunning(semanticStatus: PlatformDatasetSemanticStatus): boolean {
+  return PLATFORM_SEMANTIC_RUNNING_STATUSES.includes(semanticStatus.status.trim().toLowerCase());
+}
+
+function displayFieldName(field: Record<string, unknown>): string {
+  return (
+    asString(field.display_name) ??
+    asString(field.displayName) ??
+    asString(field.label) ??
+    asString(field.business_name) ??
+    rawFieldName(field) ??
+    '字段'
+  );
+}
+
+function rawFieldName(field: Record<string, unknown>): string {
+  return (
+    asString(field.raw_name) ??
+    asString(field.rawName) ??
+    asString(field.field_name) ??
+    asString(field.name) ??
+    asString(field.key) ??
+    ''
+  );
+}
+
+function formatPreviewCell(value: unknown): string {
+  const formatted = formatSampleCellValue(value);
+  return formatted.length > 80 ? `${formatted.slice(0, 80)}...` : formatted;
 }
 
 function isCompactDatePartitionField(fieldName: string): boolean {
@@ -1489,6 +1662,158 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
   };
 }
 
+function normalizePlatformFieldGroups(raw: unknown): PlatformDatasetFieldGroup[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const value = asRecord(item);
+      if (!value) return null;
+      const key = asString(value.key) ?? asString(value.group_key) ?? '';
+      const label = asString(value.label) ?? asString(value.name) ?? key;
+      const fields = Array.isArray(value.fields)
+        ? value.fields.filter((field): field is Record<string, unknown> => Boolean(asRecord(field)))
+        : [];
+      if (!key && !label && fields.length === 0) return null;
+      return {
+        key: key || label || 'fields',
+        label: label || key || '字段',
+        defaultOpen: asBoolean(value.default_open) ?? asBoolean(value.defaultOpen) ?? true,
+        fields,
+      };
+    })
+    .filter((item): item is PlatformDatasetFieldGroup => Boolean(item));
+}
+
+function normalizePlatformDetailDataset(
+  raw: unknown,
+  fallbackDataset: DataSourceDatasetSummary,
+): DataSourceDatasetSummary {
+  const value = asRecord(raw);
+  if (!value) return fallbackDataset;
+  const base = normalizeDataset(value) ?? fallbackDataset;
+  const explicitDatasetCode = asString(value.dataset_code) ?? asString(value.datasetCode);
+  const explicitDatasetName = asString(value.dataset_name) ?? asString(value.datasetName);
+
+  return {
+    ...base,
+    id: asString(value.id) ?? base.id ?? fallbackDataset.id,
+    data_source_id:
+      asString(value.data_source_id) ??
+      asString(value.dataSourceId) ??
+      asString((base as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id) ??
+      asString((fallbackDataset as DataSourceDatasetSummary & { data_source_id?: string }).data_source_id),
+    dataset_code:
+      explicitDatasetCode ??
+      fallbackDataset.dataset_code ??
+      base.dataset_code,
+    dataset_name:
+      explicitDatasetName ??
+      fallbackDataset.dataset_name ??
+      base.dataset_name,
+    resource_key:
+      asString(value.resource_key) ??
+      asString(value.resourceKey) ??
+      base.resource_key ??
+      fallbackDataset.resource_key ??
+      fallbackDataset.dataset_code,
+    business_name:
+      asString(value.business_name) ??
+      asString(value.businessName) ??
+      base.business_name ??
+      fallbackDataset.business_name,
+    business_description:
+      asString(value.business_description) ??
+      asString(value.businessDescription) ??
+      base.business_description ??
+      fallbackDataset.business_description,
+    publish_status:
+      asString(value.publish_status) ??
+      asString(value.publishStatus) ??
+      base.publish_status ??
+      fallbackDataset.publish_status,
+    semantic_status:
+      asString(value.semantic_status) ??
+      asString(value.semanticStatus) ??
+      base.semantic_status ??
+      fallbackDataset.semantic_status,
+    last_error_message:
+      asStringOrNull(value.last_error_message) ??
+      asStringOrNull(value.lastErrorMessage) ??
+      base.last_error_message ??
+      fallbackDataset.last_error_message,
+    field_label_map:
+      asStringRecord(value.field_label_map) ??
+      asStringRecord(value.fieldLabelMap) ??
+      base.field_label_map ??
+      fallbackDataset.field_label_map,
+    semantic_fields:
+      (Array.isArray(value.semantic_fields)
+        ? value.semantic_fields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+        : undefined) ??
+      (Array.isArray(value.semanticFields)
+        ? value.semanticFields.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+        : undefined) ??
+      base.semantic_fields ??
+      fallbackDataset.semantic_fields,
+  } as DataSourceDatasetSummary;
+}
+
+function normalizePlatformDatasetDetail(
+  source: DataSourceListItem,
+  dataset: DataSourceDatasetSummary,
+  raw: unknown,
+): PlatformShopDatasetDetail {
+  const value = asRecord(raw) ?? {};
+  const nextDataset = normalizePlatformDetailDataset(value.dataset, dataset);
+  const collectionStatusRaw = asRecord(value.collection_status) ?? asRecord(value.collectionStatus) ?? {};
+  const semanticStatusRaw = asRecord(value.semantic_status) ?? asRecord(value.semanticStatus) ?? {};
+  const rows = Array.isArray(value.rows)
+    ? value.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item))).slice(0, 20)
+    : [];
+
+  return {
+    sourceId: source.id,
+    source,
+    dataset: nextDataset,
+    collectionStatus: {
+      status:
+        asString(collectionStatusRaw.status) ??
+        asString(collectionStatusRaw.state) ??
+        asString(nextDataset.status) ??
+        'unknown',
+      message:
+        asString(collectionStatusRaw.message) ??
+        asString(collectionStatusRaw.error_message) ??
+        '',
+      canInitialize: asBoolean(collectionStatusRaw.can_initialize) ?? asBoolean(collectionStatusRaw.canInitialize) ?? false,
+      canRetryInitialize:
+        asBoolean(collectionStatusRaw.can_retry_initialize) ??
+        asBoolean(collectionStatusRaw.canRetryInitialize) ??
+        false,
+      isRunning: asBoolean(collectionStatusRaw.is_running) ?? asBoolean(collectionStatusRaw.isRunning) ?? null,
+      latestJob: asRecord(collectionStatusRaw.latest_job) ?? asRecord(collectionStatusRaw.latestJob),
+    },
+    semanticStatus: {
+      status:
+        asString(semanticStatusRaw.status) ??
+        asString(nextDataset.semantic_status) ??
+        asString(readDatasetSemanticRecord(nextDataset).status) ??
+        'unknown',
+      message:
+        asString(semanticStatusRaw.message) ??
+        asString(semanticStatusRaw.error_message) ??
+        '',
+      canRefresh: asBoolean(semanticStatusRaw.can_refresh) ?? asBoolean(semanticStatusRaw.canRefresh) ?? false,
+      canRetry: asBoolean(semanticStatusRaw.can_retry) ?? asBoolean(semanticStatusRaw.canRetry) ?? false,
+    },
+    fieldGroups: normalizePlatformFieldGroups(value.field_groups ?? value.fieldGroups),
+    rows,
+    loading: false,
+    error: '',
+    loadedAt: new Date().toISOString(),
+  };
+}
+
 function normalizeEvent(raw: unknown): DataSourceEventSummary | null {
   const value = asRecord(raw);
   if (!value) return null;
@@ -1658,8 +1983,8 @@ function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
 function normalizePlatformSummary(raw: unknown): PlatformConnectionSummary | null {
   const value = asRecord(raw);
   if (!value) return null;
-  const platformCode = asString(value.platform_code) ?? '';
-  const platformName = asString(value.platform_name) ?? '';
+  const platformCode = normalizePlatformCode(asString(value.platform_code) ?? '');
+  const platformName = platformCode === 'taobao' ? '淘宝/天猫' : asString(value.platform_name) ?? '';
   if (!platformCode || !platformName) return null;
   return {
     platform_code: platformCode,
@@ -1669,6 +1994,107 @@ function normalizePlatformSummary(raw: unknown): PlatformConnectionSummary | nul
     last_sync_at: asStringOrNull(value.last_sync_at) ?? null,
     status: asString(value.status) ?? undefined,
   };
+}
+
+function normalizePendingAuthorization(raw: unknown): PlatformPendingAuthorization | null {
+  const value = asRecord(raw);
+  if (!value) return null;
+  const id = asString(value.id) ?? asString(value.pending_authorization_id) ?? '';
+  if (!id) return null;
+  return {
+    id,
+    platform_code: asString(value.platform_code) ?? 'alipay',
+    claim_code: asString(value.claim_code) ?? '',
+    status: asString(value.status) ?? 'pending_claim',
+    app_id: asString(value.app_id),
+    source: asString(value.source),
+    external_shop_id: asString(value.external_shop_id),
+    external_seller_id: asString(value.external_seller_id),
+    merchant_display_name: asString(value.merchant_display_name),
+    expires_at: asString(value.expires_at),
+    created_at: asString(value.created_at),
+    last_error: asString(value.last_error),
+  };
+}
+
+function normalizePlatformCode(platformCode: string): PlatformCode {
+  return platformCode === 'tmall' ? 'taobao' : platformCode;
+}
+
+function defaultPlatformRedirectUri(platformCode: PlatformCode): string {
+  if (platformCode === 'taobao') return 'https://tally.example.com/api/platform-auth/callback/taobao';
+  if (platformCode === 'alipay') return 'https://tally.example.com/api/platform-auth/callback/alipay';
+  return '';
+}
+
+function createPlatformAppConfigFormState(platformCode: PlatformCode): PlatformAppConfigFormState {
+  return {
+    appKey: '',
+    appSecret: '',
+    redirectUri: defaultPlatformRedirectUri(platformCode),
+    merchantAuthMode: 'static_invite',
+    merchantAuthPcUrl: '',
+    merchantAuthQrUrl: '',
+    appPublicCert: '',
+    alipayPublicCert: '',
+    alipayRootCert: '',
+    hasAppSecret: false,
+    hasAppPublicCert: false,
+    hasAlipayPublicCert: false,
+    hasAlipayRootCert: false,
+    loading: false,
+    saving: false,
+    error: '',
+    notice: '',
+  };
+}
+
+function platformConnectionListHeading(platformCode: PlatformCode): string {
+  const normalizedPlatformCode = normalizePlatformCode(platformCode);
+  if (normalizedPlatformCode === 'alipay') return '支付宝商户列表';
+  if (normalizedPlatformCode === 'taobao') return '淘宝/天猫 店铺列表';
+  return '店铺列表';
+}
+
+function latestPlatformSyncAt(left?: string | null, right?: string | null): string | null {
+  if (!left) return right ?? null;
+  if (!right) return left ?? null;
+  const leftTime = new Date(left).getTime();
+  const rightTime = new Date(right).getTime();
+  if (Number.isNaN(leftTime)) return right;
+  if (Number.isNaN(rightTime)) return left;
+  return rightTime > leftTime ? right : left;
+}
+
+function mergePlatformSummaries(platforms: PlatformConnectionSummary[]): PlatformConnectionSummary[] {
+  const merged = new Map<string, PlatformConnectionSummary>();
+  const order: string[] = [];
+  platforms
+    .filter((platform) => DISPLAY_PLATFORM_CODES.has(normalizePlatformCode(platform.platform_code)))
+    .forEach((platform) => {
+      const platformCode = normalizePlatformCode(platform.platform_code);
+      const normalized: PlatformConnectionSummary = {
+        ...platform,
+        platform_code: platformCode,
+        platform_name: platformCode === 'taobao' ? '淘宝/天猫' : platform.platform_name,
+      };
+      const existing = merged.get(platformCode);
+      if (!existing) {
+        merged.set(platformCode, normalized);
+        order.push(platformCode);
+        return;
+      }
+      merged.set(platformCode, {
+        ...existing,
+        platform_name: existing.platform_name || normalized.platform_name,
+        authorized_shop_count:
+          (existing.authorized_shop_count ?? 0) + (normalized.authorized_shop_count ?? 0),
+        error_shop_count: (existing.error_shop_count ?? 0) + (normalized.error_shop_count ?? 0),
+        last_sync_at: latestPlatformSyncAt(existing.last_sync_at, normalized.last_sync_at),
+        status: existing.status || normalized.status,
+      });
+    });
+  return order.map((platformCode) => merged.get(platformCode)).filter(Boolean) as PlatformConnectionSummary[];
 }
 
 function executionModeLabel(mode: DataSourceExecutionMode): string {
@@ -1865,9 +2291,26 @@ export default function DataConnectionsPanel({
   const [shops, setShops] = useState<ShopConnection[]>([]);
   const [loadingShops, setLoadingShops] = useState(false);
   const [shopError, setShopError] = useState<string>('');
+  const [shopNotice, setShopNotice] = useState<string>('');
+  const [platformAppConfigs, setPlatformAppConfigs] = useState<Record<string, PlatformAppConfigFormState>>({});
   const [actioningShopId, setActioningShopId] = useState<string | null>(null);
+  const [expandedShopDatasetId, setExpandedShopDatasetId] = useState<string | null>(null);
+  const [shopDatasetDetails, setShopDatasetDetails] = useState<Record<string, PlatformShopDatasetDetail[]>>({});
+  const [shopDatasetActionError, setShopDatasetActionError] = useState('');
   const [callbackPayload, setCallbackPayload] = useState<AuthCallbackPayload | null>(initialCallback);
   const [launchingAuthPlatform, setLaunchingAuthPlatform] = useState<PlatformCode | null>(null);
+  const [alipayAuthDialog, setAlipayAuthDialog] = useState<AlipayAuthDialogState | null>(null);
+  const [alipayPendingAuthorizations, setAlipayPendingAuthorizations] = useState<PlatformPendingAuthorization[]>([]);
+  const [loadingAlipayPendingAuthorizations, setLoadingAlipayPendingAuthorizations] = useState(false);
+  const [uploadingAlipayMerchantQr, setUploadingAlipayMerchantQr] = useState(false);
+  const [alipayClaimForm, setAlipayClaimForm] = useState<AlipayClaimFormState>({
+    pendingAuthorizationId: '',
+    claimCode: initialCallback?.claimCode ?? '',
+    merchantDisplayName: initialCallback?.shopName ?? '',
+  });
+  const [claimingAlipayAuthorization, setClaimingAlipayAuthorization] = useState(false);
+  const [alipayClaimError, setAlipayClaimError] = useState('');
+  const [alipayClaimNotice, setAlipayClaimNotice] = useState('');
   const [draftSources, setDraftSources] = useState<DraftDataSource[]>([]);
   const [remoteSources, setRemoteSources] = useState<DataSourceListItem[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
@@ -1899,6 +2342,10 @@ export default function DataConnectionsPanel({
   const [datasetSemanticError, setDatasetSemanticError] = useState('');
   const [datasetSemanticNotice, setDatasetSemanticNotice] = useState('');
   const [refreshingDatasetSemantic, setRefreshingDatasetSemantic] = useState(false);
+  const [platformDatasetCollectionActionIds, setPlatformDatasetCollectionActionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const platformDatasetCollectionActionIdsRef = useRef<Set<string>>(new Set());
   const [collectionDetailDialog, setCollectionDetailDialog] = useState<DatasetCollectionDetailDialogState | null>(null);
   const [datasetViewTabsBySource, setDatasetViewTabsBySource] = useState<Record<string, DatasetViewTab>>({});
   const [physicalCatalogFiltersBySource, setPhysicalCatalogFiltersBySource] = useState<
@@ -1916,17 +2363,27 @@ export default function DataConnectionsPanel({
     Record<string, DatasetDetailState>
   >({});
   const [currentUserRole, setCurrentUserRole] = useState<string>('');
+  const [editingPlatformAppCode, setEditingPlatformAppCode] = useState<PlatformCode | null>(null);
 
   useEffect(() => {
     if (!initialCallback) return;
     setCallbackPayload(initialCallback);
     setMode('callback');
+    if (initialCallback.claimCode) {
+      setAlipayClaimForm((current) => ({
+        ...current,
+        claimCode: initialCallback.claimCode || current.claimCode,
+        pendingAuthorizationId: initialCallback.pendingAuthorizationId || current.pendingAuthorizationId,
+        merchantDisplayName: initialCallback.shopName || current.merchantDisplayName,
+      }));
+    }
   }, [initialCallback]);
 
   useEffect(() => {
     if (mode === 'callback') return;
     setMode('overview');
     setSelectedPlatform(null);
+    setEditingPlatformAppCode(null);
     setSelectedSourceId(null);
     setDatabaseDetailSourceId(null);
     setPhysicalDetailDialog(null);
@@ -1934,6 +2391,12 @@ export default function DataConnectionsPanel({
     setDatasetActionNotice('');
     setShops([]);
     setShopError('');
+    setExpandedShopDatasetId(null);
+    setShopDatasetDetails({});
+    setShopDatasetActionError('');
+    setAlipayPendingAuthorizations([]);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
   }, [selectedConnectionView, selectedSourceKind, selectedCollaborationProvider]);
 
   useEffect(() => {
@@ -1978,14 +2441,18 @@ export default function DataConnectionsPanel({
         if (!response.ok) return;
         const data = await response.json().catch(() => ({}));
         if (cancelled) return;
+        const payload = data as Record<string, unknown>;
+        const user = asRecord(payload?.user);
         const role =
-          asString((data as Record<string, unknown>)?.role) ??
-          asString((data as Record<string, unknown>)?.user_role) ??
-          asString(asRecord((data as Record<string, unknown>)?.user)?.role) ??
+          asString(payload?.role) ??
+          asString(payload?.user_role) ??
+          asString(user?.role) ??
           '';
         setCurrentUserRole((role || '').trim().toLowerCase());
       } catch {
-        if (!cancelled) setCurrentUserRole('');
+        if (!cancelled) {
+          setCurrentUserRole('');
+        }
       }
     };
     void loadRole();
@@ -1993,6 +2460,11 @@ export default function DataConnectionsPanel({
       cancelled = true;
     };
   }, [authHeaders, authToken]);
+
+  const canManageServiceProviderApps = useMemo(
+    () => ['admin', 'owner', 'super_admin'].includes(currentUserRole),
+    [currentUserRole],
+  );
 
   useEffect(() => {
     saveCollaborationChannelDrafts(draftChannels);
@@ -2003,7 +2475,7 @@ export default function DataConnectionsPanel({
     setLoadingPlatforms(true);
     setPlatformError('');
     try {
-      const response = await fetch('/api/platform-connections', {
+      const response = await fetch('/api/platform-connections?mode=real', {
         method: 'GET',
         headers: authHeaders,
       });
@@ -2016,7 +2488,11 @@ export default function DataConnectionsPanel({
         : Array.isArray(data?.data?.platforms)
         ? data.data.platforms
         : [];
-      setPlatforms(list.map((item: unknown) => normalizePlatformSummary(item)).filter(Boolean) as PlatformConnectionSummary[]);
+      setPlatforms(
+        mergePlatformSummaries(
+          list.map((item: unknown) => normalizePlatformSummary(item)).filter(Boolean) as PlatformConnectionSummary[],
+        ),
+      );
     } catch (error) {
       setPlatforms([]);
       setPlatformError(error instanceof Error ? error.message : '加载平台连接失败');
@@ -2025,8 +2501,8 @@ export default function DataConnectionsPanel({
     }
   }, [authHeaders, authToken]);
 
-  const fetchRemoteSources = useCallback(async () => {
-    if (!authToken) return;
+  const fetchRemoteSources = useCallback(async (): Promise<DataSourceListItem[]> => {
+    if (!authToken) return [];
     setLoadingSources(true);
     setSourcesError('');
     try {
@@ -2036,7 +2512,7 @@ export default function DataConnectionsPanel({
       });
       if (response.status === 404 || response.status === 405 || response.status === 501) {
         setRemoteSources([]);
-        return;
+        return [];
       }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -2049,10 +2525,15 @@ export default function DataConnectionsPanel({
         : Array.isArray(data?.items)
         ? data.items
         : [];
-      setRemoteSources(list.map((item: unknown) => normalizeSourceItem(item)).filter(Boolean) as DataSourceListItem[]);
+      const nextSources = list
+        .map((item: unknown) => normalizeSourceItem(item))
+        .filter(Boolean) as DataSourceListItem[];
+      setRemoteSources(nextSources);
+      return nextSources;
     } catch (error) {
       setRemoteSources([]);
       setSourcesError(error instanceof Error ? error.message : '加载数据源列表失败');
+      return [];
     } finally {
       setLoadingSources(false);
     }
@@ -2503,12 +2984,14 @@ export default function DataConnectionsPanel({
   }, [authHeaders, authToken]);
 
   const fetchShops = useCallback(
-    async (platformCode: PlatformCode) => {
-      if (!authToken) return;
+    async (platformCode: PlatformCode): Promise<ShopConnection[]> => {
+      if (!authToken) return [];
       setLoadingShops(true);
       setShopError('');
+      setShopNotice('');
       try {
-        const response = await fetch(`/api/platform-connections/${platformCode}/shops`, {
+        const normalizedPlatformCode = normalizePlatformCode(platformCode);
+        const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/shops?mode=real`, {
           method: 'GET',
           headers: authHeaders,
         });
@@ -2521,16 +3004,631 @@ export default function DataConnectionsPanel({
           : Array.isArray(data?.shops)
           ? data.shops
           : [];
-        setShops(list);
+        const nextShops = list as ShopConnection[];
+        setShops(nextShops);
+        return nextShops;
       } catch (error) {
         setShops([]);
         setShopError(error instanceof Error ? error.message : '加载店铺列表失败');
+        return [];
       } finally {
         setLoadingShops(false);
       }
     },
     [authHeaders, authToken],
   );
+
+  const fetchAlipayPendingAuthorizations = useCallback(async (): Promise<PlatformPendingAuthorization[]> => {
+    if (!authToken) return [];
+    setLoadingAlipayPendingAuthorizations(true);
+    setAlipayClaimError('');
+    try {
+      const response = await fetch('/api/platform-connections/alipay/pending-authorizations?status=pending_claim&mode=real', {
+        method: 'GET',
+        headers: authHeaders,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '加载支付宝待绑定授权失败'));
+      }
+      const rows = Array.isArray(data?.pending_authorizations)
+        ? data.pending_authorizations
+        : Array.isArray(data?.items)
+        ? data.items
+        : [];
+      const pendingAuthorizations = rows
+        .map((item: unknown) => normalizePendingAuthorization(item))
+        .filter(Boolean) as PlatformPendingAuthorization[];
+      setAlipayPendingAuthorizations(pendingAuthorizations);
+      if (pendingAuthorizations.length > 0) {
+        setAlipayClaimForm((current) => {
+          if (current.pendingAuthorizationId || current.claimCode) return current;
+          return {
+            ...current,
+            pendingAuthorizationId: pendingAuthorizations[0].id,
+            claimCode: pendingAuthorizations[0].claim_code,
+          };
+        });
+      }
+      return pendingAuthorizations;
+    } catch (error) {
+      setAlipayPendingAuthorizations([]);
+      setAlipayClaimError(error instanceof Error ? error.message : '加载支付宝待绑定授权失败');
+      return [];
+    } finally {
+      setLoadingAlipayPendingAuthorizations(false);
+    }
+  }, [authHeaders, authToken]);
+
+  const claimAlipayPendingAuthorization = useCallback(async () => {
+    if (!authToken) return;
+    const pendingId = alipayClaimForm.pendingAuthorizationId.trim();
+    const claimCode = alipayClaimForm.claimCode.trim();
+    const merchantDisplayName = alipayClaimForm.merchantDisplayName.trim();
+    if (!pendingId) {
+      setAlipayClaimError('请选择待绑定授权');
+      return;
+    }
+    if (!claimCode) {
+      setAlipayClaimError('待绑定授权缺少校验信息，请刷新后重试');
+      return;
+    }
+    if (!merchantDisplayName) {
+      setAlipayClaimError('请输入支付宝商户名称');
+      return;
+    }
+    setClaimingAlipayAuthorization(true);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
+    try {
+      const response = await fetch(`/api/platform-connections/alipay/pending-authorizations/${encodeURIComponent(pendingId)}/claim`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          claim_code: claimCode,
+          merchant_display_name: merchantDisplayName,
+          mode: 'real',
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '绑定支付宝授权失败'));
+      }
+      setAlipayClaimNotice(String(data?.message || '支付宝商户授权已绑定'));
+      setAlipayClaimForm({ pendingAuthorizationId: '', claimCode: '', merchantDisplayName: '' });
+      setSelectedPlatform({
+        platform_code: 'alipay',
+        platform_name: '支付宝',
+        authorized_shop_count: 1,
+        error_shop_count: 0,
+        status: 'active',
+      });
+      setMode('platform');
+      setCallbackPayload(null);
+      clearCallbackQuery('data-connections');
+      await Promise.all([
+        fetchShops('alipay'),
+        fetchPlatforms(),
+        fetchRemoteSources(),
+      ]);
+    } catch (error) {
+      setAlipayClaimError(error instanceof Error ? error.message : '绑定支付宝授权失败');
+    } finally {
+      setClaimingAlipayAuthorization(false);
+    }
+  }, [
+    alipayClaimForm,
+    authHeaders,
+    authToken,
+    fetchPlatforms,
+    fetchRemoteSources,
+    fetchShops,
+  ]);
+
+  const fillAlipayClaimFormFromCallback = useCallback((payload: AuthCallbackPayload) => {
+    setAlipayClaimForm((current) => ({
+      ...current,
+      claimCode: payload.claimCode || current.claimCode,
+      pendingAuthorizationId: payload.pendingAuthorizationId || current.pendingAuthorizationId,
+      merchantDisplayName: payload.shopName || current.merchantDisplayName,
+    }));
+  }, []);
+
+  const updatePlatformAppConfig = useCallback(
+    (
+      platformCode: PlatformCode,
+      updater: (current: PlatformAppConfigFormState) => PlatformAppConfigFormState,
+    ) => {
+      const normalizedPlatformCode = normalizePlatformCode(platformCode);
+      setPlatformAppConfigs((prev) => {
+        const current = prev[normalizedPlatformCode] ?? createPlatformAppConfigFormState(normalizedPlatformCode);
+        return {
+          ...prev,
+          [normalizedPlatformCode]: updater(current),
+        };
+      });
+    },
+    [],
+  );
+
+  const fetchPlatformAppConfig = useCallback(
+    async (platformCode: PlatformCode) => {
+      if (!authToken) return;
+      const normalizedPlatformCode = normalizePlatformCode(platformCode);
+      updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+        ...current,
+        loading: true,
+        error: '',
+        notice: '',
+      }));
+      try {
+        const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/app-config?mode=real`, {
+          method: 'GET',
+          headers: authHeaders,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '加载平台应用配置失败'));
+        }
+        const config = data?.config && typeof data.config === 'object' ? data.config : {};
+        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+          ...current,
+          appKey: String(config.app_key || ''),
+          appSecret: '',
+          redirectUri: String(config.redirect_uri || '') || defaultPlatformRedirectUri(normalizedPlatformCode),
+          merchantAuthMode: String(config.merchant_auth_mode || 'static_invite'),
+          merchantAuthPcUrl: String(config.merchant_auth_pc_url || ''),
+          merchantAuthQrUrl: String(config.merchant_auth_qr_url || ''),
+          appPublicCert: '',
+          alipayPublicCert: '',
+          alipayRootCert: '',
+          hasAppSecret: Boolean(config.has_app_secret),
+          hasAppPublicCert: Boolean(config.has_app_public_cert),
+          hasAlipayPublicCert: Boolean(config.has_alipay_public_cert),
+          hasAlipayRootCert: Boolean(config.has_alipay_root_cert),
+          loading: false,
+          error: '',
+          notice: '',
+        }));
+      } catch (error) {
+        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+          ...current,
+          loading: false,
+          error: error instanceof Error ? error.message : '加载平台应用配置失败',
+        }));
+      }
+    },
+    [authHeaders, authToken, updatePlatformAppConfig],
+  );
+
+  const savePlatformAppConfig = useCallback(
+    async (platformCode: PlatformCode) => {
+      if (!authToken) return;
+      const normalizedPlatformCode = normalizePlatformCode(platformCode);
+      const form = platformAppConfigs[normalizedPlatformCode] ?? createPlatformAppConfigFormState(normalizedPlatformCode);
+      updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+        ...current,
+        saving: true,
+        error: '',
+        notice: '',
+      }));
+      try {
+        const body: Record<string, string> = {
+          app_key: form.appKey.trim(),
+          app_secret: form.appSecret.trim(),
+          redirect_uri: form.redirectUri.trim(),
+          app_public_cert: form.appPublicCert.trim(),
+          alipay_public_cert: form.alipayPublicCert.trim(),
+          alipay_root_cert: form.alipayRootCert.trim(),
+          mode: 'real',
+        };
+        if (normalizedPlatformCode === 'alipay') {
+          body.merchant_auth_mode = form.merchantAuthMode.trim() || 'static_invite';
+          body.merchant_auth_pc_url = form.merchantAuthPcUrl.trim();
+          body.merchant_auth_qr_url = form.merchantAuthQrUrl.trim();
+        }
+        const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/app-config`, {
+          method: 'PUT',
+          headers: authHeaders,
+          body: JSON.stringify(body),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '保存平台应用配置失败'));
+        }
+        const config = data?.config && typeof data.config === 'object' ? data.config : {};
+        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+          ...current,
+          appKey: String(config.app_key || form.appKey),
+          appSecret: '',
+          redirectUri: String(config.redirect_uri || form.redirectUri),
+          merchantAuthMode: String(config.merchant_auth_mode || form.merchantAuthMode || 'static_invite'),
+          merchantAuthPcUrl: String(config.merchant_auth_pc_url || form.merchantAuthPcUrl),
+          merchantAuthQrUrl: String(config.merchant_auth_qr_url || form.merchantAuthQrUrl),
+          appPublicCert: '',
+          alipayPublicCert: '',
+          alipayRootCert: '',
+          hasAppSecret: Boolean(config.has_app_secret) || Boolean(form.appSecret.trim()),
+          hasAppPublicCert: Boolean(config.has_app_public_cert) || Boolean(form.appPublicCert.trim()),
+          hasAlipayPublicCert: Boolean(config.has_alipay_public_cert) || Boolean(form.alipayPublicCert.trim()),
+          hasAlipayRootCert: Boolean(config.has_alipay_root_cert) || Boolean(form.alipayRootCert.trim()),
+          saving: false,
+          error: '',
+          notice: String(data?.message || '平台应用配置已保存。'),
+        }));
+      } catch (error) {
+        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+          ...current,
+          saving: false,
+          error: error instanceof Error ? error.message : '保存平台应用配置失败',
+        }));
+      }
+    },
+    [authHeaders, authToken, platformAppConfigs, updatePlatformAppConfig],
+  );
+
+  const uploadAlipayMerchantQr = useCallback(
+    async (file: File | null) => {
+      if (!authToken || !file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: '二维码图片不能超过 2MB',
+          notice: '',
+        }));
+        return;
+      }
+      const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
+      if (file.type && !allowedTypes.has(file.type)) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: '仅支持 png、jpg、jpeg、webp 二维码图片',
+          notice: '',
+        }));
+        return;
+      }
+      setUploadingAlipayMerchantQr(true);
+      updatePlatformAppConfig('alipay', (current) => ({
+        ...current,
+        error: '',
+        notice: '',
+      }));
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/platform-connections/alipay/app-config/merchant-auth-qr', {
+          method: 'POST',
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+          body: formData,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '上传支付宝商家授权二维码失败'));
+        }
+        const config = data?.config && typeof data.config === 'object' ? data.config : {};
+        const qrUrl = String(data?.merchant_auth_qr_url || config.merchant_auth_qr_url || '');
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          appKey: String(config.app_key || current.appKey),
+          merchantAuthQrUrl: qrUrl || current.merchantAuthQrUrl,
+          hasAppSecret: Boolean(config.has_app_secret) || current.hasAppSecret,
+          hasAppPublicCert: Boolean(config.has_app_public_cert) || current.hasAppPublicCert,
+          hasAlipayPublicCert: Boolean(config.has_alipay_public_cert) || current.hasAlipayPublicCert,
+          hasAlipayRootCert: Boolean(config.has_alipay_root_cert) || current.hasAlipayRootCert,
+          error: '',
+          notice: String(data?.message || '支付宝商家授权二维码已上传'),
+        }));
+      } catch (error) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : '上传支付宝商家授权二维码失败',
+          notice: '',
+        }));
+      } finally {
+        setUploadingAlipayMerchantQr(false);
+      }
+    },
+    [authToken, updatePlatformAppConfig],
+  );
+
+  const renderServiceProviderAppStatus = useCallback(
+    (appConfig: PlatformAppConfigFormState) => {
+      if (appConfig.loading) {
+        return (
+          <span className="inline-flex items-center gap-1.5 text-xs text-text-secondary">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            加载中
+          </span>
+        );
+      }
+      if (appConfig.error) {
+        return <span className="text-xs text-red-600">{appConfig.error}</span>;
+      }
+      if (appConfig.appKey && appConfig.hasAppSecret) {
+        return <span className="text-xs text-green-700">Tally 服务商应用已配置</span>;
+      }
+      return <span className="text-xs text-amber-700">Tally 服务商应用待配置</span>;
+    },
+    [],
+  );
+
+  const renderServiceProviderAppConfigPanel = () => {
+    if (!editingPlatformAppCode || !canManageServiceProviderApps) return null;
+    const normalizedPlatformCode = normalizePlatformCode(editingPlatformAppCode);
+    const appConfig =
+      platformAppConfigs[normalizedPlatformCode] ??
+      createPlatformAppConfigFormState(normalizedPlatformCode);
+    const isAlipayConfig = normalizedPlatformCode === 'alipay';
+    const appKeyLabel = isAlipayConfig ? 'AppID' : 'AppKey';
+    const appSecretLabel = isAlipayConfig ? '应用私钥' : 'AppSecret';
+    const redirectLabel = isAlipayConfig ? '授权回调地址' : '回调地址';
+
+    return (
+      <div
+        className="fixed inset-0 z-40 bg-black/35"
+        onClick={() => setEditingPlatformAppCode(null)}
+      >
+        <div
+          className="ml-auto flex h-full w-full max-w-xl flex-col border-l border-border bg-surface shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="border-b border-border px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-base font-semibold text-text-primary">服务商应用配置</h4>
+                <p className="mt-1 text-sm text-text-secondary">配置平台服务商应用参数。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingPlatformAppCode(null)}
+                className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-5 py-5">
+            <div className="space-y-4">
+              <div className="inline-flex rounded-xl border border-border bg-surface-secondary p-1">
+                {([
+                  ['taobao', '淘宝/天猫'],
+                  ['alipay', '支付宝'],
+                ] as Array<[PlatformCode, string]>).map(([platformCode, label]) => {
+                  const isActive = normalizedPlatformCode === platformCode;
+                  return (
+                    <button
+                      key={platformCode}
+                      type="button"
+                      onClick={() => {
+                        setEditingPlatformAppCode(platformCode);
+                        void fetchPlatformAppConfig(platformCode);
+                      }}
+                      className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                        isActive
+                          ? 'bg-surface text-text-primary shadow-sm'
+                          : 'text-text-secondary hover:text-text-primary'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {appConfig.error && (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {appConfig.error}
+                </div>
+              )}
+              {appConfig.notice && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                  {appConfig.notice}
+                </div>
+              )}
+              {appConfig.loading ? (
+                <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载应用配置
+                </div>
+              ) : (
+                <>
+                  <label className="block text-sm font-medium text-text-primary">
+                    {appKeyLabel}
+                    <input
+                      type="text"
+                      value={appConfig.appKey}
+                      onChange={(event) =>
+                        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                          ...current,
+                          appKey: event.target.value,
+                          notice: '',
+                        }))
+                      }
+                      className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                      placeholder={isAlipayConfig ? '支付宝开放平台 AppID' : '淘宝开放平台 AppKey'}
+                    />
+                  </label>
+                  <label className="block text-sm font-medium text-text-primary">
+                    {appSecretLabel}
+                    <textarea
+                      value={appConfig.appSecret}
+                      onChange={(event) =>
+                        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                          ...current,
+                          appSecret: event.target.value,
+                          notice: '',
+                        }))
+                      }
+                      className="mt-2 min-h-24 w-full resize-y rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                      placeholder={
+                        isAlipayConfig
+                          ? appConfig.hasAppSecret
+                            ? '留空则沿用已保存应用私钥'
+                            : '粘贴应用私钥 PEM 内容'
+                          : appConfig.hasAppSecret
+                            ? '留空则沿用已保存密钥'
+                            : '淘宝开放平台 AppSecret'
+                      }
+                    />
+                  </label>
+                  {isAlipayConfig && (
+                    <>
+                      <label className="block text-sm font-medium text-text-primary">
+                        商家授权 PC 链接
+                        <input
+                          type="url"
+                          value={appConfig.merchantAuthPcUrl}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              merchantAuthPcUrl: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder="支付宝开放平台商家授权 PC 链接"
+                        />
+                      </label>
+                      <div className="block text-sm font-medium text-text-primary">
+                        商家授权二维码
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                          <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary">
+                            {uploadingAlipayMerchantQr ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <FileSpreadsheet className="h-4 w-4" />
+                            )}
+                            {uploadingAlipayMerchantQr ? '上传中' : '上传二维码图片'}
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              className="sr-only"
+                              disabled={uploadingAlipayMerchantQr}
+                              onChange={(event) => {
+                                void uploadAlipayMerchantQr(event.target.files?.[0] ?? null);
+                                event.target.value = '';
+                              }}
+                            />
+                          </label>
+                          <span className="text-xs text-text-secondary">支持 png、jpg、webp，最大 2MB</span>
+                        </div>
+                        {appConfig.merchantAuthQrUrl ? (
+                          <img
+                            src={appConfig.merchantAuthQrUrl}
+                            alt="已上传支付宝商家授权二维码"
+                            className="mt-3 h-28 w-28 rounded-lg border border-border bg-white object-contain"
+                          />
+                        ) : (
+                          <p className="mt-2 text-xs text-text-secondary">尚未上传二维码图片。</p>
+                        )}
+                      </div>
+                      <label className="block text-sm font-medium text-text-primary">
+                        应用公钥证书
+                        <textarea
+                          value={appConfig.appPublicCert}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              appPublicCert: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 min-h-24 w-full resize-y rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder={
+                            appConfig.hasAppPublicCert
+                              ? '留空则沿用已保存应用公钥证书'
+                              : '粘贴 appCertPublicKey_*.crt 内容'
+                          }
+                        />
+                      </label>
+                      <label className="block text-sm font-medium text-text-primary">
+                        支付宝公钥证书
+                        <textarea
+                          value={appConfig.alipayPublicCert}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              alipayPublicCert: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 min-h-24 w-full resize-y rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder={
+                            appConfig.hasAlipayPublicCert
+                              ? '留空则沿用已保存支付宝公钥证书'
+                              : '粘贴 alipayCertPublicKey_RSA2.crt 内容'
+                          }
+                        />
+                      </label>
+                      <label className="block text-sm font-medium text-text-primary">
+                        支付宝根证书
+                        <textarea
+                          value={appConfig.alipayRootCert}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              alipayRootCert: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 min-h-24 w-full resize-y rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder={
+                            appConfig.hasAlipayRootCert
+                              ? '留空则沿用已保存支付宝根证书'
+                              : '粘贴 alipayRootCert.crt 内容'
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
+                  <label className="block text-sm font-medium text-text-primary">
+                    {redirectLabel}
+                    <input
+                      type="url"
+                      value={appConfig.redirectUri}
+                      onChange={(event) =>
+                        updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                          ...current,
+                          redirectUri: event.target.value,
+                          notice: '',
+                        }))
+                      }
+                      className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                      placeholder={defaultPlatformRedirectUri(normalizedPlatformCode)}
+                    />
+                  </label>
+                  <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                    {appConfig.appKey && appConfig.hasAppSecret
+                      ? '当前服务商应用已配置。'
+                      : `保存完整应用配置后，后续可接入${isAlipayConfig ? '支付宝' : '淘宝/天猫'}授权。`}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="border-t border-border bg-surface px-5 py-4">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditingPlatformAppCode(null)}
+                className="inline-flex items-center rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void savePlatformAppConfig(normalizedPlatformCode)}
+                disabled={appConfig.loading || appConfig.saving}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {appConfig.saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                保存应用配置
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   useEffect(() => {
     if (!authToken) return;
@@ -2688,16 +3786,35 @@ export default function DataConnectionsPanel({
   }, [authHeaders, channelApiAvailable, editingChannel]);
 
   const launchAuthFlow = useCallback(
-    async (platformCode: PlatformCode) => {
+    async (platformCode: PlatformCode, merchantDisplayName = '') => {
       if (!authToken) return;
-      setLaunchingAuthPlatform(platformCode);
+      const normalizedPlatformCode = normalizePlatformCode(platformCode);
+      const trimmedMerchantDisplayName = merchantDisplayName.trim();
+      setLaunchingAuthPlatform(normalizedPlatformCode);
+      const isDetailPage = mode === 'platform' && selectedPlatform?.platform_code === normalizedPlatformCode;
+      if (isDetailPage) {
+        setShopError('');
+      } else {
+        setPlatformError('');
+      }
+      if (normalizedPlatformCode === 'alipay') {
+        setAlipayAuthDialog((current) => (current ? { ...current, error: '' } : current));
+      }
       try {
-        const response = await fetch(`/api/platform-connections/${platformCode}/auth-sessions`, {
+        const body: Record<string, string> = {
+          return_path:
+            normalizedPlatformCode === 'alipay'
+              ? '/data-connections?mode=platform&platform=alipay'
+              : window.location.pathname || '/',
+          mode: 'real',
+        };
+        if (normalizedPlatformCode === 'alipay') {
+          body.merchant_display_name = trimmedMerchantDisplayName;
+        }
+        const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/auth-sessions`, {
           method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({
-            return_path: window.location.pathname || '/',
-          }),
+          body: JSON.stringify(body),
         });
         const data: AuthSessionResponse = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -2709,21 +3826,56 @@ export default function DataConnectionsPanel({
         window.location.assign(data.auth_url);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建授权会话失败';
-        setPlatformError(message);
+        if (normalizedPlatformCode === 'alipay') {
+          setAlipayAuthDialog((current) => (current ? { ...current, error: message } : current));
+        }
+        if (isDetailPage) {
+          setShopError(message);
+        } else {
+          setPlatformError(message);
+        }
       } finally {
         setLaunchingAuthPlatform(null);
       }
     },
-    [authHeaders, authToken],
+    [authHeaders, authToken, mode, selectedPlatform],
+  );
+
+  const handleLaunchAuth = useCallback(
+    (platformCode: PlatformCode) => {
+      const normalizedPlatformCode = normalizePlatformCode(platformCode);
+      if (normalizedPlatformCode === 'alipay') {
+        setSelectedPlatform({
+          platform_code: 'alipay',
+          platform_name: '支付宝',
+          authorized_shop_count: 0,
+          error_shop_count: 0,
+        });
+        setMode('platform');
+        void Promise.all([fetchShops('alipay'), fetchPlatformAppConfig('alipay')]);
+        return;
+      }
+      void launchAuthFlow(normalizedPlatformCode);
+    },
+    [fetchAlipayPendingAuthorizations, fetchPlatformAppConfig, fetchShops, launchAuthFlow],
   );
 
   const handleSelectPlatform = useCallback(
     async (platform: PlatformConnectionSummary) => {
-      setSelectedPlatform(platform);
+      const normalizedPlatform = {
+        ...platform,
+        platform_code: normalizePlatformCode(platform.platform_code),
+        platform_name: normalizePlatformCode(platform.platform_code) === 'taobao' ? '淘宝/天猫' : platform.platform_name,
+      };
+      setSelectedPlatform(normalizedPlatform);
       setMode('platform');
-      await fetchShops(platform.platform_code);
+      const loadingTasks: Promise<unknown>[] = [
+        fetchShops(normalizedPlatform.platform_code),
+        fetchPlatformAppConfig(normalizedPlatform.platform_code),
+      ];
+      await Promise.all(loadingTasks);
     },
-    [fetchShops],
+    [fetchPlatformAppConfig, fetchShops],
   );
 
   const handleBackToOverview = useCallback(() => {
@@ -2731,18 +3883,26 @@ export default function DataConnectionsPanel({
     setSelectedPlatform(null);
     setShops([]);
     setShopError('');
+    setShopNotice('');
+    setPlatformError('');
+    setAlipayPendingAuthorizations([]);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
   }, []);
 
   const handleReauthorize = useCallback(
     async (shop: ShopConnection) => {
       if (!authToken) return;
       setActioningShopId(shop.id);
+      setShopError('');
+      setShopNotice('');
       try {
         const response = await fetch(`/api/shop-connections/${shop.id}/reauthorize`, {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({
             return_path: window.location.pathname || '/',
+            mode: 'real',
           }),
         });
         const data: AuthSessionResponse = await response.json().catch(() => ({}));
@@ -2770,20 +3930,38 @@ export default function DataConnectionsPanel({
     async (shop: ShopConnection) => {
       if (!authToken) return;
       setActioningShopId(shop.id);
+      setShopError('');
+      setShopNotice('');
       try {
         const response = await fetch(`/api/shop-connections/${shop.id}/disable`, {
           method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({}),
+          body: JSON.stringify({ mode: 'real' }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
           throw new Error(String(data?.detail || data?.message || '停用授权失败'));
         }
+        const responseConnection = data?.connection ?? data?.shop;
+        if (responseConnection && typeof responseConnection === 'object') {
+          setShops((current) =>
+            current.map((item) => (item.id === shop.id ? ({ ...item, ...responseConnection } as ShopConnection) : item)),
+          );
+        }
+        let nextShops: ShopConnection[] = [];
         if (selectedPlatform) {
-          await fetchShops(selectedPlatform.platform_code);
+          nextShops = await fetchShops(selectedPlatform.platform_code);
         }
         await fetchPlatforms();
+        const disabledConnection =
+          nextShops.find((item) => item.id === shop.id) ??
+          (responseConnection && typeof responseConnection === 'object' ? (responseConnection as ShopConnection) : null);
+        if (disabledConnection) {
+          setShops((current) =>
+            current.map((item) => (item.id === shop.id ? ({ ...item, ...disabledConnection } as ShopConnection) : item)),
+          );
+        }
+        setShopNotice(String(data?.message || '授权已停用'));
       } catch (error) {
         setShopError(error instanceof Error ? error.message : '停用授权失败');
       } finally {
@@ -3822,6 +5000,229 @@ export default function DataConnectionsPanel({
     [authToken, draftSourceIdSet, refreshDatasetSemanticSuggestions, requestDatasetDetail, updateDatasetInState],
   );
 
+  const findPlatformShopDatasets = useCallback(
+    (
+      shop: ShopConnection,
+      sourcesOverride: DataSourceListItem[] = remoteSources,
+    ): Array<{ source: DataSourceListItem; dataset: DataSourceDatasetSummary }> => {
+      const shopId = shop.id.trim();
+      const platformCode = shop.platform_code.trim().toLowerCase();
+      return sourcesOverride.flatMap((source) => {
+        if (source.source_kind !== 'platform_oauth') return [];
+        if (source.provider_code.trim().toLowerCase() !== platformCode) return [];
+        return (source.datasets ?? [])
+          .filter((dataset) => {
+            const resourceKey = (dataset.resource_key || dataset.dataset_code || '').trim();
+            if (platformCode === 'taobao') return resourceKey === `taobao_order_lines:${shopId}`;
+            if (platformCode === 'alipay') {
+              const parts = resourceKey.split(':');
+              return parts.length >= 3 && parts[0] === 'alipay_bill' && parts[2] === shopId;
+            }
+            return false;
+          })
+          .map((dataset) => ({ source, dataset }));
+      });
+    },
+    [remoteSources],
+  );
+
+  const loadPlatformShopDatasetDetails = useCallback(
+    async (shop: ShopConnection, forceReload = false, sourcesOverride?: DataSourceListItem[]) => {
+      setShopDatasetActionError('');
+      if (expandedShopDatasetId === shop.id && !forceReload) {
+        setExpandedShopDatasetId(null);
+        return;
+      }
+      setExpandedShopDatasetId(shop.id);
+
+      const matches = findPlatformShopDatasets(shop, sourcesOverride);
+      if (matches.length === 0) {
+        setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: [] }));
+        return;
+      }
+
+      const loadingDetails: PlatformShopDatasetDetail[] = matches.map(({ source, dataset }) => ({
+        sourceId: source.id,
+        source,
+        dataset,
+        collectionStatus: {
+          status: 'loading',
+          message: '',
+          canInitialize: false,
+          canRetryInitialize: false,
+          isRunning: true,
+          latestJob: null,
+        },
+        semanticStatus: {
+          status: 'loading',
+          message: '',
+          canRefresh: false,
+          canRetry: false,
+        },
+        fieldGroups: [],
+        rows: [],
+        loading: true,
+        error: '',
+        loadedAt: '',
+      }));
+      setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: loadingDetails }));
+
+      if (!authToken) {
+        setShopDatasetDetails((prev) => ({
+          ...prev,
+          [shop.id]: loadingDetails.map((detail) => ({
+            ...detail,
+            loading: false,
+            error: '当前环境未连接后端数据集详情接口。',
+          })),
+        }));
+        return;
+      }
+
+      const loadedDetails = await Promise.all(
+        matches.map(async ({ source, dataset }) => {
+          const resourceKey = dataset.resource_key || dataset.dataset_code;
+          const baseDetail = loadingDetails.find(
+            (detail) => detail.sourceId === source.id && detail.dataset.id === dataset.id,
+          );
+          if (draftSourceIdSet.has(source.id)) {
+            return {
+              ...(baseDetail as PlatformShopDatasetDetail),
+              loading: false,
+              error: '草稿连接尚未创建后端数据集。',
+            };
+          }
+          try {
+            const params = new URLSearchParams({
+              resource_key: resourceKey,
+              limit: '10',
+              sample_limit: '20',
+            });
+            const response = await fetch(
+              `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/collection-detail?${params.toString()}`,
+              { headers: authHeaders },
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(String(data?.detail || data?.message || '获取数据集详情失败'));
+            }
+            return normalizePlatformDatasetDetail(source, dataset, data);
+          } catch (error) {
+            return {
+              ...(baseDetail as PlatformShopDatasetDetail),
+              loading: false,
+              error: error instanceof Error ? error.message : '获取数据集详情失败',
+            };
+          }
+        }),
+      );
+      setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: loadedDetails }));
+    },
+    [authHeaders, authToken, draftSourceIdSet, expandedShopDatasetId, findPlatformShopDatasets],
+  );
+
+  const refreshCurrentConnectionView = useCallback(async () => {
+    if (selectedConnectionView === 'collaboration_channels') {
+      await fetchCollaborationChannels();
+      return;
+    }
+    if (mode === 'platform' && selectedPlatform) {
+      const [nextShops, nextSources] = await Promise.all([
+        fetchShops(selectedPlatform.platform_code),
+        fetchRemoteSources(),
+      ]);
+      const expandedShop = nextShops.find((shop) => shop.id === expandedShopDatasetId);
+      if (expandedShop) {
+        await loadPlatformShopDatasetDetails(expandedShop, true, nextSources);
+      }
+      return;
+    }
+    await fetchPlatforms();
+    await fetchRemoteSources();
+  }, [
+    expandedShopDatasetId,
+    fetchCollaborationChannels,
+    fetchPlatforms,
+    fetchRemoteSources,
+    fetchShops,
+    loadPlatformShopDatasetDetails,
+    mode,
+    selectedConnectionView,
+    selectedPlatform,
+  ]);
+
+  const refreshPlatformDatasetSemantic = useCallback(
+    async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
+      setShopDatasetActionError('');
+      if (
+        isPlatformCollectionRunning(detail.collectionStatus) ||
+        isPlatformSemanticRunning(detail.semanticStatus) ||
+        (!detail.semanticStatus.canRefresh && !detail.semanticStatus.canRetry)
+      ) {
+        return;
+      }
+      const refreshedDataset = await refreshDatasetSemanticSuggestions(detail.source, detail.dataset);
+      if (refreshedDataset) {
+        await loadPlatformShopDatasetDetails(shop, true);
+        setExpandedShopDatasetId(shop.id);
+      }
+    },
+    [loadPlatformShopDatasetDetails, refreshDatasetSemanticSuggestions],
+  );
+
+  const retryPlatformDatasetCollection = useCallback(
+    async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
+      setShopDatasetActionError('');
+      const actionId = `${detail.sourceId}:${detail.dataset.id}`;
+      if (platformDatasetCollectionActionIdsRef.current.has(actionId)) {
+        return;
+      }
+      if (isPlatformCollectionRunning(detail.collectionStatus)) {
+        return;
+      }
+      if (!authToken || draftSourceIdSet.has(detail.sourceId)) {
+        setShopDatasetActionError('当前环境未连接后端初始化接口。');
+        return;
+      }
+      platformDatasetCollectionActionIdsRef.current = new Set(platformDatasetCollectionActionIdsRef.current).add(actionId);
+      setPlatformDatasetCollectionActionIds(platformDatasetCollectionActionIdsRef.current);
+      try {
+        const resourceKey = detail.dataset.resource_key || detail.dataset.dataset_code;
+        const response = await fetch(
+          `/api/data-sources/${detail.sourceId}/datasets/${encodeURIComponent(detail.dataset.id)}/collection`,
+          {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({
+              resource_key: resourceKey,
+              background: true,
+              trigger_mode: 'initial',
+              params: {
+                dataset_id: detail.dataset.id,
+                resource_key: resourceKey,
+                query: { resource_key: resourceKey },
+              },
+            }),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '初始化数据集失败'));
+        }
+        await loadPlatformShopDatasetDetails(shop, true);
+        setExpandedShopDatasetId(shop.id);
+      } catch (error) {
+        setShopDatasetActionError(error instanceof Error ? error.message : '初始化数据集失败');
+      } finally {
+        const nextActionIds = new Set(platformDatasetCollectionActionIdsRef.current);
+        nextActionIds.delete(actionId);
+        platformDatasetCollectionActionIdsRef.current = nextActionIds;
+        setPlatformDatasetCollectionActionIds(nextActionIds);
+      }
+    },
+    [authHeaders, authToken, draftSourceIdSet, loadPlatformShopDatasetDetails],
+  );
+
   const openDatasetCollectionDetail = useCallback(
     async (source: DataSourceListItem, dataset: DataSourceDatasetSummary) => {
       const baseState: DatasetCollectionDetailDialogState = {
@@ -3849,7 +5250,7 @@ export default function DataConnectionsPanel({
         const params = new URLSearchParams({
           resource_key: dataset.resource_key || dataset.dataset_code,
           limit: '10',
-          sample_limit: '10',
+          sample_limit: '20',
         });
         const response = await fetch(
           `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/collection-detail?${params.toString()}`,
@@ -3926,7 +5327,7 @@ export default function DataConnectionsPanel({
     const params = new URLSearchParams({
       resource_key: collectionDetailDialog.resourceKey,
       limit: '10',
-      sample_limit: '10',
+      sample_limit: '20',
     });
     try {
       const response = await fetch(
@@ -6697,7 +8098,10 @@ export default function DataConnectionsPanel({
                               <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>
                             ) : (() => {
                               const sampleRows = rows.slice(0, 10).map((row) => asRecord(row) ?? {});
-                              const columns = buildSampleTableColumns(sampleRows);
+                              const columns = buildSemanticSampleTableColumns(
+                                collectionDetailDialog.detail?.fieldGroups ?? [],
+                                sampleRows,
+                              );
                               if (columns.length === 0) {
                                 return <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>;
                               }
@@ -6706,8 +8110,8 @@ export default function DataConnectionsPanel({
                                   <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
                                     <tr>
                                       {columns.map((column) => (
-                                        <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">
-                                          {column}
+                                        <th key={column.rawName} className="whitespace-nowrap px-3 py-2 font-medium">
+                                          {column.displayName}
                                         </th>
                                       ))}
                                     </tr>
@@ -6716,8 +8120,12 @@ export default function DataConnectionsPanel({
                                     {sampleRows.map((row, rowIndex) => (
                                       <tr key={`collection-sample-${rowIndex}`} className="hover:bg-surface-secondary/60">
                                         {columns.map((column) => (
-                                          <td key={`${rowIndex}-${column}`} className="max-w-56 truncate px-3 py-2" title={formatSampleCellValue(row[column])}>
-                                            {formatSampleCellValue(row[column])}
+                                          <td
+                                            key={`${rowIndex}-${column.rawName}`}
+                                            className="max-w-56 truncate px-3 py-2"
+                                            title={formatSampleCellValue(row[column.rawName])}
+                                          >
+                                            {formatSampleCellValue(row[column.rawName])}
                                           </td>
                                         ))}
                                       </tr>
@@ -7003,12 +8411,27 @@ export default function DataConnectionsPanel({
           <h3 className="text-base font-semibold text-text-primary">平台授权</h3>
           <p className="mt-1 text-sm text-text-secondary">统一管理已接入平台的授权状态和店铺连接。</p>
         </div>
-        {loadingPlatforms && (
-          <span className="inline-flex items-center gap-2 text-xs text-text-secondary">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            加载中
-          </span>
-        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {canManageServiceProviderApps && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingPlatformAppCode('taobao');
+                void fetchPlatformAppConfig('taobao');
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              服务商应用配置
+            </button>
+          )}
+          {loadingPlatforms && (
+            <span className="inline-flex items-center gap-2 text-xs text-text-secondary">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              加载中
+            </span>
+          )}
+        </div>
       </div>
       {platformError && (
         <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
@@ -7016,48 +8439,67 @@ export default function DataConnectionsPanel({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {platforms.map((platform) => (
-          <div
-            key={platform.platform_code}
-            className="rounded-2xl border border-border bg-surface-secondary p-4 transition-shadow hover:shadow-sm"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-text-primary">{platform.platform_name}</p>
-                <p className="mt-1 text-xs text-text-muted">编码：{platform.platform_code}</p>
+        {platforms.map((platform) => {
+          const isTaobaoPlatform = platform.platform_code === 'taobao';
+          const isAuthEnabled = platform.platform_code === 'alipay';
+          const authButtonLabel = isTaobaoPlatform
+            ? 'ISV申请中'
+            : isAuthEnabled
+              ? '新增授权'
+              : '待接入';
+          return (
+            <div
+              key={platform.platform_code}
+              className="rounded-2xl border border-border bg-surface-secondary p-4 transition-shadow hover:shadow-sm"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-text-primary">{platform.platform_name}</p>
+                  <p className="mt-1 text-xs text-text-muted">编码：{platform.platform_code}</p>
+                </div>
+                <Store className="h-4 w-4 shrink-0 text-text-muted" />
               </div>
-              <Store className="h-4 w-4 shrink-0 text-text-muted" />
+              <div className="mt-3 space-y-1 text-xs text-text-secondary">
+                <p>已授权店铺：{platform.authorized_shop_count ?? 0}</p>
+                <p>异常店铺：{platform.error_shop_count ?? 0}</p>
+                <p>最近同步：{formatTime(platform.last_sync_at)}</p>
+              </div>
+              {platform.platform_code === 'taobao' && (
+                <p className="mt-2 text-xs leading-5 text-text-secondary">
+                  一个淘宝/天猫店铺授权后会生成一个订单明细数据集，首次仅初始化 T-1 订单，之后每 2 小时同步订单变更。
+                </p>
+              )}
+              {platform.platform_code === 'alipay' && (
+                <p className="mt-2 text-xs leading-5 text-text-secondary">
+                  {ALIPAY_AUTH_COLLECTION_COPY}
+                </p>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleSelectPlatform(platform)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary transition-colors"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  查看店铺
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLaunchAuth(platform.platform_code)}
+                  disabled={!isAuthEnabled || launchingAuthPlatform === platform.platform_code}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-surface-tertiary disabled:text-text-muted disabled:hover:bg-surface-tertiary transition-colors"
+                >
+                  {launchingAuthPlatform === platform.platform_code ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Plus className="h-3.5 w-3.5" />
+                  )}
+                  {authButtonLabel}
+                </button>
+              </div>
             </div>
-            <div className="mt-3 space-y-1 text-xs text-text-secondary">
-              <p>已授权店铺：{platform.authorized_shop_count ?? 0}</p>
-              <p>异常店铺：{platform.error_shop_count ?? 0}</p>
-              <p>最近同步：{formatTime(platform.last_sync_at)}</p>
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => void handleSelectPlatform(platform)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary transition-colors"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                查看店铺
-              </button>
-              <button
-                type="button"
-                onClick={() => void launchAuthFlow(platform.platform_code)}
-                disabled={launchingAuthPlatform === platform.platform_code}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-              >
-                {launchingAuthPlatform === platform.platform_code ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Plus className="h-3.5 w-3.5" />
-                )}
-                新增授权
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
         {!loadingPlatforms && platforms.length === 0 && (
           <div className="col-span-full rounded-2xl border border-dashed border-border bg-surface-secondary p-10 text-center">
             <p className="text-sm text-text-secondary">暂无平台连接数据，请稍后重试。</p>
@@ -7067,8 +8509,378 @@ export default function DataConnectionsPanel({
     </div>
   );
 
-  const renderPlatformDetails = () =>
-    selectedPlatform && (
+  const renderPlatformDatasetDetail = (shop: ShopConnection) => {
+    if (expandedShopDatasetId !== shop.id) return null;
+    const details = shopDatasetDetails[shop.id] ?? [];
+
+    return (
+      <tr className="border-t border-border-subtle bg-surface-secondary/70">
+        <td colSpan={6} className="px-4 py-4">
+          {shopDatasetActionError && (
+            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+              {shopDatasetActionError}
+            </div>
+          )}
+          {details.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface px-3 py-3 text-sm text-text-secondary">
+              未找到该店铺的固定数据集。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {details.map((detail) => {
+                const datasetName =
+                  detail.dataset.dataset_name ||
+                  detail.dataset.business_name ||
+                  detail.dataset.dataset_code;
+                const collectionStatus = detail.collectionStatus.status || 'unknown';
+                const semanticStatus = detail.semanticStatus.status || 'unknown';
+                const isCollectionRunning = isPlatformCollectionRunning(detail.collectionStatus);
+                const isSemanticRunning = isPlatformSemanticRunning(detail.semanticStatus);
+                const collectionActionId = `${detail.sourceId}:${detail.dataset.id}`;
+                const isCollectionActionBusy = platformDatasetCollectionActionIds.has(collectionActionId);
+                const canRetryCollection = !isCollectionRunning && !isCollectionActionBusy;
+                const collectionActionLabel = '重新初始化';
+                const canRefreshSemantic =
+                  !isCollectionRunning &&
+                  !isSemanticRunning &&
+                  (detail.semanticStatus.canRefresh || detail.semanticStatus.canRetry);
+                const previewRows = detail.rows.slice(0, 20);
+                const previewColumns = buildSemanticSampleTableColumns(detail.fieldGroups, previewRows, 12);
+
+                return (
+                  <div key={`${detail.sourceId}-${detail.dataset.id}`} className="rounded-xl border border-border bg-surface px-4 py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-text-primary">{datasetName}</p>
+                          <span className="text-xs text-text-muted">
+                            {detail.dataset.resource_key || detail.dataset.dataset_code}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(collectionStatus)}`}>
+                            初始化：{collectionStatus}
+                          </span>
+                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(semanticStatus)}`}>
+                            语义：{semanticStatus}
+                          </span>
+                          {detail.loadedAt && (
+                            <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 text-text-secondary">
+                              {formatTime(detail.loadedAt)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void retryPlatformDatasetCollection(shop, detail)}
+                          disabled={!canRetryCollection && !isCollectionActionBusy}
+                          className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isCollectionActionBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                          {collectionActionLabel}
+                        </button>
+                        {canRefreshSemantic && (
+                          <button
+                            type="button"
+                            onClick={() => void refreshPlatformDatasetSemantic(shop, detail)}
+                            disabled={refreshingDatasetSemantic}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {refreshingDatasetSemantic ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3.5 w-3.5" />
+                            )}
+                            {detail.semanticStatus.canRetry ? '重新生成语义' : '刷新语义'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => void startEditDatasetSemantic(detail.source, detail.dataset)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          管理发布
+                        </button>
+                      </div>
+                    </div>
+
+                    {detail.loading ? (
+                      <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        正在加载数据集详情
+                      </div>
+                    ) : detail.error ? (
+                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                        {detail.error}
+                      </div>
+                    ) : (
+                      <div className="mt-3 space-y-3">
+                        {(detail.collectionStatus.message || detail.semanticStatus.message) && (
+                          <div className="grid gap-2 text-xs text-text-secondary md:grid-cols-2">
+                            {detail.collectionStatus.message && (
+                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                初始化：{detail.collectionStatus.message}
+                              </p>
+                            )}
+                            {detail.semanticStatus.message && (
+                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                语义：{detail.semanticStatus.message}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        <div>
+                          <p className="text-xs font-medium text-text-secondary">数据预览</p>
+                          <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-border bg-surface">
+                            {previewColumns.length === 0 ? (
+                              <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>
+                            ) : (
+                              <table className="min-w-full divide-y divide-border text-left text-xs">
+                                <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                                  <tr>
+                                    {previewColumns.map((column) => (
+                                      <th
+                                        key={column.rawName}
+                                        className="whitespace-nowrap px-3 py-2 font-medium"
+                                        title={column.rawName}
+                                      >
+                                        {column.displayName}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border text-text-primary">
+                                  {previewRows.length === 0 ? (
+                                    <tr>
+                                      <td colSpan={previewColumns.length} className="px-3 py-3 text-sm text-text-secondary">
+                                        暂无数据。
+                                      </td>
+                                    </tr>
+                                  ) : (
+                                    previewRows.map((row, rowIndex) => (
+                                      <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                        {previewColumns.map((column) => (
+                                          <td
+                                            key={`${rowIndex}-${column.rawName}`}
+                                            className="max-w-56 truncate px-3 py-2"
+                                            title={formatSampleCellValue(row[column.rawName])}
+                                          >
+                                            {formatPreviewCell(row[column.rawName])}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))
+                                  )}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
+  const renderAlipayMerchantAuthPanel = (appConfig: PlatformAppConfigFormState) => {
+    const hasStaticEntry = Boolean(appConfig.merchantAuthPcUrl);
+    const selectedPending = alipayPendingAuthorizations.find(
+      (item) => item.id === alipayClaimForm.pendingAuthorizationId,
+    );
+    const pendingRows = alipayPendingAuthorizations;
+
+    return (
+      <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
+            <p className="mt-1 text-xs text-text-secondary">
+              使用支付宝开放平台商家授权入口完成账单权限授权，回调后在这里填写支付宝商户名称并绑定到当前企业。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchAlipayPendingAuthorizations()}
+            disabled={loadingAlipayPendingAuthorizations}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loadingAlipayPendingAuthorizations ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            刷新待绑定
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="rounded-xl border border-border bg-surface p-3">
+            {appConfig.merchantAuthPcUrl ? (
+              <a
+                href={appConfig.merchantAuthPcUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                打开支付宝商家授权
+              </a>
+            ) : (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                待配置支付宝 PC 授权链接
+              </div>
+            )}
+            {!hasStaticEntry && canManageServiceProviderApps && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingPlatformAppCode('alipay');
+                  void fetchPlatformAppConfig('alipay');
+                }}
+                className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                <ShieldCheck className="h-3.5 w-3.5" />
+                配置授权入口
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-surface p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h5 className="text-sm font-semibold text-text-primary">待绑定授权</h5>
+                <span className="text-xs text-text-secondary">{pendingRows.length} 条待绑定</span>
+              </div>
+              {loadingAlipayPendingAuthorizations ? (
+                <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载待绑定授权
+                </div>
+              ) : pendingRows.length === 0 ? (
+                <p className="mt-3 rounded-lg border border-dashed border-border px-3 py-3 text-sm text-text-secondary">
+                  当前没有待绑定的支付宝授权。
+                </p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {pendingRows.map((pending) => {
+                    const isSelected = pending.id === alipayClaimForm.pendingAuthorizationId;
+                    return (
+                      <button
+                        key={pending.id}
+                        type="button"
+                        onClick={() =>
+                          setAlipayClaimForm((current) => ({
+                            ...current,
+                            pendingAuthorizationId: pending.id,
+                            claimCode: pending.claim_code || current.claimCode,
+                            merchantDisplayName: current.merchantDisplayName || pending.merchant_display_name || '',
+                          }))
+                        }
+                        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                          isSelected
+                            ? 'border-blue-300 bg-blue-50'
+                            : 'border-border bg-surface-secondary hover:bg-surface-tertiary'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <span className="font-medium text-text-primary">
+                            支付宝主体：{pending.external_shop_id || '未知'}
+                          </span>
+                          <span className="text-text-secondary">过期：{formatTime(pending.expires_at)}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-text-secondary">
+                          回调：{formatTime(pending.created_at)}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-border bg-surface p-3">
+              <h5 className="text-sm font-semibold text-text-primary">绑定到当前企业</h5>
+              <div className="mt-3 grid gap-3">
+                <label className="block text-sm font-medium text-text-primary">
+                  支付宝商户名称
+                  <input
+                    value={alipayClaimForm.merchantDisplayName}
+                    onChange={(event) =>
+                      setAlipayClaimForm((current) => ({ ...current, merchantDisplayName: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder="例如：福游网络"
+                  />
+                </label>
+              </div>
+              {selectedPending && (
+                <p className="mt-2 text-xs text-text-secondary">
+                  当前选择：{selectedPending.external_shop_id || selectedPending.id}
+                </p>
+              )}
+              {alipayClaimError && (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                  {alipayClaimError}
+                </div>
+              )}
+              {alipayClaimNotice && (
+                <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                  {alipayClaimNotice}
+                </div>
+              )}
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void claimAlipayPendingAuthorization()}
+                  disabled={
+                    claimingAlipayAuthorization ||
+                    !alipayClaimForm.pendingAuthorizationId.trim() ||
+                    !alipayClaimForm.claimCode.trim() ||
+                    !alipayClaimForm.merchantDisplayName.trim()
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {claimingAlipayAuthorization ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" />
+                  )}
+                  绑定到当前企业
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlatformDetails = () => {
+    if (!selectedPlatform) return null;
+    const appConfig =
+      platformAppConfigs[selectedPlatform.platform_code] ??
+      createPlatformAppConfigFormState(selectedPlatform.platform_code);
+    const isTaobaoPlatform = selectedPlatform.platform_code === 'taobao';
+    const isAlipayPlatform = selectedPlatform.platform_code === 'alipay';
+    const isAuthEnabled = selectedPlatform.platform_code === 'alipay';
+    const authButtonLabel = isTaobaoPlatform ? 'ISV申请中' : '新增授权';
+    const connectionNoun = isAlipayPlatform ? '商户' : '店铺';
+
+    return (
       <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -7080,46 +8892,93 @@ export default function DataConnectionsPanel({
               <ArrowLeft className="h-3.5 w-3.5" />
               返回平台总览
             </button>
-            <h3 className="text-base font-semibold text-text-primary">{selectedPlatform.platform_name} 店铺列表</h3>
+            <h3 className="text-base font-semibold text-text-primary">
+              {platformConnectionListHeading(selectedPlatform.platform_code)}
+            </h3>
           </div>
           <button
             type="button"
-            onClick={() => void launchAuthFlow(selectedPlatform.platform_code)}
-            disabled={launchingAuthPlatform === selectedPlatform.platform_code}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            onClick={() => handleLaunchAuth(selectedPlatform.platform_code)}
+            disabled={!isAuthEnabled || launchingAuthPlatform === selectedPlatform.platform_code}
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-surface-tertiary disabled:text-text-muted disabled:hover:bg-surface-tertiary transition-colors"
           >
             {launchingAuthPlatform === selectedPlatform.platform_code ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Plus className="h-4 w-4" />
             )}
-            新增店铺授权
+            {authButtonLabel}
           </button>
         </div>
-        <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h4 className="text-sm font-semibold text-text-primary">固定数据集</h4>
-              <p className="mt-1 text-xs text-text-secondary">
-                平台授权完成后，系统会自动生成可供规则绑定的数据集目录。
-              </p>
-            </div>
-            <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}`}>
-              {getStatusLabel(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-            {PLATFORM_FIXED_DATASET_FALLBACK.map((datasetName) => (
-              <div key={datasetName} className="rounded-xl border border-border bg-surface px-3 py-3">
-                <p className="text-sm font-medium text-text-primary">{datasetName}</p>
-                <p className="mt-1 text-xs text-text-secondary">最近同步：{formatTime(selectedPlatform.last_sync_at)}</p>
+        {isTaobaoPlatform ? (
+          <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-text-primary">Tally 服务商应用</h4>
+                <p className="mt-1 text-xs text-text-secondary">
+                  Tally 使用武汉对对科技有限公司的淘宝开放平台应用发起授权，客户只需要完成店铺授权。
+                </p>
               </div>
-            ))}
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {renderServiceProviderAppStatus(appConfig)}
+                {canManageServiceProviderApps && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingPlatformAppCode('taobao');
+                      void fetchPlatformAppConfig('taobao');
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    服务商应用配置
+                  </button>
+                )}
+              </div>
+            </div>
+            {appConfig.appKey && appConfig.hasAppSecret && (
+              <p className="mt-3 text-sm text-green-700">
+                Tally 服务商应用已配置，客户只需要完成店铺授权。
+              </p>
+            )}
+            {!appConfig.loading && !appConfig.error && (!appConfig.appKey || !appConfig.hasAppSecret) && (
+              <p className="mt-3 text-sm text-amber-700">
+                Tally 服务商应用尚未配置，需由 Tally 管理员配置 AppKey、AppSecret 和回调地址后才能授权店铺。
+              </p>
+            )}
           </div>
-        </div>
+        ) : !isAlipayPlatform ? (
+          renderAlipayMerchantAuthPanel(appConfig)
+        ) : null}
+        {isAlipayPlatform && appConfig.merchantAuthPcUrl && (
+          <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
+                <p className="mt-1 text-xs text-text-secondary">
+                  授权完成回调后会直接绑定到当前企业，并生成支付宝商户账单数据集。
+                </p>
+              </div>
+              <a
+                href={appConfig.merchantAuthPcUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                打开支付宝商家授权
+              </a>
+            </div>
+          </div>
+        )}
         {shopError && (
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
             {shopError}
+          </div>
+        )}
+        {shopNotice && (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+            {shopNotice}
           </div>
         )}
         {loadingShops ? (
@@ -7132,53 +8991,75 @@ export default function DataConnectionsPanel({
             当前平台暂无店铺授权记录。
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="min-w-[1100px] w-full table-fixed text-sm">
+              <colgroup>
+                <col className="w-[20%]" />
+                <col className="w-[20%]" />
+                <col className="w-[10%]" />
+                <col className="w-[15%]" />
+                <col className="w-[13%]" />
+                <col className="w-[22%]" />
+              </colgroup>
               <thead className="bg-surface-secondary text-left text-text-secondary">
                 <tr>
-                  <th className="px-4 py-3 font-medium">店铺名称</th>
-                  <th className="px-4 py-3 font-medium">店铺 ID</th>
-                  <th className="px-4 py-3 font-medium">授权状态</th>
-                  <th className="px-4 py-3 font-medium">Token 到期</th>
-                  <th className="px-4 py-3 font-medium">最近同步</th>
-                  <th className="px-4 py-3 font-medium text-right">操作</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">{connectionNoun}名称</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">{connectionNoun} ID</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">授权状态</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">Token 到期</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">最近同步</th>
+                  <th className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {shops.map((shop) => (
-                  <tr key={shop.id} className="border-t border-border-subtle text-text-primary">
-                    <td className="px-4 py-3">{shop.external_shop_name}</td>
-                    <td className="px-4 py-3 text-text-secondary">{shop.external_shop_id}</td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs font-medium text-blue-600">
-                        {getStatusLabel(shop.auth_status)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-text-secondary">{formatTime(shop.token_expires_at)}</td>
-                    <td className="px-4 py-3 text-text-secondary">{formatTime(shop.last_sync_at)}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void handleReauthorize(shop)}
-                          disabled={actioningShopId === shop.id}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
-                        >
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          重授权
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleDisable(shop)}
-                          disabled={actioningShopId === shop.id}
-                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
-                        >
-                          <Ban className="h-3.5 w-3.5" />
-                          停用
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                  <Fragment key={shop.id}>
+                    <tr className="border-t border-border-subtle text-text-primary">
+                      <td className="px-4 py-3 truncate" title={shop.external_shop_name}>{shop.external_shop_name}</td>
+                      <td className="px-4 py-3 truncate text-text-secondary" title={shop.external_shop_id}>{shop.external_shop_id}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(shop.auth_status || shop.status)}`}>
+                          {getStatusLabel(shop.auth_status || shop.status)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-text-secondary">{formatTime(shop.token_expires_at)}</td>
+                      <td className="px-4 py-3 text-text-secondary">{formatTime(shop.last_sync_at)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end gap-2 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => void loadPlatformShopDatasetDetails(shop)}
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                          >
+                            <Database className="h-3.5 w-3.5" />
+                            数据集
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleReauthorize(shop)}
+                            disabled={actioningShopId === shop.id}
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            重授权
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDisable(shop)}
+                            disabled={
+                              actioningShopId === shop.id ||
+                              ['disabled', 'revoked'].includes((shop.auth_status || shop.status || '').toLowerCase())
+                            }
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
+                          >
+                            <Ban className="h-3.5 w-3.5" />
+                            停用
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {renderPlatformDatasetDetail(shop)}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -7186,6 +9067,80 @@ export default function DataConnectionsPanel({
         )}
       </div>
     );
+  };
+
+  const renderAlipayAuthDialog = () => {
+    if (!alipayAuthDialog) return null;
+    const merchantDisplayName = alipayAuthDialog.merchantDisplayName;
+    const trimmedMerchantDisplayName = merchantDisplayName.trim();
+    const isSubmitting = launchingAuthPlatform === 'alipay';
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+        <div role="dialog" aria-modal="true" aria-labelledby="alipay-auth-title" className="w-full max-w-md rounded-2xl border border-border bg-surface p-5 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 id="alipay-auth-title" className="text-base font-semibold text-text-primary">
+                新增支付宝商户授权
+              </h3>
+              <p className="mt-1 text-sm text-text-secondary">
+                商户显示名称将用于后续连接列表和数据集命名。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAlipayAuthDialog(null)}
+              disabled={isSubmitting}
+              className="rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              关闭
+            </button>
+          </div>
+
+          <label className="mt-4 block space-y-2 text-sm">
+            <span className="font-medium text-text-primary">商户显示名称</span>
+            <input
+              value={merchantDisplayName}
+              onChange={(event) =>
+                setAlipayAuthDialog((current) =>
+                  current ? { ...current, merchantDisplayName: event.target.value, error: '' } : current,
+                )
+              }
+              className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+              placeholder="例如：福游网络"
+              autoFocus
+            />
+          </label>
+
+          {alipayAuthDialog.error && (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+              {alipayAuthDialog.error}
+            </div>
+          )}
+
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setAlipayAuthDialog(null)}
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={() => void launchAuthFlow('alipay', trimmedMerchantDisplayName)}
+              disabled={!trimmedMerchantDisplayName || isSubmitting}
+              className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              新增授权
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const renderSelectedPanel = () => {
     if (selectedConnectionView === 'collaboration_channels') {
@@ -7219,6 +9174,10 @@ export default function DataConnectionsPanel({
 
   if (mode === 'callback' && callbackPayload) {
     const isSuccess = callbackPayload.status === 'success';
+    const canBindAlipayCallback =
+      isSuccess &&
+      callbackPayload.platformCode === 'alipay' &&
+      Boolean(callbackPayload.pendingAuthorizationId && callbackPayload.claimCode);
     return (
       <div className="flex-1 overflow-y-auto bg-surface-secondary p-6">
         <div className="mx-auto w-full max-w-3xl space-y-4">
@@ -7240,7 +9199,49 @@ export default function DataConnectionsPanel({
                   {callbackPayload.message || (isSuccess ? '授权成功，已记录店铺连接信息。' : '授权失败，请重新发起授权。')}
                 </p>
                 {callbackPayload.shopName && (
-                  <p className="mt-2 text-sm text-text-secondary">店铺：{callbackPayload.shopName}</p>
+                  <p className="mt-2 text-sm text-text-secondary">支付宝商户：{callbackPayload.shopName}</p>
+                )}
+                {canBindAlipayCallback && (
+                  <div className="mt-4 rounded-xl border border-border bg-surface-secondary p-4">
+                    <h3 className="text-sm font-semibold text-text-primary">绑定支付宝授权到当前企业</h3>
+                    <label className="mt-3 block text-sm font-medium text-text-primary">
+                      支付宝商户名称
+                      <input
+                        value={alipayClaimForm.merchantDisplayName}
+                        onChange={(event) =>
+                          setAlipayClaimForm((current) => ({
+                            ...current,
+                            merchantDisplayName: event.target.value,
+                          }))
+                        }
+                        className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        placeholder="例如：福游网络"
+                      />
+                    </label>
+                    {alipayClaimError && (
+                      <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                        {alipayClaimError}
+                      </div>
+                    )}
+                    {alipayClaimNotice && (
+                      <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                        {alipayClaimNotice}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void claimAlipayPendingAuthorization()}
+                      disabled={claimingAlipayAuthorization || !alipayClaimForm.merchantDisplayName.trim()}
+                      className="mt-3 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {claimingAlipayAuthorization ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="h-4 w-4" />
+                      )}
+                      绑定到当前企业
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -7249,7 +9250,23 @@ export default function DataConnectionsPanel({
                 type="button"
                 onClick={() => {
                   clearCallbackQuery('data-connections');
-                  setMode('overview');
+                  if (callbackPayload.platformCode === 'alipay' && callbackPayload.claimCode) {
+                    setSelectedPlatform({
+                      platform_code: 'alipay',
+                      platform_name: '支付宝',
+                      authorized_shop_count: 0,
+                      error_shop_count: 0,
+                    });
+                    fillAlipayClaimFormFromCallback(callbackPayload);
+                    setMode('platform');
+                    void Promise.all([
+                      fetchPlatformAppConfig('alipay'),
+                      fetchAlipayPendingAuthorizations(),
+                      fetchShops('alipay'),
+                    ]);
+                  } else {
+                    setMode('overview');
+                  }
                   setCallbackPayload(null);
                   void fetchPlatforms();
                   void fetchCollaborationChannels();
@@ -7325,18 +9342,7 @@ export default function DataConnectionsPanel({
                   )}
                 <button
                   type="button"
-                  onClick={() => {
-                    if (selectedConnectionView === 'collaboration_channels') {
-                      void fetchCollaborationChannels();
-                      return;
-                    }
-                    if (mode === 'platform' && selectedPlatform) {
-                      void fetchShops(selectedPlatform.platform_code);
-                      return;
-                    }
-                    void fetchPlatforms();
-                    void fetchRemoteSources();
-                  }}
+                  onClick={() => void refreshCurrentConnectionView()}
                   className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary transition-colors hover:bg-surface-tertiary"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
@@ -7366,6 +9372,8 @@ export default function DataConnectionsPanel({
             </div>
           </div>
           {renderSelectedPanel()}
+          {renderServiceProviderAppConfigPanel()}
+          {renderAlipayAuthDialog()}
         </section>
       </div>
     </div>

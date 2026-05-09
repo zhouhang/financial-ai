@@ -93,7 +93,7 @@ class DingTalkDwsAdapter(NotificationAdapter):
         if mobile:
             search = self._run(["contact", "user", "search-mobile", "--mobile", mobile])
         else:
-            search = self._run(["contact", "user", "search", "--query", keyword])
+            search = self._run(["contact", "user", "search", "--keyword", keyword])
         if not self._is_cli_success(search):
             return self._user_failure(self._build_cli_error_message("查询钉钉用户失败", search), code="cli_error", raw=search.payload)
 
@@ -652,15 +652,42 @@ class DingTalkDwsAdapter(NotificationAdapter):
 
 
 def _extract_user_ids(payload: dict[str, Any]) -> list[str]:
-    raw_ids = payload.get("userId") or payload.get("userIds") or []
-    if isinstance(raw_ids, str):
-        return [raw_ids] if raw_ids else []
-    if isinstance(raw_ids, list):
-        return [str(item) for item in raw_ids if item]
-    result = payload.get("result") or {}
-    if isinstance(result, dict):
-        return _extract_user_ids(result)
-    return []
+    user_ids: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            user_ids.append(text)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, str):
+            append(value)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+
+        model = value.get("orgEmployeeModel") if isinstance(value.get("orgEmployeeModel"), dict) else value
+        for id_key in ("orgUserId", "userId", "userid"):
+            raw_id = model.get(id_key)
+            if isinstance(raw_id, list):
+                for item in raw_id:
+                    append(item)
+            else:
+                append(raw_id)
+
+        for key in ("userId", "userIds", "users", "list", "items", "data", "result"):
+            nested = value.get(key)
+            if nested is not None and nested is not model:
+                visit(nested)
+
+    visit(payload)
+    return user_ids
 
 
 def _users_from_payload(payload: dict[str, Any]) -> list[NotificationUser]:

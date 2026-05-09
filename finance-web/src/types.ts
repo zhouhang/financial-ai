@@ -131,6 +131,7 @@ export type DataConnectionView = 'data_sources' | 'collaboration_channels';
 export type PlatformCode =
   | 'taobao'
   | 'tmall'
+  | 'alipay'
   | 'douyin_shop'
   | 'kuaishou'
   | 'jd'
@@ -163,6 +164,8 @@ export interface AuthCallbackPayload {
   status: string;
   message: string;
   shopName?: string;
+  pendingAuthorizationId?: string;
+  claimCode?: string;
 }
 
 export type DataSourceKind =

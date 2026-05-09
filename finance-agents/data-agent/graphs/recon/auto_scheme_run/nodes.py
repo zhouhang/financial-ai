@@ -394,6 +394,51 @@ def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _first_text_from_dicts(dicts: list[dict[str, Any]], *keys: str) -> str:
+    for item in dicts:
+        for key in keys:
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _dataset_meta_containers(dataset: dict[str, Any]) -> list[dict[str, Any]]:
+    containers: list[dict[str, Any]] = []
+    for key in ("collection_config", "extract_config", "schema_summary", "metadata", "meta"):
+        value = dataset.get(key)
+        if isinstance(value, dict):
+            containers.append(dict(value))
+    catalog = _safe_dict(_safe_dict(dataset.get("metadata")).get("catalog_profile"))
+    collection_config = _safe_dict(catalog.get("collection_config"))
+    if collection_config:
+        containers.insert(0, collection_config)
+    return containers
+
+
+def _dataset_source_type_from_meta(dataset: dict[str, Any], fallback: str) -> str:
+    containers = _dataset_meta_containers(dataset)
+    explicit = _first_text_from_dicts(containers, "dataset_source_type")
+    if explicit:
+        return explicit
+    storage = _first_text_from_dicts(containers, "storage", "physical_storage").lower()
+    if storage == "platform_order_lines":
+        return "platform_order_lines"
+    if storage and storage not in {"dataset_collection_records", "collection_records"}:
+        return storage
+    return fallback or "collection_records"
+
+
+def _collection_driver_from_meta(dataset: dict[str, Any]) -> str:
+    return _first_text_from_dicts(
+        _dataset_meta_containers(dataset),
+        "collection_driver",
+        "driver",
+        "collector",
+        "collection_type",
+    )
+
+
 def _merge_feedback(existing: Any, patch: Any) -> dict[str, Any]:
     return {**_safe_dict(existing), **_safe_dict(patch)}
 
@@ -586,6 +631,12 @@ def _build_plan_binding_from_dataset_binding(
         scheme_meta=_safe_dict(scheme_meta),
     )
 
+    dataset_source_type = str(
+        mapping_config.get("dataset_source_type")
+        or filter_config.get("dataset_source_type")
+        or "collection_records"
+    ).strip() or "collection_records"
+
     return {
         "data_source_id": source_id,
         "table_name": table_name,
@@ -593,7 +644,12 @@ def _build_plan_binding_from_dataset_binding(
         "required": bool(binding.get("is_required", True)),
         "query": query,
         "dataset_id": str(mapping_config.get("dataset_id") or binding.get("dataset_id") or query.get("dataset_id") or "").strip(),
-        "dataset_source_type": str(mapping_config.get("dataset_source_type") or "collection_records").strip() or "collection_records",
+        "dataset_source_type": dataset_source_type,
+        "dataset_ref": {
+            "source_type": dataset_source_type,
+            "source_key": source_id,
+            "query": query,
+        },
         "role_code": role_code,
         "dataset_code": str(mapping_config.get("dataset_code") or resource_key).strip() or resource_key,
         "source_kind": str(mapping_config.get("source_kind") or binding.get("source_kind") or "").strip(),
@@ -631,6 +687,24 @@ def _binding_display_name(binding: dict[str, Any]) -> str:
 
 def _is_required_collection_empty(binding: dict[str, Any], collection: dict[str, Any]) -> bool:
     return _get_binding_required(binding) and _collection_record_count(collection) <= 0
+
+
+def _uses_driver_managed_dataset_loader(binding: dict[str, Any]) -> bool:
+    source_type = str(binding.get("dataset_source_type") or "collection_records").strip()
+    return bool(source_type) and source_type not in {"collection_records", "platform_order_lines"}
+
+
+def _collection_count_from_result(result: dict[str, Any]) -> int:
+    summary = _safe_dict(result.get("collection_summary"))
+    for container in (summary, result):
+        for key in ("record_count", "row_count", "upserted_count", "inserted_count"):
+            try:
+                value = int(container.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return 0
 
 
 def _flatten_input_plan_entries(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
@@ -930,6 +1004,14 @@ async def _hydrate_binding_source_meta(
             hydrated["dataset_metadata"] = _safe_dict(dataset.get("metadata"))
             hydrated["source_kind"] = str(hydrated.get("source_kind") or dataset.get("source_kind") or "").strip()
             hydrated["provider_code"] = str(hydrated.get("provider_code") or dataset.get("provider_code") or "").strip()
+            fallback_source_type = (
+                str(hydrated.get("dataset_source_type") or "collection_records").strip()
+                or "collection_records"
+            )
+            hydrated["dataset_source_type"] = _dataset_source_type_from_meta(dataset, fallback_source_type)
+            collection_driver = _collection_driver_from_meta(dataset)
+            if collection_driver:
+                hydrated["collection_driver"] = collection_driver
     return hydrated
 
 
@@ -1477,10 +1559,50 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
                     "success": collection_success,
                     "job": _safe_dict(collect_result.get("job")),
                     "error": collection_error,
+                    "collection_driver": str(
+                        collect_result.get("collection_driver")
+                        or binding.get("collection_driver")
+                        or ""
+                    ),
+                    "dataset_source_type": str(binding.get("dataset_source_type") or ""),
                 }
             )
             if not collection_success:
-                missing_bindings.append({**binding, "error": f"先同步失败：{collection_error}"})
+                missing_bindings.append(
+                    {
+                        **binding,
+                        "collection_driver": str(
+                            collect_result.get("collection_driver")
+                            or binding.get("collection_driver")
+                            or ""
+                        ),
+                        "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                        "error": f"先同步失败：{collection_error}",
+                    }
+                )
+                continue
+            if _uses_driver_managed_dataset_loader(binding):
+                ready_binding = {
+                    **binding,
+                    "dataset_source_type": str(binding.get("dataset_source_type") or "collection_records").strip()
+                    or "collection_records",
+                }
+                ready_collections.append(
+                    {
+                        "binding": ready_binding,
+                        "collection_records": {
+                            "dataset_id": str(binding.get("dataset_id") or ""),
+                            "resource_key": _get_binding_resource_key(binding),
+                            "record_count": _collection_count_from_result(collect_result),
+                            "sample_records": [],
+                            "collection_driver": str(
+                                collect_result.get("collection_driver")
+                                or binding.get("collection_driver")
+                                or ""
+                            ),
+                        },
+                    }
+                )
                 continue
         list_biz_date = biz_date if _binding_apply_biz_date_filter(binding) else ""
         result = await data_source_list_collection_records(
@@ -1500,7 +1622,8 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             "sample_records": records[:1],
         }
         if bool(result.get("success")) and not _is_required_collection_empty(binding, collection):
-            ready_binding = {**binding, "dataset_source_type": "collection_records"}
+            dataset_source_type = str(binding.get("dataset_source_type") or "collection_records").strip() or "collection_records"
+            ready_binding = {**binding, "dataset_source_type": dataset_source_type}
             ready_collections.append({"binding": ready_binding, "collection_records": collection})
         else:
             error = str(result.get("error") or "暂无采集记录，请先采集数据")

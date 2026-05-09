@@ -469,6 +469,10 @@ class DataSourceDatasetCollectionDetailResponse(BaseModel):
     resource_key: str = ""
     dataset: dict[str, Any] | None = None
     collection_stats: dict[str, Any] = Field(default_factory=dict)
+    collection_status: dict[str, Any] = Field(default_factory=dict)
+    semantic_status: dict[str, Any] = Field(default_factory=dict)
+    field_groups: list[dict[str, Any]] = Field(default_factory=list)
+    sample_limit: int = 20
     jobs: list[dict[str, Any]] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     count: int = 0
@@ -603,6 +607,7 @@ class DataSourceDatasetCollectionTriggerRequest(BaseModel):
     resource_key: str = ""
     biz_date: str = ""
     background: bool = True
+    trigger_mode: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
     mode: str = ""
 
@@ -1084,7 +1089,7 @@ async def get_dataset_collection_detail(
     dataset_id: str,
     resource_key: str = Query("", description="可选：物理资源 key；为空时按 dataset_id 查找"),
     limit: int = Query(10, ge=1, le=50, description="最近采集任务数量"),
-    sample_limit: int = Query(10, ge=1, le=50, description="最新样本行数量"),
+    sample_limit: int = Query(20, ge=1, le=50, description="最新样本行数量"),
     mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
     authorization: Optional[str] = Header(None),
 ):
@@ -1110,6 +1115,10 @@ async def get_dataset_collection_detail(
         resource_key=str(result.get("resource_key") or resource_key or ""),
         dataset=result.get("dataset"),
         collection_stats=result.get("collection_stats") or {},
+        collection_status=result.get("collection_status") or {},
+        semantic_status=result.get("semantic_status") or {},
+        field_groups=result.get("field_groups") or [],
+        sample_limit=int(result.get("sample_limit") or sample_limit),
         jobs=result.get("jobs") or [],
         rows=result.get("rows") or [],
         count=int(result.get("count") or len(result.get("jobs") or [])),
@@ -1179,6 +1188,7 @@ async def trigger_dataset_collection(
         resource_key=body.resource_key,
         biz_date=body.biz_date or _default_collection_biz_date(),
         background=body.background,
+        trigger_mode=body.trigger_mode,
         params=body.params,
         mode=body.mode,
     )

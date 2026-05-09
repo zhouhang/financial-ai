@@ -466,6 +466,7 @@ class FinanceCronSchedulerService:
         self._inflight_collection_slots.add(slot_key)
         try:
             company_token = create_scheduler_auth_token(company_id=company_id)
+            idempotency_key = f"collection:{source_id}:{dataset_id}:{schedule_slot}"
             result = await data_source_trigger_dataset_collection(
                 company_token,
                 source_id=source_id,
@@ -473,6 +474,7 @@ class FinanceCronSchedulerService:
                 resource_key=resource_key,
                 biz_date=biz_date,
                 trigger_mode="schedule",
+                idempotency_key=idempotency_key,
                 params={
                     "schedule_slot": schedule_slot,
                     "schedule_expr": schedule_expr,

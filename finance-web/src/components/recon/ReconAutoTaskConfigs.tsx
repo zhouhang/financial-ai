@@ -9,6 +9,7 @@ import {
   normalizeChannelConfig,
 } from '../../collaborationChannelDrafts';
 import { sourceKindLabel } from '../../dataSourceConfig';
+import { resolveDatasetSourceType } from './runPlanBindings';
 import type {
   CollaborationChannelListItem,
   CollaborationProvider,
@@ -53,6 +54,8 @@ interface DatasetOption {
   datasetCode: string;
   resourceKey: string;
   fields: string[];
+  schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 interface BindingQueryDraft {
@@ -177,8 +180,8 @@ function normalizeDatasetOptions(
     if (status === 'deleted' || isEnabled === false) continue;
 
     const normalizedDatasetId = datasetId || datasetCode || datasetName;
-    const schemaSummary = asRecord(value.schema_summary);
-    const extractConfig = asRecord(value.extract_config);
+    const schemaSummary = asRecord(value.schema_summary) ?? undefined;
+    const extractConfig = asRecord(value.extract_config) ?? undefined;
     const schemaColumns = Array.isArray(schemaSummary?.columns) ? schemaSummary.columns : [];
     const apiParameters = Array.isArray(extractConfig?.parameters) ? extractConfig.parameters : [];
     const fieldNames = Array.from(
@@ -207,6 +210,8 @@ function normalizeDatasetOptions(
       resourceKey:
         asString(value.resource_key).trim() || datasetCode || datasetName || normalizedDatasetId,
       fields: fieldNames,
+      schemaSummary,
+      extractConfig,
     });
   }
 
@@ -875,7 +880,7 @@ export default function ReconAutoTaskConfigs({
 
         const datasetResultGroups = await Promise.all(
           sources.map(async (source) => {
-            const response = await fetch(`/api/data-sources/${source.id}/datasets`, {
+            const response = await fetch(`/api/data-sources/${source.id}/datasets?only_published=true`, {
               headers: { Authorization: `Bearer ${authToken}` },
             });
 
@@ -1094,7 +1099,10 @@ export default function ReconAutoTaskConfigs({
         data_source_id: option.sourceId,
         table_name: slot.tableName,
         resource_key: option.resourceKey || 'default',
-        dataset_source_type: 'collection_records',
+        dataset_source_type: resolveDatasetSourceType({
+          extractConfig: option.extractConfig,
+          schemaSummary: option.schemaSummary,
+        }),
         query: {
           biz_date_filter: {
             field: dateField,

@@ -17,6 +17,7 @@ export interface RunPlanSourceDraft {
   resourceKey?: string;
   fieldLabelMap?: Record<string, string>;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 export interface RunPlanSchemeMetaSummary {
@@ -67,6 +68,35 @@ function asList(value: unknown): unknown[] {
 
 function normalizeReadMode(value: unknown): string {
   return toText(value, 'base').trim().toLowerCase() || 'base';
+}
+
+export function resolveDatasetSourceType(source: {
+  extractConfig?: Record<string, unknown>;
+  schemaSummary?: Record<string, unknown>;
+}): string {
+  const extractConfig = asRecord(source.extractConfig);
+  const schemaSummary = asRecord(source.schemaSummary);
+  const explicit = firstText(
+    extractConfig.dataset_source_type,
+    extractConfig.source_type,
+    extractConfig.loader,
+    schemaSummary.dataset_source_type,
+    schemaSummary.source_type,
+    schemaSummary.loader,
+  ).toLowerCase();
+  if (explicit) return explicit;
+
+  const storage = firstText(
+    extractConfig.storage,
+    extractConfig.physical_storage,
+    schemaSummary.storage,
+    schemaSummary.physical_storage,
+  ).toLowerCase();
+  if (storage === 'platform_order_lines') return 'platform_order_lines';
+  if (storage && storage !== 'dataset_collection_records' && storage !== 'collection_records') {
+    return storage;
+  }
+  return 'collection_records';
 }
 
 function buildInputDatasetKey(input: {
@@ -274,6 +304,7 @@ export function buildRunPlanBinding(
   const tableName = toText(source.resourceKey, toText(source.datasetCode, source.name)).trim();
   if (!sourceId || !tableName) return null;
 
+  const datasetSourceType = resolveDatasetSourceType(source);
   const query: Record<string, unknown> = {};
   if (tableName) {
     query.resource_key = tableName;
@@ -289,12 +320,15 @@ export function buildRunPlanBinding(
     data_source_id: sourceId,
     table_name: tableName,
     resource_key: tableName,
-    dataset_source_type: 'collection_records',
+    dataset_source_type: datasetSourceType,
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     role_code: `${side}_${index + 1}`,
     side,
     query,
+    mapping_config: {
+      dataset_source_type: datasetSourceType,
+    },
   };
 }
 

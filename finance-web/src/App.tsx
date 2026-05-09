@@ -77,6 +77,8 @@ function parseAuthCallbackPayloadFromLocation(): AuthCallbackPayload | null {
   const platformCode = params.get('platform_code') || params.get('platform') || '';
   const message = params.get('platform_auth_message') || params.get('message') || '';
   const shopName = params.get('shop_name') || undefined;
+  const pendingAuthorizationId = params.get('pending_authorization_id') || undefined;
+  const claimCode = params.get('claim_code') || undefined;
 
   if (!status && !path.includes('auth-callback') && !path.includes('auth_result')) {
     return null;
@@ -87,6 +89,8 @@ function parseAuthCallbackPayloadFromLocation(): AuthCallbackPayload | null {
     status: status || 'unknown',
     message: message || '授权流程已返回，请检查授权结果。',
     shopName,
+    pendingAuthorizationId,
+    claimCode,
   };
 }
 
@@ -354,6 +358,8 @@ export default function App() {
         'platform',
         'message',
         'shop_name',
+        'pending_authorization_id',
+        'claim_code',
       ].forEach((key) => url.searchParams.delete(key));
     }
     window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
@@ -495,6 +501,7 @@ export default function App() {
     setIsLoadingConversation(false);
     setIsLoading(false);
     setWaitingForFileUpload(false);
+    streamingMessageIdRef.current = null;
     setStreamingMessageId(null);
     setTasks([]);
     setUploadedFiles([]);
@@ -649,6 +656,7 @@ export default function App() {
   
   // ── 流式输出状态 ──────────────────────────────────────────
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const streamingMessageIdRef = useRef<string | null>(null);
   const nodeStatusMessageIdsRef = useRef<Map<string, string>>(new Map());
 
   // ── 响应目标会话追踪 ───────────────────────────────────────
@@ -840,6 +848,7 @@ export default function App() {
       switch (data.type) {
         case 'node_status':
           setIsLoading(false);
+          streamingMessageIdRef.current = null;
           setStreamingMessageId(null);
           if (data.node && data.status === 'running') {
             upsertRunningNodeMessage(
@@ -861,52 +870,59 @@ export default function App() {
         case 'stream':
           // 流式输出：逐步更新消息内容
           setIsLoading(false);
-          setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== targetConvId) return c;
-              
-              // 查找或创建流式消息
-              const existingMsgIndex = c.messages.findIndex(
-                (m) => m.id === streamingMessageId
-              );
-              
-              if (existingMsgIndex >= 0) {
-                // 累积内容
-                const updatedMessages = [...c.messages];
-                updatedMessages[existingMsgIndex] = {
-                  ...updatedMessages[existingMsgIndex],
-                  content: updatedMessages[existingMsgIndex].content + (data.content || ''),
-                };
-                return {
-                  ...c,
-                  messages: updatedMessages,
-                  updatedAt: new Date(),
-                };
-              } else {
-                // 创建新的流式消息
-                const newMsgId = generateId();
-                setStreamingMessageId(newMsgId);
-                return {
-                  ...c,
-                  messages: [
-                    ...c.messages,
-                    {
-                      id: newMsgId,
-                      role: 'assistant' as const,
-                      content: data.content || '',
-                      timestamp: new Date(),
-                    },
-                  ],
-                  updatedAt: new Date(),
-                };
-              }
-            })
-          );
+          {
+            const streamMessageId = streamingMessageIdRef.current || generateId();
+            if (streamingMessageIdRef.current !== streamMessageId) {
+              streamingMessageIdRef.current = streamMessageId;
+              setStreamingMessageId(streamMessageId);
+            }
+
+            setConversations((prev) =>
+              prev.map((c) => {
+                if (c.id !== targetConvId) return c;
+
+                // 查找或创建流式消息
+                const existingMsgIndex = c.messages.findIndex(
+                  (m) => m.id === streamMessageId
+                );
+
+                if (existingMsgIndex >= 0) {
+                  // 累积内容
+                  const updatedMessages = [...c.messages];
+                  updatedMessages[existingMsgIndex] = {
+                    ...updatedMessages[existingMsgIndex],
+                    content: updatedMessages[existingMsgIndex].content + (data.content || ''),
+                  };
+                  return {
+                    ...c,
+                    messages: updatedMessages,
+                    updatedAt: new Date(),
+                  };
+                } else {
+                  // 创建新的流式消息
+                  return {
+                    ...c,
+                    messages: [
+                      ...c.messages,
+                      {
+                        id: streamMessageId,
+                        role: 'assistant' as const,
+                        content: data.content || '',
+                        timestamp: new Date(),
+                      },
+                    ],
+                    updatedAt: new Date(),
+                  };
+                }
+              })
+            );
+          }
           break;
         
         case 'message': {
           setIsLoading(false);
-          const currentStreamingId = streamingMessageId;
+          const currentStreamingId = streamingMessageIdRef.current;
+          streamingMessageIdRef.current = null;
           setStreamingMessageId(null); // 完整消息，清除流式状态
           const newContent = data.content || '';
           
@@ -1008,6 +1024,7 @@ export default function App() {
         case 'done':
           setIsLoading(false);
           setWaitingForFileUpload(false);
+          streamingMessageIdRef.current = null;
           setStreamingMessageId(null); // 清除流式状态
           clearRunningNodeMessages(targetConvId);
           pendingConvIdRef.current = null;
@@ -1218,6 +1235,7 @@ export default function App() {
 
       // 如果正在流式输出，中断当前流式输出
       if (streamingMessageId) {
+        streamingMessageIdRef.current = null;
         setStreamingMessageId(null);
       }
       

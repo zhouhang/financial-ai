@@ -14,7 +14,7 @@ export const SOURCE_TYPE_CARDS: SourceTypeCard[] = [
   {
     source_kind: 'platform_oauth',
     title: '电商平台授权',
-    description: '淘宝、天猫、抖店等账号授权管理',
+    description: '淘宝/天猫、支付宝账号授权管理',
     execution_mode: 'deterministic',
     provider_code: 'multi_platform',
     behavior: 'platform',

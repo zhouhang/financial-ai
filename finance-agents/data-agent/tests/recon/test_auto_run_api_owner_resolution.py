@@ -81,6 +81,25 @@ def _channel_config() -> NotificationChannelConfig:
     )
 
 
+def test_delete_execution_run_api_calls_mcp_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    async def fake_delete(auth_token: str, run_id: str) -> dict[str, object]:
+        captured["auth_token"] = auth_token
+        captured["run_id"] = run_id
+        return {"success": True, "run": {"id": run_id}, "message": "运行记录已删除"}
+
+    monkeypatch.setattr(auto_run_api, "execution_run_delete", fake_delete)
+
+    result = asyncio.run(
+        auto_run_api.delete_execution_run_api("run-001", authorization=_auth_header())
+    )
+
+    assert result["success"] is True
+    assert captured["run_id"] == "run-001"
+    assert captured["auth_token"]
+
+
 def test_create_execution_task_resolves_owner_identifier_before_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

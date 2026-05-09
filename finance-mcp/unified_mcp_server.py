@@ -212,10 +212,14 @@ _RECON_TOOL_NAMES = {
 _PLATFORM_TOOL_NAMES = {
     "platform_list_connections",
     "platform_create_auth_session",
+    "platform_get_app_config",
+    "platform_upsert_app_config",
     "platform_handle_auth_callback",
     "platform_reauthorize_shop",
     "platform_disable_shop",
     "platform_get_shop_detail",
+    "platform_list_pending_authorizations",
+    "platform_claim_pending_authorization",
 }
 
 _DATA_SOURCE_TOOL_NAMES = {
@@ -293,6 +297,7 @@ _EXECUTION_TOOL_NAMES = {
     "execution_run_get",
     "execution_run_create",
     "execution_run_update",
+    "execution_run_delete",
     "execution_run_exceptions",
     "execution_run_exception_get",
     "execution_run_exception_create",

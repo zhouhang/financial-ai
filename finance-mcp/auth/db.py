@@ -1,7 +1,8 @@
 """认证模块的数据库操作"""
 
-import logging
+import hashlib
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -24,6 +25,9 @@ except Exception:
 logger = logging.getLogger(__name__)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
+_AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
+_PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
+_SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -53,6 +57,46 @@ _UNIFIED_DATASET_CATALOG_COLUMNS = (
     "last_used_at",
     "search_text",
 )
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_COLUMNS = (
+    "company_id",
+    "data_source_id",
+    "dataset_id",
+    "shop_connection_id",
+    "external_shop_id",
+    "bill_type",
+    "bill_date",
+    "source_file_name",
+    "source_row_number",
+    "source_row_key",
+    "alipay_trade_no",
+    "merchant_order_no",
+    "business_order_no",
+    "amount",
+    "income_amount",
+    "expense_amount",
+    "trade_time",
+    "payload",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_CONSTRAINTS = (
+    "platform_alipay_bill_lines_company_id_fkey",
+    "platform_alipay_bill_lines_data_source_id_fkey",
+    "platform_alipay_bill_lines_dataset_id_fkey",
+    "platform_alipay_bill_lines_shop_connection_id_fkey",
+    "platform_alipay_bill_lines_unique_bill_row",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES = (
+    "idx_platform_alipay_bill_lines_dataset_date",
+    "idx_platform_alipay_bill_lines_source_dataset_date",
+    "idx_platform_alipay_bill_lines_shop_type_date",
+    "idx_platform_alipay_bill_lines_alipay_trade_no",
+    "idx_platform_alipay_bill_lines_merchant_order_no",
+    "idx_platform_alipay_bill_lines_business_order_no",
+)
+
+_PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER = "update_platform_alipay_bill_lines_updated_at"
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
     id, company_id, data_source_id, dataset_code, dataset_name,
@@ -280,6 +324,118 @@ def _column_exists(table_name: str, column_name: str, *, schema: str = "public")
         raise
 
 
+def _constraint_definition(
+    table_name: str,
+    constraint_name: str,
+    *,
+    schema: str = "public",
+) -> str:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(c.oid)
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = %s
+                      AND t.relname = %s
+                      AND c.conname = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name, constraint_name),
+                )
+                row = cur.fetchone()
+                return str(row[0] or "") if row else ""
+    except Exception as e:
+        logger.error(
+            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
+        )
+        raise
+
+
+def _constraint_exists(table_name: str, constraint_name: str, *, schema: str = "public") -> bool:
+    return bool(_constraint_definition(table_name, constraint_name, schema=schema))
+
+
+def _index_exists(index_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        WHERE n.nspname = %s
+                          AND i.relname = %s
+                          AND i.relkind IN ('i', 'I')
+                    )
+                    """,
+                    (schema, index_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(f"检查索引是否存在失败 (schema={schema}, index={index_name}): {e}")
+        raise
+
+
+def _trigger_exists(table_name: str, trigger_name: str, *, schema: str = "public") -> bool:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_trigger tr
+                        JOIN pg_class t ON t.oid = tr.tgrelid
+                        JOIN pg_namespace n ON n.oid = t.relnamespace
+                        WHERE n.nspname = %s
+                          AND t.relname = %s
+                          AND tr.tgname = %s
+                          AND NOT tr.tgisinternal
+                    )
+                    """,
+                    (schema, table_name, trigger_name),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(
+            f"检查触发器是否存在失败 (schema={schema}, table={table_name}, trigger={trigger_name}): {e}"
+        )
+        raise
+
+
+def _platform_alipay_bill_lines_schema_ready() -> bool:
+    table_name = "platform_alipay_bill_lines"
+    if not _table_exists(table_name):
+        return False
+
+    return (
+        all(
+            _column_exists(table_name, column_name)
+            for column_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_COLUMNS
+        )
+        and all(
+            _constraint_exists(table_name, constraint_name)
+            for constraint_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_CONSTRAINTS
+        )
+        and all(
+            _index_exists(index_name)
+            for index_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES
+        )
+        and _trigger_exists(table_name, _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER)
+    )
+
+
 def _execute_sql_script(script_path: Path) -> None:
     sql = script_path.read_text(encoding="utf-8").strip()
     if not sql:
@@ -344,6 +500,13 @@ def ensure_unified_data_source_schema() -> list[str]:
     if any(_table_exists(table_name) for table_name in legacy_collection_tables):
         _execute_sql_script(_migration_path("017_drop_raw_snapshot_collection_tables.sql"))
         applied.append("017_drop_raw_snapshot_collection_tables.sql")
+    if not _table_exists("platform_order_lines"):
+        _execute_sql_script(_migration_path("022_platform_order_lines.sql"))
+        applied.append("022_platform_order_lines.sql")
+    if not _platform_alipay_bill_lines_schema_ready():
+        _execute_sql_script(_migration_path("025_platform_alipay_bill_lines.sql"))
+        applied.append("025_platform_alipay_bill_lines.sql")
+    applied.extend(ensure_sync_jobs_trigger_modes_schema())
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -371,6 +534,8 @@ def ensure_unified_data_source_schema() -> list[str]:
             f"missing_dataset_catalog_columns={remaining_missing_dataset_catalog_columns}, "
             f"missing_data_source_datasets={not _table_exists('data_source_datasets')}"
         )
+    if not _platform_alipay_bill_lines_schema_ready():
+        raise RuntimeError("支付宝账单行 schema 仍不完整，自动迁移后仍缺少必要列、约束、索引或触发器")
 
     _UNIFIED_DATA_SOURCE_SCHEMA_READY = True
     if applied:
@@ -378,36 +543,29 @@ def ensure_unified_data_source_schema() -> list[str]:
     return applied
 
 
-def _constraint_definition(
-    table_name: str,
-    constraint_name: str,
-    *,
-    schema: str = "public",
-) -> str:
-    conn_manager = get_conn()
-    try:
-        with conn_manager as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT pg_get_constraintdef(c.oid)
-                    FROM pg_constraint c
-                    JOIN pg_class t ON t.oid = c.conrelid
-                    JOIN pg_namespace n ON n.oid = t.relnamespace
-                    WHERE n.nspname = %s
-                      AND t.relname = %s
-                      AND c.conname = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name, constraint_name),
-                )
-                row = cur.fetchone()
-                return str(row[0] or "") if row else ""
-    except Exception as e:
-        logger.error(
-            f"检查约束定义失败 (schema={schema}, table={table_name}, constraint={constraint_name}): {e}"
-        )
-        raise
+def ensure_sync_jobs_trigger_modes_schema() -> list[str]:
+    """确保 sync_jobs.trigger_mode 允许初始化和调度采集语义。"""
+    global _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY
+    if _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY:
+        return []
+    if not _table_exists("sync_jobs"):
+        return []
+
+    required_modes = {"manual", "scheduled", "schedule", "event", "retry", "initial", "daily"}
+    constraint_def = _constraint_definition("sync_jobs", "sync_jobs_trigger_mode_check")
+    if all(mode in constraint_def for mode in required_modes):
+        _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
+        return []
+
+    migration_name = "027_sync_jobs_trigger_modes_initial_schedule.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("sync_jobs", "sync_jobs_trigger_mode_check")
+    if not all(mode in applied_constraint_def for mode in required_modes):
+        raise RuntimeError("sync_jobs.trigger_mode 约束升级失败，initial/schedule/daily 仍不可用")
+
+    _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
+    logger.info("sync_jobs.trigger_mode 约束已自动补齐: %s", migration_name)
+    return [migration_name]
 
 
 def ensure_execution_run_trigger_types_schema() -> list[str]:
@@ -431,6 +589,46 @@ def ensure_execution_run_trigger_types_schema() -> list[str]:
 
     _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = True
     logger.info("execution_runs.trigger_type 约束已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_auth_sessions_extra_schema() -> list[str]:
+    """确保 auth_sessions.extra 元数据字段存在。"""
+    global _AUTH_SESSIONS_EXTRA_SCHEMA_READY
+    if _AUTH_SESSIONS_EXTRA_SCHEMA_READY:
+        return []
+    if not _table_exists("auth_sessions"):
+        return []
+    if _column_exists("auth_sessions", "extra"):
+        _AUTH_SESSIONS_EXTRA_SCHEMA_READY = True
+        return []
+
+    migration_name = "024_auth_sessions_extra.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _column_exists("auth_sessions", "extra"):
+        raise RuntimeError("auth_sessions.extra 字段升级失败，extra 仍不可用")
+
+    _AUTH_SESSIONS_EXTRA_SCHEMA_READY = True
+    logger.info("auth_sessions.extra 字段已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_platform_pending_authorizations_schema() -> list[str]:
+    """确保无 state 平台授权待认领表存在。"""
+    global _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY
+    if _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY:
+        return []
+    if _table_exists("platform_pending_authorizations"):
+        _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = True
+        return []
+
+    migration_name = "026_platform_pending_authorizations.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _table_exists("platform_pending_authorizations"):
+        raise RuntimeError("platform_pending_authorizations 表升级失败，表仍不存在")
+
+    _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = True
+    logger.info("platform_pending_authorizations 表已自动补齐: %s", migration_name)
     return [migration_name]
 
 
@@ -1266,6 +1464,46 @@ def get_platform_app(
         return None
 
 
+def get_platform_app_by_id(
+    *,
+    platform_app_id: str,
+    company_id: str,
+    owner_company_id: str | None = None,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按 ID 查询平台应用配置，并限制应用归属公司边界。"""
+    lookup_company_id = owner_company_id or company_id
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, platform_code, app_name, app_key, app_secret,
+                           app_type, auth_base_url, token_url, refresh_url,
+                           scopes_config, extra, status, created_at, updated_at
+                    FROM platform_apps
+                    WHERE id = %s
+                      AND company_id = %s
+                      AND status <> 'deleted'
+                    LIMIT 1
+                    """,
+                    (platform_app_id, lookup_company_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                result = _normalize_record(dict(row))
+                if include_secrets:
+                    result["app_secret"] = open_secret(result.get("app_secret") or "")
+                else:
+                    result["app_secret"] = ""
+                return result
+    except Exception as e:
+        logger.error(f"按 ID 查询 platform_apps 失败 (id={platform_app_id}, company_id={lookup_company_id}): {e}")
+        return None
+
+
 def list_platform_apps(company_id: str, include_secrets: bool = False) -> list[dict]:
     """列出某公司全部平台应用配置。"""
     conn_manager = get_conn()
@@ -1877,8 +2115,10 @@ def create_auth_session(
     shop_connection_id: str | None = None,
     return_path: str = "",
     redirect_uri: str = "",
+    extra: dict | None = None,
 ) -> dict | None:
     """创建授权会话。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1887,11 +2127,11 @@ def create_auth_session(
                     """
                     INSERT INTO auth_sessions (
                         company_id, platform_code, operator_user_id, shop_connection_id,
-                        state_token, return_path, redirect_uri, status, expires_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                        state_token, return_path, redirect_uri, status, expires_at, extra
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s::jsonb)
                     RETURNING id, company_id, platform_code, operator_user_id, shop_connection_id,
                               state_token, return_path, redirect_uri, status, expires_at,
-                              callback_code, callback_error, callback_payload,
+                              callback_code, callback_error, callback_payload, extra,
                               created_at, updated_at, completed_at
                     """,
                     (
@@ -1903,6 +2143,7 @@ def create_auth_session(
                         return_path,
                         redirect_uri,
                         expires_at,
+                        psycopg2.extras.Json(extra or {}),
                     ),
                 )
                 row = cur.fetchone()
@@ -1917,6 +2158,7 @@ def create_auth_session(
 
 def get_auth_session_by_state(state_token: str) -> dict | None:
     """按 state token 查询授权会话。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1925,7 +2167,7 @@ def get_auth_session_by_state(state_token: str) -> dict | None:
                     """
                     SELECT id, company_id, platform_code, operator_user_id, shop_connection_id,
                            state_token, return_path, redirect_uri, status, expires_at,
-                           callback_code, callback_error, callback_payload,
+                           callback_code, callback_error, callback_payload, extra,
                            created_at, updated_at, completed_at
                     FROM auth_sessions
                     WHERE state_token = %s
@@ -1949,6 +2191,7 @@ def update_auth_session_callback(
     callback_payload: dict | None = None,
 ) -> dict | None:
     """更新授权回调结果。status 通常为 authorized/failed/expired/cancelled。"""
+    ensure_auth_sessions_extra_schema()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -1969,7 +2212,7 @@ def update_auth_session_callback(
                     WHERE id = %s
                     RETURNING id, company_id, platform_code, operator_user_id, shop_connection_id,
                               state_token, return_path, redirect_uri, status, expires_at,
-                              callback_code, callback_error, callback_payload,
+                              callback_code, callback_error, callback_payload, extra,
                               created_at, updated_at, completed_at
                     """,
                     (
@@ -1997,6 +2240,11 @@ def list_auth_sessions(
     limit: int = 50,
 ) -> list[dict]:
     """查询授权会话列表。"""
+    ensure_auth_sessions_extra_schema()
+    try:
+        safe_limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        safe_limit = 50
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -2004,7 +2252,7 @@ def list_auth_sessions(
                 sql = """
                     SELECT id, company_id, platform_code, operator_user_id, shop_connection_id,
                            state_token, return_path, redirect_uri, status, expires_at,
-                           callback_code, callback_error, callback_payload,
+                           callback_code, callback_error, callback_payload, extra,
                            created_at, updated_at, completed_at
                     FROM auth_sessions
                     WHERE company_id = %s
@@ -2017,7 +2265,7 @@ def list_auth_sessions(
                     sql += " AND status = %s"
                     params.append(status)
                 sql += " ORDER BY created_at DESC LIMIT %s"
-                params.append(limit)
+                params.append(safe_limit)
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
                 return [_normalize_record(dict(row)) for row in rows]
@@ -2026,6 +2274,301 @@ def list_auth_sessions(
             f"查询 auth_sessions 列表失败 (company_id={company_id}, platform_code={platform_code}, status={status}): {e}"
         )
         return []
+
+
+_PENDING_AUTH_SELECT_SQL = """
+    id, platform_code, platform_app_id, app_id, source, claim_code, status,
+    access_token, refresh_token, token_expires_at, refresh_expires_at,
+    raw_auth_payload, callback_payload, external_shop_id, external_seller_id,
+    merchant_display_name, claimed_company_id, claimed_by_user_id,
+    claimed_shop_connection_id, claimed_at, expires_at, last_error,
+    created_at, updated_at
+""".strip()
+
+
+def _normalize_pending_authorization(row: dict, *, include_secrets: bool = False) -> dict:
+    result = _normalize_record(row)
+    if include_secrets:
+        result["access_token"] = open_secret(result.get("access_token") or "")
+        result["refresh_token"] = open_secret(result.get("refresh_token") or "")
+    else:
+        result["access_token"] = ""
+        result["refresh_token"] = ""
+    return result
+
+
+def create_platform_pending_authorization(
+    *,
+    platform_code: str,
+    platform_app_id: str | None = None,
+    app_id: str = "",
+    source: str = "",
+    claim_code: str = "",
+    access_token: str = "",
+    refresh_token: str = "",
+    token_expires_at: str | None = None,
+    refresh_expires_at: str | None = None,
+    raw_auth_payload: dict | None = None,
+    callback_payload: dict | None = None,
+    external_shop_id: str = "",
+    external_seller_id: str = "",
+    merchant_display_name: str = "",
+    expires_at: str = "",
+    last_error: str = "",
+    include_secrets: bool = False,
+) -> dict | None:
+    """创建无 state 平台授权待认领记录。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO platform_pending_authorizations (
+                        platform_code, platform_app_id, app_id, source, claim_code, status,
+                        access_token, refresh_token, token_expires_at, refresh_expires_at,
+                        raw_auth_payload, callback_payload, external_shop_id, external_seller_id,
+                        merchant_display_name, expires_at, last_error
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, 'pending_claim',
+                        %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s, %s,
+                        %s, %s, %s
+                    )
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (
+                        platform_code,
+                        platform_app_id or None,
+                        app_id,
+                        source,
+                        claim_code,
+                        seal_secret(access_token),
+                        seal_secret(refresh_token),
+                        token_expires_at,
+                        refresh_expires_at,
+                        psycopg2.extras.Json(raw_auth_payload or {}),
+                        psycopg2.extras.Json(callback_payload or {}),
+                        external_shop_id,
+                        external_seller_id,
+                        merchant_display_name,
+                        expires_at,
+                        last_error,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(
+            f"创建 platform_pending_authorizations 失败 (platform_code={platform_code}, external_shop_id={external_shop_id}): {e}"
+        )
+        return None
+
+
+def list_platform_pending_authorizations(
+    *,
+    platform_code: str,
+    status: str = "pending_claim",
+    limit: int = 50,
+) -> list[dict]:
+    """查询平台待认领授权列表，不返回 token 明文。"""
+    ensure_platform_pending_authorizations_schema()
+    try:
+        safe_limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        safe_limit = 50
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE platform_code = %s
+                """
+                params: list = [platform_code]
+                if status:
+                    sql += " AND status = %s"
+                    params.append(status)
+                sql += " ORDER BY created_at DESC LIMIT %s"
+                params.append(safe_limit)
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_pending_authorization(dict(row), include_secrets=False) for row in rows]
+    except Exception as e:
+        logger.error(
+            f"查询 platform_pending_authorizations 列表失败 (platform_code={platform_code}, status={status}): {e}"
+        )
+        return []
+
+
+def get_platform_pending_authorization_by_id(
+    pending_authorization_id: str,
+    *,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按 ID 查询待认领平台授权。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (pending_authorization_id,),
+                )
+                row = cur.fetchone()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(f"按 ID 查询 platform_pending_authorizations 失败 (id={pending_authorization_id}): {e}")
+        return None
+
+
+def get_platform_pending_authorization_by_claim_code(
+    claim_code: str,
+    *,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按认领码查询待认领平台授权。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE claim_code = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (claim_code,),
+                )
+                row = cur.fetchone()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(f"按认领码查询 platform_pending_authorizations 失败 (claim_code={claim_code}): {e}")
+        return None
+
+
+def mark_platform_pending_authorization_claimed(
+    *,
+    pending_authorization_id: str,
+    claimed_company_id: str,
+    claimed_by_user_id: str,
+    claimed_shop_connection_id: str,
+    last_error: str = "",
+) -> dict | None:
+    """标记待认领授权已绑定到企业。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE platform_pending_authorizations
+                    SET status = 'claimed',
+                        claimed_company_id = %s,
+                        claimed_by_user_id = %s,
+                        claimed_shop_connection_id = %s,
+                        claimed_at = CURRENT_TIMESTAMP,
+                        last_error = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (
+                        claimed_company_id,
+                        claimed_by_user_id,
+                        claimed_shop_connection_id,
+                        last_error,
+                        pending_authorization_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=False) if row else None
+    except Exception as e:
+        logger.error(
+            f"标记 platform_pending_authorizations 已认领失败 (id={pending_authorization_id}): {e}"
+        )
+        return None
+
+
+def mark_platform_pending_authorization_failed(
+    *,
+    pending_authorization_id: str,
+    status: str = "failed",
+    last_error: str = "",
+) -> dict | None:
+    """标记待认领授权失败、过期或丢弃。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE platform_pending_authorizations
+                    SET status = %s,
+                        last_error = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (status, last_error, pending_authorization_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=False) if row else None
+    except Exception as e:
+        logger.error(
+            f"标记 platform_pending_authorizations 失败状态失败 (id={pending_authorization_id}, status={status}): {e}"
+        )
+        return None
+
+
+def find_shop_connection_by_platform_external_shop(
+    *,
+    platform_code: str,
+    external_shop_id: str,
+) -> dict | None:
+    """跨企业查询某平台主体是否已绑定。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, platform_code, external_shop_id, external_shop_name,
+                           external_seller_id, auth_subject_name, shop_type, status, meta,
+                           created_at, updated_at
+                    FROM shop_connections
+                    WHERE platform_code = %s
+                      AND external_shop_id = %s
+                      AND status <> 'deleted'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (platform_code, external_shop_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"跨企业查询 shop_connections 失败 (platform_code={platform_code}, external_shop_id={external_shop_id}): {e}"
+        )
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4468,6 +5011,871 @@ def update_unified_sync_job_status(
         return None
 
 
+def get_latest_source_dataset_checkpoint(
+    *,
+    company_id: str,
+    data_source_id: str,
+    resource_key: str,
+) -> dict:
+    """读取某数据源+资源最近一次成功同步后的 checkpoint。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT checkpoint_after
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status = 'success'
+                      AND checkpoint_after IS NOT NULL
+                      AND checkpoint_after <> '{}'::jsonb
+                    ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id, resource_key),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                checkpoint = row.get("checkpoint_after")
+                return checkpoint if isinstance(checkpoint, dict) else {}
+    except Exception as e:
+        logger.error(
+            f"查询最近同步 checkpoint 失败 (company_id={company_id}, data_source_id={data_source_id}, resource_key={resource_key}): {e}"
+        )
+        return {}
+
+
+def _clean_decimal_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _clean_timestamp_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if text else None
+
+
+_ALIPAY_AMOUNT_RAW_KEYS = ("金额", "发生金额", "账务金额", "交易金额", "订单金额")
+_ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额")
+_ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额")
+_ALIPAY_TRADE_NO_RAW_KEYS = ("支付宝交易号", "支付宝流水号", "账务流水号")
+_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS = ("商户订单号", "商户订单号/商家订单号")
+_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号", "业务流水号")
+_ALIPAY_IDENTIFIER_RAW_KEY_SETS = {
+    "alipay_trade_no": _ALIPAY_TRADE_NO_RAW_KEYS,
+    "merchant_order_no": _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
+    "business_order_no": _ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
+}
+_ALIPAY_TRADE_TIME_RAW_KEYS = (
+    "入账时间",
+    "创建时间",
+    "交易创建时间",
+    "发生时间",
+    "付款时间",
+    "交易时间",
+)
+
+
+def _safe_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_non_empty_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _first_payload_text(payload: dict[str, Any], *keys: str) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in keys:
+        if key not in payload:
+            continue
+        text = _first_non_empty_text(payload.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _alipay_raw_payload(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("raw") if isinstance(item, dict) else None
+    if isinstance(raw, dict):
+        return dict(raw)
+
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else None
+    if not isinstance(payload, dict):
+        return {}
+    nested_raw = payload.get("raw")
+    if isinstance(nested_raw, dict):
+        return dict(nested_raw)
+
+    raw_keys = (
+        *_ALIPAY_AMOUNT_RAW_KEYS,
+        *_ALIPAY_INCOME_RAW_KEYS,
+        *_ALIPAY_EXPENSE_RAW_KEYS,
+        *_ALIPAY_TRADE_NO_RAW_KEYS,
+        *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
+        *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
+        *_ALIPAY_TRADE_TIME_RAW_KEYS,
+    )
+    if any(key in payload for key in raw_keys):
+        return dict(payload)
+    return {}
+
+
+def _fallback_alipay_bill_source_row_key(
+    *,
+    bill_type: str,
+    bill_date: str,
+    source_file_name: str,
+    source_row_number: int | None,
+    raw: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    source = {
+        "bill_type": bill_type,
+        "bill_date": bill_date,
+        "source_file_name": source_file_name,
+        "source_row_number": source_row_number,
+        "raw": _json_safe_value(raw),
+        "payload": _json_safe_value(payload),
+    }
+    text = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _alipay_bill_payload(item: dict[str, Any]) -> dict[str, Any]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else None
+    result = dict(payload) if isinstance(payload, dict) else dict(item)
+    result.pop("payload", None)
+
+    raw = _alipay_raw_payload(item)
+    if raw:
+        result["raw"] = raw
+
+    amount = _first_non_empty_text(
+        item.get("amount"),
+        _first_payload_text(result, "amount"),
+        _first_payload_text(raw, *_ALIPAY_AMOUNT_RAW_KEYS),
+    )
+    income_amount = _first_non_empty_text(
+        item.get("income_amount"),
+        item.get("income"),
+        _first_payload_text(result, "income_amount", "income"),
+        _first_payload_text(raw, *_ALIPAY_INCOME_RAW_KEYS),
+    )
+    expense_amount = _first_non_empty_text(
+        item.get("expense_amount"),
+        item.get("expense"),
+        _first_payload_text(result, "expense_amount", "expense"),
+        _first_payload_text(raw, *_ALIPAY_EXPENSE_RAW_KEYS),
+    )
+    trade_time = _first_non_empty_text(
+        item.get("trade_time"),
+        _first_payload_text(result, "trade_time"),
+        _first_payload_text(raw, *_ALIPAY_TRADE_TIME_RAW_KEYS),
+    )
+
+    promoted_text_fields = (
+        "company_id",
+        "data_source_id",
+        "dataset_id",
+        "shop_connection_id",
+        "external_shop_id",
+        "bill_type",
+        "bill_date",
+        "source_file_name",
+        "source_row_key",
+        "alipay_trade_no",
+        "merchant_order_no",
+        "business_order_no",
+    )
+    for field in promoted_text_fields:
+        text = _first_non_empty_text(
+            item.get(field),
+            result.get(field),
+            _first_payload_text(raw, *_ALIPAY_IDENTIFIER_RAW_KEY_SETS.get(field, ())),
+        )
+        if text:
+            result[field] = text
+
+    source_row_number = _safe_int_or_none(item.get("source_row_number"))
+    if source_row_number is not None:
+        result["source_row_number"] = source_row_number
+    if amount:
+        result["amount"] = amount
+    if income_amount:
+        result["income_amount"] = income_amount
+    if expense_amount:
+        result["expense_amount"] = expense_amount
+    if trade_time:
+        result["trade_time"] = trade_time
+    return result
+
+
+def upsert_platform_order_lines(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    shop_connection_id: str,
+    platform_code: str,
+    external_shop_id: str,
+    rows: list[dict] | None = None,
+) -> dict:
+    """按店铺订单行唯一键 upsert 电商平台订单明细。"""
+    items = rows or []
+    if not items:
+        return {"input_count": 0, "upserted_count": 0, "inserted_count": 0, "updated_count": 0}
+
+    conn_manager = get_conn()
+    inserted_count = 0
+    updated_count = 0
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                for item in items:
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else dict(item)
+                    cur.execute(
+                        """
+                        INSERT INTO platform_order_lines (
+                            company_id, data_source_id, dataset_id, shop_connection_id,
+                            platform_code, external_shop_id, biz_date, tid, oid,
+                            trade_status, order_status, refund_status,
+                            pay_time, modified, end_time, alipay_no,
+                            payment, order_payment, total_fee, order_total_fee,
+                            discount_fee, order_discount_fee, post_fee, commission_fee,
+                            sku_id, outer_sku_id, outer_iid, num_iid,
+                            title, sku_properties_name, quantity,
+                            payload, source_modified_at
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s::jsonb, %s
+                        )
+                        ON CONFLICT (company_id, shop_connection_id, tid, oid)
+                        DO UPDATE SET
+                            data_source_id = EXCLUDED.data_source_id,
+                            dataset_id = EXCLUDED.dataset_id,
+                            platform_code = EXCLUDED.platform_code,
+                            external_shop_id = EXCLUDED.external_shop_id,
+                            biz_date = EXCLUDED.biz_date,
+                            trade_status = EXCLUDED.trade_status,
+                            order_status = EXCLUDED.order_status,
+                            refund_status = EXCLUDED.refund_status,
+                            pay_time = EXCLUDED.pay_time,
+                            modified = EXCLUDED.modified,
+                            end_time = EXCLUDED.end_time,
+                            alipay_no = EXCLUDED.alipay_no,
+                            payment = EXCLUDED.payment,
+                            order_payment = EXCLUDED.order_payment,
+                            total_fee = EXCLUDED.total_fee,
+                            order_total_fee = EXCLUDED.order_total_fee,
+                            discount_fee = EXCLUDED.discount_fee,
+                            order_discount_fee = EXCLUDED.order_discount_fee,
+                            post_fee = EXCLUDED.post_fee,
+                            commission_fee = EXCLUDED.commission_fee,
+                            sku_id = EXCLUDED.sku_id,
+                            outer_sku_id = EXCLUDED.outer_sku_id,
+                            outer_iid = EXCLUDED.outer_iid,
+                            num_iid = EXCLUDED.num_iid,
+                            title = EXCLUDED.title,
+                            sku_properties_name = EXCLUDED.sku_properties_name,
+                            quantity = EXCLUDED.quantity,
+                            payload = EXCLUDED.payload,
+                            source_modified_at = EXCLUDED.source_modified_at,
+                            latest_seen_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE platform_order_lines.source_modified_at IS NULL
+                           OR (
+                               EXCLUDED.source_modified_at IS NOT NULL
+                               AND EXCLUDED.source_modified_at >= platform_order_lines.source_modified_at
+                           )
+                        RETURNING (xmax = 0) AS inserted
+                        """,
+                        (
+                            company_id,
+                            data_source_id,
+                            dataset_id,
+                            shop_connection_id,
+                            platform_code,
+                            external_shop_id,
+                            item.get("biz_date"),
+                            str(item.get("tid") or ""),
+                            str(item.get("oid") or ""),
+                            str(item.get("trade_status") or ""),
+                            str(item.get("order_status") or ""),
+                            str(item.get("refund_status") or ""),
+                            _clean_timestamp_text(item.get("pay_time")),
+                            _clean_timestamp_text(item.get("modified")),
+                            _clean_timestamp_text(item.get("end_time")),
+                            str(item.get("alipay_no") or ""),
+                            _clean_decimal_text(item.get("payment")),
+                            _clean_decimal_text(item.get("order_payment")),
+                            _clean_decimal_text(item.get("total_fee")),
+                            _clean_decimal_text(item.get("order_total_fee")),
+                            _clean_decimal_text(item.get("discount_fee")),
+                            _clean_decimal_text(item.get("order_discount_fee")),
+                            _clean_decimal_text(item.get("post_fee")),
+                            _clean_decimal_text(item.get("commission_fee")),
+                            str(item.get("sku_id") or ""),
+                            str(item.get("outer_sku_id") or ""),
+                            str(item.get("outer_iid") or ""),
+                            str(item.get("num_iid") or ""),
+                            str(item.get("title") or ""),
+                            str(item.get("sku_properties_name") or ""),
+                            _clean_decimal_text(item.get("quantity")),
+                            psycopg2.extras.Json(_json_safe_payload(payload)),
+                            _clean_timestamp_text(item.get("modified")),
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+                    if not row:
+                        continue
+                    if bool(row.get("inserted")):
+                        inserted_count += 1
+                    else:
+                        updated_count += 1
+            conn.commit()
+            return {
+                "input_count": len(items),
+                "upserted_count": inserted_count + updated_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+            }
+    except Exception as e:
+        logger.error(
+            f"写入 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}, rows={len(items)}): {e}"
+        )
+        raise
+
+
+def list_platform_order_lines(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+    filters: dict | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询电商订单明细行，返回结构化字段和 payload。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, data_source_id, dataset_id, shop_connection_id,
+                           platform_code, external_shop_id, biz_date, tid, oid,
+                           trade_status, order_status, refund_status,
+                           pay_time, modified, end_time, alipay_no,
+                           payment, order_payment, total_fee, order_total_fee,
+                           discount_fee, order_discount_fee, post_fee, commission_fee,
+                           sku_id, outer_sku_id, outer_iid, num_iid,
+                           title, sku_properties_name, quantity, payload,
+                           first_seen_at, latest_seen_at, created_at, updated_at
+                    FROM platform_order_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                if resource_key and resource_key.startswith("taobao_order_lines:"):
+                    sql += " AND shop_connection_id = %s"
+                    params.append(resource_key.split(":", 1)[1])
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                for field, value in dict(filters or {}).items():
+                    if value in (None, "", []):
+                        continue
+                    if field not in {
+                        "tid",
+                        "oid",
+                        "trade_status",
+                        "order_status",
+                        "refund_status",
+                        "alipay_no",
+                        "sku_id",
+                        "outer_sku_id",
+                        "outer_iid",
+                    }:
+                        continue
+                    if isinstance(value, list):
+                        sql += f" AND {field} = ANY(%s)"
+                        params.append([str(item) for item in value])
+                    else:
+                        sql += f" AND {field} = %s"
+                        params.append(str(value))
+                sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
+                cur.execute(sql, tuple(params))
+                return [_normalize_record(dict(row)) for row in cur.fetchall() or []]
+    except Exception as e:
+        logger.error(f"查询 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}")
+        return []
+
+
+def get_platform_order_line_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计电商订单明细行。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(DISTINCT biz_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM platform_order_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(f"统计 platform_order_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}")
+        return {}
+
+
+def upsert_platform_alipay_bill_lines(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    shop_connection_id: str,
+    external_shop_id: str,
+    bill_type: str,
+    bill_date: str,
+    rows: list[dict] | None = None,
+    replace_bill_scope: bool = False,
+) -> dict:
+    """按支付宝账单行唯一键 upsert 账单明细。"""
+    items = rows or []
+    if not items:
+        deleted_stale_count = 0
+        if replace_bill_scope:
+            conn_manager = get_conn()
+            with conn_manager as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM platform_alipay_bill_lines
+                        WHERE company_id = %s
+                          AND shop_connection_id = %s
+                          AND bill_type = %s
+                          AND bill_date = %s
+                          AND dataset_id = %s
+                        """,
+                        (
+                            company_id,
+                            shop_connection_id,
+                            bill_type,
+                            bill_date,
+                            dataset_id,
+                        ),
+                    )
+                    deleted_stale_count = int(getattr(cur, "rowcount", 0) or 0)
+                conn.commit()
+        return {
+            "input_count": 0,
+            "upserted_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "deleted_stale_count": deleted_stale_count,
+        }
+
+    conn_manager = get_conn()
+    inserted_count = 0
+    updated_count = 0
+    deleted_stale_count = 0
+    seen_source_row_keys: list[str] = []
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                for item in items:
+                    raw = _alipay_raw_payload(item)
+                    enriched_item = {
+                        **item,
+                        "company_id": company_id,
+                        "data_source_id": data_source_id,
+                        "dataset_id": dataset_id,
+                        "shop_connection_id": shop_connection_id,
+                        "external_shop_id": external_shop_id,
+                        "bill_type": bill_type,
+                        "bill_date": bill_date,
+                    }
+                    payload = _alipay_bill_payload(enriched_item)
+                    amount = _first_non_empty_text(
+                        item.get("amount"),
+                        payload.get("amount"),
+                        _first_payload_text(raw, *_ALIPAY_AMOUNT_RAW_KEYS),
+                    )
+                    income_amount = _first_non_empty_text(
+                        item.get("income_amount"),
+                        item.get("income"),
+                        payload.get("income_amount"),
+                        payload.get("income"),
+                        _first_payload_text(raw, *_ALIPAY_INCOME_RAW_KEYS),
+                    )
+                    expense_amount = _first_non_empty_text(
+                        item.get("expense_amount"),
+                        item.get("expense"),
+                        payload.get("expense_amount"),
+                        payload.get("expense"),
+                        _first_payload_text(raw, *_ALIPAY_EXPENSE_RAW_KEYS),
+                    )
+                    trade_time = _first_non_empty_text(
+                        item.get("trade_time"),
+                        payload.get("trade_time"),
+                        _first_payload_text(raw, *_ALIPAY_TRADE_TIME_RAW_KEYS),
+                    )
+                    source_file_name = _first_non_empty_text(
+                        item.get("source_file_name"),
+                        payload.get("source_file_name"),
+                    )
+                    source_row_number = _safe_int_or_none(
+                        item.get("source_row_number") or payload.get("source_row_number")
+                    )
+                    source_row_key = _first_non_empty_text(
+                        item.get("source_row_key"),
+                        payload.get("source_row_key"),
+                    )
+                    if not source_row_key:
+                        source_row_key = _fallback_alipay_bill_source_row_key(
+                            bill_type=bill_type,
+                            bill_date=bill_date,
+                            source_file_name=source_file_name,
+                            source_row_number=source_row_number,
+                            raw=raw,
+                            payload=payload,
+                        )
+                        payload["source_row_key"] = source_row_key
+                    if source_row_key and source_row_key not in seen_source_row_keys:
+                        seen_source_row_keys.append(source_row_key)
+                    alipay_trade_no = _first_non_empty_text(
+                        item.get("alipay_trade_no"),
+                        payload.get("alipay_trade_no"),
+                        _first_payload_text(raw, *_ALIPAY_TRADE_NO_RAW_KEYS),
+                    )
+                    merchant_order_no = _first_non_empty_text(
+                        item.get("merchant_order_no"),
+                        payload.get("merchant_order_no"),
+                        _first_payload_text(raw, *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS),
+                    )
+                    business_order_no = _first_non_empty_text(
+                        item.get("business_order_no"),
+                        payload.get("business_order_no"),
+                        _first_payload_text(raw, *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS),
+                    )
+                    if alipay_trade_no:
+                        payload["alipay_trade_no"] = alipay_trade_no
+                    if merchant_order_no:
+                        payload["merchant_order_no"] = merchant_order_no
+                    if business_order_no:
+                        payload["business_order_no"] = business_order_no
+                    cur.execute(
+                        """
+                        INSERT INTO platform_alipay_bill_lines (
+                            company_id, data_source_id, dataset_id, shop_connection_id,
+                            external_shop_id, bill_type, bill_date,
+                            source_file_name, source_row_number, source_row_key,
+                            alipay_trade_no, merchant_order_no, business_order_no,
+                            amount, income_amount, expense_amount, trade_time, payload
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s, %s::jsonb
+                        )
+                        ON CONFLICT (company_id, shop_connection_id, bill_type, bill_date, source_row_key)
+                        DO UPDATE SET
+                            data_source_id = EXCLUDED.data_source_id,
+                            dataset_id = EXCLUDED.dataset_id,
+                            external_shop_id = EXCLUDED.external_shop_id,
+                            source_file_name = EXCLUDED.source_file_name,
+                            source_row_number = EXCLUDED.source_row_number,
+                            alipay_trade_no = EXCLUDED.alipay_trade_no,
+                            merchant_order_no = EXCLUDED.merchant_order_no,
+                            business_order_no = EXCLUDED.business_order_no,
+                            amount = EXCLUDED.amount,
+                            income_amount = EXCLUDED.income_amount,
+                            expense_amount = EXCLUDED.expense_amount,
+                            trade_time = EXCLUDED.trade_time,
+                            payload = EXCLUDED.payload,
+                            latest_seen_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING (xmax = 0) AS inserted
+                        """,
+                        (
+                            company_id,
+                            data_source_id,
+                            dataset_id,
+                            shop_connection_id,
+                            external_shop_id,
+                            bill_type,
+                            bill_date,
+                            source_file_name,
+                            source_row_number,
+                            source_row_key,
+                            alipay_trade_no,
+                            merchant_order_no,
+                            business_order_no,
+                            _clean_decimal_text(amount),
+                            _clean_decimal_text(income_amount),
+                            _clean_decimal_text(expense_amount),
+                            _clean_timestamp_text(trade_time),
+                            psycopg2.extras.Json(_json_safe_payload(payload)),
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+                    if not row:
+                        continue
+                    if bool(row.get("inserted")):
+                        inserted_count += 1
+                    else:
+                        updated_count += 1
+                if replace_bill_scope and seen_source_row_keys:
+                    cur.execute(
+                        """
+                        DELETE FROM platform_alipay_bill_lines
+                        WHERE company_id = %s
+                          AND shop_connection_id = %s
+                          AND bill_type = %s
+                          AND bill_date = %s
+                          AND dataset_id = %s
+                          AND source_row_key <> ALL(%s)
+                        """,
+                        (
+                            company_id,
+                            shop_connection_id,
+                            bill_type,
+                            bill_date,
+                            dataset_id,
+                            seen_source_row_keys,
+                        ),
+                    )
+                    deleted_stale_count = int(getattr(cur, "rowcount", 0) or 0)
+            conn.commit()
+            return {
+                "input_count": len(items),
+                "upserted_count": inserted_count + updated_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+                "deleted_stale_count": deleted_stale_count,
+            }
+    except Exception as e:
+        logger.error(
+            "写入 platform_alipay_bill_lines 失败 "
+            f"(company_id={company_id}, dataset_id={dataset_id}, rows={len(items)}): {e}"
+        )
+        raise
+
+
+def list_platform_alipay_bill_lines(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+    filters: dict | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询支付宝账单明细行，返回结构化字段和 payload。"""
+    resource_bill_type = ""
+    resource_shop_connection_id = ""
+    if resource_key and resource_key.startswith("alipay_bill:"):
+        resource_parts = resource_key.split(":")
+        if len(resource_parts) >= 2:
+            resource_bill_type = resource_parts[1].strip()
+        if len(resource_parts) >= 3:
+            resource_shop_connection_id = resource_parts[2].strip()
+    if (
+        shop_connection_id
+        and resource_shop_connection_id
+        and str(shop_connection_id).strip() != resource_shop_connection_id
+    ):
+        return []
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, data_source_id, dataset_id, shop_connection_id,
+                           external_shop_id, bill_type, bill_date,
+                           source_file_name, source_row_number, source_row_key,
+                           alipay_trade_no, merchant_order_no, business_order_no,
+                           amount, income_amount, expense_amount, trade_time, payload,
+                           first_seen_at, latest_seen_at, created_at, updated_at
+                    FROM platform_alipay_bill_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+
+                if resource_bill_type:
+                    sql += " AND bill_type = %s"
+                    params.append(resource_bill_type)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                elif resource_shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(resource_shop_connection_id)
+                if biz_date:
+                    sql += " AND bill_date = %s"
+                    params.append(biz_date)
+
+                for field, value in dict(filters or {}).items():
+                    if value in (None, "", []):
+                        continue
+                    if field not in {
+                        "bill_type",
+                        "source_row_key",
+                        "alipay_trade_no",
+                        "merchant_order_no",
+                        "business_order_no",
+                    }:
+                        continue
+                    if isinstance(value, list):
+                        sql += f" AND {field} = ANY(%s)"
+                        params.append([str(item) for item in value])
+                    else:
+                        sql += f" AND {field} = %s"
+                        params.append(str(value))
+
+                safe_offset = max(0, int(offset or 0))
+                sql += " ORDER BY bill_date DESC, updated_at DESC, id DESC OFFSET %s"
+                params.append(safe_offset)
+                if limit is not None:
+                    safe_limit = max(1, min(int(limit or 100), 1000))
+                    sql += " LIMIT %s"
+                    params.append(safe_limit)
+                cur.execute(sql, tuple(params))
+                return [_normalize_record(dict(row)) for row in cur.fetchall() or []]
+    except Exception as e:
+        logger.error(
+            f"查询 platform_alipay_bill_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}"
+        )
+        return []
+
+
+def get_platform_alipay_bill_line_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    shop_connection_id: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计支付宝账单明细行。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(DISTINCT bill_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM platform_alipay_bill_lines
+                    WHERE company_id = %s
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if shop_connection_id:
+                    sql += " AND shop_connection_id = %s"
+                    params.append(shop_connection_id)
+                if biz_date:
+                    sql += " AND bill_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"统计 platform_alipay_bill_lines 失败 (company_id={company_id}, dataset_id={dataset_id}): {e}"
+        )
+        return {}
+
+
 
 def upsert_dataset_collection_records(
     *,
@@ -6683,6 +8091,37 @@ def list_execution_runs(
             f"查询 execution_runs 列表失败 (company_id={company_id}, scheme_code={scheme_code}, plan_code={plan_code}): {e}"
         )
         return []
+
+
+def delete_execution_run(*, company_id: str, run_id: str) -> dict | None:
+    """删除执行记录。
+
+    execution_run_exceptions.run_id 使用 ON DELETE CASCADE，删除运行记录会同步清理异常。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM execution_runs
+                    WHERE id = %s
+                      AND company_id = %s
+                    RETURNING id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                              trigger_type, entry_mode, execution_status,
+                              failed_stage, failed_reason,
+                              run_context_json, source_snapshot_json, subtasks_json,
+                              proc_result_json, recon_result_summary_json, artifacts_json,
+                              anomaly_count, started_at, finished_at, created_at, updated_at
+                    """,
+                    (run_id, company_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"删除 execution_runs 失败 (company_id={company_id}, run_id={run_id}): {e}")
+        return None
 
 
 def create_execution_run_exception(
