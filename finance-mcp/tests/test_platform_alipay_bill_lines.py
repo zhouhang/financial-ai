@@ -30,7 +30,68 @@ def test_upsert_platform_alipay_bill_lines_empty_rows_returns_zero_counts(monkey
         "upserted_count": 0,
         "inserted_count": 0,
         "updated_count": 0,
+        "deleted_stale_count": 0,
     }
+
+
+def test_upsert_platform_alipay_bill_lines_replace_scope_prunes_when_empty(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        rowcount = 3
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    summary = auth_db.upsert_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        external_shop_id="alipay-shop-001",
+        bill_type="signcustomer",
+        bill_date="2026-05-06",
+        rows=[],
+        replace_bill_scope=True,
+    )
+
+    assert summary == {
+        "input_count": 0,
+        "upserted_count": 0,
+        "inserted_count": 0,
+        "updated_count": 0,
+        "deleted_stale_count": 3,
+    }
+    assert "DELETE FROM platform_alipay_bill_lines" in str(captured["sql"])
+    assert captured["params"] == (
+        "company-001",
+        "shop-001",
+        "signcustomer",
+        "2026-05-06",
+        "dataset-001",
+    )
 
 
 def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
@@ -90,6 +151,7 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
                 },
             }
         ],
+        replace_bill_scope=True,
     )
 
     assert summary == {
@@ -97,6 +159,7 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
         "upserted_count": 1,
         "inserted_count": 1,
         "updated_count": 0,
+        "deleted_stale_count": 0,
     }
     assert "INSERT INTO platform_alipay_bill_lines" in executed_sql[0]
     assert (
@@ -108,6 +171,71 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
     assert "M001" in combined_params
     assert "B001" in combined_params
     assert combined_params.count("12.30") >= 2
+
+
+def test_upsert_platform_alipay_bill_lines_prunes_stale_rows_for_same_bill_file(monkeypatch):
+    executed_sql: list[str] = []
+    params_seen: list[tuple] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            executed_sql.append(sql)
+            params_seen.append(tuple(params or ()))
+
+        def fetchone(self):
+            return {"inserted": True}
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    summary = auth_db.upsert_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        external_shop_id="alipay-shop-001",
+        bill_type="signcustomer",
+        bill_date="2026-05-06",
+        rows=[
+            {
+                "source_file_name": "bill.csv",
+                "source_row_number": 12,
+                "source_row_key": "row-key-1",
+                "raw": {"账务流水号": "A100", "收入金额（+元）": "12.30"},
+            }
+        ],
+        replace_bill_scope=True,
+    )
+
+    assert summary["deleted_stale_count"] == 0
+    assert "DELETE FROM platform_alipay_bill_lines" in executed_sql[-1]
+    assert "source_row_key <> ALL(%s)" in executed_sql[-1]
+    assert params_seen[-1] == (
+        "company-001",
+        "shop-001",
+        "signcustomer",
+        "2026-05-06",
+        "dataset-001",
+        ["row-key-1"],
+    )
 
 
 def test_upsert_platform_alipay_bill_lines_generates_distinct_fallback_row_keys(monkeypatch):
@@ -162,11 +290,12 @@ def test_upsert_platform_alipay_bill_lines_generates_distinct_fallback_row_keys(
                 "raw": {"金额": "45.60", "支付宝交易号": "A101"},
             },
         ],
+        replace_bill_scope=True,
     )
 
     assert summary["upserted_count"] == 2
-    assert len(params_seen) == 2
-    source_row_keys = [params[9] for params in params_seen]
+    assert len(params_seen) == 3
+    source_row_keys = [params[9] for params in params_seen[:2]]
     assert all(source_row_keys)
     assert all(len(key) <= 128 for key in source_row_keys)
     assert source_row_keys[0] != source_row_keys[1]

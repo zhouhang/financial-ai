@@ -44,6 +44,7 @@ def _alipay_bill_dataset(**overrides: Any) -> dict[str, Any]:
     dataset = {
         "id": "dataset-alipay-1",
         "data_source_id": "source-alipay-1",
+        "dataset_name": "支付宝交易账单 - 福游网络",
         "dataset_code": "alipay_trade_bill_shop_1",
         "resource_key": "alipay_bill:trade:shop-alipay-1",
         "extract_config": {
@@ -336,6 +337,8 @@ async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypat
     assert result["sample_source"] == "platform_alipay_bill_lines"
     profile = persisted["meta"]["semantic_profile"]
     assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
+    assert profile["business_name"] == "支付宝交易账单 - 福游网络"
+    assert profile["semantic_generator"]["llm_enabled"] is False
     assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
     assert profile["field_label_map"]["raw.支付宝交易号"] == "支付宝交易号"
     assert profile["field_label_map"]["raw.收入"] == "收入"
@@ -343,6 +346,84 @@ async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypat
     assert raw_field["field_source"] == "raw_bill"
     assert raw_field["source"] == "platform_preset"
     assert profile["key_fields"] == ["source_row_key"]
+
+
+@pytest.mark.anyio
+async def test_refresh_semantic_profile_names_alipay_fund_bill_without_llm(monkeypatch) -> None:
+    persisted: dict[str, Any] = {}
+    dataset = _alipay_bill_dataset(
+        id="dataset-alipay-fund-1",
+        dataset_name="支付宝资金账单 - 对对科技",
+        dataset_code="alipay_fund_bill_shop_1",
+        resource_key="alipay_bill:signcustomer:shop-alipay-1",
+        extract_config={
+            "storage": "platform_alipay_bill_lines",
+            "platform_code": "alipay",
+            "shop_connection_id": "shop-alipay-1",
+            "bill_type": "signcustomer",
+            "merchant_display_name": "对对科技",
+            "date_field": "bill_date",
+            "collection_date_field": "bill_date",
+            "key_fields": ["bill_type", "bill_date", "source_row_key"],
+        },
+        schema_summary={
+            "source": "alipay_bill_lines",
+            "storage": "platform_alipay_bill_lines",
+            "columns": [
+                {"name": "账务流水号", "data_type": "text", "nullable": True},
+                {"name": "商户订单号", "data_type": "text", "nullable": True},
+                {"name": "收入金额（+元）", "data_type": "text", "nullable": True},
+            ],
+        },
+    )
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "name": "支付宝授权连接",
+            "source_kind": "platform_oauth",
+            "provider_code": "alipay",
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_platform_alipay_bill_lines", lambda **kwargs: [])
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not read generic records")),
+    )
+
+    def fail_llm_config() -> dict[str, Any] | None:
+        raise AssertionError("支付宝账单固定数据集不应读取 LLM 配置")
+
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        persisted["meta"] = meta
+        next_dataset = dict(dataset)
+        next_dataset["meta"] = meta
+        return next_dataset
+
+    monkeypatch.setattr(data_sources, "_get_semantic_llm_config", fail_llm_config)
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_dataset_meta", fake_update_dataset_meta)
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_data_source_event", lambda **kwargs: None)
+
+    result = await data_sources._handle_data_source_refresh_dataset_semantic_profile(
+        {"auth_token": "token", "dataset_id": "dataset-alipay-fund-1", "sample_limit": 20}
+    )
+
+    assert result["success"] is True
+    profile = persisted["meta"]["semantic_profile"]
+    assert profile["business_name"] == "支付宝资金账单 - 对对科技"
+    assert profile["status"] == "generated_basic"
+    assert profile["semantic_generator"]["llm_enabled"] is False
+    assert profile["generated_from"]["sample_source"] == "none"
+    assert profile["field_label_map"]["账务流水号"] == "账务流水号"
 
 
 @pytest.mark.anyio
@@ -818,11 +899,17 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
     monkeypatch,
 ) -> None:
     calls: dict[str, Any] = {"upsert_dataset_collection_records": 0}
+    dataset = _alipay_bill_dataset()
 
     monkeypatch.setattr(
         data_sources.auth_db,
         "get_unified_data_source_dataset_by_id",
-        lambda company_id, dataset_id: _alipay_bill_dataset(),
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
     )
 
     def fake_run_alipay_bill_download_import(**kwargs: Any) -> dict[str, Any]:
@@ -884,6 +971,33 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
     )
     monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_health", lambda **kwargs: None)
     monkeypatch.setattr(data_sources, "_update_dataset_health_by_resource", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_semantic_sample_rows",
+        lambda **kwargs: (
+            [
+                {
+                    "source_row_key": "row-1",
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-06",
+                    "alipay_trade_no": "A-1",
+                    "raw.支付宝交易号": "A-1",
+                    "raw.收入": "12.30",
+                }
+            ],
+            "platform_alipay_bill_lines",
+        ),
+    )
+    monkeypatch.setattr(data_sources, "_get_semantic_llm_config", lambda: None)
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        calls["semantic_profile"] = {"dataset_id": dataset_id, "meta": meta}
+        return {**dataset, "meta": meta}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_data_source_dataset_meta",
+        fake_update_dataset_meta,
+    )
 
     result = await data_sources._execute_sync_job(
         company_id="company-1",
@@ -912,6 +1026,133 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
     assert calls["event"]["event_payload"]["original_files"] == [
         {"file_name": "trade.csv", "path": "uploads/platform/alipay/x"}
     ]
+    profile = calls["semantic_profile"]["meta"]["semantic_profile"]
+    assert profile["status"] == "generated_with_samples"
+    assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
+    assert profile["field_label_map"]["raw.收入"] == "收入"
+
+
+@pytest.mark.anyio
+async def test_execute_sync_job_generates_alipay_semantic_from_bill_header_when_no_rows(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {"upsert_dataset_collection_records": 0}
+    dataset = _alipay_bill_dataset(
+        schema_summary={
+            "source": "alipay_bill_lines",
+            "storage": "platform_alipay_bill_lines",
+        }
+    )
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: _alipay_platform_source(id=data_source_id),
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_run_alipay_bill_download_import",
+        lambda **kwargs: {
+            "success": True,
+            "healthy": True,
+            "rows": [],
+            "original_files": [{"file_name": "fund.csv", "path": "uploads/platform/alipay/x"}],
+            "collection_summary": {
+                "storage": "platform_alipay_bill_lines",
+                "platform_code": "alipay",
+                "bill_type": "signcustomer",
+                "bill_date": "2026-05-08",
+                "record_count": 0,
+                "columns": [
+                    {"name": "账务流水号", "data_type": "text", "nullable": True},
+                    {"name": "商户订单号", "data_type": "text", "nullable": True},
+                    {"name": "收入金额（+元）", "data_type": "text", "nullable": True},
+                ],
+                "original_files": [{"file_name": "fund.csv", "path": "uploads/platform/alipay/x"}],
+            },
+            "message": "支付宝账单采集成功",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_dataset_collection_records",
+        lambda **kwargs: calls.__setitem__("upsert_dataset_collection_records", 1),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_attempt",
+        lambda **kwargs: calls.setdefault("attempt", kwargs),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_sync_job_status",
+        lambda **kwargs: {"id": kwargs["sync_job_id"], "job_status": kwargs["job_status"]},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_data_source_event",
+        lambda **kwargs: calls.setdefault("event", kwargs),
+    )
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_health", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_update_dataset_health_by_resource", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_load_dataset_semantic_sample_rows", lambda **kwargs: ([], "none"))
+    monkeypatch.setattr(data_sources, "_get_semantic_llm_config", lambda: None)
+
+    def fake_upsert_dataset(**kwargs: Any) -> dict[str, Any]:
+        calls["dataset_schema"] = kwargs["schema_summary"]
+        return {**dataset, "schema_summary": kwargs["schema_summary"]}
+
+    def fake_update_dataset_meta(dataset_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        calls["semantic_profile"] = {"dataset_id": dataset_id, "meta": meta}
+        return {**dataset, "schema_summary": calls["dataset_schema"], "meta": meta}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_unified_data_source_dataset",
+        fake_upsert_dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_data_source_dataset_meta",
+        fake_update_dataset_meta,
+    )
+
+    result = await data_sources._execute_sync_job(
+        company_id="company-1",
+        source_id="source-alipay-1",
+        resource_key="alipay_bill:signcustomer:shop-alipay-1",
+        runtime_source={"source_kind": "platform_oauth", "provider_code": "alipay"},
+        arguments={
+            "params": {
+                "dataset_id": "dataset-alipay-1",
+                "dataset_code": "alipay_fund_bill_shop_1",
+                "biz_date": "2026-05-08",
+            }
+        },
+        job={"id": "job-1", "current_attempt": 1},
+        attempt={"id": "attempt-1"},
+        checkpoint_before={},
+        window_start=None,
+        window_end=None,
+    )
+
+    assert result["success"] is True
+    assert calls["upsert_dataset_collection_records"] == 0
+    assert [column["name"] for column in calls["dataset_schema"]["columns"]] == [
+        "账务流水号",
+        "商户订单号",
+        "收入金额（+元）",
+    ]
+    profile = calls["semantic_profile"]["meta"]["semantic_profile"]
+    assert profile["status"] == "generated_basic"
+    assert profile["generated_from"]["sample_source"] == "alipay_bill_header"
+    assert profile["field_label_map"]["账务流水号"] == "账务流水号"
+    assert profile["field_label_map"]["商户订单号"] == "商户订单号"
 
 
 @pytest.mark.anyio
@@ -1680,6 +1921,15 @@ def test_run_alipay_bill_collection_refreshes_expiring_token_before_fetch(monkey
             "access_token": kwargs["access_token"],
             "refresh_token": kwargs["refresh_token"],
             "raw_auth_payload": kwargs["raw_auth_payload"],
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_platform_alipay_bill_lines",
+        lambda **kwargs: {
+            "input_count": len(kwargs["rows"]),
+            "upserted_count": len(kwargs["rows"]),
+            "deleted_stale_count": 0,
         },
     )
 

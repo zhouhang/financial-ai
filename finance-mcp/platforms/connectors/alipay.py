@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,15 @@ ROW_KEY_FIELDS = (
     "支付宝流水号",
     "账务流水号",
 )
+ALIPAY_BILL_SUMMARY_MARKERS = (
+    "账务明细列表结束",
+    "账务汇总列表",
+    "账务汇总列表结束",
+    "支出合计",
+    "收入合计",
+    "合计",
+    "导出时间",
+)
 CSV_HEADER_HINTS = {
     "商户订单号",
     "支付宝交易号",
@@ -47,6 +57,69 @@ CSV_HEADER_HINTS = {
     "入账时间",
 }
 TOKEN_SECRET_KEYS = {"app_auth_token", "app_refresh_token", "access_token", "refresh_token"}
+ALIPAY_HTTP_BILL_DOWNLOAD_HOSTS = {"dwbillcenter.alipay.com"}
+
+
+def _alipay_response_key(method: str) -> str:
+    return f"{str(method or '').replace('.', '_')}_response"
+
+
+def _extract_json_value_text(raw_text: str, key: str) -> str:
+    if not raw_text or not key:
+        return ""
+    quoted_key = json.dumps(key, ensure_ascii=False)
+    key_index = raw_text.find(quoted_key)
+    if key_index < 0:
+        return ""
+    colon_index = raw_text.find(":", key_index + len(quoted_key))
+    if colon_index < 0:
+        return ""
+    value_start = colon_index + 1
+    while value_start < len(raw_text) and raw_text[value_start].isspace():
+        value_start += 1
+    try:
+        _, value_end = json.JSONDecoder().raw_decode(raw_text[value_start:])
+    except ValueError:
+        return ""
+    return raw_text[value_start : value_start + value_end]
+
+
+def _extract_gateway_sign_content(raw_text: str, *, response_key: str) -> str:
+    return _extract_json_value_text(raw_text, response_key)
+
+
+def _is_trusted_alipay_bill_download_url(url: str) -> bool:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    hostname = str(parsed.hostname or "").lower()
+    if scheme == "https":
+        return True
+    return scheme == "http" and hostname in ALIPAY_HTTP_BILL_DOWNLOAD_HOSTS
+
+
+def _load_pem_certificates(cert_text: str):
+    from cryptography import x509
+
+    pem_blocks = re.findall(
+        r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+        str(cert_text or ""),
+        flags=re.DOTALL,
+    )
+    if not pem_blocks:
+        raise ValueError("certificate PEM block not found")
+    return [x509.load_pem_x509_certificate(block.encode("utf-8")) for block in pem_blocks]
+
+
+def _alipay_cert_sn(cert_text: str, *, root: bool = False) -> str:
+    certs = _load_pem_certificates(cert_text)
+    serials: list[str] = []
+    for cert in certs:
+        if root and not cert.signature_algorithm_oid.dotted_string.startswith("1.2.840.113549.1.1"):
+            continue
+        issuer = cert.issuer.rfc4514_string()
+        source = f"{issuer}{cert.serial_number}"
+        serials.append(hashlib.md5(source.encode("utf-8")).hexdigest())
+    return "_".join(serials)
 
 
 def _first_text(row: dict[str, Any], *keys: str) -> str:
@@ -90,6 +163,24 @@ def _download_error_message(exc: requests.RequestException) -> str:
     if status_code:
         return f"支付宝账单文件下载失败: HTTP {status_code}"
     return "支付宝账单文件下载失败"
+
+
+def _alipay_business_error_message(data: dict[str, Any], *, response_key: str = "") -> str:
+    response = data.get(response_key) if response_key else None
+    if not isinstance(response, dict):
+        response = data.get("error_response") if isinstance(data.get("error_response"), dict) else {}
+    code = str(response.get("code") or "").strip()
+    sub_code = str(response.get("sub_code") or "").strip()
+    sub_msg = str(response.get("sub_msg") or "").strip()
+    msg = str(response.get("msg") or "").strip()
+    if not response or code in {"", "10000"}:
+        return ""
+    detail = sub_msg or msg or "支付宝网关返回业务错误"
+    if sub_code:
+        return f"{detail}（{sub_code}）"
+    if code:
+        return f"{detail}（{code}）"
+    return detail
 
 
 def _gateway_error_message(exc: requests.RequestException) -> str:
@@ -137,7 +228,20 @@ def build_alipay_row_key(
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
-def _csv_rows_with_header(text: str) -> list[tuple[int, dict[str, str]]]:
+def _is_summary_or_footer_bill_row(row: dict[str, Any]) -> bool:
+    values = [str(value or "").strip() for value in row.values()]
+    non_empty_values = [value for value in values if value]
+    if not non_empty_values:
+        return True
+    if any(value.startswith("#") for value in non_empty_values):
+        return True
+    if len(non_empty_values) == 1 and non_empty_values[0] in {"类型", "合计"}:
+        return True
+    joined = " ".join(non_empty_values)
+    return any(marker in joined for marker in ALIPAY_BILL_SUMMARY_MARKERS)
+
+
+def _csv_header_and_rows(text: str) -> tuple[list[str], list[tuple[int, dict[str, str]]]]:
     physical_rows = list(csv.reader(io.StringIO(text)))
     header_index = 0
     for index, row in enumerate(physical_rows):
@@ -150,7 +254,7 @@ def _csv_rows_with_header(text: str) -> list[tuple[int, dict[str, str]]]:
     ):
         header_index += 1
     if header_index >= len(physical_rows):
-        return []
+        return [], []
     headers = [str(cell or "").strip() for cell in physical_rows[header_index]]
     parsed_rows: list[tuple[int, dict[str, str]]] = []
     for physical_index, row in enumerate(physical_rows[header_index + 1 :], start=header_index + 2):
@@ -164,7 +268,14 @@ def _csv_rows_with_header(text: str) -> list[tuple[int, dict[str, str]]]:
         }
         if not any(row_dict.values()):
             continue
+        if _is_summary_or_footer_bill_row(row_dict):
+            continue
         parsed_rows.append((physical_index, row_dict))
+    return [header for header in headers if header], parsed_rows
+
+
+def _csv_rows_with_header(text: str) -> list[tuple[int, dict[str, str]]]:
+    _, parsed_rows = _csv_header_and_rows(text)
     return parsed_rows
 
 
@@ -304,7 +415,7 @@ class AlipayConnector(BasePlatformConnector):
         safe_url = str(bill_download_url or "").strip()
         if not safe_url:
             raise RuntimeError("支付宝账单下载地址为空")
-        if urlparse(safe_url).scheme.lower() != "https":
+        if not _is_trusted_alipay_bill_download_url(safe_url):
             message = "支付宝账单文件下载失败"
             logger.error(message)
             raise RuntimeError(message)
@@ -347,23 +458,18 @@ class AlipayConnector(BasePlatformConnector):
                     "size_bytes": len(content),
                 }
             )
-        return self.parse_bill_file(
+        parsed_bill = self.parse_bill_file(
             content=content,
             file_name=file_name,
             bill_type=bill_type,
             bill_date=bill_date,
             merchant_display_name=merchant_display_name,
             shop_connection_id=shop_connection_id,
-        ) if not output_dir else {
+        )
+        return parsed_bill if not output_dir else {
             "success": True,
-            "rows": self.parse_bill_file(
-                content=content,
-                file_name=file_name,
-                bill_type=bill_type,
-                bill_date=bill_date,
-                merchant_display_name=merchant_display_name,
-                shop_connection_id=shop_connection_id,
-            ),
+            "rows": parsed_bill["rows"],
+            "columns": parsed_bill["columns"],
             "files": files,
         }
 
@@ -376,25 +482,32 @@ class AlipayConnector(BasePlatformConnector):
         bill_date: str,
         merchant_display_name: str,
         shop_connection_id: str,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         if zipfile.is_zipfile(io.BytesIO(content)):
             rows: list[dict[str, Any]] = []
+            columns: list[dict[str, str]] = []
+            seen_columns: set[str] = set()
             with zipfile.ZipFile(io.BytesIO(content)) as zf:
                 for member in zf.infolist():
                     if member.is_dir() or not member.filename.lower().endswith(".csv"):
                         continue
-                    rows.extend(
-                        self._parse_csv_rows(
-                            content=zf.read(member),
-                            file_name=member.filename,
-                            bill_type=bill_type,
-                            bill_date=bill_date,
-                            merchant_display_name=merchant_display_name,
-                            shop_connection_id=shop_connection_id,
-                        )
+                    parsed = self.parse_bill_csv(
+                        content=zf.read(member),
+                        file_name=member.filename,
+                        bill_type=bill_type,
+                        bill_date=bill_date,
+                        merchant_display_name=merchant_display_name,
+                        shop_connection_id=shop_connection_id,
                     )
-            return rows
-        return self._parse_csv_rows(
+                    rows.extend(parsed["rows"])
+                    for column in parsed["columns"]:
+                        name = str(column.get("name") or "").strip()
+                        if not name or name in seen_columns:
+                            continue
+                        seen_columns.add(name)
+                        columns.append(column)
+            return {"rows": rows, "columns": columns}
+        return self.parse_bill_csv(
             content=content,
             file_name=file_name,
             bill_type=bill_type,
@@ -402,6 +515,33 @@ class AlipayConnector(BasePlatformConnector):
             merchant_display_name=merchant_display_name,
             shop_connection_id=shop_connection_id,
         )
+
+    def parse_bill_csv(
+        self,
+        *,
+        content: bytes,
+        file_name: str,
+        bill_type: str,
+        bill_date: str,
+        merchant_display_name: str,
+        shop_connection_id: str,
+    ) -> dict[str, Any]:
+        text = _decode_csv(content)
+        headers, row_items = _csv_header_and_rows(text)
+        columns = [
+            {"name": header, "data_type": "text", "nullable": True}
+            for header in headers
+            if header
+        ]
+        rows = self._parse_csv_row_items(
+            row_items=row_items,
+            file_name=file_name,
+            bill_type=bill_type,
+            bill_date=bill_date,
+            merchant_display_name=merchant_display_name,
+            shop_connection_id=shop_connection_id,
+        )
+        return {"rows": rows, "columns": columns}
 
     def _parse_csv_rows(
         self,
@@ -413,9 +553,28 @@ class AlipayConnector(BasePlatformConnector):
         merchant_display_name: str,
         shop_connection_id: str,
     ) -> list[dict[str, Any]]:
-        text = _decode_csv(content)
+        parsed = self.parse_bill_csv(
+            content=content,
+            file_name=file_name,
+            bill_type=bill_type,
+            bill_date=bill_date,
+            merchant_display_name=merchant_display_name,
+            shop_connection_id=shop_connection_id,
+        )
+        return list(parsed["rows"])
+
+    def _parse_csv_row_items(
+        self,
+        *,
+        row_items: list[tuple[int, dict[str, str]]],
+        file_name: str,
+        bill_type: str,
+        bill_date: str,
+        merchant_display_name: str,
+        shop_connection_id: str,
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for row_number, raw_row in _csv_rows_with_header(text):
+        for row_number, raw_row in row_items:
             cleaned_row = {
                 str(key or "").strip(): str(value or "").strip()
                 for key, value in raw_row.items()
@@ -455,6 +614,7 @@ class AlipayConnector(BasePlatformConnector):
                         cleaned_row,
                         "业务基础订单号",
                         "业务订单号",
+                        "业务流水号",
                     ),
                     "raw": cleaned_row,
                 }
@@ -462,7 +622,6 @@ class AlipayConnector(BasePlatformConnector):
         return rows
 
     def _token_bundle_from_response(self, data: dict[str, Any]) -> PlatformTokenBundle:
-        self._verify_gateway_response_signature(data)
         if "error_response" in data:
             error = data["error_response"] if isinstance(data.get("error_response"), dict) else {}
             raise RuntimeError(str(error.get("sub_msg") or error.get("msg") or error))
@@ -494,6 +653,7 @@ class AlipayConnector(BasePlatformConnector):
         try:
             response = requests.post(self._gateway_url(), data=payload, timeout=30)
             response.raise_for_status()
+            response_text = str(getattr(response, "text", "") or "")
             data = response.json()
         except requests.RequestException as exc:
             message = _gateway_error_message(exc)
@@ -505,13 +665,34 @@ class AlipayConnector(BasePlatformConnector):
             raise RuntimeError(message) from exc
         if not isinstance(data, dict):
             raise RuntimeError("支付宝网关响应格式错误")
-        self._verify_gateway_response_signature(data)
-        if "error_response" in data:
-            error = data["error_response"] if isinstance(data.get("error_response"), dict) else {}
-            raise RuntimeError(str(error.get("sub_msg") or error.get("msg") or error))
+        response_key = _alipay_response_key(method)
+        business_error = _alipay_business_error_message(data, response_key=response_key)
+        try:
+            self._verify_gateway_response_signature(
+                data,
+                raw_text=response_text,
+                response_key=response_key,
+            )
+        except RuntimeError:
+            if business_error:
+                logger.warning(
+                    "支付宝业务错误响应验签未通过，按业务错误返回: method=%s error=%s",
+                    method,
+                    business_error,
+                )
+                raise RuntimeError(business_error) from None
+            raise
+        if business_error:
+            raise RuntimeError(business_error)
         return data
 
-    def _verify_gateway_response_signature(self, data: dict[str, Any]) -> bool:
+    def _verify_gateway_response_signature(
+        self,
+        data: dict[str, Any],
+        *,
+        raw_text: str = "",
+        response_key: str = "",
+    ) -> bool:
         signature_text = str(data.get("sign") or "").strip()
         if not signature_text:
             return True
@@ -534,17 +715,11 @@ class AlipayConnector(BasePlatformConnector):
             except ValueError:
                 cert = x509.load_pem_x509_certificate(public_key_text.encode("utf-8"))
                 public_key = cert.public_key()
-            payload = {
-                key: value
-                for key, value in data.items()
-                if key not in {"sign", "sign_type"} and value is not None
-            }
-            sign_content = json.dumps(
-                payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            sign_content = _extract_gateway_sign_content(raw_text, response_key=response_key)
+            if not sign_content and "error_response" in data:
+                sign_content = _extract_gateway_sign_content(raw_text, response_key="error_response")
+            if not sign_content:
+                raise RuntimeError("支付宝网关响应验签失败")
             public_key.verify(
                 signature,
                 sign_content.encode("utf-8"),
@@ -552,6 +727,18 @@ class AlipayConnector(BasePlatformConnector):
                 hashes.SHA256(),
             )
         except Exception as exc:
+            public_key_fingerprint = hashlib.sha256(public_key_text.encode("utf-8")).hexdigest()[:16]
+            current_sign_content = str(locals().get("sign_content") or "")
+            logger.error(
+                "支付宝网关响应验签失败: response_key=%s sign_content_len=%s "
+                "sign_content_sha256=%s public_key_sha256=%s",
+                response_key,
+                len(current_sign_content),
+                hashlib.sha256(current_sign_content.encode("utf-8")).hexdigest()[:16]
+                if current_sign_content
+                else "",
+                public_key_fingerprint,
+            )
             raise RuntimeError("支付宝网关响应验签失败") from exc
         return True
 
@@ -575,6 +762,15 @@ class AlipayConnector(BasePlatformConnector):
         }
         if not app_auth_token:
             params.pop("app_auth_token")
+        app_public_cert = str(self.app_config.extra.get("app_public_cert") or "").strip()
+        alipay_root_cert = str(self.app_config.extra.get("alipay_root_cert") or "").strip()
+        if app_public_cert and alipay_root_cert:
+            try:
+                params["app_cert_sn"] = _alipay_cert_sn(app_public_cert)
+                params["alipay_root_cert_sn"] = _alipay_cert_sn(alipay_root_cert, root=True)
+            except Exception as exc:
+                logger.error("支付宝证书序列号计算失败: %s", exc)
+                raise RuntimeError("支付宝证书序列号计算失败") from exc
         params["sign"] = self._sign_params(params)
         return params
 

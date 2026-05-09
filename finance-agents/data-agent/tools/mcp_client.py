@@ -1510,6 +1510,9 @@ async def platform_upsert_app_config(
     app_key: str = "",
     app_secret: str = "",
     redirect_uri: str = "",
+    merchant_auth_mode: str = "",
+    merchant_auth_pc_url: str = "",
+    merchant_auth_qr_url: str = "",
     app_public_cert: str = "",
     alipay_public_cert: str = "",
     alipay_root_cert: str = "",
@@ -1535,6 +1538,9 @@ async def platform_upsert_app_config(
             "app_key": app_key,
             "app_secret": app_secret,
             "redirect_uri": redirect_uri,
+            "merchant_auth_mode": merchant_auth_mode,
+            "merchant_auth_pc_url": merchant_auth_pc_url,
+            "merchant_auth_qr_url": merchant_auth_qr_url,
             "app_public_cert": app_public_cert,
             "alipay_public_cert": alipay_public_cert,
             "alipay_root_cert": alipay_root_cert,
@@ -1632,7 +1638,7 @@ async def platform_list_pending_authorizations(
     status: str = "pending_claim",
     mode: str = "",
 ) -> dict[str, Any]:
-    """获取平台待认领授权列表。"""
+    """获取平台待绑定授权列表。"""
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
     if not platform_code:
@@ -1659,7 +1665,7 @@ async def platform_list_pending_authorizations(
         },
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
-        return {"success": False, "mode": normalized_mode, "error": "平台待认领授权接口暂未接入"}
+        return {"success": False, "mode": normalized_mode, "error": "平台待绑定授权接口暂未接入"}
     return result
 
 
@@ -1672,18 +1678,18 @@ async def platform_claim_pending_authorization(
     merchant_display_name: str,
     mode: str = "",
 ) -> dict[str, Any]:
-    """认领并绑定平台待认领授权。"""
+    """绑定平台待绑定授权。"""
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
     if not platform_code:
         return {"success": False, "error": "platform_code 不能为空"}
     if not claim_code:
-        return {"success": False, "error": "认领码不能为空"}
+        return {"success": False, "error": "授权校验信息不能为空，请重新发起授权"}
 
     normalized_platform = _normalize_platform_code(platform_code)
     normalized_mode = _normalize_mode(mode)
     if normalized_mode == "mock":
-        return {"success": False, "mode": normalized_mode, "error": "mock 模式不支持待认领授权"}
+        return {"success": False, "mode": normalized_mode, "error": "mock 模式不支持待绑定授权"}
 
     result = await call_mcp_tool(
         "platform_claim_pending_authorization",
@@ -1697,7 +1703,7 @@ async def platform_claim_pending_authorization(
         },
     )
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
-        return {"success": False, "mode": normalized_mode, "error": "平台待认领授权接口暂未接入"}
+        return {"success": False, "mode": normalized_mode, "error": "平台待绑定授权接口暂未接入"}
     return result
 
 

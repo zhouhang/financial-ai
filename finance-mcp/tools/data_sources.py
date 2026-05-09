@@ -658,6 +658,10 @@ def _extract_dataset_columns(dataset_row: dict[str, Any], sample_rows: list[dict
 
 
 def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any] | None = None) -> str:
+    alipay_business_name = _guess_alipay_bill_business_name(dataset_row)
+    if alipay_business_name:
+        return alipay_business_name
+
     dataset_name = _safe_text(dataset_row.get("dataset_name"))
     resource_key = _safe_text(dataset_row.get("resource_key"))
     dataset_code = _safe_text(dataset_row.get("dataset_code"))
@@ -680,6 +684,48 @@ def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any]
     if source_kind == "file":
         return "文件数据集"
     return "业务数据集"
+
+
+def _extract_suffix_after_separator(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    for separator in (" - ", "-", "－", "—"):
+        if separator in text:
+            suffix = text.rsplit(separator, 1)[-1].strip()
+            if suffix:
+                return suffix
+    return ""
+
+
+def _guess_alipay_bill_business_name(dataset_row: dict[str, Any] | None) -> str:
+    dataset = dataset_row if isinstance(dataset_row, dict) else {}
+    resource_key = _safe_text(dataset.get("resource_key"))
+    config = _dataset_collection_config(dataset)
+    bill_type = _safe_text(config.get("bill_type"))
+    if not bill_type and resource_key.startswith("alipay_bill:"):
+        parts = resource_key.split(":")
+        if len(parts) >= 2:
+            bill_type = parts[1]
+
+    bill_labels = {
+        "signcustomer": "支付宝资金账单",
+        "trade": "支付宝交易账单",
+    }
+    bill_label = bill_labels.get(bill_type)
+    if not bill_label:
+        return ""
+
+    merchant_name = (
+        _extract_suffix_after_separator(dataset.get("dataset_name"))
+        or _safe_text(config.get("merchant_display_name"))
+        or _safe_text(config.get("external_shop_name"))
+        or _safe_text((dataset.get("meta") or {}).get("merchant_display_name"))
+        or _safe_text((dataset.get("meta") or {}).get("external_shop_name"))
+    )
+    if merchant_name and merchant_name not in {bill_label, "业务数据集"}:
+        return f"{bill_label} - {merchant_name}"
+    return bill_label
 
 
 def _combine_field_label(prefix_label: str, suffix_label: str) -> str:
@@ -2304,6 +2350,67 @@ def _refresh_dataset_semantic_profile(
     return updated or dataset_row
 
 
+def _refresh_platform_dataset_semantic_profile_after_collection(
+    *,
+    company_id: str,
+    source_id: str,
+    dataset_row: dict[str, Any] | None,
+    source_row: dict[str, Any] | None,
+    collection_driver: str,
+    collection_summary: dict[str, Any],
+) -> None:
+    if not dataset_row:
+        return
+    if collection_driver not in {
+        COLLECTION_DRIVER_TAOBAO_ORDER_API,
+        COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT,
+    }:
+        return
+    try:
+        record_count = int(
+            collection_summary.get("record_count")
+            or collection_summary.get("upserted_count")
+            or collection_summary.get("input_count")
+            or 0
+        )
+    except (TypeError, ValueError):
+        record_count = 0
+    resource_key = _safe_text(dataset_row.get("resource_key")) or _safe_text(collection_summary.get("resource_key"))
+    sample_rows, sample_source = _load_dataset_semantic_sample_rows(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_row=dataset_row,
+        resource_key=resource_key,
+        limit=SEMANTIC_SAMPLE_ROW_LIMIT,
+    )
+    has_schema_columns = bool(_extract_dataset_columns(dataset_row, []))
+    if not sample_rows and not has_schema_columns:
+        return
+    refreshed = _refresh_dataset_semantic_profile(
+        dataset_row=dataset_row,
+        source_row=source_row,
+        sample_rows=sample_rows,
+        status="generated_with_samples" if sample_rows else "generated_basic",
+        sample_source=sample_source if sample_rows else "alipay_bill_header",
+        allow_llm=not _dataset_uses_platform_alipay_bill_lines(dataset_row),
+    )
+    auth_db.create_unified_data_source_event(
+        company_id=company_id,
+        data_source_id=source_id,
+        event_type="dataset_semantic_refreshed",
+        event_level="info",
+        event_message=f"采集成功后刷新数据集语义层：{_safe_text(dataset_row.get('dataset_name')) or _safe_text(dataset_row.get('dataset_code'))}",
+        event_payload={
+            "dataset_id": _safe_text(dataset_row.get("id")),
+            "resource_key": resource_key,
+            "sample_rows_count": len(sample_rows),
+            "sample_source": sample_source if sample_rows else "alipay_bill_header",
+            "semantic_status": _flatten_semantic_profile(refreshed or dataset_row).get("semantic_status"),
+            "collection_driver": collection_driver,
+        },
+    )
+
+
 def _resolve_dataset_row(
     *,
     company_id: str,
@@ -3913,7 +4020,9 @@ def _alipay_bill_output_dir(
     return target
 
 
-def _normalize_bill_fetch_result(result: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _normalize_bill_fetch_result(
+    result: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     if isinstance(result, dict):
         rows = [row for row in result.get("rows") or [] if isinstance(row, dict)]
         files = [
@@ -3921,10 +4030,79 @@ def _normalize_bill_fetch_result(result: Any) -> tuple[list[dict[str, Any]], lis
             for file_info in (result.get("files") or result.get("original_files") or [])
             if isinstance(file_info, dict)
         ]
-        return rows, files
+        columns = [column for column in result.get("columns") or [] if isinstance(column, dict)]
+        return rows, files, columns
     if isinstance(result, list):
-        return [row for row in result if isinstance(row, dict)], []
-    return [], []
+        return [row for row in result if isinstance(row, dict)], [], []
+    return [], [], []
+
+
+def _merge_dataset_schema_columns(
+    dataset_row: dict[str, Any] | None,
+    columns: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not dataset_row or not columns:
+        return dataset_row
+
+    schema_summary = dict(dataset_row.get("schema_summary") or {})
+    merged_columns: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in schema_summary.get("columns") or []:
+        if not isinstance(item, dict):
+            continue
+        name = _safe_text(item.get("name"))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        merged_columns.append(dict(item))
+
+    for item in columns:
+        name = _safe_text(item.get("name"))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        merged_columns.append(
+            {
+                "name": name,
+                "data_type": _safe_text(item.get("data_type")) or "text",
+                "nullable": bool(item.get("nullable", True)),
+            }
+        )
+
+    if len(merged_columns) == len(schema_summary.get("columns") or []):
+        return dataset_row
+    schema_summary["columns"] = merged_columns
+    updated = auth_db.upsert_unified_data_source_dataset(
+        company_id=_safe_text(dataset_row.get("company_id")),
+        data_source_id=_safe_text(dataset_row.get("data_source_id")),
+        dataset_code=_safe_text(dataset_row.get("dataset_code")),
+        dataset_name=_safe_text(dataset_row.get("dataset_name")),
+        resource_key=_safe_text(dataset_row.get("resource_key")) or "default",
+        dataset_kind=_safe_text(dataset_row.get("dataset_kind")) or "table",
+        origin_type=_safe_text(dataset_row.get("origin_type")) or "manual",
+        extract_config=dict(dataset_row.get("extract_config") or {}),
+        schema_summary=schema_summary,
+        sync_strategy=dict(dataset_row.get("sync_strategy") or {}),
+        status=_safe_text(dataset_row.get("status")) or "active",
+        is_enabled=bool(dataset_row.get("is_enabled", True)),
+        health_status=_safe_text(dataset_row.get("health_status")) or "unknown",
+        last_checked_at=_safe_text(dataset_row.get("last_checked_at")) or None,
+        last_sync_at=_safe_text(dataset_row.get("last_sync_at")) or None,
+        last_error_message=_safe_text(dataset_row.get("last_error_message")),
+        meta=dict(dataset_row.get("meta") or {}),
+        schema_name=_safe_text(dataset_row.get("schema_name")) or None,
+        object_name=_safe_text(dataset_row.get("object_name")) or None,
+        object_type=_safe_text(dataset_row.get("object_type")) or None,
+        publish_status=_safe_text(dataset_row.get("publish_status")) or "unpublished",
+        business_domain=_safe_text(dataset_row.get("business_domain")) or None,
+        business_object_type=_safe_text(dataset_row.get("business_object_type")) or None,
+        grain=_safe_text(dataset_row.get("grain")) or None,
+        usage_count=int(dataset_row.get("usage_count") or 0),
+        last_used_at=_safe_text(dataset_row.get("last_used_at")) or None,
+        search_text=_safe_text(dataset_row.get("search_text")) or None,
+    )
+    return updated or {**dataset_row, "schema_summary": schema_summary}
 
 
 def _is_alipay_bill_not_ready_error(exc: Exception) -> bool:
@@ -4045,7 +4223,7 @@ def _run_alipay_bill_collection(
         fetch_kwargs["app_auth_token"] = token_bundle.access_token
         fetch_result = connector.fetch_bill_rows(**fetch_kwargs)
 
-    rows, original_files = _normalize_bill_fetch_result(fetch_result)
+    rows, original_files, columns = _normalize_bill_fetch_result(fetch_result)
     collection_summary = auth_db.upsert_platform_alipay_bill_lines(
         company_id=company_id,
         data_source_id=source_id,
@@ -4055,6 +4233,7 @@ def _run_alipay_bill_collection(
         bill_type=bill_type,
         bill_date=bill_date,
         rows=rows,
+        replace_bill_scope=True,
     )
     collection_summary.update(
         {
@@ -4064,6 +4243,7 @@ def _run_alipay_bill_collection(
             "bill_date": bill_date,
             "record_count": len(rows),
             "original_files": original_files,
+            "columns": columns,
             "dataset_id": dataset_id,
             "dataset_code": dataset_code,
             "biz_date": bill_date,
@@ -5147,7 +5327,7 @@ async def _handle_data_source_list(arguments: dict[str, Any]) -> dict[str, Any]:
         _build_data_source_view(
             row,
             datasets=datasets_by_source.get(str(row.get("id") or ""), []),
-            include_dataset_details=False,
+            include_dataset_details=True,
         )
         for row in rows
     ]
@@ -5716,7 +5896,7 @@ async def _handle_data_source_refresh_dataset_semantic_profile(arguments: dict[s
         sample_rows=sample_rows,
         status="generated_with_samples" if sample_rows else "generated_basic",
         sample_source=sample_source,
-        allow_llm=True,
+        allow_llm=not _dataset_uses_platform_alipay_bill_lines(dataset_row),
     )
     if not refreshed:
         return {"success": False, "error": "刷新语义层失败"}
@@ -6686,6 +6866,10 @@ async def _execute_sync_job(
                     params=params,
                     rows=rows,
                 )
+                dataset_row = _merge_dataset_schema_columns(
+                    dataset_row,
+                    [column for column in collection_summary.get("columns") or [] if isinstance(column, dict)],
+                )
         elif collection_context:
             collection_records, collection_validation = _build_collection_records(
                 rows=rows,
@@ -6835,6 +7019,33 @@ async def _execute_sync_job(
             last_error_message="",
             last_sync_at=_now_iso(),
         )
+        try:
+            source_row_for_semantic = (
+                auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+                or runtime_source
+            )
+        except Exception as exc:
+            logger.warning(
+                "采集成功后加载语义数据源上下文失败: source_id=%s error=%s",
+                source_id,
+                exc,
+            )
+            source_row_for_semantic = runtime_source
+        try:
+            _refresh_platform_dataset_semantic_profile_after_collection(
+                company_id=company_id,
+                source_id=source_id,
+                dataset_row=dataset_row,
+                source_row=source_row_for_semantic,
+                collection_driver=collection_driver,
+                collection_summary=collection_summary,
+            )
+        except Exception as exc:
+            logger.warning(
+                "采集成功后刷新平台数据集语义失败: dataset_id=%s error=%s",
+                _safe_text((dataset_row or {}).get("id")),
+                exc,
+            )
         return {
             "success": True,
             "source_id": source_id,

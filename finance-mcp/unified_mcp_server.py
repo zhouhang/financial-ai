@@ -218,6 +218,8 @@ _PLATFORM_TOOL_NAMES = {
     "platform_reauthorize_shop",
     "platform_disable_shop",
     "platform_get_shop_detail",
+    "platform_list_pending_authorizations",
+    "platform_claim_pending_authorization",
 }
 
 _DATA_SOURCE_TOOL_NAMES = {

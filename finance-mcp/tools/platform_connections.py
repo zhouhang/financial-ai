@@ -210,7 +210,7 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="platform_list_pending_authorizations",
-            description="获取支付宝待认领商家授权列表，不返回 token 明文。",
+            description="获取支付宝待绑定商家授权列表，不返回 token 明文。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -225,7 +225,7 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="platform_claim_pending_authorization",
-            description="用认领码将支付宝待认领授权绑定到当前企业。",
+            description="用隐藏校验信息将支付宝待绑定授权绑定到当前企业。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -639,6 +639,11 @@ def build_alipay_bill_dataset_payload(
     normalized_bill_type = str(bill_type or "").strip() or normalized_bill_kind
     resource_key = f"alipay_bill:{normalized_bill_type}:{shop_connection_id}"
     key_fields = ["bill_type", "bill_date", "source_row_key"]
+    semantic_profile = {
+        "business_name": f"{dataset_label} - {display_merchant_name}"[:255],
+        "business_description": "支付宝授权商户账单采集数据集",
+        "key_fields": key_fields,
+    }
     return {
         "company_id": company_id,
         "data_source_id": data_source_id,
@@ -668,11 +673,6 @@ def build_alipay_bill_dataset_payload(
             "columns": [],
             "key_fields": key_fields,
         },
-        "semantic_profile": {
-            "business_name": f"{dataset_label} - {display_merchant_name}"[:255],
-            "business_description": "支付宝授权商户账单采集数据集",
-            "key_fields": key_fields,
-        },
         "sync_strategy": dict(ALIPAY_BILL_SYNC_STRATEGY),
         "status": "active",
         "is_enabled": True,
@@ -685,6 +685,7 @@ def build_alipay_bill_dataset_payload(
             "bill_kind": normalized_bill_kind,
             "bill_type": normalized_bill_type,
             "key_fields": key_fields,
+            "semantic_profile": semantic_profile,
         },
     }
 
@@ -991,18 +992,83 @@ def _create_logged_background_task(coroutine: Any, *, task_name: str) -> Any:
     return task
 
 
+def _platform_dataset_sync_summary(*, company_id: str, shop_connection_id: str) -> dict[str, Any]:
+    """汇总平台固定数据集同步状态，用于补充店铺/商户列表展示。"""
+    try:
+        sources = auth_db.list_unified_data_sources(
+            company_id=company_id,
+            source_kind="platform_oauth",
+            status="active",
+            include_deleted=False,
+        )
+        matched_source_ids = {
+            str(source.get("id") or "")
+            for source in sources
+            if str((source.get("meta") or {}).get("shop_connection_id") or "") == shop_connection_id
+        }
+        if not matched_source_ids:
+            return {}
+        datasets = auth_db.list_unified_data_source_datasets(
+            company_id=company_id,
+            status="active",
+            include_deleted=False,
+            limit=500,
+        )
+        matched_datasets = [
+            dataset
+            for dataset in datasets
+            if str(dataset.get("data_source_id") or "") in matched_source_ids
+        ]
+        last_sync_at = max(
+            [dataset.get("last_sync_at") for dataset in matched_datasets if dataset.get("last_sync_at")],
+            default=None,
+        )
+        last_error = next(
+            (
+                dataset.get("last_error_message")
+                for dataset in matched_datasets
+                if str(dataset.get("last_error_message") or "").strip()
+            ),
+            "",
+        )
+        return {
+            "last_sync_at": last_sync_at,
+            "last_status": "error" if last_error else None,
+            "last_error": last_error,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "读取平台固定数据集同步状态失败: company_id=%s shop_connection_id=%s error=%s",
+            company_id,
+            shop_connection_id,
+            exc,
+        )
+        return {}
+
+
 def _build_shop_view(connection: dict[str, Any]) -> dict[str, Any]:
     shop_id = str(connection.get("id") or "")
     company_id = str(connection.get("company_id") or "")
     auth = auth_db.get_current_shop_authorization(shop_connection_id=shop_id)
     sync_sources = auth_db.list_sync_sources(company_id=company_id, shop_connection_id=shop_id)
+    dataset_sync_summary = _platform_dataset_sync_summary(
+        company_id=company_id,
+        shop_connection_id=shop_id,
+    )
     sync_last = max(
-        [item.get("last_sync_at") for item in sync_sources if item.get("last_sync_at")],
+        [
+            item
+            for item in [
+                *[source.get("last_sync_at") for source in sync_sources if source.get("last_sync_at")],
+                dataset_sync_summary.get("last_sync_at"),
+            ]
+            if item
+        ],
         default=None,
     )
     last_status = next(
         (item.get("last_status") for item in sync_sources if str(item.get("last_status") or "") in {"error", "failed", "running"}),
-        sync_sources[0].get("last_status") if sync_sources else None,
+        dataset_sync_summary.get("last_status") or (sync_sources[0].get("last_status") if sync_sources else None),
     )
     auth_status = str((auth or {}).get("auth_status") or "")
     display_status = "disabled" if str(connection.get("status") or "") == "disabled" else (auth_status or "authorized")
@@ -1296,7 +1362,7 @@ async def _handle_alipay_merchant_auth_callback(arguments: dict[str, Any]) -> di
             if pending is not None:
                 break
         if pending is None:
-            raise ValueError("保存支付宝待认领授权失败")
+            raise ValueError("保存支付宝待绑定授权失败")
         public_pending = _public_pending_authorization(pending)
         claim_code = str(public_pending.get("claim_code") or "")
         return {
@@ -1305,7 +1371,7 @@ async def _handle_alipay_merchant_auth_callback(arguments: dict[str, Any]) -> di
             "pending_authorization": public_pending,
             "pending_authorization_id": str(public_pending.get("id") or ""),
             "claim_code": claim_code,
-            "message": "支付宝授权已收到，请在 Tally 输入认领码完成绑定",
+            "message": "支付宝授权已收到，请填写支付宝商户名称完成绑定",
             "return_path": "/data-connections?mode=platform&platform=alipay",
             "mode": app_config.auth_mode,
         }
@@ -1326,7 +1392,7 @@ async def _handle_list_pending_authorizations(arguments: dict[str, Any]) -> dict
     _require_user(arguments.get("auth_token", ""))
     platform_code = _normalize_platform_code(arguments.get("platform_code"))
     if platform_code != "alipay":
-        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待认领授权"}
+        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待绑定授权"}
     status = str(arguments.get("status") or "pending_claim").strip() or "pending_claim"
     try:
         limit = int(arguments.get("limit") or 50)
@@ -1355,15 +1421,15 @@ async def _handle_claim_pending_authorization(arguments: dict[str, Any]) -> dict
     user_id = str(user.get("user_id") or "")
     platform_code = _normalize_platform_code(arguments.get("platform_code"))
     if platform_code != "alipay":
-        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待认领授权"}
+        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待绑定授权"}
 
     pending_id = str(arguments.get("pending_authorization_id") or "").strip()
     claim_code = str(arguments.get("claim_code") or "").strip()
     merchant_display_name = str(arguments.get("merchant_display_name") or "").strip()
     if not claim_code:
-        return {"success": False, "platform_code": platform_code, "error": "认领码不能为空"}
+        return {"success": False, "platform_code": platform_code, "error": "授权校验信息不能为空，请重新发起授权"}
     if not merchant_display_name:
-        return {"success": False, "platform_code": platform_code, "error": "商户显示名称不能为空"}
+        return {"success": False, "platform_code": platform_code, "error": "支付宝商户名称不能为空"}
 
     pending = (
         auth_db.get_platform_pending_authorization_by_id(pending_id, include_secrets=True)
@@ -1371,20 +1437,20 @@ async def _handle_claim_pending_authorization(arguments: dict[str, Any]) -> dict
         else auth_db.get_platform_pending_authorization_by_claim_code(claim_code, include_secrets=True)
     )
     if not pending:
-        return {"success": False, "platform_code": platform_code, "error": "待认领授权不存在或已失效"}
+        return {"success": False, "platform_code": platform_code, "error": "待绑定授权不存在或已失效"}
     if str(pending.get("platform_code") or "") != "alipay":
-        return {"success": False, "platform_code": platform_code, "error": "待认领授权平台不匹配"}
+        return {"success": False, "platform_code": platform_code, "error": "待绑定授权平台不匹配"}
     if str(pending.get("status") or "") != "pending_claim":
-        return {"success": False, "platform_code": platform_code, "error": "该授权已处理，请勿重复认领"}
+        return {"success": False, "platform_code": platform_code, "error": "该授权已处理，请勿重复绑定"}
     if str(pending.get("claim_code") or "").strip() != claim_code:
-        return {"success": False, "platform_code": platform_code, "error": "认领码不匹配，请检查后重试"}
+        return {"success": False, "platform_code": platform_code, "error": "授权校验信息不匹配，请重新发起授权"}
     if _pending_authorization_expired(pending):
         auth_db.mark_platform_pending_authorization_failed(
             pending_authorization_id=str(pending.get("id") or ""),
             status="expired",
-            last_error="认领码已过期",
+            last_error="授权校验信息已过期",
         )
-        return {"success": False, "platform_code": platform_code, "error": "认领码已过期，请重新扫码授权"}
+        return {"success": False, "platform_code": platform_code, "error": "授权校验信息已过期，请重新发起授权"}
 
     external_shop_id = str(pending.get("external_shop_id") or "").strip()
     if not external_shop_id:
@@ -1473,7 +1539,7 @@ async def _handle_claim_pending_authorization(arguments: dict[str, Any]) -> dict
             "mode": _normalize_mode(arguments.get("mode")),
         }
     except Exception as exc:  # noqa: BLE001
-        logger.error("认领支付宝待认领授权失败: %s", exc, exc_info=True)
+        logger.error("绑定支付宝待绑定授权失败: %s", exc, exc_info=True)
         return {"success": False, "platform_code": "alipay", "error": str(exc)}
 
 
@@ -1702,15 +1768,18 @@ async def _handle_reauthorize_shop(arguments: dict[str, Any]) -> dict[str, Any]:
     detail = auth_db.get_shop_connection_by_id(shop_connection_id)
     if detail is None or str(detail.get("company_id") or "") != str(user["company_id"]):
         return {"success": False, "error": "店铺连接不存在"}
-    return await _handle_create_auth_session(
-        {
-            "auth_token": arguments.get("auth_token", ""),
-            "platform_code": detail.get("platform_code"),
-            "return_path": arguments.get("return_path", "/"),
-            "shop_connection_id": shop_connection_id,
-            "mode": arguments.get("mode", ""),
-        }
-    )
+    payload = {
+        "auth_token": arguments.get("auth_token", ""),
+        "platform_code": detail.get("platform_code"),
+        "return_path": arguments.get("return_path", "/"),
+        "shop_connection_id": shop_connection_id,
+        "mode": arguments.get("mode", ""),
+    }
+    if _normalize_platform_code(detail.get("platform_code")) == "alipay":
+        payload["merchant_display_name"] = str(
+            detail.get("external_shop_name") or detail.get("auth_subject_name") or ""
+        ).strip()
+    return await _handle_create_auth_session(payload)
 
 
 async def _handle_disable_shop(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1719,7 +1788,8 @@ async def _handle_disable_shop(arguments: dict[str, Any]) -> dict[str, Any]:
     detail = auth_db.get_shop_connection_by_id(shop_connection_id)
     if detail is None or str(detail.get("company_id") or "") != str(user["company_id"]):
         return {"success": False, "error": "店铺连接不存在"}
-    if not auth_db.update_shop_connection_status(shop_connection_id=shop_connection_id, status="disabled"):
+    disabled_connection = auth_db.update_shop_connection_status(shop_connection_id=shop_connection_id, status="disabled")
+    if not disabled_connection:
         return {"success": False, "error": "停用店铺连接失败"}
     authorization = auth_db.get_current_shop_authorization(shop_connection_id=shop_connection_id)
     if authorization:
@@ -1729,7 +1799,16 @@ async def _handle_disable_shop(arguments: dict[str, Any]) -> dict[str, Any]:
             last_error=str(arguments.get("reason") or ""),
             is_current=False,
         )
-    return {"success": True, "message": "店铺连接已停用"}
+    refreshed = auth_db.get_shop_connection_by_id(shop_connection_id) or disabled_connection or detail
+    connection_view = _build_shop_view(refreshed)
+    platform_code = _normalize_platform_code(refreshed.get("platform_code"))
+    subject_name = "支付宝商户" if platform_code == "alipay" else "店铺连接"
+    return {
+        "success": True,
+        "message": f"{subject_name}已停用",
+        "connection": connection_view,
+        "shop": connection_view,
+    }
 
 
 async def _handle_get_shop_detail(arguments: dict[str, Any]) -> dict[str, Any]:

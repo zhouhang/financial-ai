@@ -408,12 +408,9 @@ function buildSemanticSampleTableColumns(
 ): SampleTableColumn[] {
   const columns: SampleTableColumn[] = [];
   const seen = new Set<string>();
-  const orderedGroups = [
-    ...fieldGroups.filter((group) => group.key.trim().toLowerCase() !== 'system'),
-    ...fieldGroups.filter((group) => group.key.trim().toLowerCase() === 'system'),
-  ];
+  const businessGroups = fieldGroups.filter((group) => group.key.trim().toLowerCase() !== 'system');
 
-  orderedGroups.forEach((group) => {
+  businessGroups.forEach((group) => {
     group.fields.forEach((field) => {
       const rawName = rawFieldName(field).trim();
       if (!rawName || seen.has(rawName) || columns.length >= maxColumns) return;
@@ -425,18 +422,12 @@ function buildSemanticSampleTableColumns(
     });
   });
 
-  const fallbackColumns = buildSampleTableColumns(rows, maxColumns);
-  if (columns.length === 0) {
-    return fallbackColumns.map((column) => ({ rawName: column, displayName: column }));
-  }
+  if (columns.length > 0) return columns;
 
-  fallbackColumns.forEach((column) => {
-    if (seen.has(column) || columns.length >= maxColumns) return;
-    seen.add(column);
-    columns.push({ rawName: column, displayName: column });
-  });
-
-  return columns;
+  return buildSampleTableColumns(rows, maxColumns).map((column) => ({
+    rawName: column,
+    displayName: column,
+  }));
 }
 
 function formatSampleCellValue(value: unknown): string {
@@ -2300,6 +2291,7 @@ export default function DataConnectionsPanel({
   const [shops, setShops] = useState<ShopConnection[]>([]);
   const [loadingShops, setLoadingShops] = useState(false);
   const [shopError, setShopError] = useState<string>('');
+  const [shopNotice, setShopNotice] = useState<string>('');
   const [platformAppConfigs, setPlatformAppConfigs] = useState<Record<string, PlatformAppConfigFormState>>({});
   const [actioningShopId, setActioningShopId] = useState<string | null>(null);
   const [expandedShopDatasetId, setExpandedShopDatasetId] = useState<string | null>(null);
@@ -2310,10 +2302,11 @@ export default function DataConnectionsPanel({
   const [alipayAuthDialog, setAlipayAuthDialog] = useState<AlipayAuthDialogState | null>(null);
   const [alipayPendingAuthorizations, setAlipayPendingAuthorizations] = useState<PlatformPendingAuthorization[]>([]);
   const [loadingAlipayPendingAuthorizations, setLoadingAlipayPendingAuthorizations] = useState(false);
+  const [uploadingAlipayMerchantQr, setUploadingAlipayMerchantQr] = useState(false);
   const [alipayClaimForm, setAlipayClaimForm] = useState<AlipayClaimFormState>({
     pendingAuthorizationId: '',
     claimCode: initialCallback?.claimCode ?? '',
-    merchantDisplayName: '',
+    merchantDisplayName: initialCallback?.shopName ?? '',
   });
   const [claimingAlipayAuthorization, setClaimingAlipayAuthorization] = useState(false);
   const [alipayClaimError, setAlipayClaimError] = useState('');
@@ -2381,6 +2374,7 @@ export default function DataConnectionsPanel({
         ...current,
         claimCode: initialCallback.claimCode || current.claimCode,
         pendingAuthorizationId: initialCallback.pendingAuthorizationId || current.pendingAuthorizationId,
+        merchantDisplayName: initialCallback.shopName || current.merchantDisplayName,
       }));
     }
   }, [initialCallback]);
@@ -2994,6 +2988,7 @@ export default function DataConnectionsPanel({
       if (!authToken) return [];
       setLoadingShops(true);
       setShopError('');
+      setShopNotice('');
       try {
         const normalizedPlatformCode = normalizePlatformCode(platformCode);
         const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/shops?mode=real`, {
@@ -3034,7 +3029,7 @@ export default function DataConnectionsPanel({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '加载支付宝待认领授权失败'));
+        throw new Error(String(data?.detail || data?.message || '加载支付宝待绑定授权失败'));
       }
       const rows = Array.isArray(data?.pending_authorizations)
         ? data.pending_authorizations
@@ -3058,7 +3053,7 @@ export default function DataConnectionsPanel({
       return pendingAuthorizations;
     } catch (error) {
       setAlipayPendingAuthorizations([]);
-      setAlipayClaimError(error instanceof Error ? error.message : '加载支付宝待认领授权失败');
+      setAlipayClaimError(error instanceof Error ? error.message : '加载支付宝待绑定授权失败');
       return [];
     } finally {
       setLoadingAlipayPendingAuthorizations(false);
@@ -3071,15 +3066,15 @@ export default function DataConnectionsPanel({
     const claimCode = alipayClaimForm.claimCode.trim();
     const merchantDisplayName = alipayClaimForm.merchantDisplayName.trim();
     if (!pendingId) {
-      setAlipayClaimError('请选择待认领授权');
+      setAlipayClaimError('请选择待绑定授权');
       return;
     }
     if (!claimCode) {
-      setAlipayClaimError('请输入认领码');
+      setAlipayClaimError('待绑定授权缺少校验信息，请刷新后重试');
       return;
     }
     if (!merchantDisplayName) {
-      setAlipayClaimError('请输入商户显示名称');
+      setAlipayClaimError('请输入支付宝商户名称');
       return;
     }
     setClaimingAlipayAuthorization(true);
@@ -3097,18 +3092,27 @@ export default function DataConnectionsPanel({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '认领支付宝授权失败'));
+        throw new Error(String(data?.detail || data?.message || '绑定支付宝授权失败'));
       }
       setAlipayClaimNotice(String(data?.message || '支付宝商户授权已绑定'));
       setAlipayClaimForm({ pendingAuthorizationId: '', claimCode: '', merchantDisplayName: '' });
+      setSelectedPlatform({
+        platform_code: 'alipay',
+        platform_name: '支付宝',
+        authorized_shop_count: 1,
+        error_shop_count: 0,
+        status: 'active',
+      });
+      setMode('platform');
+      setCallbackPayload(null);
+      clearCallbackQuery('data-connections');
       await Promise.all([
-        fetchAlipayPendingAuthorizations(),
         fetchShops('alipay'),
         fetchPlatforms(),
         fetchRemoteSources(),
       ]);
     } catch (error) {
-      setAlipayClaimError(error instanceof Error ? error.message : '认领支付宝授权失败');
+      setAlipayClaimError(error instanceof Error ? error.message : '绑定支付宝授权失败');
     } finally {
       setClaimingAlipayAuthorization(false);
     }
@@ -3116,11 +3120,19 @@ export default function DataConnectionsPanel({
     alipayClaimForm,
     authHeaders,
     authToken,
-    fetchAlipayPendingAuthorizations,
     fetchPlatforms,
     fetchRemoteSources,
     fetchShops,
   ]);
+
+  const fillAlipayClaimFormFromCallback = useCallback((payload: AuthCallbackPayload) => {
+    setAlipayClaimForm((current) => ({
+      ...current,
+      claimCode: payload.claimCode || current.claimCode,
+      pendingAuthorizationId: payload.pendingAuthorizationId || current.pendingAuthorizationId,
+      merchantDisplayName: payload.shopName || current.merchantDisplayName,
+    }));
+  }, []);
 
   const updatePlatformAppConfig = useCallback(
     (
@@ -3253,6 +3265,70 @@ export default function DataConnectionsPanel({
       }
     },
     [authHeaders, authToken, platformAppConfigs, updatePlatformAppConfig],
+  );
+
+  const uploadAlipayMerchantQr = useCallback(
+    async (file: File | null) => {
+      if (!authToken || !file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: '二维码图片不能超过 2MB',
+          notice: '',
+        }));
+        return;
+      }
+      const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
+      if (file.type && !allowedTypes.has(file.type)) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: '仅支持 png、jpg、jpeg、webp 二维码图片',
+          notice: '',
+        }));
+        return;
+      }
+      setUploadingAlipayMerchantQr(true);
+      updatePlatformAppConfig('alipay', (current) => ({
+        ...current,
+        error: '',
+        notice: '',
+      }));
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/platform-connections/alipay/app-config/merchant-auth-qr', {
+          method: 'POST',
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+          body: formData,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '上传支付宝商家授权二维码失败'));
+        }
+        const config = data?.config && typeof data.config === 'object' ? data.config : {};
+        const qrUrl = String(data?.merchant_auth_qr_url || config.merchant_auth_qr_url || '');
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          appKey: String(config.app_key || current.appKey),
+          merchantAuthQrUrl: qrUrl || current.merchantAuthQrUrl,
+          hasAppSecret: Boolean(config.has_app_secret) || current.hasAppSecret,
+          hasAppPublicCert: Boolean(config.has_app_public_cert) || current.hasAppPublicCert,
+          hasAlipayPublicCert: Boolean(config.has_alipay_public_cert) || current.hasAlipayPublicCert,
+          hasAlipayRootCert: Boolean(config.has_alipay_root_cert) || current.hasAlipayRootCert,
+          error: '',
+          notice: String(data?.message || '支付宝商家授权二维码已上传'),
+        }));
+      } catch (error) {
+        updatePlatformAppConfig('alipay', (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : '上传支付宝商家授权二维码失败',
+          notice: '',
+        }));
+      } finally {
+        setUploadingAlipayMerchantQr(false);
+      }
+    },
+    [authToken, updatePlatformAppConfig],
   );
 
   const renderServiceProviderAppStatus = useCallback(
@@ -3412,22 +3488,39 @@ export default function DataConnectionsPanel({
                           placeholder="支付宝开放平台商家授权 PC 链接"
                         />
                       </label>
-                      <label className="block text-sm font-medium text-text-primary">
-                        商家授权二维码地址
-                        <input
-                          type="url"
-                          value={appConfig.merchantAuthQrUrl}
-                          onChange={(event) =>
-                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
-                              ...current,
-                              merchantAuthQrUrl: event.target.value,
-                              notice: '',
-                            }))
-                          }
-                          className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                          placeholder="二维码图片 URL"
-                        />
-                      </label>
+                      <div className="block text-sm font-medium text-text-primary">
+                        商家授权二维码
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                          <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary">
+                            {uploadingAlipayMerchantQr ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <FileSpreadsheet className="h-4 w-4" />
+                            )}
+                            {uploadingAlipayMerchantQr ? '上传中' : '上传二维码图片'}
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              className="sr-only"
+                              disabled={uploadingAlipayMerchantQr}
+                              onChange={(event) => {
+                                void uploadAlipayMerchantQr(event.target.files?.[0] ?? null);
+                                event.target.value = '';
+                              }}
+                            />
+                          </label>
+                          <span className="text-xs text-text-secondary">支持 png、jpg、webp，最大 2MB</span>
+                        </div>
+                        {appConfig.merchantAuthQrUrl ? (
+                          <img
+                            src={appConfig.merchantAuthQrUrl}
+                            alt="已上传支付宝商家授权二维码"
+                            className="mt-3 h-28 w-28 rounded-lg border border-border bg-white object-contain"
+                          />
+                        ) : (
+                          <p className="mt-2 text-xs text-text-secondary">尚未上传二维码图片。</p>
+                        )}
+                      </div>
                       <label className="block text-sm font-medium text-text-primary">
                         应用公钥证书
                         <textarea
@@ -3759,7 +3852,7 @@ export default function DataConnectionsPanel({
           error_shop_count: 0,
         });
         setMode('platform');
-        void Promise.all([fetchShops('alipay'), fetchPlatformAppConfig('alipay'), fetchAlipayPendingAuthorizations()]);
+        void Promise.all([fetchShops('alipay'), fetchPlatformAppConfig('alipay')]);
         return;
       }
       void launchAuthFlow(normalizedPlatformCode);
@@ -3780,12 +3873,9 @@ export default function DataConnectionsPanel({
         fetchShops(normalizedPlatform.platform_code),
         fetchPlatformAppConfig(normalizedPlatform.platform_code),
       ];
-      if (normalizedPlatform.platform_code === 'alipay') {
-        loadingTasks.push(fetchAlipayPendingAuthorizations());
-      }
       await Promise.all(loadingTasks);
     },
-    [fetchAlipayPendingAuthorizations, fetchPlatformAppConfig, fetchShops],
+    [fetchPlatformAppConfig, fetchShops],
   );
 
   const handleBackToOverview = useCallback(() => {
@@ -3793,6 +3883,7 @@ export default function DataConnectionsPanel({
     setSelectedPlatform(null);
     setShops([]);
     setShopError('');
+    setShopNotice('');
     setPlatformError('');
     setAlipayPendingAuthorizations([]);
     setAlipayClaimError('');
@@ -3803,6 +3894,8 @@ export default function DataConnectionsPanel({
     async (shop: ShopConnection) => {
       if (!authToken) return;
       setActioningShopId(shop.id);
+      setShopError('');
+      setShopNotice('');
       try {
         const response = await fetch(`/api/shop-connections/${shop.id}/reauthorize`, {
           method: 'POST',
@@ -3837,6 +3930,8 @@ export default function DataConnectionsPanel({
     async (shop: ShopConnection) => {
       if (!authToken) return;
       setActioningShopId(shop.id);
+      setShopError('');
+      setShopNotice('');
       try {
         const response = await fetch(`/api/shop-connections/${shop.id}/disable`, {
           method: 'POST',
@@ -3847,10 +3942,26 @@ export default function DataConnectionsPanel({
         if (!response.ok) {
           throw new Error(String(data?.detail || data?.message || '停用授权失败'));
         }
+        const responseConnection = data?.connection ?? data?.shop;
+        if (responseConnection && typeof responseConnection === 'object') {
+          setShops((current) =>
+            current.map((item) => (item.id === shop.id ? ({ ...item, ...responseConnection } as ShopConnection) : item)),
+          );
+        }
+        let nextShops: ShopConnection[] = [];
         if (selectedPlatform) {
-          await fetchShops(selectedPlatform.platform_code);
+          nextShops = await fetchShops(selectedPlatform.platform_code);
         }
         await fetchPlatforms();
+        const disabledConnection =
+          nextShops.find((item) => item.id === shop.id) ??
+          (responseConnection && typeof responseConnection === 'object' ? (responseConnection as ShopConnection) : null);
+        if (disabledConnection) {
+          setShops((current) =>
+            current.map((item) => (item.id === shop.id ? ({ ...item, ...disabledConnection } as ShopConnection) : item)),
+          );
+        }
+        setShopNotice(String(data?.message || '授权已停用'));
       } catch (error) {
         setShopError(error instanceof Error ? error.message : '停用授权失败');
       } finally {
@@ -5067,9 +5178,6 @@ export default function DataConnectionsPanel({
         return;
       }
       if (isPlatformCollectionRunning(detail.collectionStatus)) {
-        return;
-      }
-      if (!detail.collectionStatus.canInitialize && !detail.collectionStatus.canRetryInitialize) {
         return;
       }
       if (!authToken || draftSourceIdSet.has(detail.sourceId)) {
@@ -7990,7 +8098,10 @@ export default function DataConnectionsPanel({
                               <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>
                             ) : (() => {
                               const sampleRows = rows.slice(0, 10).map((row) => asRecord(row) ?? {});
-                              const columns = buildSampleTableColumns(sampleRows);
+                              const columns = buildSemanticSampleTableColumns(
+                                collectionDetailDialog.detail?.fieldGroups ?? [],
+                                sampleRows,
+                              );
                               if (columns.length === 0) {
                                 return <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>;
                               }
@@ -7999,8 +8110,8 @@ export default function DataConnectionsPanel({
                                   <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
                                     <tr>
                                       {columns.map((column) => (
-                                        <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">
-                                          {column}
+                                        <th key={column.rawName} className="whitespace-nowrap px-3 py-2 font-medium">
+                                          {column.displayName}
                                         </th>
                                       ))}
                                     </tr>
@@ -8009,8 +8120,12 @@ export default function DataConnectionsPanel({
                                     {sampleRows.map((row, rowIndex) => (
                                       <tr key={`collection-sample-${rowIndex}`} className="hover:bg-surface-secondary/60">
                                         {columns.map((column) => (
-                                          <td key={`${rowIndex}-${column}`} className="max-w-56 truncate px-3 py-2" title={formatSampleCellValue(row[column])}>
-                                            {formatSampleCellValue(row[column])}
+                                          <td
+                                            key={`${rowIndex}-${column.rawName}`}
+                                            className="max-w-56 truncate px-3 py-2"
+                                            title={formatSampleCellValue(row[column.rawName])}
+                                          >
+                                            {formatSampleCellValue(row[column.rawName])}
                                           </td>
                                         ))}
                                       </tr>
@@ -8325,7 +8440,13 @@ export default function DataConnectionsPanel({
       )}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         {platforms.map((platform) => {
-          const isAuthEnabled = platform.platform_code === 'taobao' || platform.platform_code === 'alipay';
+          const isTaobaoPlatform = platform.platform_code === 'taobao';
+          const isAuthEnabled = platform.platform_code === 'alipay';
+          const authButtonLabel = isTaobaoPlatform
+            ? 'ISV申请中'
+            : isAuthEnabled
+              ? '新增授权'
+              : '待接入';
           return (
             <div
               key={platform.platform_code}
@@ -8366,14 +8487,14 @@ export default function DataConnectionsPanel({
                   type="button"
                   onClick={() => handleLaunchAuth(platform.platform_code)}
                   disabled={!isAuthEnabled || launchingAuthPlatform === platform.platform_code}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-surface-tertiary disabled:text-text-muted disabled:hover:bg-surface-tertiary transition-colors"
                 >
                   {launchingAuthPlatform === platform.platform_code ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Plus className="h-3.5 w-3.5" />
                   )}
-                  {isAuthEnabled ? '新增授权' : '待接入'}
+                  {authButtonLabel}
                 </button>
               </div>
             </div>
@@ -8408,8 +8529,8 @@ export default function DataConnectionsPanel({
             <div className="space-y-3">
               {details.map((detail) => {
                 const datasetName =
-                  detail.dataset.business_name ||
                   detail.dataset.dataset_name ||
+                  detail.dataset.business_name ||
                   detail.dataset.dataset_code;
                 const collectionStatus = detail.collectionStatus.status || 'unknown';
                 const semanticStatus = detail.semanticStatus.status || 'unknown';
@@ -8417,10 +8538,8 @@ export default function DataConnectionsPanel({
                 const isSemanticRunning = isPlatformSemanticRunning(detail.semanticStatus);
                 const collectionActionId = `${detail.sourceId}:${detail.dataset.id}`;
                 const isCollectionActionBusy = platformDatasetCollectionActionIds.has(collectionActionId);
-                const canRetryCollection =
-                  !isCollectionRunning &&
-                  !isCollectionActionBusy &&
-                  (detail.collectionStatus.canInitialize || detail.collectionStatus.canRetryInitialize);
+                const canRetryCollection = !isCollectionRunning && !isCollectionActionBusy;
+                const collectionActionLabel = '重新初始化';
                 const canRefreshSemantic =
                   !isCollectionRunning &&
                   !isSemanticRunning &&
@@ -8453,21 +8572,19 @@ export default function DataConnectionsPanel({
                         </div>
                       </div>
                       <div className="flex flex-wrap justify-end gap-2">
-                        {(canRetryCollection || isCollectionActionBusy) && (
-                          <button
-                            type="button"
-                            onClick={() => void retryPlatformDatasetCollection(shop, detail)}
-                            disabled={isCollectionActionBusy}
-                            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isCollectionActionBusy ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <RefreshCw className="h-3.5 w-3.5" />
-                            )}
-                            初始化重试
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => void retryPlatformDatasetCollection(shop, detail)}
+                          disabled={!canRetryCollection && !isCollectionActionBusy}
+                          className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isCollectionActionBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                          {collectionActionLabel}
+                        </button>
                         {canRefreshSemantic && (
                           <button
                             type="button"
@@ -8521,50 +8638,9 @@ export default function DataConnectionsPanel({
                         )}
 
                         <div>
-                          <p className="text-xs font-medium text-text-secondary">字段结构</p>
-                          {detail.fieldGroups.length === 0 ? (
-                            <p className="mt-2 rounded-lg border border-dashed border-border px-3 py-2 text-sm text-text-secondary">
-                              暂无字段结构。
-                            </p>
-                          ) : (
-                            <div className="mt-2 grid gap-2 lg:grid-cols-3">
-                              {detail.fieldGroups.map((group) => (
-                                <div key={group.key} className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-xs font-medium text-text-primary">{group.label}</p>
-                                    <span className="text-xs text-text-muted">{group.fields.length}</span>
-                                  </div>
-                                  <div className="mt-2 flex max-h-28 flex-wrap gap-1.5 overflow-auto">
-                                    {group.fields.length === 0 ? (
-                                      <span className="text-xs text-text-muted">暂无字段</span>
-                                    ) : (
-                                      group.fields.map((field, index) => {
-                                        const rawName = rawFieldName(field);
-                                        const displayName = displayFieldName(field);
-                                        return (
-                                          <span
-                                            key={`${group.key}-${rawName || index}`}
-                                            className="inline-flex max-w-full items-center gap-1 rounded-md bg-surface px-2 py-1 text-xs text-text-secondary"
-                                            title={rawName && rawName !== displayName ? rawName : displayName}
-                                          >
-                                            <span className="truncate">{displayName}</span>
-                                          </span>
-                                        );
-                                      })
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-
-                        <div>
-                          <p className="text-xs font-medium text-text-secondary">真实数据预览</p>
+                          <p className="text-xs font-medium text-text-secondary">数据预览</p>
                           <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-border bg-surface">
-                            {previewRows.length === 0 ? (
-                              <p className="px-3 py-3 text-sm text-text-secondary">暂无真实数据。</p>
-                            ) : previewColumns.length === 0 ? (
+                            {previewColumns.length === 0 ? (
                               <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>
                             ) : (
                               <table className="min-w-full divide-y divide-border text-left text-xs">
@@ -8582,19 +8658,27 @@ export default function DataConnectionsPanel({
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border text-text-primary">
-                                  {previewRows.map((row, rowIndex) => (
-                                    <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
-                                      {previewColumns.map((column) => (
-                                        <td
-                                          key={`${rowIndex}-${column.rawName}`}
-                                          className="max-w-56 truncate px-3 py-2"
-                                          title={formatSampleCellValue(row[column.rawName])}
-                                        >
-                                          {formatPreviewCell(row[column.rawName])}
-                                        </td>
-                                      ))}
+                                  {previewRows.length === 0 ? (
+                                    <tr>
+                                      <td colSpan={previewColumns.length} className="px-3 py-3 text-sm text-text-secondary">
+                                        暂无数据。
+                                      </td>
                                     </tr>
-                                  ))}
+                                  ) : (
+                                    previewRows.map((row, rowIndex) => (
+                                      <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                        {previewColumns.map((column) => (
+                                          <td
+                                            key={`${rowIndex}-${column.rawName}`}
+                                            className="max-w-56 truncate px-3 py-2"
+                                            title={formatSampleCellValue(row[column.rawName])}
+                                          >
+                                            {formatPreviewCell(row[column.rawName])}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))
+                                  )}
                                 </tbody>
                               </table>
                             )}
@@ -8613,7 +8697,7 @@ export default function DataConnectionsPanel({
   };
 
   const renderAlipayMerchantAuthPanel = (appConfig: PlatformAppConfigFormState) => {
-    const hasStaticEntry = Boolean(appConfig.merchantAuthQrUrl || appConfig.merchantAuthPcUrl);
+    const hasStaticEntry = Boolean(appConfig.merchantAuthPcUrl);
     const selectedPending = alipayPendingAuthorizations.find(
       (item) => item.id === alipayClaimForm.pendingAuthorizationId,
     );
@@ -8625,7 +8709,7 @@ export default function DataConnectionsPanel({
           <div>
             <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
             <p className="mt-1 text-xs text-text-secondary">
-              使用支付宝开放平台商家授权入口完成账单权限授权，回调后在这里输入认领码绑定到当前企业。
+              使用支付宝开放平台商家授权入口完成账单权限授权，回调后在这里填写支付宝商户名称并绑定到当前企业。
             </p>
           </div>
           <button
@@ -8639,29 +8723,18 @@ export default function DataConnectionsPanel({
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            刷新待认领
+            刷新待绑定
           </button>
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
           <div className="rounded-xl border border-border bg-surface p-3">
-            {appConfig.merchantAuthQrUrl ? (
-              <img
-                src={appConfig.merchantAuthQrUrl}
-                alt="支付宝商家授权二维码"
-                className="aspect-square w-full rounded-lg border border-border bg-white object-contain"
-              />
-            ) : (
-              <div className="flex aspect-square w-full items-center justify-center rounded-lg border border-dashed border-border bg-surface-secondary px-3 text-center text-xs text-text-secondary">
-                待配置支付宝商家授权二维码
-              </div>
-            )}
             {appConfig.merchantAuthPcUrl ? (
               <a
                 href={appConfig.merchantAuthPcUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
                 打开支付宝商家授权
@@ -8689,17 +8762,17 @@ export default function DataConnectionsPanel({
           <div className="space-y-4">
             <div className="rounded-xl border border-border bg-surface p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h5 className="text-sm font-semibold text-text-primary">待认领授权</h5>
-                <span className="text-xs text-text-secondary">{pendingRows.length} 条待认领</span>
+                <h5 className="text-sm font-semibold text-text-primary">待绑定授权</h5>
+                <span className="text-xs text-text-secondary">{pendingRows.length} 条待绑定</span>
               </div>
               {loadingAlipayPendingAuthorizations ? (
                 <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在加载待认领授权
+                  正在加载待绑定授权
                 </div>
               ) : pendingRows.length === 0 ? (
                 <p className="mt-3 rounded-lg border border-dashed border-border px-3 py-3 text-sm text-text-secondary">
-                  当前没有待认领的支付宝授权。
+                  当前没有待绑定的支付宝授权。
                 </p>
               ) : (
                 <div className="mt-3 space-y-2">
@@ -8725,12 +8798,12 @@ export default function DataConnectionsPanel({
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                           <span className="font-medium text-text-primary">
-                            认领码：{pending.claim_code || '待输入'}
+                            支付宝主体：{pending.external_shop_id || '未知'}
                           </span>
                           <span className="text-text-secondary">过期：{formatTime(pending.expires_at)}</span>
                         </div>
                         <p className="mt-1 text-xs text-text-secondary">
-                          支付宝主体：{pending.external_shop_id || '未知'} · 回调：{formatTime(pending.created_at)}
+                          回调：{formatTime(pending.created_at)}
                         </p>
                       </button>
                     );
@@ -8741,20 +8814,9 @@ export default function DataConnectionsPanel({
 
             <div className="rounded-xl border border-border bg-surface p-3">
               <h5 className="text-sm font-semibold text-text-primary">绑定到当前企业</h5>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="mt-3 grid gap-3">
                 <label className="block text-sm font-medium text-text-primary">
-                  认领码
-                  <input
-                    value={alipayClaimForm.claimCode}
-                    onChange={(event) =>
-                      setAlipayClaimForm((current) => ({ ...current, claimCode: event.target.value }))
-                    }
-                    className="mt-2 w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder="ALIPAY-123456"
-                  />
-                </label>
-                <label className="block text-sm font-medium text-text-primary">
-                  商户显示名称
+                  支付宝商户名称
                   <input
                     value={alipayClaimForm.merchantDisplayName}
                     onChange={(event) =>
@@ -8797,7 +8859,7 @@ export default function DataConnectionsPanel({
                   ) : (
                     <CheckCircle2 className="h-4 w-4" />
                   )}
-                  绑定支付宝授权
+                  绑定到当前企业
                 </button>
               </div>
             </div>
@@ -8813,7 +8875,10 @@ export default function DataConnectionsPanel({
       platformAppConfigs[selectedPlatform.platform_code] ??
       createPlatformAppConfigFormState(selectedPlatform.platform_code);
     const isTaobaoPlatform = selectedPlatform.platform_code === 'taobao';
-    const isAuthEnabled = selectedPlatform.platform_code === 'taobao' || selectedPlatform.platform_code === 'alipay';
+    const isAlipayPlatform = selectedPlatform.platform_code === 'alipay';
+    const isAuthEnabled = selectedPlatform.platform_code === 'alipay';
+    const authButtonLabel = isTaobaoPlatform ? 'ISV申请中' : '新增授权';
+    const connectionNoun = isAlipayPlatform ? '商户' : '店铺';
 
     return (
       <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -8835,14 +8900,14 @@ export default function DataConnectionsPanel({
             type="button"
             onClick={() => handleLaunchAuth(selectedPlatform.platform_code)}
             disabled={!isAuthEnabled || launchingAuthPlatform === selectedPlatform.platform_code}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-surface-tertiary disabled:text-text-muted disabled:hover:bg-surface-tertiary transition-colors"
           >
             {launchingAuthPlatform === selectedPlatform.platform_code ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Plus className="h-4 w-4" />
             )}
-            {isTaobaoPlatform ? '新增店铺授权' : '新增授权'}
+            {authButtonLabel}
           </button>
         </div>
         {isTaobaoPlatform ? (
@@ -8882,46 +8947,38 @@ export default function DataConnectionsPanel({
               </p>
             )}
           </div>
-        ) : (
+        ) : !isAlipayPlatform ? (
           renderAlipayMerchantAuthPanel(appConfig)
-        )}
-        <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h4 className="text-sm font-semibold text-text-primary">固定数据集</h4>
-              <p className="mt-1 text-xs text-text-secondary">
-                平台授权完成后，系统会按店铺生成可供规则绑定的数据集目录。
-              </p>
-              {selectedPlatform.platform_code === 'taobao' && (
-                <p className="mt-2 text-xs text-text-secondary">
-                  一个淘宝/天猫店铺授权后会生成一个订单明细数据集，首次仅初始化 T-1 订单，之后每 2 小时同步订单变更。
+        ) : null}
+        {isAlipayPlatform && appConfig.merchantAuthPcUrl && (
+          <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
+                <p className="mt-1 text-xs text-text-secondary">
+                  授权完成回调后会直接绑定到当前企业，并生成支付宝商户账单数据集。
                 </p>
-              )}
-              {selectedPlatform.platform_code === 'alipay' && (
-                <p className="mt-2 text-xs text-text-secondary">
-                  {ALIPAY_AUTH_COLLECTION_COPY}
-                </p>
-              )}
-            </div>
-            <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}`}>
-              {getStatusLabel(selectedPlatform.status || (selectedPlatform.authorized_shop_count > 0 ? 'active' : 'pending'))}
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-            {(selectedPlatform.platform_code === 'alipay'
-              ? ALIPAY_FIXED_DATASET_FALLBACK
-              : PLATFORM_FIXED_DATASET_FALLBACK
-            ).map((datasetName) => (
-              <div key={datasetName} className="rounded-xl border border-border bg-surface px-3 py-3">
-                <p className="text-sm font-medium text-text-primary">{datasetName}</p>
-                <p className="mt-1 text-xs text-text-secondary">最近同步：{formatTime(selectedPlatform.last_sync_at)}</p>
               </div>
-            ))}
+              <a
+                href={appConfig.merchantAuthPcUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                打开支付宝商家授权
+              </a>
+            </div>
           </div>
-        </div>
+        )}
         {shopError && (
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
             {shopError}
+          </div>
+        )}
+        {shopNotice && (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+            {shopNotice}
           </div>
         )}
         {loadingShops ? (
@@ -8934,37 +8991,45 @@ export default function DataConnectionsPanel({
             当前平台暂无店铺授权记录。
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="min-w-[1100px] w-full table-fixed text-sm">
+              <colgroup>
+                <col className="w-[20%]" />
+                <col className="w-[20%]" />
+                <col className="w-[10%]" />
+                <col className="w-[15%]" />
+                <col className="w-[13%]" />
+                <col className="w-[22%]" />
+              </colgroup>
               <thead className="bg-surface-secondary text-left text-text-secondary">
                 <tr>
-                  <th className="px-4 py-3 font-medium">店铺名称</th>
-                  <th className="px-4 py-3 font-medium">店铺 ID</th>
-                  <th className="px-4 py-3 font-medium">授权状态</th>
-                  <th className="px-4 py-3 font-medium">Token 到期</th>
-                  <th className="px-4 py-3 font-medium">最近同步</th>
-                  <th className="px-4 py-3 font-medium text-right">操作</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">{connectionNoun}名称</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">{connectionNoun} ID</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">授权状态</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">Token 到期</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">最近同步</th>
+                  <th className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {shops.map((shop) => (
                   <Fragment key={shop.id}>
                     <tr className="border-t border-border-subtle text-text-primary">
-                      <td className="px-4 py-3">{shop.external_shop_name}</td>
-                      <td className="px-4 py-3 text-text-secondary">{shop.external_shop_id}</td>
+                      <td className="px-4 py-3 truncate" title={shop.external_shop_name}>{shop.external_shop_name}</td>
+                      <td className="px-4 py-3 truncate text-text-secondary" title={shop.external_shop_id}>{shop.external_shop_id}</td>
                       <td className="px-4 py-3">
-                        <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs font-medium text-blue-600">
-                          {getStatusLabel(shop.auth_status)}
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(shop.auth_status || shop.status)}`}>
+                          {getStatusLabel(shop.auth_status || shop.status)}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-text-secondary">{formatTime(shop.token_expires_at)}</td>
                       <td className="px-4 py-3 text-text-secondary">{formatTime(shop.last_sync_at)}</td>
                       <td className="px-4 py-3">
-                        <div className="flex justify-end gap-2">
+                        <div className="flex justify-end gap-2 whitespace-nowrap">
                           <button
                             type="button"
                             onClick={() => void loadPlatformShopDatasetDetails(shop)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
                           >
                             <Database className="h-3.5 w-3.5" />
                             数据集
@@ -8973,7 +9038,7 @@ export default function DataConnectionsPanel({
                             type="button"
                             onClick={() => void handleReauthorize(shop)}
                             disabled={actioningShopId === shop.id}
-                            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
                           >
                             <RefreshCw className="h-3.5 w-3.5" />
                             重授权
@@ -8981,8 +9046,11 @@ export default function DataConnectionsPanel({
                           <button
                             type="button"
                             onClick={() => void handleDisable(shop)}
-                            disabled={actioningShopId === shop.id}
-                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
+                            disabled={
+                              actioningShopId === shop.id ||
+                              ['disabled', 'revoked'].includes((shop.auth_status || shop.status || '').toLowerCase())
+                            }
+                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
                           >
                             <Ban className="h-3.5 w-3.5" />
                             停用
@@ -9106,6 +9174,10 @@ export default function DataConnectionsPanel({
 
   if (mode === 'callback' && callbackPayload) {
     const isSuccess = callbackPayload.status === 'success';
+    const canBindAlipayCallback =
+      isSuccess &&
+      callbackPayload.platformCode === 'alipay' &&
+      Boolean(callbackPayload.pendingAuthorizationId && callbackPayload.claimCode);
     return (
       <div className="flex-1 overflow-y-auto bg-surface-secondary p-6">
         <div className="mx-auto w-full max-w-3xl space-y-4">
@@ -9127,12 +9199,48 @@ export default function DataConnectionsPanel({
                   {callbackPayload.message || (isSuccess ? '授权成功，已记录店铺连接信息。' : '授权失败，请重新发起授权。')}
                 </p>
                 {callbackPayload.shopName && (
-                  <p className="mt-2 text-sm text-text-secondary">店铺：{callbackPayload.shopName}</p>
+                  <p className="mt-2 text-sm text-text-secondary">支付宝商户：{callbackPayload.shopName}</p>
                 )}
-                {callbackPayload.claimCode && (
-                  <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-3">
-                    <p className="text-xs font-medium text-blue-700">支付宝授权认领码</p>
-                    <p className="mt-1 font-mono text-lg font-semibold text-blue-900">{callbackPayload.claimCode}</p>
+                {canBindAlipayCallback && (
+                  <div className="mt-4 rounded-xl border border-border bg-surface-secondary p-4">
+                    <h3 className="text-sm font-semibold text-text-primary">绑定支付宝授权到当前企业</h3>
+                    <label className="mt-3 block text-sm font-medium text-text-primary">
+                      支付宝商户名称
+                      <input
+                        value={alipayClaimForm.merchantDisplayName}
+                        onChange={(event) =>
+                          setAlipayClaimForm((current) => ({
+                            ...current,
+                            merchantDisplayName: event.target.value,
+                          }))
+                        }
+                        className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                        placeholder="例如：福游网络"
+                      />
+                    </label>
+                    {alipayClaimError && (
+                      <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                        {alipayClaimError}
+                      </div>
+                    )}
+                    {alipayClaimNotice && (
+                      <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                        {alipayClaimNotice}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void claimAlipayPendingAuthorization()}
+                      disabled={claimingAlipayAuthorization || !alipayClaimForm.merchantDisplayName.trim()}
+                      className="mt-3 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {claimingAlipayAuthorization ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="h-4 w-4" />
+                      )}
+                      绑定到当前企业
+                    </button>
                   </div>
                 )}
               </div>
@@ -9149,11 +9257,7 @@ export default function DataConnectionsPanel({
                       authorized_shop_count: 0,
                       error_shop_count: 0,
                     });
-                    setAlipayClaimForm((current) => ({
-                      ...current,
-                      claimCode: callbackPayload.claimCode || current.claimCode,
-                      pendingAuthorizationId: callbackPayload.pendingAuthorizationId || current.pendingAuthorizationId,
-                    }));
+                    fillAlipayClaimFormFromCallback(callbackPayload);
                     setMode('platform');
                     void Promise.all([
                       fetchPlatformAppConfig('alipay'),

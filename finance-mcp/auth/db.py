@@ -27,6 +27,7 @@ _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
+_SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -505,6 +506,7 @@ def ensure_unified_data_source_schema() -> list[str]:
     if not _platform_alipay_bill_lines_schema_ready():
         _execute_sql_script(_migration_path("025_platform_alipay_bill_lines.sql"))
         applied.append("025_platform_alipay_bill_lines.sql")
+    applied.extend(ensure_sync_jobs_trigger_modes_schema())
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -539,6 +541,31 @@ def ensure_unified_data_source_schema() -> list[str]:
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
     return applied
+
+
+def ensure_sync_jobs_trigger_modes_schema() -> list[str]:
+    """确保 sync_jobs.trigger_mode 允许初始化和调度采集语义。"""
+    global _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY
+    if _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY:
+        return []
+    if not _table_exists("sync_jobs"):
+        return []
+
+    required_modes = {"manual", "scheduled", "schedule", "event", "retry", "initial", "daily"}
+    constraint_def = _constraint_definition("sync_jobs", "sync_jobs_trigger_mode_check")
+    if all(mode in constraint_def for mode in required_modes):
+        _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
+        return []
+
+    migration_name = "027_sync_jobs_trigger_modes_initial_schedule.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("sync_jobs", "sync_jobs_trigger_mode_check")
+    if not all(mode in applied_constraint_def for mode in required_modes):
+        raise RuntimeError("sync_jobs.trigger_mode 约束升级失败，initial/schedule/daily 仍不可用")
+
+    _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
+    logger.info("sync_jobs.trigger_mode 约束已自动补齐: %s", migration_name)
+    return [migration_name]
 
 
 def ensure_execution_run_trigger_types_schema() -> list[str]:
@@ -5039,7 +5066,7 @@ _ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额")
 _ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额")
 _ALIPAY_TRADE_NO_RAW_KEYS = ("支付宝交易号", "支付宝流水号", "账务流水号")
 _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS = ("商户订单号", "商户订单号/商家订单号")
-_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号")
+_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号", "业务流水号")
 _ALIPAY_IDENTIFIER_RAW_KEY_SETS = {
     "alipay_trade_no": _ALIPAY_TRADE_NO_RAW_KEYS,
     "merchant_order_no": _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
@@ -5483,15 +5510,48 @@ def upsert_platform_alipay_bill_lines(
     bill_type: str,
     bill_date: str,
     rows: list[dict] | None = None,
+    replace_bill_scope: bool = False,
 ) -> dict:
     """按支付宝账单行唯一键 upsert 账单明细。"""
     items = rows or []
     if not items:
-        return {"input_count": 0, "upserted_count": 0, "inserted_count": 0, "updated_count": 0}
+        deleted_stale_count = 0
+        if replace_bill_scope:
+            conn_manager = get_conn()
+            with conn_manager as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM platform_alipay_bill_lines
+                        WHERE company_id = %s
+                          AND shop_connection_id = %s
+                          AND bill_type = %s
+                          AND bill_date = %s
+                          AND dataset_id = %s
+                        """,
+                        (
+                            company_id,
+                            shop_connection_id,
+                            bill_type,
+                            bill_date,
+                            dataset_id,
+                        ),
+                    )
+                    deleted_stale_count = int(getattr(cur, "rowcount", 0) or 0)
+                conn.commit()
+        return {
+            "input_count": 0,
+            "upserted_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "deleted_stale_count": deleted_stale_count,
+        }
 
     conn_manager = get_conn()
     inserted_count = 0
     updated_count = 0
+    deleted_stale_count = 0
+    seen_source_row_keys: list[str] = []
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -5553,6 +5613,8 @@ def upsert_platform_alipay_bill_lines(
                             payload=payload,
                         )
                         payload["source_row_key"] = source_row_key
+                    if source_row_key and source_row_key not in seen_source_row_keys:
+                        seen_source_row_keys.append(source_row_key)
                     alipay_trade_no = _first_non_empty_text(
                         item.get("alipay_trade_no"),
                         payload.get("alipay_trade_no"),
@@ -5636,12 +5698,34 @@ def upsert_platform_alipay_bill_lines(
                         inserted_count += 1
                     else:
                         updated_count += 1
+                if replace_bill_scope and seen_source_row_keys:
+                    cur.execute(
+                        """
+                        DELETE FROM platform_alipay_bill_lines
+                        WHERE company_id = %s
+                          AND shop_connection_id = %s
+                          AND bill_type = %s
+                          AND bill_date = %s
+                          AND dataset_id = %s
+                          AND source_row_key <> ALL(%s)
+                        """,
+                        (
+                            company_id,
+                            shop_connection_id,
+                            bill_type,
+                            bill_date,
+                            dataset_id,
+                            seen_source_row_keys,
+                        ),
+                    )
+                    deleted_stale_count = int(getattr(cur, "rowcount", 0) or 0)
             conn.commit()
             return {
                 "input_count": len(items),
                 "upserted_count": inserted_count + updated_count,
                 "inserted_count": inserted_count,
                 "updated_count": updated_count,
+                "deleted_stale_count": deleted_stale_count,
             }
     except Exception as e:
         logger.error(

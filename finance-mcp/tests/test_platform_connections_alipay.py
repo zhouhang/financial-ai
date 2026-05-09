@@ -767,6 +767,81 @@ def test_build_alipay_bill_dataset_payload_starts_unpublished() -> None:
 
     assert payload["resource_key"] == "alipay_bill:trade:shop-alipay-1"
     assert payload["publish_status"] == "unpublished"
+    assert "semantic_profile" not in payload
+    assert payload["meta"]["semantic_profile"]["business_name"] == "支付宝交易账单 - 福游网络"
+    assert payload["meta"]["semantic_profile"]["key_fields"] == [
+        "bill_type",
+        "bill_date",
+        "source_row_key",
+    ]
+
+
+def test_build_shop_view_uses_platform_dataset_last_sync_when_sync_source_empty(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_current_shop_authorization",
+        lambda shop_connection_id: {"id": "auth-1", "auth_status": "authorized", "token_expires_at": None},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "list_sync_sources",
+        lambda company_id, shop_connection_id: [
+            {
+                "id": "sync-bills",
+                "source_type": "bills",
+                "last_sync_at": None,
+                "last_status": "idle",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "list_unified_data_sources",
+        lambda **kwargs: [
+            {
+                "id": "source-alipay-1",
+                "company_id": kwargs["company_id"],
+                "source_kind": "platform_oauth",
+                "provider_code": "alipay",
+                "meta": {"shop_connection_id": "shop-alipay-1"},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [
+            {
+                "id": "dataset-fund",
+                "data_source_id": "source-alipay-1",
+                "resource_key": "alipay_bill:signcustomer:shop-alipay-1",
+                "last_sync_at": "2026-05-08T10:00:00+00:00",
+                "last_error_message": "",
+            },
+            {
+                "id": "dataset-trade",
+                "data_source_id": "source-alipay-1",
+                "resource_key": "alipay_bill:trade:shop-alipay-1",
+                "last_sync_at": "2026-05-08T11:00:00+00:00",
+                "last_error_message": "",
+            },
+        ],
+        raising=False,
+    )
+
+    view = platform_connections._build_shop_view(
+        {
+            "id": "shop-alipay-1",
+            "company_id": "company-1",
+            "platform_code": "alipay",
+            "external_shop_id": "2088123412341234",
+            "external_shop_name": "对对科技",
+            "status": "active",
+        }
+    )
+
+    assert view["last_sync_at"] == "2026-05-08T11:00:00+00:00"
 
 
 @pytest.mark.anyio
@@ -867,6 +942,8 @@ async def test_alipay_no_state_callback_creates_pending_claim(monkeypatch) -> No
     assert result["pending_authorization"]["id"] == "pending-1"
     assert result["pending_authorization"]["claim_code"] == "ALIPAY-123456"
     assert result["claim_code"] == "ALIPAY-123456"
+    assert result["message"] == "支付宝授权已收到，请填写支付宝商户名称完成绑定"
+    assert "认领码" not in result["message"]
     assert created["platform_code"] == "alipay"
     assert created["platform_app_id"] == "alipay-app-1"
     assert created["access_token"] == "app-auth-token"
@@ -1050,7 +1127,7 @@ async def test_claim_pending_alipay_authorization_rejects_wrong_claim_code(monke
     )
 
     assert result["success"] is False
-    assert result["error"] == "认领码不匹配，请检查后重试"
+    assert result["error"] == "授权校验信息不匹配，请重新发起授权"
 
 
 @pytest.mark.anyio
@@ -1098,3 +1175,123 @@ async def test_claim_pending_alipay_authorization_rejects_other_company_binding(
 
     assert result["success"] is False
     assert result["error"] == "该支付宝主体已绑定到其他企业，请联系服务商管理员处理"
+
+
+@pytest.mark.anyio
+async def test_reauthorize_alipay_shop_uses_existing_merchant_name(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_connection_id: {
+            "id": shop_connection_id,
+            "company_id": "company-1",
+            "platform_code": "alipay",
+            "external_shop_id": "2088123412341234",
+            "external_shop_name": "对对科技",
+            "status": "active",
+        },
+        raising=False,
+    )
+
+    async def fake_create_auth_session(arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update(arguments)
+        return {
+            "success": True,
+            "platform_code": "alipay",
+            "auth_url": "https://b.alipay.com/page/message/tasksDetail?bizData=abc",
+            "message": "已生成授权链接",
+        }
+
+    monkeypatch.setattr(platform_connections, "_handle_create_auth_session", fake_create_auth_session)
+
+    result = await platform_connections._handle_reauthorize_shop(
+        {
+            "auth_token": "token",
+            "shop_connection_id": "shop-alipay-1",
+            "return_path": "/data-connections",
+            "mode": "real",
+        }
+    )
+
+    assert result["success"] is True
+    assert captured["platform_code"] == "alipay"
+    assert captured["merchant_display_name"] == "对对科技"
+
+
+@pytest.mark.anyio
+async def test_disable_alipay_shop_returns_disabled_connection_view(monkeypatch) -> None:
+    updated: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        platform_connections,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_shop_connection_by_id",
+        lambda shop_connection_id: {
+            "id": shop_connection_id,
+            "company_id": "company-1",
+            "platform_code": "alipay",
+            "external_shop_id": "2088123412341234",
+            "external_shop_name": "对对科技",
+            "status": updated.get("status") or "active",
+        },
+        raising=False,
+    )
+
+    def fake_update_shop_connection_status(**kwargs: Any) -> dict[str, Any]:
+        updated["status"] = kwargs["status"]
+        return {
+            "id": kwargs["shop_connection_id"],
+            "company_id": "company-1",
+            "platform_code": "alipay",
+            "external_shop_name": "对对科技",
+            "status": kwargs["status"],
+        }
+
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "update_shop_connection_status",
+        fake_update_shop_connection_status,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "get_current_shop_authorization",
+        lambda shop_connection_id: {"id": "auth-1", "auth_status": "authorized"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        platform_connections.auth_db,
+        "update_shop_authorization_status",
+        lambda **kwargs: {"id": kwargs["authorization_id"], "auth_status": kwargs["auth_status"]},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        platform_connections,
+        "_build_shop_view",
+        lambda connection: {**connection, "auth_status": "disabled", "status": "disabled"},
+    )
+
+    result = await platform_connections._handle_disable_shop(
+        {
+            "auth_token": "token",
+            "shop_connection_id": "shop-alipay-1",
+            "reason": "测试停用",
+            "mode": "real",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["connection"]["status"] == "disabled"
+    assert result["connection"]["auth_status"] == "disabled"
+    assert result["message"] == "支付宝商户已停用"

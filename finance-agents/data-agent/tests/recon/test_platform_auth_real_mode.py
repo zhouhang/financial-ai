@@ -7,12 +7,24 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from starlette.datastructures import Headers
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 mcp_client = importlib.import_module("tools.mcp_client")
 platform_api = importlib.import_module("graphs.platform.api")
+
+
+class MemoryUploadFile:
+    def __init__(self, filename: str, content: bytes, content_type: str) -> None:
+        self.filename = filename
+        self.content_type = content_type
+        self._content = content
+        self.headers = Headers({"content-type": content_type})
+
+    async def read(self) -> bytes:
+        return self._content
 
 
 @pytest.mark.anyio
@@ -183,6 +195,9 @@ async def test_platform_app_config_wrappers_call_mcp(monkeypatch) -> None:
                 "app_public_cert": "APP-CERT",
                 "alipay_public_cert": "ALIPAY-CERT",
                 "alipay_root_cert": "ROOT-CERT",
+                "merchant_auth_mode": "",
+                "merchant_auth_pc_url": "",
+                "merchant_auth_qr_url": "",
             },
         ),
     ]
@@ -272,6 +287,107 @@ async def test_platform_app_config_route_forces_real_mode(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_platform_app_config_route_preserves_alipay_merchant_auth_links(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_platform_upsert_app_config(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "success": True,
+            "mode": kwargs["mode"],
+            "platform_code": args[1],
+            "configured": True,
+            "config": {
+                "platform_code": args[1],
+                "app_key": kwargs["app_key"],
+                "merchant_auth_mode": kwargs["merchant_auth_mode"],
+                "merchant_auth_pc_url": kwargs["merchant_auth_pc_url"],
+                "merchant_auth_qr_url": kwargs["merchant_auth_qr_url"],
+            },
+        }
+
+    monkeypatch.setattr(platform_api, "platform_upsert_app_config", fake_platform_upsert_app_config)
+
+    result = await platform_api.upsert_platform_app_config(
+        "alipay",
+        platform_api.UpsertPlatformAppConfigRequest(
+            app_key="2021006152656574",
+            app_secret="PRIVATE-KEY",
+            redirect_uri="https://dev.tallyai.cn/api/platform-auth/callback/alipay",
+            app_public_cert="APP-CERT",
+            alipay_public_cert="ALIPAY-CERT",
+            alipay_root_cert="ROOT-CERT",
+            merchant_auth_mode="static_invite",
+            merchant_auth_pc_url="https://b.alipay.com/page/message/tasksDetail?bizData=abc",
+            merchant_auth_qr_url="",
+        ),
+        authorization="Bearer token",
+    )
+
+    assert result.config.merchant_auth_pc_url == "https://b.alipay.com/page/message/tasksDetail?bizData=abc"
+    assert result.config.merchant_auth_qr_url == ""
+    assert calls[0]["kwargs"]["merchant_auth_mode"] == "static_invite"
+    assert calls[0]["kwargs"]["merchant_auth_pc_url"] == "https://b.alipay.com/page/message/tasksDetail?bizData=abc"
+    assert calls[0]["kwargs"]["merchant_auth_qr_url"] == ""
+
+
+@pytest.mark.anyio
+async def test_upload_alipay_merchant_auth_qr_saves_image_and_updates_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    saved_payloads: list[dict[str, Any]] = []
+
+    async def fake_platform_get_app_config(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "platform_code": args[1],
+            "configured": True,
+            "config": {
+                "app_key": "2021006152656574",
+                "has_app_secret": True,
+                "has_app_public_cert": True,
+                "has_alipay_public_cert": True,
+                "has_alipay_root_cert": True,
+                "redirect_uri": "https://dev.tallyai.cn/api/platform-auth/callback/alipay",
+                "merchant_auth_mode": "static_invite",
+                "merchant_auth_pc_url": "https://b.alipay.com/page/message/tasksDetail?bizData=abc",
+                "merchant_auth_qr_url": "",
+            },
+        }
+
+    async def fake_platform_upsert_app_config(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        saved_payloads.append({"args": args, "kwargs": kwargs})
+        return {
+            "success": True,
+            "mode": kwargs["mode"],
+            "platform_code": args[1],
+            "configured": True,
+            "config": {
+                "platform_code": args[1],
+                "app_key": kwargs["app_key"],
+                "merchant_auth_qr_url": kwargs["merchant_auth_qr_url"],
+            },
+            "message": "支付宝商家授权二维码已上传",
+        }
+
+    monkeypatch.setattr(platform_api, "ALIPAY_AUTH_ASSET_ROOT", tmp_path)
+    monkeypatch.setattr(platform_api, "platform_get_app_config", fake_platform_get_app_config)
+    monkeypatch.setattr(platform_api, "platform_upsert_app_config", fake_platform_upsert_app_config)
+
+    result = await platform_api.upload_alipay_merchant_auth_qr(
+        MemoryUploadFile("qr.png", b"\x89PNG\r\n\x1a\nqr-content", "image/png"),
+        authorization="Bearer token",
+    )
+
+    assert result.success is True
+    assert result.merchant_auth_qr_url == "/api/platform-connections/alipay/assets/merchant-auth-qr.png"
+    assert (tmp_path / "merchant-auth-qr.png").read_bytes() == b"\x89PNG\r\n\x1a\nqr-content"
+    assert saved_payloads[0]["kwargs"]["merchant_auth_pc_url"] == "https://b.alipay.com/page/message/tasksDetail?bizData=abc"
+    assert saved_payloads[0]["kwargs"]["merchant_auth_qr_url"] == "/api/platform-connections/alipay/assets/merchant-auth-qr.png"
+
+
+@pytest.mark.anyio
 async def test_platform_pending_authorization_routes_forward_to_mcp(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -338,6 +454,50 @@ async def test_platform_pending_authorization_routes_forward_to_mcp(monkeypatch)
             },
         },
     ]
+
+
+@pytest.mark.anyio
+async def test_platform_shop_list_route_preserves_authorization_fields(monkeypatch) -> None:
+    async def fake_platform_list_shops(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "mode": kwargs["mode"],
+            "platform_code": args[1],
+            "platform_name": "支付宝",
+            "shops": [
+                {
+                    "id": "shop-alipay-1",
+                    "company_id": "company-1",
+                    "platform_code": "alipay",
+                    "platform_name": "支付宝",
+                    "external_shop_id": "2088123412341234",
+                    "external_shop_name": "对对科技",
+                    "auth_status": "authorized",
+                    "status": "authorized",
+                    "token_status": "authorized",
+                    "token_expires_at": "2027-05-09T12:00:00+08:00",
+                    "last_refresh_at": "2026-05-09T12:00:00+08:00",
+                    "last_sync_at": "2026-05-09T12:30:00+08:00",
+                    "last_status": "success",
+                }
+            ],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(platform_api, "platform_list_shops", fake_platform_list_shops)
+
+    response = await platform_api.get_platform_shops(
+        "alipay",
+        mode="real",
+        authorization="Bearer token",
+    )
+
+    shop = response.shops[0]
+    assert shop.auth_status == "authorized"
+    assert shop.token_expires_at == "2027-05-09T12:00:00+08:00"
+    assert shop.last_refresh_at == "2026-05-09T12:00:00+08:00"
+    assert shop.last_sync_at == "2026-05-09T12:30:00+08:00"
+    assert shop.last_status == "success"
 
 
 @pytest.mark.anyio
@@ -413,7 +573,7 @@ async def test_platform_auth_callback_redirect_includes_pending_claim_params(mon
             "mode": kwargs["mode"],
             "platform_code": args[0],
             "return_path": "/data-connections?mode=platform&platform=alipay",
-            "message": "支付宝授权已收到，请在 Tally 输入认领码完成绑定",
+            "message": "支付宝授权已收到，请填写支付宝商户名称完成绑定",
             "pending_authorization_id": "pending-1",
             "claim_code": "ALIPAY-123456",
         }
@@ -446,5 +606,6 @@ async def test_platform_auth_callback_redirect_includes_pending_claim_params(mon
 
     assert response.status_code == 303
     assert redirect_query["platform_auth_status"] == ["success"]
+    assert redirect_query["platform_auth_message"] == ["支付宝授权已收到，请填写支付宝商户名称完成绑定"]
     assert redirect_query["pending_authorization_id"] == ["pending-1"]
     assert redirect_query["claim_code"] == ["ALIPAY-123456"]

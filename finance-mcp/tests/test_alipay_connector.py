@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import sys
@@ -16,6 +17,35 @@ from platforms.connectors.alipay import AlipayConnector, build_alipay_row_key
 from platforms.factory import build_connector
 
 
+def _test_private_key_and_cert():
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    from datetime import datetime, timedelta, timezone
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Tally Test"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "2088000000000000"),
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=1))
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    return private_key, cert_pem
+
+
 def _config() -> PlatformAppConfig:
     return PlatformAppConfig(
         id="app-row-id",
@@ -30,9 +60,9 @@ def _config() -> PlatformAppConfig:
         refresh_url="https://openapi.alipay.com/gateway.do",
         redirect_uri="https://tally.example.com/api/platform-auth/callback/alipay",
         extra={
-            "app_public_cert": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
-            "alipay_public_cert": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
-            "alipay_root_cert": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            "app_public_cert": "",
+            "alipay_public_cert": "",
+            "alipay_root_cert": "",
             "mode": "real",
         },
         auth_mode="real",
@@ -201,7 +231,7 @@ def test_parse_bill_zip_rows_adds_metadata_and_row_key():
     with zipfile.ZipFile(raw, "w") as zf:
         zf.writestr("2088_20260506.csv", csv_text.encode("gbk"))
 
-    rows = connector.parse_bill_file(
+    parsed = connector.parse_bill_file(
         content=raw.getvalue(),
         file_name="bill.zip",
         bill_type="trade",
@@ -209,7 +239,9 @@ def test_parse_bill_zip_rows_adds_metadata_and_row_key():
         merchant_display_name="福游网络",
         shop_connection_id="shop-1",
     )
+    rows = parsed["rows"]
 
+    assert [column["name"] for column in parsed["columns"]] == ["商户订单号", "支付宝交易号", "金额"]
     assert rows[0]["bill_type"] == "trade"
     assert rows[0]["bill_date"] == "2026-05-06"
     assert rows[0]["merchant_order_no"] == "M-1"
@@ -246,11 +278,37 @@ def test_download_bill_file_sanitizes_http_error_url(monkeypatch):
     assert "secret.zip" not in message
 
 
-def test_download_bill_file_rejects_non_https_url(monkeypatch):
+def test_download_bill_file_allows_alipay_billcenter_http_url(monkeypatch):
+    connector = AlipayConnector(_config())
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        content = b"bill-content"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("platforms.connectors.alipay.requests.get", fake_get)
+
+    content = connector.download_bill_file(
+        bill_download_url="http://dwbillcenter.alipay.com/downloadBillFile.resource?bizType=trade"
+    )
+
+    assert content == b"bill-content"
+    assert captured["url"] == "http://dwbillcenter.alipay.com/downloadBillFile.resource?bizType=trade"
+    assert captured["timeout"] == 60
+
+
+def test_download_bill_file_rejects_untrusted_http_url(monkeypatch):
     connector = AlipayConnector(_config())
 
     def fail_get(url, timeout):
-        raise AssertionError("requests.get should not be called for non-HTTPS URLs")
+        raise AssertionError("requests.get should not be called for untrusted HTTP URLs")
 
     monkeypatch.setattr("platforms.connectors.alipay.requests.get", fail_get)
 
@@ -272,7 +330,7 @@ def test_parse_csv_skips_preamble_before_header():
         "M-1,A-1,10.00\n"
     ).encode("utf-8")
 
-    rows = connector.parse_bill_file(
+    parsed = connector.parse_bill_file(
         content=content,
         file_name="bill.csv",
         bill_type="trade",
@@ -280,8 +338,14 @@ def test_parse_csv_skips_preamble_before_header():
         merchant_display_name="福游网络",
         shop_connection_id="shop-1",
     )
+    rows = parsed["rows"]
 
     assert len(rows) == 1
+    assert parsed["columns"] == [
+        {"name": "商户订单号", "data_type": "text", "nullable": True},
+        {"name": "支付宝交易号", "data_type": "text", "nullable": True},
+        {"name": "金额", "data_type": "text", "nullable": True},
+    ]
     assert rows[0]["merchant_order_no"] == "M-1"
     assert rows[0]["alipay_trade_no"] == "A-1"
     assert rows[0]["raw"]["金额"] == "10.00"
@@ -291,7 +355,7 @@ def test_parse_direct_csv_rows_adds_business_order_no():
     connector = AlipayConnector(_config())
     content = "业务订单号,支付宝流水号,金额\nB-1,F-1,12.00\n".encode("utf-8-sig")
 
-    rows = connector.parse_bill_file(
+    parsed = connector.parse_bill_file(
         content=content,
         file_name="bill.csv",
         bill_type="signcustomer",
@@ -299,6 +363,7 @@ def test_parse_direct_csv_rows_adds_business_order_no():
         merchant_display_name="福游网络",
         shop_connection_id="shop-1",
     )
+    rows = parsed["rows"]
 
     assert rows[0]["business_order_no"] == "B-1"
     assert rows[0]["alipay_trade_no"] == "F-1"
@@ -306,6 +371,69 @@ def test_parse_direct_csv_rows_adds_business_order_no():
     assert rows[0]["source_row_number"] == 2
     assert len(rows[0]["source_row_key"]) == 64
     assert rows[0]["source_row_key"] != "B-1"
+
+
+def test_parse_signcustomer_csv_filters_summary_and_footer_rows():
+    connector = AlipayConnector(_config())
+    content = (
+        "#支付宝账务汇总查询\n"
+        "#起始日期：[2026年05月08日 00:00:00]   终止日期：[2026年05月09日 00:00:00]\n"
+        "账务流水号,商户订单号,业务流水号,收入金额（+元）,支出金额（-元）,账户余额（元）,发生时间,备注\n"
+        "202605080001,M-1,B-1,88.00,,100.00,2026-05-08 10:00:00,订单收款\n"
+        "#-----------------------------------------账务明细列表结束------------------------------------,,,,,,,\n"
+        "#支出合计：0笔，共0.00元,,,,,,,\n"
+        "#收入合计：1笔，共88.00元,,,,,,,\n"
+        "#导出时间：[2026年05月09日 12:51:06],,,,,,,\n"
+    ).encode("gbk")
+
+    parsed = connector.parse_bill_file(
+        content=content,
+        file_name="fund.csv",
+        bill_type="signcustomer",
+        bill_date="2026-05-08",
+        merchant_display_name="福游网络",
+        shop_connection_id="shop-1",
+    )
+    rows = parsed["rows"]
+
+    assert len(rows) == 1
+    assert rows[0]["alipay_trade_no"] == "202605080001"
+    assert rows[0]["merchant_order_no"] == "M-1"
+    assert rows[0]["business_order_no"] == "B-1"
+    assert rows[0]["raw"]["收入金额（+元）"] == "88.00"
+
+
+def test_parse_empty_signcustomer_bill_returns_columns_without_summary_rows():
+    connector = AlipayConnector(_config())
+    content = (
+        "#支付宝账务明细查询\n"
+        "账务流水号,商户订单号,业务流水号,收入金额（+元）,支出金额（-元）,账户余额（元）,发生时间,备注\n"
+        "#-----------------------------------------账务明细列表结束------------------------------------,,,,,,,\n"
+        "#支出合计：0笔，共0.00元,,,,,,,\n"
+        "#收入合计：0笔，共0.00元,,,,,,,\n"
+        "#导出时间：[2026年05月09日 12:51:06],,,,,,,\n"
+    ).encode("gbk")
+
+    parsed = connector.parse_bill_file(
+        content=content,
+        file_name="fund.csv",
+        bill_type="signcustomer",
+        bill_date="2026-05-08",
+        merchant_display_name="福游网络",
+        shop_connection_id="shop-1",
+    )
+
+    assert parsed["rows"] == []
+    assert [column["name"] for column in parsed["columns"]] == [
+        "账务流水号",
+        "商户订单号",
+        "业务流水号",
+        "收入金额（+元）",
+        "支出金额（-元）",
+        "账户余额（元）",
+        "发生时间",
+        "备注",
+    ]
 
 
 def test_build_alipay_row_key_is_hash_even_with_business_identifier():
@@ -351,6 +479,34 @@ def test_sign_params_returns_base64_signature_for_pem_private_key():
     )
 
 
+def test_build_signed_params_adds_certificate_serial_numbers(monkeypatch):
+    _, app_cert_pem = _test_private_key_and_cert()
+    _, root_cert_pem = _test_private_key_and_cert()
+    config = _config()
+    config.extra["app_public_cert"] = app_cert_pem
+    config.extra["alipay_root_cert"] = root_cert_pem
+    connector = AlipayConnector(config)
+    captured: dict[str, str] = {}
+
+    def fake_sign(params):
+        captured.update(params)
+        return "fake-sign"
+
+    monkeypatch.setattr(connector, "_sign_params", fake_sign)
+
+    params = connector._build_signed_params(
+        method="alipay.open.auth.token.app",
+        app_auth_token="",
+        biz_content={"grant_type": "authorization_code", "code": "app-auth-code"},
+    )
+
+    assert "app_auth_token" not in params
+    assert captured["app_cert_sn"]
+    assert captured["alipay_root_cert_sn"]
+    assert params["app_cert_sn"] == captured["app_cert_sn"]
+    assert params["alipay_root_cert_sn"] == captured["alipay_root_cert_sn"]
+
+
 def test_gateway_response_signature_malformed_signature_raises_sanitized_error():
     connector = AlipayConnector(_config())
 
@@ -365,6 +521,223 @@ def test_gateway_response_signature_malformed_signature_raises_sanitized_error()
     message = str(exc_info.value)
     assert message == "支付宝网关响应验签失败"
     assert "not-base64" not in message
+
+
+def test_post_alipay_request_verifies_signed_response_value_text(monkeypatch):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    config = _config()
+    config.extra["alipay_public_key"] = public_pem
+    connector = AlipayConnector(config)
+    monkeypatch.setattr(connector, "_sign_params", lambda params: "fake-sign")
+
+    response_payload = (
+        '{"code":"10000","msg":"Success","app_auth_token":"merchant-token",'
+        '"app_refresh_token":"merchant-refresh","expires_in":"31536000",'
+        '"re_expires_in":"32140800","auth_app_id":"2021000000000001",'
+        '"user_id":"2088123412341234"}'
+    )
+    signature = private_key.sign(
+        response_payload.encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    signature_text = base64.b64encode(signature).decode("ascii")
+    raw_response = (
+        '{"alipay_open_auth_token_app_response":'
+        f'{response_payload},"sign":"{signature_text}"'
+        "}"
+    )
+
+    class FakeResponse:
+        text = raw_response
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return json.loads(raw_response)
+
+    monkeypatch.setattr(
+        "platforms.connectors.alipay.requests.post",
+        lambda url, data, timeout: FakeResponse(),
+    )
+
+    data = connector._post_alipay_request(
+        method="alipay.open.auth.token.app",
+        app_auth_token="",
+        biz_content={"grant_type": "authorization_code", "code": "app-auth-code"},
+    )
+
+    assert data["alipay_open_auth_token_app_response"]["app_auth_token"] == "merchant-token"
+
+
+def test_post_alipay_request_verifies_response_value_with_escaped_slashes(monkeypatch):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    config = _config()
+    config.extra["alipay_public_key"] = public_pem
+    connector = AlipayConnector(config)
+    monkeypatch.setattr(connector, "_sign_params", lambda params: "fake-sign")
+
+    raw_response_payload = (
+        '{"code":"10000","msg":"Success",'
+        '"bill_download_url":"http:\\/\\/dwbillcenter.alipay.com\\/downloadBillFile.resource?bizType=trade"}'
+    )
+    signature = private_key.sign(
+        raw_response_payload.encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    signature_text = base64.b64encode(signature).decode("ascii")
+    raw_response = (
+        '{"alipay_data_dataservice_bill_downloadurl_query_response":'
+        f'{raw_response_payload},"sign":"{signature_text}"'
+        "}"
+    )
+
+    class FakeResponse:
+        text = raw_response
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return json.loads(raw_response)
+
+    monkeypatch.setattr(
+        "platforms.connectors.alipay.requests.post",
+        lambda url, data, timeout: FakeResponse(),
+    )
+
+    data = connector._post_alipay_request(
+        method="alipay.data.dataservice.bill.downloadurl.query",
+        app_auth_token="merchant-token",
+        biz_content={"bill_type": "trade", "bill_date": "2026-05-08"},
+    )
+
+    response = data["alipay_data_dataservice_bill_downloadurl_query_response"]
+    assert response["bill_download_url"].startswith("http://dwbillcenter.alipay.com/")
+
+
+def test_post_alipay_request_surfaces_business_error_when_error_signature_mismatches(monkeypatch):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    config = _config()
+    config.extra["alipay_public_key"] = public_pem
+    connector = AlipayConnector(config)
+    monkeypatch.setattr(connector, "_sign_params", lambda params: "fake-sign")
+
+    response_payload = (
+        '{"code":"40004","msg":"Business Failed",'
+        '"sub_code":"TYPE_NOT_SUPPORTED","sub_msg":"此账单类型不支持下载"}'
+    )
+    mismatched_signature = other_private_key.sign(
+        response_payload.encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    signature_text = base64.b64encode(mismatched_signature).decode("ascii")
+    raw_response = (
+        '{"alipay_data_dataservice_bill_downloadurl_query_response":'
+        f'{response_payload},"sign":"{signature_text}"'
+        "}"
+    )
+
+    class FakeResponse:
+        text = raw_response
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return json.loads(raw_response)
+
+    monkeypatch.setattr(
+        "platforms.connectors.alipay.requests.post",
+        lambda url, data, timeout: FakeResponse(),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        connector._post_alipay_request(
+            method="alipay.data.dataservice.bill.downloadurl.query",
+            app_auth_token="merchant-token",
+            biz_content={"bill_type": "trade", "bill_date": "2026-05-08"},
+        )
+
+    message = str(exc_info.value)
+    assert "此账单类型不支持下载" in message
+    assert "TYPE_NOT_SUPPORTED" in message
+
+
+def test_post_alipay_request_rejects_response_signature_for_envelope_text(monkeypatch):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    config = _config()
+    config.extra["alipay_public_key"] = public_pem
+    connector = AlipayConnector(config)
+    monkeypatch.setattr(connector, "_sign_params", lambda params: "fake-sign")
+
+    response_payload = (
+        '{"code":"10000","msg":"Success","app_auth_token":"merchant-token",'
+        '"app_refresh_token":"merchant-refresh","expires_in":"31536000",'
+        '"re_expires_in":"32140800","auth_app_id":"2021000000000001",'
+        '"user_id":"2088123412341234"}'
+    )
+    sign_content = '{"alipay_open_auth_token_app_response":' + response_payload + "}"
+    signature = private_key.sign(sign_content.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+    signature_text = base64.b64encode(signature).decode("ascii")
+    raw_response = (
+        '{"alipay_open_auth_token_app_response":'
+        f'{response_payload},"sign":"{signature_text}"'
+        "}"
+    )
+
+    class FakeResponse:
+        text = raw_response
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return json.loads(raw_response)
+
+    monkeypatch.setattr(
+        "platforms.connectors.alipay.requests.post",
+        lambda url, data, timeout: FakeResponse(),
+    )
+
+    with pytest.raises(RuntimeError, match="支付宝网关响应验签失败"):
+        connector._post_alipay_request(
+            method="alipay.open.auth.token.app",
+            app_auth_token="",
+            biz_content={"grant_type": "authorization_code", "code": "app-auth-code"},
+        )
 
 
 def test_gateway_request_error_sanitizes_url(monkeypatch):
