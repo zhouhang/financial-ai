@@ -56,6 +56,15 @@ CSV_HEADER_HINTS = {
     "发生金额",
     "入账时间",
 }
+CSV_DETAIL_HEADER_HINTS = {
+    "商户订单号",
+    "支付宝交易号",
+    "支付宝流水号",
+    "账务流水号",
+    "业务流水号",
+    "业务基础订单号",
+    "业务订单号",
+}
 TOKEN_SECRET_KEYS = {"app_auth_token", "app_refresh_token", "access_token", "refresh_token"}
 ALIPAY_HTTP_BILL_DOWNLOAD_HOSTS = {"dwbillcenter.alipay.com"}
 
@@ -256,6 +265,8 @@ def _csv_header_and_rows(text: str) -> tuple[list[str], list[tuple[int, dict[str
     if header_index >= len(physical_rows):
         return [], []
     headers = [str(cell or "").strip() for cell in physical_rows[header_index]]
+    if not (set(headers) & CSV_DETAIL_HEADER_HINTS):
+        return [], []
     parsed_rows: list[tuple[int, dict[str, str]]] = []
     for physical_index, row in enumerate(physical_rows[header_index + 1 :], start=header_index + 2):
         if not any(str(cell or "").strip() for cell in row):
