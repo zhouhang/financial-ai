@@ -142,6 +142,9 @@ def create_tools() -> list[Tool]:
                     "app_public_cert": {"type": "string"},
                     "alipay_public_cert": {"type": "string"},
                     "alipay_root_cert": {"type": "string"},
+                    "merchant_auth_mode": {"type": "string"},
+                    "merchant_auth_pc_url": {"type": "string"},
+                    "merchant_auth_qr_url": {"type": "string"},
                     "mode": {"type": "string", "description": "mock 或 real"},
                 },
                 "required": ["auth_token", "platform_code", "app_key", "redirect_uri"],
@@ -205,6 +208,37 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "shop_connection_id"],
             },
         ),
+        Tool(
+            name="platform_list_pending_authorizations",
+            description="获取支付宝待认领商家授权列表，不返回 token 明文。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "platform_code": {"type": "string"},
+                    "status": {"type": "string", "description": "pending_claim、claimed、expired、failed、discarded"},
+                    "limit": {"type": "number"},
+                    "mode": {"type": "string", "description": "mock 或 real"},
+                },
+                "required": ["auth_token", "platform_code"],
+            },
+        ),
+        Tool(
+            name="platform_claim_pending_authorization",
+            description="用认领码将支付宝待认领授权绑定到当前企业。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "platform_code": {"type": "string"},
+                    "pending_authorization_id": {"type": "string"},
+                    "claim_code": {"type": "string"},
+                    "merchant_display_name": {"type": "string"},
+                    "mode": {"type": "string", "description": "mock 或 real"},
+                },
+                "required": ["auth_token", "platform_code", "claim_code"],
+            },
+        ),
     ]
 
 
@@ -225,6 +259,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return await _handle_disable_shop(arguments)
     if name == "platform_get_shop_detail":
         return await _handle_get_shop_detail(arguments)
+    if name == "platform_list_pending_authorizations":
+        return await _handle_list_pending_authorizations(arguments)
+    if name == "platform_claim_pending_authorization":
+        return await _handle_claim_pending_authorization(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -259,6 +297,40 @@ def _safe_raw_auth_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         else:
             cleaned[normalized_key] = value
     return cleaned
+
+
+def _generate_claim_code() -> str:
+    return f"ALIPAY-{uuid.uuid4().hex[:8].upper()}"
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _pending_authorization_expired(pending: dict[str, Any]) -> bool:
+    expires_at = _parse_datetime(pending.get("expires_at"))
+    return expires_at is not None and expires_at <= datetime.now(timezone.utc)
+
+
+def _public_pending_authorization(record: dict[str, Any] | None) -> dict[str, Any]:
+    pending = dict(record or {})
+    pending["access_token"] = ""
+    pending["refresh_token"] = ""
+    raw_payload = pending.get("raw_auth_payload") if isinstance(pending.get("raw_auth_payload"), dict) else {}
+    pending["raw_auth_payload"] = _safe_raw_auth_payload(raw_payload)
+    return pending
 
 
 def _platform_name(platform_code: str) -> str:
@@ -296,6 +368,9 @@ def _public_app_config(record: dict[str, Any] | None, *, platform_code: str) -> 
         "auth_base_url": str((record or {}).get("auth_base_url") or ""),
         "token_url": str((record or {}).get("token_url") or ""),
         "refresh_url": str((record or {}).get("refresh_url") or ""),
+        "merchant_auth_mode": str(extra.get("merchant_auth_mode") or "static_invite"),
+        "merchant_auth_pc_url": str(extra.get("merchant_auth_pc_url") or ""),
+        "merchant_auth_qr_url": str(extra.get("merchant_auth_qr_url") or ""),
         "status": str((record or {}).get("status") or ""),
     }
 
@@ -778,6 +853,55 @@ def _upsert_alipay_bill_datasets(
     return source, datasets.get("fund"), datasets.get("trade")
 
 
+async def _initialize_alipay_connection_datasets(
+    *,
+    company_id: str,
+    connection: dict[str, Any],
+    run_in_background: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str]:
+    alipay_source: dict[str, Any] | None = None
+    alipay_fund_dataset: dict[str, Any] | None = None
+    alipay_trade_dataset: dict[str, Any] | None = None
+    dataset_warning = ""
+    try:
+        alipay_source, alipay_fund_dataset, alipay_trade_dataset = _upsert_alipay_bill_datasets(
+            company_id=company_id,
+            connection=connection,
+        )
+        alipay_jobs: list[dict[str, Any]] = []
+        for spec, dataset in (
+            (ALIPAY_BILL_DATASETS[0], alipay_fund_dataset),
+            (ALIPAY_BILL_DATASETS[1], alipay_trade_dataset),
+        ):
+            if not alipay_source or not dataset:
+                continue
+            alipay_jobs.extend(
+                _build_alipay_initial_collection_jobs(
+                    source_id=str(alipay_source["id"]),
+                    dataset_id=str(dataset["id"]),
+                    resource_key=str(dataset.get("resource_key") or ""),
+                    bill_type=spec["bill_type"],
+                    sync_strategy=dict(dataset.get("sync_strategy") or ALIPAY_BILL_SYNC_STRATEGY),
+                )
+            )
+        if alipay_jobs:
+            coroutine = _run_alipay_initial_collection_jobs(company_id=company_id, jobs=alipay_jobs)
+            if run_in_background:
+                _create_logged_background_task(coroutine, task_name="支付宝初始化采集任务")
+            else:
+                await coroutine
+    except Exception as dataset_exc:  # noqa: BLE001
+        dataset_warning = str(dataset_exc)
+        logger.error(
+            "支付宝授权成功但账单数据集创建失败: company_id=%s shop_connection_id=%s error=%s",
+            company_id,
+            connection.get("id"),
+            dataset_warning,
+            exc_info=True,
+        )
+    return alipay_source, alipay_fund_dataset, alipay_trade_dataset, dataset_warning
+
+
 async def _run_taobao_initial_collection_jobs(
     *,
     company_id: str,
@@ -819,7 +943,7 @@ async def _run_alipay_initial_collection_jobs(
 
     for job_payload in jobs:
         try:
-            await data_sources.trigger_dataset_collection_for_company(
+            result = await data_sources.trigger_dataset_collection_for_company(
                 company_id=company_id,
                 source_id=str(job_payload.get("source_id") or ""),
                 dataset_id=str(job_payload.get("dataset_id") or ""),
@@ -829,6 +953,17 @@ async def _run_alipay_initial_collection_jobs(
                 background=False,
                 params=dict(job_payload.get("params") or {}),
             )
+            if isinstance(result, dict) and result.get("success") is False:
+                logger.error(
+                    "支付宝初始化采集任务触发失败: company_id=%s source_id=%s dataset_id=%s "
+                    "resource_key=%s idempotency_key=%s error=%s",
+                    company_id,
+                    job_payload.get("source_id"),
+                    job_payload.get("dataset_id"),
+                    job_payload.get("resource_key"),
+                    job_payload.get("idempotency_key"),
+                    result.get("error") or result,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "支付宝初始化采集任务执行失败: company_id=%s dataset_id=%s resource_key=%s error=%s",
@@ -838,6 +973,22 @@ async def _run_alipay_initial_collection_jobs(
                 exc,
                 exc_info=True,
             )
+
+
+def _create_logged_background_task(coroutine: Any, *, task_name: str) -> Any:
+    """创建后台任务，并记录未被任务内部捕获的异常。"""
+    task = asyncio.create_task(coroutine)
+
+    def _log_task_result(done_task: Any) -> None:
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            logger.warning("%s已取消", task_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s执行失败: %s", task_name, exc, exc_info=True)
+
+    task.add_done_callback(_log_task_result)
+    return task
 
 
 def _build_shop_view(connection: dict[str, Any]) -> dict[str, Any]:
@@ -977,6 +1128,15 @@ async def _handle_upsert_app_config(arguments: dict[str, Any]) -> dict[str, Any]
             if not cert_value:
                 return {"success": False, "platform_code": platform_code, "error": f"{field_label}不能为空"}
             extra[field_name] = cert_value
+        extra["merchant_auth_mode"] = str(
+            arguments.get("merchant_auth_mode") or extra.get("merchant_auth_mode") or "static_invite"
+        ).strip() or "static_invite"
+        extra["merchant_auth_pc_url"] = str(
+            arguments.get("merchant_auth_pc_url") or extra.get("merchant_auth_pc_url") or ""
+        ).strip()
+        extra["merchant_auth_qr_url"] = str(
+            arguments.get("merchant_auth_qr_url") or extra.get("merchant_auth_qr_url") or ""
+        ).strip()
     extra.update(
         {
             "mode": "real",
@@ -1079,6 +1239,244 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
     }
 
 
+async def _handle_alipay_merchant_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
+    callback_payload = dict(arguments.get("callback_payload") or {})
+    code = str(
+        callback_payload.get("app_auth_code")
+        or callback_payload.get("code")
+        or arguments.get("code")
+        or ""
+    ).strip()
+    if not code:
+        return {
+            "success": False,
+            "platform_code": "alipay",
+            "error": "缺少支付宝授权码，请重新扫码授权",
+            "message": "缺少支付宝授权码，请重新扫码授权",
+            "return_path": "/data-connections?mode=platform&platform=alipay",
+            "mode": _normalize_mode(arguments.get("mode")),
+        }
+    try:
+        app_config = _load_app_config(
+            _platform_app_owner_company_id(),
+            "alipay",
+            mode=arguments.get("mode"),
+            redirect_uri=str(callback_payload.get("redirect_uri") or ""),
+        )
+        connector = build_connector(app_config)
+        token_bundle = connector.exchange_code_for_token(
+            code=code,
+            auth_session=None,
+            callback_payload=callback_payload,
+        )
+        shop_profile = connector.fetch_shop_profile(
+            token_bundle=token_bundle,
+            auth_session=None,
+            callback_payload=callback_payload,
+        )
+        pending: dict[str, Any] | None = None
+        for _ in range(3):
+            pending = auth_db.create_platform_pending_authorization(
+                platform_code="alipay",
+                platform_app_id=str(app_config.id or "") or None,
+                app_id=str(callback_payload.get("app_id") or app_config.app_key or ""),
+                source=str(callback_payload.get("source") or "alipay_app_auth"),
+                claim_code=_generate_claim_code(),
+                access_token=token_bundle.access_token,
+                refresh_token=token_bundle.refresh_token,
+                token_expires_at=_compute_expire_at(token_bundle.expires_in),
+                refresh_expires_at=_compute_expire_at(token_bundle.refresh_expires_in),
+                raw_auth_payload=_safe_raw_auth_payload(token_bundle.raw_payload),
+                callback_payload=callback_payload,
+                external_shop_id=shop_profile.external_shop_id,
+                external_seller_id=shop_profile.external_seller_id,
+                merchant_display_name=shop_profile.external_shop_name,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            )
+            if pending is not None:
+                break
+        if pending is None:
+            raise ValueError("保存支付宝待认领授权失败")
+        public_pending = _public_pending_authorization(pending)
+        claim_code = str(public_pending.get("claim_code") or "")
+        return {
+            "success": True,
+            "platform_code": "alipay",
+            "pending_authorization": public_pending,
+            "pending_authorization_id": str(public_pending.get("id") or ""),
+            "claim_code": claim_code,
+            "message": "支付宝授权已收到，请在 Tally 输入认领码完成绑定",
+            "return_path": "/data-connections?mode=platform&platform=alipay",
+            "mode": app_config.auth_mode,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("处理支付宝商家授权回调失败: %s", exc, exc_info=True)
+        message = str(exc) or "支付宝授权处理失败，请重新扫码授权"
+        return {
+            "success": False,
+            "platform_code": "alipay",
+            "error": message,
+            "message": message,
+            "return_path": "/data-connections?mode=platform&platform=alipay",
+            "mode": _normalize_mode(arguments.get("mode")),
+        }
+
+
+async def _handle_list_pending_authorizations(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_user(arguments.get("auth_token", ""))
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
+    if platform_code != "alipay":
+        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待认领授权"}
+    status = str(arguments.get("status") or "pending_claim").strip() or "pending_claim"
+    try:
+        limit = int(arguments.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    pending_authorizations = [
+        _public_pending_authorization(item)
+        for item in auth_db.list_platform_pending_authorizations(
+            platform_code=platform_code,
+            status=status,
+            limit=limit,
+        )
+    ]
+    return {
+        "success": True,
+        "platform_code": platform_code,
+        "pending_authorizations": pending_authorizations,
+        "count": len(pending_authorizations),
+        "mode": _normalize_mode(arguments.get("mode")),
+    }
+
+
+async def _handle_claim_pending_authorization(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    user_id = str(user.get("user_id") or "")
+    platform_code = _normalize_platform_code(arguments.get("platform_code"))
+    if platform_code != "alipay":
+        return {"success": False, "platform_code": platform_code, "error": "暂只支持支付宝待认领授权"}
+
+    pending_id = str(arguments.get("pending_authorization_id") or "").strip()
+    claim_code = str(arguments.get("claim_code") or "").strip()
+    merchant_display_name = str(arguments.get("merchant_display_name") or "").strip()
+    if not claim_code:
+        return {"success": False, "platform_code": platform_code, "error": "认领码不能为空"}
+    if not merchant_display_name:
+        return {"success": False, "platform_code": platform_code, "error": "商户显示名称不能为空"}
+
+    pending = (
+        auth_db.get_platform_pending_authorization_by_id(pending_id, include_secrets=True)
+        if pending_id
+        else auth_db.get_platform_pending_authorization_by_claim_code(claim_code, include_secrets=True)
+    )
+    if not pending:
+        return {"success": False, "platform_code": platform_code, "error": "待认领授权不存在或已失效"}
+    if str(pending.get("platform_code") or "") != "alipay":
+        return {"success": False, "platform_code": platform_code, "error": "待认领授权平台不匹配"}
+    if str(pending.get("status") or "") != "pending_claim":
+        return {"success": False, "platform_code": platform_code, "error": "该授权已处理，请勿重复认领"}
+    if str(pending.get("claim_code") or "").strip() != claim_code:
+        return {"success": False, "platform_code": platform_code, "error": "认领码不匹配，请检查后重试"}
+    if _pending_authorization_expired(pending):
+        auth_db.mark_platform_pending_authorization_failed(
+            pending_authorization_id=str(pending.get("id") or ""),
+            status="expired",
+            last_error="认领码已过期",
+        )
+        return {"success": False, "platform_code": platform_code, "error": "认领码已过期，请重新扫码授权"}
+
+    external_shop_id = str(pending.get("external_shop_id") or "").strip()
+    if not external_shop_id:
+        return {"success": False, "platform_code": platform_code, "error": "支付宝主体 ID 为空，无法绑定"}
+    existing_binding = auth_db.find_shop_connection_by_platform_external_shop(
+        platform_code="alipay",
+        external_shop_id=external_shop_id,
+    )
+    if existing_binding and str(existing_binding.get("company_id") or "") != company_id:
+        return {
+            "success": False,
+            "platform_code": platform_code,
+            "error": "该支付宝主体已绑定到其他企业，请联系服务商管理员处理",
+        }
+
+    try:
+        connection = auth_db.upsert_shop_connection(
+            company_id=company_id,
+            platform_code="alipay",
+            external_shop_id=external_shop_id,
+            external_shop_name=merchant_display_name,
+            external_seller_id=str(pending.get("external_seller_id") or ""),
+            auth_subject_name=merchant_display_name,
+            shop_type="merchant",
+            status="active",
+            meta={
+                "source": "pending_authorization",
+                "pending_authorization_id": str(pending.get("id") or ""),
+                "alipay_app_id": str(pending.get("app_id") or ""),
+            },
+        )
+        if connection is None:
+            raise ValueError("保存支付宝商户连接失败")
+
+        authorization = auth_db.create_shop_authorization(
+            company_id=company_id,
+            shop_connection_id=str(connection["id"]),
+            platform_app_id=str(pending.get("platform_app_id") or ""),
+            auth_type="alipay_app_auth",
+            access_token=str(pending.get("access_token") or ""),
+            refresh_token=str(pending.get("refresh_token") or ""),
+            token_expires_at=str(pending.get("token_expires_at") or "") or None,
+            refresh_expires_at=str(pending.get("refresh_expires_at") or "") or None,
+            scope_text="",
+            auth_status="authorized",
+            last_error="",
+            raw_auth_payload=_safe_raw_auth_payload(dict(pending.get("raw_auth_payload") or {})),
+        )
+        if authorization is None:
+            raise ValueError("保存支付宝商户授权失败")
+
+        for source_type in ("orders", "refunds", "settlements", "bills"):
+            auth_db.upsert_sync_source(
+                company_id=company_id,
+                shop_connection_id=str(connection["id"]),
+                source_type=source_type,
+            )
+
+        alipay_source, alipay_fund_dataset, alipay_trade_dataset, dataset_warning = (
+            await _initialize_alipay_connection_datasets(
+                company_id=company_id,
+                connection=connection,
+                run_in_background=False,
+            )
+        )
+        claimed = auth_db.mark_platform_pending_authorization_claimed(
+            pending_authorization_id=str(pending.get("id") or ""),
+            claimed_company_id=company_id,
+            claimed_by_user_id=user_id,
+            claimed_shop_connection_id=str(connection["id"]),
+            last_error=dataset_warning,
+        )
+        detail = _build_shop_view(connection)
+        return {
+            "success": True,
+            "platform_code": "alipay",
+            "pending_authorization": _public_pending_authorization(claimed or pending),
+            "shop": detail,
+            "connection": detail,
+            "shop_authorization_id": str((authorization or {}).get("id") or ""),
+            "alipay_data_source_id": str((alipay_source or {}).get("id") or ""),
+            "alipay_fund_bill_dataset_id": str((alipay_fund_dataset or {}).get("id") or ""),
+            "alipay_trade_bill_dataset_id": str((alipay_trade_dataset or {}).get("id") or ""),
+            "warning": dataset_warning,
+            "message": "支付宝商户授权已绑定",
+            "mode": _normalize_mode(arguments.get("mode")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("认领支付宝待认领授权失败: %s", exc, exc_info=True)
+        return {"success": False, "platform_code": "alipay", "error": str(exc)}
+
+
 async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
     platform_code = _normalize_platform_code(arguments.get("platform_code"))
     state = str(arguments.get("state") or "").strip()
@@ -1086,6 +1484,11 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
     error = str(arguments.get("error") or "").strip()
     error_description = str(arguments.get("error_description") or "").strip()
     callback_payload = dict(arguments.get("callback_payload") or {})
+
+    if not state and platform_code == "alipay" and not error:
+        callback_code = str(callback_payload.get("app_auth_code") or code or "").strip()
+        if callback_code:
+            return await _handle_alipay_merchant_auth_callback(arguments)
 
     auth_session = auth_db.get_auth_session_by_state(state)
     if auth_session is None:
@@ -1224,11 +1627,12 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                 if alipay_jobs:
-                    asyncio.create_task(
+                    _create_logged_background_task(
                         _run_alipay_initial_collection_jobs(
                             company_id=company_id,
                             jobs=alipay_jobs,
-                        )
+                        ),
+                        task_name="支付宝初始化采集任务",
                     )
             except Exception as dataset_exc:  # noqa: BLE001
                 dataset_warning = str(dataset_exc)

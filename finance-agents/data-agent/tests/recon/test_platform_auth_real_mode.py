@@ -189,6 +189,55 @@ async def test_platform_app_config_wrappers_call_mcp(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_platform_pending_authorization_wrappers_call_mcp(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_call_mcp_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return {"success": True, "platform_code": payload["platform_code"]}
+
+    monkeypatch.setattr(mcp_client, "call_mcp_tool", fake_call_mcp_tool)
+
+    list_result = await mcp_client.platform_list_pending_authorizations(
+        "token",
+        "alipay",
+        status="pending_claim",
+    )
+    claim_result = await mcp_client.platform_claim_pending_authorization(
+        "token",
+        "alipay",
+        "pending-1",
+        claim_code="ALIPAY-123456",
+        merchant_display_name="福游网络",
+    )
+
+    assert list_result["success"] is True
+    assert claim_result["success"] is True
+    assert calls == [
+        (
+            "platform_list_pending_authorizations",
+            {
+                "auth_token": "token",
+                "platform_code": "alipay",
+                "status": "pending_claim",
+                "mode": "real",
+            },
+        ),
+        (
+            "platform_claim_pending_authorization",
+            {
+                "auth_token": "token",
+                "platform_code": "alipay",
+                "pending_authorization_id": "pending-1",
+                "claim_code": "ALIPAY-123456",
+                "merchant_display_name": "福游网络",
+                "mode": "real",
+            },
+        ),
+    ]
+
+
+@pytest.mark.anyio
 async def test_platform_app_config_route_forces_real_mode(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -220,6 +269,75 @@ async def test_platform_app_config_route_forces_real_mode(monkeypatch) -> None:
 
     assert result.mode == "real"
     assert calls[0]["kwargs"]["mode"] == "real"
+
+
+@pytest.mark.anyio
+async def test_platform_pending_authorization_routes_forward_to_mcp(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_list_pending(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"name": "list", "args": args, "kwargs": kwargs})
+        return {
+            "success": True,
+            "platform_code": args[1],
+            "pending_authorizations": [
+                {
+                    "id": "pending-1",
+                    "platform_code": "alipay",
+                    "claim_code": "ALIPAY-123456",
+                    "status": "pending_claim",
+                }
+            ],
+            "count": 1,
+        }
+
+    async def fake_claim_pending(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"name": "claim", "args": args, "kwargs": kwargs})
+        return {
+            "success": True,
+            "platform_code": args[1],
+            "shop": {"id": "shop-1", "platform_code": "alipay", "external_shop_name": "福游网络"},
+            "message": "支付宝商户授权已绑定",
+        }
+
+    monkeypatch.setattr(platform_api, "platform_list_pending_authorizations", fake_list_pending)
+    monkeypatch.setattr(platform_api, "platform_claim_pending_authorization", fake_claim_pending)
+
+    list_response = await platform_api.list_platform_pending_authorizations(
+        "alipay",
+        status="pending_claim",
+        mode="real",
+        authorization="Bearer token",
+    )
+    claim_response = await platform_api.claim_platform_pending_authorization(
+        "alipay",
+        "pending-1",
+        platform_api.ClaimPendingAuthorizationRequest(
+            claim_code="ALIPAY-123456",
+            merchant_display_name="福游网络",
+            mode="mock",
+        ),
+        authorization="Bearer token",
+    )
+
+    assert list_response.count == 1
+    assert claim_response.shop["id"] == "shop-1"
+    assert calls == [
+        {
+            "name": "list",
+            "args": ("token", "alipay"),
+            "kwargs": {"status": "pending_claim", "mode": "real"},
+        },
+        {
+            "name": "claim",
+            "args": ("token", "alipay", "pending-1"),
+            "kwargs": {
+                "claim_code": "ALIPAY-123456",
+                "merchant_display_name": "福游网络",
+                "mode": "real",
+            },
+        },
+    ]
 
 
 @pytest.mark.anyio
@@ -285,3 +403,48 @@ async def test_platform_auth_callback_forwards_full_query_payload(monkeypatch) -
             },
         }
     ]
+
+
+@pytest.mark.anyio
+async def test_platform_auth_callback_redirect_includes_pending_claim_params(monkeypatch) -> None:
+    async def fake_platform_handle_auth_callback(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "mode": kwargs["mode"],
+            "platform_code": args[0],
+            "return_path": "/data-connections?mode=platform&platform=alipay",
+            "message": "支付宝授权已收到，请在 Tally 输入认领码完成绑定",
+            "pending_authorization_id": "pending-1",
+            "claim_code": "ALIPAY-123456",
+        }
+
+    monkeypatch.setattr(
+        platform_api,
+        "platform_handle_auth_callback",
+        fake_platform_handle_auth_callback,
+    )
+
+    response = await platform_api.handle_platform_auth_callback(
+        "alipay",
+        request=platform_api.Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/platform-auth/callback/alipay",
+                "query_string": b"app_auth_code=P0161-auth-code&app_id=2021006152656574&mode=real",
+                "headers": [],
+            }
+        ),
+        state="",
+        code="",
+        error="",
+        error_description="",
+        mode="real",
+    )
+
+    redirect_query = parse_qs(urlsplit(response.headers["location"]).query)
+
+    assert response.status_code == 303
+    assert redirect_query["platform_auth_status"] == ["success"]
+    assert redirect_query["pending_authorization_id"] == ["pending-1"]
+    assert redirect_query["claim_code"] == ["ALIPAY-123456"]

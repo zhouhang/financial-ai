@@ -178,6 +178,9 @@ interface PlatformAppConfigFormState {
   appKey: string;
   appSecret: string;
   redirectUri: string;
+  merchantAuthMode: string;
+  merchantAuthPcUrl: string;
+  merchantAuthQrUrl: string;
   appPublicCert: string;
   alipayPublicCert: string;
   alipayRootCert: string;
@@ -217,6 +220,27 @@ interface PhysicalCatalogDetailDialogState {
 interface AlipayAuthDialogState {
   merchantDisplayName: string;
   error: string;
+}
+
+interface PlatformPendingAuthorization {
+  id: string;
+  platform_code: string;
+  claim_code: string;
+  status: string;
+  app_id?: string;
+  source?: string;
+  external_shop_id?: string;
+  external_seller_id?: string;
+  merchant_display_name?: string;
+  expires_at?: string | null;
+  created_at?: string | null;
+  last_error?: string;
+}
+
+interface AlipayClaimFormState {
+  pendingAuthorizationId: string;
+  claimCode: string;
+  merchantDisplayName: string;
 }
 
 interface EditableDatasetSemantic {
@@ -1981,6 +2005,27 @@ function normalizePlatformSummary(raw: unknown): PlatformConnectionSummary | nul
   };
 }
 
+function normalizePendingAuthorization(raw: unknown): PlatformPendingAuthorization | null {
+  const value = asRecord(raw);
+  if (!value) return null;
+  const id = asString(value.id) ?? asString(value.pending_authorization_id) ?? '';
+  if (!id) return null;
+  return {
+    id,
+    platform_code: asString(value.platform_code) ?? 'alipay',
+    claim_code: asString(value.claim_code) ?? '',
+    status: asString(value.status) ?? 'pending_claim',
+    app_id: asString(value.app_id),
+    source: asString(value.source),
+    external_shop_id: asString(value.external_shop_id),
+    external_seller_id: asString(value.external_seller_id),
+    merchant_display_name: asString(value.merchant_display_name),
+    expires_at: asString(value.expires_at),
+    created_at: asString(value.created_at),
+    last_error: asString(value.last_error),
+  };
+}
+
 function normalizePlatformCode(platformCode: string): PlatformCode {
   return platformCode === 'tmall' ? 'taobao' : platformCode;
 }
@@ -1996,6 +2041,9 @@ function createPlatformAppConfigFormState(platformCode: PlatformCode): PlatformA
     appKey: '',
     appSecret: '',
     redirectUri: defaultPlatformRedirectUri(platformCode),
+    merchantAuthMode: 'static_invite',
+    merchantAuthPcUrl: '',
+    merchantAuthQrUrl: '',
     appPublicCert: '',
     alipayPublicCert: '',
     alipayRootCert: '',
@@ -2260,6 +2308,16 @@ export default function DataConnectionsPanel({
   const [callbackPayload, setCallbackPayload] = useState<AuthCallbackPayload | null>(initialCallback);
   const [launchingAuthPlatform, setLaunchingAuthPlatform] = useState<PlatformCode | null>(null);
   const [alipayAuthDialog, setAlipayAuthDialog] = useState<AlipayAuthDialogState | null>(null);
+  const [alipayPendingAuthorizations, setAlipayPendingAuthorizations] = useState<PlatformPendingAuthorization[]>([]);
+  const [loadingAlipayPendingAuthorizations, setLoadingAlipayPendingAuthorizations] = useState(false);
+  const [alipayClaimForm, setAlipayClaimForm] = useState<AlipayClaimFormState>({
+    pendingAuthorizationId: '',
+    claimCode: initialCallback?.claimCode ?? '',
+    merchantDisplayName: '',
+  });
+  const [claimingAlipayAuthorization, setClaimingAlipayAuthorization] = useState(false);
+  const [alipayClaimError, setAlipayClaimError] = useState('');
+  const [alipayClaimNotice, setAlipayClaimNotice] = useState('');
   const [draftSources, setDraftSources] = useState<DraftDataSource[]>([]);
   const [remoteSources, setRemoteSources] = useState<DataSourceListItem[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
@@ -2318,6 +2376,13 @@ export default function DataConnectionsPanel({
     if (!initialCallback) return;
     setCallbackPayload(initialCallback);
     setMode('callback');
+    if (initialCallback.claimCode) {
+      setAlipayClaimForm((current) => ({
+        ...current,
+        claimCode: initialCallback.claimCode || current.claimCode,
+        pendingAuthorizationId: initialCallback.pendingAuthorizationId || current.pendingAuthorizationId,
+      }));
+    }
   }, [initialCallback]);
 
   useEffect(() => {
@@ -2335,6 +2400,9 @@ export default function DataConnectionsPanel({
     setExpandedShopDatasetId(null);
     setShopDatasetDetails({});
     setShopDatasetActionError('');
+    setAlipayPendingAuthorizations([]);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
   }, [selectedConnectionView, selectedSourceKind, selectedCollaborationProvider]);
 
   useEffect(() => {
@@ -2955,6 +3023,105 @@ export default function DataConnectionsPanel({
     [authHeaders, authToken],
   );
 
+  const fetchAlipayPendingAuthorizations = useCallback(async (): Promise<PlatformPendingAuthorization[]> => {
+    if (!authToken) return [];
+    setLoadingAlipayPendingAuthorizations(true);
+    setAlipayClaimError('');
+    try {
+      const response = await fetch('/api/platform-connections/alipay/pending-authorizations?status=pending_claim&mode=real', {
+        method: 'GET',
+        headers: authHeaders,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '加载支付宝待认领授权失败'));
+      }
+      const rows = Array.isArray(data?.pending_authorizations)
+        ? data.pending_authorizations
+        : Array.isArray(data?.items)
+        ? data.items
+        : [];
+      const pendingAuthorizations = rows
+        .map((item: unknown) => normalizePendingAuthorization(item))
+        .filter(Boolean) as PlatformPendingAuthorization[];
+      setAlipayPendingAuthorizations(pendingAuthorizations);
+      if (pendingAuthorizations.length > 0) {
+        setAlipayClaimForm((current) => {
+          if (current.pendingAuthorizationId || current.claimCode) return current;
+          return {
+            ...current,
+            pendingAuthorizationId: pendingAuthorizations[0].id,
+            claimCode: pendingAuthorizations[0].claim_code,
+          };
+        });
+      }
+      return pendingAuthorizations;
+    } catch (error) {
+      setAlipayPendingAuthorizations([]);
+      setAlipayClaimError(error instanceof Error ? error.message : '加载支付宝待认领授权失败');
+      return [];
+    } finally {
+      setLoadingAlipayPendingAuthorizations(false);
+    }
+  }, [authHeaders, authToken]);
+
+  const claimAlipayPendingAuthorization = useCallback(async () => {
+    if (!authToken) return;
+    const pendingId = alipayClaimForm.pendingAuthorizationId.trim();
+    const claimCode = alipayClaimForm.claimCode.trim();
+    const merchantDisplayName = alipayClaimForm.merchantDisplayName.trim();
+    if (!pendingId) {
+      setAlipayClaimError('请选择待认领授权');
+      return;
+    }
+    if (!claimCode) {
+      setAlipayClaimError('请输入认领码');
+      return;
+    }
+    if (!merchantDisplayName) {
+      setAlipayClaimError('请输入商户显示名称');
+      return;
+    }
+    setClaimingAlipayAuthorization(true);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
+    try {
+      const response = await fetch(`/api/platform-connections/alipay/pending-authorizations/${encodeURIComponent(pendingId)}/claim`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          claim_code: claimCode,
+          merchant_display_name: merchantDisplayName,
+          mode: 'real',
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data?.detail || data?.message || '认领支付宝授权失败'));
+      }
+      setAlipayClaimNotice(String(data?.message || '支付宝商户授权已绑定'));
+      setAlipayClaimForm({ pendingAuthorizationId: '', claimCode: '', merchantDisplayName: '' });
+      await Promise.all([
+        fetchAlipayPendingAuthorizations(),
+        fetchShops('alipay'),
+        fetchPlatforms(),
+        fetchRemoteSources(),
+      ]);
+    } catch (error) {
+      setAlipayClaimError(error instanceof Error ? error.message : '认领支付宝授权失败');
+    } finally {
+      setClaimingAlipayAuthorization(false);
+    }
+  }, [
+    alipayClaimForm,
+    authHeaders,
+    authToken,
+    fetchAlipayPendingAuthorizations,
+    fetchPlatforms,
+    fetchRemoteSources,
+    fetchShops,
+  ]);
+
   const updatePlatformAppConfig = useCallback(
     (
       platformCode: PlatformCode,
@@ -2997,6 +3164,9 @@ export default function DataConnectionsPanel({
           appKey: String(config.app_key || ''),
           appSecret: '',
           redirectUri: String(config.redirect_uri || '') || defaultPlatformRedirectUri(normalizedPlatformCode),
+          merchantAuthMode: String(config.merchant_auth_mode || 'static_invite'),
+          merchantAuthPcUrl: String(config.merchant_auth_pc_url || ''),
+          merchantAuthQrUrl: String(config.merchant_auth_qr_url || ''),
           appPublicCert: '',
           alipayPublicCert: '',
           alipayRootCert: '',
@@ -3031,18 +3201,24 @@ export default function DataConnectionsPanel({
         notice: '',
       }));
       try {
+        const body: Record<string, string> = {
+          app_key: form.appKey.trim(),
+          app_secret: form.appSecret.trim(),
+          redirect_uri: form.redirectUri.trim(),
+          app_public_cert: form.appPublicCert.trim(),
+          alipay_public_cert: form.alipayPublicCert.trim(),
+          alipay_root_cert: form.alipayRootCert.trim(),
+          mode: 'real',
+        };
+        if (normalizedPlatformCode === 'alipay') {
+          body.merchant_auth_mode = form.merchantAuthMode.trim() || 'static_invite';
+          body.merchant_auth_pc_url = form.merchantAuthPcUrl.trim();
+          body.merchant_auth_qr_url = form.merchantAuthQrUrl.trim();
+        }
         const response = await fetch(`/api/platform-connections/${normalizedPlatformCode}/app-config`, {
           method: 'PUT',
           headers: authHeaders,
-          body: JSON.stringify({
-            app_key: form.appKey.trim(),
-            app_secret: form.appSecret.trim(),
-            redirect_uri: form.redirectUri.trim(),
-            app_public_cert: form.appPublicCert.trim(),
-            alipay_public_cert: form.alipayPublicCert.trim(),
-            alipay_root_cert: form.alipayRootCert.trim(),
-            mode: 'real',
-          }),
+          body: JSON.stringify(body),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -3054,6 +3230,9 @@ export default function DataConnectionsPanel({
           appKey: String(config.app_key || form.appKey),
           appSecret: '',
           redirectUri: String(config.redirect_uri || form.redirectUri),
+          merchantAuthMode: String(config.merchant_auth_mode || form.merchantAuthMode || 'static_invite'),
+          merchantAuthPcUrl: String(config.merchant_auth_pc_url || form.merchantAuthPcUrl),
+          merchantAuthQrUrl: String(config.merchant_auth_qr_url || form.merchantAuthQrUrl),
           appPublicCert: '',
           alipayPublicCert: '',
           alipayRootCert: '',
@@ -3217,6 +3396,38 @@ export default function DataConnectionsPanel({
                   </label>
                   {isAlipayConfig && (
                     <>
+                      <label className="block text-sm font-medium text-text-primary">
+                        商家授权 PC 链接
+                        <input
+                          type="url"
+                          value={appConfig.merchantAuthPcUrl}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              merchantAuthPcUrl: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder="支付宝开放平台商家授权 PC 链接"
+                        />
+                      </label>
+                      <label className="block text-sm font-medium text-text-primary">
+                        商家授权二维码地址
+                        <input
+                          type="url"
+                          value={appConfig.merchantAuthQrUrl}
+                          onChange={(event) =>
+                            updatePlatformAppConfig(normalizedPlatformCode, (current) => ({
+                              ...current,
+                              merchantAuthQrUrl: event.target.value,
+                              notice: '',
+                            }))
+                          }
+                          className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                          placeholder="二维码图片 URL"
+                        />
+                      </label>
                       <label className="block text-sm font-medium text-text-primary">
                         应用公钥证书
                         <textarea
@@ -3541,12 +3752,19 @@ export default function DataConnectionsPanel({
     (platformCode: PlatformCode) => {
       const normalizedPlatformCode = normalizePlatformCode(platformCode);
       if (normalizedPlatformCode === 'alipay') {
-        setAlipayAuthDialog({ merchantDisplayName: '', error: '' });
+        setSelectedPlatform({
+          platform_code: 'alipay',
+          platform_name: '支付宝',
+          authorized_shop_count: 0,
+          error_shop_count: 0,
+        });
+        setMode('platform');
+        void Promise.all([fetchShops('alipay'), fetchPlatformAppConfig('alipay'), fetchAlipayPendingAuthorizations()]);
         return;
       }
       void launchAuthFlow(normalizedPlatformCode);
     },
-    [launchAuthFlow],
+    [fetchAlipayPendingAuthorizations, fetchPlatformAppConfig, fetchShops, launchAuthFlow],
   );
 
   const handleSelectPlatform = useCallback(
@@ -3558,12 +3776,16 @@ export default function DataConnectionsPanel({
       };
       setSelectedPlatform(normalizedPlatform);
       setMode('platform');
-      await Promise.all([
+      const loadingTasks: Promise<unknown>[] = [
         fetchShops(normalizedPlatform.platform_code),
         fetchPlatformAppConfig(normalizedPlatform.platform_code),
-      ]);
+      ];
+      if (normalizedPlatform.platform_code === 'alipay') {
+        loadingTasks.push(fetchAlipayPendingAuthorizations());
+      }
+      await Promise.all(loadingTasks);
     },
-    [fetchPlatformAppConfig, fetchShops],
+    [fetchAlipayPendingAuthorizations, fetchPlatformAppConfig, fetchShops],
   );
 
   const handleBackToOverview = useCallback(() => {
@@ -3572,6 +3794,9 @@ export default function DataConnectionsPanel({
     setShops([]);
     setShopError('');
     setPlatformError('');
+    setAlipayPendingAuthorizations([]);
+    setAlipayClaimError('');
+    setAlipayClaimNotice('');
   }, []);
 
   const handleReauthorize = useCallback(
@@ -8387,6 +8612,201 @@ export default function DataConnectionsPanel({
     );
   };
 
+  const renderAlipayMerchantAuthPanel = (appConfig: PlatformAppConfigFormState) => {
+    const hasStaticEntry = Boolean(appConfig.merchantAuthQrUrl || appConfig.merchantAuthPcUrl);
+    const selectedPending = alipayPendingAuthorizations.find(
+      (item) => item.id === alipayClaimForm.pendingAuthorizationId,
+    );
+    const pendingRows = alipayPendingAuthorizations;
+
+    return (
+      <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
+            <p className="mt-1 text-xs text-text-secondary">
+              使用支付宝开放平台商家授权入口完成账单权限授权，回调后在这里输入认领码绑定到当前企业。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchAlipayPendingAuthorizations()}
+            disabled={loadingAlipayPendingAuthorizations}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loadingAlipayPendingAuthorizations ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            刷新待认领
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="rounded-xl border border-border bg-surface p-3">
+            {appConfig.merchantAuthQrUrl ? (
+              <img
+                src={appConfig.merchantAuthQrUrl}
+                alt="支付宝商家授权二维码"
+                className="aspect-square w-full rounded-lg border border-border bg-white object-contain"
+              />
+            ) : (
+              <div className="flex aspect-square w-full items-center justify-center rounded-lg border border-dashed border-border bg-surface-secondary px-3 text-center text-xs text-text-secondary">
+                待配置支付宝商家授权二维码
+              </div>
+            )}
+            {appConfig.merchantAuthPcUrl ? (
+              <a
+                href={appConfig.merchantAuthPcUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                打开支付宝商家授权
+              </a>
+            ) : (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                待配置支付宝 PC 授权链接
+              </div>
+            )}
+            {!hasStaticEntry && canManageServiceProviderApps && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingPlatformAppCode('alipay');
+                  void fetchPlatformAppConfig('alipay');
+                }}
+                className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                <ShieldCheck className="h-3.5 w-3.5" />
+                配置授权入口
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-surface p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h5 className="text-sm font-semibold text-text-primary">待认领授权</h5>
+                <span className="text-xs text-text-secondary">{pendingRows.length} 条待认领</span>
+              </div>
+              {loadingAlipayPendingAuthorizations ? (
+                <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载待认领授权
+                </div>
+              ) : pendingRows.length === 0 ? (
+                <p className="mt-3 rounded-lg border border-dashed border-border px-3 py-3 text-sm text-text-secondary">
+                  当前没有待认领的支付宝授权。
+                </p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {pendingRows.map((pending) => {
+                    const isSelected = pending.id === alipayClaimForm.pendingAuthorizationId;
+                    return (
+                      <button
+                        key={pending.id}
+                        type="button"
+                        onClick={() =>
+                          setAlipayClaimForm((current) => ({
+                            ...current,
+                            pendingAuthorizationId: pending.id,
+                            claimCode: pending.claim_code || current.claimCode,
+                            merchantDisplayName: current.merchantDisplayName || pending.merchant_display_name || '',
+                          }))
+                        }
+                        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                          isSelected
+                            ? 'border-blue-300 bg-blue-50'
+                            : 'border-border bg-surface-secondary hover:bg-surface-tertiary'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <span className="font-medium text-text-primary">
+                            认领码：{pending.claim_code || '待输入'}
+                          </span>
+                          <span className="text-text-secondary">过期：{formatTime(pending.expires_at)}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-text-secondary">
+                          支付宝主体：{pending.external_shop_id || '未知'} · 回调：{formatTime(pending.created_at)}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-border bg-surface p-3">
+              <h5 className="text-sm font-semibold text-text-primary">绑定到当前企业</h5>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <label className="block text-sm font-medium text-text-primary">
+                  认领码
+                  <input
+                    value={alipayClaimForm.claimCode}
+                    onChange={(event) =>
+                      setAlipayClaimForm((current) => ({ ...current, claimCode: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder="ALIPAY-123456"
+                  />
+                </label>
+                <label className="block text-sm font-medium text-text-primary">
+                  商户显示名称
+                  <input
+                    value={alipayClaimForm.merchantDisplayName}
+                    onChange={(event) =>
+                      setAlipayClaimForm((current) => ({ ...current, merchantDisplayName: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder="例如：福游网络"
+                  />
+                </label>
+              </div>
+              {selectedPending && (
+                <p className="mt-2 text-xs text-text-secondary">
+                  当前选择：{selectedPending.external_shop_id || selectedPending.id}
+                </p>
+              )}
+              {alipayClaimError && (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                  {alipayClaimError}
+                </div>
+              )}
+              {alipayClaimNotice && (
+                <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                  {alipayClaimNotice}
+                </div>
+              )}
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void claimAlipayPendingAuthorization()}
+                  disabled={
+                    claimingAlipayAuthorization ||
+                    !alipayClaimForm.pendingAuthorizationId.trim() ||
+                    !alipayClaimForm.claimCode.trim() ||
+                    !alipayClaimForm.merchantDisplayName.trim()
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {claimingAlipayAuthorization ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" />
+                  )}
+                  绑定支付宝授权
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderPlatformDetails = () => {
     if (!selectedPlatform) return null;
     const appConfig =
@@ -8463,9 +8883,7 @@ export default function DataConnectionsPanel({
             )}
           </div>
         ) : (
-          <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4 text-sm text-text-secondary">
-            {ALIPAY_AUTH_COLLECTION_COPY}
-          </div>
+          renderAlipayMerchantAuthPanel(appConfig)
         )}
         <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -8711,6 +9129,12 @@ export default function DataConnectionsPanel({
                 {callbackPayload.shopName && (
                   <p className="mt-2 text-sm text-text-secondary">店铺：{callbackPayload.shopName}</p>
                 )}
+                {callbackPayload.claimCode && (
+                  <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-3">
+                    <p className="text-xs font-medium text-blue-700">支付宝授权认领码</p>
+                    <p className="mt-1 font-mono text-lg font-semibold text-blue-900">{callbackPayload.claimCode}</p>
+                  </div>
+                )}
               </div>
             </div>
             <div className="mt-5 flex flex-wrap gap-3">
@@ -8718,7 +9142,27 @@ export default function DataConnectionsPanel({
                 type="button"
                 onClick={() => {
                   clearCallbackQuery('data-connections');
-                  setMode('overview');
+                  if (callbackPayload.platformCode === 'alipay' && callbackPayload.claimCode) {
+                    setSelectedPlatform({
+                      platform_code: 'alipay',
+                      platform_name: '支付宝',
+                      authorized_shop_count: 0,
+                      error_shop_count: 0,
+                    });
+                    setAlipayClaimForm((current) => ({
+                      ...current,
+                      claimCode: callbackPayload.claimCode || current.claimCode,
+                      pendingAuthorizationId: callbackPayload.pendingAuthorizationId || current.pendingAuthorizationId,
+                    }));
+                    setMode('platform');
+                    void Promise.all([
+                      fetchPlatformAppConfig('alipay'),
+                      fetchAlipayPendingAuthorizations(),
+                      fetchShops('alipay'),
+                    ]);
+                  } else {
+                    setMode('overview');
+                  }
                   setCallbackPayload(null);
                   void fetchPlatforms();
                   void fetchCollaborationChannels();

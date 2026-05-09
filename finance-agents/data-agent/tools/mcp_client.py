@@ -1625,6 +1625,82 @@ async def platform_handle_auth_callback(
     return result
 
 
+async def platform_list_pending_authorizations(
+    auth_token: str,
+    platform_code: str,
+    *,
+    status: str = "pending_claim",
+    mode: str = "",
+) -> dict[str, Any]:
+    """获取平台待认领授权列表。"""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not platform_code:
+        return {"success": False, "error": "platform_code 不能为空"}
+
+    normalized_platform = _normalize_platform_code(platform_code)
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == "mock":
+        return {
+            "success": True,
+            "platform_code": normalized_platform,
+            "pending_authorizations": [],
+            "count": 0,
+            "mode": normalized_mode,
+        }
+
+    result = await call_mcp_tool(
+        "platform_list_pending_authorizations",
+        {
+            "auth_token": auth_token,
+            "platform_code": normalized_platform,
+            "status": status,
+            "mode": normalized_mode,
+        },
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return {"success": False, "mode": normalized_mode, "error": "平台待认领授权接口暂未接入"}
+    return result
+
+
+async def platform_claim_pending_authorization(
+    auth_token: str,
+    platform_code: str,
+    pending_authorization_id: str,
+    *,
+    claim_code: str,
+    merchant_display_name: str,
+    mode: str = "",
+) -> dict[str, Any]:
+    """认领并绑定平台待认领授权。"""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not platform_code:
+        return {"success": False, "error": "platform_code 不能为空"}
+    if not claim_code:
+        return {"success": False, "error": "认领码不能为空"}
+
+    normalized_platform = _normalize_platform_code(platform_code)
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == "mock":
+        return {"success": False, "mode": normalized_mode, "error": "mock 模式不支持待认领授权"}
+
+    result = await call_mcp_tool(
+        "platform_claim_pending_authorization",
+        {
+            "auth_token": auth_token,
+            "platform_code": normalized_platform,
+            "pending_authorization_id": pending_authorization_id,
+            "claim_code": claim_code,
+            "merchant_display_name": merchant_display_name,
+            "mode": normalized_mode,
+        },
+    )
+    if not result.get("success") and _is_unknown_tool_error(result.get("error")):
+        return {"success": False, "mode": normalized_mode, "error": "平台待认领授权接口暂未接入"}
+    return result
+
+
 async def platform_reauthorize_shop(
     auth_token: str,
     connection_id: str,

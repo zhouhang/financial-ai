@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
+_PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -582,6 +583,25 @@ def ensure_auth_sessions_extra_schema() -> list[str]:
 
     _AUTH_SESSIONS_EXTRA_SCHEMA_READY = True
     logger.info("auth_sessions.extra 字段已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_platform_pending_authorizations_schema() -> list[str]:
+    """确保无 state 平台授权待认领表存在。"""
+    global _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY
+    if _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY:
+        return []
+    if _table_exists("platform_pending_authorizations"):
+        _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = True
+        return []
+
+    migration_name = "026_platform_pending_authorizations.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _table_exists("platform_pending_authorizations"):
+        raise RuntimeError("platform_pending_authorizations 表升级失败，表仍不存在")
+
+    _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = True
+    logger.info("platform_pending_authorizations 表已自动补齐: %s", migration_name)
     return [migration_name]
 
 
@@ -2227,6 +2247,301 @@ def list_auth_sessions(
             f"查询 auth_sessions 列表失败 (company_id={company_id}, platform_code={platform_code}, status={status}): {e}"
         )
         return []
+
+
+_PENDING_AUTH_SELECT_SQL = """
+    id, platform_code, platform_app_id, app_id, source, claim_code, status,
+    access_token, refresh_token, token_expires_at, refresh_expires_at,
+    raw_auth_payload, callback_payload, external_shop_id, external_seller_id,
+    merchant_display_name, claimed_company_id, claimed_by_user_id,
+    claimed_shop_connection_id, claimed_at, expires_at, last_error,
+    created_at, updated_at
+""".strip()
+
+
+def _normalize_pending_authorization(row: dict, *, include_secrets: bool = False) -> dict:
+    result = _normalize_record(row)
+    if include_secrets:
+        result["access_token"] = open_secret(result.get("access_token") or "")
+        result["refresh_token"] = open_secret(result.get("refresh_token") or "")
+    else:
+        result["access_token"] = ""
+        result["refresh_token"] = ""
+    return result
+
+
+def create_platform_pending_authorization(
+    *,
+    platform_code: str,
+    platform_app_id: str | None = None,
+    app_id: str = "",
+    source: str = "",
+    claim_code: str = "",
+    access_token: str = "",
+    refresh_token: str = "",
+    token_expires_at: str | None = None,
+    refresh_expires_at: str | None = None,
+    raw_auth_payload: dict | None = None,
+    callback_payload: dict | None = None,
+    external_shop_id: str = "",
+    external_seller_id: str = "",
+    merchant_display_name: str = "",
+    expires_at: str = "",
+    last_error: str = "",
+    include_secrets: bool = False,
+) -> dict | None:
+    """创建无 state 平台授权待认领记录。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO platform_pending_authorizations (
+                        platform_code, platform_app_id, app_id, source, claim_code, status,
+                        access_token, refresh_token, token_expires_at, refresh_expires_at,
+                        raw_auth_payload, callback_payload, external_shop_id, external_seller_id,
+                        merchant_display_name, expires_at, last_error
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, 'pending_claim',
+                        %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s, %s,
+                        %s, %s, %s
+                    )
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (
+                        platform_code,
+                        platform_app_id or None,
+                        app_id,
+                        source,
+                        claim_code,
+                        seal_secret(access_token),
+                        seal_secret(refresh_token),
+                        token_expires_at,
+                        refresh_expires_at,
+                        psycopg2.extras.Json(raw_auth_payload or {}),
+                        psycopg2.extras.Json(callback_payload or {}),
+                        external_shop_id,
+                        external_seller_id,
+                        merchant_display_name,
+                        expires_at,
+                        last_error,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(
+            f"创建 platform_pending_authorizations 失败 (platform_code={platform_code}, external_shop_id={external_shop_id}): {e}"
+        )
+        return None
+
+
+def list_platform_pending_authorizations(
+    *,
+    platform_code: str,
+    status: str = "pending_claim",
+    limit: int = 50,
+) -> list[dict]:
+    """查询平台待认领授权列表，不返回 token 明文。"""
+    ensure_platform_pending_authorizations_schema()
+    try:
+        safe_limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        safe_limit = 50
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE platform_code = %s
+                """
+                params: list = [platform_code]
+                if status:
+                    sql += " AND status = %s"
+                    params.append(status)
+                sql += " ORDER BY created_at DESC LIMIT %s"
+                params.append(safe_limit)
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_pending_authorization(dict(row), include_secrets=False) for row in rows]
+    except Exception as e:
+        logger.error(
+            f"查询 platform_pending_authorizations 列表失败 (platform_code={platform_code}, status={status}): {e}"
+        )
+        return []
+
+
+def get_platform_pending_authorization_by_id(
+    pending_authorization_id: str,
+    *,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按 ID 查询待认领平台授权。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (pending_authorization_id,),
+                )
+                row = cur.fetchone()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(f"按 ID 查询 platform_pending_authorizations 失败 (id={pending_authorization_id}): {e}")
+        return None
+
+
+def get_platform_pending_authorization_by_claim_code(
+    claim_code: str,
+    *,
+    include_secrets: bool = False,
+) -> dict | None:
+    """按认领码查询待认领平台授权。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_PENDING_AUTH_SELECT_SQL}
+                    FROM platform_pending_authorizations
+                    WHERE claim_code = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (claim_code,),
+                )
+                row = cur.fetchone()
+                return _normalize_pending_authorization(dict(row), include_secrets=include_secrets) if row else None
+    except Exception as e:
+        logger.error(f"按认领码查询 platform_pending_authorizations 失败 (claim_code={claim_code}): {e}")
+        return None
+
+
+def mark_platform_pending_authorization_claimed(
+    *,
+    pending_authorization_id: str,
+    claimed_company_id: str,
+    claimed_by_user_id: str,
+    claimed_shop_connection_id: str,
+    last_error: str = "",
+) -> dict | None:
+    """标记待认领授权已绑定到企业。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE platform_pending_authorizations
+                    SET status = 'claimed',
+                        claimed_company_id = %s,
+                        claimed_by_user_id = %s,
+                        claimed_shop_connection_id = %s,
+                        claimed_at = CURRENT_TIMESTAMP,
+                        last_error = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (
+                        claimed_company_id,
+                        claimed_by_user_id,
+                        claimed_shop_connection_id,
+                        last_error,
+                        pending_authorization_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=False) if row else None
+    except Exception as e:
+        logger.error(
+            f"标记 platform_pending_authorizations 已认领失败 (id={pending_authorization_id}): {e}"
+        )
+        return None
+
+
+def mark_platform_pending_authorization_failed(
+    *,
+    pending_authorization_id: str,
+    status: str = "failed",
+    last_error: str = "",
+) -> dict | None:
+    """标记待认领授权失败、过期或丢弃。"""
+    ensure_platform_pending_authorizations_schema()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE platform_pending_authorizations
+                    SET status = %s,
+                        last_error = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING {_PENDING_AUTH_SELECT_SQL}
+                    """,
+                    (status, last_error, pending_authorization_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_pending_authorization(dict(row), include_secrets=False) if row else None
+    except Exception as e:
+        logger.error(
+            f"标记 platform_pending_authorizations 失败状态失败 (id={pending_authorization_id}, status={status}): {e}"
+        )
+        return None
+
+
+def find_shop_connection_by_platform_external_shop(
+    *,
+    platform_code: str,
+    external_shop_id: str,
+) -> dict | None:
+    """跨企业查询某平台主体是否已绑定。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, platform_code, external_shop_id, external_shop_name,
+                           external_seller_id, auth_subject_name, shop_type, status, meta,
+                           created_at, updated_at
+                    FROM shop_connections
+                    WHERE platform_code = %s
+                      AND external_shop_id = %s
+                      AND status <> 'deleted'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (platform_code, external_shop_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            f"跨企业查询 shop_connections 失败 (platform_code={platform_code}, external_shop_id={external_shop_id}): {e}"
+        )
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

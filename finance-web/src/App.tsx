@@ -77,6 +77,8 @@ function parseAuthCallbackPayloadFromLocation(): AuthCallbackPayload | null {
   const platformCode = params.get('platform_code') || params.get('platform') || '';
   const message = params.get('platform_auth_message') || params.get('message') || '';
   const shopName = params.get('shop_name') || undefined;
+  const pendingAuthorizationId = params.get('pending_authorization_id') || undefined;
+  const claimCode = params.get('claim_code') || undefined;
 
   if (!status && !path.includes('auth-callback') && !path.includes('auth_result')) {
     return null;
@@ -87,6 +89,8 @@ function parseAuthCallbackPayloadFromLocation(): AuthCallbackPayload | null {
     status: status || 'unknown',
     message: message || '授权流程已返回，请检查授权结果。',
     shopName,
+    pendingAuthorizationId,
+    claimCode,
   };
 }
 
@@ -354,6 +358,8 @@ export default function App() {
         'platform',
         'message',
         'shop_name',
+        'pending_authorization_id',
+        'claim_code',
       ].forEach((key) => url.searchParams.delete(key));
     }
     window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);

@@ -162,21 +162,33 @@ describe('电商平台授权入口', () => {
     });
   });
 
-  it('支付宝新增授权先填写商户显示名称并提交真实授权会话', async () => {
+  it('支付宝新增授权进入商家授权和认领页面', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         requests.push({ url, init });
-        if (url.includes('/app-config')) {
-          return mockJsonResponse({ success: true, configured: false, config: {} });
-        }
-        if (url.startsWith('/api/platform-connections/alipay/auth-sessions')) {
+        if (url.includes('/platform-connections/alipay/app-config')) {
           return mockJsonResponse({
             success: true,
-            auth_url: '#alipay-auth',
+            configured: true,
+            config: {
+              platform_code: 'alipay',
+              app_key: '2021006152656574',
+              has_app_secret: true,
+              redirect_uri: 'https://dev.tallyai.cn/api/platform-auth/callback/alipay',
+              merchant_auth_pc_url: 'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
+              merchant_auth_qr_url: 'https://static.example.com/alipay-qr.png',
+            },
           });
+        }
+        if (url.includes('/pending-authorizations')) {
+          return mockJsonResponse({ success: true, pending_authorizations: [], count: 0 });
+        }
+        if (url.includes('/shops')) return mockJsonResponse({ shops: [] });
+        if (url.includes('/app-config')) {
+          return mockJsonResponse({ success: true, configured: false, config: {} });
         }
         if (url.startsWith('/api/platform-connections')) {
           return mockJsonResponse({
@@ -218,25 +230,14 @@ describe('电商平台授权入口', () => {
     expect(alipayCard).toBeTruthy();
     fireEvent.click(within(alipayCard as HTMLElement).getByRole('button', { name: '新增授权' }));
 
-    const dialog = await screen.findByRole('dialog', { name: '新增支付宝商户授权' });
-    const submitButton = within(dialog).getByRole('button', { name: '新增授权' });
-    expect(submitButton).toBeDisabled();
-
-    fireEvent.change(within(dialog).getByLabelText('商户显示名称'), { target: { value: '福游网络' } });
-    expect(submitButton).not.toBeDisabled();
-    fireEvent.click(submitButton);
-
-    await waitFor(() => {
-      expect(requests.some((request) => request.url === '/api/platform-connections/alipay/auth-sessions')).toBe(true);
-    });
-    const authRequest = requests.find(
-      (request) => request.url === '/api/platform-connections/alipay/auth-sessions',
+    expect(await screen.findByText('支付宝商家授权入口')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '打开支付宝商家授权' })).toHaveAttribute(
+      'href',
+      'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
     );
-    expect(JSON.parse(String(authRequest?.init?.body || '{}'))).toEqual({
-      return_path: '/data-connections?mode=platform&platform=alipay',
-      mode: 'real',
-      merchant_display_name: '福游网络',
-    });
+    expect(
+      requests.some((request) => request.url === '/api/platform-connections/alipay/auth-sessions'),
+    ).toBe(false);
   });
 
   it('详情页新增店铺授权失败时在当前页展示错误', async () => {
@@ -700,6 +701,9 @@ describe('电商平台授权入口', () => {
       app_public_cert: 'APP-CERT',
       alipay_public_cert: 'ALIPAY-CERT',
       alipay_root_cert: 'ROOT-CERT',
+      merchant_auth_mode: 'static_invite',
+      merchant_auth_pc_url: '',
+      merchant_auth_qr_url: '',
       mode: 'real',
     });
   });
@@ -787,6 +791,205 @@ describe('电商平台授权入口', () => {
     expect(screen.queryByDisplayValue('APP-CERT')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('ALIPAY-CERT')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('ROOT-CERT')).not.toBeInTheDocument();
+  });
+
+  it('支付宝授权页展示固定二维码和 PC 授权链接', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/platform-connections/alipay/app-config')) {
+          return mockJsonResponse({
+            success: true,
+            configured: true,
+            config: {
+              platform_code: 'alipay',
+              app_key: '2021006152656574',
+              has_app_secret: true,
+              redirect_uri: 'https://dev.tallyai.cn/api/platform-auth/callback/alipay',
+              merchant_auth_mode: 'static_invite',
+              merchant_auth_pc_url: 'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
+              merchant_auth_qr_url: 'https://static.example.com/alipay-qr.png',
+            },
+          });
+        }
+        if (url.includes('/pending-authorizations')) {
+          return mockJsonResponse({ success: true, pending_authorizations: [], count: 0 });
+        }
+        if (url.includes('/shops')) return mockJsonResponse({ shops: [] });
+        if (url.includes('/app-config')) return mockJsonResponse({ success: true, configured: false, config: {} });
+        if (url.startsWith('/api/platform-connections')) {
+          return mockJsonResponse({
+            platforms: [
+              {
+                platform_code: 'alipay',
+                platform_name: '支付宝',
+                authorized_shop_count: 0,
+                error_shop_count: 0,
+                status: 'supported',
+              },
+            ],
+          });
+        }
+        if (url === '/api/data-sources') return mockJsonResponse({ data_sources: [] });
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="platform_oauth"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    await screen.findByText('编码：alipay');
+    fireEvent.click(screen.getByRole('button', { name: '查看店铺' }));
+
+    const qr = await screen.findByAltText('支付宝商家授权二维码');
+    expect(qr).toHaveAttribute('src', 'https://static.example.com/alipay-qr.png');
+    expect(screen.getByRole('link', { name: '打开支付宝商家授权' })).toHaveAttribute(
+      'href',
+      'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
+    );
+  });
+
+  it('管理员可输入认领码绑定支付宝待认领授权', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, init });
+        if (url.includes('/platform-connections/alipay/app-config')) {
+          return mockJsonResponse({
+            success: true,
+            configured: true,
+            config: {
+              platform_code: 'alipay',
+              app_key: '2021006152656574',
+              has_app_secret: true,
+              redirect_uri: 'https://dev.tallyai.cn/api/platform-auth/callback/alipay',
+              merchant_auth_pc_url: 'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
+              merchant_auth_qr_url: 'https://static.example.com/alipay-qr.png',
+            },
+          });
+        }
+        if (url.includes('/pending-authorizations/pending-1/claim')) {
+          return mockJsonResponse({
+            success: true,
+            message: '支付宝商户授权已绑定',
+            shop: { id: 'shop-alipay-1', platform_code: 'alipay', external_shop_name: '福游网络' },
+          });
+        }
+        if (url.includes('/pending-authorizations')) {
+          return mockJsonResponse({
+            success: true,
+            pending_authorizations: [
+              {
+                id: 'pending-1',
+                platform_code: 'alipay',
+                claim_code: 'ALIPAY-123456',
+                status: 'pending_claim',
+                external_shop_id: '2088123412341234',
+                expires_at: '2026-05-10T00:00:00+08:00',
+                created_at: '2026-05-09T12:00:00+08:00',
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (url.includes('/shops')) return mockJsonResponse({ shops: [] });
+        if (url.includes('/app-config')) return mockJsonResponse({ success: true, configured: false, config: {} });
+        if (url.startsWith('/api/platform-connections')) {
+          return mockJsonResponse({
+            platforms: [
+              {
+                platform_code: 'alipay',
+                platform_name: '支付宝',
+                authorized_shop_count: 0,
+                error_shop_count: 0,
+                status: 'supported',
+              },
+            ],
+          });
+        }
+        if (url === '/api/data-sources') return mockJsonResponse({ data_sources: [] });
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="platform_oauth"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    await screen.findByText('编码：alipay');
+    fireEvent.click(screen.getByRole('button', { name: '查看店铺' }));
+
+    expect(await screen.findByText('认领码：ALIPAY-123456')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('商户显示名称'), { target: { value: '福游网络' } });
+    fireEvent.click(screen.getByRole('button', { name: '绑定支付宝授权' }));
+
+    await waitFor(() => {
+      expect(
+        requests.some(
+          (request) =>
+            request.url === '/api/platform-connections/alipay/pending-authorizations/pending-1/claim' &&
+            request.init?.method === 'POST',
+        ),
+      ).toBe(true);
+    });
+    const claimRequest = requests.find(
+      (request) => request.url === '/api/platform-connections/alipay/pending-authorizations/pending-1/claim',
+    );
+    expect(JSON.parse(String(claimRequest?.init?.body || '{}'))).toEqual({
+      claim_code: 'ALIPAY-123456',
+      merchant_display_name: '福游网络',
+      mode: 'real',
+    });
+    expect(await screen.findByText('支付宝商户授权已绑定')).toBeInTheDocument();
+  });
+
+  it('无 state 支付宝回调页展示认领码', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/app-config')) return mockJsonResponse({ success: true, configured: false, config: {} });
+        if (url.startsWith('/api/platform-connections')) return mockJsonResponse({ platforms: [] });
+        if (url === '/api/data-sources') return mockJsonResponse({ data_sources: [] });
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        initialCallback={{
+          platformCode: 'alipay',
+          status: 'success',
+          message: '支付宝授权已收到，请在 Tally 输入认领码完成绑定',
+          pendingAuthorizationId: 'pending-1',
+          claimCode: 'ALIPAY-123456',
+        }}
+        selectedConnectionView="data_sources"
+        selectedSourceKind="platform_oauth"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    expect(await screen.findByText('支付宝授权认领码')).toBeInTheDocument();
+    expect(screen.getByText('ALIPAY-123456')).toBeInTheDocument();
   });
 
   it('店铺需重授权状态展示为需重授权且保留重授权操作', async () => {

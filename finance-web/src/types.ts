@@ -164,6 +164,8 @@ export interface AuthCallbackPayload {
   status: string;
   message: string;
   shopName?: string;
+  pendingAuthorizationId?: string;
+  claimCode?: string;
 }
 
 export type DataSourceKind =

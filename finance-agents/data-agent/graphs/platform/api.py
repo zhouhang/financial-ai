@@ -24,6 +24,8 @@ from tools.mcp_client import (
     platform_get_app_config,
     platform_get_shop_detail,
     platform_handle_auth_callback,
+    platform_claim_pending_authorization,
+    platform_list_pending_authorizations,
     platform_list_connections,
     platform_list_shops,
     platform_reauthorize_shop,
@@ -170,6 +172,31 @@ class ShopDetailResponse(BaseModel):
     connection: Optional[ShopConnection] = None
     sync_sources: list[dict[str, Any]] = Field(default_factory=list)
     authorization: dict[str, Any] = Field(default_factory=dict)
+    message: str = ""
+
+
+class PendingAuthorizationResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    platform_code: str
+    pending_authorizations: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    message: str = ""
+
+
+class ClaimPendingAuthorizationRequest(BaseModel):
+    claim_code: str
+    merchant_display_name: str = ""
+    mode: str = ""
+
+
+class ClaimPendingAuthorizationResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    platform_code: str
+    shop: dict[str, Any] = Field(default_factory=dict)
+    pending_authorization: dict[str, Any] = Field(default_factory=dict)
+    warning: str = ""
     message: str = ""
 
 
@@ -325,6 +352,80 @@ async def create_platform_auth_session(
     )
 
 
+@router.get(
+    "/platform-connections/{platform_code}/pending-authorizations",
+    response_model=PendingAuthorizationResponse,
+)
+async def list_platform_pending_authorizations(
+    platform_code: str,
+    status: str = Query("pending_claim", description="待认领授权状态"),
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    if platform_code != "alipay":
+        raise HTTPException(status_code=400, detail="暂只支持支付宝待认领授权")
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await platform_list_pending_authorizations(
+        auth_token,
+        platform_code,
+        status=status,
+        mode=mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取待认领授权失败"))
+
+    pending_authorizations = result.get("pending_authorizations") or []
+    return PendingAuthorizationResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "real"),
+        platform_code=platform_code,
+        pending_authorizations=pending_authorizations,
+        count=int(result.get("count") or len(pending_authorizations)),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.post(
+    "/platform-connections/{platform_code}/pending-authorizations/{pending_authorization_id}/claim",
+    response_model=ClaimPendingAuthorizationResponse,
+)
+async def claim_platform_pending_authorization(
+    platform_code: str,
+    pending_authorization_id: str,
+    body: ClaimPendingAuthorizationRequest,
+    authorization: Optional[str] = Header(None),
+):
+    if platform_code != "alipay":
+        raise HTTPException(status_code=400, detail="暂只支持支付宝待认领授权")
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await platform_claim_pending_authorization(
+        auth_token,
+        platform_code,
+        pending_authorization_id,
+        claim_code=body.claim_code,
+        merchant_display_name=body.merchant_display_name,
+        mode="real",
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "认领待认领授权失败"))
+
+    return ClaimPendingAuthorizationResponse(
+        success=True,
+        mode=str(result.get("mode") or "real"),
+        platform_code=platform_code,
+        shop=result.get("shop") or result.get("connection") or {},
+        pending_authorization=result.get("pending_authorization") or {},
+        warning=str(result.get("warning") or ""),
+        message=str(result.get("message") or "支付宝商户授权已绑定"),
+    )
+
+
 @router.get("/platform-auth/callback/{platform_code}")
 async def handle_platform_auth_callback(
     platform_code: str,
@@ -353,6 +454,8 @@ async def handle_platform_auth_callback(
         success=success,
         message=display_message,
         shop_name=str(((result.get("connection") or {}).get("external_shop_name")) or ""),
+        pending_authorization_id=str(result.get("pending_authorization_id") or ""),
+        claim_code=str(result.get("claim_code") or ""),
     )
     return RedirectResponse(url=redirect_to, status_code=303)
 
@@ -443,6 +546,8 @@ def _build_callback_redirect_url(
     success: bool,
     message: str,
     shop_name: str = "",
+    pending_authorization_id: str = "",
+    claim_code: str = "",
 ) -> str:
     raw_target = (return_path or "/").strip() or "/"
     if not raw_target.startswith("/"):
@@ -462,6 +567,14 @@ def _build_callback_redirect_url(
         query_pairs["shop_name"] = shop_name
     else:
         query_pairs.pop("shop_name", None)
+    if pending_authorization_id:
+        query_pairs["pending_authorization_id"] = pending_authorization_id
+    else:
+        query_pairs.pop("pending_authorization_id", None)
+    if claim_code:
+        query_pairs["claim_code"] = claim_code
+    else:
+        query_pairs.pop("claim_code", None)
 
     return urlunsplit(
         (
