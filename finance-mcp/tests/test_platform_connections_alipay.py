@@ -564,7 +564,10 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         "alipay_bill:trade:shop-alipay-1",
     }
     assert all(job["trigger_mode"] == "initial" for job in jobs)
-    assert all("alipay-initial:" in job["idempotency_key"] for job in jobs)
+    assert {job["idempotency_key"] for job in jobs} == {
+        f"alipay-initial:dataset-0:signcustomer:{expected_bill_date}",
+        f"alipay-initial:dataset-1:trade:{expected_bill_date}",
+    }
     assert all(job["params"]["bill_date"] == expected_bill_date for job in jobs)
     assert all(job["params"]["biz_date"] == expected_bill_date for job in jobs)
     assert {job["params"]["bill_type"] for job in jobs} == {"signcustomer", "trade"}
@@ -648,6 +651,24 @@ async def test_run_alipay_initial_collection_jobs_triggers_dataset_collection(mo
     ]
     assert [call["params"]["bill_date"] for call in calls] == ["2026-05-08", "2026-05-08"]
     assert [call["params"]["biz_date"] for call in calls] == ["2026-05-08", "2026-05-08"]
+    assert [call["params"] for call in calls] == [
+        {
+            "dataset_id": "dataset-fund",
+            "resource_key": "alipay_bill:signcustomer:shop-alipay-1",
+            "bill_type": "signcustomer",
+            "bill_date": "2026-05-08",
+            "biz_date": "2026-05-08",
+            "force_mode": "initial",
+        },
+        {
+            "dataset_id": "dataset-trade",
+            "resource_key": "alipay_bill:trade:shop-alipay-1",
+            "bill_type": "trade",
+            "bill_date": "2026-05-08",
+            "biz_date": "2026-05-08",
+            "force_mode": "initial",
+        },
+    ]
     assert all("alipay-initial:" in call["idempotency_key"] for call in calls)
 
 
