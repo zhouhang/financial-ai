@@ -326,7 +326,7 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         "data_sources": [],
         "datasets": [],
         "callbacks": [],
-        "scheduled": [],
+        "initial_collection_tasks": [],
     }
     auth_session = {
         "id": "auth-session-1",
@@ -418,13 +418,28 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         calls["datasets"].append(kwargs)
         return {"id": dataset_id, **kwargs}
 
-    def fake_create_unified_sync_job(**kwargs: Any) -> dict[str, Any]:
-        calls["scheduled"].append(kwargs)
-        return {"id": f"sync-job-{len(calls['scheduled'])}", **kwargs}
+    def forbidden_create_unified_sync_job(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "Alipay authorization callback must trigger initial collection, not create deferred sync jobs"
+        )
 
     def fake_update_auth_session_callback(**kwargs: Any) -> dict[str, Any]:
         calls["callbacks"].append(kwargs)
         return {**auth_session, **kwargs}
+
+    created_tasks: list[CompletedTask] = []
+
+    class CompletedTask:
+        def __init__(self, coroutine: Any):
+            self.coroutine = coroutine
+
+    async def fake_run_alipay_initial_collection_jobs(**kwargs: Any) -> None:
+        calls["initial_collection_tasks"].append(kwargs)
+
+    def fake_create_task(coroutine: Any) -> CompletedTask:
+        task = CompletedTask(coroutine)
+        created_tasks.append(task)
+        return task
 
     monkeypatch.setattr(platform_connections.auth_db, "upsert_shop_connection", fake_upsert_shop_connection)
     monkeypatch.setattr(platform_connections.auth_db, "create_shop_authorization", fake_create_shop_authorization)
@@ -438,7 +453,7 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
     monkeypatch.setattr(
         platform_connections.auth_db,
         "create_unified_sync_job",
-        fake_create_unified_sync_job,
+        forbidden_create_unified_sync_job,
     )
     monkeypatch.setattr(
         platform_connections.auth_db,
@@ -461,6 +476,13 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         "_build_shop_view",
         lambda connection: {**connection, "last_sync_at": None, "last_status": "idle"},
     )
+    monkeypatch.setattr(
+        platform_connections,
+        "_run_alipay_initial_collection_jobs",
+        fake_run_alipay_initial_collection_jobs,
+        raising=False,
+    )
+    monkeypatch.setattr(platform_connections.asyncio, "create_task", fake_create_task)
 
     result = await platform_connections._handle_auth_callback(
         {
@@ -470,6 +492,8 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
             "mode": "real",
         }
     )
+    assert len(created_tasks) == 1
+    await created_tasks[0].coroutine
 
     assert result["success"] is True
     assert result["platform_code"] == "alipay"
@@ -527,35 +551,104 @@ async def test_alipay_callback_creates_merchant_and_two_datasets(monkeypatch) ->
         dataset["extract_config"]["collection_date_field"] == "bill_date"
         for dataset in calls["datasets"]
     )
-    assert len(calls["scheduled"]) == 2
-    scheduled_jobs = calls["scheduled"]
-    assert {job["data_source_id"] for job in scheduled_jobs} == {"source-alipay-1"}
-    assert {job["resource_key"] for job in scheduled_jobs} == {
+    assert len(calls["initial_collection_tasks"]) == 1
+    initial_task = calls["initial_collection_tasks"][0]
+    assert initial_task["company_id"] == "company-1"
+    jobs = initial_task["jobs"]
+    assert len(jobs) == 2
+    expected_bill_date = (datetime.now(timezone(timedelta(hours=8))).date() - timedelta(days=1)).isoformat()
+    assert {job["source_id"] for job in jobs} == {"source-alipay-1"}
+    assert {job["dataset_id"] for job in jobs} == {"dataset-0", "dataset-1"}
+    assert {job["resource_key"] for job in jobs} == {
         "alipay_bill:signcustomer:shop-alipay-1",
         "alipay_bill:trade:shop-alipay-1",
     }
-    expected_bill_date = (datetime.now(timezone(timedelta(hours=8))).date() - timedelta(days=1)).isoformat()
-    assert all(job["idempotency_key"].endswith(f":{expected_bill_date}") for job in scheduled_jobs)
-    assert {job["window_start"] for job in scheduled_jobs} == {expected_bill_date}
-    assert {job["window_end"] for job in scheduled_jobs} == {expected_bill_date}
-    assert all(
-        job["request_payload"]["deferred_until"] == "alipay_bill_collector"
-        for job in scheduled_jobs
-    )
-    assert [job["request_payload"]["params"]["bill_date"] for job in scheduled_jobs] == [
-        expected_bill_date,
-        expected_bill_date,
-    ]
-    assert all(job["trigger_mode"] == "initial" for job in scheduled_jobs)
-    assert {job["request_payload"]["params"]["bill_type"] for job in scheduled_jobs} == {
-        "signcustomer",
-        "trade",
-    }
+    assert all(job["trigger_mode"] == "initial" for job in jobs)
+    assert all("alipay-initial:" in job["idempotency_key"] for job in jobs)
+    assert all(job["params"]["bill_date"] == expected_bill_date for job in jobs)
+    assert all(job["params"]["biz_date"] == expected_bill_date for job in jobs)
+    assert {job["params"]["bill_type"] for job in jobs} == {"signcustomer", "trade"}
+    assert all("deferred_until" not in job for job in jobs)
+    assert all("deferred_until" not in job.get("params", {}) for job in jobs)
     callback_payload = calls["callbacks"][0]["callback_payload"]
     assert callback_payload["alipay_data_source_id"] == "source-alipay-1"
     assert callback_payload["alipay_fund_bill_dataset_id"] == "dataset-0"
     assert callback_payload["alipay_trade_bill_dataset_id"] == "dataset-1"
     assert callback_payload["alipay_dataset_warning"] == ""
+
+
+@pytest.mark.anyio
+async def test_run_alipay_initial_collection_jobs_triggers_dataset_collection(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_trigger_dataset_collection_for_company(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"success": True, "job": {"id": f"job-{len(calls)}"}}
+
+    class FakeDataSources:
+        trigger_dataset_collection_for_company = staticmethod(
+            fake_trigger_dataset_collection_for_company
+        )
+
+    original_import = __import__
+
+    def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+        if name == "tools" and "data_sources" in fromlist:
+            return type("ToolsModule", (), {"data_sources": FakeDataSources})()
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    await platform_connections._run_alipay_initial_collection_jobs(
+        company_id="company-1",
+        jobs=[
+            {
+                "source_id": "source-alipay-1",
+                "dataset_id": "dataset-fund",
+                "resource_key": "alipay_bill:signcustomer:shop-alipay-1",
+                "trigger_mode": "initial",
+                "idempotency_key": "alipay-initial:dataset-fund:signcustomer:2026-05-08",
+                "background": True,
+                "params": {
+                    "dataset_id": "dataset-fund",
+                    "resource_key": "alipay_bill:signcustomer:shop-alipay-1",
+                    "bill_type": "signcustomer",
+                    "bill_date": "2026-05-08",
+                    "biz_date": "2026-05-08",
+                    "force_mode": "initial",
+                },
+            },
+            {
+                "source_id": "source-alipay-1",
+                "dataset_id": "dataset-trade",
+                "resource_key": "alipay_bill:trade:shop-alipay-1",
+                "trigger_mode": "initial",
+                "idempotency_key": "alipay-initial:dataset-trade:trade:2026-05-08",
+                "background": True,
+                "params": {
+                    "dataset_id": "dataset-trade",
+                    "resource_key": "alipay_bill:trade:shop-alipay-1",
+                    "bill_type": "trade",
+                    "bill_date": "2026-05-08",
+                    "biz_date": "2026-05-08",
+                    "force_mode": "initial",
+                },
+            },
+        ],
+    )
+
+    assert [call["dataset_id"] for call in calls] == ["dataset-fund", "dataset-trade"]
+    assert all(call["company_id"] == "company-1" for call in calls)
+    assert all(call["source_id"] == "source-alipay-1" for call in calls)
+    assert all(call["trigger_mode"] == "initial" for call in calls)
+    assert all(call["background"] is False for call in calls)
+    assert [call["resource_key"] for call in calls] == [
+        "alipay_bill:signcustomer:shop-alipay-1",
+        "alipay_bill:trade:shop-alipay-1",
+    ]
+    assert [call["params"]["bill_date"] for call in calls] == ["2026-05-08", "2026-05-08"]
+    assert [call["params"]["biz_date"] for call in calls] == ["2026-05-08", "2026-05-08"]
+    assert all("alipay-initial:" in call["idempotency_key"] for call in calls)
 
 
 def test_build_alipay_bill_dataset_payload_starts_unpublished() -> None:

@@ -809,37 +809,29 @@ async def _run_taobao_initial_collection_jobs(
             )
 
 
-def _schedule_alipay_initial_collection_jobs(
+async def _run_alipay_initial_collection_jobs(
     *,
     company_id: str,
     jobs: list[dict[str, Any]],
 ) -> None:
-    """创建支付宝 T-1 初始化账单采集任务；Task 6 接入专用采集器后再执行。"""
+    """串行执行支付宝 T-1 初始化账单采集任务。"""
+    from tools import data_sources
+
     for job_payload in jobs:
         try:
-            params = dict(job_payload.get("params") or {})
-            bill_date = str(params.get("bill_date") or params.get("biz_date") or "")
-            scheduled_job = auth_db.create_unified_sync_job(
+            await data_sources.trigger_dataset_collection_for_company(
                 company_id=company_id,
-                data_source_id=str(job_payload.get("source_id") or ""),
-                trigger_mode=str(job_payload.get("trigger_mode") or "initial"),
+                source_id=str(job_payload.get("source_id") or ""),
+                dataset_id=str(job_payload.get("dataset_id") or ""),
                 resource_key=str(job_payload.get("resource_key") or ""),
+                trigger_mode=str(job_payload.get("trigger_mode") or "initial"),
                 idempotency_key=str(job_payload.get("idempotency_key") or ""),
-                window_start=bill_date or None,
-                window_end=bill_date or None,
-                request_payload={
-                    "dataset_id": str(job_payload.get("dataset_id") or ""),
-                    "resource_key": str(job_payload.get("resource_key") or ""),
-                    "background": bool(job_payload.get("background")),
-                    "params": params,
-                    "deferred_until": "alipay_bill_collector",
-                },
+                background=False,
+                params=dict(job_payload.get("params") or {}),
             )
-            if scheduled_job is None:
-                raise ValueError("创建支付宝初始化采集任务失败")
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "支付宝初始化采集任务创建失败: company_id=%s dataset_id=%s resource_key=%s error=%s",
+                "支付宝初始化采集任务执行失败: company_id=%s dataset_id=%s resource_key=%s error=%s",
                 company_id,
                 job_payload.get("dataset_id"),
                 job_payload.get("resource_key"),
@@ -1232,9 +1224,11 @@ async def _handle_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                 if alipay_jobs:
-                    _schedule_alipay_initial_collection_jobs(
-                        company_id=company_id,
-                        jobs=alipay_jobs,
+                    asyncio.create_task(
+                        _run_alipay_initial_collection_jobs(
+                            company_id=company_id,
+                            jobs=alipay_jobs,
+                        )
                     )
             except Exception as dataset_exc:  # noqa: BLE001
                 dataset_warning = str(dataset_exc)
