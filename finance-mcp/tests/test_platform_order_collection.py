@@ -405,6 +405,27 @@ def test_clean_platform_semantic_profile_removes_raw_prefixed_fields() -> None:
     assert cleaned["key_fields"] == ["source_row_key"]
     assert cleaned["low_confidence_fields"] == ["收入"]
 
+
+def test_normalize_manual_semantic_patch_ignores_raw_fields_without_schema() -> None:
+    normalized = data_sources._normalize_manual_semantic_patch(
+        {
+            "field_label_map": {
+                "raw": "原始对象",
+                "raw.收入": "收入",
+            },
+            "fields": [
+                {"raw_name": "raw", "display_name": "原始对象"},
+                {"raw_name": "raw.收入", "display_name": "收入"},
+            ],
+            "key_fields": ["raw.收入"],
+        },
+        valid_field_names=set(),
+    )
+
+    assert normalized.get("field_label_map") == {}
+    assert normalized.get("fields") == []
+    assert normalized.get("key_fields") == []
+
 @pytest.mark.anyio
 async def test_refresh_semantic_profile_names_alipay_fund_bill_without_llm(monkeypatch) -> None:
     persisted: dict[str, Any] = {}

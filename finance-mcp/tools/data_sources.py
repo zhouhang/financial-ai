@@ -2540,11 +2540,27 @@ def _normalize_manual_semantic_patch(
 
     key_fields = patch.get("key_fields")
     if isinstance(key_fields, list):
-        normalized["key_fields"] = [_safe_text(item) for item in key_fields if _safe_text(item)]
+        normalized["key_fields"] = [
+            _safe_text(item)
+            for item in key_fields
+            if not _is_non_publishable_semantic_field_name(item)
+        ]
 
     field_label_map = patch.get("field_label_map")
     fields = patch.get("fields")
-    if (isinstance(field_label_map, dict) or isinstance(fields, list)) and not valid_field_names:
+    has_publishable_field_patch = False
+    if isinstance(field_label_map, dict):
+        has_publishable_field_patch = any(
+            not _is_non_publishable_semantic_field_name(raw_name)
+            for raw_name in field_label_map
+        )
+    if isinstance(fields, list):
+        has_publishable_field_patch = has_publishable_field_patch or any(
+            isinstance(item, dict)
+            and not _is_non_publishable_semantic_field_name(item.get("raw_name"))
+            for item in fields
+        )
+    if has_publishable_field_patch and not valid_field_names:
         raise ValueError("当前数据集缺少 schema 字段定义，无法更新字段中文名或字段语义")
 
     if isinstance(field_label_map, dict):
