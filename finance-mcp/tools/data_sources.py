@@ -348,6 +348,69 @@ def _is_non_publishable_semantic_field_name(value: Any) -> bool:
     return normalized.startswith("raw.")
 
 
+def _clean_semantic_field_list(fields: Any) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in fields or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_text(item.get("raw_name") or item.get("name"))
+        if _is_non_publishable_semantic_field_name(raw_name) or raw_name in seen:
+            continue
+        next_item = dict(item)
+        next_item["raw_name"] = raw_name
+        cleaned.append(next_item)
+        seen.add(raw_name)
+    return cleaned
+
+
+def _clean_semantic_label_map(field_label_map: Any) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    if not isinstance(field_label_map, dict):
+        return cleaned
+    for raw_name, display_name in field_label_map.items():
+        raw_key = _safe_text(raw_name)
+        if _is_non_publishable_semantic_field_name(raw_key):
+            continue
+        cleaned[raw_key] = _safe_text(display_name) or raw_key
+    return cleaned
+
+
+def _clean_semantic_name_list(values: Any) -> list[str]:
+    cleaned: list[str] = []
+    for item in values or []:
+        raw_name = _safe_text(item)
+        if _is_non_publishable_semantic_field_name(raw_name) or raw_name in cleaned:
+            continue
+        cleaned.append(raw_name)
+    return cleaned
+
+
+def _clean_platform_semantic_profile(
+    *,
+    dataset_row: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    if not _platform_semantic_storage_key(dataset_row):
+        return profile
+
+    next_profile = dict(profile)
+    fields = _clean_semantic_field_list(next_profile.get("fields"))
+    field_label_map = _clean_semantic_label_map(next_profile.get("field_label_map"))
+    for field in fields:
+        raw_name = _safe_text(field.get("raw_name"))
+        if raw_name and raw_name not in field_label_map:
+            field_label_map[raw_name] = _safe_text(field.get("display_name")) or raw_name
+
+    next_profile["fields"] = fields
+    next_profile["field_label_map"] = field_label_map
+    next_profile["key_fields"] = _clean_semantic_name_list(next_profile.get("key_fields"))
+    next_profile["low_confidence_fields"] = _clean_semantic_name_list(
+        next_profile.get("low_confidence_fields")
+    )
+    return next_profile
+
+
 _FIELD_TOKEN_LABELS: dict[str, str] = {
     "account": "账户",
     "actual": "实付",
@@ -942,7 +1005,7 @@ def _apply_platform_semantic_profile_overrides(
                 field_item=current_item,
             )
         raw_name = _safe_text(field_item.get("raw_name"))
-        if not raw_name:
+        if _is_non_publishable_semantic_field_name(raw_name):
             continue
         fields.append(field_item)
         field_label_map[raw_name] = _safe_text(field_item.get("display_name")) or raw_name
@@ -955,7 +1018,7 @@ def _apply_platform_semantic_profile_overrides(
     key_fields = [
         _safe_text(item)
         for item in next_profile.get("key_fields") or []
-        if _safe_text(item)
+        if not _is_non_publishable_semantic_field_name(item)
     ]
     preserve_manual_key_fields = (
         _normalize_semantic_status(next_profile.get("status"), default="generated_basic") == "manual_updated"
@@ -973,7 +1036,7 @@ def _apply_platform_semantic_profile_overrides(
     next_profile["field_label_map"] = field_label_map
     next_profile["low_confidence_fields"] = low_confidence_fields
     next_profile["key_fields"] = key_fields
-    return next_profile
+    return _clean_platform_semantic_profile(dataset_row=dataset_row, profile=next_profile)
 
 
 def _collect_sample_values(
@@ -2488,7 +2551,7 @@ def _normalize_manual_semantic_patch(
         cleaned_map: dict[str, str] = {}
         for raw_name, display_name in field_label_map.items():
             raw_key = _safe_text(raw_name)
-            if not raw_key:
+            if _is_non_publishable_semantic_field_name(raw_key):
                 continue
             if raw_key not in valid_field_names:
                 raise ValueError(f"field_label_map 包含不存在字段: {raw_key}")
@@ -2501,7 +2564,7 @@ def _normalize_manual_semantic_patch(
             if not isinstance(item, dict):
                 continue
             raw_name = _safe_text(item.get("raw_name"))
-            if not raw_name:
+            if _is_non_publishable_semantic_field_name(raw_name):
                 continue
             if raw_name not in valid_field_names:
                 raise ValueError(f"fields 包含不存在字段: {raw_name}")
@@ -6036,6 +6099,10 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
         "sample_hash": _hash_payload(sample_rows[:SEMANTIC_SAMPLE_ROW_LIMIT]) if sample_rows else "",
         "has_sample_rows": bool(sample_rows),
     }
+    next_profile = _apply_platform_semantic_profile_overrides(
+        dataset_row=dataset_row,
+        profile=next_profile,
+    )
 
     updated = _persist_dataset_semantic_profile(
         dataset_row=dataset_row,

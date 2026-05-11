@@ -292,7 +292,7 @@ async def test_refresh_semantic_profile_reads_platform_order_lines(monkeypatch) 
 
 
 @pytest.mark.anyio
-async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypatch) -> None:
+async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields_without_raw_prefix(monkeypatch) -> None:
     persisted: dict[str, Any] = {}
     dataset = _alipay_bill_dataset(id="dataset-alipay-1")
 
@@ -361,13 +361,49 @@ async def test_refresh_semantic_profile_expands_alipay_raw_bill_fields(monkeypat
     assert profile["business_name"] == "支付宝交易账单 - 福游网络"
     assert profile["semantic_generator"]["llm_enabled"] is False
     assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
-    assert profile["field_label_map"]["raw.支付宝交易号"] == "支付宝交易号"
-    assert profile["field_label_map"]["raw.收入"] == "收入"
-    raw_field = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
-    assert raw_field["field_source"] == "raw_bill"
-    assert raw_field["source"] == "platform_preset"
+    assert profile["field_label_map"]["支付宝交易号"] == "支付宝交易号"
+    assert profile["field_label_map"]["收入"] == "收入"
+    assert "raw.支付宝交易号" not in profile["field_label_map"]
+    assert "raw.收入" not in profile["field_label_map"]
+    income_field = next(item for item in profile["fields"] if item["raw_name"] == "收入")
+    assert income_field["field_source"] == "normalized"
+    assert income_field["source"] == "platform_preset"
+    assert all(not item["raw_name"].startswith("raw.") for item in profile["fields"])
     assert profile["key_fields"] == ["source_row_key"]
 
+
+def test_clean_platform_semantic_profile_removes_raw_prefixed_fields() -> None:
+    dataset = _alipay_bill_dataset()
+    profile = {
+        "status": "manual_updated",
+        "field_label_map": {
+            "source_row_key": "账单行唯一键",
+            "raw": "原始对象",
+            "raw.收入": "收入",
+            "收入": "收入",
+        },
+        "fields": [
+            {"raw_name": "source_row_key", "display_name": "账单行唯一键", "confidence": 0.98},
+            {"raw_name": "raw", "display_name": "原始对象", "confidence": 0.98},
+            {"raw_name": "raw.收入", "display_name": "收入", "confidence": 0.98},
+            {"raw_name": "收入", "display_name": "收入", "confidence": 0.98},
+        ],
+        "key_fields": ["source_row_key", "raw.收入"],
+        "low_confidence_fields": ["raw.收入", "收入"],
+    }
+
+    cleaned = data_sources._clean_platform_semantic_profile(
+        dataset_row=dataset,
+        profile=profile,
+    )
+
+    assert cleaned["field_label_map"] == {
+        "source_row_key": "账单行唯一键",
+        "收入": "收入",
+    }
+    assert [item["raw_name"] for item in cleaned["fields"]] == ["source_row_key", "收入"]
+    assert cleaned["key_fields"] == ["source_row_key"]
+    assert cleaned["low_confidence_fields"] == ["收入"]
 
 @pytest.mark.anyio
 async def test_refresh_semantic_profile_names_alipay_fund_bill_without_llm(monkeypatch) -> None:
