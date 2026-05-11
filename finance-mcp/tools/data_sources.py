@@ -4782,6 +4782,8 @@ def _build_dataset_semantic_field_groups(dataset_row: dict[str, Any] | None) -> 
             continue
         field = dict(item)
         raw_name = _safe_text(field.get("raw_name") or field.get("name"))
+        if _is_non_publishable_semantic_field_name(raw_name):
+            continue
         field_source = _safe_text(field.get("field_source")).lower()
         if not field_source:
             if raw_name.startswith("raw."):

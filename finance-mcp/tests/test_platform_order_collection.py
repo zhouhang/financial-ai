@@ -2406,10 +2406,10 @@ async def test_collection_detail_returns_platform_field_groups_and_twenty_rows(
                 "field_source": "normalized",
             },
             {
-                "raw_name": "raw.收入",
+                "raw_name": "收入",
                 "display_name": "收入",
                 "semantic_type": "amount",
-                "field_source": "raw_bill",
+                "field_source": "normalized",
             },
             {
                 "raw_name": "source_row_key",
@@ -2477,12 +2477,14 @@ async def test_collection_detail_returns_platform_field_groups_and_twenty_rows(
         "raw_bill",
         "system",
     ]
-    assert [group["fields"][0]["raw_name"] for group in result["field_groups"]] == [
+    assert [field["raw_name"] for field in result["field_groups"][0]["fields"]] == [
         "alipay_trade_no",
-        "raw.收入",
-        "source_row_key",
+        "收入",
     ]
-    assert result["rows"][0]["raw.收入"] == "1.00"
+    assert result["field_groups"][1]["fields"] == []
+    assert result["field_groups"][2]["fields"][0]["raw_name"] == "source_row_key"
+    assert result["rows"][0]["收入"] == "1.00"
+    assert "raw.收入" not in result["rows"][0]
 
 
 @pytest.mark.anyio
