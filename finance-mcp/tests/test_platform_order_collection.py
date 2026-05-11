@@ -609,13 +609,15 @@ async def test_refresh_semantic_profile_preserves_alipay_presets_when_llm_enable
     profile = persisted["meta"]["semantic_profile"]
     assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
     assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
-    assert profile["field_label_map"]["raw.收入"] == "收入"
+    assert profile["field_label_map"]["收入"] == "收入"
+    assert "raw.收入" not in profile["field_label_map"]
     source_row_key = next(item for item in profile["fields"] if item["raw_name"] == "source_row_key")
-    raw_income = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
+    income = next(item for item in profile["fields"] if item["raw_name"] == "收入")
     assert source_row_key["source"] == "platform_preset"
     assert source_row_key["field_source"] == "system"
-    assert raw_income["source"] == "platform_preset"
-    assert raw_income["field_source"] == "raw_bill"
+    assert income["source"] == "platform_preset"
+    assert income["field_source"] == "normalized"
+    assert all(item["raw_name"] != "raw.收入" for item in profile["fields"])
     assert profile["key_fields"] == ["source_row_key"]
 
 
@@ -733,18 +735,20 @@ async def test_refresh_semantic_profile_prefers_alipay_presets_over_cached_llm(
     profile = persisted["meta"]["semantic_profile"]
     assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
     assert profile["field_label_map"]["alipay_trade_no"] == "支付宝交易号"
-    assert profile["field_label_map"]["raw.收入"] == "收入"
+    assert profile["field_label_map"]["收入"] == "收入"
+    assert "raw.收入" not in profile["field_label_map"]
     assert profile["key_fields"] == ["source_row_key"]
     alipay_trade_no = next(item for item in profile["fields"] if item["raw_name"] == "alipay_trade_no")
-    raw_income = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
+    income = next(item for item in profile["fields"] if item["raw_name"] == "收入")
     assert alipay_trade_no["source"] == "platform_preset"
     assert alipay_trade_no["field_source"] == "normalized"
-    assert raw_income["source"] == "platform_preset"
-    assert raw_income["field_source"] == "raw_bill"
+    assert income["source"] == "platform_preset"
+    assert income["field_source"] == "normalized"
+    assert all(item["raw_name"] != "raw.收入" for item in profile["fields"])
 
 
 @pytest.mark.anyio
-async def test_refresh_semantic_profile_keeps_manual_alipay_field_over_platform_preset(
+async def test_refresh_semantic_profile_cleans_manual_alipay_raw_field(
     monkeypatch,
 ) -> None:
     persisted: dict[str, Any] = {}
@@ -832,12 +836,13 @@ async def test_refresh_semantic_profile_keeps_manual_alipay_field_over_platform_
 
     assert result["success"] is True
     profile = persisted["meta"]["semantic_profile"]
-    raw_income = next(item for item in profile["fields"] if item["raw_name"] == "raw.收入")
-    assert profile["field_label_map"]["raw.收入"] == "人工收入字段"
-    assert raw_income["source"] == "manual_confirmed"
-    assert raw_income["confirmed_by_user"] is True
-    assert raw_income["description"] == "人工确认的收入字段"
-    assert profile["key_fields"] == ["alipay_trade_no"]
+    income = next(item for item in profile["fields"] if item["raw_name"] == "收入")
+    assert profile["field_label_map"]["收入"] == "收入"
+    assert "raw.收入" not in profile["field_label_map"]
+    assert income["source"] == "platform_preset"
+    assert income["field_source"] == "normalized"
+    assert all(item["raw_name"] != "raw.收入" for item in profile["fields"])
+    assert profile["key_fields"] == ["source_row_key"]
 
 
 @pytest.mark.anyio
@@ -1059,8 +1064,8 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
                     "bill_type": "trade",
                     "bill_date": "2026-05-06",
                     "alipay_trade_no": "A-1",
-                    "raw.支付宝交易号": "A-1",
-                    "raw.收入": "12.30",
+                    "支付宝交易号": "A-1",
+                    "收入": "12.30",
                 }
             ],
             "platform_alipay_bill_lines",
@@ -1107,7 +1112,9 @@ async def test_execute_sync_job_routes_alipay_bill_rows_to_platform_alipay_bill_
     profile = calls["semantic_profile"]["meta"]["semantic_profile"]
     assert profile["status"] == "generated_with_samples"
     assert profile["generated_from"]["sample_source"] == "platform_alipay_bill_lines"
-    assert profile["field_label_map"]["raw.收入"] == "收入"
+    assert profile["field_label_map"]["收入"] == "收入"
+    assert "raw.收入" not in profile["field_label_map"]
+    assert all(item["raw_name"] != "raw.收入" for item in profile["fields"])
 
 
 @pytest.mark.anyio
