@@ -1420,7 +1420,7 @@ describe('电商平台授权入口', () => {
                 key: 'raw_bill',
                 label: '原始账单字段',
                 default_open: true,
-                fields: [{ raw_name: 'raw.收入', display_name: '收入' }],
+                fields: [{ raw_name: 'raw.收入', display_name: 'RAW重复收入列' }],
               },
             ],
             rows: [{ 账务流水号: 'A001' }],
