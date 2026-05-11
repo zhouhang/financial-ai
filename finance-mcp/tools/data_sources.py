@@ -335,6 +335,19 @@ PLATFORM_SYSTEM_FIELDS = {
     "created_at",
     "updated_at",
 }
+NON_PUBLISHABLE_SEMANTIC_FIELD_NAMES = {"raw", "payload", "meta", "metadata"}
+
+
+def _is_non_publishable_semantic_field_name(value: Any) -> bool:
+    raw_name = _safe_text(value)
+    normalized = raw_name.lower()
+    if not normalized:
+        return True
+    if normalized in NON_PUBLISHABLE_SEMANTIC_FIELD_NAMES:
+        return True
+    return normalized.startswith("raw.")
+
+
 _FIELD_TOKEN_LABELS: dict[str, str] = {
     "account": "账户",
     "actual": "实付",
@@ -2067,9 +2080,9 @@ def _flatten_platform_sample_payload(row: dict[str, Any]) -> dict[str, Any]:
     raw = payload.get("raw")
     if isinstance(raw, dict):
         for key, value in raw.items():
-            raw_name = f"raw.{_safe_text(key)}"
-            if raw_name.strip() and raw_name not in payload:
-                payload[raw_name] = value
+            raw_key = _safe_text(key)
+            if raw_key and raw_key not in payload:
+                payload[raw_key] = value
     return payload
 
 
@@ -2464,7 +2477,11 @@ def _normalize_manual_semantic_patch(
 
     key_fields = patch.get("key_fields")
     if isinstance(key_fields, list):
-        normalized["key_fields"] = [_safe_text(item) for item in key_fields if _safe_text(item)]
+        normalized["key_fields"] = [
+            _safe_text(item)
+            for item in key_fields
+            if not _is_non_publishable_semantic_field_name(item)
+        ]
 
     field_label_map = patch.get("field_label_map")
     fields = patch.get("fields")
@@ -2475,7 +2492,7 @@ def _normalize_manual_semantic_patch(
         cleaned_map: dict[str, str] = {}
         for raw_name, display_name in field_label_map.items():
             raw_key = _safe_text(raw_name)
-            if not raw_key:
+            if _is_non_publishable_semantic_field_name(raw_key):
                 continue
             if raw_key not in valid_field_names:
                 raise ValueError(f"field_label_map 包含不存在字段: {raw_key}")
@@ -2488,7 +2505,7 @@ def _normalize_manual_semantic_patch(
             if not isinstance(item, dict):
                 continue
             raw_name = _safe_text(item.get("raw_name"))
-            if not raw_name:
+            if _is_non_publishable_semantic_field_name(raw_name):
                 continue
             if raw_name not in valid_field_names:
                 raise ValueError(f"fields 包含不存在字段: {raw_name}")
@@ -5984,12 +6001,20 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
     if "key_fields" in patch:
         next_profile["key_fields"] = patch["key_fields"]
 
-    next_field_label_map = dict(next_profile.get("field_label_map") or {})
+    next_field_label_map = {
+        _safe_text(raw_name): label
+        for raw_name, label in dict(next_profile.get("field_label_map") or {}).items()
+        if not _is_non_publishable_semantic_field_name(raw_name)
+    }
     if "field_label_map" in patch:
         next_field_label_map.update(dict(patch["field_label_map"]))
 
     existing_fields = [item for item in next_profile.get("fields") or [] if isinstance(item, dict)]
-    fields_by_name = {_safe_text(item.get("raw_name")): dict(item) for item in existing_fields if _safe_text(item.get("raw_name"))}
+    fields_by_name = {
+        _safe_text(item.get("raw_name")): dict(item)
+        for item in existing_fields
+        if not _is_non_publishable_semantic_field_name(item.get("raw_name"))
+    }
     if "fields" in patch:
         for item in patch["fields"]:
             raw_name = _safe_text(item.get("raw_name"))

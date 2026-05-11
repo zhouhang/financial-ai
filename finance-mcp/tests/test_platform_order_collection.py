@@ -86,6 +86,27 @@ def _alipay_platform_source(**overrides: Any) -> dict[str, Any]:
     return source
 
 
+def test_flatten_platform_sample_payload_exposes_raw_bill_columns_without_prefix() -> None:
+    row = data_sources._flatten_platform_sample_payload(
+        {
+            "source_row_key": "row-1",
+            "bill_date": "2026-05-07",
+            "raw": {
+                "账务流水号": "A001",
+                "收入": "12.30",
+            },
+        }
+    )
+
+    assert row["source_row_key"] == "row-1"
+    assert row["bill_date"] == "2026-05-07"
+    assert row["账务流水号"] == "A001"
+    assert row["收入"] == "12.30"
+    assert row["raw"] == {"账务流水号": "A001", "收入": "12.30"}
+    assert "raw.账务流水号" not in row
+    assert "raw.收入" not in row
+
+
 def _authorized_shop(monkeypatch, authorization: dict[str, Any]) -> None:
     monkeypatch.setattr(
         data_sources.auth_db,
