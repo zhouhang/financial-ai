@@ -173,6 +173,78 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
     assert combined_params.count("12.30") >= 2
 
 
+def test_upsert_platform_alipay_bill_lines_promotes_signed_fund_amount_columns(monkeypatch):
+    params_seen: list[tuple] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            params_seen.append(tuple(params or ()))
+
+        def fetchone(self):
+            return {"inserted": True}
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    auth_db.upsert_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        shop_connection_id="shop-001",
+        external_shop_id="alipay-shop-001",
+        bill_type="signcustomer",
+        bill_date="2026-05-06",
+        rows=[
+            {
+                "source_file_name": "bill.csv",
+                "source_row_number": "12",
+                "source_row_key": "row-key-1",
+                "raw": {
+                    "账务流水号": "A001",
+                    "业务流水号": "B001",
+                    "商户订单号": "M001",
+                    "收入金额（+元）": "88.00",
+                    "支出金额（-元）": "-0.30",
+                    "发生时间": "2026-05-06 12:30:00",
+                },
+            }
+        ],
+    )
+
+    params = params_seen[0]
+    assert params[10:17] == (
+        "A001",
+        "M001",
+        "B001",
+        None,
+        "88.00",
+        "-0.30",
+        "2026-05-06 12:30:00",
+    )
+    payload = params[17].adapted
+    assert payload["income_amount"] == "88.00"
+    assert payload["expense_amount"] == "-0.30"
+    assert payload["trade_time"] == "2026-05-06 12:30:00"
+
+
 def test_upsert_platform_alipay_bill_lines_prunes_stale_rows_for_same_bill_file(monkeypatch):
     executed_sql: list[str] = []
     params_seen: list[tuple] = []

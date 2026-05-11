@@ -316,6 +316,8 @@ class _McpSession:
                     try:
                         return json.loads(text)
                     except Exception:
+                        if any(marker in text for marker in ("失败", "错误", "无效", "过期", "未提供")):
+                            return {"success": False, "error": text}
                         return {"success": True, "result": text}
             return result
 

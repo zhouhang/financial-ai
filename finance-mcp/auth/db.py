@@ -5062,8 +5062,8 @@ def _clean_timestamp_text(value: Any) -> str | None:
 
 
 _ALIPAY_AMOUNT_RAW_KEYS = ("金额", "发生金额", "账务金额", "交易金额", "订单金额")
-_ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额")
-_ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额")
+_ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额", "收入金额（+元）", "收入金额(+元)")
+_ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额", "支出金额（-元）", "支出金额(-元)")
 _ALIPAY_TRADE_NO_RAW_KEYS = ("支付宝交易号", "支付宝流水号", "账务流水号")
 _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS = ("商户订单号", "商户订单号/商家订单号")
 _ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号", "业务流水号")

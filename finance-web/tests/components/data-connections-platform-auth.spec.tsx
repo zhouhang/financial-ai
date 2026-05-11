@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import DataConnectionsPanel from '../../src/components/DataConnectionsPanel';
+import type { CollaborationProvider } from '../../src/types';
 
 const SERVICE_PROVIDER_COMPANY_ID = '00000000-0000-0000-0000-00000000dd01';
 
@@ -152,13 +153,63 @@ describe('电商平台授权入口', () => {
     expect(requests.some((request) => request.url.includes('/auth-sessions'))).toBe(false);
   });
 
-  it('支付宝新增授权进入商家授权和认领页面', async () => {
+  it.each([
+    ['dingtalk_dws', '钉钉'],
+    ['feishu', '飞书'],
+    ['wechat_work', '企微'],
+  ] satisfies Array<[CollaborationProvider, string]>)(
+    '%s 新增协作通道配置使用弹窗交互',
+    async (provider, label) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+          if (url === '/api/data-sources') return mockJsonResponse({ data_sources: [] });
+          if (url.startsWith('/api/platform-connections')) return mockJsonResponse({ platforms: [] });
+          return mockJsonResponse({});
+        }),
+      );
+
+      render(
+        <DataConnectionsPanel
+          authToken="token"
+          selectedConnectionView="collaboration_channels"
+          selectedSourceKind="platform_oauth"
+          selectedCollaborationProvider={provider}
+        />,
+      );
+
+      await screen.findByRole('button', { name: '新增配置' });
+      expect(screen.getByText('当前协作通道还没有配置，可先新增默认通道。')).toBeInTheDocument();
+      expect(screen.queryByText('请选择一条协作通道配置进行编辑，或点击“新增配置”创建新的通道。')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: '新增配置' }));
+
+      const dialog = await screen.findByRole('dialog', { name: `新增${label}协作通道配置` });
+      expect(within(dialog).getByLabelText('通道名称')).toHaveValue(`${label}默认通道`);
+      expect(within(dialog).getByRole('button', { name: '保存配置' })).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: '取消' })).toBeInTheDocument();
+      expect(screen.queryByText('请选择一条协作通道配置进行编辑，或点击“新增配置”创建新的通道。')).not.toBeInTheDocument();
+    },
+  );
+
+  it('支付宝新增授权生成企业专属授权链接', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         requests.push({ url, init });
+        if (url === '/api/platform-connections/alipay/auth-sessions') {
+          return mockJsonResponse({
+            success: true,
+            platform_code: 'alipay',
+            state: 'state-alipay-1',
+            auth_url:
+              'https://openauth.alipay.com/oauth2/appToAppAuth.htm?app_id=2021006152656574&state=state-alipay-1',
+          });
+        }
         if (url.includes('/platform-connections/alipay/app-config')) {
           return mockJsonResponse({
             success: true,
@@ -220,16 +271,23 @@ describe('电商平台授权入口', () => {
     expect(alipayCard).toBeTruthy();
     fireEvent.click(within(alipayCard as HTMLElement).getByRole('button', { name: '新增授权' }));
 
-    expect(await screen.findByText('支付宝商家授权入口')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '打开支付宝商家授权' })).toHaveAttribute(
-      'href',
-      'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
+    const dialog = await screen.findByRole('dialog', { name: '新增支付宝商户授权' });
+    fireEvent.change(within(dialog).getByLabelText('商户显示名称'), {
+      target: { value: '对对科技' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '生成专属授权链接' }));
+
+    expect(await within(dialog).findByText('企业专属授权链接')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('企业专属授权链接')).toHaveValue(
+      'https://openauth.alipay.com/oauth2/appToAppAuth.htm?app_id=2021006152656574&state=state-alipay-1',
     );
-    expect(screen.queryByAltText('支付宝商家授权二维码')).not.toBeInTheDocument();
-    expect(screen.queryByText('待配置支付宝商家授权二维码')).not.toBeInTheDocument();
-    expect(
-      requests.some((request) => request.url === '/api/platform-connections/alipay/auth-sessions'),
-    ).toBe(false);
+    const sessionRequest = requests.find((request) => request.url === '/api/platform-connections/alipay/auth-sessions');
+    expect(sessionRequest).toBeTruthy();
+    expect(JSON.parse(String(sessionRequest?.init?.body))).toMatchObject({
+      return_path: '/data-connections?mode=platform&platform=alipay',
+      mode: 'real',
+      merchant_display_name: '对对科技',
+    });
   });
 
   it('淘宝天猫详情页禁用新增店铺授权入口', async () => {
@@ -832,7 +890,7 @@ describe('电商平台授权入口', () => {
     expect(screen.queryByDisplayValue('ROOT-CERT')).not.toBeInTheDocument();
   });
 
-  it('支付宝授权页只展示 PC 授权链接，不展示二维码', async () => {
+  it('支付宝商户列表不展示额外授权入口', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -888,13 +946,13 @@ describe('电商平台授权入口', () => {
     await screen.findByText('编码：alipay');
     fireEvent.click(screen.getByRole('button', { name: '查看店铺' }));
 
-    expect(await screen.findByText('支付宝商家授权入口')).toBeInTheDocument();
+    expect(await screen.findByText('支付宝商户列表')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '新增授权' })).toBeInTheDocument();
+    expect(screen.queryByText('支付宝商家授权入口')).not.toBeInTheDocument();
     expect(screen.queryByAltText('支付宝商家授权二维码')).not.toBeInTheDocument();
     expect(screen.queryByText('待配置支付宝商家授权二维码')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '打开支付宝商家授权' })).toHaveAttribute(
-      'href',
-      'https://b.alipay.com/page/message/tasksDetail?bizData=abc',
-    );
+    expect(screen.queryByRole('button', { name: '生成专属授权链接' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '打开支付宝商家授权' })).not.toBeInTheDocument();
   });
 
   it('支付宝商户列表隐藏待绑定区域并保留商户字段和可用操作', async () => {
@@ -1129,13 +1187,30 @@ describe('电商平台授权入口', () => {
                 key: 'normalized',
                 label: '标准字段',
                 default_open: true,
-                fields: [{ raw_name: 'alipay_trade_no', display_name: '支付宝交易号' }],
+                fields: [
+                  { raw_name: '账务流水号', display_name: '账务流水号' },
+                  { raw_name: '业务流水号', display_name: '业务流水号' },
+                  { raw_name: '商品名称', display_name: '商品名称' },
+                  { raw_name: '发生时间', display_name: '发生时间' },
+                  { raw_name: '收入金额（+元）', display_name: '收入金额（+元）' },
+                  { raw_name: '支出金额（-元）', display_name: '支出金额（-元）' },
+                  { raw_name: '账户余额（元）', display_name: '账户余额（元）' },
+                  { raw_name: '交易渠道', display_name: '交易渠道' },
+                  { raw_name: '业务类型', display_name: '业务类型' },
+                  { raw_name: '备注', display_name: '备注' },
+                  { raw_name: '商户订单号', display_name: '商户订单号' },
+                  { raw_name: '对方账号', display_name: '对方账号' },
+                  { raw_name: '业务基础订单号', display_name: '业务基础订单号' },
+                  { raw_name: '业务订单号', display_name: '业务订单号' },
+                  { raw_name: '业务账单来源', display_name: '业务账单来源' },
+                  { raw_name: '业务描述', display_name: '业务描述' },
+                ],
               },
               {
                 key: 'raw_bill',
                 label: '原始账单字段',
                 default_open: true,
-                fields: [{ raw_name: 'raw.收入', display_name: '收入' }],
+                fields: [{ raw_name: 'raw.收入', display_name: 'RAW重复收入列' }],
               },
               {
                 key: 'system',
@@ -1211,14 +1286,18 @@ describe('电商平台授权入口', () => {
     await screen.findByText('对对科技');
     fireEvent.click(screen.getByRole('button', { name: '数据集' }));
 
+    expect(await screen.findByRole('dialog', { name: '支付宝商户数据集' })).toBeInTheDocument();
     expect(await screen.findByText('支付宝交易账单 - 对对科技')).toBeInTheDocument();
     expect(screen.queryByText('业务数据集')).not.toBeInTheDocument();
     expect(screen.queryByText('固定数据集')).not.toBeInTheDocument();
     expect(screen.queryByText('字段结构')).not.toBeInTheDocument();
     expect(screen.getByText('数据预览')).toBeInTheDocument();
     expect(screen.queryByText('真实数据预览')).not.toBeInTheDocument();
-    expect(screen.getByRole('columnheader', { name: '支付宝交易号' })).toBeInTheDocument();
-    expect(screen.getByRole('columnheader', { name: '收入' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '账务流水号' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '业务基础订单号' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '业务订单号' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '业务账单来源' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '业务描述' })).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'dataset_id' })).not.toBeInTheDocument();
     expect(screen.getByText('暂无数据。')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重新初始化' })).toBeInTheDocument();
@@ -1242,12 +1321,263 @@ describe('电商平台授权入口', () => {
 
     const shopTable = screen.getByText('商户 ID').closest('table');
     expect(shopTable).toHaveClass('min-w-[1100px]');
+    expect(within(shopTable as HTMLElement).queryByText('支付宝交易账单 - 对对科技')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '数据集' })).toHaveClass('whitespace-nowrap');
     expect(screen.getByRole('button', { name: '重授权' })).toHaveClass('whitespace-nowrap');
     expect(screen.getByRole('button', { name: '停用' })).toHaveClass('whitespace-nowrap');
   });
 
-  it('支付宝商户停用后展示已停用状态并禁用停用按钮', async () => {
+  it('支付宝商户数据集展示初始化采集条数并按状态控制发布入口', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let publishAttempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, init });
+        if (url.includes('/platform-connections/alipay/app-config')) {
+          return mockJsonResponse({ success: true, configured: true, config: { platform_code: 'alipay' } });
+        }
+        if (url.includes('/data-sources/source-alipay-1/datasets/dataset-fund/publish')) {
+          publishAttempts += 1;
+          if (publishAttempts === 1) {
+            return mockJsonResponse(
+              { detail: 'field_label_map 包含不存在字段: bill_date' },
+              false,
+              400,
+            );
+          }
+          return mockJsonResponse({
+            success: true,
+            message: '数据集已发布',
+            dataset: {
+              id: 'dataset-fund',
+              data_source_id: 'source-alipay-1',
+              dataset_code: 'alipay_fund_bill_shop_alipay_1',
+              dataset_name: '支付宝资金账单 - 对对科技',
+              resource_key: 'alipay_bill:signcustomer:shop-alipay-1',
+              status: 'active',
+              publish_status: 'published',
+              semantic_status: 'manual_updated',
+              field_label_map: { 账务流水号: '账务流水号' },
+              semantic_fields: [{ raw_name: '账务流水号', display_name: '账务流水号' }],
+            },
+          });
+        }
+        if (url.includes('/platform-connections/alipay/shops')) {
+          return mockJsonResponse({
+            shops: [
+              {
+                id: 'shop-alipay-1',
+                platform_code: 'alipay',
+                external_shop_id: '2088123412341234',
+                external_shop_name: '对对科技',
+                auth_status: 'authorized',
+                token_expires_at: '2027-05-09T12:00:00+08:00',
+                last_sync_at: '2026-05-11T10:30:00+08:00',
+              },
+            ],
+          });
+        }
+        if (url.includes('/data-sources/source-alipay-1/datasets/dataset-fund/collection-detail')) {
+          return mockJsonResponse({
+            dataset: {
+              id: 'dataset-fund',
+              data_source_id: 'source-alipay-1',
+              dataset_code: 'alipay_fund_bill_shop_alipay_1',
+              dataset_name: '支付宝资金账单 - 对对科技',
+              resource_key: 'alipay_bill:signcustomer:shop-alipay-1',
+              publish_status: 'unpublished',
+              schema_summary: {
+                columns: [{ name: 'raw' }, { name: '账务流水号' }],
+              },
+              field_label_map: { raw: '原始对象', 账务流水号: '账务流水号' },
+              semantic_fields: [
+                { raw_name: 'raw', display_name: '原始对象' },
+                { raw_name: '账务流水号', display_name: '账务流水号' },
+              ],
+            },
+            collection_stats: { total_count: 233 },
+            collection_status: {
+              status: 'succeeded',
+              message: '已采集真实样本',
+              total_count: 233,
+              row_count: 20,
+              latest_job: {
+                request_payload: { bill_date: '2026-05-10', bill_type: 'signcustomer' },
+                checkpoint_after: { last_row_count: 233 },
+                completed_at: '2026-05-11T10:30:00+08:00',
+              },
+            },
+            semantic_status: { status: 'succeeded', message: '已生成语义结构' },
+            field_groups: [
+              {
+                key: 'normalized',
+                label: '标准字段',
+                fields: [{ raw_name: '账务流水号', display_name: '账务流水号' }],
+              },
+              {
+                key: 'raw_bill',
+                label: '原始账单字段',
+                default_open: true,
+                fields: [{ raw_name: 'raw.收入', display_name: '收入' }],
+              },
+            ],
+            rows: [{ 账务流水号: 'A001' }],
+          });
+        }
+        if (url.includes('/data-sources/source-alipay-1/datasets/dataset-trade/collection-detail')) {
+          return mockJsonResponse({
+            dataset: {
+              id: 'dataset-trade',
+              data_source_id: 'source-alipay-1',
+              dataset_code: 'alipay_trade_bill_shop_alipay_1',
+              dataset_name: '支付宝交易账单 - 对对科技',
+              resource_key: 'alipay_bill:trade:shop-alipay-1',
+              publish_status: 'unpublished',
+            },
+            collection_stats: { total_count: 0 },
+            collection_status: {
+              status: 'failed',
+              message: '此账单类型不支持下载（TYPE_NOT_SUPPORTED）',
+              total_count: 0,
+              row_count: 0,
+              latest_job: {
+                request_payload: { bill_date: '2026-05-10', bill_type: 'trade' },
+                error_message: '此账单类型不支持下载（TYPE_NOT_SUPPORTED）',
+                completed_at: '2026-05-11T10:30:00+08:00',
+              },
+            },
+            semantic_status: { status: 'waiting_for_samples', message: '等待采集样本后生成语义结构' },
+            field_groups: [],
+            rows: [],
+          });
+        }
+        if (url === '/api/data-sources') {
+          return mockJsonResponse({
+            data_sources: [
+              {
+                id: 'source-alipay-1',
+                source_kind: 'platform_oauth',
+                provider_code: 'alipay',
+                name: '支付宝授权 - 对对科技',
+                status: 'active',
+                execution_mode: 'deterministic',
+                datasets: [
+                  {
+                    id: 'dataset-fund',
+                    data_source_id: 'source-alipay-1',
+                    dataset_code: 'alipay_fund_bill_shop_alipay_1',
+                    dataset_name: '支付宝资金账单 - 对对科技',
+                    resource_key: 'alipay_bill:signcustomer:shop-alipay-1',
+                    status: 'active',
+                    publish_status: 'unpublished',
+                  },
+                  {
+                    id: 'dataset-trade',
+                    data_source_id: 'source-alipay-1',
+                    dataset_code: 'alipay_trade_bill_shop_alipay_1',
+                    dataset_name: '支付宝交易账单 - 对对科技',
+                    resource_key: 'alipay_bill:trade:shop-alipay-1',
+                    status: 'active',
+                    publish_status: 'unpublished',
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        if (url.startsWith('/api/platform-connections')) {
+          return mockJsonResponse({
+            platforms: [
+              {
+                platform_code: 'alipay',
+                platform_name: '支付宝',
+                authorized_shop_count: 1,
+                error_shop_count: 0,
+                status: 'active',
+              },
+            ],
+          });
+        }
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="platform_oauth"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    await screen.findByText('编码：alipay');
+    fireEvent.click(screen.getByRole('button', { name: '查看店铺' }));
+    await screen.findByText('对对科技');
+    fireEvent.click(screen.getByRole('button', { name: '数据集' }));
+
+    expect(await screen.findByText('支付宝资金账单 - 对对科技')).toBeInTheDocument();
+    expect(screen.getByText('初始化：已采集真实样本 233 条')).toBeInTheDocument();
+    expect(screen.getByText('每日采集：最近 2026-05-10，233 条')).toBeInTheDocument();
+    expect(screen.getByText('支付宝交易账单 - 对对科技')).toBeInTheDocument();
+    expect(screen.getByText('初始化失败：此账单类型不支持下载（TYPE_NOT_SUPPORTED）')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '采集详情' })).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '发布' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '管理发布' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '刷新语义' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重新生成语义' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: '采集详情' })[0]);
+    expect(await screen.findByRole('heading', { name: '采集详情' })).toBeInTheDocument();
+    expect(screen.queryByText('raw.收入')).not.toBeInTheDocument();
+    expect(screen.queryByText('RAW重复收入列')).not.toBeInTheDocument();
+    expect(screen.getByText('采集记录数')).toBeInTheDocument();
+    const closeButtons = screen.getAllByRole('button', { name: '关闭' });
+    fireEvent.click(closeButtons[closeButtons.length - 1]);
+
+    fireEvent.click(screen.getByRole('button', { name: '发布' }));
+    expect(await screen.findByRole('heading', { name: '发布数据集' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认发布' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认发布' }));
+    const publishError = await screen.findByText('field_label_map 包含不存在字段: bill_date');
+    expect(publishError).toBeVisible();
+    expect(publishError.closest('div')).toHaveClass('sticky');
+
+    fireEvent.click(screen.getByRole('button', { name: '确认发布' }));
+    expect(await screen.findByText('数据集已发布')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '管理发布' })).toBeInTheDocument();
+    expect(screen.getByText('已发布')).toBeInTheDocument();
+    const drawerCloseButtons = screen.getAllByRole('button', { name: '关闭' });
+    fireEvent.click(drawerCloseButtons[drawerCloseButtons.length - 1]);
+    expect(await screen.findByRole('button', { name: '管理发布' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '发布' })).not.toBeInTheDocument();
+    expect(
+      requests.some(
+        (request) =>
+          request.url === '/api/data-sources/source-alipay-1/datasets/dataset-fund/publish' &&
+          request.init?.method === 'POST',
+      ),
+    ).toBe(true);
+    const publishRequest = requests.find(
+      (request) =>
+        request.url === '/api/data-sources/source-alipay-1/datasets/dataset-fund/publish' &&
+        request.init?.method === 'POST',
+    );
+    const publishPayload = JSON.parse(String(publishRequest?.init?.body || '{}'));
+    expect(publishPayload.field_label_map.raw).toBeUndefined();
+    expect(publishPayload.field_label_map['raw.收入']).toBeUndefined();
+    expect(publishPayload.fields.some((field: { raw_name?: string }) => field.raw_name === 'raw')).toBe(false);
+    expect(publishPayload.fields.some((field: { raw_name?: string }) => field.raw_name === 'raw.收入')).toBe(false);
+    expect(publishPayload.key_fields).not.toContain('raw');
+    expect(publishPayload.key_fields).not.toContain('raw.收入');
+    expect(publishAttempts).toBe(2);
+  });
+
+  it('支付宝商户停用需要二次确认后才执行停用', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     let disabled = false;
     vi.stubGlobal(
@@ -1270,6 +1600,11 @@ describe('电商平台授权入口', () => {
               token_expires_at: null,
               last_sync_at: '2026-05-09T12:30:00+08:00',
             },
+          });
+        }
+        if (url.includes('/shop-connections/shop-alipay-1/reauthorize')) {
+          return mockJsonResponse({
+            success: true,
           });
         }
         if (url.includes('/platform-connections/alipay/app-config')) {
@@ -1324,13 +1659,39 @@ describe('电商平台授权入口', () => {
     await screen.findByText('对对科技');
     fireEvent.click(screen.getByRole('button', { name: '停用' }));
 
-    expect(await screen.findByText('支付宝商户已停用')).toBeInTheDocument();
-    expect(await screen.findByText('已停用')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '停用' })).toBeDisabled();
+    expect(await screen.findByRole('dialog', { name: '确认停用授权？' })).toBeInTheDocument();
+    expect(screen.getByText('停用后该商户授权将不可用于后续采集；如需恢复，需要重新授权。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认停用' })).toHaveTextContent('确认停用');
+    expect(screen.getByRole('button', { name: '确认停用' })).toBeVisible();
     expect(
       requests.some(
         (request) =>
           request.url === '/api/shop-connections/shop-alipay-1/disable' &&
+          request.init?.method === 'POST',
+      ),
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('dialog', { name: '确认停用授权？' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '停用' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认停用' }));
+
+    expect(await screen.findByText('支付宝商户已停用')).toBeInTheDocument();
+    expect(await screen.findByText('已停用')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重授权' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '停用' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重新授权启用' }));
+    expect(
+      requests.some(
+        (request) =>
+          request.url === '/api/shop-connections/shop-alipay-1/disable' &&
+          request.init?.method === 'POST',
+      ),
+    ).toBe(true);
+    expect(
+      requests.some(
+        (request) =>
+          request.url === '/api/shop-connections/shop-alipay-1/reauthorize' &&
           request.init?.method === 'POST',
       ),
     ).toBe(true);

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -17,9 +17,9 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Store,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   COLLABORATION_CHANNEL_CARDS,
@@ -56,6 +56,7 @@ interface DataConnectionsPanelProps {
   authToken?: string | null;
   initialCallback?: AuthCallbackPayload | null;
   onBackToChat?: () => void;
+  onLoginRequired?: () => void;
   selectedConnectionView: DataConnectionView;
   selectedSourceKind: DataSourceKind;
   selectedCollaborationProvider: CollaborationProvider;
@@ -65,6 +66,7 @@ interface AuthSessionResponse {
   success?: boolean;
   auth_url?: string;
   message?: string;
+  state?: string;
 }
 
 interface DraftDataSource {
@@ -219,6 +221,8 @@ interface PhysicalCatalogDetailDialogState {
 
 interface AlipayAuthDialogState {
   merchantDisplayName: string;
+  authUrl: string;
+  notice: string;
   error: string;
 }
 
@@ -294,6 +298,9 @@ interface PlatformDatasetCollectionStatus {
   canRetryInitialize: boolean;
   isRunning: boolean | null;
   latestJob: Record<string, unknown> | null;
+  rowCount: number | null;
+  totalCount: number | null;
+  latestCollectionDate: string;
 }
 
 interface PlatformDatasetSemanticStatus {
@@ -334,16 +341,23 @@ interface SampleTableColumn {
   displayName: string;
 }
 
-const PLATFORM_FIXED_DATASET_FALLBACK = ['订单', '支付单', '退款单', '结算单'];
-const ALIPAY_FIXED_DATASET_FALLBACK = ['资金账单', '交易账单'];
 const ALIPAY_AUTH_COLLECTION_COPY =
   '一个支付宝商户授权后会生成资金账单和交易账单两个数据集，每天 10:30 采集 T-1 账单。';
 const PLATFORM_COLLECTION_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'initializing'];
 const PLATFORM_SEMANTIC_RUNNING_STATUSES = ['running', 'queued', 'pending', 'loading', 'refreshing'];
+const NON_PUBLISHABLE_SEMANTIC_RAW_NAMES = new Set(['raw', 'payload', 'meta', 'metadata']);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object') return null;
   return value as Record<string, unknown>;
+}
+
+function isPublishableDatasetSemanticRawName(rawName: string): boolean {
+  const normalized = rawName.trim();
+  const lower = normalized.toLowerCase();
+  if (!normalized) return false;
+  if (NON_PUBLISHABLE_SEMANTIC_RAW_NAMES.has(lower)) return false;
+  return !lower.startsWith('raw.');
 }
 
 function asString(value: unknown): string | undefined {
@@ -413,7 +427,7 @@ function buildSemanticSampleTableColumns(
   businessGroups.forEach((group) => {
     group.fields.forEach((field) => {
       const rawName = rawFieldName(field).trim();
-      if (!rawName || seen.has(rawName) || columns.length >= maxColumns) return;
+      if (!isPublishableDatasetSemanticRawName(rawName) || seen.has(rawName) || columns.length >= maxColumns) return;
       seen.add(rawName);
       columns.push({
         rawName,
@@ -424,10 +438,17 @@ function buildSemanticSampleTableColumns(
 
   if (columns.length > 0) return columns;
 
-  return buildSampleTableColumns(rows, maxColumns).map((column) => ({
-    rawName: column,
-    displayName: column,
-  }));
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (!isPublishableDatasetSemanticRawName(key) || seen.has(key) || columns.length >= maxColumns) return;
+      seen.add(key);
+      columns.push({
+        rawName: key,
+        displayName: key,
+      });
+    });
+  });
+  return columns;
 }
 
 function formatSampleCellValue(value: unknown): string {
@@ -461,6 +482,54 @@ function isPlatformCollectionRunning(collectionStatus: PlatformDatasetCollection
 
 function isPlatformSemanticRunning(semanticStatus: PlatformDatasetSemanticStatus): boolean {
   return PLATFORM_SEMANTIC_RUNNING_STATUSES.includes(semanticStatus.status.trim().toLowerCase());
+}
+
+function isPlatformStatusSucceeded(status: string): boolean {
+  return ['succeeded', 'success', 'completed', 'generated', 'generated_with_samples', 'ready'].includes(
+    status.trim().toLowerCase(),
+  );
+}
+
+function isPlatformStatusFailed(status: string): boolean {
+  return ['failed', 'error'].includes(status.trim().toLowerCase());
+}
+
+function platformDatasetCollectionLabel(detail: PlatformShopDatasetDetail): string {
+  const status = detail.collectionStatus.status.trim().toLowerCase();
+  const message = detail.collectionStatus.message.trim();
+  const count = detail.collectionStatus.totalCount ?? detail.collectionStatus.rowCount;
+
+  if (isPlatformStatusFailed(status)) {
+    return `初始化失败：${message || '数据采集失败'}`;
+  }
+  if (isPlatformCollectionRunning(detail.collectionStatus)) return '初始化中';
+  if (isPlatformStatusSucceeded(status)) {
+    if (typeof count === 'number' && count > 0) return `初始化：已采集真实样本 ${count} 条`;
+    return '初始化：已采集真实样本';
+  }
+  if (['missing', 'not_started', 'none'].includes(status)) return '未初始化';
+  return `初始化：${message || detail.collectionStatus.status || '未知'}`;
+}
+
+function platformDatasetDailyCollectionLabel(detail: PlatformShopDatasetDetail): string {
+  const date = detail.collectionStatus.latestCollectionDate.trim();
+  const count = detail.collectionStatus.totalCount ?? detail.collectionStatus.rowCount;
+  if (!date) return '';
+  if (typeof count === 'number') return `每日采集：最近 ${date}，${count} 条`;
+  return `每日采集：最近 ${date}`;
+}
+
+function canPublishPlatformDataset(detail: PlatformShopDatasetDetail): boolean {
+  if (detail.loading || detail.error) return false;
+  if (!isPlatformStatusSucceeded(detail.collectionStatus.status)) return false;
+  if (!isPlatformStatusSucceeded(detail.semanticStatus.status)) return false;
+  if (isPlatformCollectionRunning(detail.collectionStatus) || isPlatformSemanticRunning(detail.semanticStatus)) return false;
+  const count = detail.collectionStatus.totalCount ?? detail.collectionStatus.rowCount ?? detail.rows.length;
+  return count > 0;
+}
+
+function platformPublishButtonLabel(detail: PlatformShopDatasetDetail): string {
+  return readDatasetPublishStatus(detail.dataset) === 'published' ? '管理发布' : '发布';
 }
 
 function displayFieldName(field: Record<string, unknown>): string {
@@ -1241,12 +1310,12 @@ function buildEditableDatasetSemanticFieldRows(dataset: DataSourceDatasetSummary
         .map((item) => item.trim())
         .filter(Boolean),
     ]),
-  );
+  ).filter(isPublishableDatasetSemanticRawName);
   const semanticFieldMap = new Map<string, Record<string, unknown>>();
   semanticFields.forEach((field) => {
     const value = asRecord(field);
     const rawName = (asString(value?.raw_name) ?? asString(value?.name) ?? '').trim();
-    if (!rawName) return;
+    if (!isPublishableDatasetSemanticRawName(rawName)) return;
     semanticFieldMap.set(rawName, value ?? {});
   });
   return orderedKeys.map((rawName) => {
@@ -1766,10 +1835,38 @@ function normalizePlatformDatasetDetail(
   const value = asRecord(raw) ?? {};
   const nextDataset = normalizePlatformDetailDataset(value.dataset, dataset);
   const collectionStatusRaw = asRecord(value.collection_status) ?? asRecord(value.collectionStatus) ?? {};
+  const collectionStatsRaw = asRecord(value.collection_stats) ?? asRecord(value.collectionStats) ?? {};
   const semanticStatusRaw = asRecord(value.semantic_status) ?? asRecord(value.semanticStatus) ?? {};
+  const latestJob = asRecord(collectionStatusRaw.latest_job) ?? asRecord(collectionStatusRaw.latestJob);
+  const latestJobMetrics = asRecord(latestJob?.metrics) ?? {};
+  const latestJobCheckpoint = asRecord(latestJob?.checkpoint_after) ?? asRecord(latestJob?.checkpointAfter) ?? {};
+  const latestJobRequestPayload = asRecord(latestJob?.request_payload) ?? asRecord(latestJob?.requestPayload) ?? {};
   const rows = Array.isArray(value.rows)
     ? value.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item))).slice(0, 20)
     : [];
+  const rowCount =
+    asNumber(collectionStatusRaw.row_count) ??
+    asNumber(collectionStatusRaw.rowCount) ??
+    asNumber(latestJobMetrics.row_count) ??
+    null;
+  const totalCount =
+    asNumber(collectionStatusRaw.total_count) ??
+    asNumber(collectionStatusRaw.totalCount) ??
+    asNumber(collectionStatsRaw.total_count) ??
+    asNumber(collectionStatsRaw.totalCount) ??
+    asNumber(collectionStatsRaw.record_count) ??
+    asNumber(collectionStatsRaw.recordCount) ??
+    asNumber(latestJobCheckpoint.last_row_count) ??
+    asNumber(latestJobCheckpoint.lastRowCount) ??
+    asNumber(latestJobMetrics.collection_upserted) ??
+    asNumber(latestJobMetrics.collectionUpserted) ??
+    rowCount;
+  const latestCollectionDate =
+    asString(latestJobRequestPayload.bill_date) ??
+    asString(latestJobRequestPayload.billDate) ??
+    asString(latestJobRequestPayload.biz_date) ??
+    asString(latestJobRequestPayload.bizDate) ??
+    '';
 
   return {
     sourceId: source.id,
@@ -1791,7 +1888,10 @@ function normalizePlatformDatasetDetail(
         asBoolean(collectionStatusRaw.canRetryInitialize) ??
         false,
       isRunning: asBoolean(collectionStatusRaw.is_running) ?? asBoolean(collectionStatusRaw.isRunning) ?? null,
-      latestJob: asRecord(collectionStatusRaw.latest_job) ?? asRecord(collectionStatusRaw.latestJob),
+      latestJob,
+      rowCount,
+      totalCount,
+      latestCollectionDate,
     },
     semanticStatus: {
       status:
@@ -2262,6 +2362,7 @@ export default function DataConnectionsPanel({
   authToken,
   initialCallback = null,
   onBackToChat,
+  onLoginRequired,
   selectedConnectionView,
   selectedSourceKind,
   selectedCollaborationProvider,
@@ -2294,14 +2395,13 @@ export default function DataConnectionsPanel({
   const [shopNotice, setShopNotice] = useState<string>('');
   const [platformAppConfigs, setPlatformAppConfigs] = useState<Record<string, PlatformAppConfigFormState>>({});
   const [actioningShopId, setActioningShopId] = useState<string | null>(null);
+  const [disableConfirmShop, setDisableConfirmShop] = useState<ShopConnection | null>(null);
   const [expandedShopDatasetId, setExpandedShopDatasetId] = useState<string | null>(null);
   const [shopDatasetDetails, setShopDatasetDetails] = useState<Record<string, PlatformShopDatasetDetail[]>>({});
   const [shopDatasetActionError, setShopDatasetActionError] = useState('');
   const [callbackPayload, setCallbackPayload] = useState<AuthCallbackPayload | null>(initialCallback);
   const [launchingAuthPlatform, setLaunchingAuthPlatform] = useState<PlatformCode | null>(null);
   const [alipayAuthDialog, setAlipayAuthDialog] = useState<AlipayAuthDialogState | null>(null);
-  const [alipayPendingAuthorizations, setAlipayPendingAuthorizations] = useState<PlatformPendingAuthorization[]>([]);
-  const [loadingAlipayPendingAuthorizations, setLoadingAlipayPendingAuthorizations] = useState(false);
   const [uploadingAlipayMerchantQr, setUploadingAlipayMerchantQr] = useState(false);
   const [alipayClaimForm, setAlipayClaimForm] = useState<AlipayClaimFormState>({
     pendingAuthorizationId: '',
@@ -2365,6 +2465,15 @@ export default function DataConnectionsPanel({
   const [currentUserRole, setCurrentUserRole] = useState<string>('');
   const [editingPlatformAppCode, setEditingPlatformAppCode] = useState<PlatformCode | null>(null);
 
+  const openAlipayAuthDialog = useCallback((merchantDisplayName = '') => {
+    setAlipayAuthDialog({
+      merchantDisplayName,
+      authUrl: '',
+      notice: '',
+      error: '',
+    });
+  }, []);
+
   useEffect(() => {
     if (!initialCallback) return;
     setCallbackPayload(initialCallback);
@@ -2394,7 +2503,6 @@ export default function DataConnectionsPanel({
     setExpandedShopDatasetId(null);
     setShopDatasetDetails({});
     setShopDatasetActionError('');
-    setAlipayPendingAuthorizations([]);
     setAlipayClaimError('');
     setAlipayClaimNotice('');
   }, [selectedConnectionView, selectedSourceKind, selectedCollaborationProvider]);
@@ -3020,7 +3128,6 @@ export default function DataConnectionsPanel({
 
   const fetchAlipayPendingAuthorizations = useCallback(async (): Promise<PlatformPendingAuthorization[]> => {
     if (!authToken) return [];
-    setLoadingAlipayPendingAuthorizations(true);
     setAlipayClaimError('');
     try {
       const response = await fetch('/api/platform-connections/alipay/pending-authorizations?status=pending_claim&mode=real', {
@@ -3039,7 +3146,6 @@ export default function DataConnectionsPanel({
       const pendingAuthorizations = rows
         .map((item: unknown) => normalizePendingAuthorization(item))
         .filter(Boolean) as PlatformPendingAuthorization[];
-      setAlipayPendingAuthorizations(pendingAuthorizations);
       if (pendingAuthorizations.length > 0) {
         setAlipayClaimForm((current) => {
           if (current.pendingAuthorizationId || current.claimCode) return current;
@@ -3052,13 +3158,27 @@ export default function DataConnectionsPanel({
       }
       return pendingAuthorizations;
     } catch (error) {
-      setAlipayPendingAuthorizations([]);
       setAlipayClaimError(error instanceof Error ? error.message : '加载支付宝待绑定授权失败');
       return [];
-    } finally {
-      setLoadingAlipayPendingAuthorizations(false);
     }
   }, [authHeaders, authToken]);
+
+  useEffect(() => {
+    if (!authToken || !callbackPayload) return;
+    if (callbackPayload.platformCode !== 'alipay' || callbackPayload.status !== 'success') return;
+    if (callbackPayload.pendingAuthorizationId && callbackPayload.claimCode) return;
+
+    setSelectedPlatform({
+      platform_code: 'alipay',
+      platform_name: '支付宝',
+      authorized_shop_count: 0,
+      error_shop_count: 0,
+    });
+    setMode('platform');
+    setShopNotice(callbackPayload.message || '支付宝授权已完成，请查看绑定结果。');
+    clearCallbackQuery('data-connections');
+    void fetchShops('alipay');
+  }, [authToken, callbackPayload, clearCallbackQuery, fetchShops]);
 
   const claimAlipayPendingAuthorization = useCallback(async () => {
     if (!authToken) return;
@@ -3381,9 +3501,10 @@ export default function DataConnectionsPanel({
               <button
                 type="button"
                 onClick={() => setEditingPlatformAppCode(null)}
-                className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
               >
-                关闭
+                <X className="h-4 w-4" />
               </button>
             </div>
           </div>
@@ -3823,6 +3944,19 @@ export default function DataConnectionsPanel({
         if (!data?.auth_url) {
           throw new Error('后端未返回授权链接 auth_url');
         }
+        if (normalizedPlatformCode === 'alipay') {
+          setAlipayAuthDialog((current) =>
+            current
+              ? {
+                  ...current,
+                  authUrl: String(data.auth_url || ''),
+                  notice: '已生成企业专属授权链接，可复制发送给商户管理员，或在本机打开完成授权。',
+                  error: '',
+                }
+              : current,
+          );
+          return;
+        }
         window.location.assign(data.auth_url);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建授权会话失败';
@@ -3853,11 +3987,12 @@ export default function DataConnectionsPanel({
         });
         setMode('platform');
         void Promise.all([fetchShops('alipay'), fetchPlatformAppConfig('alipay')]);
+        openAlipayAuthDialog();
         return;
       }
       void launchAuthFlow(normalizedPlatformCode);
     },
-    [fetchAlipayPendingAuthorizations, fetchPlatformAppConfig, fetchShops, launchAuthFlow],
+    [fetchPlatformAppConfig, fetchShops, launchAuthFlow, openAlipayAuthDialog],
   );
 
   const handleSelectPlatform = useCallback(
@@ -3885,7 +4020,6 @@ export default function DataConnectionsPanel({
     setShopError('');
     setShopNotice('');
     setPlatformError('');
-    setAlipayPendingAuthorizations([]);
     setAlipayClaimError('');
     setAlipayClaimNotice('');
   }, []);
@@ -3966,6 +4100,7 @@ export default function DataConnectionsPanel({
         setShopError(error instanceof Error ? error.message : '停用授权失败');
       } finally {
         setActioningShopId(null);
+        setDisableConfirmShop(null);
       }
     },
     [authHeaders, authToken, fetchPlatforms, fetchShops, selectedPlatform],
@@ -4908,6 +5043,27 @@ export default function DataConnectionsPanel({
           },
         };
       });
+
+      setShopDatasetDetails((prev) => {
+        let hasChanges = false;
+        const nextEntries = Object.entries(prev).map(([shopId, details]) => {
+          const nextDetails = details.map((detail) => {
+            if (detail.sourceId !== sourceId) return detail;
+            const matched =
+              detail.dataset.id === datasetId ||
+              (datasetCode && detail.dataset.dataset_code === datasetCode);
+            if (!matched) return detail;
+            hasChanges = true;
+            return {
+              ...detail,
+              dataset: applyPatch(detail.dataset),
+            };
+          });
+          return [shopId, nextDetails] as const;
+        });
+        if (!hasChanges) return prev;
+        return Object.fromEntries(nextEntries);
+      });
     },
     [updateSourceDetail],
   );
@@ -5027,12 +5183,8 @@ export default function DataConnectionsPanel({
   );
 
   const loadPlatformShopDatasetDetails = useCallback(
-    async (shop: ShopConnection, forceReload = false, sourcesOverride?: DataSourceListItem[]) => {
+    async (shop: ShopConnection, sourcesOverride?: DataSourceListItem[]) => {
       setShopDatasetActionError('');
-      if (expandedShopDatasetId === shop.id && !forceReload) {
-        setExpandedShopDatasetId(null);
-        return;
-      }
       setExpandedShopDatasetId(shop.id);
 
       const matches = findPlatformShopDatasets(shop, sourcesOverride);
@@ -5052,6 +5204,9 @@ export default function DataConnectionsPanel({
           canRetryInitialize: false,
           isRunning: true,
           latestJob: null,
+          rowCount: null,
+          totalCount: null,
+          latestCollectionDate: '',
         },
         semanticStatus: {
           status: 'loading',
@@ -5118,7 +5273,7 @@ export default function DataConnectionsPanel({
       );
       setShopDatasetDetails((prev) => ({ ...prev, [shop.id]: loadedDetails }));
     },
-    [authHeaders, authToken, draftSourceIdSet, expandedShopDatasetId, findPlatformShopDatasets],
+    [authHeaders, authToken, draftSourceIdSet, findPlatformShopDatasets],
   );
 
   const refreshCurrentConnectionView = useCallback(async () => {
@@ -5133,7 +5288,7 @@ export default function DataConnectionsPanel({
       ]);
       const expandedShop = nextShops.find((shop) => shop.id === expandedShopDatasetId);
       if (expandedShop) {
-        await loadPlatformShopDatasetDetails(expandedShop, true, nextSources);
+        await loadPlatformShopDatasetDetails(expandedShop, nextSources);
       }
       return;
     }
@@ -5150,25 +5305,6 @@ export default function DataConnectionsPanel({
     selectedConnectionView,
     selectedPlatform,
   ]);
-
-  const refreshPlatformDatasetSemantic = useCallback(
-    async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
-      setShopDatasetActionError('');
-      if (
-        isPlatformCollectionRunning(detail.collectionStatus) ||
-        isPlatformSemanticRunning(detail.semanticStatus) ||
-        (!detail.semanticStatus.canRefresh && !detail.semanticStatus.canRetry)
-      ) {
-        return;
-      }
-      const refreshedDataset = await refreshDatasetSemanticSuggestions(detail.source, detail.dataset);
-      if (refreshedDataset) {
-        await loadPlatformShopDatasetDetails(shop, true);
-        setExpandedShopDatasetId(shop.id);
-      }
-    },
-    [loadPlatformShopDatasetDetails, refreshDatasetSemanticSuggestions],
-  );
 
   const retryPlatformDatasetCollection = useCallback(
     async (shop: ShopConnection, detail: PlatformShopDatasetDetail) => {
@@ -5209,7 +5345,7 @@ export default function DataConnectionsPanel({
         if (!response.ok) {
           throw new Error(String(data?.detail || data?.message || '初始化数据集失败'));
         }
-        await loadPlatformShopDatasetDetails(shop, true);
+        await loadPlatformShopDatasetDetails(shop);
         setExpandedShopDatasetId(shop.id);
       } catch (error) {
         setShopDatasetActionError(error instanceof Error ? error.message : '初始化数据集失败');
@@ -5510,7 +5646,7 @@ export default function DataConnectionsPanel({
     const normalizedFields = editingDatasetSemantic.fieldRows
       .map((row) => {
         const rawName = row.rawName.trim();
-        if (!rawName) return null;
+        if (!isPublishableDatasetSemanticRawName(rawName)) return null;
         const displayName = row.displayName.trim() || rawName;
         return {
           raw_name: rawName,
@@ -5530,6 +5666,8 @@ export default function DataConnectionsPanel({
       })
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
     const fieldLabelMap = Object.fromEntries(normalizedFields.map((row) => [row.raw_name, row.display_name]));
+    const publishableFieldNameSet = new Set(normalizedFields.map((row) => row.raw_name.trim().toLowerCase()));
+    const publishableKeyFields = keyFields.filter((field) => publishableFieldNameSet.has(field.trim().toLowerCase()));
     const pendingFieldNames: string[] = [];
     const updatedAt = new Date().toISOString();
     const semanticProfile = {
@@ -5540,7 +5678,7 @@ export default function DataConnectionsPanel({
       grain,
       publish_status: 'published',
       field_label_map: fieldLabelMap,
-      key_fields: keyFields,
+      key_fields: publishableKeyFields,
       fields: normalizedFields,
       low_confidence_fields: pendingFieldNames,
       tech_name: editingDatasetSemantic.resourceKey || editingDatasetSemantic.datasetName,
@@ -5572,7 +5710,7 @@ export default function DataConnectionsPanel({
           business_object_type: businessObjectType,
           grain,
           publish_status: 'published',
-          key_fields: keyFields,
+          key_fields: publishableKeyFields,
           field_label_map: fieldLabelMap,
           semantic_fields: normalizedFields,
           low_confidence_fields: pendingFieldNames,
@@ -5595,7 +5733,7 @@ export default function DataConnectionsPanel({
               businessObjectType,
               grain,
               publishStatus: 'published',
-              uniqueIdentifierRawNames: keyFields,
+              uniqueIdentifierRawNames: publishableKeyFields,
               collectionDateField: collectionConfig.date_field,
               collectionDateFormat: collectionConfig.date_format,
               collectionScheduleFrequency: collectionConfig.schedule.frequency,
@@ -5632,7 +5770,7 @@ export default function DataConnectionsPanel({
             resource_key: editingDatasetSemantic.resourceKey || editingDatasetSemantic.datasetCode,
             business_name: businessName,
             business_description: '',
-            key_fields: keyFields,
+            key_fields: publishableKeyFields,
             field_label_map: fieldLabelMap,
             fields: normalizedFields,
             status: 'manual_updated',
@@ -5658,11 +5796,15 @@ export default function DataConnectionsPanel({
 
       const savedDataset = normalizeDataset(data?.dataset ?? data?.item ?? data?.data?.dataset);
       if (savedDataset) {
+        const publishedDataset = {
+          ...savedDataset,
+          publish_status: 'published',
+        };
         updateDatasetInState(
           editingDatasetSemantic.sourceId,
           editingDatasetSemantic.datasetId,
           editingDatasetSemantic.datasetCode,
-          () => savedDataset,
+          () => publishedDataset,
         );
         setEditingDatasetSemantic((prev) =>
           prev &&
@@ -5670,10 +5812,12 @@ export default function DataConnectionsPanel({
           prev.datasetId === editingDatasetSemantic.datasetId
             ? buildEditableDatasetSemanticState(
                 { id: editingDatasetSemantic.sourceId, name: editingDatasetSemantic.sourceName },
-                savedDataset,
+                publishedDataset,
               )
             : prev,
         );
+      } else {
+        applyLocalUpdate(String(data?.message || '已发布为可用数据集'));
       }
       setDatasetSemanticNotice(
         String(
@@ -7415,9 +7559,10 @@ export default function DataConnectionsPanel({
               <button
                 type="button"
                 onClick={() => setPhysicalDetailDialog(null)}
-                className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
               >
-                关闭
+                <X className="h-4 w-4" />
               </button>
             </div>
 
@@ -7490,9 +7635,10 @@ export default function DataConnectionsPanel({
               <button
                 type="button"
                 onClick={() => setTargetedDiscoverDialog(null)}
-                className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
               >
-                关闭
+                <X className="h-4 w-4" />
               </button>
             </div>
             <div className="mt-4 space-y-3">
@@ -7543,7 +7689,7 @@ export default function DataConnectionsPanel({
         </div>
       )}
       {editingDatasetSemantic && (
-        <div className="fixed inset-0 z-40 bg-black/35" onClick={closeEditingDatasetSemantic}>
+        <div className="fixed inset-0 z-[60] bg-black/35" onClick={closeEditingDatasetSemantic}>
           <div
             className="ml-auto flex h-full w-full max-w-2xl flex-col border-l border-border bg-surface shadow-2xl"
             onClick={(event) => event.stopPropagation()}
@@ -7570,15 +7716,26 @@ export default function DataConnectionsPanel({
                 <button
                   type="button"
                   onClick={closeEditingDatasetSemantic}
-                  className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                  aria-label="关闭"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
                 >
-                  关闭
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-4">
+                {datasetSemanticError && (
+                  <div className="sticky top-0 z-10 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 shadow-sm">
+                    {datasetSemanticError}
+                  </div>
+                )}
+                {datasetSemanticNotice && (
+                  <div className="sticky top-0 z-10 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 shadow-sm">
+                    {datasetSemanticNotice}
+                  </div>
+                )}
                 {refreshingDatasetSemantic && (
                   <div className="flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -7801,16 +7958,6 @@ export default function DataConnectionsPanel({
                   </div>
                 </div>
 
-                {datasetSemanticError && (
-                  <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                    {datasetSemanticError}
-                  </div>
-                )}
-                {datasetSemanticNotice && (
-                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                    {datasetSemanticNotice}
-                  </div>
-                )}
               </div>
             </div>
 
@@ -7849,7 +7996,7 @@ export default function DataConnectionsPanel({
         </div>
       )}
       {collectionDetailDialog && (
-        <div className="fixed inset-0 z-40 bg-black/35" onClick={() => setCollectionDetailDialog(null)}>
+        <div className="fixed inset-0 z-[60] bg-black/35" onClick={() => setCollectionDetailDialog(null)}>
           <div
             className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl"
             onClick={(event) => event.stopPropagation()}
@@ -7866,9 +8013,10 @@ export default function DataConnectionsPanel({
                 <button
                   type="button"
                   onClick={() => setCollectionDetailDialog(null)}
-                  className="inline-flex items-center rounded-lg border border-border bg-surface-secondary px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-surface-tertiary"
+                  aria-label="关闭"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
                 >
-                  关闭
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -8098,8 +8246,12 @@ export default function DataConnectionsPanel({
                               <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>
                             ) : (() => {
                               const sampleRows = rows.slice(0, 10).map((row) => asRecord(row) ?? {});
+                              const fieldGroups = normalizePlatformFieldGroups(
+                                collectionDetailDialog.detail?.field_groups ??
+                                  collectionDetailDialog.detail?.fieldGroups,
+                              );
                               const columns = buildSemanticSampleTableColumns(
-                                collectionDetailDialog.detail?.fieldGroups ?? [],
+                                fieldGroups,
                                 sampleRows,
                               );
                               if (columns.length === 0) {
@@ -8170,6 +8322,171 @@ export default function DataConnectionsPanel({
     );
   };
 
+  const renderCollaborationChannelDialog = () => {
+    if (!editingChannel) return null;
+
+    const providerCard = collaborationProviderCard(editingChannel.provider);
+    const dialogTitle = `${editingChannel.isDraft ? '新增' : '编辑'}${providerCard.title}协作通道配置`;
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="collaboration-channel-dialog-title"
+          className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-2xl border border-border bg-surface shadow-xl"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+            <div className="min-w-0">
+              <h3 id="collaboration-channel-dialog-title" className="text-base font-semibold text-text-primary">
+                {dialogTitle}
+              </h3>
+              <p className="mt-1 text-sm text-text-secondary">{providerCard.description}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingChannel(null);
+                setChannelError('');
+              }}
+              aria-label="关闭"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="overflow-y-auto px-5 py-4">
+            {channelError && (
+              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                {channelError}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label className="space-y-2 text-sm">
+                  <span className="font-medium text-text-primary">通道名称</span>
+                  <input
+                    value={editingChannel.name}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, name: event.target.value } : prev))
+                    }
+                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder={providerCard.defaultName}
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="font-medium text-text-primary">通道编码</span>
+                  <input
+                    value={editingChannel.channel_code}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, channel_code: event.target.value } : prev))
+                    }
+                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder="default"
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="font-medium text-text-primary">{providerCard.clientIdLabel}</span>
+                  <input
+                    value={editingChannel.client_id}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, client_id: event.target.value } : prev))
+                    }
+                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder="请输入"
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="font-medium text-text-primary">{providerCard.clientSecretLabel}</span>
+                  <input
+                    type="password"
+                    value={editingChannel.client_secret}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, client_secret: event.target.value } : prev))
+                    }
+                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                    placeholder={editingChannel.isDraft ? '请输入' : '留空表示暂不修改'}
+                  />
+                </label>
+              </div>
+
+              <label className="space-y-2 text-sm block">
+                <span className="font-medium text-text-primary">{providerCard.robotCodeLabel}</span>
+                <input
+                  value={editingChannel.robot_code}
+                  onChange={(event) =>
+                    setEditingChannel((prev) => (prev ? { ...prev, robot_code: event.target.value } : prev))
+                  }
+                  className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                  placeholder="可选"
+                />
+              </label>
+
+              <label className="space-y-2 text-sm block">
+                <span className="font-medium text-text-primary">扩展配置（JSON）</span>
+                <textarea
+                  value={editingChannel.extraText}
+                  onChange={(event) =>
+                    setEditingChannel((prev) => (prev ? { ...prev, extraText: event.target.value } : prev))
+                  }
+                  className="min-h-28 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 font-mono text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                  placeholder='例如：{"bot_scope":"internal"}'
+                />
+              </label>
+
+              <div className="flex flex-wrap gap-5 text-sm text-text-secondary">
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editingChannel.is_default}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, is_default: event.target.checked } : prev))
+                    }
+                  />
+                  设为默认通道
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editingChannel.is_enabled}
+                    onChange={(event) =>
+                      setEditingChannel((prev) => (prev ? { ...prev, is_enabled: event.target.checked } : prev))
+                    }
+                  />
+                  启用该通道
+                </label>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveEditingChannel()}
+                  disabled={savingChannel}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
+                >
+                  {savingChannel ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  保存配置
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingChannel(null);
+                    setChannelError('');
+                  }}
+                  className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-tertiary transition-colors"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderCollaborationPanel = () => {
     const rows = selectedProviderChannels;
     const providerCard = selectedChannelCard;
@@ -8196,7 +8513,7 @@ export default function DataConnectionsPanel({
               当前后端协作通道接口未接入，保存结果会先停留在前端本地草稿，不会写入服务端。
             </div>
           )}
-          {channelError && (
+          {channelError && !editingChannel && (
             <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
               {channelError}
             </div>
@@ -8270,133 +8587,6 @@ export default function DataConnectionsPanel({
                   ))}
                 </tbody>
               </table>
-            </div>
-          )}
-        </div>
-
-        <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
-          {!editingChannel ? (
-            <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
-              请选择一条协作通道配置进行编辑，或点击“新增配置”创建新的通道。
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium text-text-primary">通道名称</span>
-                  <input
-                    value={editingChannel.name}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, name: event.target.value } : prev))
-                    }
-                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder={collaborationProviderCard(editingChannel.provider).defaultName}
-                  />
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium text-text-primary">通道编码</span>
-                  <input
-                    value={editingChannel.channel_code}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, channel_code: event.target.value } : prev))
-                    }
-                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder="default"
-                  />
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium text-text-primary">{collaborationProviderCard(editingChannel.provider).clientIdLabel}</span>
-                  <input
-                    value={editingChannel.client_id}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, client_id: event.target.value } : prev))
-                    }
-                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder="请输入"
-                  />
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium text-text-primary">{collaborationProviderCard(editingChannel.provider).clientSecretLabel}</span>
-                  <input
-                    type="password"
-                    value={editingChannel.client_secret}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, client_secret: event.target.value } : prev))
-                    }
-                    className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder={editingChannel.isDraft ? '请输入' : '留空表示暂不修改'}
-                  />
-                </label>
-              </div>
-
-              <label className="space-y-2 text-sm block">
-                <span className="font-medium text-text-primary">{collaborationProviderCard(editingChannel.provider).robotCodeLabel}</span>
-                <input
-                  value={editingChannel.robot_code}
-                  onChange={(event) =>
-                    setEditingChannel((prev) => (prev ? { ...prev, robot_code: event.target.value } : prev))
-                  }
-                  className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                  placeholder="可选"
-                />
-              </label>
-
-              <label className="space-y-2 text-sm block">
-                <span className="font-medium text-text-primary">扩展配置（JSON）</span>
-                <textarea
-                  value={editingChannel.extraText}
-                  onChange={(event) =>
-                    setEditingChannel((prev) => (prev ? { ...prev, extraText: event.target.value } : prev))
-                  }
-                  className="min-h-28 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 font-mono text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                  placeholder='例如：{"bot_scope":"internal"}'
-                />
-              </label>
-
-              <div className="flex flex-wrap gap-5 text-sm text-text-secondary">
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={editingChannel.is_default}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, is_default: event.target.checked } : prev))
-                    }
-                  />
-                  设为默认通道
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={editingChannel.is_enabled}
-                    onChange={(event) =>
-                      setEditingChannel((prev) => (prev ? { ...prev, is_enabled: event.target.checked } : prev))
-                    }
-                  />
-                  启用该通道
-                </label>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void saveEditingChannel()}
-                  disabled={savingChannel}
-                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
-                >
-                  {savingChannel ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  保存配置
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingChannel(null);
-                    setChannelError('');
-                  }}
-                  className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-tertiary transition-colors"
-                >
-                  取消编辑
-                </button>
-              </div>
             </div>
           )}
         </div>
@@ -8509,360 +8699,233 @@ export default function DataConnectionsPanel({
     </div>
   );
 
-  const renderPlatformDatasetDetail = (shop: ShopConnection) => {
-    if (expandedShopDatasetId !== shop.id) return null;
+  const renderPlatformDatasetDialog = () => {
+    const shop = shops.find((item) => item.id === expandedShopDatasetId);
+    if (!shop) return null;
     const details = shopDatasetDetails[shop.id] ?? [];
+    const normalizedPlatformCode = shop.platform_code.trim().toLowerCase();
+    const connectionNoun = normalizedPlatformCode === 'alipay' ? '商户' : '店铺';
+    const dialogTitle =
+      normalizedPlatformCode === 'alipay'
+        ? '支付宝商户数据集'
+        : normalizedPlatformCode === 'taobao'
+          ? '淘宝/天猫店铺数据集'
+          : `${connectionNoun}数据集`;
 
     return (
-      <tr className="border-t border-border-subtle bg-surface-secondary/70">
-        <td colSpan={6} className="px-4 py-4">
-          {shopDatasetActionError && (
-            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-              {shopDatasetActionError}
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="platform-dataset-dialog-title"
+          className="flex max-h-[88vh] w-full max-w-6xl flex-col rounded-2xl border border-border bg-surface shadow-xl"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+            <div className="min-w-0">
+              <h3 id="platform-dataset-dialog-title" className="text-base font-semibold text-text-primary">
+                {dialogTitle}
+              </h3>
+              <p className="mt-1 truncate text-sm text-text-secondary">
+                {shop.external_shop_name || `${connectionNoun}未命名`} · {connectionNoun} ID：{shop.external_shop_id || '未知'}
+              </p>
             </div>
-          )}
-          {details.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border bg-surface px-3 py-3 text-sm text-text-secondary">
-              未找到该店铺的固定数据集。
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {details.map((detail) => {
-                const datasetName =
-                  detail.dataset.dataset_name ||
-                  detail.dataset.business_name ||
-                  detail.dataset.dataset_code;
-                const collectionStatus = detail.collectionStatus.status || 'unknown';
-                const semanticStatus = detail.semanticStatus.status || 'unknown';
-                const isCollectionRunning = isPlatformCollectionRunning(detail.collectionStatus);
-                const isSemanticRunning = isPlatformSemanticRunning(detail.semanticStatus);
-                const collectionActionId = `${detail.sourceId}:${detail.dataset.id}`;
-                const isCollectionActionBusy = platformDatasetCollectionActionIds.has(collectionActionId);
-                const canRetryCollection = !isCollectionRunning && !isCollectionActionBusy;
-                const collectionActionLabel = '重新初始化';
-                const canRefreshSemantic =
-                  !isCollectionRunning &&
-                  !isSemanticRunning &&
-                  (detail.semanticStatus.canRefresh || detail.semanticStatus.canRetry);
-                const previewRows = detail.rows.slice(0, 20);
-                const previewColumns = buildSemanticSampleTableColumns(detail.fieldGroups, previewRows, 12);
+            <button
+              type="button"
+              onClick={() => setExpandedShopDatasetId(null)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+              aria-label="关闭"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="overflow-y-auto px-5 py-4">
+            {shopDatasetActionError && (
+              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                {shopDatasetActionError}
+              </div>
+            )}
+            {details.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border bg-surface px-3 py-3 text-sm text-text-secondary">
+                未找到该{connectionNoun}的数据集。
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {details.map((detail) => {
+                  const datasetName =
+                    detail.dataset.dataset_name ||
+                    detail.dataset.business_name ||
+                    detail.dataset.dataset_code;
+                  const collectionStatus = detail.collectionStatus.status || 'unknown';
+                  const semanticStatus = detail.semanticStatus.status || 'unknown';
+                  const isCollectionRunning = isPlatformCollectionRunning(detail.collectionStatus);
+                  const collectionActionId = `${detail.sourceId}:${detail.dataset.id}`;
+                  const isCollectionActionBusy = platformDatasetCollectionActionIds.has(collectionActionId);
+                  const isCollectionFailed = isPlatformStatusFailed(collectionStatus);
+                  const canRetryCollection =
+                    !isCollectionRunning &&
+                    !isCollectionActionBusy &&
+                    (isCollectionFailed ||
+                      detail.collectionStatus.canRetryInitialize ||
+                      detail.collectionStatus.canInitialize ||
+                      ['missing', 'not_started', 'none'].includes(collectionStatus.trim().toLowerCase()));
+                  const collectionLabel = platformDatasetCollectionLabel(detail);
+                  const dailyCollectionLabel = platformDatasetDailyCollectionLabel(detail);
+                  const canPublishDataset = canPublishPlatformDataset(detail);
+                  const previewRows = detail.rows.slice(0, 20);
+                  const previewColumns = buildSemanticSampleTableColumns(detail.fieldGroups, previewRows, 100);
 
-                return (
-                  <div key={`${detail.sourceId}-${detail.dataset.id}`} className="rounded-xl border border-border bg-surface px-4 py-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-medium text-text-primary">{datasetName}</p>
-                          <span className="text-xs text-text-muted">
-                            {detail.dataset.resource_key || detail.dataset.dataset_code}
-                          </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(collectionStatus)}`}>
-                            初始化：{collectionStatus}
-                          </span>
-                          <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(semanticStatus)}`}>
-                            语义：{semanticStatus}
-                          </span>
-                          {detail.loadedAt && (
-                            <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 text-text-secondary">
-                              {formatTime(detail.loadedAt)}
+                  return (
+                    <div key={`${detail.sourceId}-${detail.dataset.id}`} className="rounded-xl border border-border bg-surface px-4 py-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-medium text-text-primary">{datasetName}</p>
+                            <span className="text-xs text-text-muted">
+                              {detail.dataset.resource_key || detail.dataset.dataset_code}
                             </span>
-                          )}
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(collectionStatus)}`}>
+                              {collectionLabel}
+                            </span>
+                            {dailyCollectionLabel && (
+                              <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 font-medium text-text-secondary">
+                                {dailyCollectionLabel}
+                              </span>
+                            )}
+                            <span className={`inline-flex rounded-full px-2.5 py-1 font-medium ${platformDatasetStatusClass(semanticStatus)}`}>
+                              语义：{semanticStatus}
+                            </span>
+                            {detail.loadedAt && (
+                              <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 text-text-secondary">
+                                {formatTime(detail.loadedAt)}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex flex-wrap justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void retryPlatformDatasetCollection(shop, detail)}
-                          disabled={!canRetryCollection && !isCollectionActionBusy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isCollectionActionBusy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <RefreshCw className="h-3.5 w-3.5" />
+                        <div className="flex flex-wrap justify-end gap-2">
+                          {canRetryCollection && (
+                            <button
+                              type="button"
+                              onClick={() => void retryPlatformDatasetCollection(shop, detail)}
+                              disabled={isCollectionActionBusy}
+                              className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {isCollectionActionBusy ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              )}
+                              重新初始化
+                            </button>
                           )}
-                          {collectionActionLabel}
-                        </button>
-                        {canRefreshSemantic && (
                           <button
                             type="button"
-                            onClick={() => void refreshPlatformDatasetSemantic(shop, detail)}
-                            disabled={refreshingDatasetSemantic}
-                            className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              closeEditingDatasetSemantic();
+                              void openDatasetCollectionDetail(detail.source, detail.dataset);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
                           >
-                            {refreshingDatasetSemantic ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Sparkles className="h-3.5 w-3.5" />
-                            )}
-                            {detail.semanticStatus.canRetry ? '重新生成语义' : '刷新语义'}
+                            <FileSpreadsheet className="h-3.5 w-3.5" />
+                            采集详情
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => void startEditDatasetSemantic(detail.source, detail.dataset)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          管理发布
-                        </button>
+                          {canPublishDataset && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCollectionDetailDialog(null);
+                                void startEditDatasetSemantic(detail.source, detail.dataset);
+                              }}
+                              className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              {platformPublishButtonLabel(detail)}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    </div>
 
-                    {detail.loading ? (
-                      <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        正在加载数据集详情
-                      </div>
-                    ) : detail.error ? (
-                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-                        {detail.error}
-                      </div>
-                    ) : (
-                      <div className="mt-3 space-y-3">
-                        {(detail.collectionStatus.message || detail.semanticStatus.message) && (
-                          <div className="grid gap-2 text-xs text-text-secondary md:grid-cols-2">
-                            {detail.collectionStatus.message && (
-                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
-                                初始化：{detail.collectionStatus.message}
-                              </p>
-                            )}
-                            {detail.semanticStatus.message && (
-                              <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
-                                语义：{detail.semanticStatus.message}
-                              </p>
-                            )}
-                          </div>
-                        )}
+                      {detail.loading ? (
+                        <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          正在加载数据集详情
+                        </div>
+                      ) : detail.error ? (
+                        <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                          {detail.error}
+                        </div>
+                      ) : (
+                        <div className="mt-3 space-y-3">
+                          {(detail.collectionStatus.message || detail.semanticStatus.message) && (
+                            <div className="grid gap-2 text-xs text-text-secondary md:grid-cols-2">
+                              {detail.collectionStatus.message && (
+                                <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                  初始化：{detail.collectionStatus.message}
+                                </p>
+                              )}
+                              {detail.semanticStatus.message && (
+                                <p className="rounded-lg bg-surface-secondary px-2.5 py-2">
+                                  语义：{detail.semanticStatus.message}
+                                </p>
+                              )}
+                            </div>
+                          )}
 
-                        <div>
-                          <p className="text-xs font-medium text-text-secondary">数据预览</p>
-                          <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-border bg-surface">
-                            {previewColumns.length === 0 ? (
-                              <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>
-                            ) : (
-                              <table className="min-w-full divide-y divide-border text-left text-xs">
-                                <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
-                                  <tr>
-                                    {previewColumns.map((column) => (
-                                      <th
-                                        key={column.rawName}
-                                        className="whitespace-nowrap px-3 py-2 font-medium"
-                                        title={column.rawName}
-                                      >
-                                        {column.displayName}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-border text-text-primary">
-                                  {previewRows.length === 0 ? (
+                          <div>
+                            <p className="text-xs font-medium text-text-secondary">数据预览</p>
+                            <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-border bg-surface">
+                              {previewColumns.length === 0 ? (
+                                <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>
+                              ) : (
+                                <table className="min-w-full divide-y divide-border text-left text-xs">
+                                  <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
                                     <tr>
-                                      <td colSpan={previewColumns.length} className="px-3 py-3 text-sm text-text-secondary">
-                                        暂无数据。
-                                      </td>
+                                      {previewColumns.map((column) => (
+                                        <th
+                                          key={column.rawName}
+                                          className="whitespace-nowrap px-3 py-2 font-medium"
+                                          title={column.rawName}
+                                        >
+                                          {column.displayName}
+                                        </th>
+                                      ))}
                                     </tr>
-                                  ) : (
-                                    previewRows.map((row, rowIndex) => (
-                                      <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
-                                        {previewColumns.map((column) => (
-                                          <td
-                                            key={`${rowIndex}-${column.rawName}`}
-                                            className="max-w-56 truncate px-3 py-2"
-                                            title={formatSampleCellValue(row[column.rawName])}
-                                          >
-                                            {formatPreviewCell(row[column.rawName])}
-                                          </td>
-                                        ))}
+                                  </thead>
+                                  <tbody className="divide-y divide-border text-text-primary">
+                                    {previewRows.length === 0 ? (
+                                      <tr>
+                                        <td colSpan={previewColumns.length} className="px-3 py-3 text-sm text-text-secondary">
+                                          暂无数据。
+                                        </td>
                                       </tr>
-                                    ))
-                                  )}
-                                </tbody>
-                              </table>
-                            )}
+                                    ) : (
+                                      previewRows.map((row, rowIndex) => (
+                                        <tr key={`platform-dataset-row-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                          {previewColumns.map((column) => (
+                                            <td
+                                              key={`${rowIndex}-${column.rawName}`}
+                                              className="max-w-56 truncate px-3 py-2"
+                                              title={formatSampleCellValue(row[column.rawName])}
+                                            >
+                                              {formatPreviewCell(row[column.rawName])}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      ))
+                                    )}
+                                  </tbody>
+                                </table>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </td>
-      </tr>
-    );
-  };
-
-  const renderAlipayMerchantAuthPanel = (appConfig: PlatformAppConfigFormState) => {
-    const hasStaticEntry = Boolean(appConfig.merchantAuthPcUrl);
-    const selectedPending = alipayPendingAuthorizations.find(
-      (item) => item.id === alipayClaimForm.pendingAuthorizationId,
-    );
-    const pendingRows = alipayPendingAuthorizations;
-
-    return (
-      <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
-            <p className="mt-1 text-xs text-text-secondary">
-              使用支付宝开放平台商家授权入口完成账单权限授权，回调后在这里填写支付宝商户名称并绑定到当前企业。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void fetchAlipayPendingAuthorizations()}
-            disabled={loadingAlipayPendingAuthorizations}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {loadingAlipayPendingAuthorizations ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            刷新待绑定
-          </button>
-        </div>
-
-        <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
-          <div className="rounded-xl border border-border bg-surface p-3">
-            {appConfig.merchantAuthPcUrl ? (
-              <a
-                href={appConfig.merchantAuthPcUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                打开支付宝商家授权
-              </a>
-            ) : (
-              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                待配置支付宝 PC 授权链接
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
-            {!hasStaticEntry && canManageServiceProviderApps && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingPlatformAppCode('alipay');
-                  void fetchPlatformAppConfig('alipay');
-                }}
-                className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
-              >
-                <ShieldCheck className="h-3.5 w-3.5" />
-                配置授权入口
-              </button>
-            )}
-          </div>
-
-          <div className="space-y-4">
-            <div className="rounded-xl border border-border bg-surface p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h5 className="text-sm font-semibold text-text-primary">待绑定授权</h5>
-                <span className="text-xs text-text-secondary">{pendingRows.length} 条待绑定</span>
-              </div>
-              {loadingAlipayPendingAuthorizations ? (
-                <div className="mt-3 flex items-center gap-2 text-sm text-text-secondary">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  正在加载待绑定授权
-                </div>
-              ) : pendingRows.length === 0 ? (
-                <p className="mt-3 rounded-lg border border-dashed border-border px-3 py-3 text-sm text-text-secondary">
-                  当前没有待绑定的支付宝授权。
-                </p>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {pendingRows.map((pending) => {
-                    const isSelected = pending.id === alipayClaimForm.pendingAuthorizationId;
-                    return (
-                      <button
-                        key={pending.id}
-                        type="button"
-                        onClick={() =>
-                          setAlipayClaimForm((current) => ({
-                            ...current,
-                            pendingAuthorizationId: pending.id,
-                            claimCode: pending.claim_code || current.claimCode,
-                            merchantDisplayName: current.merchantDisplayName || pending.merchant_display_name || '',
-                          }))
-                        }
-                        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
-                          isSelected
-                            ? 'border-blue-300 bg-blue-50'
-                            : 'border-border bg-surface-secondary hover:bg-surface-tertiary'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                          <span className="font-medium text-text-primary">
-                            支付宝主体：{pending.external_shop_id || '未知'}
-                          </span>
-                          <span className="text-text-secondary">过期：{formatTime(pending.expires_at)}</span>
-                        </div>
-                        <p className="mt-1 text-xs text-text-secondary">
-                          回调：{formatTime(pending.created_at)}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-border bg-surface p-3">
-              <h5 className="text-sm font-semibold text-text-primary">绑定到当前企业</h5>
-              <div className="mt-3 grid gap-3">
-                <label className="block text-sm font-medium text-text-primary">
-                  支付宝商户名称
-                  <input
-                    value={alipayClaimForm.merchantDisplayName}
-                    onChange={(event) =>
-                      setAlipayClaimForm((current) => ({ ...current, merchantDisplayName: event.target.value }))
-                    }
-                    className="mt-2 w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                    placeholder="例如：福游网络"
-                  />
-                </label>
-              </div>
-              {selectedPending && (
-                <p className="mt-2 text-xs text-text-secondary">
-                  当前选择：{selectedPending.external_shop_id || selectedPending.id}
-                </p>
-              )}
-              {alipayClaimError && (
-                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-                  {alipayClaimError}
-                </div>
-              )}
-              {alipayClaimNotice && (
-                <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                  {alipayClaimNotice}
-                </div>
-              )}
-              <div className="mt-3 flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => void claimAlipayPendingAuthorization()}
-                  disabled={
-                    claimingAlipayAuthorization ||
-                    !alipayClaimForm.pendingAuthorizationId.trim() ||
-                    !alipayClaimForm.claimCode.trim() ||
-                    !alipayClaimForm.merchantDisplayName.trim()
-                  }
-                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {claimingAlipayAuthorization ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="h-4 w-4" />
-                  )}
-                  绑定到当前企业
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -8947,30 +9010,7 @@ export default function DataConnectionsPanel({
               </p>
             )}
           </div>
-        ) : !isAlipayPlatform ? (
-          renderAlipayMerchantAuthPanel(appConfig)
         ) : null}
-        {isAlipayPlatform && appConfig.merchantAuthPcUrl && (
-          <div className="mb-4 rounded-2xl border border-border bg-surface-secondary p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h4 className="text-sm font-semibold text-text-primary">支付宝商家授权入口</h4>
-                <p className="mt-1 text-xs text-text-secondary">
-                  授权完成回调后会直接绑定到当前企业，并生成支付宝商户账单数据集。
-                </p>
-              </div>
-              <a
-                href={appConfig.merchantAuthPcUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-500"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                打开支付宝商家授权
-              </a>
-            </div>
-          </div>
-        )}
         {shopError && (
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
             {shopError}
@@ -9012,9 +9052,12 @@ export default function DataConnectionsPanel({
                 </tr>
               </thead>
               <tbody>
-                {shops.map((shop) => (
-                  <Fragment key={shop.id}>
-                    <tr className="border-t border-border-subtle text-text-primary">
+                {shops.map((shop) => {
+                  const normalizedShopStatus = (shop.auth_status || shop.status || '').toLowerCase();
+                  const isShopDisabled = ['disabled', 'revoked'].includes(normalizedShopStatus);
+
+                  return (
+                    <tr key={shop.id} className="border-t border-border-subtle text-text-primary">
                       <td className="px-4 py-3 truncate" title={shop.external_shop_name}>{shop.external_shop_name}</td>
                       <td className="px-4 py-3 truncate text-text-secondary" title={shop.external_shop_id}>{shop.external_shop_id}</td>
                       <td className="px-4 py-3">
@@ -9041,30 +9084,470 @@ export default function DataConnectionsPanel({
                             className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-primary hover:bg-surface-tertiary disabled:opacity-60 transition-colors"
                           >
                             <RefreshCw className="h-3.5 w-3.5" />
-                            重授权
+                            {isShopDisabled ? '重新授权启用' : '重授权'}
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleDisable(shop)}
-                            disabled={
-                              actioningShopId === shop.id ||
-                              ['disabled', 'revoked'].includes((shop.auth_status || shop.status || '').toLowerCase())
-                            }
-                            className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
-                          >
-                            <Ban className="h-3.5 w-3.5" />
-                            停用
-                          </button>
+                          {!isShopDisabled && (
+                            <button
+                              type="button"
+                              onClick={() => setDisableConfirmShop(shop)}
+                              disabled={actioningShopId === shop.id}
+                              className="inline-flex whitespace-nowrap items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60 transition-colors"
+                            >
+                              <Ban className="h-3.5 w-3.5" />
+                              停用
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
-                    {renderPlatformDatasetDetail(shop)}
-                  </Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
+      </div>
+    );
+  };
+
+  const renderDisableConfirmDialog = () => {
+    if (!disableConfirmShop) return null;
+    const normalizedPlatformCode = disableConfirmShop.platform_code.trim().toLowerCase();
+    const connectionNoun = normalizedPlatformCode === 'alipay' ? '商户' : '店铺';
+    const displayName =
+      disableConfirmShop.external_shop_name ||
+      disableConfirmShop.external_shop_id ||
+      `${connectionNoun}授权`;
+    const isDisabling = actioningShopId === disableConfirmShop.id;
+
+    return (
+      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4 py-6">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="disable-shop-confirm-title"
+          className="w-full max-w-md rounded-2xl border border-border bg-surface p-5 shadow-xl"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 id="disable-shop-confirm-title" className="text-base font-semibold text-text-primary">
+                确认停用授权？
+              </h3>
+              <p className="mt-1 truncate text-sm text-text-primary">{displayName}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDisableConfirmShop(null)}
+              disabled={isDisabling}
+              aria-label="关闭"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <p className="mt-4 text-sm leading-6 text-text-secondary">
+            停用后该{connectionNoun}授权将不可用于后续采集；如需恢复，需要重新授权。
+          </p>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setDisableConfirmShop(null)}
+              disabled={isDisabling}
+              className="inline-flex min-h-10 items-center justify-center rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDisable(disableConfirmShop)}
+              disabled={isDisabling}
+              className="inline-flex min-h-10 min-w-28 items-center justify-center gap-2 rounded-xl border border-red-600 bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isDisabling && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
+              确认停用
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlatformDatasetSemanticDrawer = () => {
+    if (!editingDatasetSemantic || selectedSourceKind !== 'platform_oauth') return null;
+    const editingSemanticFieldRows = editingDatasetSemantic.fieldRows;
+    const editingUniqueIdentifierRawNameSet = new Set(editingDatasetSemantic.uniqueIdentifierRawNames);
+    const editingUniqueIdentifierRows = editingSemanticFieldRows.filter((row) =>
+      editingUniqueIdentifierRawNameSet.has(row.rawName),
+    );
+    const editingPendingFieldCount = editingSemanticFieldRows.filter((row) => row.pending).length;
+
+    return (
+      <div className="fixed inset-0 z-[60] bg-black/35" onClick={closeEditingDatasetSemantic}>
+        <div
+          className="ml-auto flex h-full w-full max-w-2xl flex-col border-l border-border bg-surface shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="border-b border-border px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-base font-semibold text-text-primary">
+                    {editingDatasetSemantic.publishStatus === 'published' ? '管理发布' : '发布数据集'}
+                  </h4>
+                  <span
+                    className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(editingDatasetSemantic.publishStatus)}`}
+                  >
+                    {publishStatusLabel(editingDatasetSemantic.publishStatus)}
+                  </span>
+                </div>
+                <p className="mt-1 truncate text-sm text-text-primary">{editingDatasetSemantic.datasetName}</p>
+                <p className="mt-1 truncate text-xs text-text-secondary">
+                  {editingDatasetSemantic.sourceName}
+                  {editingDatasetSemantic.resourceKey ? ` · ${editingDatasetSemantic.resourceKey}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEditingDatasetSemantic}
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-5">
+            <div className="space-y-4">
+              {datasetSemanticError && (
+                <div className="sticky top-0 z-10 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 shadow-sm">
+                  {datasetSemanticError}
+                </div>
+              )}
+              {datasetSemanticNotice && (
+                <div className="sticky top-0 z-10 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 shadow-sm">
+                  {datasetSemanticNotice}
+                </div>
+              )}
+              {refreshingDatasetSemantic && (
+                <div className="flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在刷新语义建议，请稍候。
+                </div>
+              )}
+
+              <label className="block rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                <span className="text-xs text-text-muted">业务名称</span>
+                <input
+                  value={editingDatasetSemantic.businessName}
+                  onChange={(event) =>
+                    setEditingDatasetSemantic((prev) =>
+                      prev ? { ...prev, businessName: event.target.value } : prev,
+                    )
+                  }
+                  className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                  placeholder="例如：支付宝资金账单"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-text-secondary" />
+                  <span className="text-sm font-medium text-text-primary">唯一标识字段</span>
+                </div>
+                {editingUniqueIdentifierRows.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {editingUniqueIdentifierRows.map((row) => (
+                      <span
+                        key={`platform-unique-identifier-${row.rawName}`}
+                        className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700"
+                      >
+                        {row.displayName || row.rawName}
+                        <span className="ml-1 font-mono text-blue-500">{row.rawName}</span>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-xl border border-dashed border-border px-3 py-2 text-sm text-text-secondary">
+                    当前还没有明确的唯一标识字段，请在下方字段列表中勾选。
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="h-4 w-4 text-text-secondary" />
+                      <span className="text-sm font-medium text-text-primary">字段语义确认</span>
+                    </div>
+                    <p className="mt-1 text-xs text-text-secondary">
+                      当前共 {editingSemanticFieldRows.length} 个字段，待确认 {editingPendingFieldCount} 个。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={acceptAllEditingDatasetSemanticSuggestions}
+                    disabled={editingPendingFieldCount === 0}
+                    className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    全部接受建议
+                  </button>
+                </div>
+
+                <div className="mt-4 max-h-[34rem] space-y-3 overflow-y-auto pr-1">
+                  {editingSemanticFieldRows.map((row) => {
+                    const isUniqueIdentifier = editingUniqueIdentifierRawNameSet.has(row.rawName);
+                    return (
+                      <div key={row.id} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-text-primary">{row.rawName}</p>
+                            <p className="mt-1 text-xs text-text-secondary">
+                              {buildDatasetFieldSummary(row) || '待补充字段语义'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleEditingDatasetSemanticUniqueIdentifier(row.rawName)}
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                              isUniqueIdentifier
+                                ? 'border border-blue-200 bg-blue-50 text-blue-700'
+                                : 'border border-border bg-surface-secondary text-text-secondary hover:bg-surface-tertiary'
+                            }`}
+                          >
+                            {isUniqueIdentifier ? '唯一标识' : '作为唯一标识'}
+                          </button>
+                        </div>
+                        <label className="mt-3 block">
+                          <span className="text-xs text-text-muted">中文名</span>
+                          <input
+                            value={row.displayName}
+                            onChange={(event) =>
+                              updateEditingDatasetSemanticField(row.id, { displayName: event.target.value })
+                            }
+                            className="mt-2 w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
+                            placeholder={`例如：${inferDatasetFieldDisplayName(row.rawName)}`}
+                          />
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div className="border-t border-border bg-surface px-5 py-4">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeEditingDatasetSemantic}
+                className="inline-flex items-center rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveEditingDatasetSemantic()}
+                disabled={savingDatasetSemantic || refreshingDatasetSemantic}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {savingDatasetSemantic ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {editingDatasetSemantic.publishStatus === 'published' ? '保存发布信息' : '确认发布'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlatformCollectionDetailDrawer = () => {
+    if (!collectionDetailDialog || selectedSourceKind !== 'platform_oauth') return null;
+    const detail = collectionDetailDialog.detail ?? {};
+    const collectionStats = asRecord(detail.collection_stats) ?? {};
+    const jobs = Array.isArray(detail.jobs)
+      ? detail.jobs.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : [];
+    const rows = Array.isArray(detail.rows)
+      ? detail.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : [];
+    const latestJob = jobs[0] ?? {};
+    const collectedCount = jobs.reduce((total, job) => {
+      const metrics = asRecord(job.metrics) ?? {};
+      return total + (asNumber(metrics.collection_upserted) ?? asNumber(metrics.row_count) ?? asNumber(metrics.rows) ?? 0);
+    }, 0);
+    const totalRecordCount =
+      asNumber(collectionStats.total_count) ??
+      asNumber(collectionStats.record_count) ??
+      collectedCount ??
+      rows.length;
+
+    return (
+      <div className="fixed inset-0 z-[60] bg-black/35" onClick={() => setCollectionDetailDialog(null)}>
+        <div
+          className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="border-b border-border px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h4 className="text-base font-semibold text-text-primary">采集详情</h4>
+                <p className="mt-1 truncate text-sm text-text-primary">{collectionDetailDialog.datasetName}</p>
+                <p className="mt-1 truncate text-xs text-text-secondary">
+                  {collectionDetailDialog.sourceName} · {collectionDetailDialog.resourceKey}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCollectionDetailDialog(null)}
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-5">
+            {collectionDetailDialog.loading ? (
+              <div className="flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在加载采集详情。
+              </div>
+            ) : collectionDetailDialog.error ? (
+              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                {collectionDetailDialog.error}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                    <p className="text-xs text-text-muted">采集任务</p>
+                    <p className="mt-2 text-lg font-semibold text-text-primary">{jobs.length} 次</p>
+                  </div>
+                  <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                    <p className="text-xs text-text-muted">采集记录数</p>
+                    <p className="mt-2 text-lg font-semibold text-text-primary">{totalRecordCount || rows.length}</p>
+                  </div>
+                  <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                    <p className="text-xs text-text-muted">最近采集</p>
+                    <p className="mt-2 text-sm font-medium text-text-primary">
+                      {formatTime(asString(latestJob.completed_at) || asString(latestJob.created_at))}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-medium text-text-primary">最近采集任务</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void refreshCollectionDetailDialog()}
+                        className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        刷新
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void retryCollectionDetailDataset()}
+                        className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        立即采集
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {jobs.length === 0 ? (
+                      <p className="rounded-xl border border-dashed border-border px-3 py-2 text-sm text-text-secondary">
+                        暂无采集任务。
+                      </p>
+                    ) : (
+                      jobs.map((job) => {
+                        const status = asString(job.status) || asString(job.job_status) || 'unknown';
+                        const metrics = asRecord(job.metrics) ?? {};
+                        const requestPayload = asRecord(job.request_payload) ?? {};
+                        const sourceRowCount = asNumber(metrics.row_count);
+                        const collectionUpsertedCount = asNumber(metrics.collection_upserted);
+                        const billDate = asString(requestPayload.bill_date) || asString(requestPayload.biz_date) || '';
+                        return (
+                          <div key={asString(job.id) || JSON.stringify(job)} className="rounded-xl border border-border bg-surface px-3 py-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(status)}`}>
+                                {status}
+                              </span>
+                              <span className="text-xs text-text-muted">
+                                {formatTime(asString(job.completed_at) || asString(job.created_at))}
+                              </span>
+                            </div>
+                            <div className="mt-2 grid gap-2 text-xs text-text-secondary sm:grid-cols-2">
+                              <p>源表读取：{typeof sourceRowCount === 'number' ? sourceRowCount : '未返回'} 条</p>
+                              <p>资产记录：{typeof collectionUpsertedCount === 'number' ? collectionUpsertedCount : '未返回'} 条</p>
+                              {billDate && <p>采集日期：{billDate}</p>}
+                            </div>
+                            {asString(job.error_message) && (
+                              <p className="mt-1 text-xs text-red-600">失败原因：{asString(job.error_message)}</p>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                  <p className="text-sm font-medium text-text-primary">最新 10 条数据</p>
+                  <div className="mt-3 max-h-80 overflow-auto rounded-xl border border-border bg-surface">
+                    {rows.length === 0 ? (
+                      <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>
+                    ) : (() => {
+                      const sampleRows = rows.slice(0, 10).map((row) => asRecord(row) ?? {});
+                      const fieldGroups = normalizePlatformFieldGroups(detail.field_groups ?? detail.fieldGroups);
+                      const columns = buildSemanticSampleTableColumns(fieldGroups, sampleRows);
+                      if (columns.length === 0) {
+                        return <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>;
+                      }
+                      return (
+                        <table className="min-w-full divide-y divide-border text-left text-xs">
+                          <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                            <tr>
+                              {columns.map((column) => (
+                                <th key={column.rawName} className="whitespace-nowrap px-3 py-2 font-medium">
+                                  {column.displayName}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border text-text-primary">
+                            {sampleRows.map((row, rowIndex) => (
+                              <tr key={`platform-collection-sample-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                {columns.map((column) => (
+                                  <td
+                                    key={`${rowIndex}-${column.rawName}`}
+                                    className="max-w-56 truncate px-3 py-2"
+                                    title={formatSampleCellValue(row[column.rawName])}
+                                  >
+                                    {formatSampleCellValue(row[column.rawName])}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     );
   };
@@ -9084,16 +9567,17 @@ export default function DataConnectionsPanel({
                 新增支付宝商户授权
               </h3>
               <p className="mt-1 text-sm text-text-secondary">
-                商户显示名称将用于后续连接列表和数据集命名。
+                生成绑定当前 Tally 企业的专属授权链接，可发给商户管理员在任意电脑完成授权。
               </p>
             </div>
             <button
               type="button"
               onClick={() => setAlipayAuthDialog(null)}
               disabled={isSubmitting}
-              className="rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+              aria-label="关闭"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
             >
-              关闭
+              <X className="h-4 w-4" />
             </button>
           </div>
 
@@ -9103,7 +9587,15 @@ export default function DataConnectionsPanel({
               value={merchantDisplayName}
               onChange={(event) =>
                 setAlipayAuthDialog((current) =>
-                  current ? { ...current, merchantDisplayName: event.target.value, error: '' } : current,
+                  current
+                    ? {
+                        ...current,
+                        merchantDisplayName: event.target.value,
+                        authUrl: '',
+                        notice: '',
+                        error: '',
+                      }
+                    : current,
                 )
               }
               className="w-full rounded-xl border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
@@ -9115,6 +9607,48 @@ export default function DataConnectionsPanel({
           {alipayAuthDialog.error && (
             <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
               {alipayAuthDialog.error}
+            </div>
+          )}
+
+          {alipayAuthDialog.notice && (
+            <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {alipayAuthDialog.notice}
+            </div>
+          )}
+
+          {alipayAuthDialog.authUrl && (
+            <div className="mt-4 rounded-xl border border-border bg-surface-secondary p-3">
+              <p className="text-xs font-medium text-text-primary">企业专属授权链接</p>
+              <textarea
+                value={alipayAuthDialog.authUrl}
+                readOnly
+                className="mt-2 min-h-24 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-xs text-text-primary outline-none"
+                aria-label="企业专属授权链接"
+              />
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(alipayAuthDialog.authUrl);
+                    setAlipayAuthDialog((current) =>
+                      current ? { ...current, notice: '授权链接已复制。' } : current,
+                    );
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  复制链接
+                </button>
+                <a
+                  href={alipayAuthDialog.authUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  打开授权
+                </a>
+              </div>
             </div>
           )}
 
@@ -9134,7 +9668,7 @@ export default function DataConnectionsPanel({
               className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              新增授权
+              生成专属授权链接
             </button>
           </div>
         </div>
@@ -9155,6 +9689,42 @@ export default function DataConnectionsPanel({
     }
     return renderReservedPanel(selectedSourceKind);
   };
+
+  if (!authToken && mode === 'callback' && callbackPayload) {
+    const isSuccess = callbackPayload.status === 'success';
+    return (
+      <div className="flex-1 flex items-center justify-center bg-surface-secondary p-6">
+        <div className="w-full max-w-xl rounded-2xl border border-border bg-surface p-8 text-center shadow-sm">
+          <div
+            className={`mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl ${
+              isSuccess ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
+            }`}
+          >
+            {isSuccess ? <CheckCircle2 className="h-6 w-6" /> : <AlertCircle className="h-6 w-6" />}
+          </div>
+          <h2 className="text-xl font-semibold text-text-primary">
+            {isSuccess ? '支付宝授权已完成' : '支付宝授权未完成'}
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-text-secondary">
+            {callbackPayload.message ||
+              (isSuccess
+                ? '授权结果已返回 Tally，请登录后查看绑定结果。'
+                : '授权流程返回失败，请登录后重新发起授权。')}
+          </p>
+          {callbackPayload.shopName && (
+            <p className="mt-2 text-sm text-text-secondary">支付宝商户：{callbackPayload.shopName}</p>
+          )}
+          <button
+            type="button"
+            onClick={onLoginRequired}
+            className="mt-5 inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+          >
+            登录
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!authToken) {
     return (
@@ -9250,20 +9820,25 @@ export default function DataConnectionsPanel({
                 type="button"
                 onClick={() => {
                   clearCallbackQuery('data-connections');
-                  if (callbackPayload.platformCode === 'alipay' && callbackPayload.claimCode) {
+                  if (callbackPayload.platformCode === 'alipay') {
                     setSelectedPlatform({
                       platform_code: 'alipay',
                       platform_name: '支付宝',
                       authorized_shop_count: 0,
                       error_shop_count: 0,
                     });
-                    fillAlipayClaimFormFromCallback(callbackPayload);
+                    if (callbackPayload.claimCode) {
+                      fillAlipayClaimFormFromCallback(callbackPayload);
+                    }
                     setMode('platform');
-                    void Promise.all([
+                    const loadingTasks: Promise<unknown>[] = [
                       fetchPlatformAppConfig('alipay'),
-                      fetchAlipayPendingAuthorizations(),
                       fetchShops('alipay'),
-                    ]);
+                    ];
+                    if (callbackPayload.claimCode) {
+                      loadingTasks.push(fetchAlipayPendingAuthorizations());
+                    }
+                    void Promise.all(loadingTasks);
                   } else {
                     setMode('overview');
                   }
@@ -9373,6 +9948,11 @@ export default function DataConnectionsPanel({
           </div>
           {renderSelectedPanel()}
           {renderServiceProviderAppConfigPanel()}
+          {renderCollaborationChannelDialog()}
+          {renderPlatformDatasetDialog()}
+          {renderPlatformDatasetSemanticDrawer()}
+          {renderPlatformCollectionDetailDrawer()}
+          {renderDisableConfirmDialog()}
           {renderAlipayAuthDialog()}
         </section>
       </div>

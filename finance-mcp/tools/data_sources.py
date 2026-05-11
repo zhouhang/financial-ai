@@ -6042,12 +6042,12 @@ async def _handle_data_source_update_dataset_semantic_profile(arguments: dict[st
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
 
-    sample_rows = _load_dataset_sample_rows_from_collection_records(
+    resource_key = _safe_text(dataset_row.get("resource_key")) or "default"
+    sample_rows, _sample_source = _load_dataset_semantic_sample_rows(
         company_id=company_id,
         data_source_id=source_id,
-        dataset_id=_safe_text(dataset_row.get("id")),
-        dataset_code=_safe_text(dataset_row.get("dataset_code")),
-        resource_key=_safe_text(dataset_row.get("resource_key")) or "default",
+        dataset_row=dataset_row,
+        resource_key=resource_key,
         limit=SEMANTIC_SAMPLE_ROW_LIMIT,
     )
     valid_field_names = {item.get("name") for item in _extract_dataset_columns(dataset_row, sample_rows) if _safe_text(item.get("name"))}
