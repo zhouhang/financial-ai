@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Ban,
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
   Cpu,
@@ -284,6 +285,18 @@ interface DatasetCollectionDetailDialogState {
   detail: Record<string, unknown> | null;
 }
 
+interface DateCollectionDialogState {
+  sourceId: string;
+  sourceName: string;
+  datasetId: string;
+  datasetName: string;
+  resourceKey: string;
+  dateField: string;
+  selectedDate: string;
+  submitting: boolean;
+  error: string;
+}
+
 interface PlatformDatasetFieldGroup {
   key: string;
   label: string;
@@ -400,19 +413,6 @@ function asStringRecord(value: unknown): Record<string, string> | undefined {
     .filter(([key, item]) => key.trim().length > 0 && item.length > 0);
   if (entries.length === 0) return undefined;
   return Object.fromEntries(entries);
-}
-
-function buildSampleTableColumns(rows: Record<string, unknown>[], maxColumns = 12): string[] {
-  const columns: string[] = [];
-  const seen = new Set<string>();
-  rows.forEach((row) => {
-    Object.keys(row).forEach((key) => {
-      if (seen.has(key) || columns.length >= maxColumns) return;
-      seen.add(key);
-      columns.push(key);
-    });
-  });
-  return columns;
 }
 
 function buildSemanticSampleTableColumns(
@@ -614,6 +614,38 @@ function collectionDateFormatLabel(format: string): string {
   if (normalized === 'unix_seconds') return 'Unix 秒时间戳';
   if (normalized === 'unix_millis') return 'Unix 毫秒时间戳';
   return '数据库日期/时间字段';
+}
+
+function readCollectionDateFieldFromDetail(
+  detail: Record<string, unknown> | null | undefined,
+  fallbackDataset?: DataSourceDatasetSummary,
+): string {
+  const detailDataset = asRecord(detail?.dataset);
+  const detailMeta = asRecord(detailDataset?.meta);
+  const detailCatalogProfile =
+    asRecord(detailDataset?.catalog_profile) ?? asRecord(detailMeta?.catalog_profile);
+  const detailCollectionConfig =
+    asRecord(detailDataset?.collection_config) ??
+    asRecord(detailMeta?.collection_config) ??
+    asRecord(detailCatalogProfile?.collection_config);
+  const fallbackDatasetRecord = asRecord(fallbackDataset);
+  const fallbackMeta = asRecord(fallbackDataset?.meta);
+  const fallbackCatalogProfile =
+    asRecord(fallbackDatasetRecord?.catalog_profile) ?? asRecord(fallbackMeta?.catalog_profile);
+  const fallbackCollectionConfig =
+    asRecord(fallbackDataset?.collection_config) ??
+    asRecord(fallbackMeta?.collection_config) ??
+    asRecord(fallbackCatalogProfile?.collection_config);
+
+  return (
+    asString(detailCollectionConfig?.date_field) ||
+    asString(detailCollectionConfig?.collection_date_field) ||
+    asString(detailCollectionConfig?.physical_date_field) ||
+    asString(fallbackCollectionConfig?.date_field) ||
+    asString(fallbackCollectionConfig?.collection_date_field) ||
+    asString(fallbackCollectionConfig?.physical_date_field) ||
+    ''
+  );
 }
 
 function formatCollectionFilterDisplay(dateField: string, bizDate: string, format = ''): string {
@@ -2447,6 +2479,7 @@ export default function DataConnectionsPanel({
   );
   const platformDatasetCollectionActionIdsRef = useRef<Set<string>>(new Set());
   const [collectionDetailDialog, setCollectionDetailDialog] = useState<DatasetCollectionDetailDialogState | null>(null);
+  const [dateCollectionDialog, setDateCollectionDialog] = useState<DateCollectionDialogState | null>(null);
   const [datasetViewTabsBySource, setDatasetViewTabsBySource] = useState<Record<string, DatasetViewTab>>({});
   const [physicalCatalogFiltersBySource, setPhysicalCatalogFiltersBySource] = useState<
     Record<string, PhysicalCatalogFilterState>
@@ -5413,50 +5446,121 @@ export default function DataConnectionsPanel({
     [authHeaders, authToken, draftSourceIdSet],
   );
 
-  const retryCollectionDetailDataset = useCallback(async () => {
-    if (!collectionDetailDialog || !authToken || draftSourceIdSet.has(collectionDetailDialog.sourceId)) return;
-    const source = remoteSources.find((item) => item.id === collectionDetailDialog.sourceId);
-    const dataset = source?.datasets?.find((item) => item.id === collectionDetailDialog.datasetId) ?? {
-      id: collectionDetailDialog.datasetId,
-      dataset_code: collectionDetailDialog.resourceKey,
-      dataset_name: collectionDetailDialog.datasetName,
-      resource_key: collectionDetailDialog.resourceKey,
-    } as DataSourceDatasetSummary;
-    setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: true, actionError: '' } : prev));
-    try {
-      const response = await fetch(
-        `/api/data-sources/${collectionDetailDialog.sourceId}/datasets/${encodeURIComponent(collectionDetailDialog.datasetId)}/collection`,
-        {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
+  const triggerCollectionDetailDataset = useCallback(
+    async (options?: { bizDate?: string; onSuccess?: () => void }) => {
+      if (!collectionDetailDialog || !authToken || draftSourceIdSet.has(collectionDetailDialog.sourceId)) return;
+      const source = remoteSources.find((item) => item.id === collectionDetailDialog.sourceId);
+      const dataset = source?.datasets?.find((item) => item.id === collectionDetailDialog.datasetId) ?? {
+        id: collectionDetailDialog.datasetId,
+        dataset_code: collectionDetailDialog.resourceKey,
+        dataset_name: collectionDetailDialog.datasetName,
+        resource_key: collectionDetailDialog.resourceKey,
+      } as DataSourceDatasetSummary;
+      const bizDate = (options?.bizDate || '').trim();
+      setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: true, actionError: '' } : prev));
+      try {
+        const body: Record<string, unknown> = {
           resource_key: collectionDetailDialog.resourceKey,
+          trigger_mode: 'manual',
           params: {
             resource_key: collectionDetailDialog.resourceKey,
+            ...(bizDate ? { biz_date: bizDate } : {}),
             query: { resource_key: collectionDetailDialog.resourceKey },
           },
-        }),
-        },
+        };
+        if (bizDate) {
+          body.idempotency_key = `manual-date-collection:${collectionDetailDialog.sourceId}:${collectionDetailDialog.datasetId}:${bizDate}`;
+        }
+        const response = await fetch(
+          `/api/data-sources/${collectionDetailDialog.sourceId}/datasets/${encodeURIComponent(collectionDetailDialog.datasetId)}/collection`,
+          {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(body),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || (bizDate ? '按日期采集失败' : '立即采集失败')));
+        }
+        options?.onSuccess?.();
+        if (source) {
+          await openDatasetCollectionDetail(source, dataset);
+        } else {
+          setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false } : prev));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : bizDate ? '按日期采集失败' : '立即采集失败';
+        if (source) {
+          await openDatasetCollectionDetail(source, dataset);
+          setCollectionDetailDialog((prev) => (prev ? { ...prev, actionError: message } : prev));
+        } else {
+          setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false, actionError: message } : prev));
+        }
+        throw error;
+      }
+    },
+    [authHeaders, authToken, collectionDetailDialog, draftSourceIdSet, openDatasetCollectionDetail, remoteSources],
+  );
+
+  const retryCollectionDetailDataset = useCallback(async () => {
+    await triggerCollectionDetailDataset();
+  }, [triggerCollectionDetailDataset]);
+
+  const openDateCollectionDialog = useCallback(() => {
+    if (!collectionDetailDialog) return;
+    const source = remoteSources.find((item) => item.id === collectionDetailDialog.sourceId);
+    const dataset = source?.datasets?.find((item) => item.id === collectionDetailDialog.datasetId);
+    const dateField = readCollectionDateFieldFromDetail(collectionDetailDialog.detail, dataset);
+    if (!dateField) {
+      setCollectionDetailDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              actionError: '该数据集未配置采集时间字段，无法按日期采集。',
+            }
+          : prev,
       );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.detail || data?.message || '立即采集失败'));
-      }
-      if (source) {
-        await openDatasetCollectionDetail(source, dataset);
-      } else {
-        setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false } : prev));
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '立即采集失败';
-      if (source) {
-        await openDatasetCollectionDetail(source, dataset);
-        setCollectionDetailDialog((prev) => (prev ? { ...prev, actionError: message } : prev));
-      } else {
-        setCollectionDetailDialog((prev) => (prev ? { ...prev, loading: false, actionError: message } : prev));
-      }
+      return;
     }
-  }, [authHeaders, authToken, collectionDetailDialog, draftSourceIdSet, openDatasetCollectionDetail, remoteSources]);
+    setDateCollectionDialog({
+      sourceId: collectionDetailDialog.sourceId,
+      sourceName: collectionDetailDialog.sourceName,
+      datasetId: collectionDetailDialog.datasetId,
+      datasetName: collectionDetailDialog.datasetName,
+      resourceKey: collectionDetailDialog.resourceKey,
+      dateField,
+      selectedDate: '',
+      submitting: false,
+      error: '',
+    });
+  }, [collectionDetailDialog, remoteSources]);
+
+  const submitDateCollectionDialog = useCallback(async () => {
+    if (!dateCollectionDialog || dateCollectionDialog.submitting) return;
+    const selectedDate = dateCollectionDialog.selectedDate.trim();
+    if (!selectedDate) {
+      setDateCollectionDialog((prev) => (prev ? { ...prev, error: '请选择采集日期。' } : prev));
+      return;
+    }
+    setDateCollectionDialog((prev) => (prev ? { ...prev, submitting: true, error: '' } : prev));
+    try {
+      await triggerCollectionDetailDataset({
+        bizDate: selectedDate,
+        onSuccess: () => setDateCollectionDialog(null),
+      });
+    } catch (error) {
+      setDateCollectionDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              submitting: false,
+              error: error instanceof Error ? error.message : '按日期采集失败',
+            }
+          : prev,
+      );
+    }
+  }, [dateCollectionDialog, triggerCollectionDetailDataset]);
 
   const refreshCollectionDetailDialog = useCallback(async () => {
     if (!collectionDetailDialog || !authToken || draftSourceIdSet.has(collectionDetailDialog.sourceId)) return;
@@ -7995,7 +8099,7 @@ export default function DataConnectionsPanel({
           </div>
         </div>
       )}
-      {collectionDetailDialog && (
+      {collectionDetailDialog && !dateCollectionDialog && (
         <div className="fixed inset-0 z-[60] bg-black/35" onClick={() => setCollectionDetailDialog(null)}>
           <div
             className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl"
@@ -8060,6 +8164,16 @@ export default function DataConnectionsPanel({
                       asNumber(collectionStats.record_count) ??
                       collectedCount ??
                       rows.length;
+                    const sourceForCollectionDetail = remoteSources.find(
+                      (item) => item.id === collectionDetailDialog.sourceId,
+                    );
+                    const datasetForCollectionDetail = sourceForCollectionDetail?.datasets?.find(
+                      (item) => item.id === collectionDetailDialog.datasetId,
+                    );
+                    const collectionDateField = readCollectionDateFieldFromDetail(
+                      collectionDetailDialog.detail,
+                      datasetForCollectionDetail,
+                    );
                     return (
                       <>
                         <div className="grid gap-3 sm:grid-cols-3">
@@ -8100,6 +8214,16 @@ export default function DataConnectionsPanel({
                               >
                                 <RefreshCw className="h-4 w-4" />
                                 刷新
+                              </button>
+                              <button
+                                type="button"
+                                onClick={openDateCollectionDialog}
+                                disabled={!collectionDateField}
+                                title={!collectionDateField ? '该数据集未配置采集时间字段，无法按日期采集' : undefined}
+                                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                <CalendarDays className="h-4 w-4" />
+                                按日期采集
                               </button>
                               <button
                                 type="button"
@@ -8293,6 +8417,78 @@ export default function DataConnectionsPanel({
                   })()}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {dateCollectionDialog && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/35 px-4" onClick={() => setDateCollectionDialog(null)}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="date-collection-title"
+            className="w-full max-w-md rounded-2xl border border-border bg-surface p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h4 id="date-collection-title" className="text-base font-semibold text-text-primary">
+                  按日期采集
+                </h4>
+                <p className="mt-1 text-sm text-text-primary">数据集：{dateCollectionDialog.datasetName}</p>
+                <p className="mt-1 text-xs text-text-secondary">
+                  {dateCollectionDialog.sourceName} · {dateCollectionDialog.resourceKey}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDateCollectionDialog(null)}
+                aria-label="关闭"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+              采集时间字段：{dateCollectionDialog.dateField}
+            </div>
+            {dateCollectionDialog.error && (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                {dateCollectionDialog.error}
+              </div>
+            )}
+            <label className="mt-4 block text-sm font-medium text-text-primary" htmlFor="date-collection-date">
+              采集日期
+            </label>
+            <input
+              id="date-collection-date"
+              type="date"
+              value={dateCollectionDialog.selectedDate}
+              onChange={(event) =>
+                setDateCollectionDialog((prev) =>
+                  prev ? { ...prev, selectedDate: event.target.value, error: '' } : prev,
+                )
+              }
+              className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-blue-400"
+            />
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDateCollectionDialog(null)}
+                disabled={dateCollectionDialog.submitting}
+                className="inline-flex items-center rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitDateCollectionDialog()}
+                disabled={dateCollectionDialog.submitting}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {dateCollectionDialog.submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarDays className="h-4 w-4" />}
+                采集
+              </button>
             </div>
           </div>
         </div>

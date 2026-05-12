@@ -1327,6 +1327,255 @@ describe('电商平台授权入口', () => {
     expect(screen.getByRole('button', { name: '停用' })).toHaveClass('whitespace-nowrap');
   });
 
+  it('数据库数据集采集详情支持按单日日期采集', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let detailCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, init });
+        if (url.includes('/data-sources/source-db-1/datasets/dataset-order/collection-detail')) {
+          detailCalls += 1;
+          return mockJsonResponse({
+            dataset: {
+              id: 'dataset-order',
+              data_source_id: 'source-db-1',
+              dataset_code: 'public_ods_yxst_trd_order_di_o',
+              dataset_name: 'public.ods_yxst_trd_order_di_o',
+              business_name: '交易订单明细表',
+              resource_key: 'public.ods_yxst_trd_order_di_o',
+              collection_config: {
+                mode: 'date_field',
+                date_field: 'create_date',
+              },
+            },
+            collection_stats: { total_count: 805284 },
+            jobs: [
+              {
+                id: 'job-1',
+                status: 'success',
+                request_payload: {
+                  biz_date: '2026-04-15',
+                  date_field: 'create_date',
+                },
+                metrics: {
+                  row_count: 80591,
+                  collection_upserted: 80591,
+                },
+                completed_at: '2026-05-12T09:30:00+08:00',
+              },
+            ],
+            rows: [],
+          });
+        }
+        if (
+          url.includes('/data-sources/source-db-1/datasets/dataset-order/collection') &&
+          init?.method === 'POST'
+        ) {
+          return mockJsonResponse({ success: true, message: '同步成功并写入采集记录' });
+        }
+        if (url.includes('/data-sources/source-db-1/datasets?')) {
+          return mockJsonResponse({
+            datasets: [
+              {
+                id: 'dataset-order',
+                data_source_id: 'source-db-1',
+                dataset_code: 'public_ods_yxst_trd_order_di_o',
+                dataset_name: 'public.ods_yxst_trd_order_di_o',
+                business_name: '交易订单明细表',
+                resource_key: 'public.ods_yxst_trd_order_di_o',
+                status: 'active',
+                publish_status: 'published',
+                collection_config: {
+                  mode: 'date_field',
+                  date_field: 'create_date',
+                },
+              },
+            ],
+          });
+        }
+        if (url === '/api/data-sources') {
+          return mockJsonResponse({
+            data_sources: [
+              {
+                id: 'source-db-1',
+                source_kind: 'database',
+                provider_code: 'hologres',
+                name: 'Hologres 订单库',
+                status: 'active',
+                execution_mode: 'deterministic',
+                datasets: [
+                  {
+                    id: 'dataset-order',
+                    data_source_id: 'source-db-1',
+                    dataset_code: 'public_ods_yxst_trd_order_di_o',
+                    dataset_name: 'public.ods_yxst_trd_order_di_o',
+                    business_name: '交易订单明细表',
+                    resource_key: 'public.ods_yxst_trd_order_di_o',
+                    status: 'active',
+                    publish_status: 'published',
+                    collection_config: {
+                      mode: 'date_field',
+                      date_field: 'create_date',
+                    },
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        if (url.startsWith('/api/platform-connections')) return mockJsonResponse({ platforms: [] });
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="database"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    expect(await screen.findByText('Hologres 订单库')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('进入详情'));
+    expect(await screen.findByText('交易订单明细表')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '采集详情' }));
+    expect(await screen.findByRole('heading', { name: '采集详情' })).toBeInTheDocument();
+    expect(screen.getByText('采集时间字段：create_date')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '按日期采集' }));
+    expect(await screen.findByRole('heading', { name: '按日期采集' })).toBeInTheDocument();
+    expect(screen.getByText('交易订单明细表')).toBeInTheDocument();
+    expect(screen.getByText('采集时间字段：create_date')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('采集日期'), { target: { value: '2026-04-01' } });
+    fireEvent.click(screen.getByRole('button', { name: '采集' }));
+
+    await waitFor(() => {
+      expect(
+        requests.some(
+          (request) =>
+            request.url.includes('/data-sources/source-db-1/datasets/dataset-order/collection') &&
+            request.init?.method === 'POST',
+        ),
+      ).toBe(true);
+    });
+
+    const collectionRequest = requests.find(
+      (request) =>
+        request.url.includes('/data-sources/source-db-1/datasets/dataset-order/collection') &&
+        request.init?.method === 'POST',
+    );
+    const payload = JSON.parse(String(collectionRequest?.init?.body || '{}'));
+    expect(payload.resource_key).toBe('public.ods_yxst_trd_order_di_o');
+    expect(payload.trigger_mode).toBe('manual');
+    expect(payload.params).toEqual({
+      resource_key: 'public.ods_yxst_trd_order_di_o',
+      biz_date: '2026-04-01',
+      query: { resource_key: 'public.ods_yxst_trd_order_di_o' },
+    });
+    expect(payload.idempotency_key).toBe('manual-date-collection:source-db-1:dataset-order:2026-04-01');
+
+    await waitFor(() => {
+      expect(detailCalls).toBeGreaterThan(1);
+    });
+    expect(screen.queryByRole('heading', { name: '按日期采集' })).not.toBeInTheDocument();
+  });
+
+  it('数据库数据集未配置采集时间字段时禁用按日期采集', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/data-sources/source-db-1/datasets/dataset-no-date/collection-detail')) {
+          return mockJsonResponse({
+            dataset: {
+              id: 'dataset-no-date',
+              data_source_id: 'source-db-1',
+              dataset_code: 'public_no_date_table',
+              dataset_name: 'public.no_date_table',
+              business_name: '无日期字段表',
+              resource_key: 'public.no_date_table',
+              collection_config: { mode: 'manual' },
+            },
+            collection_stats: { total_count: 0 },
+            jobs: [],
+            rows: [],
+          });
+        }
+        if (url.includes('/data-sources/source-db-1/datasets?')) {
+          return mockJsonResponse({
+            datasets: [
+              {
+                id: 'dataset-no-date',
+                data_source_id: 'source-db-1',
+                dataset_code: 'public_no_date_table',
+                dataset_name: 'public.no_date_table',
+                business_name: '无日期字段表',
+                resource_key: 'public.no_date_table',
+                status: 'active',
+                publish_status: 'published',
+                collection_config: { mode: 'manual' },
+              },
+            ],
+          });
+        }
+        if (url === '/api/data-sources') {
+          return mockJsonResponse({
+            data_sources: [
+              {
+                id: 'source-db-1',
+                source_kind: 'database',
+                provider_code: 'hologres',
+                name: 'Hologres 订单库',
+                status: 'active',
+                execution_mode: 'deterministic',
+                datasets: [
+                  {
+                    id: 'dataset-no-date',
+                    data_source_id: 'source-db-1',
+                    dataset_code: 'public_no_date_table',
+                    dataset_name: 'public.no_date_table',
+                    business_name: '无日期字段表',
+                    resource_key: 'public.no_date_table',
+                    status: 'active',
+                    publish_status: 'published',
+                    collection_config: { mode: 'manual' },
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        if (url.startsWith('/api/platform-connections')) return mockJsonResponse({ platforms: [] });
+        if (url === '/api/collaboration-channels') return mockJsonResponse({ channels: [] });
+        return mockJsonResponse({});
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="database"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    expect(await screen.findByText('Hologres 订单库')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('进入详情'));
+    expect(await screen.findByText('无日期字段表')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '采集详情' }));
+    expect(await screen.findByRole('heading', { name: '采集详情' })).toBeInTheDocument();
+    const dateCollectionButton = screen.getByRole('button', { name: '按日期采集' });
+    expect(dateCollectionButton).toBeDisabled();
+    expect(dateCollectionButton).toHaveAttribute('title', '该数据集未配置采集时间字段，无法按日期采集');
+  });
+
   it('支付宝商户数据集展示初始化采集条数并按状态控制发布入口', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     let publishAttempts = 0;
