@@ -1472,6 +1472,11 @@ describe('电商平台授权入口', () => {
                     resource_key: 'alipay_bill:signcustomer:shop-alipay-1',
                     status: 'active',
                     publish_status: 'unpublished',
+                    key_fields: ['raw.收入', '账务流水号'],
+                    field_label_map: {
+                      'raw.收入': 'RAW重复收入列',
+                      账务流水号: '账务流水号',
+                    },
                   },
                   {
                     id: 'dataset-trade',

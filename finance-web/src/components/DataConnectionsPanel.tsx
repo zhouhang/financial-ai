@@ -799,7 +799,7 @@ function readDatasetSemanticInfo(dataset: DataSourceDatasetSummary): DatasetSema
 
   return {
     businessName: businessName?.trim() || undefined,
-    keyFields: keyFields.map((item) => item.trim()).filter(Boolean),
+    keyFields: keyFields.map((item) => item.trim()).filter(isPublishableDatasetSemanticRawName),
     keyFieldsExplicit: explicitKeyFields !== undefined,
     fieldLabelMap,
   };
