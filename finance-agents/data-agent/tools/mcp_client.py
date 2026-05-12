@@ -3560,6 +3560,7 @@ async def data_source_trigger_dataset_collection(
     dataset_id: str = "",
     resource_key: str = "",
     biz_date: str = "",
+    idempotency_key: str = "",
     trigger_mode: str = "",
     background: bool | None = None,
     params: dict[str, Any] | None = None,
@@ -3596,6 +3597,8 @@ async def data_source_trigger_dataset_collection(
         payload["resource_key"] = resource_key
     if biz_date:
         payload["biz_date"] = biz_date
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
     if trigger_mode:
         payload["trigger_mode"] = trigger_mode
     if background is not None:
