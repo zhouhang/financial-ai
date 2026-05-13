@@ -3,6 +3,8 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import DataConnectionsPanel from './components/DataConnectionsPanel';
 import ReconWorkspace from './components/ReconWorkspace';
+import PublicReconRunExceptionsPage from './components/PublicReconRunExceptionsPage';
+import { isPublicReconRunExceptionsPath } from './components/publicReconRunExceptionsRoute';
 import LoginModal from './components/LoginModal';
 import type { ReconExecutionMode } from './components/recon/ReconConversationBar';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -206,7 +208,7 @@ function getInitialConversationState(): {
 
 const initialState = getInitialConversationState();
 
-export default function App() {
+function AppShell() {
   // ── 会话状态 ──────────────────────────────────────────────
   const [conversations, setConversations] = useState<Conversation[]>(initialState.conversations);
   const [activeConvId, setActiveConvId] = useState<string>(initialState.activeId);
@@ -1714,4 +1716,11 @@ export default function App() {
       )}
     </div>
   );
+}
+
+export default function App() {
+  if (isPublicReconRunExceptionsPath()) {
+    return <PublicReconRunExceptionsPage />;
+  }
+  return <AppShell />;
 }
