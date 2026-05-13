@@ -10,10 +10,14 @@
 
 第一版保持现有差异总数口径，不按匹配字段去重，不改钉钉汇总消息、责任人消息，也不改运行记录异常看板。
 
+2026-05-13 追加确认：源数据行数必须表示“本次实际进入对账的数据行数”，不能使用采集快照、源表日期全量、匹配字段去重数或采集新增/更新数。
+
 ## 目标
 
 - 在现有“差异总数”左侧增加“匹配成功”。
-- 增加“本次读取数据”，按真实中文数据集名称展示每个源数据集的行数。
+- 在“匹配成功 / 差异总数”指标上方展示两侧源数据集名称和本次实际进入对账的数据行数。
+- 去掉独立的“本次读取数据”区域。
+- 去掉“执行状态”指标卡，把成功/失败标签放到顶部任务名称旁边。
 - 保持异常列表、筛选、详情弹窗现有行为不变。
 - 不做数据库迁移，不改变对账执行流程。
 
@@ -30,20 +34,15 @@
 在 `PublicReconRunExceptionsPage` 顶部概览区域展示：
 
 ```text
-匹配成功：X 条    差异总数：Y 条
+泰斯支付宝对账  成功
 
-本次读取数据：
-交易订单明细表：100 条
-支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺：160 条
+交易订单明细表：数据 205 条
+支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺：数据 136 条
+
+匹配成功：136 条    差异总数：69 条
 ```
 
-如果能拿到新增/更新信息，则作为弱化辅助信息展示，例如小字或 tooltip：
-
-```text
-新增 30 / 更新 130
-```
-
-主数字始终表示本次对账读取或进入对账的数据行数，不用 upsert 合计替代主数字。
+主数字始终表示本次实际进入对账规则的数据行数，不展示采集新增/更新辅助信息。
 
 ## 指标口径
 
@@ -67,40 +66,28 @@ run.raw.recon_result_summary_json.matched_exact
 
 `matched_exact` 不计入差异总数。
 
-### 本次读取数据
+### 源数据行数
 
-展示每个源数据集本次实际读取或进入对账的数据行数。优先读取：
+展示两侧源数据集本次实际进入对账规则的数据行数。第一版直接从对账汇总推导：
 
 ```text
-run.raw.source_snapshot_json.collections[].collection_records.record_count
+左侧行数 = matched_exact + matched_with_diff + source_only
+右侧行数 = matched_exact + matched_with_diff + target_only
 ```
 
-字段兜底顺序：
+原因：
 
-- `collection_records.record_count`
-- `collection_records.count`
-- `collection_records.row_count`
-- collection 顶层 `record_count`
-- collection 顶层 `count`
-- collection 顶层 `row_count`
+- `source_snapshot_json.collections[].collection_records.record_count` 是采集/快照类信息，可能是样例、去重或采集批次记录数，不等价于本次进入对账的数据行数。
+- 源表按日期全量可能包含大量未被整理规则过滤的数据，也不等价于本次进入对账的数据行数。
+- 匹配字段去重数会把多行明细压成一个业务单号，也不等价于进入对账的数据行数。
 
-数据集名称沿用差异页已有的财务友好名称逻辑：
+数据集名称沿用差异页已有的财务友好名称逻辑，优先：
 
 - `dataset_name`
 - `business_name`
 - `display_name`
 - `name`
 - 非技术化的 `resource_key` / `table_name` 只作为最后兜底。
-
-### 新增 / 更新辅助信息
-
-如果运行快照中存在采集任务或采集摘要字段，可以展示辅助信息：
-
-- `inserted_count`
-- `updated_count`
-- `upserted_count`
-
-如果字段不存在，则不展示辅助信息，不报错，不把缺失字段当作 0。
 
 ## 数据流
 
@@ -112,7 +99,7 @@ run.raw.source_snapshot_json.collections[].collection_records.record_count
    - `sourceReadCounts[]`
 4. 顶部概览区渲染这些指标，异常列表继续使用原来的数据。
 
-第一版不新增后端接口。如果确认现有公开 bundle 没有返回 `source_snapshot_json` 或 `recon_result_summary_json`，实现时只补充 bundle 序列化字段，不新增表结构。
+第一版不新增后端接口。如果确认现有公开 bundle 没有返回 `recon_result_summary_json`，实现时只补充 bundle 序列化字段，不新增表结构。
 
 ## 兼容策略
 
@@ -120,7 +107,7 @@ run.raw.source_snapshot_json.collections[].collection_records.record_count
 
 - 缺少 `matched_exact` 时，“匹配成功”显示 `--`；
 - “差异总数”保持当前页面逻辑；
-- 缺少可用源数据条数时，隐藏“本次读取数据”或显示“不详”；
+- 缺少可用源数据条数时，两侧源数据行数显示 `--`；
 - 异常列表必须正常渲染。
 
 ## 测试要求
@@ -129,8 +116,16 @@ run.raw.source_snapshot_json.collections[].collection_records.record_count
 
 - `matched_exact` 正确展示为“匹配成功”。
 - `total` 继续作为差异总数。
-- `record_count` 能按中文数据集名称展示。
+- 左侧源数据行数按 `matched_exact + matched_with_diff + source_only` 展示。
+- 右侧源数据行数按 `matched_exact + matched_with_diff + target_only` 展示。
 - 指标缺失时页面不崩溃。
-- 只有存在新增/更新字段时才展示新增/更新辅助信息。
+- 不再展示采集新增/更新辅助信息。
 
-手工验证使用现有“泰斯支付宝对账”差异页面，确认顶部新增指标出现，且异常列表内容不变。
+手工验证使用现有“泰斯支付宝对账”4-30 差异页面，确认顶部显示：
+
+- 交易订单明细表：数据 205 条
+- 支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺：数据 136 条
+- 匹配成功：136 条
+- 差异总数：69 条
+
+异常列表内容不变。
