@@ -330,8 +330,10 @@ export function createEmptyAiProcSideDraft(): AiProcSideDraft {
     validations: [],
     warnings: [],
     outputRows: [],
+    outputFields: [],
     outputFieldLabelMap: {},
     outputColumnHints: {},
+    sampleDatasets: [],
   };
 }
 
@@ -457,6 +459,19 @@ export async function buildRuleGenerationSourcePayloads(
   );
 }
 
+function normalizeAiSampleDatasets(value: unknown): Array<Record<string, unknown>> {
+  return asList(value)
+    .filter(isRecord)
+    .map((item) => {
+      const sampleRows = toPreviewTableRows(item.sample_rows);
+      return {
+        ...item,
+        sample_rows: sampleRows,
+      };
+    })
+    .filter((item) => (item.sample_rows as PreviewTableRow[]).length > 0);
+}
+
 export function normalizeAiOutputFields(value: unknown): OutputFieldDraft[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -494,6 +509,30 @@ function normalizeAiOutputFieldLabelMap(value: unknown): Record<string, string> 
       })
       .filter(([name]) => Boolean(name)),
   );
+}
+
+function inferAiOutputFieldsFromRows(
+  rows: PreviewTableRow[],
+  fieldLabelMap: Record<string, string>,
+): OutputFieldDraft[] {
+  const orderedNames: string[] = [];
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      const name = key.trim();
+      if (name && !orderedNames.includes(name)) {
+        orderedNames.push(name);
+      }
+    });
+  });
+
+  return orderedNames.map((name) => {
+    const label = fieldLabelMap[name] || name;
+    const draft = createOutputFieldDraft(name);
+    draft.semanticRole = inferOutputFieldSemanticRole(name, label);
+    draft.valueMode = 'source_field';
+    draft.sourceField = name;
+    return draft;
+  });
 }
 
 function normalizeAiOutputColumnHints(value: unknown): Record<string, {
@@ -694,6 +733,9 @@ export function applyRuleGenerationEventToDraft(
     const outputRows = normalizeAiOutputRows(payload.output_preview_rows);
     outputFields = normalizeAiOutputFields(payload.output_fields);
     const outputFieldLabelMap = normalizeAiOutputFieldLabelMap(payload.output_fields);
+    if (outputFields.length === 0 && outputRows.length > 0) {
+      outputFields = inferAiOutputFieldsFromRows(outputRows, outputFieldLabelMap);
+    }
     const outputColumnHints = normalizeAiOutputColumnHints(payload.output_fields);
     nextDraft.status = 'succeeded';
     nextDraft.summary = `${sideLabel}输出数据已生成，样例试跑通过。`;
@@ -702,10 +744,12 @@ export function applyRuleGenerationEventToDraft(
     nextDraft.failureDetails = [];
     nextDraft.questions = [];
     nextDraft.outputRows = outputRows;
+    nextDraft.outputFields = outputFields;
     nextDraft.outputFieldLabelMap = Object.keys(outputFieldLabelMap).length > 0
       ? outputFieldLabelMap
       : Object.fromEntries(outputFields.map((field) => [field.outputName, field.outputName]));
     nextDraft.outputColumnHints = outputColumnHints;
+    nextDraft.sampleDatasets = normalizeAiSampleDatasets(payload.sample_datasets || payload.sample_inputs);
     nextDraft.procRuleJson = isRecord(payload.proc_rule_json) ? payload.proc_rule_json : undefined;
     nextDraft.inputPlanJson = isRecord(payload.input_plan_json) ? payload.input_plan_json : undefined;
     nextDraft.procSteps = isRecord(payload.proc_rule_json) && Array.isArray(payload.proc_rule_json.steps)

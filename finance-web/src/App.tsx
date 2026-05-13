@@ -3,6 +3,8 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import DataConnectionsPanel from './components/DataConnectionsPanel';
 import ReconWorkspace from './components/ReconWorkspace';
+import PublicReconRunExceptionsPage from './components/PublicReconRunExceptionsPage';
+import { isPublicReconRunExceptionsPath } from './components/publicReconRunExceptionsRoute';
 import LoginModal from './components/LoginModal';
 import type { ReconExecutionMode } from './components/recon/ReconConversationBar';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -206,7 +208,7 @@ function getInitialConversationState(): {
 
 const initialState = getInitialConversationState();
 
-export default function App() {
+function AppShell() {
   // ── 会话状态 ──────────────────────────────────────────────
   const [conversations, setConversations] = useState<Conversation[]>(initialState.conversations);
   const [activeConvId, setActiveConvId] = useState<string>(initialState.activeId);
@@ -341,8 +343,9 @@ export default function App() {
   useEffect(() => {
     if (authToken) return;
     if (panelView !== 'data-connections') return;
+    if (authCallbackPayload) return;
     setPanelView('conversation');
-  }, [panelView, authToken]);
+  }, [panelView, authToken, authCallbackPayload]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -462,11 +465,16 @@ export default function App() {
     setUploadedFiles([]);
     setTaskResult(null);
     setWaitingForFileUpload(false);
+    if (authCallbackPayload) {
+      setSelectedDataConnectionView('data_sources');
+      setSelectedDataSourceKind('platform_oauth');
+      setPanelView('data-connections');
+    }
     // 标记刚登录，加载会话列表后选择最近会话
     hasLoadedInitialConvRef.current = false;
     justLoggedInRef.current = true;
     void loadConversations();
-  }, [clearConversationsCache, loadConversations]);
+  }, [authCallbackPayload, clearConversationsCache, loadConversations]);
 
   // 追踪对账任务状态（用于在任务完成时删除"任务启动"消息）
   const taskStartedRef = useRef<Map<string, boolean>>(new Map());
@@ -1686,6 +1694,10 @@ export default function App() {
           authToken={authToken}
           initialCallback={authCallbackPayload}
           onBackToChat={handleBackToChat}
+          onLoginRequired={() => {
+            setLoginModalTitleHint('登录后查看支付宝授权结果');
+            setIsLoginModalOpen(true);
+          }}
           selectedConnectionView={selectedDataConnectionView}
           selectedSourceKind={selectedDataSourceKind}
           selectedCollaborationProvider={selectedCollaborationProvider}
@@ -1704,4 +1716,11 @@ export default function App() {
       )}
     </div>
   );
+}
+
+export default function App() {
+  if (isPublicReconRunExceptionsPath()) {
+    return <PublicReconRunExceptionsPage />;
+  }
+  return <AppShell />;
 }

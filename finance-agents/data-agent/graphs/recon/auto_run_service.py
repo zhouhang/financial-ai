@@ -22,6 +22,7 @@ from services.notifications.models import UnifiedTodoStatus
 from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import (
     data_source_trigger_dataset_collection,
+    execution_run_exception_bulk_update_by_owner,
     execution_run_exception_get,
     execution_run_exception_update,
     execution_run_get,
@@ -1354,6 +1355,39 @@ async def sync_execution_run_exception_reminder(
         patch["reminder_status"] = "cancelled"
     elif status == UnifiedTodoStatus.FAILED:
         patch["reminder_status"] = "sync_failed"
+
+    batch_source = str(feedback_json.get("batch_source") or "").strip()
+    batch_todo_id = str(feedback_json.get("batch_todo_id") or "").strip()
+    run_id = str(exception.get("run_id") or feedback_json.get("batch_run_id") or "").strip()
+    owner_identifier = str(exception.get("owner_identifier") or "").strip()
+    if run_id and owner_identifier and (batch_source == "run_owner" or batch_todo_id):
+        bulk_patch = {
+            **patch,
+            "owner_identifier": owner_identifier,
+        }
+        update_result = await execution_run_exception_bulk_update_by_owner(auth_token, run_id, bulk_patch)
+        exceptions = [
+            item for item in (update_result.get("exceptions") or [])
+            if isinstance(item, dict)
+        ] if update_result.get("success") else []
+        current_exception = next(
+            (item for item in exceptions if str(item.get("id") or "") == str(exception.get("id") or "")),
+            {},
+        )
+        return {
+            "success": bool(update_result.get("success")),
+            "exception": current_exception or exception,
+            "updated_count": int(update_result.get("updated_count") or len(exceptions)),
+            "sync": {
+                "todo_id": todo_id,
+                "status": status.value,
+                "is_terminal": bool(sync_result.is_terminal),
+                "polls": int(sync_result.polls),
+                "batch_source": "run_owner",
+                "owner_identifier": owner_identifier,
+            },
+            **({"error": str(update_result.get("error") or "批量更新异常状态失败")} if not update_result.get("success") else {}),
+        }
 
     update_result = await execution_run_exception_update(auth_token, exception_id, patch)
     return {

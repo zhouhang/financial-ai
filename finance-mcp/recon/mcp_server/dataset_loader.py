@@ -1055,24 +1055,17 @@ def _load_platform_alipay_bill_line_rows(
             raise DatasetLoadError("platform_alipay_bill_lines query.limit 必须是正整数")
     limit_sql = f" LIMIT {limit}" if isinstance(limit, int) and limit > 0 else ""
 
-    promoted_columns = [
+    metadata_columns = [
         "bill_type",
         "bill_date",
         "source_file_name",
         "source_row_number",
         "source_row_key",
-        "alipay_trade_no",
-        "merchant_order_no",
-        "business_order_no",
-        "amount",
-        "income_amount",
-        "expense_amount",
-        "trade_time",
     ]
     select_parts = [f"{_safe_identifier(payload_col)} AS payload"]
     select_parts.extend(
         f"{_safe_identifier(column_name)} AS {_safe_identifier(column_name)}"
-        for column_name in promoted_columns
+        for column_name in metadata_columns
         if column_name in columns
     )
 
@@ -1215,30 +1208,12 @@ def _load_from_platform_alipay_bill_lines(dataset_ref: dict[str, Any], table_nam
         )
 
     rows = _load_platform_alipay_bill_line_rows(source_key=source_key, query=query)
-    promoted_columns = [
-        "bill_type",
-        "bill_date",
-        "source_file_name",
-        "source_row_number",
-        "source_row_key",
-        "alipay_trade_no",
-        "merchant_order_no",
-        "business_order_no",
-        "amount",
-        "income_amount",
-        "expense_amount",
-        "trade_time",
-    ]
     payload_rows: list[dict[str, Any]] = []
     for row in rows:
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        merged = dict(payload)
-        for column_name in promoted_columns:
-            if column_name in row:
-                merged.setdefault(column_name, row.get(column_name))
-        payload_rows.append(merged)
+        payload_rows.append(dict(payload))
 
     if not payload_rows:
         raise DatasetLoadError(

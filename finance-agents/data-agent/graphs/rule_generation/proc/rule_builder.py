@@ -208,7 +208,7 @@ def _bound_field_for_role(field_bindings: list[dict[str, Any]], role: str, table
 def _dsl_constraints() -> dict[str, Any]:
     return {
         "actions": ["create_schema", "write_dataset"],
-        "builtin_functions": ["current_date", "month_of", "add_months"],
+        "builtin_functions": ["current_date", "month_of", "add_months", "strip_prefix"],
         "aggregate_operators": ["sum", "min"],
         "field_write_modes": ["overwrite", "increment"],
         "row_write_modes": ["insert_if_missing", "update_only", "upsert"],
@@ -411,6 +411,8 @@ def _expression_data_type(expression: dict[str, Any]) -> str:
         return "decimal"
     if op == "function" and str(expression.get("name") or "").strip() in {"current_date", "add_months"}:
         return "date"
+    if op == "function" and str(expression.get("name") or "").strip() == "strip_prefix":
+        return "string"
     value = expression.get("value") if op == "constant" else None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return "decimal"

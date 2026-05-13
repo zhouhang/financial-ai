@@ -366,6 +366,8 @@ async def trial_proc_step(
             auth_token=auth_token,
             session_id=session_id,
             input_plan_json=(body.input_plan_json if body else {}),
+            sample_datasets=(body.sample_datasets if body else []),
+            uploaded_files=(body.uploaded_files if body else []),
         )
     except ValueError as exc:
         raise _translate_service_error(exc) from exc

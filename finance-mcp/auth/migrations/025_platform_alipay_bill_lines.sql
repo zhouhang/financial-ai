@@ -10,13 +10,6 @@ CREATE TABLE IF NOT EXISTS public.platform_alipay_bill_lines (
     source_file_name text DEFAULT ''::text NOT NULL,
     source_row_number integer,
     source_row_key character varying(128) NOT NULL,
-    alipay_trade_no character varying(128) DEFAULT ''::character varying NOT NULL,
-    merchant_order_no character varying(128) DEFAULT ''::character varying NOT NULL,
-    business_order_no character varying(128) DEFAULT ''::character varying NOT NULL,
-    amount numeric(18, 2),
-    income_amount numeric(18, 2),
-    expense_amount numeric(18, 2),
-    trade_time timestamp with time zone,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
     first_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     latest_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
@@ -36,13 +29,6 @@ ALTER TABLE public.platform_alipay_bill_lines
     ADD COLUMN IF NOT EXISTS source_file_name text DEFAULT ''::text,
     ADD COLUMN IF NOT EXISTS source_row_number integer,
     ADD COLUMN IF NOT EXISTS source_row_key character varying(128),
-    ADD COLUMN IF NOT EXISTS alipay_trade_no character varying(128) DEFAULT ''::character varying,
-    ADD COLUMN IF NOT EXISTS merchant_order_no character varying(128) DEFAULT ''::character varying,
-    ADD COLUMN IF NOT EXISTS business_order_no character varying(128) DEFAULT ''::character varying,
-    ADD COLUMN IF NOT EXISTS amount numeric(18, 2),
-    ADD COLUMN IF NOT EXISTS income_amount numeric(18, 2),
-    ADD COLUMN IF NOT EXISTS expense_amount numeric(18, 2),
-    ADD COLUMN IF NOT EXISTS trade_time timestamp with time zone,
     ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS first_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     ADD COLUMN IF NOT EXISTS latest_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
@@ -102,15 +88,6 @@ CREATE INDEX IF NOT EXISTS idx_platform_alipay_bill_lines_source_dataset_date
 
 CREATE INDEX IF NOT EXISTS idx_platform_alipay_bill_lines_shop_type_date
     ON public.platform_alipay_bill_lines USING btree (company_id, shop_connection_id, bill_type, bill_date DESC);
-
-CREATE INDEX IF NOT EXISTS idx_platform_alipay_bill_lines_alipay_trade_no
-    ON public.platform_alipay_bill_lines USING btree (company_id, alipay_trade_no);
-
-CREATE INDEX IF NOT EXISTS idx_platform_alipay_bill_lines_merchant_order_no
-    ON public.platform_alipay_bill_lines USING btree (company_id, merchant_order_no);
-
-CREATE INDEX IF NOT EXISTS idx_platform_alipay_bill_lines_business_order_no
-    ON public.platform_alipay_bill_lines USING btree (company_id, business_order_no);
 
 DROP TRIGGER IF EXISTS update_platform_alipay_bill_lines_updated_at ON public.platform_alipay_bill_lines;
 CREATE TRIGGER update_platform_alipay_bill_lines_updated_at

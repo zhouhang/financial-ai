@@ -14,6 +14,17 @@ AUTO_SCHEME_DIR = RECON_DIR / "auto_scheme_run"
 
 sys.path.insert(0, str(ROOT))
 
+from services.notifications.models import (  # noqa: E402
+    BotMessageResult,
+    NotificationChannelConfig,
+    NotificationUser,
+    ReminderResult,
+    TodoRecord,
+    TodoResult,
+    UserResolveResult,
+    UnifiedTodoStatus,
+)
+
 
 def _ensure_package(name: str, path: Path) -> types.ModuleType:
     module = sys.modules.get(name)
@@ -36,6 +47,112 @@ auto_scheme_package.run_auto_scheme_run_graph = _unused_run_auto_scheme_run_grap
 
 nodes = importlib.import_module("graphs.recon.auto_scheme_run.nodes")
 auto_run_service = importlib.import_module("graphs.recon.auto_run_service")
+
+
+def _channel_config() -> NotificationChannelConfig:
+    return NotificationChannelConfig(
+        id="channel-001",
+        company_id="company-001",
+        provider="dingtalk_dws",
+        channel_code="default",
+        name="默认钉钉",
+        robot_code="robot",
+        is_default=True,
+        is_enabled=True,
+    )
+
+
+class _BatchNotifyAdapter:
+    provider = "dingtalk_dws"
+
+    def __init__(self) -> None:
+        self.reminder_calls: list[dict[str, object]] = []
+        self.bot_calls: list[dict[str, object]] = []
+
+    def resolve_user(self, *, user_id: str = "", mobile: str = "", keyword: str = "") -> UserResolveResult:
+        user = NotificationUser(
+            user_id=user_id or "ding-user-001",
+            display_name=keyword or "周行",
+            mobile=mobile,
+        )
+        return UserResolveResult(
+            success=True,
+            provider=self.provider,
+            users=[user],
+            resolved_user=user,
+        )
+
+    def send_bot_message(
+        self,
+        *,
+        content: str,
+        to_user_id: str,
+        content_type: str = "text",
+        title: str = "",
+        bot_id: str = "",
+        conversation_id: str = "",
+    ) -> BotMessageResult:
+        self.bot_calls.append(
+            {
+                "content": content,
+                "to_user_id": to_user_id,
+                "content_type": content_type,
+                "title": title,
+                "bot_id": bot_id,
+                "conversation_id": conversation_id,
+            }
+        )
+        return BotMessageResult(
+            success=True,
+            provider=self.provider,
+            message_id=f"msg-{len(self.bot_calls)}",
+            receiver_user_id=to_user_id,
+        )
+
+    def send_reminder(
+        self,
+        *,
+        title: str,
+        content: str,
+        todo_title: str = "",
+        assignee_user_id: str = "",
+        mobile: str = "",
+        keyword: str = "",
+        due_time: str = "",
+        source_id: str = "",
+        operator_user_id: str = "",
+    ) -> ReminderResult:
+        self.reminder_calls.append(
+            {
+                "title": title,
+                "content": content,
+                "todo_title": todo_title,
+                "assignee_user_id": assignee_user_id,
+                "mobile": mobile,
+                "keyword": keyword,
+                "due_time": due_time,
+                "source_id": source_id,
+                "operator_user_id": operator_user_id,
+            }
+        )
+        todo = TodoRecord(
+            todo_id=f"todo-{len(self.reminder_calls)}",
+            title=todo_title,
+            assignee_user_id=assignee_user_id,
+            status=UnifiedTodoStatus.OPEN,
+        )
+        return ReminderResult(
+            success=True,
+            provider=self.provider,
+            bot_result=BotMessageResult(
+                success=True,
+                provider=self.provider,
+                message_id=f"msg-reminder-{len(self.reminder_calls)}",
+                receiver_user_id=assignee_user_id,
+            ),
+            todo_result=TodoResult(success=True, provider=self.provider, todo=todo),
+            assignee_user_id=assignee_user_id,
+        )
 
 
 def test_plan_dataset_binding_uses_raw_date_field_from_scheme_meta() -> None:
@@ -859,3 +976,199 @@ def test_update_rerun_exception_verification_reopens_when_anomaly_remains(monkey
     assert payload["fix_status"] == "pending"
     assert payload["is_closed"] is False
     assert payload["feedback_json"]["verify_anomaly_count"] == 1
+
+
+def test_create_exception_tasks_node_creates_all_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        assert name == "execution_run_exception_create"
+        created_payloads.append(payload)
+        index = len(created_payloads)
+        return {
+            "success": True,
+            "exception": {
+                "id": f"exception-{index}",
+                "run_id": payload["run_id"],
+                "owner_identifier": payload["owner_identifier"],
+                "feedback_json": {},
+            },
+        }
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    anomalies = [
+        {
+            "item_id": f"run-001:1:source_only:{index}",
+            "anomaly_type": "source_only",
+            "join_key": [{"source_field": "订单号", "source_value": f"ORD-{index}"}],
+            "compare_values": [],
+            "raw_record": {"订单号": f"ORD-{index}"},
+        }
+        for index in range(1, 56)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-001"},
+            "scheme_code": "scheme-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {
+                        "name": "周行",
+                        "identifier": "ding-user-001",
+                    }
+                },
+                "plan_meta_json": {
+                    "notify_policy": {
+                        "explosion_threshold": 10,
+                        "explosion_sample_limit": 3,
+                    }
+                },
+            },
+            "scheme": {
+                "scheme_meta_json": {
+                    "left_sources": [{"dataset_name": "交易订单明细表"}],
+                    "right_sources": [{"dataset_name": "支付宝资金账单"}],
+                }
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    assert len(created_payloads) == len(anomalies)
+    assert recon_ctx["exception_created_count"] == len(anomalies)
+    assert recon_ctx["exception_creation_limited"] is False
+    assert recon_ctx["exception_created_sample_count"] == len(anomalies)
+    assert recon_ctx["auto_notify_policy"]["explosion"] is True
+    assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == len(anomalies)
+
+
+def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _BatchNotifyAdapter()
+    updated_payloads: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_update(auth_token: str, exception_id: str, payload: dict[str, object]) -> dict[str, object]:
+        updated_payloads.append((exception_id, payload))
+        return {
+            "success": True,
+            "exception": {
+                "id": exception_id,
+                **payload,
+            },
+        }
+
+    monkeypatch.setattr(nodes, "load_company_channel_config_by_id", lambda channel_id: _channel_config())
+    monkeypatch.setattr(nodes, "get_notification_adapter", lambda **kwargs: adapter)
+    monkeypatch.setattr(nodes, "execution_run_exception_update", fake_update)
+    monkeypatch.setenv("TALLY_PUBLIC_WEB_BASE_URL", "https://dev.tallyai.cn")
+
+    created_exceptions = [
+        {
+            "exception_id": f"exception-{index}",
+            "exception": {
+                "id": f"exception-{index}",
+                "run_id": "run-001",
+                "anomaly_type": "source_only",
+                "owner_name": "周行",
+                "owner_identifier": "ding-user-001",
+                "owner_contact_json": {},
+                "summary": f"异常 {index}",
+                "detail_json": {
+                    "join_key": [{"source_field": "订单号", "source_value": f"ORD-{index}"}],
+                    "compare_values": [],
+                },
+                "feedback_json": {},
+            },
+        }
+        for index in range(1, 4)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-001"},
+            "run_plan": {
+                "plan_name": "泰斯支付宝对账",
+                "channel_config_id": "channel-001",
+                "plan_meta_json": {
+                    "summary_recipient": {
+                        "display_name": "汇总人",
+                        "user_id": "summary-user",
+                    }
+                },
+            },
+            "scheme": {
+                "scheme_name": "泰斯支付宝对账方案",
+                "scheme_meta_json": {
+                    "input_plan_json": {
+                        "plans": [
+                            {
+                                "side": "left",
+                                "target_table": "left_recon_ready",
+                                "datasets": [{"resource_key": "public.ods_taesi_orders"}],
+                            },
+                            {
+                                "side": "right",
+                                "target_table": "right_recon_ready",
+                                "datasets": [{"resource_key": "public.ods_alipay_signcustomer"}],
+                            },
+                        ]
+                    }
+                },
+            },
+            "biz_date": "2026-05-11",
+            "ready_collections": [
+                {
+                    "binding": {
+                        "role_code": "left_1",
+                        "input_plan_target_table": "left_recon_ready",
+                        "dataset_name": "交易订单明细表",
+                    },
+                },
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "input_plan_target_table": "right_recon_ready",
+                        "dataset_name": "支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺",
+                    },
+                },
+            ],
+            "anomaly_items": [{"anomaly_type": "source_only"} for _ in created_exceptions],
+            "created_exceptions": created_exceptions,
+            "auto_notify_policy": {"explosion_threshold": 1, "explosion": True},
+        },
+    }
+
+    result = asyncio.run(nodes.maybe_auto_notify_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    assert recon_ctx["auto_notify_status"] == "sent"
+    assert recon_ctx["auto_notify_result"]["sent"] == 3
+    assert len(adapter.reminder_calls) == 1
+    assert adapter.reminder_calls[0]["assignee_user_id"] == "ding-user-001"
+    assert "你有3条异常待处理" in str(adapter.reminder_calls[0]["todo_title"])
+    owner_content = str(adapter.reminder_calls[0]["content"])
+    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
+        owner_content
+    )
+    assert "数据集 A" not in owner_content
+    assert "数据集 B" not in owner_content
+    assert "仅 交易订单明细表 存在（支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺 缺失）" in owner_content
+    assert len(adapter.bot_calls) == 1
+    assert adapter.bot_calls[0]["content_type"] == "markdown"
+    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
+        adapter.bot_calls[0]["content"]
+    )
+    assert len(updated_payloads) == 3
+    for _exception_id, payload in updated_payloads:
+        feedback_json = payload["feedback_json"]
+        assert isinstance(feedback_json, dict)
+        assert feedback_json["batch_source"] == "run_owner"
+        assert feedback_json["batch_run_id"] == "run-001"
+        assert feedback_json["batch_todo_id"] == "todo-1"
+        assert feedback_json["public_detail_url"].endswith(
+            "/recon/runs/run-001/exceptions?owner=ding-user-001"
+        )

@@ -606,6 +606,7 @@ class DataSourceDatasetSemanticUpdateRequest(BaseModel):
 class DataSourceDatasetCollectionTriggerRequest(BaseModel):
     resource_key: str = ""
     biz_date: str = ""
+    idempotency_key: str = ""
     background: bool = True
     trigger_mode: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
@@ -1181,12 +1182,14 @@ async def trigger_dataset_collection(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
 
+    params_biz_date = str(body.params.get("biz_date") or "").strip()
     result = await data_source_trigger_dataset_collection(
         auth_token,
         source_id,
         dataset_id=dataset_id,
         resource_key=body.resource_key,
-        biz_date=body.biz_date or _default_collection_biz_date(),
+        biz_date=body.biz_date or params_biz_date or _default_collection_biz_date(),
+        idempotency_key=body.idempotency_key,
         background=body.background,
         trigger_mode=body.trigger_mode,
         params=body.params,

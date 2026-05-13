@@ -246,9 +246,9 @@ class FinanceCronSchedulerService:
             max_instances=1,
             misfire_grace_time=self.config.misfire_grace_seconds,
         )
-        await self.refresh_run_plans()
-        await self.refresh_collection_plans()
         self.scheduler.start()
+        await self._safe_initial_refresh("运行计划", self.refresh_run_plans)
+        await self._safe_initial_refresh("采集计划", self.refresh_collection_plans)
         logger.info(
             "[finance-cron] 已启动 APScheduler: timezone=%s refresh_interval_seconds=%s",
             self.config.timezone,
@@ -259,6 +259,28 @@ class FinanceCronSchedulerService:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
         await aclose_mcp_session()
+
+    async def _safe_initial_refresh(self, name: str, refresh_func: Any) -> None:
+        delays_seconds = (0.0, 2.0, 5.0)
+        total_attempts = len(delays_seconds)
+        for attempt, delay_seconds in enumerate(delays_seconds, start=1):
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            try:
+                await refresh_func()
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[finance-cron] 初始刷新%s失败: attempt=%s/%s error=%s",
+                    name,
+                    attempt,
+                    total_attempts,
+                    exc,
+                )
+        logger.warning(
+            "[finance-cron] 初始刷新%s仍失败，调度器保持运行并等待后续周期自动恢复",
+            name,
+        )
 
     async def refresh_run_plans(self) -> None:
         scheduler_token = create_scheduler_auth_token()

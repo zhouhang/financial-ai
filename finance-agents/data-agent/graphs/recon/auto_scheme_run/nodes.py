@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import urllib.parse
 import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -44,14 +45,15 @@ _FAILED_STAGE_LABELS: dict[str, str] = {
 
 
 _ANOMALY_TYPE_LABELS: dict[str, str] = {
-    "source_only": "仅左侧基础表存在（右侧基础表缺失）",
-    "target_only": "仅右侧基础表存在（左侧基础表缺失）",
+    "source_only": "仅数据集 A 存在（数据集 B 缺失）",
+    "target_only": "仅数据集 B 存在（数据集 A 缺失）",
     "matched_with_diff": "金额或字段存在差异",
     "value_mismatch": "金额或字段存在差异",
     "unknown": "未知异常",
 }
 
 _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
+_DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
 
 
 def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
@@ -74,17 +76,70 @@ def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: s
     return _ANOMALY_TYPE_LABELS.get(atype, str(anomaly_type or "未知异常"))
 
 
+def _public_web_base_url() -> str:
+    value = (
+        os.getenv("TALLY_PUBLIC_WEB_BASE_URL")
+        or os.getenv("TALLY_WEB_BASE_URL")
+        or os.getenv("PUBLIC_WEB_BASE_URL")
+        or _DEFAULT_PUBLIC_WEB_BASE_URL
+    )
+    return str(value or _DEFAULT_PUBLIC_WEB_BASE_URL).strip().rstrip("/")
+
+
+def _run_public_exceptions_url(run_id: str, owner_identifier: str = "") -> str:
+    base = _public_web_base_url()
+    encoded_run_id = str(run_id or "").strip()
+    if not encoded_run_id:
+        return base
+    url = f"{base}/recon/runs/{encoded_run_id}/exceptions"
+    owner = str(owner_identifier or "").strip()
+    if owner:
+        url += f"?owner={urllib.parse.quote(owner)}"
+    return url
+
+
 def _replace_generic_side_labels(text: str, *, left_name: str = "", right_name: str = "") -> str:
     value = str(text or "")
     left = str(left_name or "").strip()
     right = str(right_name or "").strip()
     if left:
-        for token in ("源数据", "源文件", "左侧数据", "左侧基础表"):
+        for token in ("源数据", "源文件", "左侧数据", "左侧基础表", "左侧"):
             value = value.replace(token, left)
     if right:
-        for token in ("目标数据", "目标文件", "右侧数据", "右侧基础表"):
+        for token in ("目标数据", "目标文件", "右侧数据", "右侧基础表", "右侧"):
             value = value.replace(token, right)
     return value
+
+
+def _is_generic_recon_field_label(value: str) -> bool:
+    return str(value or "").strip() in {"匹配字段", "对比字段", "match_key", "compare_field"}
+
+
+def _field_label(field: str, field_labels: dict[str, str]) -> str:
+    raw = str(field or "").strip()
+    if not raw:
+        return ""
+    return str(field_labels.get(raw) or raw).strip()
+
+
+def _compare_value_display_name(
+    compare_value: dict[str, Any],
+    *,
+    anomaly_type: str,
+    field_labels: dict[str, str],
+) -> str:
+    source_field = str(compare_value.get("source_field") or "").strip()
+    target_field = str(compare_value.get("target_field") or "").strip()
+    source_label = _field_label(source_field, field_labels)
+    target_label = _field_label(target_field, field_labels)
+    atype = str(anomaly_type or "").strip()
+    if atype == "source_only":
+        return source_label or target_label or str(compare_value.get("name") or "对比值").strip()
+    if atype == "target_only":
+        return target_label or source_label or str(compare_value.get("name") or "对比值").strip()
+    if source_label and target_label and source_label != target_label:
+        return f"{source_label} ↔ {target_label}"
+    return source_label or target_label or str(compare_value.get("name") or "对比值").strip()
 
 
 def _build_anomaly_summary(
@@ -96,8 +151,8 @@ def _build_anomaly_summary(
     field_labels: dict[str, str] | None = None,
 ) -> str:
     """Build a finance-friendly one-line summary for an anomaly item."""
-    src = str(left_name or "左侧基础表").strip()
-    tgt = str(right_name or "右侧基础表").strip()
+    src = str(left_name or "数据集 A").strip()
+    tgt = str(right_name or "数据集 B").strip()
     atype = str(anomaly_type or "").strip()
     fl = field_labels or {}
 
@@ -114,8 +169,11 @@ def _build_anomaly_summary(
     join_key = [k for k in _safe_list(item.get("join_key")) if isinstance(k, dict)]
     key_parts: list[str] = []
     for k in join_key[:2]:
-        raw_field = str(k.get("field") or k.get("source_field") or k.get("target_field") or "")
-        display_field = fl.get(raw_field) or raw_field
+        if atype == "target_only":
+            raw_field = str(k.get("target_field") or k.get("field") or k.get("source_field") or "")
+        else:
+            raw_field = str(k.get("source_field") or k.get("field") or k.get("target_field") or "")
+        display_field = _field_label(raw_field, fl)
         if atype == "target_only":
             value = k.get("target_value") or k.get("value") or ""
         else:
@@ -128,8 +186,7 @@ def _build_anomaly_summary(
     diff_parts: list[str] = []
     if compare_values:
         for cv in compare_values[:3]:
-            raw_field = str(cv.get("source_field") or "").strip()
-            name = str(cv.get("name") or fl.get(raw_field) or raw_field).strip()
+            name = _compare_value_display_name(cv, anomaly_type=atype, field_labels=fl)
             left_val = cv.get("source_value")
             right_val = cv.get("target_value")
             diff_val = cv.get("diff_value")
@@ -261,7 +318,32 @@ def _build_field_label_map(scheme_meta: dict[str, Any]) -> dict[str, str]:
         "merchant_order_no": "商户订单号",
         "source_name": "来源名称",
     }
-    # 2. compare_columns from recon rules
+    # 2. Explicit output labels created by scheme design.
+    for map_key in (
+        "left_output_field_label_map",
+        "right_output_field_label_map",
+        "leftOutputFieldLabelMap",
+        "rightOutputFieldLabelMap",
+    ):
+        label_map = scheme_meta.get(map_key)
+        if isinstance(label_map, dict):
+            for key, value in label_map.items():
+                if key and value:
+                    labels[str(key)] = str(value)
+
+    # 3. Output field configs from the UI.
+    for field_key in ("left_output_fields", "right_output_fields", "leftOutputFields", "rightOutputFields"):
+        for item in _safe_list(scheme_meta.get(field_key)):
+            if not isinstance(item, dict):
+                continue
+            output_name = str(item.get("outputName") or item.get("output_name") or item.get("name") or "").strip()
+            source_field = str(item.get("sourceField") or item.get("source_field") or "").strip()
+            if output_name and source_field and not _is_generic_recon_field_label(output_name):
+                labels.setdefault(output_name, output_name)
+            if source_field and output_name and not _is_generic_recon_field_label(output_name):
+                labels.setdefault(source_field, output_name)
+
+    # 4. compare_columns from recon rules
     for rule in _safe_list((scheme_meta.get("recon_rule_json") or {}).get("rules")):
         if not isinstance(rule, dict):
             continue
@@ -276,7 +358,8 @@ def _build_field_label_map(scheme_meta: dict[str, Any]) -> dict[str, str]:
                 field = str(col.get(fk) or "").strip()
                 if field:
                     labels[field] = col_name
-    # 3. Explicit field_label_map on each source
+
+    # 5. Explicit field_label_map on each source
     for src in _safe_list(scheme_meta.get("left_sources")) + _safe_list(scheme_meta.get("right_sources")):
         if not isinstance(src, dict):
             continue
@@ -284,7 +367,27 @@ def _build_field_label_map(scheme_meta: dict[str, Any]) -> dict[str, str]:
         if isinstance(flm, dict):
             for k, v in flm.items():
                 if k and v:
-                    labels[str(k)] = str(v)
+                    labels.setdefault(str(k), str(v))
+
+    # 6. Proc rule mappings can map generic output names to their source field label.
+    source_labels = dict(labels)
+    for step in _safe_list(_safe_dict(scheme_meta.get("proc_rule_json")).get("steps")):
+        if not isinstance(step, dict):
+            continue
+        for mapping in _safe_list(step.get("mappings")):
+            if not isinstance(mapping, dict):
+                continue
+            target_field = str(mapping.get("target_field") or "").strip()
+            value_spec = _safe_dict(mapping.get("value"))
+            source_field = ""
+            if str(value_spec.get("type") or "").strip() == "source":
+                source_field = str(_safe_dict(value_spec.get("source")).get("field") or value_spec.get("field") or "").strip()
+            elif str(value_spec.get("type") or "").strip() == "function":
+                nested = _safe_dict(_safe_dict(value_spec.get("args")).get("value"))
+                source_field = str(_safe_dict(nested.get("source")).get("field") or nested.get("field") or "").strip()
+            source_label = source_labels.get(source_field) if source_field else ""
+            if target_field and source_label and _is_generic_recon_field_label(target_field):
+                labels[target_field] = source_label
     return labels
 
 
@@ -1972,8 +2075,6 @@ def _compose_execution_exception_reminder_text(
         or scheme.get("name")
         or "自动对账任务"
     ).strip()
-    scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
-
     # Extract dataset names from scheme_meta_json for user-friendly labels
     meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
     left_name, right_name = _base_source_names_from_input_plan(meta)
@@ -2013,10 +2114,9 @@ def _compose_execution_exception_reminder_text(
 
     bot_title = f"{plan_name} 对账异常催办"
     lines = [
-        f"任务：{plan_name}",
-        f"业务日期：{biz_date}" if biz_date else "",
-        f"对账方案：{scheme_name}" if scheme_name else "",
-        f"异常详情：{summary}",
+        f"任务：\n{plan_name}",
+        f"业务日期：\n{biz_date}" if biz_date else "",
+        f"异常详情：\n{summary}",
         "请尽快处理完成，并在钉钉待办中标记完成后同步给财务复核。",
     ]
     bot_content = "\n\n".join(line for line in lines if line)
@@ -2039,8 +2139,8 @@ def _format_anomaly_type_stats(
 
 
 def _format_recon_result_summary_lines(summary: dict[str, Any], *, left_name: str = "", right_name: str = "") -> list[str]:
-    left = str(left_name or "左侧基础表").strip()
-    right = str(right_name or "右侧基础表").strip()
+    left = str(left_name or "数据集 A").strip()
+    right = str(right_name or "数据集 B").strip()
     source_only = _safe_int(summary.get("source_only"), 0)
     target_only = _safe_int(summary.get("target_only"), 0)
     matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
@@ -2120,16 +2220,115 @@ def _format_date_binding_lines(ctx: dict[str, Any]) -> list[str]:
         if not date_field:
             continue
         sample = _extract_collection_date_sample(binding, collection)
-        side = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-        side_label = "左侧" if side == "left" else "右侧" if side == "right" else "数据集"
         display_name = _binding_display_name(binding)
         display_date_field = str(query.get("display_date_field") or date_field).strip()
         sample_text = sample or "未取到样例"
         lines.append(
-            f"{side_label} {display_name}：日期字段 {display_date_field}（{date_field}），"
+            f"{display_name}：日期字段 {display_date_field}（{date_field}），"
             f"格式 {_date_field_format_hint(sample)}，样例 {sample_text}"
         )
     return lines
+
+
+def _owner_batch_key(exception_ref: dict[str, Any]) -> str:
+    exception = _safe_dict(exception_ref.get("exception"))
+    return str(
+        exception.get("owner_identifier")
+        or _safe_dict(exception.get("owner_contact_json")).get("mobile")
+        or exception.get("owner_name")
+        or "__unassigned__"
+    ).strip() or "__unassigned__"
+
+
+def _group_exception_refs_by_owner(created_exceptions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in created_exceptions:
+        item_dict = _safe_dict(item)
+        exception = _safe_dict(item_dict.get("exception"))
+        key = _owner_batch_key(item_dict)
+        if key not in grouped:
+            grouped[key] = {
+                "key": key,
+                "owner_name": str(exception.get("owner_name") or "").strip(),
+                "owner_identifier": str(exception.get("owner_identifier") or "").strip(),
+                "owner_contact_json": _safe_dict(exception.get("owner_contact_json")),
+                "items": [],
+            }
+        grouped[key]["items"].append(item_dict)
+    return list(grouped.values())
+
+
+def _anomaly_count_lines_for_exception_refs(
+    exception_refs: list[dict[str, Any]],
+    *,
+    left_name: str = "",
+    right_name: str = "",
+) -> list[str]:
+    counts = Counter(
+        str(_safe_dict(item.get("exception")).get("anomaly_type") or "unknown")
+        for item in exception_refs
+    )
+    return [
+        f"- {_label_anomaly_type(atype, left_name=left_name, right_name=right_name)}：{count} 条"
+        for atype, count in counts.most_common()
+    ]
+
+
+def _compose_owner_batch_reminder_text(
+    *,
+    run_plan: dict[str, Any],
+    scheme: dict[str, Any],
+    biz_date: str,
+    exception_refs: list[dict[str, Any]],
+    detail_url: str,
+    left_name: str = "",
+    right_name: str = "",
+) -> tuple[str, str, str]:
+    plan_name = str(
+        run_plan.get("plan_name")
+        or run_plan.get("name")
+        or scheme.get("scheme_name")
+        or scheme.get("name")
+        or "自动对账任务"
+    ).strip()
+    meta = _safe_dict(scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta"))
+    resolved_left = str(left_name or "").strip()
+    resolved_right = str(right_name or "").strip()
+    if not resolved_left or not resolved_right:
+        meta_left, meta_right = _base_source_names_from_input_plan(meta)
+        resolved_left = resolved_left or meta_left
+        resolved_right = resolved_right or meta_right
+    if not resolved_left:
+        resolved_left = next(
+            (_source_display_name(s) for s in _safe_list(meta.get("left_sources")) if isinstance(s, dict) and _source_display_name(s)),
+            "",
+        )
+    if not resolved_right:
+        resolved_right = next(
+            (_source_display_name(s) for s in _safe_list(meta.get("right_sources")) if isinstance(s, dict) and _source_display_name(s)),
+            "",
+        )
+
+    total = len(exception_refs)
+    title_date = f" {biz_date}" if biz_date else ""
+    todo_title = f"{plan_name}{title_date}：你有{total}条异常待处理"
+    bot_title = f"{plan_name} 对账异常待处理"
+    lines = [
+        f"任务：\n{plan_name}",
+        f"业务日期：\n{biz_date}" if biz_date else "",
+        f"待处理差异：\n{total} 条",
+    ]
+    count_lines = _anomaly_count_lines_for_exception_refs(
+        exception_refs,
+        left_name=resolved_left,
+        right_name=resolved_right,
+    )
+    if count_lines:
+        lines.append("差异分布：\n" + "\n".join(count_lines))
+    if detail_url:
+        lines.append(f"[查看全量差异]({detail_url})")
+    lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
+    return todo_title, bot_title, "\n\n".join(line for line in lines if line)
 
 
 def _compose_run_summary_notification_text(
@@ -2138,6 +2337,7 @@ def _compose_run_summary_notification_text(
     anomalies: list[dict[str, Any]],
     threshold: int,
     explosion: bool,
+    detail_url: str = "",
 ) -> tuple[str, str]:
     run_plan = _safe_dict(ctx.get("run_plan"))
     scheme = _safe_dict(ctx.get("scheme"))
@@ -2148,38 +2348,25 @@ def _compose_run_summary_notification_text(
         or scheme.get("name")
         or "自动对账任务"
     ).strip()
-    scheme_name = str(scheme.get("scheme_name") or scheme.get("name") or "").strip()
     biz_date = str(ctx.get("biz_date") or _safe_dict(ctx.get("run_context")).get("biz_date") or "").strip()
     left_name, right_name = _resolve_side_names(ctx)
-    summary = _safe_dict(ctx.get("recon_result_summary_json") or _safe_dict(ctx.get("execution_run_record")).get("recon_result_summary_json"))
 
     total = len(anomalies)
-    status = "异常数过高，已暂停逐条催办" if explosion else "执行完成"
+    status = "执行完成，待处理异常已按责任人聚合催办" if total else "执行完成"
     title = f"{plan_name} 对账结果汇总"
     lines = [
-        f"任务：{plan_name}",
-        f"对账方案：{scheme_name}" if scheme_name else "",
-        f"业务日期：{biz_date}" if biz_date else "",
-        f"执行结果：{status}",
-        f"异常总数：{total} 条",
+        f"任务：\n{plan_name}",
+        f"业务日期：\n{biz_date}" if biz_date else "",
+        f"执行结果：\n{status}",
+        f"待处理差异：\n{total} 条",
     ]
-    if threshold:
-        lines.append(f"爆炸保护阈值：{threshold} 条")
-    if summary:
-        lines.append("对账结果摘要：")
-        lines.extend(_format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name))
-    else:
-        lines.append("异常统计：")
-        lines.extend(f"- {line}" for line in _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name))
-    date_lines = _format_date_binding_lines(ctx)
-    if date_lines:
-        lines.append("对账日期字段：")
-        lines.extend(f"- {line}" for line in date_lines)
-    if explosion:
-        lines.append("请优先检查对账方案、匹配字段、对账日期字段和值格式，确认是否配置导致异常数异常放大。")
-    else:
-        lines.append("如异常数量或类型不符合预期，请检查方案配置或数据日期范围。")
-    content = "\n".join(line for line in lines if line)
+    count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
+    if count_lines:
+        lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
+    if detail_url:
+        lines.append(f"[查看全量差异]({detail_url})")
+    lines.append("如异常数量或类型不符合预期，请检查方案配置或数据日期范围。")
+    content = "\n\n".join(line for line in lines if line)
     return title, content
 
 
@@ -2345,11 +2532,11 @@ async def _send_execution_run_exception_reminder(
         updated = await _mark_execution_exception_status(
             auth_token=auth_token,
             exception=exception,
-            owner_name=str(resolved_user.display_name or exception.get("owner_name") or ""),
+            owner_name=str(exception.get("owner_name") or resolved_user.display_name or ""),
             owner_identifier=str(resolved_user.user_id or ""),
             owner_contact_json={
                 "provider": adapter.provider,
-                "display_name": str(resolved_user.display_name or ""),
+                "display_name": str(exception.get("owner_name") or resolved_user.display_name or ""),
                 "mobile": str(resolved_user.mobile or ""),
             },
             reminder_status="send_failed",
@@ -2377,11 +2564,11 @@ async def _send_execution_run_exception_reminder(
     updated = await _mark_execution_exception_status(
         auth_token=auth_token,
         exception=exception,
-        owner_name=str(resolved_user.display_name or exception.get("owner_name") or ""),
+        owner_name=str(exception.get("owner_name") or resolved_user.display_name or ""),
         owner_identifier=str(resolved_user.user_id or ""),
         owner_contact_json={
             "provider": adapter.provider,
-            "display_name": str(resolved_user.display_name or ""),
+            "display_name": str(exception.get("owner_name") or resolved_user.display_name or ""),
             "mobile": str(resolved_user.mobile or ""),
         },
         reminder_status="sent",
@@ -2398,6 +2585,158 @@ async def _send_execution_run_exception_reminder(
             "provider": adapter.provider,
             "message_id": feedback_patch.get("message_id"),
             "todo_id": feedback_patch.get("todo_id"),
+        },
+    }
+
+
+async def _send_execution_run_exception_batch_reminder(
+    *,
+    auth_token: str,
+    owner_group: dict[str, Any],
+    channel_config: Any,
+    run_plan: dict[str, Any],
+    scheme: dict[str, Any],
+    biz_date: str,
+    run_id: str,
+    left_name: str = "",
+    right_name: str = "",
+) -> dict[str, Any]:
+    exception_refs = [item for item in _safe_list(owner_group.get("items")) if isinstance(item, dict)]
+    if not exception_refs:
+        return {"status": "skipped", "reason": "empty_owner_group", "items": []}
+
+    owner_probe_exception = {
+        "owner_name": str(owner_group.get("owner_name") or "").strip(),
+        "owner_identifier": str(owner_group.get("owner_identifier") or "").strip(),
+        "owner_contact_json": _safe_dict(owner_group.get("owner_contact_json")),
+    }
+    if not any(
+        [
+            owner_probe_exception["owner_name"],
+            owner_probe_exception["owner_identifier"],
+            _resolve_exception_mobile(owner_probe_exception),
+        ]
+    ):
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=exception_refs,
+            reminder_status="owner_missing",
+            latest_feedback="运行计划未配置可触达的责任人，已跳过自动催办",
+            feedback_patch={"auto_notify_skipped_reason": "owner_missing"},
+        )
+        return {
+            "status": "skipped",
+            "reason": "owner_missing",
+            "error": "缺少责任人信息",
+            "items": updated_refs,
+        }
+
+    adapter = get_notification_adapter(
+        provider=str(getattr(channel_config, "provider", "") or ""),
+        channel_config=channel_config,
+    )
+    resolved_user, resolve_error = _resolve_exception_user(adapter, owner_probe_exception)
+    if resolved_user is None:
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=exception_refs,
+            reminder_status="owner_unresolved",
+            latest_feedback=resolve_error,
+            feedback_patch={"auto_notify_skipped_reason": "owner_unresolved"},
+        )
+        return {
+            "status": "skipped",
+            "reason": "owner_unresolved",
+            "error": resolve_error,
+            "items": updated_refs,
+        }
+
+    owner_identifier = str(resolved_user.user_id or owner_probe_exception.get("owner_identifier") or "")
+    detail_url = _run_public_exceptions_url(run_id, owner_identifier)
+    todo_title, bot_title, bot_content = _compose_owner_batch_reminder_text(
+        run_plan=run_plan,
+        scheme=scheme,
+        biz_date=biz_date,
+        exception_refs=exception_refs,
+        detail_url=detail_url,
+        left_name=left_name,
+        right_name=right_name,
+    )
+    reminder = adapter.send_reminder(
+        title=bot_title,
+        content=bot_content,
+        todo_title=todo_title,
+        assignee_user_id=owner_identifier,
+        source_id=run_id,
+    )
+    if not reminder.success:
+        updated_refs = await _mark_created_exceptions_skipped(
+            auth_token=auth_token,
+            created_exceptions=exception_refs,
+            reminder_status="send_failed",
+            latest_feedback=str(reminder.message or "自动催办发送失败"),
+            feedback_patch={
+                "provider": adapter.provider,
+                "channel_config_id": str(getattr(channel_config, "id", "") or ""),
+                "public_detail_url": detail_url,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "send_failed",
+            "error": str(reminder.message or "自动催办发送失败"),
+            "items": updated_refs,
+        }
+
+    feedback_patch = {
+        "provider": adapter.provider,
+        "channel_config_id": str(getattr(channel_config, "id", "") or ""),
+        "message_id": reminder.bot_result.message_id if reminder.bot_result else "",
+        "todo_id": reminder.todo_result.todo.todo_id if reminder.todo_result and reminder.todo_result.todo else "",
+        "batch_todo_id": reminder.todo_result.todo.todo_id if reminder.todo_result and reminder.todo_result.todo else "",
+        "batch_source": "run_owner",
+        "batch_run_id": run_id,
+        "public_detail_url": detail_url,
+        "last_reminded_at": datetime.now().isoformat(),
+    }
+    updated_refs: list[dict[str, Any]] = []
+    for item in exception_refs:
+        item_dict = _safe_dict(item)
+        exception = _safe_dict(item_dict.get("exception"))
+        updated = await _mark_execution_exception_status(
+            auth_token=auth_token,
+            exception=exception,
+            owner_name=str(exception.get("owner_name") or resolved_user.display_name or ""),
+            owner_identifier=owner_identifier,
+            owner_contact_json={
+                "provider": adapter.provider,
+                "display_name": str(exception.get("owner_name") or resolved_user.display_name or ""),
+                "mobile": str(resolved_user.mobile or ""),
+            },
+            reminder_status="sent",
+            latest_feedback="已按责任人聚合发送催办消息并创建待办",
+            feedback_patch=feedback_patch,
+        )
+        updated_refs.append(
+            {
+                **item_dict,
+                "exception_id": str(item_dict.get("exception_id") or updated.get("id") or ""),
+                "exception": updated,
+            }
+        )
+
+    return {
+        "status": "sent",
+        "reason": "",
+        "error": "",
+        "items": updated_refs,
+        "reminder": {
+            "provider": adapter.provider,
+            "message_id": feedback_patch.get("message_id"),
+            "todo_id": feedback_patch.get("todo_id"),
+            "owner_identifier": owner_identifier,
+            "exception_count": len(updated_refs),
+            "public_detail_url": detail_url,
         },
     }
 
@@ -2475,13 +2814,14 @@ async def _send_run_summary_notification(
         anomalies=anomalies,
         threshold=threshold,
         explosion=explosion,
+        detail_url=_run_public_exceptions_url(str(_safe_dict(ctx.get("execution_run_record")).get("id") or "")),
     )
     run = _safe_dict(ctx.get("execution_run_record"))
     result = adapter.send_bot_message(
         title=title,
         content=content,
         to_user_id=str(resolved.user_id or ""),
-        content_type="text",
+        content_type="markdown",
     )
     if not result.success:
         return {
@@ -2557,14 +2897,11 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     explosion_sample_limit = int(notify_policy["explosion_sample_limit"])
     total_anomaly_count = len(anomalies)
     notify_explosion = total_anomaly_count > explosion_threshold
-    anomalies_to_create = anomalies
-    if notify_explosion:
-        anomalies_to_create = anomalies[:explosion_sample_limit]
     ctx["auto_notify_policy"] = {
         **notify_policy,
         "anomaly_count": total_anomaly_count,
         "explosion": notify_explosion,
-        "created_exception_sample_limit": len(anomalies_to_create),
+        "created_exception_sample_limit": total_anomaly_count,
     }
 
     # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
@@ -2577,7 +2914,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
     created = 0
     created_exceptions: list[dict[str, Any]] = []
-    for idx, item in enumerate(anomalies_to_create, start=1):
+    for idx, item in enumerate(anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
         payload = {
@@ -2608,10 +2945,9 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
-    if notify_explosion:
-        ctx["exception_creation_limited"] = True
-        ctx["exception_total_count"] = total_anomaly_count
-        ctx["exception_created_sample_count"] = created
+    ctx["exception_creation_limited"] = False
+    ctx["exception_total_count"] = total_anomaly_count
+    ctx["exception_created_sample_count"] = created
     return {"recon_ctx": ctx}
 
 
@@ -2703,52 +3039,6 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         }
         return {"recon_ctx": ctx}
 
-    if explosion:
-        summary_status = str(summary_result.get("status") or "").strip()
-        summary_error = str(summary_result.get("error") or summary_result.get("reason") or "").strip()
-        summary_sent = summary_status == "sent"
-        latest_feedback = (
-            "异常数量超过阈值，已发送汇总给发起人，跳过逐条责任人催办"
-            if summary_sent
-            else f"异常数量超过阈值，已跳过逐条责任人催办；发起人汇总通知发送失败：{summary_error or '未知原因'}"
-        )
-        updated_refs = await _mark_created_exceptions_skipped(
-            auth_token=auth_token,
-            created_exceptions=created_exceptions,
-            reminder_status="summary_only",
-            latest_feedback=latest_feedback,
-            feedback_patch={
-                "auto_notify_skipped_reason": "anomaly_explosion",
-                "anomaly_count": len(anomalies),
-                "explosion_threshold": threshold,
-                "summary_notification": summary_result,
-            },
-        )
-        ctx["created_exceptions"] = updated_refs
-        ctx["auto_notify_status"] = "summary_only" if summary_sent else "summary_failed"
-        ctx["auto_notify_result"] = {
-            "total": len(anomalies),
-            "created_exception_sample_count": len(created_exceptions),
-            "sent": 0,
-            "failed": 0,
-            "skipped": len(created_exceptions),
-            "channel_config_id": channel_config_id,
-            "provider": str(getattr(channel_config, "provider", "") or ""),
-            "channel_name": str(getattr(channel_config, "name", "") or ""),
-            "explosion": True,
-            "explosion_threshold": threshold,
-            "summary_notification": summary_result,
-            "items": [
-                {
-                    "exception_id": str(item.get("exception_id") or ""),
-                    "status": "skipped",
-                    "reason": "anomaly_explosion",
-                }
-                for item in updated_refs
-            ],
-        }
-        return {"recon_ctx": ctx}
-
     scheme = _safe_dict(ctx.get("scheme"))
     biz_date = str(
         ctx.get("biz_date")
@@ -2762,39 +3052,42 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     skipped_count = 0
     results: list[dict[str, Any]] = []
     updated_refs: list[dict[str, Any]] = []
+    owner_groups = _group_exception_refs_by_owner(created_exceptions)
+    run_id = str(_safe_dict(ctx.get("execution_run_record")).get("id") or "")
+    left_name, right_name = _resolve_side_names(ctx)
 
     try:
-        for item in created_exceptions:
-            item_dict = _safe_dict(item)
-            result = await _send_execution_run_exception_reminder(
+        for owner_group in owner_groups:
+            result = await _send_execution_run_exception_batch_reminder(
                 auth_token=auth_token,
-                exception_ref=item_dict,
+                owner_group=owner_group,
                 channel_config=channel_config,
                 run_plan=run_plan,
                 scheme=scheme,
                 biz_date=biz_date,
+                run_id=run_id,
+                left_name=left_name,
+                right_name=right_name,
             )
             status = str(result.get("status") or "")
+            item_count = len(_safe_list(result.get("items")))
             if status == "sent":
-                sent_count += 1
+                sent_count += item_count
             elif status == "failed":
-                failed_count += 1
+                failed_count += item_count
             else:
-                skipped_count += 1
+                skipped_count += item_count
 
-            updated_refs.append(
-                {
-                    **item_dict,
-                    "exception_id": str(result.get("exception_id") or item_dict.get("exception_id") or ""),
-                    "exception": _safe_dict(result.get("exception")) or _safe_dict(item_dict.get("exception")),
-                }
-            )
+            updated_refs.extend([item for item in _safe_list(result.get("items")) if isinstance(item, dict)])
             results.append(
                 {
-                    "exception_id": str(result.get("exception_id") or ""),
+                    "owner_identifier": str(_safe_dict(result.get("reminder")).get("owner_identifier") or owner_group.get("owner_identifier") or ""),
+                    "exception_count": item_count,
                     "status": status,
                     "reason": str(result.get("reason") or ""),
                     "error": str(result.get("error") or ""),
+                    "todo_id": str(_safe_dict(result.get("reminder")).get("todo_id") or ""),
+                    "message_id": str(_safe_dict(result.get("reminder")).get("message_id") or ""),
                 }
             )
     except Exception as exc:

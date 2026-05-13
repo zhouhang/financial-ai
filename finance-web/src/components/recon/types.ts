@@ -80,6 +80,8 @@ export interface ReconTaskListItem {
   scheduleType: string;
   scheduleExpr: string;
   bizDateOffset: string;
+  dateFieldSummary: string;
+  dateFieldLines: string[];
   leftTimeSemantic: string;
   rightTimeSemantic: string;
   channelConfigId: string;

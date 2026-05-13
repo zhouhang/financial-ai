@@ -13,6 +13,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 _TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+_CONNECT_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.0, 4.0)
 
 
 def _finance_mcp_base_url() -> str:
@@ -38,19 +39,37 @@ class _McpSession:
             if self._sse_task and not self._sse_task.done():
                 return self.session_id is not None
 
-            try:
-                self._client = httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False)
-                session_ready = asyncio.get_running_loop().create_future()
-                self._sse_task = asyncio.create_task(self._sse_listener(session_ready))
-                await asyncio.wait_for(session_ready, timeout=15.0)
-                if not self.session_id:
+            base_url = _finance_mcp_base_url()
+            total_attempts = len(_CONNECT_RETRY_DELAYS_SECONDS)
+            for attempt, delay_seconds in enumerate(_CONNECT_RETRY_DELAYS_SECONDS, start=1):
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                try:
+                    self._client = httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False)
+                    session_ready = asyncio.get_running_loop().create_future()
+                    self._sse_task = asyncio.create_task(self._sse_listener(session_ready))
+                    await asyncio.wait_for(session_ready, timeout=15.0)
+                    if not self.session_id:
+                        await self._close_failed_connection()
+                        logger.warning(
+                            "MCP SSE 连接未就绪: base_url=%s attempt=%s/%s",
+                            base_url,
+                            attempt,
+                            total_attempts,
+                        )
+                        continue
+                    await self._handshake()
+                    return True
+                except Exception as exc:  # noqa: BLE001
                     await self._close_failed_connection()
-                    return False
-                await self._handshake()
-                return True
-            except Exception:
-                await self._close_failed_connection()
-                return False
+                    logger.warning(
+                        "MCP SSE 连接失败: base_url=%s attempt=%s/%s error=%s",
+                        base_url,
+                        attempt,
+                        total_attempts,
+                        exc,
+                    )
+            return False
 
     async def aclose(self) -> None:
         sse_task = self._sse_task
@@ -105,9 +124,10 @@ class _McpSession:
             )
 
     async def _sse_listener(self, session_ready: asyncio.Future[Any]) -> None:
+        base_url = _finance_mcp_base_url()
         try:
             assert self._client is not None
-            async with self._client.stream("GET", f"{_finance_mcp_base_url()}/sse") as response:
+            async with self._client.stream("GET", f"{base_url}/sse") as response:
                 if response.status_code != 200:
                     if not session_ready.done():
                         session_ready.set_result(None)
@@ -149,8 +169,10 @@ class _McpSession:
                     event_type = None
         except asyncio.CancelledError:
             raise
+        except httpx.HTTPError as exc:
+            logger.warning("MCP SSE 监听异常: base_url=%s error=%s", base_url, exc)
         except Exception as exc:  # noqa: BLE001
-            logger.error("MCP SSE 监听异常: %s", exc, exc_info=True)
+            logger.error("MCP SSE 监听异常: base_url=%s error=%s", base_url, exc, exc_info=True)
         finally:
             for fut in self._pending.values():
                 if not fut.done():
@@ -170,7 +192,10 @@ class _McpSession:
         if not self.session_id or (self._sse_task and self._sse_task.done()):
             ok = await self.connect()
             if not ok:
-                return {"success": False, "error": "无法建立 finance-mcp 连接"}
+                return {
+                    "success": False,
+                    "error": f"无法建立 finance-mcp 连接: {_finance_mcp_base_url()}",
+                }
 
         req_id = self._next_id()
         loop = asyncio.get_running_loop()

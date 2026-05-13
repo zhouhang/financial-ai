@@ -33,6 +33,7 @@ from graphs.rule_generation.input_plan import (
 )
 from graphs.rule_generation.service import (
     RuleGenerationService,
+    _apply_rule_text_deterministic_understanding,
     _normalize_generated_proc_rule,
     _source_profile,
     _validate_understanding,
@@ -78,6 +79,9 @@ def test_understanding_prompt_treats_role_fields_as_outputs_generically() -> Non
 def _source_payload() -> dict[str, object]:
     return {
         "id": "dataset_1",
+        "source_id": "source_1",
+        "dataset_id": "dataset_1",
+        "resource_key": "public.trade_orders",
         "table_name": "public.trade_orders",
         "business_name": "交易订单明细表",
         "field_label_map": {
@@ -104,6 +108,209 @@ def _source_payload() -> dict[str, object]:
             }
         ],
     }
+
+
+def test_rule_generation_refetches_matching_rows_when_filter_excludes_current_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = RuleGenerationService()
+    source = _source_payload()
+    source["sample_rows"] = [
+        {
+            "customer_order_no": "ORD-001",
+            "tax_sale_amount": 100.23,
+            "customer_member_code": "1111111",
+            "order_finish_time": "2026-04-18",
+            "overdue_amount": 80.0,
+        }
+    ]
+    generated_rule = {
+        "role_desc": "按客户会员编码筛选后生成对账字段",
+        "version": "1.0",
+        "steps": [
+            {
+                "step_id": "create_left_recon_ready",
+                "action": "create_schema",
+                "target_table": "left_recon_ready",
+                "schema": {
+                    "columns": [
+                        {"name": "biz_key", "data_type": "string"},
+                        {"name": "amount", "data_type": "decimal"},
+                    ]
+                },
+            },
+            {
+                "step_id": "write_left_recon_ready",
+                "action": "write_dataset",
+                "target_table": "left_recon_ready",
+                "sources": [{"table": "public.trade_orders", "alias": "source_1"}],
+                "filter": {
+                    "expr": "({filter_field_1} == {filter_value_2})",
+                    "bindings": {
+                        "filter_field_1": {
+                            "type": "source",
+                            "source": {"alias": "source_1", "field": "customer_member_code"},
+                        },
+                        "filter_value_2": {"type": "constant", "value": "6504690"},
+                    },
+                },
+                "mappings": [
+                    {
+                        "target_field": "biz_key",
+                        "value": {
+                            "type": "source",
+                            "source": {"alias": "source_1", "field": "customer_order_no"},
+                        },
+                    },
+                    {
+                        "target_field": "amount",
+                        "value": {
+                            "type": "source",
+                            "source": {"alias": "source_1", "field": "tax_sale_amount"},
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    llm_responses = iter([
+        {
+            "understanding": {
+                "rule_summary": "按会员编码筛选并输出客户订单号和含税销售金额",
+                "source_references": [
+                    {
+                        "ref_id": "ref_filter",
+                        "semantic_name": "客户会员编码",
+                        "usage": "filter_field",
+                        "operator": "eq",
+                        "value": "6504690",
+                        "must_bind": True,
+                    },
+                    {
+                        "ref_id": "ref_key",
+                        "semantic_name": "客户订单号",
+                        "usage": "match_key",
+                        "must_bind": True,
+                    },
+                    {
+                        "ref_id": "ref_amount",
+                        "semantic_name": "含税销售金额",
+                        "usage": "compare_field",
+                        "must_bind": True,
+                    },
+                ],
+                "output_specs": [
+                    {"output_id": "out_key", "name": "biz_key", "kind": "rename", "source_ref_ids": ["ref_key"]},
+                    {"output_id": "out_amount", "name": "amount", "kind": "rename", "source_ref_ids": ["ref_amount"]},
+                ],
+                "business_rules": [
+                    {
+                        "rule_id": "filter_member",
+                        "type": "filter",
+                        "description": "只取客户会员编码为6504690的数据",
+                        "related_ref_ids": ["ref_filter"],
+                        "predicate": {
+                            "op": "eq",
+                            "left": {"op": "ref", "ref_id": "ref_filter"},
+                            "right": {"op": "constant", "value": "6504690"},
+                        },
+                    }
+                ],
+            },
+            "assumptions": [],
+            "ambiguities": [],
+        },
+        generated_rule,
+    ])
+    sample_calls: list[list[dict[str, object]]] = []
+
+    async def fake_invoke_llm_json(prompt: str, **_: object) -> dict[str, object]:
+        return next(llm_responses)
+
+    async def fake_run_proc_sample(**kwargs: object) -> dict[str, object]:
+        sources = list(kwargs.get("sources") or [])
+        sample_calls.append(sources)
+        rows = list((sources[0] or {}).get("sample_rows") or []) if sources else []
+        if rows and rows[0].get("customer_member_code") == "6504690":
+            return {
+                "success": True,
+                "ready_for_confirm": True,
+                "backend": "mock",
+                "output_samples": [
+                    {
+                        "target_table": "left_recon_ready",
+                        "rows": [{"biz_key": "ORD-6504690", "amount": 321.45}],
+                    }
+                ],
+            }
+        return {
+            "success": True,
+            "ready_for_confirm": False,
+            "backend": "mock",
+            "output_samples": [{"target_table": "left_recon_ready", "rows": [], "row_count": 0}],
+        }
+
+    async def fake_list_collection_records(**kwargs: object) -> dict[str, object]:
+        assert kwargs["source_id"] == "source_1"
+        assert kwargs["dataset_id"] == "dataset_1"
+        assert kwargs["resource_key"] == "public.trade_orders"
+        assert kwargs["filters"] == {"customer_member_code": 6504690}
+        return {
+            "success": True,
+            "records": [
+                {
+                    "payload": {
+                        "customer_order_no": "ORD-6504690",
+                        "tax_sale_amount": 321.45,
+                        "customer_member_code": "6504690",
+                    }
+                }
+            ],
+        }
+
+    monkeypatch.setattr("graphs.rule_generation.service.invoke_llm_json", fake_invoke_llm_json)
+    monkeypatch.setattr("graphs.rule_generation.service.run_proc_sample", fake_run_proc_sample)
+    monkeypatch.setattr(
+        "graphs.rule_generation.service.data_source_list_collection_records",
+        fake_list_collection_records,
+    )
+
+    result = asyncio.run(
+        service.run_proc_side(
+            auth_token="token",
+            payload={
+                "side": "left",
+                "target_table": "left_recon_ready",
+                "rule_text": (
+                    "取客户会员编码为6504690\n"
+                    "平台订单客户订单号作为匹配字段\n"
+                    "含税销售金额对比字段"
+                ),
+                "sources": [source],
+            },
+        )
+    )
+
+    assert result["event"] == "graph_completed", json.dumps(result, ensure_ascii=False, default=str)
+    assert result["status"] == "succeeded"
+    assert len(sample_calls) == 2
+    assert sample_calls[1][0]["sample_rows"] == [
+        {
+            "customer_order_no": "ORD-6504690",
+            "tax_sale_amount": 321.45,
+            "customer_member_code": "6504690",
+        }
+    ]
+    assert result["sample_inputs"][0]["sample_origin"] == "collection_refetch"
+    assert result["sample_inputs"][0]["sample_rows"] == sample_calls[1][0]["sample_rows"]
+    assert result["sample_datasets"][0]["sample_rows"] == sample_calls[1][0]["sample_rows"]
+    assert result["output_preview_rows"] == [{"biz_key": "ORD-6504690", "amount": 321.45}]
+    assert any("回源命中" in warning for warning in result["warnings"])
+    assert any(
+        validation.get("summary", {}).get("sample_origin") == "collection_refetch"
+        for validation in result["validations"]
+        if isinstance(validation, dict)
+    )
 
 
 def _trade_order_source_with_member_aliases_payload() -> dict[str, object]:
@@ -235,6 +442,209 @@ def _alipay_order_source_payload() -> dict[str, object]:
             }
         ],
     }
+
+
+def _alipay_signcustomer_source_payload() -> dict[str, object]:
+    return {
+        "id": "alipay_signcustomer",
+        "source_id": "source_alipay",
+        "dataset_id": "dataset_alipay_signcustomer",
+        "resource_key": "platform.alipay_signcustomer",
+        "table_name": "platform.alipay_signcustomer",
+        "business_name": "支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺",
+        "field_label_map": {
+            "merchant_order_no": "商户订单号",
+            "alipay_income_amount_yuan": "支付宝收入金额（+元）",
+            "business_type": "业务类型",
+        },
+        "fields": [
+            {"name": "merchant_order_no", "label": "商户订单号", "data_type": "string"},
+            {"name": "alipay_income_amount_yuan", "label": "支付宝收入金额（+元）", "data_type": "decimal"},
+            {"name": "business_type", "label": "业务类型", "data_type": "string"},
+        ],
+        "sample_rows": [
+            {
+                "merchant_order_no": "T100P3301619736056008485",
+                "alipay_income_amount_yuan": "88.00",
+                "business_type": "交易付款",
+            },
+            {
+                "merchant_order_no": "T100P3301619736056008486",
+                "alipay_income_amount_yuan": "10.00",
+                "business_type": "退款",
+            },
+        ],
+    }
+
+
+def test_alipay_rule_text_binds_prefixed_order_id_as_string_and_amount_as_decimal() -> None:
+    source = _alipay_signcustomer_source_payload()
+    rule_text = (
+        "商户订单号去掉前面的T100P，作为匹配字段\n"
+        "支付宝收入金额（+元）作为对比字段\n"
+        "只取业务类型为交易付款的数据"
+    )
+    understanding = normalize_understanding(
+        {
+            "rule_summary": rule_text,
+            "target_table": "left_recon_ready",
+            "source_references": [
+                {
+                    "ref_id": "ref_key",
+                    "semantic_name": "商户订单号",
+                    "usage": "match_key",
+                    "must_bind": True,
+                },
+                {
+                    "ref_id": "ref_amount",
+                    "semantic_name": "支付宝收入金额（+元）",
+                    "usage": "compare_field",
+                    "must_bind": True,
+                },
+                {
+                    "ref_id": "ref_filter",
+                    "semantic_name": "业务类型",
+                    "usage": "filter_field",
+                    "operator": "eq",
+                    "value": "交易付款",
+                    "must_bind": True,
+                },
+            ],
+            "output_specs": [
+                {
+                    "output_id": "out_key",
+                    "name": "商户订单号",
+                    "kind": "rename",
+                    "source_ref_ids": ["ref_key"],
+                },
+                {
+                    "output_id": "out_amount",
+                    "name": "支付宝收入金额（+元）",
+                    "kind": "rename",
+                    "source_ref_ids": ["ref_amount"],
+                },
+            ],
+            "business_rules": [
+                {
+                    "rule_id": "filter_business_type",
+                    "type": "filter",
+                    "description": "只取业务类型为交易付款的数据",
+                    "related_ref_ids": ["ref_filter"],
+                    "predicate": {
+                        "op": "eq",
+                        "left": {"op": "ref", "ref_id": "ref_filter"},
+                        "right": {"op": "constant", "value": "交易付款"},
+                    },
+                }
+            ],
+        },
+        rule_text=rule_text,
+        target_table="left_recon_ready",
+    )
+    understanding = _apply_rule_text_deterministic_understanding(
+        understanding,
+        rule_text=rule_text,
+        target_table="left_recon_ready",
+    )
+    source_profiles = [_source_profile(source)]
+    field_bindings = [
+        {
+            "intent_id": "ref_key",
+            "role": "match_key",
+            "usage": "match_key",
+            "mention": "商户订单号",
+            "must_bind": True,
+            "status": "bound",
+            "selected_field": {"name": "merchant_order_no", "label": "商户订单号", "table_name": "platform.alipay_signcustomer"},
+        },
+        {
+            "intent_id": "ref_amount",
+            "role": "compare_field",
+            "usage": "compare_field",
+            "mention": "支付宝收入金额（+元）",
+            "must_bind": True,
+            "status": "bound",
+            "selected_field": {
+                "name": "alipay_income_amount_yuan",
+                "label": "支付宝收入金额（+元）",
+                "table_name": "platform.alipay_signcustomer",
+            },
+        },
+        {
+            "intent_id": "ref_filter",
+            "role": "filter_field",
+            "usage": "filter_field",
+            "mention": "业务类型",
+            "must_bind": True,
+            "status": "bound",
+            "selected_field": {"name": "business_type", "label": "业务类型", "table_name": "platform.alipay_signcustomer"},
+            "operator": "eq",
+            "value": "交易付款",
+        },
+    ]
+    lint_result = lint_rule_generation_ir(
+        understanding,
+        field_bindings=field_bindings,
+        rule_text=rule_text,
+        source_profiles=source_profiles,
+    )
+
+    assert lint_result["success"] is True
+
+    skeleton = build_proc_rule_skeleton_from_ir(
+        side="left",
+        target_table="left_recon_ready",
+        rule_text=rule_text,
+        sources=[source],
+        understanding=understanding,
+        field_bindings=field_bindings,
+    )
+    compiled_rule = compile_understanding_into_rule(
+        skeleton,
+        understanding=understanding,
+        field_bindings=field_bindings,
+        sources=[source],
+        target_table="left_recon_ready",
+        target_tables=[],
+    )
+    write_step = compiled_rule["steps"][1]
+    key_mapping = next(item for item in write_step["mappings"] if item["target_field"] == "商户订单号")
+    amount_mapping = next(item for item in write_step["mappings"] if item["target_field"] == "支付宝收入金额（+元）")
+
+    assert key_mapping["value"]["function"] == "strip_prefix"
+    assert key_mapping["value"]["args"]["prefix"]["expr"] == "'T100P'"
+    assert key_mapping["value"]["args"]["value"]["source"]["field"] == "merchant_order_no"
+    assert not _contains_decimal_function(key_mapping["value"])
+    assert amount_mapping["value"]["source"]["field"] == "alipay_income_amount_yuan"
+    assert write_step["filter"]["bindings"]["ref_filter_1"]["source"]["field"] == "business_type"
+
+    from proc.mcp_server.steps_runtime import StepsProcRuntime
+
+    runtime = StepsProcRuntime(
+        "alipay_strip_prefix_rule",
+        compiled_rule,
+        [],
+        "",
+        preloaded_frames={
+            "platform.alipay_signcustomer": pd.DataFrame(source["sample_rows"]),
+        },
+    )
+    runtime.execute_to_frames()
+
+    output = runtime.tables["left_recon_ready"]
+    assert output.to_dict("records") == [
+        {"商户订单号": "3301619736056008485", "支付宝收入金额（+元）": 88.0}
+    ]
+
+
+def _contains_decimal_function(value: object) -> bool:
+    if isinstance(value, dict):
+        if str(value.get("type") or "") == "function" and str(value.get("function") or "") == "to_decimal":
+            return True
+        return any(_contains_decimal_function(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_decimal_function(item) for item in value)
+    return False
 
 
 def test_input_plan_infers_lookup_table_keyset_read() -> None:

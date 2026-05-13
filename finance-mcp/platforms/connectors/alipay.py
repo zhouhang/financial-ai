@@ -610,24 +610,7 @@ class AlipayConnector(BasePlatformConnector):
                     "source_file_name": file_name,
                     "source_row_number": row_number,
                     "source_row_key": row_key,
-                    "alipay_trade_no": _first_text(
-                        cleaned_row,
-                        "支付宝交易号",
-                        "支付宝流水号",
-                        "账务流水号",
-                    ),
-                    "merchant_order_no": _first_text(
-                        cleaned_row,
-                        "商户订单号",
-                        "商户订单号/商家订单号",
-                    ),
-                    "business_order_no": _first_text(
-                        cleaned_row,
-                        "业务基础订单号",
-                        "业务订单号",
-                        "业务流水号",
-                    ),
-                    "raw": cleaned_row,
+                    "payload": cleaned_row,
                 }
             )
         return rows

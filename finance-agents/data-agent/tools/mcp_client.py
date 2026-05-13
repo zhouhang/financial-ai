@@ -316,6 +316,8 @@ class _McpSession:
                     try:
                         return json.loads(text)
                     except Exception:
+                        if any(marker in text for marker in ("失败", "错误", "无效", "过期", "未提供")):
+                            return {"success": False, "error": text}
                         return {"success": True, "result": text}
             return result
 
@@ -1006,6 +1008,19 @@ async def execution_run_exceptions(
     )
 
 
+async def execution_run_public_exception_bundle(
+    run_id: str,
+    *,
+    owner_identifier: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_public_exception_bundle",
+        {"run_id": run_id, "owner_identifier": owner_identifier, "limit": limit, "offset": offset},
+    )
+
+
 async def execution_run_exception_list(
     auth_token: str,
     run_id: str,
@@ -1043,6 +1058,17 @@ async def execution_run_exception_update(
     return await call_mcp_tool(
         "execution_run_exception_update",
         {"auth_token": auth_token, "exception_id": exception_id, **(payload or {})},
+    )
+
+
+async def execution_run_exception_bulk_update_by_owner(
+    auth_token: str,
+    run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_bulk_update_by_owner",
+        {"auth_token": auth_token, "run_id": run_id, **(payload or {})},
     )
 
 
@@ -3558,6 +3584,7 @@ async def data_source_trigger_dataset_collection(
     dataset_id: str = "",
     resource_key: str = "",
     biz_date: str = "",
+    idempotency_key: str = "",
     trigger_mode: str = "",
     background: bool | None = None,
     params: dict[str, Any] | None = None,
@@ -3594,6 +3621,8 @@ async def data_source_trigger_dataset_collection(
         payload["resource_key"] = resource_key
     if biz_date:
         payload["biz_date"] = biz_date
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
     if trigger_mode:
         payload["trigger_mode"] = trigger_mode
     if background is not None:
@@ -3726,6 +3755,7 @@ async def data_source_list_collection_records(
     biz_date: str = "",
     limit: int = 20,
     mode: str = "",
+    filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
@@ -3745,6 +3775,8 @@ async def data_source_list_collection_records(
         args["resource_key"] = resource_key
     if biz_date:
         args["biz_date"] = biz_date
+    if filters:
+        args["filters"] = filters
 
     result = await call_mcp_tool("data_source_list_collection_records", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):

@@ -29,7 +29,7 @@ PROC_DSL_CONSTRAINTS = """
 - formula 必须写成 {"type":"formula","expr":"...","bindings":{...}}，expr 必须是字符串，不能再嵌套一层对象。
 - formula 只用于逐行计算，内联函数只支持 coalesce/is_null；禁止在 formula 中写 sum/min/avg/count 等聚合函数。
 - 行过滤必须使用 write_dataset.step.filter，格式为 {"type":"formula","expr":"...","bindings":{...}}，不要输出 filters 数组。
-- 逐行运行时函数必须用 value.type=function，function 只支持 current_date/add_months/month_of/fraction_numerator/earliest_date/to_decimal。
+- 逐行运行时函数必须用 value.type=function，function 只支持 current_date/add_months/month_of/fraction_numerator/earliest_date/to_decimal/strip_prefix。
 - 禁止输出 match.keys 或 match.type；当前执行器不支持这种 match 写法。
 - match 只支持 match.sources，格式为 {"sources":[{"alias":"...","keys":[{"field":"源字段","target_field":"目标字段"}]}]}。
 - 多源关联派生字段优先使用单一基础 alias，并用 lookup 从非基础 alias 读取字段。
@@ -73,6 +73,7 @@ def build_understanding_prompt(context: dict[str, Any]) -> str:
         "示例1：订单金额+10 => {\"op\":\"add\",\"operands\":[{\"op\":\"ref\",\"ref_id\":\"...\"},{\"op\":\"constant\",\"value\":10}]}\n"
         "示例2：当前日期 => {\"op\":\"function\",\"name\":\"current_date\",\"args\":[]}\n"
         "示例3：如果 A>0 则 A 否则 0 => {\"op\":\"conditional\",\"when\":{predicate},\"then\":{expression},\"else\":{expression}}\n"
+        "示例7：商户订单号去掉前面的 T100P => {\"op\":\"function\",\"name\":\"strip_prefix\",\"args\":[{\"op\":\"ref\",\"ref_id\":\"商户订单号ref\"},{\"op\":\"constant\",\"value\":\"T100P\"}]}\n"
         "派生输出字段、聚合字段、公式字段不要求存在于 source_profiles 里，不要把它们塞进 source_references。\n"
         "business_rules 只放过滤、关联、聚合、推导、校验等规则，每项包含 rule_id/type/description/related_ref_ids/output_ids/predicate/params。\n"
         "凡是 join/aggregate/derive/filter 会影响某个输出字段，必须用 business_rules.output_ids 指向 output_specs.output_id，或用 output_specs.rule_ids 指向 business_rules.rule_id。\n"

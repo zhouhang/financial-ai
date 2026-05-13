@@ -390,6 +390,79 @@ def _build_output_field_candidates(
     return matched_fields
 
 
+def _source_field_entries(source_item: dict[str, Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+
+    def append(raw_name: Any, display_name: Any = "") -> None:
+        raw = text(raw_name)
+        display = text(display_name)
+        if not raw and display:
+            raw = display
+        if raw:
+            entries.append({"raw_name": raw, "display_name": display})
+
+    schema_summary = safe_dict(source_item.get("schema_summary"))
+    for raw_field in safe_list(schema_summary.get("fields")):
+        field = safe_dict(raw_field)
+        append(
+            text(field.get("raw_name"), field.get("name"), field.get("field_name"), field.get("column_name")),
+            text(field.get("display_name"), field.get("displayName"), field.get("label")),
+        )
+    for raw_column in safe_list(schema_summary.get("columns")):
+        column = safe_dict(raw_column)
+        append(
+            text(column.get("raw_name"), column.get("name"), column.get("field_name"), column.get("column_name")),
+            text(column.get("display_name"), column.get("displayName"), column.get("label")),
+        )
+
+    semantic_profile = safe_dict(source_item.get("semantic_profile"))
+    for raw_field in safe_list(semantic_profile.get("fields")):
+        field = safe_dict(raw_field)
+        append(
+            text(field.get("raw_name"), field.get("name"), field.get("field_name"), field.get("column_name")),
+            text(field.get("display_name"), field.get("displayName"), field.get("label")),
+        )
+
+    field_label_map = safe_dict(source_item.get("field_label_map"))
+    for raw_name, display_name in field_label_map.items():
+        append(raw_name, display_name)
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in entries:
+        key = (item["raw_name"], item["display_name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _resolve_raw_source_field_from_schema(
+    *,
+    matched_source_items: list[dict[str, Any]],
+    display_date_field: str,
+) -> dict[str, Any]:
+    display = display_date_field.strip()
+    if not display:
+        return {"field": "", "status": "missing", "candidates": []}
+
+    candidates: list[str] = []
+    for source_item in matched_source_items:
+        for field in _source_field_entries(source_item):
+            raw_name = field.get("raw_name", "")
+            display_name = field.get("display_name", "")
+            if display in {raw_name, display_name} and raw_name:
+                candidates.append(raw_name)
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    if len(unique_candidates) == 1:
+        return {"field": unique_candidates[0], "status": "resolved", "candidates": unique_candidates}
+    if len(unique_candidates) > 1:
+        return {"field": "", "status": "ambiguous", "candidates": unique_candidates}
+    return {"field": "", "status": "missing", "candidates": []}
+
+
 def resolve_scheme_source_date_field_resolution(
     *,
     scheme_meta: dict[str, Any],
@@ -418,6 +491,13 @@ def resolve_scheme_source_date_field_resolution(
     }
     matched_dataset_ids.discard("")
 
+    schema_resolution = _resolve_raw_source_field_from_schema(
+        matched_source_items=matched_source_items,
+        display_date_field=display_date_field,
+    )
+    if text(schema_resolution.get("field")):
+        return {"field": text(schema_resolution.get("field")), "status": "resolved", "error": ""}
+
     candidate_fields = _build_output_field_candidates(
         output_fields=output_fields,
         matched_dataset_ids=matched_dataset_ids,
@@ -433,6 +513,16 @@ def resolve_scheme_source_date_field_resolution(
         binding=binding,
         matched_source_items=matched_source_items,
     )
+    if schema_resolution.get("status") == "ambiguous":
+        candidates = [text(item) for item in safe_list(schema_resolution.get("candidates")) if text(item)]
+        return {
+            "field": "",
+            "status": "ambiguous",
+            "error": (
+                f"{binding_label} 的时间字段“{display_date_field}”"
+                f"可匹配到多个原始字段（{'、'.join(candidates)}），无法确定按哪个字段做 T-1 取数。"
+            ),
+        }
     if proc_rule_json:
         for field in candidate_fields:
             output_name = field.get("output_name", "")

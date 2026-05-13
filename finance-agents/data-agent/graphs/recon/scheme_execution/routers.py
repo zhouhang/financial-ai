@@ -21,6 +21,15 @@ def route_after_decide_prepare(state: AgentState) -> str:
     return "build_recon_inputs_node"
 
 
+def route_after_execute_proc(state: AgentState) -> str:
+    ctx = state.get("recon_ctx") or {}
+    if str(ctx.get("exec_status") or "").strip().lower() == "error":
+        return "build_recon_observation_node"
+    if str(ctx.get("failed_stage") or "").strip().lower() == "prepare":
+        return "build_recon_observation_node"
+    return "build_recon_inputs_node"
+
+
 def build_scheme_execution_graph() -> StateGraph:
     graph = StateGraph(AgentState)
     graph.add_node("decide_prepare_node", decide_prepare_node)
@@ -38,9 +47,15 @@ def build_scheme_execution_graph() -> StateGraph:
             "build_recon_inputs_node": "build_recon_inputs_node",
         },
     )
-    graph.add_edge("execute_proc_node", "build_recon_inputs_node")
+    graph.add_conditional_edges(
+        "execute_proc_node",
+        route_after_execute_proc,
+        {
+            "build_recon_inputs_node": "build_recon_inputs_node",
+            "build_recon_observation_node": "build_recon_observation_node",
+        },
+    )
     graph.add_edge("build_recon_inputs_node", "execute_recon_node")
     graph.add_edge("execute_recon_node", "build_recon_observation_node")
     graph.add_edge("build_recon_observation_node", END)
     return graph
-

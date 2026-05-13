@@ -244,11 +244,12 @@ def test_parse_bill_zip_rows_adds_metadata_and_row_key():
     assert [column["name"] for column in parsed["columns"]] == ["商户订单号", "支付宝交易号", "金额"]
     assert rows[0]["bill_type"] == "trade"
     assert rows[0]["bill_date"] == "2026-05-06"
-    assert rows[0]["merchant_order_no"] == "M-1"
-    assert rows[0]["alipay_trade_no"] == "A-1"
     assert len(rows[0]["source_row_key"]) == 64
     assert rows[0]["source_row_key"] != "M-1"
-    assert rows[0]["raw"]["金额"] == "10.00"
+    assert rows[0]["payload"] == {"商户订单号": "M-1", "支付宝交易号": "A-1", "金额": "10.00"}
+    assert "raw" not in rows[0]
+    assert "merchant_order_no" not in rows[0]
+    assert "alipay_trade_no" not in rows[0]
 
 
 def test_download_bill_file_sanitizes_http_error_url(monkeypatch):
@@ -346,12 +347,13 @@ def test_parse_csv_skips_preamble_before_header():
         {"name": "支付宝交易号", "data_type": "text", "nullable": True},
         {"name": "金额", "data_type": "text", "nullable": True},
     ]
-    assert rows[0]["merchant_order_no"] == "M-1"
-    assert rows[0]["alipay_trade_no"] == "A-1"
-    assert rows[0]["raw"]["金额"] == "10.00"
+    assert rows[0]["payload"] == {"商户订单号": "M-1", "支付宝交易号": "A-1", "金额": "10.00"}
+    assert "merchant_order_no" not in rows[0]
+    assert "alipay_trade_no" not in rows[0]
+    assert "raw" not in rows[0]
 
 
-def test_parse_direct_csv_rows_adds_business_order_no():
+def test_parse_direct_csv_rows_keeps_business_order_no_in_payload_only():
     connector = AlipayConnector(_config())
     content = "业务订单号,支付宝流水号,金额\nB-1,F-1,12.00\n".encode("utf-8-sig")
 
@@ -365,12 +367,14 @@ def test_parse_direct_csv_rows_adds_business_order_no():
     )
     rows = parsed["rows"]
 
-    assert rows[0]["business_order_no"] == "B-1"
-    assert rows[0]["alipay_trade_no"] == "F-1"
     assert rows[0]["source_file_name"] == "bill.csv"
     assert rows[0]["source_row_number"] == 2
     assert len(rows[0]["source_row_key"]) == 64
     assert rows[0]["source_row_key"] != "B-1"
+    assert rows[0]["payload"] == {"业务订单号": "B-1", "支付宝流水号": "F-1", "金额": "12.00"}
+    assert "business_order_no" not in rows[0]
+    assert "alipay_trade_no" not in rows[0]
+    assert "raw" not in rows[0]
 
 
 def test_parse_signcustomer_csv_filters_summary_and_footer_rows():
@@ -397,10 +401,14 @@ def test_parse_signcustomer_csv_filters_summary_and_footer_rows():
     rows = parsed["rows"]
 
     assert len(rows) == 1
-    assert rows[0]["alipay_trade_no"] == "202605080001"
-    assert rows[0]["merchant_order_no"] == "M-1"
-    assert rows[0]["business_order_no"] == "B-1"
-    assert rows[0]["raw"]["收入金额（+元）"] == "88.00"
+    assert rows[0]["payload"]["账务流水号"] == "202605080001"
+    assert rows[0]["payload"]["商户订单号"] == "M-1"
+    assert rows[0]["payload"]["业务流水号"] == "B-1"
+    assert rows[0]["payload"]["收入金额（+元）"] == "88.00"
+    assert "alipay_trade_no" not in rows[0]
+    assert "merchant_order_no" not in rows[0]
+    assert "business_order_no" not in rows[0]
+    assert "raw" not in rows[0]
 
 
 def test_parse_empty_signcustomer_bill_returns_columns_without_summary_rows():

@@ -14,6 +14,7 @@ RUNTIME_FUNCTIONS = {
     "month_of",
     "fraction_numerator",
     "to_decimal",
+    "strip_prefix",
 }
 
 INLINE_FORMULA_FUNCTIONS = {"coalesce", "is_null"}
@@ -1687,6 +1688,15 @@ def _compile_runtime_function_node(
         value_spec, _ = _compile_expression_to_value_spec(args[0], compile_context, numeric_context=False)
         if value_spec:
             return {"type": "function", "function": "to_decimal", "args": {"value": value_spec}}, "decimal"
+    if function_name == "strip_prefix" and len(args) == 2:
+        value_spec, _ = _compile_expression_to_value_spec(args[0], compile_context, numeric_context=False)
+        prefix_spec, _ = _compile_expression_to_value_spec(args[1], compile_context, numeric_context=False)
+        if value_spec and prefix_spec:
+            return {
+                "type": "function",
+                "function": "strip_prefix",
+                "args": {"value": value_spec, "prefix": prefix_spec},
+            }, "string"
     return None, "unknown"
 
 
@@ -1965,7 +1975,8 @@ def _ensure_schema_column(schema_step: dict[str, Any], *, target_field: str, dat
     for column in columns:
         if str(column.get("name") or "").strip() != target_field:
             continue
-        if not str(column.get("data_type") or "").strip():
+        current_type = str(column.get("data_type") or "").strip()
+        if not current_type or (current_type == "string" and data_type in {"decimal", "date"}):
             column["data_type"] = data_type or "string"
         return
     columns.append({"name": target_field, "data_type": data_type or "string"})
@@ -2075,6 +2086,8 @@ def _expression_data_type(expression: dict[str, Any], compile_context: StepCompi
             return "date"
         if function_name in {"month_of", "fraction_numerator", "to_decimal"}:
             return "decimal"
+        if function_name == "strip_prefix":
+            return "string"
     return "unknown"
 
 

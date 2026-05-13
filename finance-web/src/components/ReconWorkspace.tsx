@@ -316,7 +316,7 @@ interface SchemeMetaSummary {
 const SCHEME_LIST_TEMPLATE =
   'minmax(0,1.6fr) minmax(220px,1fr) minmax(220px,1fr) minmax(268px,auto)';
 const TASK_LIST_TEMPLATE =
-  'minmax(0,2.3fr) minmax(200px,1.1fr) minmax(180px,0.9fr) minmax(120px,0.7fr) minmax(280px,auto)';
+  'minmax(220px,1.5fr) minmax(180px,0.9fr) minmax(360px,2.2fr) minmax(140px,0.7fr) minmax(160px,0.8fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
   'minmax(0,2.7fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
 
@@ -874,31 +874,6 @@ function executionStatusMeta(status: string): { label: string; className: string
   };
 }
 
-function formatAnomalyTypeLabel(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'source_only') return '左侧独有';
-  if (normalized === 'target_only') return '右侧独有';
-  if (normalized === 'matched_with_diff') return '已匹配但字段不一致';
-  if (normalized === 'value_mismatch') return '字段值不一致';
-  if (normalized === 'amount_diff') return '金额不一致';
-  return value || '未知异常';
-}
-
-function formatReminderStatusLabel(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'pending') return '待催办';
-  if (normalized === 'sent') return '已催办';
-  if (normalized === 'completed') return '已完成';
-  if (normalized === 'channel_missing') return '缺少协作通道';
-  if (normalized === 'owner_missing') return '缺少责任人';
-  if (normalized === 'owner_unresolved') return '责任人未识别';
-  if (normalized === 'send_failed') return '催办发送失败';
-  if (normalized === 'cancelled') return '已取消';
-  if (normalized === 'sync_failed') return '状态同步失败';
-  if (normalized === 'skipped') return '已跳过';
-  return value || '--';
-}
-
 function formatProcessingStatusLabel(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'pending') return '待处理';
@@ -907,17 +882,6 @@ function formatProcessingStatusLabel(value: string): string {
   if (normalized === 'verifying') return '复核中';
   if (normalized === 'verified') return '已复核';
   if (normalized === 'closed') return '已关闭';
-  return value || '--';
-}
-
-function formatFixStatusLabel(value: string, isClosed: boolean): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'pending') return '待修复';
-  if (normalized === 'ready_for_verify') return '待复核';
-  if (normalized === 'fixed') return '已修复';
-  if (normalized === 'verified') return '已确认';
-  if (normalized === 'cancelled') return '已取消';
-  if (!value && isClosed) return '已关闭';
   return value || '--';
 }
 
@@ -949,55 +913,6 @@ function humanizeExceptionFieldName(field: string, fallback = ''): string {
   const normalized = stripRunExceptionFieldPrefix(field || fallback);
   if (!normalized) return fallback || '--';
   return PREPARED_OUTPUT_FIELD_LABEL_MAP[normalized] || humanizeProcDescription(normalized).trim() || normalized;
-}
-
-function buildRunExceptionJoinKeySummary(item: ReconRunExceptionDetail): string[] {
-  return getRunExceptionJoinKeys(item)
-    .map((entry) => {
-      const label = humanizeExceptionFieldName(
-        toText(entry.source_field),
-        toText(entry.target_field, '匹配字段'),
-      );
-      const sourceValue = formatDetailValue(entry.source_value);
-      const targetValue = formatDetailValue(entry.target_value);
-      if (sourceValue !== '--') {
-        return `${label}：${sourceValue}`;
-      }
-      if (targetValue !== '--') {
-        return `${label}：${targetValue}`;
-      }
-      return '';
-    })
-    .filter(Boolean);
-}
-
-function buildRunExceptionCompareSummary(item: ReconRunExceptionDetail): string[] {
-  return getRunExceptionCompareValues(item)
-    .map((entry) => {
-      const label = toText(
-        entry.name,
-        humanizeExceptionFieldName(toText(entry.source_field), toText(entry.target_field, '对比字段')),
-      );
-      const sourceValue = formatDetailValue(entry.source_value);
-      const targetValue = formatDetailValue(entry.target_value);
-      const diffValue = formatDetailValue(entry.diff_value);
-      return `${label}：左侧 ${sourceValue} / 右侧 ${targetValue}${diffValue !== '--' ? ` / 差额 ${diffValue}` : ''}`;
-    })
-    .filter(Boolean);
-}
-
-function getRunExceptionJoinKeys(item: ReconRunExceptionDetail): Array<Record<string, unknown>> {
-  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-  return asList(detail.join_key)
-    .map((entry) => asRecord(entry))
-    .filter((entry) => Object.keys(entry).length > 0);
-}
-
-function getRunExceptionCompareValues(item: ReconRunExceptionDetail): Array<Record<string, unknown>> {
-  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-  return asList(detail.compare_values)
-    .map((entry) => asRecord(entry))
-    .filter((entry) => Object.keys(entry).length > 0);
 }
 
 function getRunExceptionRawRecord(item: ReconRunExceptionDetail): Record<string, unknown> {
@@ -1117,11 +1032,16 @@ function mapScheme(item: unknown): ReconSchemeListItem {
   };
 }
 
-function mapTask(item: unknown, schemeNameByCode: Map<string, string>): ReconTaskListItem {
+function mapTask(
+  item: unknown,
+  schemeNameByCode: Map<string, string>,
+  schemeMetaByCode: Map<string, SchemeMetaSummary>,
+): ReconTaskListItem {
   const raw = asRecord(item);
   const enabled = toBool(raw.is_enabled, true);
   const schemeCode = toText(raw.scheme_code);
   const planMeta = firstNonEmptyRecord(raw.plan_meta_json, raw.plan_meta, raw.meta);
+  const schemeMeta = schemeMetaByCode.get(schemeCode) || null;
   const summaryRecipient = asRecord(planMeta.summary_recipient);
   const ownerSummary = summarizeOwnerMapping(raw.owner_mapping_json);
   const ownerMapping = asRecord(raw.owner_mapping_json);
@@ -1143,6 +1063,8 @@ function mapTask(item: unknown, schemeNameByCode: Map<string, string>): ReconTas
     scheduleType: toText(raw.schedule_type),
     scheduleExpr: toText(raw.schedule_expr),
     bizDateOffset: toText(raw.biz_date_offset, 'T-1'),
+    dateFieldSummary: formatRunPlanDateFieldSummary(planMeta.date_field_by_input_key, schemeMeta),
+    dateFieldLines: formatRunPlanDateFieldLines(planMeta.date_field_by_input_key, schemeMeta),
     leftTimeSemantic: toText(planMeta.left_time_semantic),
     rightTimeSemantic: toText(planMeta.right_time_semantic),
     channelConfigId: toText(raw.channel_config_id),
@@ -1502,6 +1424,36 @@ function buildDefaultRunPlanDateFieldMap(
       next[input.key] = currentIsValid ? current : pickDefaultRunPlanDateField(input);
     });
   return next;
+}
+
+function formatRunPlanDateFieldSummary(
+  rawDateFieldMap: unknown,
+  schemeMeta: SchemeMetaSummary | null,
+): string {
+  const lines = formatRunPlanDateFieldLines(rawDateFieldMap, schemeMeta);
+  return lines.join('、') || '--';
+}
+
+function formatRunPlanDateFieldLines(
+  rawDateFieldMap: unknown,
+  schemeMeta: SchemeMetaSummary | null,
+): string[] {
+  const dateFieldMap = asRecord(rawDateFieldMap);
+  const inputByKey = new Map(
+    extractRunPlanInputDatasets(schemeMeta).map((input) => [input.key, input]),
+  );
+  const labels = Object.entries(dateFieldMap)
+    .map(([inputKey, value]) => {
+      const fieldName = toText(value).trim();
+      if (!fieldName) return '';
+      const input = inputByKey.get(inputKey);
+      const fieldLabel = toText(input?.source?.fieldLabelMap?.[fieldName]).trim();
+      const displayFieldName = fieldLabel || renderPreparedFieldOptionLabel(fieldName);
+      const datasetName = toText(input?.displayName).trim();
+      return datasetName ? `${datasetName}-${displayFieldName}` : displayFieldName;
+    })
+    .filter(Boolean);
+  return dedupeTextList(labels);
 }
 
 function normalizeSchemaType(value: unknown): string {
@@ -2452,6 +2404,104 @@ function buildAllReconFieldOptions(
   return buildReconFieldOptions(fields, '', undefined, 'normal', fieldLabelMap);
 }
 
+function inferOutputFieldSemanticRoleFromSamples(
+  fieldName: string,
+  fieldLabelMap: Record<string, string> | undefined,
+  rows: PreviewTableRow[],
+): OutputFieldSemanticRole {
+  const label = fieldLabelMap?.[fieldName] || '';
+  const nameRole = inferOutputFieldSemanticRole(fieldName, label);
+  if (nameRole !== 'normal') return nameRole;
+
+  const values = rows
+    .map((row) => row[fieldName])
+    .filter((value) => value !== null && value !== undefined)
+    .slice(0, 5);
+  const hasPrefixedOrderLikeValue = values.some(
+    (value) => typeof value === 'string' && /^[A-Za-z]\w*\d{8,}$/.test(value.trim()),
+  );
+  if (hasPrefixedOrderLikeValue && !/(金额|收入|支出|付款|收款|余额|amount|money|fee|price)/i.test(`${fieldName} ${label}`)) {
+    return 'match_key';
+  }
+
+  const numericCount = values.filter((value) => {
+    if (typeof value === 'number') return true;
+    if (typeof value !== 'string') return false;
+    return /^-?\d+(?:\.\d+)?$/.test(value.trim().replace(/,/g, ''));
+  }).length;
+  if (values.length > 0 && numericCount === values.length && /(金额|收入|支出|付款|收款|余额|amount|money|fee|price)/i.test(`${fieldName} ${label}`)) {
+    return 'compare_field';
+  }
+
+  return 'normal';
+}
+
+function createOutputFieldsFromRows(
+  rows: PreviewTableRow[],
+  fieldLabelMap?: Record<string, string>,
+): OutputFieldDraft[] {
+  const orderedNames: string[] = [];
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      const name = key.trim();
+      if (name && !orderedNames.includes(name)) {
+        orderedNames.push(name);
+      }
+    });
+  });
+
+  return orderedNames.map((name) => {
+    const draft = createOutputFieldDraft(name);
+    draft.semanticRole = inferOutputFieldSemanticRoleFromSamples(name, fieldLabelMap, rows);
+    draft.valueMode = 'source_field';
+    draft.sourceField = name;
+    return draft;
+  });
+}
+
+function mergeOutputFieldsByName(
+  primary: OutputFieldDraft[],
+  fallback: OutputFieldDraft[],
+): OutputFieldDraft[] {
+  const merged = new Map<string, OutputFieldDraft>();
+  fallback.forEach((field) => {
+    const name = field.outputName.trim();
+    if (name) merged.set(name, field);
+  });
+  primary.forEach((field) => {
+    const name = field.outputName.trim();
+    if (name) merged.set(name, field);
+  });
+  return Array.from(merged.values());
+}
+
+async function resolveRuleGenerationTrialSamples(
+  sideDraft: AiProcSideDraft,
+  selectedSources: SchemeSourceOption[],
+  authToken?: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  if (sideDraft.sampleDatasets.length > 0) {
+    return sideDraft.sampleDatasets;
+  }
+  return buildRuleGenerationSourcePayloads(selectedSources, authToken);
+}
+
+async function buildAiProcTrialSampleDatasets(
+  sideDrafts: Record<AiProcSide, AiProcSideDraft>,
+  selectedLeftSources: SchemeSourceOption[],
+  selectedRightSources: SchemeSourceOption[],
+  authToken?: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const [leftSamples, rightSamples] = await Promise.all([
+    resolveRuleGenerationTrialSamples(sideDrafts.left, selectedLeftSources, authToken),
+    resolveRuleGenerationTrialSamples(sideDrafts.right, selectedRightSources, authToken),
+  ]);
+  return [
+    ...leftSamples.map((source) => ({ ...source, side: 'left' })),
+    ...rightSamples.map((source) => ({ ...source, side: 'right' })),
+  ];
+}
+
 function buildStructuredReconDraftText(config: {
   reconRuleName: string;
   matchFieldPairs: ReconFieldPairDraft[];
@@ -3285,43 +3335,75 @@ export default function ReconWorkspace({
     () => buildSemanticRoleReconFieldPairs(leftOutputFields, rightOutputFields, 'compare_field'),
     [leftOutputFields, rightOutputFields],
   );
+  const aiLeftOutputFields = useMemo(
+    () => mergeOutputFieldsByName(
+      aiProcSideDrafts.left.outputFields || [],
+      createOutputFieldsFromRows(aiProcSideDrafts.left.outputRows || [], aiProcSideDrafts.left.outputFieldLabelMap),
+    ),
+    [aiProcSideDrafts.left.outputFieldLabelMap, aiProcSideDrafts.left.outputFields, aiProcSideDrafts.left.outputRows],
+  );
+  const aiRightOutputFields = useMemo(
+    () => mergeOutputFieldsByName(
+      aiProcSideDrafts.right.outputFields || [],
+      createOutputFieldsFromRows(aiProcSideDrafts.right.outputRows || [], aiProcSideDrafts.right.outputFieldLabelMap),
+    ),
+    [aiProcSideDrafts.right.outputFieldLabelMap, aiProcSideDrafts.right.outputFields, aiProcSideDrafts.right.outputRows],
+  );
+  const activeLeftOutputFields = procBuildMode === 'ai_complex_rule' && leftOutputFields.length === 0
+    ? aiLeftOutputFields
+    : leftOutputFields;
+  const activeRightOutputFields = procBuildMode === 'ai_complex_rule' && rightOutputFields.length === 0
+    ? aiRightOutputFields
+    : rightOutputFields;
+  const aiRoleDerivedMatchFieldPairs = useMemo(
+    () => buildSemanticRoleReconFieldPairs(activeLeftOutputFields, activeRightOutputFields, 'match_key'),
+    [activeLeftOutputFields, activeRightOutputFields],
+  );
+  const aiRoleDerivedCompareFieldPairs = useMemo(
+    () => buildSemanticRoleReconFieldPairs(activeLeftOutputFields, activeRightOutputFields, 'compare_field'),
+    [activeLeftOutputFields, activeRightOutputFields],
+  );
   const activeMatchFieldPairs = useMemo(
     () => (
       parsedReconConfig.matchFieldPairs.length > 0
         ? parsedReconConfig.matchFieldPairs
+        : aiRoleDerivedMatchFieldPairs.length > 0
+        ? aiRoleDerivedMatchFieldPairs
         : roleDerivedMatchFieldPairs
     ),
-    [parsedReconConfig.matchFieldPairs, roleDerivedMatchFieldPairs],
+    [aiRoleDerivedMatchFieldPairs, parsedReconConfig.matchFieldPairs, roleDerivedMatchFieldPairs],
   );
   const activeCompareFieldPairs = useMemo(
     () => (
       parsedReconConfig.compareFieldPairs.length > 0
         ? parsedReconConfig.compareFieldPairs
+        : aiRoleDerivedCompareFieldPairs.length > 0
+        ? aiRoleDerivedCompareFieldPairs
         : roleDerivedCompareFieldPairs
     ),
-    [parsedReconConfig.compareFieldPairs, roleDerivedCompareFieldPairs],
+    [aiRoleDerivedCompareFieldPairs, parsedReconConfig.compareFieldPairs, roleDerivedCompareFieldPairs],
   );
   const leftOutputFieldLabelMap = useMemo(
     () => mergeLabelMaps(
-      buildOutputFieldLabelMap(leftOutputFields, selectedLeftSources),
+      buildOutputFieldLabelMap(activeLeftOutputFields, selectedLeftSources),
       aiProcSideDrafts.left.outputFieldLabelMap,
     ),
-    [aiProcSideDrafts.left.outputFieldLabelMap, leftOutputFields, selectedLeftSources],
+    [activeLeftOutputFields, aiProcSideDrafts.left.outputFieldLabelMap, selectedLeftSources],
   );
   const rightOutputFieldLabelMap = useMemo(
     () => mergeLabelMaps(
-      buildOutputFieldLabelMap(rightOutputFields, selectedRightSources),
+      buildOutputFieldLabelMap(activeRightOutputFields, selectedRightSources),
       aiProcSideDrafts.right.outputFieldLabelMap,
     ),
-    [aiProcSideDrafts.right.outputFieldLabelMap, rightOutputFields, selectedRightSources],
+    [activeRightOutputFields, aiProcSideDrafts.right.outputFieldLabelMap, selectedRightSources],
   );
   const leftReconFieldOptions = useMemo(
-    () => buildAllReconFieldOptions(leftOutputFields, leftOutputFieldLabelMap),
-    [leftOutputFieldLabelMap, leftOutputFields],
+    () => buildAllReconFieldOptions(activeLeftOutputFields, leftOutputFieldLabelMap),
+    [activeLeftOutputFields, leftOutputFieldLabelMap],
   );
   const rightReconFieldOptions = useMemo(
-    () => buildAllReconFieldOptions(rightOutputFields, rightOutputFieldLabelMap),
-    [rightOutputFieldLabelMap, rightOutputFields],
+    () => buildAllReconFieldOptions(activeRightOutputFields, rightOutputFieldLabelMap),
+    [activeRightOutputFields, rightOutputFieldLabelMap],
   );
   const compiledReconRuleResult = useMemo(() => {
     try {
@@ -3422,8 +3504,9 @@ export default function ReconWorkspace({
       const allSchemes = asList(schemeData.schemes).map(mapScheme);
       const nextSchemes = allSchemes.filter((item) => item.status === 'enabled');
       const backendSchemeNameByCode = new Map(allSchemes.map((item) => [item.schemeCode, item.name]));
+      const backendSchemeMetaByCode = new Map(allSchemes.map((item) => [item.schemeCode, extractSchemeMeta(item)]));
       const allTasks = asList(taskData.tasks || taskData.run_plans).map((item) =>
-        mapTask(item, backendSchemeNameByCode),
+        mapTask(item, backendSchemeNameByCode, backendSchemeMetaByCode),
       );
       const nextTasks = allTasks
         .filter((item) => !isTaskMarkedDeleted(item))
@@ -3951,23 +4034,22 @@ export default function ReconWorkspace({
         if (mergedRule) {
           setIsTrialingProc(true);
           try {
-            const [leftSamples, rightSamples] = await Promise.all([
-              buildRuleGenerationSourcePayloads(selectedLeftSources, authToken),
-              buildRuleGenerationSourcePayloads(selectedRightSources, authToken),
-            ]);
+            const mergedSampleDatasets = await buildAiProcTrialSampleDatasets(
+              aiProcSideDraftsRef.current,
+              selectedLeftSources,
+              selectedRightSources,
+              authToken,
+            );
             const trialResponse = await fetchReconAutoApi('/schemes/design/proc-trial', {
               method: 'POST',
               headers: {
                 Authorization: `Bearer ${authToken || ''}`,
                 'Content-Type': 'application/json',
               },
-        body: JSON.stringify({
-          proc_rule_json: mergedRule,
-          input_plan_json: mergedInputPlan || undefined,
-          sample_datasets: [
-            ...leftSamples.map((source) => ({ ...source, side: 'left' })),
-            ...rightSamples.map((source) => ({ ...source, side: 'right' })),
-                ],
+              body: JSON.stringify({
+                proc_rule_json: mergedRule,
+                input_plan_json: mergedInputPlan || undefined,
+                sample_datasets: mergedSampleDatasets,
               }),
             });
             const trialData = await trialResponse.json().catch(() => ({}));
@@ -4745,6 +4827,14 @@ export default function ReconWorkspace({
       if (!procPrepareResponse.ok) {
         throw new Error(String(procPrepareData.detail || procPrepareData.message || '同步数据整理规则失败'));
       }
+      const procTrialSampleDatasets = procBuildMode === 'ai_complex_rule'
+        ? await buildAiProcTrialSampleDatasets(
+            aiProcSideDraftsRef.current,
+            selectedLeftSources,
+            selectedRightSources,
+            authToken,
+          )
+        : [];
       const procTrialResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/trial`, {
         method: 'POST',
         headers: {
@@ -4753,6 +4843,7 @@ export default function ReconWorkspace({
         },
         body: JSON.stringify({
           input_plan_json: schemeDraft.inputPlanJson || undefined,
+          sample_datasets: procTrialSampleDatasets,
         }),
       });
       const procTrialData = await procTrialResponse.json().catch(() => ({}));
@@ -4864,8 +4955,12 @@ export default function ReconWorkspace({
     compiledReconRuleResult.json,
     ensureDesignSession,
     parsedReconConfig,
+    procBuildMode,
     schemeDraft.procRuleJson,
     schemeDraft.procTrialStatus,
+    schemeDraft.inputPlanJson,
+    selectedLeftSources,
+    selectedRightSources,
     syncDesignTarget,
     toCompatibilityResult,
   ]);
@@ -5195,8 +5290,7 @@ export default function ReconWorkspace({
       );
       return;
     }
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const autoName = `${schemeName} ${todayStr}`;
+    const autoName = schemeName.trim() || '未命名对账任务';
     const inputBindings = buildRunPlanBindings(
       matchedSchemeMeta,
       planDraft.dateFieldByInputKey,
@@ -5607,13 +5701,18 @@ export default function ReconWorkspace({
   const schemeStepOneReady = Boolean(schemeDraft.name.trim());
   const aiProcGenerationBusy =
     aiProcSideDrafts.left.status === 'generating' || aiProcSideDrafts.right.status === 'generating';
+  const aiProcBothSidesSucceeded =
+    aiProcSideDrafts.left.status === 'succeeded' && aiProcSideDrafts.right.status === 'succeeded';
+  const activeLeftOutputFieldsReady = activeLeftOutputFields.length > 0;
+  const activeRightOutputFieldsReady = activeRightOutputFields.length > 0;
   const aiProcStepReady = Boolean(
-    aiProcSideDrafts.left.status === 'succeeded'
-    && aiProcSideDrafts.right.status === 'succeeded'
+    aiProcBothSidesSucceeded
     && schemeDraft.procRuleJson
-    && leftOutputFields.length > 0
-    && rightOutputFields.length > 0,
+    && activeLeftOutputFieldsReady
+    && activeRightOutputFieldsReady,
   );
+  const isSchemeWizardBusy =
+    isTrialingProc || isTrialingRecon || aiProcGenerationBusy;
   const schemeStepTwoReady = Boolean(
     procBuildMode === 'ai_complex_rule'
       ? aiProcStepReady
@@ -5624,9 +5723,50 @@ export default function ReconWorkspace({
   );
   const schemeStepTwoPassed =
     schemeDraft.procTrialStatus === 'passed' && Boolean(schemeDraft.procRuleJson);
+  const schemeStepTwoBlockReason = useMemo(() => {
+    if (schemeWizardStep !== 2) return '';
+    if (isSchemeWizardBusy) return '当前正在生成或试跑，请等待本次操作完成后再进入下一步。';
+    if (procBuildMode !== 'ai_complex_rule') {
+      if (selectedLeftSources.length === 0 || selectedRightSources.length === 0) {
+        return '请先完成左右数据集选择。';
+      }
+      if (leftOutputFields.length === 0 || rightOutputFields.length === 0) {
+        return '请先完成左右输出字段配置。';
+      }
+      if (!schemeStepTwoPassed) {
+        return '请先完成数据整理试跑验证。';
+      }
+      return '';
+    }
+    if (!aiProcBothSidesSucceeded) {
+      return '请先分别完成左侧和右侧的“AI生成输出数据”。';
+    }
+    if (!schemeDraft.procRuleJson) {
+      return '左右侧输出已生成，但合并后的数据整理规则尚未生成，请重新生成最近修改的一侧。';
+    }
+    if (!activeLeftOutputFieldsReady || !activeRightOutputFieldsReady) {
+      return '左右侧输出已生成，但未识别到可用于第三步的输出字段，请重新生成对应侧输出数据。';
+    }
+    if (!schemeStepTwoPassed) {
+      return schemeDraft.procTrialSummary || 'AI生成输出数据尚未通过，请重新生成左右侧输出数据。';
+    }
+    return '';
+  }, [
+    activeLeftOutputFieldsReady,
+    activeRightOutputFieldsReady,
+    aiProcBothSidesSucceeded,
+    isSchemeWizardBusy,
+    leftOutputFields.length,
+    procBuildMode,
+    rightOutputFields.length,
+    schemeDraft.procRuleJson,
+    schemeDraft.procTrialSummary,
+    schemeStepTwoPassed,
+    schemeWizardStep,
+    selectedLeftSources.length,
+    selectedRightSources.length,
+  ]);
   const schemeStepThreeReady = Boolean(compiledReconRuleResult.json);
-  const isSchemeWizardBusy =
-    isTrialingProc || isTrialingRecon || aiProcGenerationBusy;
 
   const goToNextSchemeStep = useCallback(async () => {
     setModalError(null);
@@ -5645,15 +5785,16 @@ export default function ReconWorkspace({
     if (schemeWizardStep === 2) {
       if (!schemeStepTwoReady) {
         setModalError(
-          procBuildMode === 'ai_complex_rule'
-            ? '请先分别完成左侧和右侧的“AI生成输出数据”。'
-            : '请先完成左右数据集选择与输出字段配置。',
+          schemeStepTwoBlockReason
+          || (procBuildMode === 'ai_complex_rule'
+              ? '请先分别完成左侧和右侧的“AI生成输出数据”。'
+              : '请先完成左右数据集选择与输出字段配置。'),
         );
         return;
       }
       if (!schemeStepTwoPassed) {
         if (procBuildMode === 'ai_complex_rule') {
-          setModalError('AI生成输出数据尚未通过，请重新生成左右侧输出数据。');
+          setModalError(schemeStepTwoBlockReason || 'AI生成输出数据尚未通过，请重新生成左右侧输出数据。');
           return;
         }
         const passed = await trialProcDraft();
@@ -5664,6 +5805,19 @@ export default function ReconWorkspace({
       }
       const nextMatchFieldPairs = filterCompleteReconFieldPairs(activeMatchFieldPairs);
       const nextCompareFieldPairs = filterCompleteReconFieldPairs(activeCompareFieldPairs);
+      if (
+        procBuildMode === 'ai_complex_rule'
+        && (leftOutputFields.length === 0 || rightOutputFields.length === 0)
+      ) {
+        setWizardDraftState((prev) => ({
+          ...prev,
+          preparation: {
+            ...prev.preparation,
+            leftOutputFields: leftOutputFields.length > 0 ? prev.preparation.leftOutputFields : activeLeftOutputFields,
+            rightOutputFields: rightOutputFields.length > 0 ? prev.preparation.rightOutputFields : activeRightOutputFields,
+          },
+        }));
+      }
       applyStructuredReconConfig({
         reconRuleName: schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name),
         matchFieldPairs: nextMatchFieldPairs,
@@ -5684,6 +5838,7 @@ export default function ReconWorkspace({
     compiledReconRuleResult.json,
     schemeStepOneReady,
     schemeStepThreeReady,
+    schemeStepTwoBlockReason,
     schemeStepTwoPassed,
     schemeStepTwoReady,
     procBuildMode,
@@ -5694,7 +5849,11 @@ export default function ReconWorkspace({
     trialProcDraft,
     applyStructuredReconConfig,
     activeCompareFieldPairs,
+    activeLeftOutputFields,
     activeMatchFieldPairs,
+    activeRightOutputFields,
+    leftOutputFields.length,
+    rightOutputFields.length,
   ]);
 
   const goToPreviousSchemeStep = useCallback(() => {
@@ -5918,9 +6077,9 @@ export default function ReconWorkspace({
         })
       : (
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
-      <div className="min-w-[1080px]">
+      <div className="min-w-[1560px]">
         <ListHeader
-          columns={['任务名称', '对账方案', '运行计划', '状态', '操作']}
+          columns={['任务名称', '对账方案', '对账日期字段', '运行计划', '任务创建时间', '状态', '操作']}
           template={TASK_LIST_TEMPLATE}
         />
         {tasks.map((item) => {
@@ -5941,17 +6100,32 @@ export default function ReconWorkspace({
               style={{ gridTemplateColumns: TASK_LIST_TEMPLATE }}
             >
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
-                <div className="mt-1 space-y-0.5 text-sm leading-5 text-text-secondary">
-                  <p>{resolveChannelProviderLabel(item.channelConfigId)}</p>
-                  <p>对账汇总接收人：{item.summaryRecipient || '--'}</p>
-                  <p>责任人：{item.ownerSummary || '--'}</p>
-                </div>
+                <p className="truncate text-sm font-semibold text-text-primary" title={item.name}>
+                  {item.name || '--'}
+                </p>
+                <p className="mt-1 truncate text-xs leading-5 text-text-secondary">
+                  {resolveChannelProviderLabel(item.channelConfigId)}
+                </p>
+                <p className="truncate text-xs leading-5 text-text-secondary">
+                  汇总：{item.summaryRecipient || '--'} · 责任：{item.ownerSummary || '--'}
+                </p>
               </div>
               <span className="truncate text-sm text-text-secondary">{item.schemeName || '--'}</span>
+              <div className="min-w-0 space-y-1 text-sm leading-5 text-text-secondary" title={item.dateFieldSummary}>
+                {item.dateFieldLines.length > 0 ? (
+                  item.dateFieldLines.map((line) => (
+                    <p key={line} className="truncate">
+                      {line}
+                    </p>
+                  ))
+                ) : (
+                  <p>--</p>
+                )}
+              </div>
               <span className="text-sm text-text-secondary">
                 {formatScheduleLabel(item.scheduleType, item.scheduleExpr)}
               </span>
+              <span className="text-sm text-text-secondary">{formatDateTime(item.createdAt)}</span>
               <span
                 className={cn(
                   'justify-self-start rounded-full border px-2.5 py-1 text-xs font-medium',
@@ -6274,7 +6448,7 @@ export default function ReconWorkspace({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">新增对账方案</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">按三步完成方案设计与试跑确认</h3>
+            <h3 id="recon-center-modal-title" className="mt-1 text-lg font-semibold text-text-primary">按三步完成方案设计与试跑确认</h3>
           </div>
           <div className="space-y-6 px-6 py-5">
             <div className="grid gap-3 lg:grid-cols-3">
@@ -6296,7 +6470,7 @@ export default function ReconWorkspace({
             ) : null}
             {renderSchemeWizardContent()}
           </div>
-          <div className="flex items-center justify-between border-t border-border px-6 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-6 py-4">
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -6315,6 +6489,11 @@ export default function ReconWorkspace({
                 </button>
               ) : null}
             </div>
+            {schemeWizardStep === 2 && schemeStepTwoBlockReason ? (
+              <p className="max-w-xl text-right text-xs leading-5 text-amber-700">
+                {schemeStepTwoBlockReason}
+              </p>
+            ) : null}
             {schemeWizardStep < 3 ? (
               <button
                 type="button"
@@ -6355,7 +6534,7 @@ export default function ReconWorkspace({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">新增运行计划</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">为方案补充调度、对账周期、协作通道与责任人</h3>
+            <h3 id="recon-center-modal-title" className="mt-1 text-lg font-semibold text-text-primary">为方案补充调度、对账周期、协作通道与责任人</h3>
           </div>
           <div className="space-y-4 px-6 py-5">
             {modalError ? (
@@ -6794,15 +6973,9 @@ export default function ReconWorkspace({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">方案详情</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">{scheme.name}</h3>
+            <h3 id="recon-center-modal-title" className="mt-1 text-lg font-semibold text-text-primary">{scheme.name}</h3>
           </div>
           <div className="space-y-5 px-6 py-5">
-            <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-              <p className="text-sm font-semibold text-text-primary">对账目标</p>
-              <p className="mt-2 text-sm leading-6 text-text-secondary">
-                {schemeMeta.businessGoal || '当前方案尚未补充业务说明。'}
-              </p>
-            </div>
             <div className="grid gap-4 xl:grid-cols-2">
               <div className="min-w-0 overflow-hidden rounded-3xl border border-border bg-surface-secondary p-4">
                 <p className="text-sm font-semibold text-text-primary">左侧数据</p>
@@ -6871,23 +7044,6 @@ export default function ReconWorkspace({
                 </div>
               </div>
             </div>
-            <div className="grid gap-4 xl:grid-cols-2">
-              <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-                <p className="text-sm font-semibold text-text-primary">数据整理</p>
-                <p className="mt-2 text-sm leading-6 text-text-secondary">
-                  {schemeMeta.procTrialSummary || '暂无摘要。'}
-                </p>
-                <p className="mt-2 text-xs text-text-muted">
-                  规则：{schemeMeta.procRuleName || scheme.procRuleCode || '--'}
-                </p>
-              </div>
-              <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-                <p className="text-sm font-semibold text-text-primary">数据对账</p>
-                {(schemeMeta.reconRuleName || scheme.reconRuleCode) ? (
-                  <p className="mt-2 text-xs text-text-muted">规则：{schemeMeta.reconRuleName || scheme.reconRuleCode}</p>
-                ) : null}
-              </div>
-            </div>
           </div>
           <div className="flex items-center justify-end gap-3 border-t border-border px-6 py-4">
             <button
@@ -6908,7 +7064,7 @@ export default function ReconWorkspace({
         <>
           <div className="border-b border-border px-6 py-5">
             <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">任务详情</p>
-            <h3 className="mt-1 text-lg font-semibold text-text-primary">{task.name}</h3>
+            <h3 id="recon-center-modal-title" className="mt-1 text-lg font-semibold text-text-primary">{task.name}</h3>
           </div>
           <div className="px-6 py-5">
             <div className="divide-y divide-border-subtle">
@@ -6930,13 +7086,15 @@ export default function ReconWorkspace({
     const { run } = modalState;
     const modalExceptions = exceptionsByRunId[run.id] || [];
     const statusMeta = executionStatusMeta(run.executionStatus);
+    const normalizedRunStatus = run.executionStatus.trim().toLowerCase();
+    const shouldShowRunFailureInfo = !['success', 'succeeded', 'completed'].includes(normalizedRunStatus);
 
     return (
       <>
         <div className="border-b border-border px-6 py-5">
           <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常看板</p>
           <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold text-text-primary">{run.planName}</h3>
+            <h3 id="recon-center-modal-title" className="text-lg font-semibold text-text-primary">{run.planName}</h3>
             <button
               type="button"
               onClick={() => void handleRerunValidation(run.id)}
@@ -6978,18 +7136,22 @@ export default function ReconWorkspace({
               <p className="text-xs text-text-secondary">结束时间</p>
               <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(run.finishedAt)}</p>
             </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">失败阶段</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.failedStage || '--'}</p>
-            </div>
+            {shouldShowRunFailureInfo ? (
+              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+                <p className="text-xs text-text-secondary">失败阶段</p>
+                <p className="mt-1 text-sm font-medium text-text-primary">{run.failedStage || '--'}</p>
+              </div>
+            ) : null}
           </div>
 
-          <div className="rounded-3xl border border-border bg-surface-secondary px-4 py-4">
-            <p className="text-xs text-text-secondary">失败原因</p>
-            <p className="mt-2 text-sm leading-6 text-text-primary">
-              {run.failedReason || '本次运行没有失败原因，通常表示执行成功或尚未返回失败明细。'}
-            </p>
-          </div>
+          {shouldShowRunFailureInfo ? (
+            <div className="rounded-3xl border border-border bg-surface-secondary px-4 py-4">
+              <p className="text-xs text-text-secondary">失败原因</p>
+              <p className="mt-2 text-sm leading-6 text-text-primary">
+                {run.failedReason || '本次运行没有失败原因，通常表示执行成功或尚未返回失败明细。'}
+              </p>
+            </div>
+          ) : null}
 
           {loadingExceptionsRunId === run.id ? (
             <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
@@ -6999,61 +7161,33 @@ export default function ReconWorkspace({
           ) : modalExceptions.length > 0 ? (
             <div className="overflow-x-auto rounded-3xl border border-border bg-surface">
               <div className="min-w-[940px]">
-                <div className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_170px] gap-6 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
+                <div className="grid grid-cols-[minmax(0,3.4fr)_140px_140px_120px] gap-6 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
                   <span>异常摘要</span>
                   <span>责任人</span>
-                  <span>催办</span>
                   <span>处理进展</span>
-                  <span>修复状态</span>
+                  <span className="justify-self-end">操作</span>
                 </div>
                 {modalExceptions.map((item) => (
                   <div
                     key={item.id}
-                    className="grid grid-cols-[minmax(0,2.2fr)_140px_120px_120px_170px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
+                    className="grid grid-cols-[minmax(0,3.4fr)_140px_140px_120px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
                   >
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-text-primary">{item.summary}</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <span className="inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-700">
-                          {formatAnomalyTypeLabel(item.anomalyType)}
-                        </span>
-                        {buildRunExceptionJoinKeySummary(item).slice(0, 1).map((line) => (
-                          <span
-                            key={`${item.id}-${line}`}
-                            className="inline-flex rounded-full border border-border bg-surface-secondary px-2 py-0.5 text-[11px] text-text-secondary"
-                          >
-                            {line}
-                          </span>
-                        ))}
-                      </div>
-                      <p className="mt-2 text-xs leading-5 text-text-secondary">
-                        {buildRunExceptionCompareSummary(item)[0]
-                          || item.latestFeedback
-                          || '打开详情查看匹配字段、对比字段差异与左右侧原始记录。'}
+                      <p className="line-clamp-4 text-sm font-medium leading-6 text-text-primary">
+                        {item.summary || '异常详情待补充。'}
                       </p>
+                    </div>
+                    <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
+                    <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
+                    <div className="justify-self-end">
                       <button
                         type="button"
                         onClick={() => setSelectedExceptionDetail(item)}
-                        className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
                       >
                         <Eye className="h-3.5 w-3.5" />
                         查看详情
                       </button>
-                    </div>
-                    <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
-                    <span className="text-sm text-text-secondary">{formatReminderStatusLabel(item.reminderStatus)}</span>
-                    <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={cn(
-                          'rounded-full border px-2.5 py-1 text-xs font-medium',
-                          item.isClosed
-                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                            : 'border-amber-200 bg-amber-50 text-amber-700',
-                        )}
-                      >
-                        {formatFixStatusLabel(item.fixStatus, item.isClosed)}
-                      </span>
                     </div>
                   </div>
                 ))}
@@ -7154,6 +7288,9 @@ export default function ReconWorkspace({
       {modalState ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.24)] px-4 py-8">
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="recon-center-modal-title"
             className={cn(
               'max-h-[88vh] w-full overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]',
               modalMaxWidthClass,

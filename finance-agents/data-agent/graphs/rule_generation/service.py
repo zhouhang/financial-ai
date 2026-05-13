@@ -38,6 +38,7 @@ from graphs.rule_generation.proc.understanding import (
     normalize_source_reference_usage,
     normalize_understanding,
 )
+from tools.mcp_client import data_source_list_collection_records
 
 logger = logging.getLogger(__name__)
 
@@ -270,8 +271,12 @@ class RuleGenerationService:
                         return
                     if context.pop("restart_validation_loop", False):
                         continue
-                    yield self._graph_failed(context)
-                    return
+                    if _node_success(context.get("sample_result")):
+                        if _node_success(context.get("assert_result")):
+                            break
+                    else:
+                        yield self._graph_failed(context)
+                        return
 
                 yield self._node_started(context, "assert_output", attempt=runtime_attempt)
                 yield await self._run_node(context, "assert_output", self._assert_output, attempt=runtime_attempt)
@@ -286,6 +291,8 @@ class RuleGenerationService:
                         return
                     if context.pop("restart_validation_loop", False):
                         continue
+                    if _node_success(context.get("assert_result")):
+                        break
                     yield self._graph_failed(context)
                     return
                 break
@@ -456,6 +463,38 @@ class RuleGenerationService:
         yield diagnosis_event
         diagnosis = context.get("sample_diagnosis_result") or {}
         if diagnosis.get("terminal") or not diagnosis.get("repair_recommended"):
+            backfill_event = await self._try_refetch_filter_sample_and_rerun(
+                context,
+                diagnosis=diagnosis,
+                attempt=runtime_attempt,
+            )
+            if backfill_event:
+                yield backfill_event
+                if _node_success(context.get("sample_result")):
+                    yield self._node_started(context, "assert_output", attempt=runtime_attempt)
+                    yield await self._run_node(
+                        context,
+                        "assert_output",
+                        self._assert_output,
+                        attempt=runtime_attempt,
+                    )
+                    if _node_success(context.get("assert_result")):
+                        return
+                if _node_success(context.get("sample_refetch_result")):
+                    _mark_terminal_failure(
+                        context,
+                        category="sample_data_issue",
+                        stage="assert_output" if context.get("assert_result") else "run_sample",
+                        message="回源命中样例后重新执行预览仍未通过，已停止自动修复。",
+                        failures=_stage_failures(
+                            context,
+                            "assert_output" if context.get("assert_result") else "run_sample",
+                            context.get("assert_result") or context.get("sample_result") or {},
+                        ),
+                    )
+                    context["runtime_terminal_failure"] = True
+                    yield self._graph_failed(context)
+                    return
             _mark_terminal_failure(
                 context,
                 category="sample_data_issue",
@@ -482,6 +521,121 @@ class RuleGenerationService:
             return
         if not context.get("restart_validation_loop"):
             context["runtime_terminal_failure"] = True
+
+    async def _try_refetch_filter_sample_and_rerun(
+        self,
+        context: dict[str, Any],
+        *,
+        diagnosis: dict[str, Any],
+        attempt: int,
+    ) -> dict[str, Any] | None:
+        request = _build_filter_sample_refetch_request(context, diagnosis)
+        if not request:
+            return None
+
+        source = request["source"]
+        filters = request["filters"]
+        result: dict[str, Any]
+        try:
+            result = await data_source_list_collection_records(
+                auth_token=str(context.get("auth_token") or ""),
+                source_id=str(request.get("source_id") or ""),
+                dataset_id=str(request.get("dataset_id") or ""),
+                resource_key=str(request.get("resource_key") or ""),
+                limit=20,
+                filters=filters,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"success": False, "error": str(exc)}
+
+        rows = _collection_payload_rows(result)
+        if not result.get("success") or not rows:
+            refetch_result = {
+                "success": False,
+                "message": "当前样例未命中过滤条件，回源查询也未找到可用于预览的真实行。",
+                "summary": {
+                    "sample_origin": "collection_refetch",
+                    "filter_count": len(filters),
+                    "matched_row_count": len(rows),
+                },
+                "errors": [{
+                    "reason": "filter_sample_refetch_no_rows",
+                    "message": str(result.get("error") or result.get("message") or "回源查询未命中真实行。"),
+                    "filters": filters,
+                }],
+            }
+            context["sample_refetch_result"] = refetch_result
+            _replace_stage_error(context, "refetch_filter_sample", refetch_result["errors"])
+            return build_event(
+                "node_failed",
+                run_id=context["run_id"],
+                side=context["side"],
+                target_table=context["target_table"],
+                node_code="run_sample",
+                node_status="failed",
+                attempt=attempt,
+                message=refetch_result["message"],
+                summary=refetch_result["summary"],
+                errors=refetch_result["errors"],
+            )
+
+        updated_inputs = []
+        source_table = _source_table_name(source)
+        for item in list(context.get("sample_inputs") or context.get("sources") or []):
+            if isinstance(item, dict) and _source_table_name(item) == source_table:
+                updated_inputs.append({
+                    **item,
+                    "sample_rows": rows,
+                    "sample_origin": "collection_refetch",
+                })
+            elif isinstance(item, dict):
+                updated_inputs.append(item)
+        context["sample_inputs"] = updated_inputs
+        context["sample_input_result"] = {
+            "success": True,
+            "message": "当前样例未命中过滤条件，已回源命中真实行并重新生成预览输入。",
+            "summary": {
+                "sample_dataset_count": len(updated_inputs),
+                "sample_origin": "collection_refetch",
+                "refetched_dataset": source_table,
+                "matched_row_count": len(rows),
+            },
+        }
+        warning = f"样例未命中过滤条件，已按 {', '.join(f'{k}={v}' for k, v in filters.items())} 回源命中 {len(rows)} 行并重跑预览。"
+        if warning not in context.setdefault("warnings", []):
+            context["warnings"].append(warning)
+        context["sample_diagnosis_result"] = _mark_sample_diagnosis_recovered(
+            context.get("sample_diagnosis_result") or {},
+            message=warning,
+        )
+        _clear_stage_error(context, "diagnose_sample")
+        _clear_stage_error(context, "run_sample")
+        _clear_stage_error(context, "refetch_filter_sample")
+        rerun_result = await self._run_sample(context)
+        refetch_result = {
+            "success": bool(rerun_result.get("success")),
+            "message": "已用回源命中行重新执行样例预览。" if rerun_result.get("success") else "回源命中行重新执行样例预览未通过。",
+            "summary": {
+                "sample_origin": "collection_refetch",
+                "refetched_dataset": source_table,
+                "matched_row_count": len(rows),
+                "ready_for_confirm": bool((context.get("sample_result") or {}).get("ready_for_confirm")),
+            },
+            "errors": rerun_result.get("errors") or [],
+        }
+        context["sample_refetch_result"] = refetch_result
+        return build_event(
+            "node_completed" if refetch_result["success"] else "node_failed",
+            run_id=context["run_id"],
+            side=context["side"],
+            target_table=context["target_table"],
+            node_code="run_sample",
+            node_status="completed" if refetch_result["success"] else "failed",
+            attempt=attempt,
+            message=refetch_result["message"],
+            summary=refetch_result["summary"],
+            errors=refetch_result["errors"],
+        )
 
     async def _repair_ir_and_validate(
         self,
@@ -746,8 +900,12 @@ class RuleGenerationService:
                 temperature=0.05,
                 timeout_seconds=_rule_generation_llm_timeout_seconds(),
             )
-            context["understanding"] = normalize_understanding(
-                _safe_dict(parsed.get("understanding")) or fallback_understanding,
+            context["understanding"] = _apply_rule_text_deterministic_understanding(
+                normalize_understanding(
+                    _safe_dict(parsed.get("understanding")) or fallback_understanding,
+                    rule_text=rule_text,
+                    target_table=str(context.get("target_table") or ""),
+                ),
                 rule_text=rule_text,
                 target_table=str(context.get("target_table") or ""),
             )
@@ -758,8 +916,12 @@ class RuleGenerationService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[rule_generation] understand_rule fallback: %s", exc)
             context.setdefault("warnings", []).append(f"规则理解 LLM 不可用，已使用确定性 fallback：{exc}")
-            context["understanding"] = normalize_understanding(
-                fallback_understanding,
+            context["understanding"] = _apply_rule_text_deterministic_understanding(
+                normalize_understanding(
+                    fallback_understanding,
+                    rule_text=rule_text,
+                    target_table=str(context.get("target_table") or ""),
+                ),
                 rule_text=rule_text,
                 target_table=str(context.get("target_table") or ""),
             )
@@ -768,8 +930,12 @@ class RuleGenerationService:
         return {"message": "已将规则描述转换为结构化理解。"}
 
     async def _validate_ir_structure(self, context: dict[str, Any]) -> dict[str, Any]:
-        normalized = normalize_understanding(
-            context.get("understanding") or {},
+        normalized = _apply_rule_text_deterministic_understanding(
+            normalize_understanding(
+                context.get("understanding") or {},
+                rule_text=str(context.get("rule_text") or ""),
+                target_table=str(context.get("target_table") or ""),
+            ),
             rule_text=str(context.get("rule_text") or ""),
             target_table=str(context.get("target_table") or ""),
         )
@@ -850,8 +1016,12 @@ class RuleGenerationService:
             temperature=0.05,
             timeout_seconds=_rule_generation_llm_timeout_seconds(),
         )
-        repaired_understanding = normalize_understanding(
-            _safe_dict(parsed.get("understanding")) or {},
+        repaired_understanding = _apply_rule_text_deterministic_understanding(
+            normalize_understanding(
+                _safe_dict(parsed.get("understanding")) or {},
+                rule_text=str(context.get("rule_text") or ""),
+                target_table=str(context.get("target_table") or ""),
+            ),
             rule_text=str(context.get("rule_text") or ""),
             target_table=str(context.get("target_table") or ""),
         )
@@ -1265,6 +1435,7 @@ class RuleGenerationService:
             len(context.get("output_preview_rows") or []),
             len((context.get("normalized_rule_json") or {}).get("steps") or []),
         )
+        sample_inputs = _sample_inputs_for_event(context)
         return build_event(
             "graph_completed",
             run_id=context["run_id"],
@@ -1277,6 +1448,8 @@ class RuleGenerationService:
             output_fields=context.get("output_fields") or [],
             output_preview_rows=context.get("output_preview_rows") or [],
             output_samples=(context.get("sample_result") or {}).get("output_samples") or [],
+            sample_inputs=sample_inputs,
+            sample_datasets=sample_inputs,
             assumptions=context.get("assumptions") or [],
             field_bindings=context.get("field_bindings") or [],
             understanding=context.get("understanding") or {},
@@ -1290,6 +1463,8 @@ class RuleGenerationService:
                 context.get("input_plan_generation_result") or {},
                 context.get("input_plan_validation_result") or {},
                 context.get("input_plan_preview_result") or {},
+                context.get("sample_input_result") or {},
+                context.get("sample_refetch_result") or {},
                 context.get("sample_diagnosis_result") or {},
                 context.get("assert_result") or {},
             ],
@@ -1432,30 +1607,338 @@ FIELD_BINDING_ROLES = {
 
 
 FIELD_REFERENCE_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("match_key", r"(?P<mention>[^，,。；;\n]{1,30}?)(?:作为|做为|为|是|当作|用作)?(?:匹配字段|匹配键|对账字段|关联字段|主键)"),
-    ("compare_field", r"(?P<mention>[^，,。；;\n]{1,30}?)(?:作为|做为|为|是|当作|用作)?(?:对比字段|比较字段|核对字段)"),
-    ("time_field", r"(?P<mention>[^，,。；;\n]{1,30}?)(?:作为|做为|为|是|当作|用作)?(?:时间字段|日期字段)"),
-    ("filter_field", r"(?P<mention>[^，,。；;\n]{1,30}?)(?:只取|仅取|筛选|过滤|取)(?P<value>[A-Za-z0-9_\-.]+)的数据"),
+    ("match_key", r"(?P<mention>(?!作为|做为|为|是|当作|用作)[^，,。；;\n]{1,50}?)(?:作为|做为|为|是|当作|用作)?(?:匹配字段|匹配键|对账字段|关联字段|主键)"),
+    ("compare_field", r"(?P<mention>(?!作为|做为|为|是|当作|用作)[^，,。；;\n]{1,50}?)(?:作为|做为|为|是|当作|用作)?(?:对比字段|比较字段|核对字段)"),
+    ("time_field", r"(?P<mention>(?!作为|做为|为|是|当作|用作)[^，,。；;\n]{1,50}?)(?:作为|做为|为|是|当作|用作)?(?:时间字段|日期字段)"),
 )
 
 
 def _fallback_source_references(rule_text: str) -> list[dict[str, Any]]:
     references: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    def add_reference(usage: str, mention: Any, *, operator: str = "", value: Any = None) -> None:
+        semantic_name = _clean_field_mention(mention)
+        if not semantic_name or _is_invalid_field_mention(semantic_name):
+            return
+        key = (usage, semantic_name, operator, "" if value is None else str(value))
+        if key in seen:
+            return
+        seen.add(key)
+        references.append({
+            "ref_id": f"fallback_{usage}_{len(references) + 1}",
+            "semantic_name": semantic_name,
+            "usage": usage,
+            "must_bind": True,
+            "operator": operator,
+            "value": value,
+            "candidate_fields": [],
+        })
+
+    for transform in _extract_prefix_transforms(rule_text):
+        add_reference("match_key", transform.get("semantic_name"))
+    for condition in _extract_filter_conditions(rule_text):
+        add_reference(
+            "filter_field",
+            condition.get("semantic_name"),
+            operator="eq",
+            value=condition.get("value"),
+        )
+    for usage, pattern in FIELD_REFERENCE_PATTERNS:
+        for match in re.finditer(pattern, rule_text or ""):
+            add_reference(usage, match.group("mention"))
+    return references
+
+
+def _apply_rule_text_deterministic_understanding(
+    understanding: dict[str, Any],
+    *,
+    rule_text: str,
+    target_table: str,
+) -> dict[str, Any]:
+    normalized = dict(understanding or {})
+    normalized["target_table"] = str(normalized.get("target_table") or target_table or "").strip()
+    source_references = _normalize_existing_source_references(
+        _safe_list_of_dicts(normalized.get("source_references"))
+    )
+    output_specs = _safe_list_of_dicts(normalized.get("output_specs"))
+    business_rules = _safe_list_of_dicts(normalized.get("business_rules"))
+
+    for transform in _extract_prefix_transforms(rule_text):
+        reference = _upsert_source_reference(
+            source_references,
+            semantic_name=str(transform.get("semantic_name") or ""),
+            usage="match_key",
+        )
+        ref_id = str(reference.get("ref_id") or "").strip()
+        if not ref_id:
+            continue
+        _ensure_output_spec(
+            output_specs,
+            output_name=str(transform.get("semantic_name") or ""),
+            ref_id=ref_id,
+            kind="formula",
+            expression={
+                "op": "function",
+                "name": "strip_prefix",
+                "args": [
+                    {"op": "ref", "ref_id": ref_id},
+                    {"op": "constant", "value": str(transform.get("prefix") or "")},
+                ],
+            },
+        )
+
+    for role_ref in _extract_role_mentions(rule_text):
+        usage = str(role_ref.get("usage") or "").strip()
+        semantic_name = str(role_ref.get("semantic_name") or "").strip()
+        if usage not in {"match_key", "compare_field", "time_field"}:
+            continue
+        reference = _upsert_source_reference(
+            source_references,
+            semantic_name=semantic_name,
+            usage=usage,
+        )
+        ref_id = str(reference.get("ref_id") or "").strip()
+        if ref_id:
+            _ensure_output_spec(output_specs, output_name=semantic_name, ref_id=ref_id, kind="rename")
+
+    for condition in _extract_filter_conditions(rule_text):
+        reference = _upsert_source_reference(
+            source_references,
+            semantic_name=str(condition.get("semantic_name") or ""),
+            usage="filter_field",
+            operator="eq",
+            value=condition.get("value"),
+        )
+        ref_id = str(reference.get("ref_id") or "").strip()
+        if ref_id:
+            _ensure_filter_rule(
+                business_rules,
+                ref_id=ref_id,
+                semantic_name=str(condition.get("semantic_name") or ""),
+                value=condition.get("value"),
+            )
+
+    normalized["source_references"] = source_references
+    normalized["output_specs"] = output_specs
+    normalized["business_rules"] = business_rules
+    if output_specs:
+        normalized["output_mode"] = "explicit"
+    return normalized
+
+
+def _normalize_existing_source_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, reference in enumerate(references, start=1):
+        semantic_name = _clean_field_mention(reference.get("semantic_name"))
+        if not semantic_name or _is_invalid_field_mention(semantic_name):
+            continue
+        item = dict(reference)
+        item["semantic_name"] = semantic_name
+        item["usage"] = _normalize_source_reference_role(item.get("usage"))
+        ref_id = str(item.get("ref_id") or "").strip() or f"det_ref_{index}"
+        if ref_id in seen_ids:
+            ref_id = _next_ref_id(normalized, item["usage"])
+        seen_ids.add(ref_id)
+        item["ref_id"] = ref_id
+        normalized.append(item)
+    return normalized
+
+
+def _upsert_source_reference(
+    references: list[dict[str, Any]],
+    *,
+    semantic_name: str,
+    usage: str,
+    operator: str = "",
+    value: Any = None,
+) -> dict[str, Any]:
+    semantic_name = _clean_field_mention(semantic_name)
+    if not semantic_name:
+        return {}
+    normalized_name = _normalize_text_for_match(semantic_name)
+    normalized_usage = _normalize_source_reference_role(usage)
+    fallback_match: dict[str, Any] | None = None
+    for reference in references:
+        current_name = _normalize_text_for_match(reference.get("semantic_name"))
+        if current_name != normalized_name:
+            if (
+                _normalize_source_reference_role(reference.get("usage")) == normalized_usage
+                and _looks_like_same_mentioned_field(normalized_name, current_name)
+            ):
+                fallback_match = fallback_match or reference
+            continue
+        if _normalize_source_reference_role(reference.get("usage")) == normalized_usage:
+            match = reference
+            break
+        fallback_match = fallback_match or reference
+    else:
+        match = fallback_match
+    if match is None:
+        match = {
+            "ref_id": _next_ref_id(references, normalized_usage),
+            "semantic_name": semantic_name,
+            "usage": normalized_usage,
+            "must_bind": True,
+            "candidate_fields": [],
+        }
+        references.append(match)
+    match["semantic_name"] = semantic_name
+    match["usage"] = normalized_usage
+    match["must_bind"] = bool(match.get("must_bind", True))
+    if operator:
+        match["operator"] = operator
+    if value is not None:
+        match["value"] = value
+    return match
+
+
+def _ensure_output_spec(
+    output_specs: list[dict[str, Any]],
+    *,
+    output_name: str,
+    ref_id: str,
+    kind: str,
+    expression: dict[str, Any] | None = None,
+) -> None:
+    if not output_name or not ref_id:
+        return
+    existing: dict[str, Any] | None = None
+    normalized_name = _normalize_text_for_match(output_name)
+    for spec in output_specs:
+        source_ref_ids = [str(item).strip() for item in list(spec.get("source_ref_ids") or [])]
+        if ref_id in source_ref_ids:
+            existing = spec
+            break
+        if _normalize_text_for_match(spec.get("name")) == normalized_name:
+            existing = spec
+            break
+    if existing is None:
+        existing = {
+            "output_id": _next_output_id(output_specs),
+            "name": output_name,
+            "kind": kind,
+            "source_ref_ids": [ref_id],
+        }
+        output_specs.append(existing)
+    else:
+        existing.setdefault("name", output_name)
+        existing["source_ref_ids"] = [ref_id]
+        if not str(existing.get("kind") or "").strip() or str(existing.get("kind") or "").strip() == "unknown":
+            existing["kind"] = kind
+    if expression:
+        existing["kind"] = "formula"
+        existing["expression"] = expression
+
+
+def _ensure_filter_rule(
+    business_rules: list[dict[str, Any]],
+    *,
+    ref_id: str,
+    semantic_name: str,
+    value: Any,
+) -> None:
+    if not ref_id:
+        return
+    for rule in business_rules:
+        if str(rule.get("type") or "").strip() != "filter":
+            continue
+        related_ref_ids = [str(item).strip() for item in list(rule.get("related_ref_ids") or [])]
+        if ref_id not in related_ref_ids:
+            continue
+        if not isinstance(rule.get("predicate"), dict):
+            rule["predicate"] = _eq_predicate(ref_id, value)
+        return
+    business_rules.append({
+        "rule_id": _next_rule_id(business_rules, "filter"),
+        "type": "filter",
+        "description": f"只取{semantic_name}为{value}的数据",
+        "related_ref_ids": [ref_id],
+        "predicate": _eq_predicate(ref_id, value),
+    })
+
+
+def _eq_predicate(ref_id: str, value: Any) -> dict[str, Any]:
+    return {
+        "op": "eq",
+        "left": {"op": "ref", "ref_id": ref_id},
+        "right": {"op": "constant", "value": value},
+    }
+
+
+def _extract_role_mentions(rule_text: str) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for usage, pattern in FIELD_REFERENCE_PATTERNS:
         for match in re.finditer(pattern, rule_text or ""):
             semantic_name = _clean_field_mention(match.group("mention"))
-            if not semantic_name:
+            if not semantic_name or _is_invalid_field_mention(semantic_name):
                 continue
-            references.append({
-                "ref_id": f"fallback_{usage}_{len(references) + 1}",
-                "semantic_name": semantic_name,
-                "usage": usage,
-                "must_bind": True,
-                "operator": "eq" if "value" in match.groupdict() else "",
-                "value": match.group("value") if "value" in match.groupdict() else None,
-                "candidate_fields": [],
-            })
-    return references
+            key = (usage, semantic_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append({"usage": usage, "semantic_name": semantic_name})
+    return refs
+
+
+def _extract_prefix_transforms(rule_text: str) -> list[dict[str, str]]:
+    transforms: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    pattern = (
+        r"(?P<mention>[^，,。；;\n]{1,50}?)"
+        r"(?:去掉|去除|删除|剔除)"
+        r"(?:前面(?:的)?|开头(?:的)?|前缀)?"
+        r"(?P<prefix>[A-Za-z0-9_\-]+)"
+        r"[^，,。；;\n]{0,20}"
+        r"[，,。；;\s]*"
+        r"(?:作为|做为|为|是|当作|用作)?"
+        r"(?:匹配字段|匹配键|对账字段|关联字段|主键)"
+    )
+    for match in re.finditer(pattern, rule_text or ""):
+        semantic_name = _clean_field_mention(match.group("mention"))
+        prefix = str(match.group("prefix") or "").strip()
+        if not semantic_name or not prefix:
+            continue
+        key = (semantic_name, prefix)
+        if key in seen:
+            continue
+        seen.add(key)
+        transforms.append({"semantic_name": semantic_name, "prefix": prefix})
+    return transforms
+
+
+def _extract_filter_conditions(rule_text: str) -> list[dict[str, Any]]:
+    conditions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    patterns = (
+        r"(?:只取|仅取|筛选|过滤|取|只保留|仅保留|保留)\s*"
+        r"(?P<mention>[^为=，,。；;\n]{1,40}?)"
+        r"(?:为|=|等于|是)\s*"
+        r"(?P<value>[^，,。；;\n]+)",
+        r"(?P<mention>(?!只取|仅取|筛选|过滤|取|只保留|仅保留|保留)[^，,。；;\n]{1,40}?)"
+        r"(?:只取|仅取|筛选|过滤|只保留|仅保留|保留)\s*"
+        r"(?P<value>[^，,。；;\n]+?)(?:的数据|的记录|记录|数据)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, rule_text or ""):
+            semantic_name = _clean_field_mention(match.group("mention"))
+            value = _clean_filter_value(match.group("value"))
+            if not semantic_name or not value:
+                continue
+            key = (semantic_name, str(value))
+            if key in seen:
+                continue
+            seen.add(key)
+            conditions.append({"semantic_name": semantic_name, "value": value})
+    return conditions
+
+
+def _clean_filter_value(value: Any) -> str:
+    text = str(value or "").strip().strip("'\"“”‘’")
+    text = re.sub(r"(的数据|的记录|记录|数据)$", "", text).strip()
+    return text.strip("'\"“”‘’")
 
 
 def _normalize_source_reference_role(value: Any) -> str:
@@ -1466,8 +1949,50 @@ def _normalize_source_reference_role(value: Any) -> str:
 def _clean_field_mention(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^(把|将|用|按|以|根据|其中|并且|且|同时)", "", text).strip()
+    text = re.sub(r"^(?:平台订单|业务订单|电商订单)", "", text).strip()
+    text = re.sub(r"(?:去掉|去除|删除|剔除)(?:前面(?:的)?|开头(?:的)?|前缀)?[A-Za-z0-9_\-]+", "", text).strip()
+    text = re.sub(r"(?:作为|做为|为|是|当作|用作)?(?:匹配字段|匹配键|对账字段|关联字段|主键|对比字段|比较字段|核对字段|时间字段|日期字段)$", "", text).strip()
     text = re.sub(r"(字段|列|口径)$", "", text).strip()
     return text
+
+
+def _looks_like_same_mentioned_field(normalized_name: str, current_name: str) -> bool:
+    if not normalized_name or not current_name:
+        return False
+    if normalized_name == current_name:
+        return True
+    shorter = min(len(normalized_name), len(current_name))
+    return shorter >= 4 and (normalized_name in current_name or current_name in normalized_name)
+
+
+def _is_invalid_field_mention(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text in {"作", "作为", "做", "做为", "为", "是", "当作", "用作"}
+
+
+def _next_ref_id(references: list[dict[str, Any]], usage: str) -> str:
+    existing = {str(item.get("ref_id") or "").strip() for item in references}
+    base = f"det_{usage or 'ref'}"
+    index = 1
+    while f"{base}_{index}" in existing:
+        index += 1
+    return f"{base}_{index}"
+
+
+def _next_output_id(output_specs: list[dict[str, Any]]) -> str:
+    existing = {str(item.get("output_id") or item.get("id") or "").strip() for item in output_specs}
+    index = 1
+    while f"det_out_{index}" in existing:
+        index += 1
+    return f"det_out_{index}"
+
+
+def _next_rule_id(business_rules: list[dict[str, Any]], prefix: str) -> str:
+    existing = {str(item.get("rule_id") or item.get("id") or "").strip() for item in business_rules}
+    index = 1
+    while f"det_{prefix}_{index}" in existing:
+        index += 1
+    return f"det_{prefix}_{index}"
 
 
 def _bind_source_reference(reference: dict[str, Any], source_profiles: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2376,6 +2901,145 @@ def _node_success(result: Any) -> bool:
     return True
 
 
+def _build_filter_sample_refetch_request(
+    context: dict[str, Any],
+    diagnosis: dict[str, Any],
+) -> dict[str, Any]:
+    condition_groups = []
+    for diagnostic in _safe_list_of_dicts(diagnosis.get("diagnostics")):
+        if str(diagnostic.get("reason") or "") != "filter_zero_rows_no_matching_sample":
+            continue
+        conditions = [
+            condition
+            for condition in _safe_list_of_dicts(diagnostic.get("filter_conditions"))
+            if str(condition.get("operator") or "") == "eq"
+            and str(condition.get("field") or "").strip()
+            and condition.get("value") not in {None, ""}
+        ]
+        if conditions:
+            condition_groups.append(conditions)
+    if not condition_groups:
+        return {}
+
+    sources = [
+        item
+        for item in list(context.get("sample_inputs") or context.get("sources") or [])
+        if isinstance(item, dict)
+    ]
+    alias_to_table = _step_alias_to_table(context.get("normalized_rule_json") or {})
+    for conditions in condition_groups:
+        aliases = {str(condition.get("alias") or "").strip() for condition in conditions}
+        aliases.discard("")
+        if len(aliases) > 1:
+            continue
+        alias = next(iter(aliases), "")
+        table = alias_to_table.get(alias) if alias else ""
+        source = _find_source_for_alias_or_table(sources, alias=alias, table=table)
+        if not source:
+            continue
+        source_id = _source_id_for_collection(source)
+        if not source_id:
+            continue
+        filters = {
+            str(condition.get("field") or "").strip(): condition.get("value")
+            for condition in conditions
+            if str(condition.get("field") or "").strip()
+        }
+        if not filters:
+            continue
+        return {
+            "source": source,
+            "source_id": source_id,
+            "dataset_id": str(source.get("dataset_id") or source.get("id") or "").strip(),
+            "resource_key": str(source.get("resource_key") or source.get("dataset_code") or _source_table_name(source)).strip(),
+            "filters": filters,
+        }
+    return {}
+
+
+def _step_alias_to_table(rule_json: dict[str, Any]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for step in _safe_list_of_dicts(rule_json.get("steps")):
+        if str(step.get("action") or "") != "write_dataset":
+            continue
+        for source in _safe_list_of_dicts(step.get("sources")):
+            alias = str(source.get("alias") or "").strip()
+            table = str(source.get("table") or "").strip()
+            if alias and table:
+                mapping[alias] = table
+    return mapping
+
+
+def _find_source_for_alias_or_table(
+    sources: list[dict[str, Any]],
+    *,
+    alias: str,
+    table: str,
+) -> dict[str, Any]:
+    table = str(table or "").strip()
+    for source in sources:
+        if table and _source_table_name(source) == table:
+            return source
+    if alias and len(sources) == 1:
+        return sources[0]
+    return {}
+
+
+def _source_table_name(source: dict[str, Any]) -> str:
+    return str(
+        source.get("table_name")
+        or source.get("resource_key")
+        or source.get("dataset_code")
+        or source.get("dataset_name")
+        or source.get("source_id")
+        or source.get("id")
+        or ""
+    ).strip()
+
+
+def _source_id_for_collection(source: dict[str, Any]) -> str:
+    return str(source.get("source_id") or source.get("data_source_id") or "").strip()
+
+
+def _collection_payload_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_rows = result.get("records")
+    if not isinstance(raw_rows, list):
+        raw_rows = result.get("collection_records")
+    if not isinstance(raw_rows, list):
+        raw_rows = result.get("rows")
+    rows: list[dict[str, Any]] = []
+    for item in list(raw_rows or []):
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if isinstance(payload, dict):
+            rows.append(dict(payload))
+        else:
+            rows.append(dict(item))
+    return rows
+
+
+def _mark_sample_diagnosis_recovered(
+    diagnosis: dict[str, Any],
+    *,
+    message: str,
+) -> dict[str, Any]:
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+    recovered = dict(diagnosis)
+    recovered["success"] = True
+    recovered["status"] = "recovered_by_collection_refetch"
+    recovered["repair_recommended"] = False
+    recovered["terminal"] = False
+    recovered["message"] = message
+    summary = dict(recovered.get("summary") or {})
+    summary["terminal"] = False
+    summary["recovered_by"] = "collection_refetch"
+    recovered["summary"] = summary
+    recovered["warnings"] = [*list(recovered.get("warnings") or []), message]
+    return recovered
+
+
 def _event_node_failed(event: dict[str, Any]) -> bool:
     node = event.get("node") if isinstance(event.get("node"), dict) else {}
     return event.get("event") == "node_failed" or node.get("status") == "failed"
@@ -2883,6 +3547,25 @@ def _log_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     except TypeError:
         return str(value)
+
+
+def _sample_inputs_for_event(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the final sample inputs used by the successful preview run."""
+    sample_inputs: list[dict[str, Any]] = []
+    for item in list(context.get("sample_inputs") or context.get("sources") or []):
+        if not isinstance(item, dict):
+            continue
+        row_limit = 50 if item.get("sample_origin") == "collection_refetch" else 20
+        sample_rows = [
+            dict(row)
+            for row in list(item.get("sample_rows") or [])[:row_limit]
+            if isinstance(row, dict)
+        ]
+        sample_input = dict(item)
+        sample_input["sample_rows"] = sample_rows
+        sample_input["sample_row_count"] = len(sample_rows)
+        sample_inputs.append(sample_input)
+    return sample_inputs
 
 
 def _truncate_log_text(value: Any, *, limit: int = 320) -> str:

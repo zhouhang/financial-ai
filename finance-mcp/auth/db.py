@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -69,13 +70,6 @@ _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_COLUMNS = (
     "source_file_name",
     "source_row_number",
     "source_row_key",
-    "alipay_trade_no",
-    "merchant_order_no",
-    "business_order_no",
-    "amount",
-    "income_amount",
-    "expense_amount",
-    "trade_time",
     "payload",
 )
 
@@ -91,12 +85,41 @@ _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES = (
     "idx_platform_alipay_bill_lines_dataset_date",
     "idx_platform_alipay_bill_lines_source_dataset_date",
     "idx_platform_alipay_bill_lines_shop_type_date",
-    "idx_platform_alipay_bill_lines_alipay_trade_no",
-    "idx_platform_alipay_bill_lines_merchant_order_no",
-    "idx_platform_alipay_bill_lines_business_order_no",
 )
 
 _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER = "update_platform_alipay_bill_lines_updated_at"
+_PLATFORM_ALIPAY_BILL_LINES_DERIVED_BUSINESS_COLUMNS = (
+    "alipay_trade_no",
+    "merchant_order_no",
+    "business_order_no",
+    "amount",
+    "income_amount",
+    "expense_amount",
+    "trade_time",
+)
+_PLATFORM_ALIPAY_SEMANTIC_PROFILE_HIDDEN_FIELDS = (
+    "source_row_key",
+    "source_file_name",
+    "source_row_number",
+    "data_source_id",
+    "dataset_id",
+    "shop_connection_id",
+    "resource_key",
+    "created_at",
+    "updated_at",
+    "bill_type",
+    "bill_date",
+    "biz_date",
+    "company_id",
+    "external_shop_id",
+    "platform_code",
+    "merchant_display_name",
+    *_PLATFORM_ALIPAY_BILL_LINES_DERIVED_BUSINESS_COLUMNS,
+    "raw",
+    "payload",
+    "meta",
+    "metadata",
+)
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
     id, company_id, data_source_id, dataset_code, dataset_name,
@@ -436,6 +459,90 @@ def _platform_alipay_bill_lines_schema_ready() -> bool:
     )
 
 
+def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
+    if not _table_exists("data_source_datasets"):
+        return False
+
+    hidden_fields = list(_PLATFORM_ALIPAY_SEMANTIC_PROFILE_HIDDEN_FIELDS)
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM data_source_datasets d
+                        WHERE (
+                            d.resource_key LIKE 'alipay_bill:%%'
+                            OR d.schema_summary->>'storage' = 'platform_alipay_bill_lines'
+                            OR d.extract_config->>'storage' = 'platform_alipay_bill_lines'
+                        )
+                          AND COALESCE(d.meta, '{}'::jsonb) ? 'semantic_profile'
+                          AND (
+                            EXISTS (
+                                SELECT 1
+                                FROM jsonb_array_elements(
+                                    CASE
+                                        WHEN jsonb_typeof(d.meta->'semantic_profile'->'fields') = 'array'
+                                        THEN d.meta->'semantic_profile'->'fields'
+                                        ELSE '[]'::jsonb
+                                    END
+                                ) AS item
+                                WHERE item->>'raw_name' = ANY(%s)
+                                   OR item->>'name' = ANY(%s)
+                                   OR item->>'raw_name' LIKE 'raw.%%'
+                                   OR item->>'name' LIKE 'raw.%%'
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM jsonb_object_keys(
+                                    CASE
+                                        WHEN jsonb_typeof(d.meta->'semantic_profile'->'field_label_map') = 'object'
+                                        THEN d.meta->'semantic_profile'->'field_label_map'
+                                        ELSE '{}'::jsonb
+                                    END
+                                ) AS raw_name
+                                WHERE raw_name = ANY(%s)
+                                   OR raw_name LIKE 'raw.%%'
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM jsonb_array_elements_text(
+                                    CASE
+                                        WHEN jsonb_typeof(d.meta->'semantic_profile'->'key_fields') = 'array'
+                                        THEN d.meta->'semantic_profile'->'key_fields'
+                                        ELSE '[]'::jsonb
+                                    END
+                                ) AS raw_name
+                                WHERE raw_name = ANY(%s)
+                                   OR raw_name LIKE 'raw.%%'
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM jsonb_array_elements_text(
+                                    CASE
+                                        WHEN jsonb_typeof(d.meta->'semantic_profile'->'low_confidence_fields') = 'array'
+                                        THEN d.meta->'semantic_profile'->'low_confidence_fields'
+                                        ELSE '[]'::jsonb
+                                    END
+                                ) AS raw_name
+                                WHERE raw_name = ANY(%s)
+                                   OR raw_name LIKE 'raw.%%'
+                            )
+                          )
+                        LIMIT 1
+                    )
+                    """,
+                    (hidden_fields, hidden_fields, hidden_fields, hidden_fields, hidden_fields),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+    except Exception as e:
+        logger.error(f"检查支付宝账单语义字段是否需清理失败: {e}")
+        raise
+
+
 def _execute_sql_script(script_path: Path) -> None:
     sql = script_path.read_text(encoding="utf-8").strip()
     if not sql:
@@ -506,6 +613,15 @@ def ensure_unified_data_source_schema() -> list[str]:
     if not _platform_alipay_bill_lines_schema_ready():
         _execute_sql_script(_migration_path("025_platform_alipay_bill_lines.sql"))
         applied.append("025_platform_alipay_bill_lines.sql")
+    if _table_exists("platform_alipay_bill_lines") and any(
+        _column_exists("platform_alipay_bill_lines", column_name)
+        for column_name in _PLATFORM_ALIPAY_BILL_LINES_DERIVED_BUSINESS_COLUMNS
+    ):
+        _execute_sql_script(_migration_path("028_drop_alipay_derived_business_columns.sql"))
+        applied.append("028_drop_alipay_derived_business_columns.sql")
+    if _alipay_semantic_profiles_need_hidden_field_cleanup():
+        _execute_sql_script(_migration_path("029_clean_alipay_semantic_profiles.sql"))
+        applied.append("029_clean_alipay_semantic_profiles.sql")
     applied.extend(ensure_sync_jobs_trigger_modes_schema())
 
     remaining_missing_tables = sorted(
@@ -5061,25 +5177,29 @@ def _clean_timestamp_text(value: Any) -> str | None:
     return text if text else None
 
 
-_ALIPAY_AMOUNT_RAW_KEYS = ("金额", "发生金额", "账务金额", "交易金额", "订单金额")
-_ALIPAY_INCOME_RAW_KEYS = ("收入", "收入金额", "入账金额")
-_ALIPAY_EXPENSE_RAW_KEYS = ("支出", "支出金额", "出账金额")
-_ALIPAY_TRADE_NO_RAW_KEYS = ("支付宝交易号", "支付宝流水号", "账务流水号")
-_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS = ("商户订单号", "商户订单号/商家订单号")
-_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS = ("业务基础订单号", "业务订单号", "业务流水号")
-_ALIPAY_IDENTIFIER_RAW_KEY_SETS = {
-    "alipay_trade_no": _ALIPAY_TRADE_NO_RAW_KEYS,
-    "merchant_order_no": _ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
-    "business_order_no": _ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
+_ALIPAY_BILL_SYSTEM_PAYLOAD_FIELDS = {
+    "company_id",
+    "data_source_id",
+    "dataset_id",
+    "shop_connection_id",
+    "external_shop_id",
+    "bill_type",
+    "bill_date",
+    "source_file_name",
+    "source_row_number",
+    "source_row_key",
+    "platform_code",
+    "merchant_display_name",
 }
-_ALIPAY_TRADE_TIME_RAW_KEYS = (
-    "入账时间",
-    "创建时间",
-    "交易创建时间",
-    "发生时间",
-    "付款时间",
-    "交易时间",
-)
+_ALIPAY_DERIVED_BUSINESS_FIELDS = {
+    "alipay_trade_no",
+    "merchant_order_no",
+    "business_order_no",
+    "amount",
+    "income_amount",
+    "expense_amount",
+    "trade_time",
+}
 
 
 def _safe_int_or_none(value: Any) -> int | None:
@@ -5108,51 +5228,12 @@ def _first_non_empty_text(*values: Any) -> str:
     return ""
 
 
-def _first_payload_text(payload: dict[str, Any], *keys: str) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    for key in keys:
-        if key not in payload:
-            continue
-        text = _first_non_empty_text(payload.get(key))
-        if text:
-            return text
-    return ""
-
-
-def _alipay_raw_payload(item: dict[str, Any]) -> dict[str, Any]:
-    raw = item.get("raw") if isinstance(item, dict) else None
-    if isinstance(raw, dict):
-        return dict(raw)
-
-    payload = item.get("payload") if isinstance(item.get("payload"), dict) else None
-    if not isinstance(payload, dict):
-        return {}
-    nested_raw = payload.get("raw")
-    if isinstance(nested_raw, dict):
-        return dict(nested_raw)
-
-    raw_keys = (
-        *_ALIPAY_AMOUNT_RAW_KEYS,
-        *_ALIPAY_INCOME_RAW_KEYS,
-        *_ALIPAY_EXPENSE_RAW_KEYS,
-        *_ALIPAY_TRADE_NO_RAW_KEYS,
-        *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS,
-        *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS,
-        *_ALIPAY_TRADE_TIME_RAW_KEYS,
-    )
-    if any(key in payload for key in raw_keys):
-        return dict(payload)
-    return {}
-
-
 def _fallback_alipay_bill_source_row_key(
     *,
     bill_type: str,
     bill_date: str,
     source_file_name: str,
     source_row_number: int | None,
-    raw: dict[str, Any],
     payload: dict[str, Any],
 ) -> str:
     source = {
@@ -5160,7 +5241,6 @@ def _fallback_alipay_bill_source_row_key(
         "bill_date": bill_date,
         "source_file_name": source_file_name,
         "source_row_number": source_row_number,
-        "raw": _json_safe_value(raw),
         "payload": _json_safe_value(payload),
     }
     text = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -5168,71 +5248,22 @@ def _fallback_alipay_bill_source_row_key(
 
 
 def _alipay_bill_payload(item: dict[str, Any]) -> dict[str, Any]:
-    payload = item.get("payload") if isinstance(item.get("payload"), dict) else None
-    result = dict(payload) if isinstance(payload, dict) else dict(item)
-    result.pop("payload", None)
+    source = item.get("payload")
+    if not isinstance(source, dict):
+        source = item.get("raw")
+    if not isinstance(source, dict):
+        source = item
 
-    raw = _alipay_raw_payload(item)
-    if raw:
-        result["raw"] = raw
-
-    amount = _first_non_empty_text(
-        item.get("amount"),
-        _first_payload_text(result, "amount"),
-        _first_payload_text(raw, *_ALIPAY_AMOUNT_RAW_KEYS),
-    )
-    income_amount = _first_non_empty_text(
-        item.get("income_amount"),
-        item.get("income"),
-        _first_payload_text(result, "income_amount", "income"),
-        _first_payload_text(raw, *_ALIPAY_INCOME_RAW_KEYS),
-    )
-    expense_amount = _first_non_empty_text(
-        item.get("expense_amount"),
-        item.get("expense"),
-        _first_payload_text(result, "expense_amount", "expense"),
-        _first_payload_text(raw, *_ALIPAY_EXPENSE_RAW_KEYS),
-    )
-    trade_time = _first_non_empty_text(
-        item.get("trade_time"),
-        _first_payload_text(result, "trade_time"),
-        _first_payload_text(raw, *_ALIPAY_TRADE_TIME_RAW_KEYS),
-    )
-
-    promoted_text_fields = (
-        "company_id",
-        "data_source_id",
-        "dataset_id",
-        "shop_connection_id",
-        "external_shop_id",
-        "bill_type",
-        "bill_date",
-        "source_file_name",
-        "source_row_key",
-        "alipay_trade_no",
-        "merchant_order_no",
-        "business_order_no",
-    )
-    for field in promoted_text_fields:
-        text = _first_non_empty_text(
-            item.get(field),
-            result.get(field),
-            _first_payload_text(raw, *_ALIPAY_IDENTIFIER_RAW_KEY_SETS.get(field, ())),
-        )
-        if text:
-            result[field] = text
-
-    source_row_number = _safe_int_or_none(item.get("source_row_number"))
-    if source_row_number is not None:
-        result["source_row_number"] = source_row_number
-    if amount:
-        result["amount"] = amount
-    if income_amount:
-        result["income_amount"] = income_amount
-    if expense_amount:
-        result["expense_amount"] = expense_amount
-    if trade_time:
-        result["trade_time"] = trade_time
+    result: dict[str, Any] = {}
+    for key, value in dict(source).items():
+        field_name = str(key or "").strip()
+        if not field_name:
+            continue
+        if field_name in _ALIPAY_BILL_SYSTEM_PAYLOAD_FIELDS or field_name in _ALIPAY_DERIVED_BUSINESS_FIELDS:
+            continue
+        if field_name == "raw":
+            continue
+        result[field_name] = _json_safe_value(value)
     return result
 
 
@@ -5425,20 +5456,19 @@ def list_platform_order_lines(
                 if biz_date:
                     sql += " AND biz_date = %s"
                     params.append(biz_date)
-                for field, value in dict(filters or {}).items():
-                    if value in (None, "", []):
-                        continue
-                    if field not in {
-                        "tid",
-                        "oid",
-                        "trade_status",
-                        "order_status",
-                        "refund_status",
-                        "alipay_no",
-                        "sku_id",
-                        "outer_sku_id",
-                        "outer_iid",
-                    }:
+                allowed_columns = {
+                    "tid",
+                    "oid",
+                    "trade_status",
+                    "order_status",
+                    "refund_status",
+                    "alipay_no",
+                    "sku_id",
+                    "outer_sku_id",
+                    "outer_iid",
+                }
+                for field, value in _normalize_payload_filters(filters).items():
+                    if field not in allowed_columns:
                         continue
                     if isinstance(value, list):
                         sql += f" AND {field} = ANY(%s)"
@@ -5446,6 +5476,15 @@ def list_platform_order_lines(
                     else:
                         sql += f" AND {field} = %s"
                         params.append(str(value))
+                for field_name, filter_value in _normalize_payload_filters(filters).items():
+                    if field_name in allowed_columns:
+                        continue
+                    if isinstance(filter_value, list):
+                        sql += " AND payload ->> %s = ANY(%s)"
+                        params.extend([field_name, [str(item) for item in filter_value]])
+                    else:
+                        sql += " AND payload ->> %s = %s"
+                        params.extend([field_name, str(filter_value)])
                 sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
                 params.append(max(0, offset))
                 if limit is not None:
@@ -5556,7 +5595,6 @@ def upsert_platform_alipay_bill_lines(
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 for item in items:
-                    raw = _alipay_raw_payload(item)
                     enriched_item = {
                         **item,
                         "company_id": company_id,
@@ -5568,40 +5606,14 @@ def upsert_platform_alipay_bill_lines(
                         "bill_date": bill_date,
                     }
                     payload = _alipay_bill_payload(enriched_item)
-                    amount = _first_non_empty_text(
-                        item.get("amount"),
-                        payload.get("amount"),
-                        _first_payload_text(raw, *_ALIPAY_AMOUNT_RAW_KEYS),
-                    )
-                    income_amount = _first_non_empty_text(
-                        item.get("income_amount"),
-                        item.get("income"),
-                        payload.get("income_amount"),
-                        payload.get("income"),
-                        _first_payload_text(raw, *_ALIPAY_INCOME_RAW_KEYS),
-                    )
-                    expense_amount = _first_non_empty_text(
-                        item.get("expense_amount"),
-                        item.get("expense"),
-                        payload.get("expense_amount"),
-                        payload.get("expense"),
-                        _first_payload_text(raw, *_ALIPAY_EXPENSE_RAW_KEYS),
-                    )
-                    trade_time = _first_non_empty_text(
-                        item.get("trade_time"),
-                        payload.get("trade_time"),
-                        _first_payload_text(raw, *_ALIPAY_TRADE_TIME_RAW_KEYS),
-                    )
                     source_file_name = _first_non_empty_text(
                         item.get("source_file_name"),
-                        payload.get("source_file_name"),
                     )
                     source_row_number = _safe_int_or_none(
-                        item.get("source_row_number") or payload.get("source_row_number")
+                        item.get("source_row_number")
                     )
                     source_row_key = _first_non_empty_text(
                         item.get("source_row_key"),
-                        payload.get("source_row_key"),
                     )
                     if not source_row_key:
                         source_row_key = _fallback_alipay_bill_source_row_key(
@@ -5609,47 +5621,22 @@ def upsert_platform_alipay_bill_lines(
                             bill_date=bill_date,
                             source_file_name=source_file_name,
                             source_row_number=source_row_number,
-                            raw=raw,
                             payload=payload,
                         )
-                        payload["source_row_key"] = source_row_key
                     if source_row_key and source_row_key not in seen_source_row_keys:
                         seen_source_row_keys.append(source_row_key)
-                    alipay_trade_no = _first_non_empty_text(
-                        item.get("alipay_trade_no"),
-                        payload.get("alipay_trade_no"),
-                        _first_payload_text(raw, *_ALIPAY_TRADE_NO_RAW_KEYS),
-                    )
-                    merchant_order_no = _first_non_empty_text(
-                        item.get("merchant_order_no"),
-                        payload.get("merchant_order_no"),
-                        _first_payload_text(raw, *_ALIPAY_MERCHANT_ORDER_NO_RAW_KEYS),
-                    )
-                    business_order_no = _first_non_empty_text(
-                        item.get("business_order_no"),
-                        payload.get("business_order_no"),
-                        _first_payload_text(raw, *_ALIPAY_BUSINESS_ORDER_NO_RAW_KEYS),
-                    )
-                    if alipay_trade_no:
-                        payload["alipay_trade_no"] = alipay_trade_no
-                    if merchant_order_no:
-                        payload["merchant_order_no"] = merchant_order_no
-                    if business_order_no:
-                        payload["business_order_no"] = business_order_no
                     cur.execute(
                         """
                         INSERT INTO platform_alipay_bill_lines (
                             company_id, data_source_id, dataset_id, shop_connection_id,
                             external_shop_id, bill_type, bill_date,
                             source_file_name, source_row_number, source_row_key,
-                            alipay_trade_no, merchant_order_no, business_order_no,
-                            amount, income_amount, expense_amount, trade_time, payload
+                            payload
                         ) VALUES (
                             %s, %s, %s, %s,
                             %s, %s, %s,
                             %s, %s, %s,
-                            %s, %s, %s,
-                            %s, %s, %s, %s, %s::jsonb
+                            %s::jsonb
                         )
                         ON CONFLICT (company_id, shop_connection_id, bill_type, bill_date, source_row_key)
                         DO UPDATE SET
@@ -5658,13 +5645,6 @@ def upsert_platform_alipay_bill_lines(
                             external_shop_id = EXCLUDED.external_shop_id,
                             source_file_name = EXCLUDED.source_file_name,
                             source_row_number = EXCLUDED.source_row_number,
-                            alipay_trade_no = EXCLUDED.alipay_trade_no,
-                            merchant_order_no = EXCLUDED.merchant_order_no,
-                            business_order_no = EXCLUDED.business_order_no,
-                            amount = EXCLUDED.amount,
-                            income_amount = EXCLUDED.income_amount,
-                            expense_amount = EXCLUDED.expense_amount,
-                            trade_time = EXCLUDED.trade_time,
                             payload = EXCLUDED.payload,
                             latest_seen_at = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
@@ -5681,13 +5661,6 @@ def upsert_platform_alipay_bill_lines(
                             source_file_name,
                             source_row_number,
                             source_row_key,
-                            alipay_trade_no,
-                            merchant_order_no,
-                            business_order_no,
-                            _clean_decimal_text(amount),
-                            _clean_decimal_text(income_amount),
-                            _clean_decimal_text(expense_amount),
-                            _clean_timestamp_text(trade_time),
                             psycopg2.extras.Json(_json_safe_payload(payload)),
                         ),
                     )
@@ -5771,8 +5744,7 @@ def list_platform_alipay_bill_lines(
                     SELECT id, company_id, data_source_id, dataset_id, shop_connection_id,
                            external_shop_id, bill_type, bill_date,
                            source_file_name, source_row_number, source_row_key,
-                           alipay_trade_no, merchant_order_no, business_order_no,
-                           amount, income_amount, expense_amount, trade_time, payload,
+                           payload,
                            first_seen_at, latest_seen_at, created_at, updated_at
                     FROM platform_alipay_bill_lines
                     WHERE company_id = %s
@@ -5798,16 +5770,12 @@ def list_platform_alipay_bill_lines(
                     sql += " AND bill_date = %s"
                     params.append(biz_date)
 
-                for field, value in dict(filters or {}).items():
-                    if value in (None, "", []):
-                        continue
-                    if field not in {
-                        "bill_type",
-                        "source_row_key",
-                        "alipay_trade_no",
-                        "merchant_order_no",
-                        "business_order_no",
-                    }:
+                allowed_columns = {
+                    "bill_type",
+                    "source_row_key",
+                }
+                for field, value in _normalize_payload_filters(filters).items():
+                    if field not in allowed_columns:
                         continue
                     if isinstance(value, list):
                         sql += f" AND {field} = ANY(%s)"
@@ -5815,6 +5783,15 @@ def list_platform_alipay_bill_lines(
                     else:
                         sql += f" AND {field} = %s"
                         params.append(str(value))
+                for field_name, filter_value in _normalize_payload_filters(filters).items():
+                    if field_name in allowed_columns:
+                        continue
+                    if isinstance(filter_value, list):
+                        sql += " AND payload ->> %s = ANY(%s)"
+                        params.extend([field_name, [str(item) for item in filter_value]])
+                    else:
+                        sql += " AND payload ->> %s = %s"
+                        params.extend([field_name, str(filter_value)])
 
                 safe_offset = max(0, int(offset or 0))
                 sql += " ORDER BY bill_date DESC, updated_at DESC, id DESC OFFSET %s"
@@ -5978,6 +5955,7 @@ def list_dataset_collection_records(
     resource_key: str | None = None,
     biz_date: str | None = None,
     item_key: str | None = None,
+    filters: dict[str, Any] | None = None,
     limit: int | None = 100,
     offset: int = 0,
 ) -> list[dict]:
@@ -6013,6 +5991,13 @@ def list_dataset_collection_records(
                 if item_key:
                     sql += " AND item_key = %s"
                     params.append(item_key)
+                for field_name, filter_value in _normalize_payload_filters(filters).items():
+                    if isinstance(filter_value, list):
+                        sql += " AND payload ->> %s = ANY(%s)"
+                        params.extend([field_name, [str(item) for item in filter_value]])
+                    else:
+                        sql += " AND payload ->> %s = %s"
+                        params.extend([field_name, str(filter_value)])
                 sql += " ORDER BY biz_date DESC, updated_at DESC, id DESC OFFSET %s"
                 params.append(max(0, offset))
                 if limit is not None:
@@ -6026,6 +6011,37 @@ def list_dataset_collection_records(
             f"查询 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
         )
         return []
+
+
+def _normalize_payload_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(filters, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for raw_field, raw_value in filters.items():
+        field_name = str(raw_field or "").strip()
+        if not _is_safe_payload_filter_field(field_name):
+            continue
+        if raw_value is None or raw_value == "":
+            continue
+        if isinstance(raw_value, (list, tuple, set)):
+            values = [
+                item
+                for item in list(raw_value)[:50]
+                if item not in {None, ""}
+                and isinstance(item, (str, int, float, bool))
+            ]
+            if values:
+                normalized[field_name] = values
+            continue
+        if isinstance(raw_value, (str, int, float, bool)):
+            normalized[field_name] = raw_value
+    return normalized
+
+
+def _is_safe_payload_filter_field(field_name: str) -> bool:
+    if not field_name or len(field_name) > 128:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-\u4e00-\u9fff（）()＋+\s]+", field_name))
 
 
 def get_dataset_collection_record_stats(
@@ -8286,6 +8302,203 @@ def list_execution_run_exceptions(
                 return [_normalize_record(dict(row)) for row in rows]
     except Exception as e:
         logger.error(f"查询 execution_run_exceptions 列表失败 (company_id={company_id}, run_id={run_id}): {e}")
+        return []
+
+
+def get_public_execution_run_exception_bundle(
+    *,
+    run_id: str,
+    owner_identifier: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict | None:
+    """公开只读查询一次执行运行及其异常明细。
+
+    第一版公开分享链接依赖不可猜的 run UUID，不要求登录；因此这里只返回
+    展示异常详情必要的方案、运行计划和异常数据，不返回任何授权密钥。
+    """
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return None
+
+    safe_limit = max(1, min(int(limit or 100), 500))
+    safe_offset = max(0, int(offset or 0))
+    normalized_owner = str(owner_identifier or "").strip()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                           trigger_type, entry_mode, execution_status,
+                           failed_stage, failed_reason,
+                           run_context_json, source_snapshot_json, subtasks_json,
+                           proc_result_json, recon_result_summary_json, artifacts_json,
+                           anomaly_count, started_at, finished_at, created_at, updated_at
+                    FROM execution_runs
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (normalized_run_id,),
+                )
+                run_row = cur.fetchone()
+                if not run_row:
+                    return None
+                run = _normalize_record(dict(run_row))
+                company_id = str(run.get("company_id") or "")
+                scheme_code = str(run.get("scheme_code") or "")
+                plan_code = str(run.get("plan_code") or "")
+
+                scheme: dict = {}
+                if scheme_code:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, scheme_code, scheme_name, scheme_type, description,
+                               file_rule_code, proc_rule_code, recon_rule_code, scheme_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_schemes
+                        WHERE company_id = %s
+                          AND scheme_code = %s
+                        LIMIT 1
+                        """,
+                        (company_id, scheme_code),
+                    )
+                    scheme_row = cur.fetchone()
+                    scheme = _normalize_record(dict(scheme_row)) if scheme_row else {}
+
+                run_plan: dict = {}
+                if plan_code:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, plan_code, plan_name, scheme_code,
+                               schedule_type, schedule_expr, biz_date_offset,
+                               input_bindings_json, channel_config_id,
+                               owner_mapping_json, plan_meta_json,
+                               is_enabled, created_by, created_at, updated_at
+                        FROM execution_run_plans
+                        WHERE company_id = %s
+                          AND plan_code = %s
+                        LIMIT 1
+                        """,
+                        (company_id, plan_code),
+                    )
+                    plan_row = cur.fetchone()
+                    run_plan = _normalize_record(dict(plan_row)) if plan_row else {}
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM execution_run_exceptions
+                    WHERE run_id = %s
+                      AND (%s = '' OR owner_identifier = %s)
+                    """,
+                    (normalized_run_id, normalized_owner, normalized_owner),
+                )
+                total_row = cur.fetchone() or {}
+                total = int(total_row.get("total") or 0)
+
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                           summary, detail_json,
+                           owner_name, owner_identifier, owner_contact_json,
+                           reminder_status, processing_status, fix_status,
+                           latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    FROM execution_run_exceptions
+                    WHERE run_id = %s
+                      AND (%s = '' OR owner_identifier = %s)
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (normalized_run_id, normalized_owner, normalized_owner, safe_limit, safe_offset),
+                )
+                exception_rows = cur.fetchall()
+                exceptions = [_normalize_record(dict(row)) for row in exception_rows]
+
+                return {
+                    "run": run,
+                    "scheme": scheme,
+                    "run_plan": run_plan,
+                    "exceptions": exceptions,
+                    "count": len(exceptions),
+                    "total": total,
+                    "limit": safe_limit,
+                    "offset": safe_offset,
+                }
+    except Exception as e:
+        logger.error(f"公开查询 execution_run_exceptions 失败 (run_id={run_id}): {e}")
+        return None
+
+
+def bulk_update_execution_run_exceptions_by_owner(
+    *,
+    company_id: str,
+    run_id: str,
+    owner_identifier: str = "",
+    reminder_status: str | None = None,
+    processing_status: str | None = None,
+    fix_status: str | None = None,
+    latest_feedback: str | None = None,
+    feedback_patch_json: dict | None = None,
+) -> list[dict]:
+    """按运行批次和责任人批量更新异常状态。"""
+    normalized_company_id = str(company_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    normalized_owner = str(owner_identifier or "").strip()
+    if not normalized_company_id or not normalized_run_id:
+        return []
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                owner_clause = ""
+                params: list[Any] = [
+                    reminder_status,
+                    processing_status,
+                    fix_status,
+                    latest_feedback,
+                    psycopg2.extras.Json(feedback_patch_json or {}),
+                    psycopg2.extras.Json(feedback_patch_json or {}),
+                    normalized_company_id,
+                    normalized_run_id,
+                ]
+                if normalized_owner:
+                    owner_clause = " AND owner_identifier = %s"
+                    params.append(normalized_owner)
+
+                cur.execute(
+                    f"""
+                    UPDATE execution_run_exceptions
+                    SET reminder_status = COALESCE(%s, reminder_status),
+                        processing_status = COALESCE(%s, processing_status),
+                        fix_status = COALESCE(%s, fix_status),
+                        latest_feedback = COALESCE(%s, latest_feedback),
+                        feedback_json = CASE
+                            WHEN %s::jsonb = '{{}}'::jsonb THEN feedback_json
+                            ELSE COALESCE(feedback_json, '{{}}'::jsonb) || %s::jsonb
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND run_id = %s
+                      {owner_clause}
+                    RETURNING id, company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+                              summary, detail_json,
+                              owner_name, owner_identifier, owner_contact_json,
+                              reminder_status, processing_status, fix_status,
+                              latest_feedback, feedback_json, is_closed, created_at, updated_at
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall()
+                conn.commit()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(
+            "批量更新 execution_run_exceptions 失败 "
+            f"(company_id={company_id}, run_id={run_id}, owner_identifier={owner_identifier}): {e}"
+        )
         return []
 
 

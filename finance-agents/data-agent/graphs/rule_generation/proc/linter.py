@@ -19,6 +19,7 @@ SUPPORTED_FUNCTION_NODES = {
     "fraction_numerator",
     "earliest_date",
     "to_decimal",
+    "strip_prefix",
 }
 SUPPORTED_FORMULA_CALLS = {"coalesce", "is_null"}
 _ALLOWED_AST_NODES = (
