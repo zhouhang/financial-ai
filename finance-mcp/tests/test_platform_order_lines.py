@@ -241,6 +241,49 @@ def test_list_platform_order_lines_filters_by_dataset_and_biz_date(monkeypatch):
     assert "2026-05-06" in captured["params"]
 
 
+def test_list_platform_order_lines_filters_payload_fields_with_params(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+        def fetchall(self):
+            return [{"payload": {"客户会员编码": "6504690"}}]
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    rows = auth_db.list_platform_order_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        filters={"客户会员编码": "6504690"},
+        limit=20,
+    )
+
+    assert rows == [{"payload": {"客户会员编码": "6504690"}}]
+    assert "payload ->> %s = %s" in str(captured["sql"])
+    assert "客户会员编码" in captured["params"]
+    assert "6504690" in captured["params"]
+
+
 def test_get_platform_app_by_id_filters_owner_company_and_opens_secret(monkeypatch):
     captured: dict[str, object] = {}
 

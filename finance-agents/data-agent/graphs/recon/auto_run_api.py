@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
@@ -32,12 +33,14 @@ from services.notifications.repository import (
 )
 from graphs.recon.scheme_rule_registry import ensure_scheme_rule_saved
 from tools.mcp_client import (
+    execution_run_exception_bulk_update_by_owner,
     execution_run_exception_get,
     execution_run_exception_update,
     execution_run_exceptions,
     execution_run_delete,
     execution_run_get,
     execution_run_list,
+    execution_run_public_exception_bundle,
     execution_run_plan_create,
     execution_run_plan_delete,
     execution_run_plan_get,
@@ -280,6 +283,16 @@ class ExceptionRemindRequest(BaseModel):
 
 class ExceptionSyncRequest(BaseModel):
     provider: str = ""
+    channel_code: str = ""
+    max_polls: int = 1
+    poll_interval_seconds: float = 2.0
+
+
+class ExceptionBatchSyncRequest(BaseModel):
+    todo_id: str
+    owner_identifier: str = ""
+    provider: str = ""
+    channel_config_id: str = ""
     channel_code: str = ""
     max_polls: int = 1
     poll_interval_seconds: float = 2.0
@@ -1322,6 +1335,24 @@ async def list_execution_run_exceptions_api(
     return result
 
 
+@router.get("/public/runs/{run_id}/exceptions")
+async def public_execution_run_exceptions_api(
+    run_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    owner: str = Query("", alias="owner"),
+):
+    result = await execution_run_public_exception_bundle(
+        run_id,
+        owner_identifier=owner,
+        limit=limit,
+        offset=offset,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "执行记录不存在"))
+    return result
+
+
 @router.get("/run-exceptions/{exception_id}")
 async def get_execution_run_exception_api(
     exception_id: str,
@@ -1375,6 +1406,81 @@ async def sync_execution_run_exception_api(
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "同步待办状态失败"))
     return result
+
+
+@router.post("/runs/{run_id}/exceptions/sync-todo-batch")
+async def sync_execution_run_exception_batch_api(
+    run_id: str,
+    body: ExceptionBatchSyncRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    try:
+        adapter = None
+        if body.channel_config_id:
+            channel_config = load_company_channel_config_by_id(channel_id=body.channel_config_id)
+            if channel_config is not None:
+                adapter = get_notification_adapter(
+                    provider=str(getattr(channel_config, "provider", "") or body.provider or ""),
+                    channel_config=channel_config,
+                )
+        if adapter is None:
+            user = _get_user_from_token(auth_token)
+            adapter = get_notification_adapter(
+                provider=body.provider or "",
+                company_id=str((user or {}).get("company_id") or ""),
+                channel_code=body.channel_code or None,
+            )
+        sync_result = adapter.sync_todo_status(
+            todo_id=body.todo_id,
+            max_polls=max(1, body.max_polls),
+            poll_interval_seconds=max(0.5, body.poll_interval_seconds),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "同步待办状态失败") from exc
+
+    if not sync_result.success:
+        raise HTTPException(status_code=400, detail=sync_result.message or "同步待办状态失败")
+
+    status = sync_result.status.value
+    patch: dict[str, Any] = {
+        "owner_identifier": body.owner_identifier,
+        "feedback_json": {
+            "batch_todo_id": body.todo_id,
+            "todo_status": status,
+            "todo_synced_at": datetime.now().isoformat(),
+        },
+        "latest_feedback": f"批次待办状态已同步为 {status}",
+    }
+    if status == "completed":
+        patch.update(
+            {
+                "processing_status": "owner_done",
+                "fix_status": "ready_for_verify",
+                "reminder_status": "completed",
+            }
+        )
+    elif status == "cancelled":
+        patch["reminder_status"] = "cancelled"
+    elif status == "failed":
+        patch["reminder_status"] = "sync_failed"
+
+    update_result = await execution_run_exception_bulk_update_by_owner(auth_token, run_id, patch)
+    if not update_result.get("success"):
+        raise HTTPException(status_code=400, detail=update_result.get("error", "批量更新异常状态失败"))
+    return {
+        "success": True,
+        "sync": {
+            "todo_id": body.todo_id,
+            "status": status,
+            "is_terminal": bool(sync_result.is_terminal),
+            "polls": int(sync_result.polls),
+        },
+        "updated_count": int(update_result.get("updated_count") or 0),
+    }
 
 
 @router.post("/run-exceptions/{exception_id}/remind")

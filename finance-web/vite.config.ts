@@ -8,6 +8,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     allowedHosts: ['dev.tallyai.cn'],
+    headers: {
+      'Cache-Control': 'no-store, max-age=0',
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:8100',

@@ -1192,6 +1192,8 @@ class SchemeDesignService:
         auth_token: str,
         session_id: str,
         input_plan_json: dict[str, Any] | None = None,
+        sample_datasets: list[dict[str, Any]] | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
     ) -> Optional[SchemeDesignSession]:
         session = await self._get_owned_session(auth_token, session_id, touch=False)
         if session is None:
@@ -1201,14 +1203,21 @@ class SchemeDesignService:
             raise ValueError("当前没有可试跑的数据整理配置")
         # Fix any bare unquoted string formula exprs that may exist in stored JSON
         proc_rule_json = _fix_proc_formula_exprs(dict(proc_rule_json))
-        target_sample_datasets = await self._build_target_sample_datasets(
+        provided_sample_datasets = [
+            _normalize_target_dataset(dict(item))
+            for item in list(sample_datasets or [])
+            if isinstance(item, dict) and _has_dict_rows(item.get("sample_rows"))
+        ]
+        target_sample_datasets = provided_sample_datasets or await self._build_target_sample_datasets(
             session,
             auth_token=auth_token,
         )
+        trial_uploaded_files = list(uploaded_files or []) or self._build_uploaded_files(session.sample_files)
         logger.info(
-            "[scheme_design][proc] trial start session_id=%s datasets=%s proc_rule=%s",
+            "[scheme_design][proc] trial start session_id=%s datasets=%s provided_samples=%s proc_rule=%s",
             session_id,
             _log_json(_dataset_log_summary(target_sample_datasets)),
+            bool(provided_sample_datasets),
             _truncate_log_text(json.dumps(proc_rule_json, ensure_ascii=False), limit=500),
         )
         trial_result = await self.run_proc_trial(
@@ -1217,7 +1226,7 @@ class SchemeDesignService:
                 proc_rule_json=proc_rule_json,
                 input_plan_json=input_plan_json,
                 sample_datasets=target_sample_datasets,
-                uploaded_files=self._build_uploaded_files(session.sample_files),
+                uploaded_files=trial_uploaded_files,
             ),
         )
         normalized_rule = trial_result.get("normalized_rule")

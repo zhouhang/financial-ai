@@ -35,6 +35,7 @@ class TableSchemaState:
     primary_key: list[str] = field(default_factory=list)
     column_order: list[str] = field(default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
+    data_types: dict[str, str] = field(default_factory=dict)
     export_layout: dict[str, Any] = field(default_factory=dict)
     export_enabled: bool = True
 
@@ -303,18 +304,21 @@ class StepsProcRuntime:
 
         column_order: list[str] = []
         defaults: dict[str, Any] = {}
+        data_types: dict[str, str] = {}
         for column in columns:
             name = str(column.get("name") or "").strip()
             if not name or name in column_order:
                 continue
             column_order.append(name)
             defaults[name] = column.get("default")
+            data_types[name] = str(column.get("data_type") or "").strip().lower()
 
         self.schemas[target_table] = TableSchemaState(
             name=target_table,
             primary_key=list(schema_def.get("primary_key") or []),
             column_order=column_order,
             defaults=defaults,
+            data_types=data_types,
             export_layout=dict(schema_def.get("export_layout") or {}),
             export_enabled=bool(schema_def.get("export_enabled", True)),
         )
@@ -1053,6 +1057,7 @@ class StepsProcRuntime:
             current_value = current_target_row.get(target_field)
             field_write_mode = str(mapping.get("field_write_mode") or "overwrite")
             new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
+            new_value = self._normalize_value_for_column(target_table, target_field, new_value)
             target_df.at[row_index, target_field] = new_value
             current_target_row[target_field] = new_value
             if (
@@ -1082,6 +1087,7 @@ class StepsProcRuntime:
             current_value = current_target_row.get(target_field)
             field_write_mode = str(mapping.get("field_write_mode") or "overwrite")
             new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
+            new_value = self._normalize_value_for_column(target_table, target_field, new_value)
             self._ensure_column_exists(target_table, target_df, target_field)
             target_df.at[row_index, target_field] = new_value
             current_target_row[target_field] = new_value
@@ -1315,6 +1321,24 @@ class StepsProcRuntime:
                 contexts,
             )
             return _to_decimal(value)
+        if function_name == "strip_prefix":
+            value = self._evaluate_value_spec(
+                args.get("value") or args.get("text") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            prefix = self._evaluate_value_spec(
+                args.get("prefix") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            return _strip_prefix(value, prefix)
         if function_name == "earliest_date":
             source_table = str(args.get("source") or "").strip()
             date_field = str(args.get("date_field") or "").strip()
@@ -1608,14 +1632,29 @@ class StepsProcRuntime:
         if schema and column_name not in schema.column_order:
             schema.column_order.append(column_name)
             schema.defaults.setdefault(column_name, None)
+            schema.data_types.setdefault(column_name, "")
 
     def _align_columns(self, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
         schema = self.schemas.get(table_name)
         if not schema:
             return df
+        df = self._normalize_dataframe_for_schema(schema, df)
         ordered = [column for column in schema.column_order if column in df.columns]
         extras = [column for column in df.columns if column not in ordered]
         return df[ordered + extras]
+
+    def _normalize_dataframe_for_schema(self, schema: TableSchemaState, df: pd.DataFrame) -> pd.DataFrame:
+        for column_name, data_type in schema.data_types.items():
+            if data_type != "decimal" or column_name not in df.columns:
+                continue
+            df[column_name] = df[column_name].map(_normalize_decimal_cell)
+        return df
+
+    def _normalize_value_for_column(self, table_name: str, column_name: str, value: Any) -> Any:
+        schema = self.schemas.get(table_name)
+        if not schema or schema.data_types.get(column_name) != "decimal":
+            return value
+        return _normalize_decimal_cell(value)
 
     def _ensure_alias_frame_loaded(
         self,
@@ -2121,6 +2160,25 @@ def _to_decimal(value: Any) -> Optional[float]:
         raise ValueError(f"无法解析 decimal 值: {value}") from exc
 
 
+def _normalize_decimal_cell(value: Any) -> Any:
+    if _is_nullish(value):
+        return None
+    try:
+        return _to_decimal(value)
+    except ValueError:
+        return value
+
+
+def _strip_prefix(value: Any, prefix: Any) -> Optional[str]:
+    if _is_nullish(value):
+        return None
+    text = str(value)
+    prefix_text = "" if _is_nullish(prefix) else str(prefix)
+    if prefix_text and text.startswith(prefix_text):
+        return text[len(prefix_text):]
+    return text
+
+
 def _offset_month(month: int, offset: int) -> int:
     return ((month - 1 + offset) % 12) + 1
 
@@ -2370,11 +2428,14 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         if isinstance(node.op, ast.Add):
             return left + right
         if isinstance(node.op, ast.Sub):
-            return left - right
+            left_num, right_num = _require_formula_numeric_operands(left, right, "-")
+            return left_num - right_num
         if isinstance(node.op, ast.Mult):
-            return left * right
+            left_num, right_num = _require_formula_numeric_operands(left, right, "*")
+            return left_num * right_num
         if isinstance(node.op, ast.Div):
-            return left / right
+            left_num, right_num = _require_formula_numeric_operands(left, right, "/")
+            return left_num / right_num
         raise ValueError(f"不支持的算术运算: {type(node.op).__name__}")
 
     if isinstance(node, ast.UnaryOp):
@@ -2423,6 +2484,33 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         raise ValueError("公式包含不支持的函数调用")
 
     raise ValueError(f"公式包含不支持的节点: {type(node).__name__}")
+
+
+def _coerce_formula_numeric_operands(left: Any, right: Any) -> Optional[tuple[float, float]]:
+    left_num = _coerce_formula_number(left)
+    right_num = _coerce_formula_number(right)
+    if left_num is None or right_num is None:
+        return None
+    return left_num, right_num
+
+
+def _require_formula_numeric_operands(left: Any, right: Any, operator: str) -> tuple[float, float]:
+    operands = _coerce_formula_numeric_operands(left, right)
+    if operands is None:
+        raise ValueError(
+            f"公式算术运算 {operator} 需要数值，实际为 "
+            f"{type(left).__name__}({left!r}) 和 {type(right).__name__}({right!r})"
+        )
+    return operands
+
+
+def _coerce_formula_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or _is_nullish(value):
+        return None
+    try:
+        return _to_decimal(value)
+    except ValueError:
+        return None
 
 
 def _apply_compare_operator(operator: ast.cmpop, left: Any, right: Any) -> bool:

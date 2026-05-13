@@ -27,6 +27,22 @@ stop_pid_file() {
 }
 
 stop_pid_file "finance-cron" "/tmp/finance-cron.pid"
+pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
+
+if [ -f /tmp/recon-workers.pids ]; then
+  while IFS= read -r pid; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "停止 recon-worker (PID: $pid)..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    fi
+  done < /tmp/recon-workers.pids
+  rm -f /tmp/recon-workers.pids
+fi
+pkill -f "recon_worker.py" 2>/dev/null || true
 
 for port in 3335 8100 5173; do
   pid=$(lsof -ti:$port 2>/dev/null)

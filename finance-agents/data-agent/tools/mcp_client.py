@@ -1008,6 +1008,19 @@ async def execution_run_exceptions(
     )
 
 
+async def execution_run_public_exception_bundle(
+    run_id: str,
+    *,
+    owner_identifier: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_public_exception_bundle",
+        {"run_id": run_id, "owner_identifier": owner_identifier, "limit": limit, "offset": offset},
+    )
+
+
 async def execution_run_exception_list(
     auth_token: str,
     run_id: str,
@@ -1045,6 +1058,17 @@ async def execution_run_exception_update(
     return await call_mcp_tool(
         "execution_run_exception_update",
         {"auth_token": auth_token, "exception_id": exception_id, **(payload or {})},
+    )
+
+
+async def execution_run_exception_bulk_update_by_owner(
+    auth_token: str,
+    run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_bulk_update_by_owner",
+        {"auth_token": auth_token, "run_id": run_id, **(payload or {})},
     )
 
 
@@ -3731,6 +3755,7 @@ async def data_source_list_collection_records(
     biz_date: str = "",
     limit: int = 20,
     mode: str = "",
+    filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
@@ -3750,6 +3775,8 @@ async def data_source_list_collection_records(
         args["resource_key"] = resource_key
     if biz_date:
         args["biz_date"] = biz_date
+    if filters:
+        args["filters"] = filters
 
     result = await call_mcp_tool("data_source_list_collection_records", args)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):

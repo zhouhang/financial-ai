@@ -128,8 +128,10 @@ export interface AiProcSideDraft {
   inputPlanJson?: Record<string, unknown>;
   procSteps?: Array<Record<string, unknown>>;
   outputRows: ProcSampleRow[];
+  outputFields: OutputFieldDraft[];
   outputFieldLabelMap: Record<string, string>;
   outputColumnHints?: Record<string, PreviewColumnHintMeta>;
+  sampleDatasets: Array<Record<string, unknown>>;
 }
 
 export interface SchemeWizardTargetProcStepProps {
@@ -1398,8 +1400,10 @@ function createEmptyAiProcSideDraft(): AiProcSideDraft {
     validations: [],
     warnings: [],
     outputRows: [],
+    outputFields: [],
     outputFieldLabelMap: {},
     outputColumnHints: {},
+    sampleDatasets: [],
   };
 }
 

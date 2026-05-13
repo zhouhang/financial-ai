@@ -402,6 +402,20 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="execution_run_public_exception_bundle",
+            description="公开只读查询一次执行运行及其异常明细，用于钉钉分享链接。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "owner_identifier": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "required": ["run_id"],
+            },
+        ),
+        Tool(
             name="execution_run_exception_get",
             description="查询单个执行异常。",
             inputSchema={
@@ -458,6 +472,24 @@ def create_tools() -> list[Tool]:
                     "is_closed": {"type": "boolean"},
                 },
                 "required": ["auth_token", "exception_id"],
+            },
+        ),
+        Tool(
+            name="execution_run_exception_bulk_update_by_owner",
+            description="按 run_id + owner_identifier 批量更新执行异常状态。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "owner_identifier": {"type": "string"},
+                    "reminder_status": {"type": "string"},
+                    "processing_status": {"type": "string"},
+                    "fix_status": {"type": "string"},
+                    "latest_feedback": {"type": "string"},
+                    "feedback_json": {"type": "object"},
+                },
+                "required": ["auth_token", "run_id"],
             },
         ),
         Tool(
@@ -562,12 +594,16 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _run_delete(arguments)
         if name == "execution_run_exceptions":
             return _run_exceptions(arguments)
+        if name == "execution_run_public_exception_bundle":
+            return _run_public_exception_bundle(arguments)
         if name == "execution_run_exception_get":
             return _exception_get(arguments)
         if name == "execution_run_exception_create":
             return _exception_create(arguments)
         if name == "execution_run_exception_update":
             return _exception_update(arguments)
+        if name == "execution_run_exception_bulk_update_by_owner":
+            return _exception_bulk_update_by_owner(arguments)
         if name == "execution_proc_draft_trial":
             return _proc_draft_trial(arguments)
         if name == "execution_recon_draft_trial":
@@ -2356,6 +2392,21 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "count": len(items), "exceptions": items}
 
 
+def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
+    run_id = _as_text(arguments.get("run_id"))
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+    bundle = auth_db.get_public_execution_run_exception_bundle(
+        run_id=run_id,
+        owner_identifier=_as_text(arguments.get("owner_identifier") or arguments.get("owner")),
+        limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
+        offset=_as_int(arguments.get("offset"), 0, minimum=0),
+    )
+    if not bundle:
+        return {"success": False, "error": "执行记录不存在"}
+    return {"success": True, **bundle}
+
+
 def _exception_get(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     exception_id = str(arguments.get("exception_id") or "").strip()
@@ -2432,6 +2483,31 @@ def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:
     if not item:
         return {"success": False, "error": "执行异常不存在或更新失败"}
     return {"success": True, "exception": item}
+
+
+def _exception_bulk_update_by_owner(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    run_id = _as_text(arguments.get("run_id"))
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+    run = auth_db.get_execution_run(company_id=str(user.get("company_id") or ""), run_id=run_id)
+    if not run:
+        return {"success": False, "error": "run_id 对应执行记录不存在"}
+    items = auth_db.bulk_update_execution_run_exceptions_by_owner(
+        company_id=str(user.get("company_id") or ""),
+        run_id=run_id,
+        owner_identifier=_as_text(arguments.get("owner_identifier")),
+        reminder_status=arguments.get("reminder_status"),
+        processing_status=arguments.get("processing_status"),
+        fix_status=arguments.get("fix_status"),
+        latest_feedback=arguments.get("latest_feedback"),
+        feedback_patch_json=_safe_dict(arguments.get("feedback_json")),
+    )
+    return {
+        "success": True,
+        "updated_count": len(items),
+        "exceptions": items,
+    }
 
 
 def _validate_proc_source_tables(rule_json: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2591,6 +2667,15 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             item.get("target_table") == "right_recon_ready" and bool(item.get("rows"))
             for item in output_samples
         )
+        output_row_counts = {
+            _as_text(item.get("target_table")): _as_int(
+                item.get("row_count"),
+                len(_safe_list(item.get("rows"))),
+                minimum=0,
+            )
+            for item in output_samples
+            if _as_text(item.get("target_table"))
+        }
         if require_both_sides:
             ready_for_confirm = (
                 has_left_output
@@ -2611,7 +2696,11 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"试跑未生成预期输出：{', '.join(missing_targets)}")
         if require_both_sides:
             if not has_left_preview_rows or not has_right_preview_rows:
-                warnings.append("试跑已生成结果表，但未产出可展示的左右侧抽样结果，请检查关键字段映射。")
+                warnings.append(
+                    "试跑已生成结果表，但部分结果表没有可展示数据："
+                    f"left_recon_ready {output_row_counts.get('left_recon_ready', 0)} 行，"
+                    f"right_recon_ready {output_row_counts.get('right_recon_ready', 0)} 行。"
+                )
             if not ready_for_confirm:
                 warnings.append("试跑未同时生成 left_recon_ready 与 right_recon_ready。")
         elif expected_targets and not ready_for_confirm:
@@ -2633,7 +2722,11 @@ def _proc_draft_trial(arguments: dict[str, Any]) -> dict[str, Any]:
             "summary": (
                 "已完成数据整理试跑，左右两侧对账数据均已生成。"
                 if ready_for_confirm
-                else "已完成数据整理试跑，但左右对账输出仍不完整，请调整整理配置。"
+                else (
+                    "已完成数据整理试跑，但左右对账输出仍不完整："
+                    f"left_recon_ready {output_row_counts.get('left_recon_ready', 0)} 行，"
+                    f"right_recon_ready {output_row_counts.get('right_recon_ready', 0)} 行。"
+                )
             ),
             "rule_type": str(validation.get("rule_type") or ""),
             "uploaded_files_count": len(validated_files),

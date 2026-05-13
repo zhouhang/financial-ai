@@ -185,6 +185,119 @@ def test_steps_runtime_preserves_excel_formula_style_text_identifiers(tmp_path: 
     assert exported.iloc[0]["金额"] == 100
 
 
+def test_steps_runtime_formula_arithmetic_accepts_excel_text_numbers(tmp_path: Path) -> None:
+    runtime = StepsProcRuntime(
+        "test_rule",
+        {
+            "steps": [
+                {
+                    "action": "create_schema",
+                    "target_table": "ready",
+                    "schema": {
+                        "primary_key": ["id"],
+                        "columns": [
+                            {"name": "id", "data_type": "string"},
+                            {"name": "ending", "data_type": "decimal"},
+                            {"name": "age1", "data_type": "decimal"},
+                            {"name": "age2", "data_type": "decimal"},
+                            {"name": "tax_calc", "data_type": "decimal"},
+                            {"name": "age_sum", "data_type": "decimal"},
+                        ],
+                    },
+                },
+                {
+                    "action": "write_dataset",
+                    "target_table": "ready",
+                    "sources": [{"alias": "src", "table": "public.input"}],
+                    "row_write_mode": "upsert",
+                    "mappings": [
+                        {
+                            "target_field": "id",
+                            "value": {"type": "source", "source": {"alias": "src", "field": "id"}},
+                        },
+                        {
+                            "target_field": "ending",
+                            "value": {"type": "source", "source": {"alias": "src", "field": "ending"}},
+                        },
+                        {
+                            "target_field": "age1",
+                            "value": {"type": "source", "source": {"alias": "src", "field": "age1"}},
+                        },
+                        {
+                            "target_field": "age2",
+                            "value": {"type": "source", "source": {"alias": "src", "field": "age2"}},
+                        },
+                    ],
+                },
+                {
+                    "action": "write_dataset",
+                    "target_table": "ready",
+                    "sources": [{"alias": "ready", "table": "ready"}],
+                    "row_write_mode": "update_only",
+                    "match": {
+                        "sources": [
+                            {
+                                "alias": "ready",
+                                "keys": [{"field": "id", "target_field": "id"}],
+                            }
+                        ]
+                    },
+                    "mappings": [
+                        {
+                            "target_field": "tax_calc",
+                            "value": {
+                                "type": "formula",
+                                "expr": "{ending} - {age1}",
+                                "bindings": {
+                                    "ending": {
+                                        "type": "source",
+                                        "source": {"alias": "ready", "field": "ending"},
+                                    },
+                                    "age1": {
+                                        "type": "source",
+                                        "source": {"alias": "ready", "field": "age1"},
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "target_field": "age_sum",
+                            "value": {
+                                "type": "formula",
+                                "expr": "{age1} + {age2}",
+                                "bindings": {
+                                    "age1": {
+                                        "type": "source",
+                                        "source": {"alias": "ready", "field": "age1"},
+                                    },
+                                    "age2": {
+                                        "type": "source",
+                                        "source": {"alias": "ready", "field": "age2"},
+                                    },
+                                },
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        [],
+        str(tmp_path),
+        preloaded_frames={
+            "public.input": pd.DataFrame(
+                [{"id": "A-1", "ending": 100.5, "age1": "20.25", "age2": "4.75"}]
+            )
+        },
+    )
+
+    runtime.execute_to_frames()
+
+    assert runtime.tables["ready"].iloc[0]["age1"] == pytest.approx(20.25)
+    assert runtime.tables["ready"].iloc[0]["age2"] == pytest.approx(4.75)
+    assert runtime.tables["ready"].iloc[0]["tax_calc"] == pytest.approx(80.25)
+    assert runtime.tables["ready"].iloc[0]["age_sum"] == pytest.approx(25.0)
+
+
 def test_steps_runtime_returns_memory_frames_without_excel_roundtrip(tmp_path: Path) -> None:
     rule = {
         "steps": [

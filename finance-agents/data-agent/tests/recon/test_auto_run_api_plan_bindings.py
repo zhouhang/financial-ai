@@ -53,6 +53,76 @@ def _scheme_meta() -> dict[str, object]:
     }
 
 
+def _raw_source_date_field_scheme_meta() -> dict[str, object]:
+    return {
+        "dataset_bindings": {
+            "right": [
+                {
+                    "dataset_id": "dataset-alipay",
+                    "data_source_id": "source-alipay",
+                    "resource_key": "alipay_bill:signcustomer:merchant-1",
+                    "schema_summary": {
+                        "fields": [
+                            {"raw_name": "发生时间", "display_name": "发生时间"},
+                            {"raw_name": "商户订单号", "display_name": "商户订单号"},
+                            {"raw_name": "收入金额（+元）", "display_name": "收入金额（+元）"},
+                        ]
+                    },
+                }
+            ]
+        },
+        "right_output_fields": [
+            {
+                "outputName": "匹配字段",
+                "sourceField": "",
+                "semanticRole": "match_key",
+                "sourceDatasetId": "",
+                "valueMode": "formula",
+            },
+            {
+                "outputName": "对比字段",
+                "sourceField": "收入金额（+元）",
+                "semanticRole": "compare_field",
+                "sourceDatasetId": "dataset-alipay",
+            },
+        ],
+        "proc_rule_json": {
+            "steps": [
+                {
+                    "action": "write_dataset",
+                    "target_table": "right_recon_ready",
+                    "sources": [
+                        {"table": "alipay_bill:signcustomer:merchant-1", "alias": "source_1"},
+                    ],
+                    "mappings": [
+                        {
+                            "target_field": "匹配字段",
+                            "value": {
+                                "type": "function",
+                                "function": "strip_prefix",
+                                "args": {
+                                    "value": {
+                                        "type": "source",
+                                        "source": {"alias": "source_1", "field": "商户订单号"},
+                                    },
+                                    "prefix": {"type": "formula", "expr": "'T100P'"},
+                                },
+                            },
+                        },
+                        {
+                            "target_field": "对比字段",
+                            "value": {
+                                "type": "source",
+                                "source": {"alias": "source_1", "field": "收入金额（+元）"},
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+
+
 def _aggregate_time_scheme_meta() -> dict[str, object]:
     return {
         "left_time_semantic": "时间",
@@ -236,6 +306,26 @@ def test_normalize_binding_query_date_field_does_not_save_display_name_as_date_f
 
     assert normalized["date_field"] == "updated_at"
     assert normalized["display_date_field"] == "订单更新时间"
+
+
+def test_normalize_binding_query_date_field_keeps_raw_source_date_field() -> None:
+    normalized = binding_date_fields.normalize_binding_query_date_field(
+        scheme_meta=_raw_source_date_field_scheme_meta(),
+        binding={
+            "side": "right",
+            "data_source_id": "source-alipay",
+            "resource_key": "alipay_bill:signcustomer:merchant-1",
+        },
+        query={
+            "resource_key": "alipay_bill:signcustomer:merchant-1",
+            "display_date_field": "发生时间",
+            "date_field": "发生时间",
+        },
+        side="right",
+    )
+
+    assert normalized["date_field"] == "发生时间"
+    assert normalized["display_date_field"] == "发生时间"
 
 
 def test_normalize_binding_query_date_field_strict_mode_rejects_untraceable_time_binding() -> None:

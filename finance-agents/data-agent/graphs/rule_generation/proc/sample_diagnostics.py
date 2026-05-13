@@ -285,6 +285,7 @@ def _diagnose_filter(
         base_alias=base_alias,
         rule_text=rule_text,
     )
+    filter_conditions = comparison_diag.get("filter_conditions") or []
     if comparison_diag.get("repair_recommended"):
         return {
             "reason": "filter_zero_rows_repairable",
@@ -297,6 +298,7 @@ def _diagnose_filter(
             "repair_recommended": True,
             "terminal": False,
             "evidence": comparison_diag.get("evidence") or [],
+            "filter_conditions": filter_conditions,
         }
 
     return {
@@ -310,6 +312,7 @@ def _diagnose_filter(
         "repair_recommended": False,
         "terminal": True,
         "evidence": comparison_diag.get("evidence") or [],
+        "filter_conditions": filter_conditions,
     }
 
 
@@ -322,6 +325,7 @@ def _diagnose_zero_match_comparisons(
     rule_text: str,
 ) -> dict[str, Any]:
     evidence: list[dict[str, Any]] = []
+    filter_conditions: list[dict[str, Any]] = []
     repair_recommended = False
     comparisons = _extract_comparisons(expr)
     equality_comparisons = 0
@@ -340,6 +344,15 @@ def _diagnose_zero_match_comparisons(
             continue
         alias = source_info["alias"] or base_alias
         field = source_info["field"]
+        if field and constant_value not in {None, ""}:
+            condition = {
+                "alias": alias,
+                "field": field,
+                "operator": "eq",
+                "value": constant_value,
+            }
+            if condition not in filter_conditions:
+                filter_conditions.append(condition)
         source_rows = rows_by_alias.get(alias) or []
         source_values = [row.get(field) for row in source_rows if isinstance(row, dict)]
         loose_same_field = any(_loose_equal(value, constant_value) for value in source_values)
@@ -407,7 +420,11 @@ def _diagnose_zero_match_comparisons(
             "reason": "filter_comparison_not_resolved",
             "message": "过滤比较条件无法解析为源字段与常量的比较。",
         })
-    return {"repair_recommended": repair_recommended, "evidence": evidence}
+    return {
+        "repair_recommended": repair_recommended,
+        "evidence": evidence,
+        "filter_conditions": filter_conditions,
+    }
 
 
 def _diagnose_assertion_failure(
@@ -566,6 +583,18 @@ def _evaluate_function_node(
                 rows_by_alias=rows_by_alias,
             )
         )
+    if function_name == "strip_prefix":
+        value = _evaluate_value_node(
+            args.get("value") or args.get("text"),
+            row_contexts=row_contexts,
+            rows_by_alias=rows_by_alias,
+        )
+        prefix = _evaluate_value_node(
+            args.get("prefix"),
+            row_contexts=row_contexts,
+            rows_by_alias=rows_by_alias,
+        )
+        return _strip_prefix(value, prefix)
     if function_name == "coalesce":
         values = args.get("values") if isinstance(args.get("values"), list) else list(args.values())
         return _coalesce(*[
@@ -674,6 +703,16 @@ def _to_decimal(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(str(value).replace(",", ""))
+
+
+def _strip_prefix(value: Any, prefix: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    prefix_text = "" if prefix is None else str(prefix)
+    if prefix_text and text.startswith(prefix_text):
+        return text[len(prefix_text):]
+    return text
 
 
 _SAFE_FUNCTIONS = {

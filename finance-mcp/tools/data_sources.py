@@ -335,6 +335,23 @@ PLATFORM_SYSTEM_FIELDS = {
     "created_at",
     "updated_at",
 }
+ALIPAY_BILL_HIDDEN_FIELDS = {
+    *PLATFORM_SYSTEM_FIELDS,
+    "bill_type",
+    "bill_date",
+    "biz_date",
+    "company_id",
+    "external_shop_id",
+    "platform_code",
+    "merchant_display_name",
+    "alipay_trade_no",
+    "merchant_order_no",
+    "business_order_no",
+    "amount",
+    "income_amount",
+    "expense_amount",
+    "trade_time",
+}
 NON_PUBLISHABLE_SEMANTIC_FIELD_NAMES = {"raw", "payload", "meta", "metadata"}
 
 
@@ -348,6 +365,13 @@ def _is_non_publishable_semantic_field_name(value: Any) -> bool:
     return normalized.startswith("raw.")
 
 
+def _is_hidden_alipay_bill_field_name(value: Any) -> bool:
+    raw_name = _safe_text(value)
+    if not raw_name:
+        return True
+    return raw_name in ALIPAY_BILL_HIDDEN_FIELDS or _is_non_publishable_semantic_field_name(raw_name)
+
+
 def _clean_semantic_field_list(fields: Any) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -356,6 +380,22 @@ def _clean_semantic_field_list(fields: Any) -> list[dict[str, Any]]:
             continue
         raw_name = _safe_text(item.get("raw_name") or item.get("name"))
         if _is_non_publishable_semantic_field_name(raw_name) or raw_name in seen:
+            continue
+        next_item = dict(item)
+        next_item["raw_name"] = raw_name
+        cleaned.append(next_item)
+        seen.add(raw_name)
+    return cleaned
+
+
+def _clean_alipay_bill_semantic_field_list(fields: Any) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in fields or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = _safe_text(item.get("raw_name") or item.get("name"))
+        if _is_hidden_alipay_bill_field_name(raw_name) or raw_name in seen:
             continue
         next_item = dict(item)
         next_item["raw_name"] = raw_name
@@ -376,11 +416,33 @@ def _clean_semantic_label_map(field_label_map: Any) -> dict[str, str]:
     return cleaned
 
 
+def _clean_alipay_bill_semantic_label_map(field_label_map: Any) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    if not isinstance(field_label_map, dict):
+        return cleaned
+    for raw_name, display_name in field_label_map.items():
+        raw_key = _safe_text(raw_name)
+        if _is_hidden_alipay_bill_field_name(raw_key):
+            continue
+        cleaned[raw_key] = _safe_text(display_name) or raw_key
+    return cleaned
+
+
 def _clean_semantic_name_list(values: Any) -> list[str]:
     cleaned: list[str] = []
     for item in values or []:
         raw_name = _safe_text(item)
         if _is_non_publishable_semantic_field_name(raw_name) or raw_name in cleaned:
+            continue
+        cleaned.append(raw_name)
+    return cleaned
+
+
+def _clean_alipay_bill_semantic_name_list(values: Any) -> list[str]:
+    cleaned: list[str] = []
+    for item in values or []:
+        raw_name = _safe_text(item)
+        if _is_hidden_alipay_bill_field_name(raw_name) or raw_name in cleaned:
             continue
         cleaned.append(raw_name)
     return cleaned
@@ -395,8 +457,17 @@ def _clean_platform_semantic_profile(
         return profile
 
     next_profile = dict(profile)
-    fields = _clean_semantic_field_list(next_profile.get("fields"))
-    field_label_map = _clean_semantic_label_map(next_profile.get("field_label_map"))
+    is_alipay_bill = _dataset_uses_platform_alipay_bill_lines(dataset_row)
+    fields = (
+        _clean_alipay_bill_semantic_field_list(next_profile.get("fields"))
+        if is_alipay_bill
+        else _clean_semantic_field_list(next_profile.get("fields"))
+    )
+    field_label_map = (
+        _clean_alipay_bill_semantic_label_map(next_profile.get("field_label_map"))
+        if is_alipay_bill
+        else _clean_semantic_label_map(next_profile.get("field_label_map"))
+    )
     for field in fields:
         raw_name = _safe_text(field.get("raw_name"))
         if raw_name and raw_name not in field_label_map:
@@ -404,9 +475,15 @@ def _clean_platform_semantic_profile(
 
     next_profile["fields"] = fields
     next_profile["field_label_map"] = field_label_map
-    next_profile["key_fields"] = _clean_semantic_name_list(next_profile.get("key_fields"))
-    next_profile["low_confidence_fields"] = _clean_semantic_name_list(
-        next_profile.get("low_confidence_fields")
+    next_profile["key_fields"] = (
+        _clean_alipay_bill_semantic_name_list(next_profile.get("key_fields"))
+        if is_alipay_bill
+        else _clean_semantic_name_list(next_profile.get("key_fields"))
+    )
+    next_profile["low_confidence_fields"] = (
+        _clean_alipay_bill_semantic_name_list(next_profile.get("low_confidence_fields"))
+        if is_alipay_bill
+        else _clean_semantic_name_list(next_profile.get("low_confidence_fields"))
     )
     return next_profile
 
@@ -946,17 +1023,7 @@ def _apply_platform_semantic_preset(
     if not storage:
         return field_item
 
-    if raw_name.startswith("raw."):
-        raw_label = raw_name.split(".", 1)[1]
-        preset = {
-            "display_name": raw_label,
-            "semantic_type": "unknown",
-            "business_role": "normal",
-            "confidence": 0.92,
-            **preset,
-        }
-        field_source = "raw_bill"
-    elif raw_name in PLATFORM_SYSTEM_FIELDS:
+    if raw_name in PLATFORM_SYSTEM_FIELDS:
         field_source = "system"
     else:
         field_source = "normalized"
@@ -1005,6 +1072,8 @@ def _apply_platform_semantic_profile_overrides(
                 field_item=current_item,
             )
         raw_name = _safe_text(field_item.get("raw_name"))
+        if storage == "platform_alipay_bill_lines" and _is_hidden_alipay_bill_field_name(raw_name):
+            continue
         if _is_non_publishable_semantic_field_name(raw_name):
             continue
         fields.append(field_item)
@@ -1018,6 +1087,7 @@ def _apply_platform_semantic_profile_overrides(
     key_fields = [
         _safe_text(item)
         for item in next_profile.get("key_fields") or []
+        if not (storage == "platform_alipay_bill_lines" and _is_hidden_alipay_bill_field_name(item))
         if not _is_non_publishable_semantic_field_name(item)
     ]
     preserve_manual_key_fields = (
@@ -1029,8 +1099,12 @@ def _apply_platform_semantic_profile_overrides(
         pass
     elif storage == "platform_order_lines":
         key_fields = [field for field in ["tid", "oid"] if field in field_label_map]
-    elif storage == "platform_alipay_bill_lines" and "source_row_key" in field_label_map:
-        key_fields = ["source_row_key"]
+    elif storage == "platform_alipay_bill_lines":
+        key_fields = [
+            field
+            for field in ("支付宝交易号", "账务流水号", "商户订单号", "业务流水号", "业务订单号")
+            if field in field_label_map
+        ][:2]
 
     next_profile["fields"] = fields
     next_profile["field_label_map"] = field_label_map
@@ -1419,8 +1493,12 @@ def _build_semantic_profile(
     storage = _platform_semantic_storage_key(dataset_row)
     if storage == "platform_order_lines":
         key_fields = [field for field in ["tid", "oid"] if field in field_label_map]
-    elif storage == "platform_alipay_bill_lines" and "source_row_key" in field_label_map:
-        key_fields = ["source_row_key"]
+    elif storage == "platform_alipay_bill_lines":
+        key_fields = [
+            field
+            for field in ("支付宝交易号", "账务流水号", "商户订单号", "业务流水号", "业务订单号")
+            if field in field_label_map
+        ][:2]
 
     business_name = _guess_business_name(dataset_row, source_row=source_row)
     business_description = (
@@ -1495,7 +1573,10 @@ def _extract_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
     semantic_profile = meta.get("semantic_profile")
     if not isinstance(semantic_profile, dict):
         return {}
-    return semantic_profile
+    return _clean_platform_semantic_profile(
+        dataset_row=dataset_row,
+        profile=semantic_profile,
+    )
 
 
 def _semantic_profile_has_manual_field_overrides(profile: dict[str, Any]) -> bool:
@@ -2146,6 +2227,18 @@ def _flatten_platform_sample_payload(row: dict[str, Any]) -> dict[str, Any]:
             raw_key = _safe_text(key)
             if raw_key and raw_key not in payload:
                 payload[raw_key] = value
+    return payload
+
+
+def _flatten_alipay_bill_payload(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("raw")
+    source = raw if isinstance(raw, dict) else row
+    payload: dict[str, Any] = {}
+    for key, value in dict(source).items():
+        raw_key = _safe_text(key)
+        if not raw_key or _is_hidden_alipay_bill_field_name(raw_key):
+            continue
+        payload[raw_key] = value
     return payload
 
 
@@ -7567,7 +7660,13 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             limit=sample_limit,
             offset=0,
         )
-    if _dataset_uses_platform_order_lines(dataset_row) or _dataset_uses_platform_alipay_bill_lines(dataset_row):
+    if _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        sample_rows = [
+            _flatten_alipay_bill_payload(dict(item.get("payload") or {}))
+            for item in collection_records
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+    elif _dataset_uses_platform_order_lines(dataset_row):
         sample_rows = [
             _flatten_platform_sample_payload(dict(item.get("payload") or {}))
             for item in collection_records
@@ -7628,14 +7727,18 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
 
     limit = max(1, min(int(arguments.get("limit") or 100), 1000))
     offset = max(0, int(arguments.get("offset") or 0))
+    payload_filters = arguments.get("filters") if isinstance(arguments.get("filters"), dict) else None
     if _dataset_uses_platform_order_lines(dataset_row):
+        order_filters = {"tid": _safe_text(arguments.get("item_key")) or None}
+        if payload_filters:
+            order_filters.update(payload_filters)
         records = auth_db.list_platform_order_lines(
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=dataset_id,
             resource_key=resource_key or None,
             biz_date=_safe_text(arguments.get("biz_date")) or None,
-            filters={"tid": _safe_text(arguments.get("item_key")) or None},
+            filters=order_filters,
             limit=limit,
             offset=offset,
         )
@@ -7646,13 +7749,16 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
             biz_date=_safe_text(arguments.get("biz_date")) or None,
         )
     elif _dataset_uses_platform_alipay_bill_lines(dataset_row):
+        alipay_filters = {"source_row_key": _safe_text(arguments.get("item_key")) or None}
+        if payload_filters:
+            alipay_filters.update(payload_filters)
         records = auth_db.list_platform_alipay_bill_lines(
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=dataset_id,
             resource_key=resource_key or None,
             biz_date=_safe_text(arguments.get("biz_date")) or None,
-            filters={"source_row_key": _safe_text(arguments.get("item_key")) or None},
+            filters=alipay_filters,
             limit=limit,
             offset=offset,
         )
@@ -7671,6 +7777,7 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
             resource_key=resource_key or None,
             biz_date=_safe_text(arguments.get("biz_date")) or None,
             item_key=_safe_text(arguments.get("item_key")) or None,
+            filters=payload_filters,
             limit=limit,
             offset=offset,
         )
@@ -7717,9 +7824,9 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             offset=0,
         )
         rows = [
-            dict(item.get("payload") or item)
+            _flatten_platform_sample_payload(dict(item.get("payload") or {}))
             for item in records
-            if isinstance(item, dict)
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
         return {
             "success": True,
@@ -7741,9 +7848,9 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             offset=0,
         )
         rows = [
-            dict(item.get("payload") or item)
+            _flatten_alipay_bill_payload(dict(item.get("payload") or {}))
             for item in records
-            if isinstance(item, dict)
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
         return {
             "success": True,

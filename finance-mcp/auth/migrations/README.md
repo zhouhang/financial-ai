@@ -31,6 +31,10 @@
 23. **023_tally_service_provider_company.sql** - 初始化 Tally 服务商公司
 24. **024_auth_sessions_extra.sql** - 为平台授权会话增加 extra 元数据，用于记录支付宝商户显示名称等授权上下文
 25. **025_platform_alipay_bill_lines.sql** - 支付宝账单行物理表，用于支付宝授权采集后的资金账单和交易账单
+26. **026_platform_pending_authorizations.sql** - 平台待授权会话
+27. **027_sync_jobs_trigger_modes_initial_schedule.sql** - 同步任务触发模式与首次调度字段
+28. **028_drop_alipay_derived_business_columns.sql** - 删除支付宝账单英文派生业务列，业务字段仅保留明细 payload
+29. **029_clean_alipay_semantic_profiles.sql** - 清理支付宝账单历史语义档案中的隐藏元数据和旧英文派生字段
 
 ## 使用方法
 

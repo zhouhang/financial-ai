@@ -94,7 +94,7 @@ def test_upsert_platform_alipay_bill_lines_replace_scope_prunes_when_empty(monke
     )
 
 
-def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
+def test_upsert_platform_alipay_bill_lines_writes_single_chinese_payload(monkeypatch):
     executed_sql: list[str] = []
     params_seen: list[tuple] = []
 
@@ -140,10 +140,10 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
                 "source_file_name": "bill.csv",
                 "source_row_number": "12",
                 "source_row_key": "row-key-1",
-                "alipay_trade_no": "A001",
-                "merchant_order_no": "M001",
-                "business_order_no": "B001",
-                "raw": {
+                "payload": {
+                    "账务流水号": "A001",
+                    "商户订单号": "M001",
+                    "业务流水号": "B001",
                     "金额": "12.30",
                     "收入": "12.30",
                     "支出": "",
@@ -166,14 +166,29 @@ def test_upsert_platform_alipay_bill_lines_promotes_recon_fields(monkeypatch):
         "ON CONFLICT (company_id, shop_connection_id, bill_type, bill_date, source_row_key)"
         in executed_sql[0]
     )
-    combined_params = [str(value) for value in params_seen[0]]
-    assert "A001" in combined_params
-    assert "M001" in combined_params
-    assert "B001" in combined_params
-    assert combined_params.count("12.30") >= 2
+    sql = str(executed_sql[0])
+    assert "alipay_trade_no" not in sql
+    assert "merchant_order_no" not in sql
+    assert "business_order_no" not in sql
+    assert "income_amount" not in sql
+    assert "expense_amount" not in sql
+    assert "trade_time" not in sql
+    params = params_seen[0]
+    payload = params[10].adapted
+    assert payload == {
+        "账务流水号": "A001",
+        "商户订单号": "M001",
+        "业务流水号": "B001",
+        "金额": "12.30",
+        "收入": "12.30",
+        "支出": "",
+        "入账时间": "2026-05-06 12:30:00",
+    }
+    assert "raw" not in payload
+    assert "merchant_order_no" not in payload
 
 
-def test_upsert_platform_alipay_bill_lines_promotes_signed_fund_amount_columns(monkeypatch):
+def test_upsert_platform_alipay_bill_lines_keeps_amount_columns_in_payload_only(monkeypatch):
     params_seen: list[tuple] = []
 
     class FakeCursor:
@@ -217,7 +232,7 @@ def test_upsert_platform_alipay_bill_lines_promotes_signed_fund_amount_columns(m
                 "source_file_name": "bill.csv",
                 "source_row_number": "12",
                 "source_row_key": "row-key-1",
-                "raw": {
+                "payload": {
                     "账务流水号": "A001",
                     "业务流水号": "B001",
                     "商户订单号": "M001",
@@ -230,19 +245,16 @@ def test_upsert_platform_alipay_bill_lines_promotes_signed_fund_amount_columns(m
     )
 
     params = params_seen[0]
-    assert params[10:17] == (
-        "A001",
-        "M001",
-        "B001",
-        None,
-        "88.00",
-        "-0.30",
-        "2026-05-06 12:30:00",
-    )
-    payload = params[17].adapted
-    assert payload["income_amount"] == "88.00"
-    assert payload["expense_amount"] == "-0.30"
-    assert payload["trade_time"] == "2026-05-06 12:30:00"
+    payload = params[10].adapted
+    assert payload["账务流水号"] == "A001"
+    assert payload["业务流水号"] == "B001"
+    assert payload["商户订单号"] == "M001"
+    assert payload["收入金额（+元）"] == "88.00"
+    assert payload["支出金额（-元）"] == "-0.30"
+    assert payload["发生时间"] == "2026-05-06 12:30:00"
+    assert "income_amount" not in payload
+    assert "expense_amount" not in payload
+    assert "trade_time" not in payload
 
 
 def test_upsert_platform_alipay_bill_lines_prunes_stale_rows_for_same_bill_file(monkeypatch):
@@ -291,7 +303,7 @@ def test_upsert_platform_alipay_bill_lines_prunes_stale_rows_for_same_bill_file(
                 "source_file_name": "bill.csv",
                 "source_row_number": 12,
                 "source_row_key": "row-key-1",
-                "raw": {"账务流水号": "A100", "收入金额（+元）": "12.30"},
+                "payload": {"账务流水号": "A100", "收入金额（+元）": "12.30"},
             }
         ],
         replace_bill_scope=True,
@@ -354,12 +366,12 @@ def test_upsert_platform_alipay_bill_lines_generates_distinct_fallback_row_keys(
                 "source_file_name": "bill.csv",
                 "source_row_number": 12,
                 "source_row_key": " ",
-                "raw": {"金额": "12.30", "支付宝交易号": "A100"},
+                "payload": {"金额": "12.30", "支付宝交易号": "A100"},
             },
             {
                 "source_file_name": "bill.csv",
                 "source_row_number": 13,
-                "raw": {"金额": "45.60", "支付宝交易号": "A101"},
+                "payload": {"金额": "45.60", "支付宝交易号": "A101"},
             },
         ],
         replace_bill_scope=True,
@@ -373,7 +385,7 @@ def test_upsert_platform_alipay_bill_lines_generates_distinct_fallback_row_keys(
     assert source_row_keys[0] != source_row_keys[1]
 
 
-def test_upsert_platform_alipay_bill_lines_promotes_raw_only_identifiers(monkeypatch):
+def test_upsert_platform_alipay_bill_lines_keeps_identifiers_in_payload_only(monkeypatch):
     params_seen: list[tuple] = []
 
     class FakeCursor:
@@ -417,7 +429,7 @@ def test_upsert_platform_alipay_bill_lines_promotes_raw_only_identifiers(monkeyp
                 "source_file_name": "bill.csv",
                 "source_row_number": 12,
                 "source_row_key": "row-key-1",
-                "raw": {
+                "payload": {
                     "支付宝交易号": "A100",
                     "商户订单号": "M100",
                     "业务订单号": "B100",
@@ -428,11 +440,13 @@ def test_upsert_platform_alipay_bill_lines_promotes_raw_only_identifiers(monkeyp
     )
 
     params = params_seen[0]
-    assert params[10:13] == ("A100", "M100", "B100")
-    payload = params[17].adapted
-    assert payload["alipay_trade_no"] == "A100"
-    assert payload["merchant_order_no"] == "M100"
-    assert payload["business_order_no"] == "B100"
+    payload = params[10].adapted
+    assert payload["支付宝交易号"] == "A100"
+    assert payload["商户订单号"] == "M100"
+    assert payload["业务订单号"] == "B100"
+    assert "alipay_trade_no" not in payload
+    assert "merchant_order_no" not in payload
+    assert "business_order_no" not in payload
 
 
 def test_list_platform_alipay_bill_lines_filters_resource_key(monkeypatch):
@@ -470,7 +484,7 @@ def test_list_platform_alipay_bill_lines_filters_resource_key(monkeypatch):
         dataset_id="dataset-001",
         resource_key="alipay_bill:trade:shop-001",
         biz_date="2026-05-06",
-        filters={"merchant_order_no": "M001"},
+        filters={"source_row_key": "row-key-1"},
         limit=20,
         offset=5,
     )
@@ -480,7 +494,7 @@ def test_list_platform_alipay_bill_lines_filters_resource_key(monkeypatch):
     assert "bill_type = %s" in str(captured["sql"])
     assert "shop_connection_id = %s" in str(captured["sql"])
     assert "bill_date = %s" in str(captured["sql"])
-    assert "merchant_order_no = %s" in str(captured["sql"])
+    assert "source_row_key = %s" in str(captured["sql"])
     assert captured["params"] == (
         "company-001",
         "source-001",
@@ -488,10 +502,53 @@ def test_list_platform_alipay_bill_lines_filters_resource_key(monkeypatch):
         "trade",
         "shop-001",
         "2026-05-06",
-        "M001",
+        "row-key-1",
         5,
         20,
     )
+
+
+def test_list_platform_alipay_bill_lines_filters_payload_fields_with_params(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = tuple(params or ())
+
+        def fetchall(self):
+            return [{"payload": {"商户订单号": "M1001"}}]
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConn())
+
+    rows = auth_db.list_platform_alipay_bill_lines(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        filters={"商户订单号": "M1001"},
+        limit=20,
+    )
+
+    assert rows == [{"payload": {"商户订单号": "M1001"}}]
+    assert "payload ->> %s = %s" in str(captured["sql"])
+    assert "商户订单号" in captured["params"]
+    assert "M1001" in captured["params"]
 
 
 def test_list_platform_alipay_bill_lines_limit_none_keeps_offset_without_limit(monkeypatch):

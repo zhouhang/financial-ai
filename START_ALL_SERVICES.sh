@@ -76,6 +76,29 @@ print(process.pid)
 PY
 }
 
+wait_http_health() {
+    local name="$1"
+    local url="$2"
+    local timeout_seconds="${3:-45}"
+    local started_at
+    local now
+
+    started_at="$(date +%s)"
+    while true; do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            echo "✅ $name 健康检查通过: $url"
+            return 0
+        fi
+
+        now="$(date +%s)"
+        if [ $((now - started_at)) -ge "$timeout_seconds" ]; then
+            echo "❌ $name 健康检查超时: $url"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 
@@ -90,6 +113,8 @@ echo "📌 步骤 1: 停止现有服务..."
 lsof -ti:3335,8100,5173 | xargs kill -9 2>/dev/null || true
 [ -f /tmp/finance-cron.pid ] && kill -9 "$(cat /tmp/finance-cron.pid)" 2>/dev/null || true
 rm -f /tmp/finance-cron.pid
+# 兜底清理 PID 文件丢失后遗留的旧 finance-cron。
+pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
 # 停止已有的 recon-worker 进程
 if [ -f /tmp/recon-workers.pids ]; then
     while IFS= read -r pid; do
@@ -112,9 +137,7 @@ source .venv/bin/activate
 load_project_env
 FINANCE_MCP_PID="$(start_detached "$LOG_DIR/finance-mcp.log" "$PROJECT_ROOT/finance-mcp" python unified_mcp_server.py)"
 echo "✅ finance-mcp 已启动 (PID: $FINANCE_MCP_PID)"
-
-# 等待 finance-mcp 启动
-sleep 3
+wait_http_health "finance-mcp" "http://127.0.0.1:3335/health" 60
 
 # 启动 data-agent
 # 开发调试：可在 finance-agents/data-agent 目录运行 `pip install -e .` 后执行 `langgraph dev --allow-blocking` 接入 LangSmith Studio（端口 2024）；--allow-blocking 可避免当前代码中 llm.invoke 等同步调用触发的 BlockingError
@@ -129,9 +152,7 @@ load_project_env
 configure_langsmith_env
 DATA_AGENT_PID="$(start_detached "$LOG_DIR/data-agent.log" "$PROJECT_ROOT/finance-agents/data-agent" python -m server)"
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
-
-# 等待 data-agent 启动
-sleep 3
+wait_http_health "data-agent" "http://127.0.0.1:8100/health" 60
 
 # 启动 finance-cron
 echo ""
@@ -145,6 +166,10 @@ echo "✅ finance-cron 已启动 (PID: $FINANCE_CRON_PID)"
 
 # 等待 finance-cron 启动
 sleep 2
+if ! kill -0 "$FINANCE_CRON_PID" 2>/dev/null; then
+    echo "❌ finance-cron 启动后立即退出，请查看日志：tail -80 $LOG_DIR/finance-cron.log"
+    exit 1
+fi
 
 # 启动 recon-worker（默认 4 个进程，可通过 RECON_WORKER_COUNT 覆盖）
 echo ""

@@ -124,6 +124,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         dataset_ref = payload.get("dataset_ref") if isinstance(payload.get("dataset_ref"), dict) else payload
         source_id = str(dataset_ref.get("source_key") or dataset_ref.get("source_id") or "").strip()
+        source_type = str(dataset_ref.get("source_type") or "collection_records").strip() or "collection_records"
         query = dataset_ref.get("query") if isinstance(dataset_ref.get("query"), dict) else {}
         resource_key = str(query.get("resource_key") or "").strip()
         if not source_id or not table_name:
@@ -146,7 +147,7 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
             {
                 "table_name": table_name,
                 "dataset_ref": {
-                    "source_type": "collection_records",
+                    "source_type": source_type,
                     "source_key": source_id,
                     "query": ref_query,
                 },
