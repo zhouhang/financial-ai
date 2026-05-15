@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 from models import AgentState
 from graphs.recon.scheme_execution import build_scheme_execution_graph
 from .nodes import (
+    apply_alipay_fund_source_only_suppression_node,
     bind_ready_collection_node,
     build_auto_run_context_node,
     check_dataset_ready_node,
@@ -98,6 +99,10 @@ def build_auto_scheme_run_graph() -> StateGraph:
     graph.add_node("validate_dataset_completeness_node", validate_dataset_completeness_node)
     graph.add_node("build_auto_run_context_node", build_auto_run_context_node)
     graph.add_node("scheme_execution_graph", scheme_execution)
+    graph.add_node(
+        "apply_alipay_fund_source_only_suppression_node",
+        apply_alipay_fund_source_only_suppression_node,
+    )
     graph.add_node("persist_failed_run_node", persist_failed_run_node)
     graph.add_node("persist_auto_run_node", persist_auto_run_node)
     graph.add_node("create_exception_tasks_node", create_exception_tasks_node)
@@ -157,7 +162,8 @@ def build_auto_scheme_run_graph() -> StateGraph:
         },
     )
     graph.add_edge("build_auto_run_context_node", "scheme_execution_graph")
-    graph.add_edge("scheme_execution_graph", "persist_auto_run_node")
+    graph.add_edge("scheme_execution_graph", "apply_alipay_fund_source_only_suppression_node")
+    graph.add_edge("apply_alipay_fund_source_only_suppression_node", "persist_auto_run_node")
     graph.add_edge("persist_auto_run_node", "create_exception_tasks_node")
     graph.add_edge("create_exception_tasks_node", "maybe_auto_notify_node")
     graph.add_edge("maybe_auto_notify_node", "update_rerun_exception_verification_node")
