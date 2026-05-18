@@ -35,6 +35,7 @@
 27. **027_sync_jobs_trigger_modes_initial_schedule.sql** - 同步任务触发模式与首次调度字段
 28. **028_drop_alipay_derived_business_columns.sql** - 删除支付宝账单英文派生业务列，业务字段仅保留明细 payload
 29. **029_clean_alipay_semantic_profiles.sql** - 清理支付宝账单历史语义档案中的隐藏元数据和旧英文派生字段
+30. **030_messages_seq_ordering.sql** - 为 messages 表新增单调自增 seq 列,修复聊天记录加载顺序乱序
 
 ## 使用方法
 
