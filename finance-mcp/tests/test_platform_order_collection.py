@@ -1079,6 +1079,22 @@ async def test_trigger_dataset_collection_for_company_does_not_require_auth_toke
         "get_latest_source_dataset_checkpoint",
         lambda **kwargs: {"last_window_end": "2026-05-06T12:00:00+08:00"},
     )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_or_reuse_dataset_collection_sync_job",
+        lambda **kwargs: {
+            "job": {
+                "id": "job-created",
+                "company_id": kwargs["company_id"],
+                "data_source_id": kwargs["data_source_id"],
+                "resource_key": kwargs["resource_key"],
+                "job_status": "pending",
+                "current_attempt": 0,
+            },
+            "reused": False,
+            "reuse_reason": "",
+        },
+    )
 
     async def fake_trigger_sync(
         arguments: dict[str, Any],

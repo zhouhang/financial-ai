@@ -5165,6 +5165,239 @@ def get_latest_source_dataset_checkpoint(
         return {}
 
 
+def find_inflight_dataset_collection_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> dict | None:
+    """查找同一数据集业务日期正在执行的采集任务。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                           window_start, window_end, idempotency_key, job_status,
+                           request_payload, checkpoint_before, checkpoint_after,
+                           active_snapshot_id, published_snapshot_id, current_attempt,
+                           error_message, started_at, completed_at, created_at, updated_at
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status IN ('pending', 'running')
+                      AND request_payload ->> 'dataset_id' = %s
+                      AND request_payload ->> 'biz_date' = %s
+                      AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id, resource_key, dataset_id, biz_date),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            "查询进行中采集任务失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return None
+
+
+def find_recent_success_dataset_collection_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+    ttl_seconds: int,
+) -> dict | None:
+    """查找 TTL 内同一数据集业务日期最近一次成功采集任务。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                           window_start, window_end, idempotency_key, job_status,
+                           request_payload, checkpoint_before, checkpoint_after,
+                           active_snapshot_id, published_snapshot_id, current_attempt,
+                           error_message, started_at, completed_at, created_at, updated_at
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status = 'success'
+                      AND request_payload ->> 'dataset_id' = %s
+                      AND request_payload ->> 'biz_date' = %s
+                      AND completed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                    ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        resource_key,
+                        dataset_id,
+                        biz_date,
+                        max(1, int(ttl_seconds or 1)),
+                    ),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            "查询 TTL 内成功采集任务失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return None
+
+
+def create_or_reuse_dataset_collection_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    trigger_mode: str,
+    resource_key: str,
+    dataset_id: str,
+    biz_date: str,
+    ttl_seconds: int,
+    idempotency_key: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
+    request_payload: dict | None = None,
+    checkpoint_before: dict | None = None,
+    inflight_ttl_seconds: int = 900,
+) -> dict:
+    """在同一数据库临界区内复用或创建数据集采集任务。"""
+    stored_idempotency_key = str(idempotency_key or "").strip() or None
+    lock_key = f"dataset_collection:{company_id}:{data_source_id}:{dataset_id}:{resource_key}:{biz_date}"
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+                cur.execute(
+                    """
+                    SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                           window_start, window_end, idempotency_key, job_status,
+                           request_payload, checkpoint_before, checkpoint_after,
+                           active_snapshot_id, published_snapshot_id, current_attempt,
+                           error_message, started_at, completed_at, created_at, updated_at
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status IN ('pending', 'running')
+                      AND request_payload ->> 'dataset_id' = %s
+                      AND request_payload ->> 'biz_date' = %s
+                      AND updated_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        resource_key,
+                        dataset_id,
+                        biz_date,
+                        max(1, int(inflight_ttl_seconds or 1)),
+                    ),
+                )
+                row = cur.fetchone()
+                if row:
+                    conn.commit()
+                    return {
+                        "job": _normalize_record(dict(row)),
+                        "reused": True,
+                        "reuse_reason": "inflight",
+                    }
+
+                if int(ttl_seconds or 0) > 0:
+                    cur.execute(
+                        """
+                        SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                               window_start, window_end, idempotency_key, job_status,
+                               request_payload, checkpoint_before, checkpoint_after,
+                               active_snapshot_id, published_snapshot_id, current_attempt,
+                               error_message, started_at, completed_at, created_at, updated_at
+                        FROM sync_jobs
+                        WHERE company_id = %s
+                          AND data_source_id = %s
+                          AND resource_key = %s
+                          AND job_status = 'success'
+                          AND request_payload ->> 'dataset_id' = %s
+                          AND request_payload ->> 'biz_date' = %s
+                          AND completed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                        ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                        LIMIT 1
+                        """,
+                        (
+                            company_id,
+                            data_source_id,
+                            resource_key,
+                            dataset_id,
+                            biz_date,
+                            max(1, int(ttl_seconds or 1)),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        conn.commit()
+                        return {
+                            "job": _normalize_record(dict(row)),
+                            "reused": True,
+                            "reuse_reason": "recent_success_ttl",
+                        }
+
+                cur.execute(
+                    """
+                    INSERT INTO sync_jobs (
+                        company_id, data_source_id, trigger_mode, resource_key, idempotency_key,
+                        window_start, window_end, request_payload, checkpoint_before
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s::jsonb, %s::jsonb
+                    )
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, started_at, completed_at, created_at, updated_at
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        trigger_mode,
+                        resource_key,
+                        stored_idempotency_key,
+                        window_start,
+                        window_end,
+                        psycopg2.extras.Json(request_payload or {}),
+                        psycopg2.extras.Json(checkpoint_before or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return {
+                    "job": _normalize_record(dict(row)) if row else None,
+                    "reused": False,
+                    "reuse_reason": "",
+                }
+    except Exception as e:
+        logger.error(
+            "复用或创建数据集采集任务失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return {"job": None, "reused": False, "reuse_reason": "", "error": str(e)}
+
+
 def _clean_decimal_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -5872,65 +6105,81 @@ def upsert_dataset_collection_records(
 
     conn_manager = get_conn()
     input_count = len(items)
-    inserted_count = 0
-    updated_count = 0
-    unchanged_count = 0
+    values: list[tuple[Any, ...]] = []
+    for item in items:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        key_values = item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {}
+        values.append(
+            (
+                company_id,
+                data_source_id,
+                dataset_id,
+                dataset_code,
+                resource_key or "default",
+                biz_date,
+                str(item.get("item_key") or ""),
+                psycopg2.extras.Json(_json_safe_payload(key_values)),
+                str(item.get("item_hash") or ""),
+                psycopg2.extras.Json(_json_safe_payload(payload)),
+                sync_job_id,
+                sync_job_id,
+            )
+        )
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                for item in items:
-                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                    key_values = item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {}
-                    cur.execute(
-                        """
-                        INSERT INTO dataset_collection_records (
-                            company_id, data_source_id, dataset_id, dataset_code, resource_key,
-                            biz_date, item_key, item_key_values, item_hash, payload, record_status,
-                            first_seen_job_id, latest_seen_job_id
-                        ) VALUES (
-                            %s, %s, %s, %s, %s,
-                            %s, %s, %s::jsonb, %s, %s::jsonb, 'active',
-                            %s, %s
-                        )
-                        ON CONFLICT (company_id, dataset_id, biz_date, item_key)
-                        DO UPDATE SET
-                            data_source_id = EXCLUDED.data_source_id,
-                            dataset_code = EXCLUDED.dataset_code,
-                            resource_key = EXCLUDED.resource_key,
-                            item_key_values = EXCLUDED.item_key_values,
-                            item_hash = EXCLUDED.item_hash,
-                            payload = EXCLUDED.payload,
-                            record_status = CASE
-                                WHEN dataset_collection_records.item_hash = EXCLUDED.item_hash THEN 'unchanged'
-                                ELSE 'updated'
-                            END,
-                            latest_seen_job_id = EXCLUDED.latest_seen_job_id,
-                            latest_seen_at = CURRENT_TIMESTAMP,
-                            updated_at = CURRENT_TIMESTAMP
-                        RETURNING (xmax = 0) AS inserted, record_status
-                        """,
-                        (
-                            company_id,
-                            data_source_id,
-                            dataset_id,
-                            dataset_code,
-                            resource_key or "default",
-                            biz_date,
-                            str(item.get("item_key") or ""),
-                            psycopg2.extras.Json(_json_safe_payload(key_values)),
-                            str(item.get("item_hash") or ""),
-                            psycopg2.extras.Json(_json_safe_payload(payload)),
-                            sync_job_id,
-                            sync_job_id,
-                        ),
-                    )
-                    row = cur.fetchone()
-                    if row and bool(row.get("inserted")):
-                        inserted_count += 1
-                    elif row and str(row.get("record_status") or "") == "unchanged":
-                        unchanged_count += 1
-                    else:
-                        updated_count += 1
+                rows = psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dataset_collection_records (
+                        company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                        biz_date, item_key, item_key_values, item_hash, payload, record_status,
+                        first_seen_job_id, latest_seen_job_id
+                    ) VALUES %s
+                    ON CONFLICT (company_id, dataset_id, biz_date, item_key)
+                    DO UPDATE SET
+                        data_source_id = EXCLUDED.data_source_id,
+                        dataset_code = EXCLUDED.dataset_code,
+                        resource_key = EXCLUDED.resource_key,
+                        item_key_values = CASE
+                            WHEN dataset_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN dataset_collection_records.item_key_values
+                            ELSE EXCLUDED.item_key_values
+                        END,
+                        item_hash = EXCLUDED.item_hash,
+                        payload = CASE
+                            WHEN dataset_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN dataset_collection_records.payload
+                            ELSE EXCLUDED.payload
+                        END,
+                        record_status = CASE
+                            WHEN dataset_collection_records.item_hash = EXCLUDED.item_hash THEN 'unchanged'
+                            ELSE 'updated'
+                        END,
+                        latest_seen_job_id = EXCLUDED.latest_seen_job_id,
+                        latest_seen_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING CASE
+                        WHEN (xmax = 0) THEN 'inserted'
+                        WHEN record_status = 'unchanged' THEN 'unchanged'
+                        ELSE 'updated'
+                    END AS action
+                    """,
+                    values,
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, "
+                        "'active', %s, %s)"
+                    ),
+                    page_size=1000,
+                    fetch=True,
+                )
+                inserted_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "inserted"
+                )
+                unchanged_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "unchanged"
+                )
+                updated_count = max(0, len(rows or []) - inserted_count - unchanged_count)
             conn.commit()
             return {
                 "input_count": input_count,

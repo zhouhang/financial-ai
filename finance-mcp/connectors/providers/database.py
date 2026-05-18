@@ -6,7 +6,7 @@ import logging
 import re
 import sqlite3
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Iterator
 
 import psycopg2
 import psycopg2.extras
@@ -393,6 +393,49 @@ class DatabaseConnector(BaseDataSourceConnector):
             "message": f"已同步 {len(rows)} 行数据库数据",
         }
 
+    def iter_sync_batches(
+        self,
+        arguments: dict[str, Any],
+        *,
+        batch_size: int = 5000,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Yield sync rows in batches without materializing the full result set."""
+        cfg = self._resolved_connection_config()
+        db_type = _normalize_db_type(cfg.get("db_type"))
+        missing = self._validate_connection_config(cfg)
+        if missing:
+            raise RuntimeError(f"database 配置缺失: {', '.join(missing)}")
+
+        schema_name, table_name, filters = self._resolve_sync_target(arguments)
+        if not table_name:
+            raise RuntimeError("同步数据需要提供 resource_key 或表名")
+
+        safe_batch_size = max(1, min(_to_int(batch_size, 5000), 50000))
+        if db_type == "postgresql":
+            yield from self._iter_sync_postgresql_batches(
+                cfg,
+                schema_name or "public",
+                table_name,
+                filters,
+                batch_size=safe_batch_size,
+            )
+            return
+
+        if db_type == "mysql":
+            rows = self._sync_mysql(
+                cfg,
+                schema_name or str(cfg.get("database") or ""),
+                table_name,
+                filters,
+            )
+        elif db_type == "sqlite":
+            rows = self._sync_sqlite(cfg, table_name, filters)
+        else:
+            raise RuntimeError(f"暂不支持 {db_type} 的同步")
+
+        for offset in range(0, len(rows), safe_batch_size):
+            yield rows[offset : offset + safe_batch_size]
+
     def discover_datasets(self, arguments: dict[str, Any]) -> dict[str, Any]:
         cfg = self._resolved_connection_config()
         db_type = _normalize_db_type(cfg.get("db_type"))
@@ -605,6 +648,39 @@ class DatabaseConnector(BaseDataSourceConnector):
                     query += pg_sql.SQL(" WHERE ") + where_sql
                 cur.execute(query, params)
                 return [dict(row) for row in cur.fetchall() or []]
+        finally:
+            conn.close()
+
+    def _iter_sync_postgresql_batches(
+        self,
+        cfg: dict[str, Any],
+        schema_name: str,
+        table_name: str,
+        filters: dict[str, Any],
+        *,
+        batch_size: int,
+    ) -> Iterator[list[dict[str, Any]]]:
+        conn = self._connect_postgresql(cfg)
+        try:
+            cursor_name = f"tally_sync_{id(self)}"
+            with conn.cursor(
+                name=cursor_name,
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.itersize = batch_size
+                query = pg_sql.SQL("SELECT * FROM {}.{}").format(
+                    pg_sql.Identifier(schema_name),
+                    pg_sql.Identifier(table_name),
+                )
+                where_sql, params = self._build_postgresql_filter_sql(filters)
+                if where_sql is not None:
+                    query += pg_sql.SQL(" WHERE ") + where_sql
+                cur.execute(query, params)
+                while True:
+                    rows = cur.fetchmany(batch_size)
+                    if not rows:
+                        break
+                    yield [dict(row) for row in rows]
         finally:
             conn.close()
 

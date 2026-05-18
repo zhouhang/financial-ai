@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time as monotonic_time
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ import requests
 from dotenv import dotenv_values
 from mcp import Tool
 
+from app_config import SERVICE_PROVIDER_COMPANY_ID
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from connectors.factory import build_connector
@@ -37,7 +39,15 @@ from tools.platform_connections import handle_tool_call as handle_platform_tool_
 
 logger = logging.getLogger("tools.data_sources")
 CONNECTOR_SYNC_TIMEOUT_SECONDS = int(os.getenv("CONNECTOR_SYNC_TIMEOUT_SECONDS", "180"))
-SERVICE_PROVIDER_COMPANY_ID = "00000000-0000-0000-0000-00000000dd01"
+DATASET_COLLECTION_REUSE_TTL_SECONDS = int(
+    os.getenv("DATASET_COLLECTION_REUSE_TTL_SECONDS", "600")
+)
+DATASET_COLLECTION_INFLIGHT_WAIT_SECONDS = int(
+    os.getenv("DATASET_COLLECTION_INFLIGHT_WAIT_SECONDS", "180")
+)
+DATASET_COLLECTION_INFLIGHT_POLL_SECONDS = float(
+    os.getenv("DATASET_COLLECTION_INFLIGHT_POLL_SECONDS", "2")
+)
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -75,6 +85,35 @@ DATASET_CANDIDATE_MAX_SCAN_PAGES = 200
 _SEMANTIC_ENV_CACHE: dict[str, str] | None = None
 TAOBAO_TZ = timezone(timedelta(hours=8))
 PLATFORM_TOKEN_REFRESH_THRESHOLD = timedelta(minutes=30)
+
+
+def _elapsed_seconds(started_at: float) -> float:
+    return round(max(0.0, monotonic_time.perf_counter() - started_at), 6)
+
+
+def _collection_source_batch_size(params: dict[str, Any]) -> int:
+    raw_value = (
+        params.get("source_batch_size")
+        or params.get("batch_size")
+        or params.get("fetch_batch_size")
+        or 5000
+    )
+    try:
+        return max(1, min(int(raw_value), 50000))
+    except (TypeError, ValueError):
+        return 5000
+
+
+def _dataset_collection_reuse_ttl_seconds(params: dict[str, Any]) -> int:
+    raw_value = (
+        params.get("collection_reuse_ttl_seconds")
+        or params.get("reuse_ttl_seconds")
+        or DATASET_COLLECTION_REUSE_TTL_SECONDS
+    )
+    try:
+        return max(0, min(int(raw_value), 3600))
+    except (TypeError, ValueError):
+        return DATASET_COLLECTION_REUSE_TTL_SECONDS
 
 
 def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
@@ -4700,6 +4739,24 @@ def _attach_aliases_to_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+async def _wait_for_collection_job_completion(
+    sync_job_id: str,
+    *,
+    timeout_seconds: int = DATASET_COLLECTION_INFLIGHT_WAIT_SECONDS,
+    poll_seconds: float = DATASET_COLLECTION_INFLIGHT_POLL_SECONDS,
+) -> dict[str, Any] | None:
+    """等待同一数据集正在执行的采集任务完成，避免重复打源库。"""
+    deadline = monotonic_time.monotonic() + max(1, int(timeout_seconds or 1))
+    while True:
+        job = auth_db.get_unified_sync_job_by_id(sync_job_id)
+        status = _safe_text((job or {}).get("job_status")).lower()
+        if status not in {"pending", "running"}:
+            return job
+        if monotonic_time.monotonic() >= deadline:
+            return job
+        await asyncio.sleep(max(0.1, float(poll_seconds or 0.1)))
+
+
 def _enrich_jobs_with_latest_attempts(company_id: str, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not jobs:
         return []
@@ -6969,6 +7026,124 @@ def _fail_sync_job(
     )
 
 
+def _execute_database_collection_stream(
+    *,
+    runtime_source: dict[str, Any],
+    arguments: dict[str, Any],
+    company_id: str,
+    source_id: str,
+    resource_key: str,
+    sync_job_id: str,
+    collection_context: dict[str, Any],
+    batch_size: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, float], str]:
+    connector = build_connector(runtime_source)
+    iter_batches = getattr(connector, "iter_sync_batches", None)
+    if not callable(iter_batches):
+        raise RuntimeError("当前数据库连接器不支持分批采集")
+
+    timing = {
+        "connector_sync_seconds": 0.0,
+        "build_collection_records_seconds": 0.0,
+        "data_hash_seconds": 0.0,
+        "upsert_collection_records_seconds": 0.0,
+    }
+    summary = {
+        "input_count": 0,
+        "upserted_count": 0,
+        "inserted_count": 0,
+        "updated_count": 0,
+        "unchanged_count": 0,
+        "batch_count": 0,
+        "max_batch_size": 0,
+    }
+    validation = {
+        "skipped_empty_key_count": 0,
+        "skipped_empty_key_samples": [],
+    }
+    digest = hashlib.sha1()
+    connector_started_at = monotonic_time.perf_counter()
+    try:
+        iterator = iter(iter_batches(arguments, batch_size=batch_size))
+        while True:
+            fetch_started_at = monotonic_time.perf_counter()
+            try:
+                batch_rows = next(iterator)
+            except StopIteration:
+                timing["connector_sync_seconds"] += _elapsed_seconds(fetch_started_at)
+                break
+            timing["connector_sync_seconds"] += _elapsed_seconds(fetch_started_at)
+            if not batch_rows:
+                continue
+            rows = [row for row in batch_rows if isinstance(row, dict)]
+            if not rows:
+                continue
+            summary["batch_count"] += 1
+            summary["max_batch_size"] = max(int(summary["max_batch_size"]), len(rows))
+
+            hash_started_at = monotonic_time.perf_counter()
+            digest.update(_json_safe(rows).encode("utf-8"))
+            timing["data_hash_seconds"] += _elapsed_seconds(hash_started_at)
+
+            build_started_at = monotonic_time.perf_counter()
+            collection_records, batch_validation = _build_collection_records(
+                rows=rows,
+                key_fields=list(collection_context.get("key_fields") or []),
+            )
+            timing["build_collection_records_seconds"] += _elapsed_seconds(build_started_at)
+            validation["skipped_empty_key_count"] += int(
+                batch_validation.get("skipped_empty_key_count") or 0
+            )
+            if batch_validation.get("skipped_empty_key_samples"):
+                validation["skipped_empty_key_samples"].extend(
+                    batch_validation.get("skipped_empty_key_samples") or []
+                )
+                validation["skipped_empty_key_samples"] = validation[
+                    "skipped_empty_key_samples"
+                ][:5]
+
+            upsert_started_at = monotonic_time.perf_counter()
+            upsert_summary = auth_db.upsert_dataset_collection_records(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=str(collection_context.get("dataset_id") or ""),
+                dataset_code=str(collection_context.get("dataset_code") or ""),
+                resource_key=resource_key,
+                biz_date=str(collection_context.get("biz_date") or ""),
+                sync_job_id=sync_job_id,
+                records=collection_records,
+            )
+            timing["upsert_collection_records_seconds"] += _elapsed_seconds(upsert_started_at)
+            for key in (
+                "input_count",
+                "upserted_count",
+                "inserted_count",
+                "updated_count",
+                "unchanged_count",
+            ):
+                summary[key] += int(upsert_summary.get(key) or 0)
+    except Exception:
+        if timing["connector_sync_seconds"] == 0.0:
+            timing["connector_sync_seconds"] = _elapsed_seconds(connector_started_at)
+        raise
+
+    data_hash = digest.hexdigest()
+    collection_summary = {
+        **summary,
+        "dataset_id": str(collection_context.get("dataset_id") or ""),
+        "dataset_code": str(collection_context.get("dataset_code") or ""),
+        "biz_date": str(collection_context.get("biz_date") or ""),
+        "key_fields": list(collection_context.get("key_fields") or []),
+        "record_count": summary["upserted_count"],
+        "streaming": True,
+        "source_batch_size": batch_size,
+        "source_batch_count": summary["batch_count"],
+        "source_max_batch_size": summary["max_batch_size"],
+        **validation,
+    }
+    return collection_summary, validation, timing, data_hash
+
+
 async def _execute_sync_job(
     *,
     company_id: str,
@@ -6984,11 +7159,51 @@ async def _execute_sync_job(
 ) -> dict[str, Any]:
     job_id = _safe_text(job.get("id"))
     attempt_id = _safe_text(attempt.get("id"))
+    total_started_at = monotonic_time.perf_counter()
+    finalize_started_at: float | None = None
+    collection_timing: dict[str, float] = {
+        "total_seconds": 0.0,
+        "connector_sync_seconds": 0.0,
+        "build_collection_records_seconds": 0.0,
+        "data_hash_seconds": 0.0,
+        "upsert_collection_records_seconds": 0.0,
+        "finalize_job_seconds": 0.0,
+    }
     try:
         params = dict(arguments.get("params") or {})
         dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
         collection_driver = _resolve_collection_driver(runtime_source, dataset_row)
-        if collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API:
+        collection_context = _collection_context_from_args(arguments)
+        connector_started_at = monotonic_time.perf_counter()
+        uses_streaming_collection = (
+            collection_driver == COLLECTION_DRIVER_DB_QUERY
+            and runtime_source.get("source_kind") == "database"
+            and bool(collection_context)
+        )
+        if uses_streaming_collection:
+            batch_size = _collection_source_batch_size(params)
+            collection_summary, collection_validation, stream_timing, data_hash = (
+                _execute_database_collection_stream(
+                    runtime_source=runtime_source,
+                    arguments=arguments,
+                    company_id=company_id,
+                    source_id=source_id,
+                    resource_key=resource_key,
+                    sync_job_id=job_id,
+                    collection_context=collection_context,
+                    batch_size=batch_size,
+                )
+            )
+            collection_timing.update(stream_timing)
+            result = {
+                "success": True,
+                "healthy": True,
+                "message": f"已分批同步 {collection_summary.get('record_count', 0)} 行数据库数据",
+            }
+            rows: list[dict[str, Any]] = []
+            uses_driver_managed_storage = False
+            collection_records: list[dict[str, Any]] = []
+        elif collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API:
             params.setdefault("collection_config", _dataset_collection_config(dataset_row))
             params.setdefault("dataset_id", _safe_text((dataset_row or {}).get("id")))
             params.setdefault("dataset_code", _safe_text((dataset_row or {}).get("dataset_code")))
@@ -7034,44 +7249,51 @@ async def _execute_sync_job(
             )
         else:
             result = await _run_connector_sync(runtime_source, arguments)
-        rows = _sync_rows_from_payload(result)
-        collection_context = _collection_context_from_args(arguments)
-        collection_records: list[dict[str, Any]] = []
-        collection_validation: dict[str, Any] = {}
-        result_collection_summary = (
-            result.get("collection_summary") if isinstance(result.get("collection_summary"), dict) else {}
-        )
-        collection_summary: dict[str, Any] = dict(result_collection_summary)
-        collection_storage = _safe_text(result_collection_summary.get("storage"))
-        uses_alipay_driver_managed_storage = (
-            collection_driver == COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
-            and (
-                _dataset_uses_platform_alipay_bill_lines(dataset_row)
-                or (bool(collection_storage) and collection_storage != "dataset_collection_records")
+        if not uses_streaming_collection:
+            collection_timing["connector_sync_seconds"] = _elapsed_seconds(connector_started_at)
+            rows = _sync_rows_from_payload(result)
+            collection_records = []
+            collection_validation = {}
+            result_collection_summary = (
+                result.get("collection_summary") if isinstance(result.get("collection_summary"), dict) else {}
             )
-        )
-        uses_driver_managed_storage = (
-            collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API
-            or uses_alipay_driver_managed_storage
-        )
-        if uses_driver_managed_storage:
-            if uses_alipay_driver_managed_storage:
-                collection_summary = _normalize_alipay_driver_collection_summary(
-                    summary=collection_summary,
-                    dataset_row=dataset_row,
-                    params=params,
+            collection_summary = dict(result_collection_summary)
+            collection_storage = _safe_text(result_collection_summary.get("storage"))
+            uses_alipay_driver_managed_storage = (
+                collection_driver == COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT
+                and (
+                    _dataset_uses_platform_alipay_bill_lines(dataset_row)
+                    or (bool(collection_storage) and collection_storage != "dataset_collection_records")
+                )
+            )
+            uses_driver_managed_storage = (
+                collection_driver == COLLECTION_DRIVER_TAOBAO_ORDER_API
+                or uses_alipay_driver_managed_storage
+            )
+            build_records_started_at = monotonic_time.perf_counter()
+            if uses_driver_managed_storage:
+                if uses_alipay_driver_managed_storage:
+                    collection_summary = _normalize_alipay_driver_collection_summary(
+                        summary=collection_summary,
+                        dataset_row=dataset_row,
+                        params=params,
+                        rows=rows,
+                    )
+                    dataset_row = _merge_dataset_schema_columns(
+                        dataset_row,
+                        [column for column in collection_summary.get("columns") or [] if isinstance(column, dict)],
+                    )
+            elif collection_context:
+                collection_records, collection_validation = _build_collection_records(
                     rows=rows,
+                    key_fields=list(collection_context.get("key_fields") or []),
                 )
-                dataset_row = _merge_dataset_schema_columns(
-                    dataset_row,
-                    [column for column in collection_summary.get("columns") or [] if isinstance(column, dict)],
-                )
-        elif collection_context:
-            collection_records, collection_validation = _build_collection_records(
-                rows=rows,
-                key_fields=list(collection_context.get("key_fields") or []),
+            collection_timing["build_collection_records_seconds"] = _elapsed_seconds(
+                build_records_started_at
             )
-        data_hash = _hash_payload(rows)
+            data_hash_started_at = monotonic_time.perf_counter()
+            data_hash = _hash_payload(rows)
+            collection_timing["data_hash_seconds"] = _elapsed_seconds(data_hash_started_at)
         healthy = bool(result.get("healthy", result.get("success", False)))
         if not bool(result.get("success")) or not healthy:
             message = str(result.get("error") or result.get("message") or "同步失败")
@@ -7084,6 +7306,10 @@ async def _execute_sync_job(
                     "data_hash": data_hash,
                     "collection_upserted": 0,
                     "collection_driver": collection_driver,
+                    "collection_timing": {
+                        **collection_timing,
+                        "total_seconds": _elapsed_seconds(total_started_at),
+                    },
                 },
                 checkpoint_after=checkpoint_before,
             )
@@ -7134,7 +7360,8 @@ async def _execute_sync_job(
                 "collection_driver": collection_driver,
             }
 
-        if collection_context and not uses_driver_managed_storage:
+        if collection_context and not uses_driver_managed_storage and not uses_streaming_collection:
+            upsert_started_at = monotonic_time.perf_counter()
             collection_summary = auth_db.upsert_dataset_collection_records(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -7144,6 +7371,9 @@ async def _execute_sync_job(
                 biz_date=str(collection_context.get("biz_date") or ""),
                 sync_job_id=job_id,
                 records=collection_records,
+            )
+            collection_timing["upsert_collection_records_seconds"] = _elapsed_seconds(
+                upsert_started_at
             )
             collection_summary.update(
                 {
@@ -7155,30 +7385,18 @@ async def _execute_sync_job(
                     **collection_validation,
                 }
             )
+        collection_row_count = int(
+            collection_summary.get("record_count")
+            or collection_summary.get("upserted_count")
+            or len(rows)
+        )
+        finalize_started_at = monotonic_time.perf_counter()
         checkpoint_after = _build_checkpoint_after(
             checkpoint_before,
             window_start=window_start,
             window_end=window_end,
-            rows_count=int(collection_summary.get("upserted_count") or len(rows)),
+            rows_count=collection_row_count,
             result=result,
-        )
-        auth_db.update_unified_sync_job_attempt(
-            attempt_id=attempt_id,
-            attempt_status="success",
-            error_message="",
-            metrics={
-                "row_count": len(rows),
-                "data_hash": data_hash,
-                "collection_input": int(collection_summary.get("input_count") or 0),
-                "collection_upserted": int(collection_summary.get("upserted_count") or 0),
-                "collection_inserted": int(collection_summary.get("inserted_count") or 0),
-                "collection_updated": int(collection_summary.get("updated_count") or 0),
-                "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
-                "collection_skipped_empty_key": int(collection_validation.get("skipped_empty_key_count") or 0),
-                "collection_skipped_empty_key_samples": collection_validation.get("skipped_empty_key_samples") or [],
-                "collection_driver": collection_driver,
-            },
-            checkpoint_after=checkpoint_after,
         )
         updated_job = auth_db.update_unified_sync_job_status(
             sync_job_id=job_id,
@@ -7195,7 +7413,7 @@ async def _execute_sync_job(
             event_level="info",
             event_message=str(result.get("message") or "同步成功"),
             event_payload={
-                "rows": len(rows),
+                "rows": collection_row_count,
                 "resource_key": resource_key,
                 "collection_summary": collection_summary,
                 "original_files": result.get("original_files") or collection_summary.get("original_files") or [],
@@ -7242,6 +7460,31 @@ async def _execute_sync_job(
                 _safe_text((dataset_row or {}).get("id")),
                 exc,
             )
+        if finalize_started_at is not None:
+            collection_timing["finalize_job_seconds"] = _elapsed_seconds(finalize_started_at)
+        collection_timing["total_seconds"] = _elapsed_seconds(total_started_at)
+        auth_db.update_unified_sync_job_attempt(
+            attempt_id=attempt_id,
+            attempt_status="success",
+            error_message="",
+            metrics={
+                "row_count": collection_row_count,
+                "data_hash": data_hash,
+                "collection_input": int(collection_summary.get("input_count") or 0),
+                "collection_upserted": int(collection_summary.get("upserted_count") or 0),
+                "collection_inserted": int(collection_summary.get("inserted_count") or 0),
+                "collection_updated": int(collection_summary.get("updated_count") or 0),
+                "collection_unchanged": int(collection_summary.get("unchanged_count") or 0),
+                "collection_batch_count": int(collection_summary.get("source_batch_count") or 0),
+                "collection_max_batch_size": int(collection_summary.get("source_max_batch_size") or 0),
+                "collection_streaming": bool(collection_summary.get("streaming")),
+                "collection_skipped_empty_key": int(collection_validation.get("skipped_empty_key_count") or 0),
+                "collection_skipped_empty_key_samples": collection_validation.get("skipped_empty_key_samples") or [],
+                "collection_driver": collection_driver,
+                "collection_timing": collection_timing,
+            },
+            checkpoint_after=checkpoint_after,
+        )
         return {
             "success": True,
             "source_id": source_id,
@@ -7333,17 +7576,79 @@ async def _handle_data_source_trigger_sync(
         if isinstance(params.get("checkpoint_before"), dict)
         else {}
     )
-    job = auth_db.create_unified_sync_job(
-        company_id=company_id,
-        data_source_id=source_id,
-        trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
-        resource_key=resource_key,
-        idempotency_key=idempotency_key,
-        window_start=window_start,
-        window_end=window_end,
-        request_payload=params,
-        checkpoint_before=checkpoint_before,
-    )
+    dataset_id = _safe_text(params.get("dataset_id"))
+    biz_date = _safe_text(params.get("biz_date"))
+    if dataset_id and biz_date:
+        job_result = auth_db.create_or_reuse_dataset_collection_sync_job(
+            company_id=company_id,
+            data_source_id=source_id,
+            trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
+            resource_key=resource_key,
+            dataset_id=dataset_id,
+            biz_date=biz_date,
+            ttl_seconds=_dataset_collection_reuse_ttl_seconds(params),
+            idempotency_key=idempotency_key,
+            window_start=window_start,
+            window_end=window_end,
+            request_payload=params,
+            checkpoint_before=checkpoint_before,
+        )
+        job = job_result.get("job") if isinstance(job_result, dict) else None
+        if bool((job_result or {}).get("reused")) and job:
+            reuse_reason = _safe_text(job_result.get("reuse_reason"))
+            if reuse_reason == "inflight":
+                completed_job = await _wait_for_collection_job_completion(_safe_text(job.get("id")))
+                completed_status = _safe_text((completed_job or {}).get("job_status")).lower()
+                if completed_job and completed_status == "success":
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(completed_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "inflight_completed",
+                        "message": "同一数据集正在采集，已等待并复用完成结果",
+                    }
+                if completed_job and completed_status in {"failed", "cancelled", "partial"}:
+                    return {
+                        "success": False,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(completed_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "inflight_failed",
+                        "error": str(completed_job.get("error_message") or "同一数据集正在采集的任务失败"),
+                    }
+                return {
+                    "success": False,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(completed_job or job),
+                    "reused": True,
+                    "queued": False,
+                    "reuse_reason": "inflight_timeout",
+                    "error": "同一数据集正在采集，等待超时",
+                }
+            return {
+                "success": True,
+                "source_id": source_id,
+                "job": _attach_aliases_to_job(job),
+                "reused": True,
+                "queued": False,
+                "reuse_reason": reuse_reason or "recent_success_ttl",
+                "message": "短时间内已有同一数据集采集结果，已复用",
+            }
+    else:
+        job = auth_db.create_unified_sync_job(
+            company_id=company_id,
+            data_source_id=source_id,
+            trigger_mode=_safe_text(arguments.get("trigger_mode")) or "manual",
+            resource_key=resource_key,
+            idempotency_key=idempotency_key,
+            window_start=window_start,
+            window_end=window_end,
+            request_payload=params,
+            checkpoint_before=checkpoint_before,
+        )
     if not job:
         if idempotency_key:
             existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
@@ -7466,7 +7771,7 @@ async def _trigger_dataset_collection_resolved(
         return {"success": False, "error": "发布数据集不存在"}
 
     resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
-    biz_date = _collection_biz_date_from_args(arguments)
+    biz_date = _collection_biz_date_from_args({**arguments, "params": params})
     config = _dataset_collection_config(dataset_row)
     collection_driver = _resolve_collection_driver({}, dataset_row)
     if not collection_driver:
