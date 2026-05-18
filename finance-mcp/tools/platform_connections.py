@@ -11,14 +11,13 @@ from urllib.parse import urlsplit
 
 from mcp import Tool
 
+from app_config import SERVICE_PROVIDER_COMPANY_ID
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from platforms.base import PlatformAppConfig
 from platforms.factory import build_connector
 
 logger = logging.getLogger("tools.platform_connections")
-
-SERVICE_PROVIDER_COMPANY_ID = "00000000-0000-0000-0000-00000000dd01"
 
 SUPPORTED_PLATFORMS: tuple[dict[str, str], ...] = (
     {"platform_code": "taobao", "platform_name": "淘宝/天猫", "status": "supported"},

@@ -54,6 +54,9 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
 
 _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
+ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID = "alipay-fund-source-only-non-alipay-payment"
+ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL = "非支付宝支付订单"
+ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN = "微信/其他支付资金账单接入后，重新纳入资金对账"
 
 
 def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
@@ -471,6 +474,54 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
             return left, right
 
     return "", ""
+
+
+def _is_alipay_fund_bill_binding(binding: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(binding.get(key) or "")
+        for key in (
+            "dataset_name",
+            "business_name",
+            "display_name",
+            "name",
+            "dataset_code",
+            "resource_key",
+            "table_name",
+        )
+    ).lower()
+    return "支付宝资金账单" in haystack or "alipay_bill:signcustomer" in haystack
+
+
+def _collection_side(collection: dict[str, Any]) -> str:
+    binding = _safe_dict(collection.get("binding"))
+    text = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
+    target = str(binding.get("input_plan_target_table") or binding.get("target_table") or "").strip().lower()
+    if text == "left" or text.startswith("left_") or target == "left_recon_ready":
+        return "left"
+    if text == "right" or text.startswith("right_") or target == "right_recon_ready":
+        return "right"
+    return ""
+
+
+def _alipay_fund_side(ctx: dict[str, Any]) -> str:
+    source_collection_json = _safe_dict(ctx.get("source_collection_json"))
+    collections = [
+        item for item in _safe_list(source_collection_json.get("collections"))
+        if isinstance(item, dict)
+    ]
+    if not collections:
+        collections = [
+            {"binding": item}
+            for item in _safe_list(ctx.get("plan_input_bindings"))
+            if isinstance(item, dict)
+        ]
+    for collection in collections:
+        binding = _safe_dict(collection.get("binding"))
+        if _is_alipay_fund_bill_binding(binding):
+            side = _collection_side(collection)
+            if side:
+                return side
+    return ""
 
 
 def _resolve_failed_reason(ctx: dict[str, Any]) -> str:
@@ -1818,6 +1869,77 @@ async def persist_failed_run_node(state: AgentState) -> dict[str, Any]:
     return {"recon_ctx": ctx}
 
 
+def apply_alipay_fund_source_only_suppression_node(state: AgentState) -> dict[str, Any]:
+    ctx = _get_recon_ctx(state)
+    exec_status = str(ctx.get("exec_status") or "success").strip().lower()
+    if exec_status not in {"", "success", "partial_success", "skipped"}:
+        return {"recon_ctx": ctx}
+
+    alipay_side = _alipay_fund_side(ctx)
+    if alipay_side not in {"left", "right"}:
+        return {"recon_ctx": ctx}
+
+    recon_observation = _safe_dict(ctx.get("recon_observation"))
+    summary = _safe_dict(recon_observation.get("summary"))
+    anomaly_items = [
+        item for item in _safe_list(recon_observation.get("anomaly_items"))
+        if isinstance(item, dict)
+    ]
+    source_only = _safe_int(summary.get("source_only"), 0)
+    target_only = _safe_int(summary.get("target_only"), 0)
+    matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
+
+    # source_only means the left/source side exists and the right/target side is missing.
+    # Suppress it only when the Alipay fund bill is the right/target side.
+    if alipay_side != "right" or source_only <= 0:
+        pending_total = source_only + target_only + matched_with_diff
+        summary.update(
+            {
+                "pending_source_only": source_only,
+                "pending_target_only": target_only,
+                "pending_matched_with_diff": matched_with_diff,
+                "pending_total": pending_total,
+                "has_anomaly": pending_total > 0,
+            }
+        )
+        recon_observation["summary"] = summary
+        recon_observation["anomaly_items"] = anomaly_items
+        recon_observation["anomaly_item_count"] = len(anomaly_items)
+        ctx["recon_observation"] = recon_observation
+        ctx["recon_result_summary_json"] = summary
+        ctx["anomaly_items"] = anomaly_items
+        return {"recon_ctx": ctx}
+
+    pending_anomalies = [
+        item for item in anomaly_items
+        if str(item.get("anomaly_type") or "") != "source_only"
+    ]
+    pending_total = target_only + matched_with_diff
+    summary.update(
+        {
+            "pending_source_only": 0,
+            "pending_target_only": target_only,
+            "pending_matched_with_diff": matched_with_diff,
+            "pending_total": pending_total,
+            "has_anomaly": pending_total > 0,
+            "temporary_suppression": {
+                "id": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID,
+                "enabled": True,
+                "suppressed_source_only": source_only,
+                "label": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL,
+                "remove_when": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN,
+            },
+        }
+    )
+    recon_observation["summary"] = summary
+    recon_observation["anomaly_items"] = pending_anomalies
+    recon_observation["anomaly_item_count"] = len(pending_anomalies)
+    ctx["recon_observation"] = recon_observation
+    ctx["recon_result_summary_json"] = summary
+    ctx["anomaly_items"] = pending_anomalies
+    return {"recon_ctx": ctx}
+
+
 async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
@@ -2141,15 +2263,20 @@ def _format_anomaly_type_stats(
 def _format_recon_result_summary_lines(summary: dict[str, Any], *, left_name: str = "", right_name: str = "") -> list[str]:
     left = str(left_name or "数据集 A").strip()
     right = str(right_name or "数据集 B").strip()
-    source_only = _safe_int(summary.get("source_only"), 0)
-    target_only = _safe_int(summary.get("target_only"), 0)
-    matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
+    source_only = _safe_int(summary.get("pending_source_only", summary.get("source_only")), 0)
+    target_only = _safe_int(summary.get("pending_target_only", summary.get("target_only")), 0)
+    matched_with_diff = _safe_int(
+        summary.get("pending_matched_with_diff", summary.get("matched_with_diff")),
+        0,
+    )
     matched_exact = _safe_int(summary.get("matched_exact"), 0)
+    if source_only + target_only + matched_with_diff == 0:
+        return ["无待处理差异", f"完全匹配：{matched_exact} 条"]
     return [
-        f"- 仅 {left} 存在（{right} 缺失）：{source_only} 条",
-        f"- 仅 {right} 存在（{left} 缺失）：{target_only} 条",
-        f"- 金额/字段差异：{matched_with_diff} 条",
-        f"- 完全匹配：{matched_exact} 条",
+        f"仅 {left} 存在（{right} 缺失）：{source_only} 条",
+        f"仅 {right} 存在（{left} 缺失）：{target_only} 条",
+        f"金额/字段差异：{matched_with_diff} 条",
+        f"完全匹配：{matched_exact} 条",
     ]
 
 
@@ -2351,8 +2478,20 @@ def _compose_run_summary_notification_text(
     biz_date = str(ctx.get("biz_date") or _safe_dict(ctx.get("run_context")).get("biz_date") or "").strip()
     left_name, right_name = _resolve_side_names(ctx)
 
-    total = len(anomalies)
-    status = "执行完成，待处理异常已按责任人聚合催办" if total else "执行完成"
+    summary = _safe_dict(ctx.get("recon_result_summary_json"))
+    total = (
+        _safe_int(summary.get("pending_total"), len(anomalies))
+        if "pending_total" in summary
+        else len(anomalies)
+    )
+    owner_names = _notified_owner_names_from_context(ctx)
+    status = (
+        f"执行完成，待处理异常已催办责任人「{'、'.join(owner_names)}」"
+        if total and owner_names
+        else "执行完成，待处理异常已催办责任人"
+        if total
+        else "执行完成"
+    )
     title = f"{plan_name} 对账结果汇总"
     lines = [
         f"任务：\n{plan_name}",
@@ -2360,14 +2499,41 @@ def _compose_run_summary_notification_text(
         f"执行结果：\n{status}",
         f"待处理差异：\n{total} 条",
     ]
-    count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
+    count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
+    if not any(
+        _safe_int(summary.get(key), 0)
+        for key in (
+            "pending_source_only",
+            "pending_target_only",
+            "pending_matched_with_diff",
+            "matched_exact",
+        )
+    ):
+        count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
     if detail_url:
         lines.append(f"[查看全量差异]({detail_url})")
-    lines.append("如异常数量或类型不符合预期，请检查方案配置或数据日期范围。")
     content = "\n\n".join(line for line in lines if line)
     return title, content
+
+
+def _notified_owner_names_from_context(ctx: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for item in _safe_list(ctx.get("created_exceptions")):
+        if not isinstance(item, dict):
+            continue
+        exception = _safe_dict(item.get("exception"))
+        contact = _safe_dict(exception.get("owner_contact_json"))
+        name = str(
+            exception.get("owner_name")
+            or contact.get("display_name")
+            or exception.get("owner_identifier")
+            or ""
+        ).strip()
+        if name and name not in names:
+            names.append(name)
+    return names[:8]
 
 
 def _resolve_exception_mobile(exception: dict[str, Any]) -> str:

@@ -105,11 +105,12 @@ interface SourceReadCountMetric {
   id: string;
   name: string;
   count: number | null;
+  note: string;
 }
 
 interface RunMetricsViewModel {
   matchedSuccessCount: number | null;
-  differenceTotal: number;
+  pendingDifferenceTotal: number;
   sourceReadCounts: SourceReadCountMetric[];
 }
 
@@ -468,10 +469,14 @@ function buildRunMetrics(bundle: PublicExceptionBundle | null): RunMetricsViewMo
   const rawRun = asRecord(bundle?.run?.raw);
   const summary = asRecord(rawRun.recon_result_summary_json);
   const sourceSnapshot = asRecord(rawRun.source_snapshot_json);
+  const temporarySuppression = asRecord(summary.temporary_suppression);
   const matchedExact = toOptionalInt(summary.matched_exact);
   const matchedWithDiff = toOptionalInt(summary.matched_with_diff);
   const sourceOnly = toOptionalInt(summary.source_only);
   const targetOnly = toOptionalInt(summary.target_only);
+  const pendingTotal = toOptionalInt(summary.pending_total);
+  const suppressedSourceOnly = toOptionalInt(temporarySuppression.suppressed_source_only);
+  const suppressionLabel = toText(temporarySuppression.label).trim() || '非支付宝支付订单';
   const hasSummaryCounts = (
     matchedExact !== null
     && matchedWithDiff !== null
@@ -490,6 +495,9 @@ function buildRunMetrics(bundle: PublicExceptionBundle | null): RunMetricsViewMo
       const item = asRecord(collection);
       const binding = asRecord(item.binding);
       const name = sourceDisplayName(binding) || sourceDisplayName(item) || `数据源 ${index + 1}`;
+      const note = index === 0 && suppressedSourceOnly !== null && suppressedSourceOnly > 0
+        ? `其中 ${formatCount(suppressedSourceOnly)} 条为${suppressionLabel}`
+        : '';
       return {
         id: firstText(
           binding.input_plan_key,
@@ -500,12 +508,13 @@ function buildRunMetrics(bundle: PublicExceptionBundle | null): RunMetricsViewMo
         ),
         name,
         count: sideCounts[index] ?? null,
+        note,
       };
     });
 
   return {
     matchedSuccessCount: matchedExact,
-    differenceTotal: bundle?.total ?? (bundle?.exceptions || []).length,
+    pendingDifferenceTotal: pendingTotal ?? bundle?.total ?? (bundle?.exceptions || []).length,
     sourceReadCounts,
   };
 }
@@ -1131,7 +1140,7 @@ export default function PublicReconRunExceptionsPage() {
                 <div key={item.id} className="min-w-0 rounded-2xl border border-border bg-surface-secondary px-4 py-3">
                   <p className="break-words text-sm font-medium text-text-primary">{item.name}</p>
                   <p className="mt-2 text-lg font-semibold text-text-primary">
-                    数据 {formatCount(item.count)} 条
+                    数据 {formatCount(item.count)} 条{item.note ? `（${item.note}）` : ''}
                   </p>
                 </div>
               ))}
@@ -1143,8 +1152,8 @@ export default function PublicReconRunExceptionsPage() {
               <p className="mt-1 text-lg font-semibold text-emerald-700">{formatCount(runMetrics.matchedSuccessCount)}</p>
             </div>
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">差异总数</p>
-              <p className="mt-1 text-lg font-semibold text-text-primary">{formatCount(runMetrics.differenceTotal)}</p>
+              <p className="text-xs text-text-secondary">待处理差异</p>
+              <p className="mt-1 text-lg font-semibold text-text-primary">{formatCount(runMetrics.pendingDifferenceTotal)}</p>
             </div>
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">开始时间</p>

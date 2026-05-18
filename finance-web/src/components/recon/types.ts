@@ -104,6 +104,7 @@ export interface ReconCenterRunItem {
   triggerType: string;
   entryMode: string;
   anomalyCount: number;
+  dataDate: string;
   failedStage: string;
   failedReason: string;
   startedAt: string;
@@ -170,6 +171,7 @@ export interface ReconCenterRunItem {
   triggerType: string;
   entryMode: string;
   anomalyCount: number;
+  dataDate: string;
   failedStage: string;
   failedReason: string;
   startedAt: string;

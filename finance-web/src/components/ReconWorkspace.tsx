@@ -316,7 +316,7 @@ interface SchemeMetaSummary {
 const SCHEME_LIST_TEMPLATE =
   'minmax(0,1.6fr) minmax(220px,1fr) minmax(220px,1fr) minmax(268px,auto)';
 const TASK_LIST_TEMPLATE =
-  'minmax(220px,1.5fr) minmax(180px,0.9fr) minmax(360px,2.2fr) minmax(140px,0.7fr) minmax(160px,0.8fr) minmax(96px,0.45fr) minmax(240px,auto)';
+  'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
   'minmax(0,2.7fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
 
@@ -1093,6 +1093,13 @@ function mapRun(
 ): ReconCenterRunItem {
   const raw = asRecord(item);
   const runContext = asRecord(raw.run_context_json);
+  const dataDate =
+    toText(raw.biz_date).trim()
+    || toText(raw.business_date).trim()
+    || toText(raw.data_date).trim()
+    || toText(runContext.biz_date).trim()
+    || toText(runContext.business_date).trim()
+    || toText(runContext.data_date).trim();
   const schemeCode = toText(raw.scheme_code);
   const planCode = toText(raw.plan_code);
   return {
@@ -1106,6 +1113,7 @@ function mapRun(
     triggerType: toText(runContext.trigger_type, toText(raw.trigger_type)),
     entryMode: toText(raw.entry_mode),
     anomalyCount: toInt(raw.anomaly_count, 0),
+    dataDate,
     failedStage: toText(raw.failed_stage),
     failedReason: toText(raw.failed_reason),
     startedAt: toText(raw.started_at),
@@ -6077,9 +6085,9 @@ export default function ReconWorkspace({
         })
       : (
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
-      <div className="min-w-[1560px]">
+      <div className="min-w-[1260px]">
         <ListHeader
-          columns={['任务名称', '对账方案', '对账日期字段', '运行计划', '任务创建时间', '状态', '操作']}
+          columns={['任务名称', '对账日期字段', '运行计划', '状态', '操作']}
           template={TASK_LIST_TEMPLATE}
         />
         {tasks.map((item) => {
@@ -6104,13 +6112,12 @@ export default function ReconWorkspace({
                   {item.name || '--'}
                 </p>
                 <p className="mt-1 truncate text-xs leading-5 text-text-secondary">
-                  {resolveChannelProviderLabel(item.channelConfigId)}
+                  {formatDateTime(item.createdAt)}
                 </p>
                 <p className="truncate text-xs leading-5 text-text-secondary">
-                  汇总：{item.summaryRecipient || '--'} · 责任：{item.ownerSummary || '--'}
+                  {resolveChannelProviderLabel(item.channelConfigId)} 汇总：{item.summaryRecipient || '--'} · 责任：{item.ownerSummary || '--'}
                 </p>
               </div>
-              <span className="truncate text-sm text-text-secondary">{item.schemeName || '--'}</span>
               <div className="min-w-0 space-y-1 text-sm leading-5 text-text-secondary" title={item.dateFieldSummary}>
                 {item.dateFieldLines.length > 0 ? (
                   item.dateFieldLines.map((line) => (
@@ -6125,7 +6132,6 @@ export default function ReconWorkspace({
               <span className="text-sm text-text-secondary">
                 {formatScheduleLabel(item.scheduleType, item.scheduleExpr)}
               </span>
-              <span className="text-sm text-text-secondary">{formatDateTime(item.createdAt)}</span>
               <span
                 className={cn(
                   'justify-self-start rounded-full border px-2.5 py-1 text-xs font-medium',
@@ -7117,6 +7123,10 @@ export default function ReconWorkspace({
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">所属方案</p>
               <p className="mt-1 text-sm font-medium text-text-primary">{run.schemeName || '--'}</p>
+            </div>
+            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
+              <p className="text-xs text-text-secondary">数据日期</p>
+              <p className="mt-1 text-sm font-medium text-text-primary">{run.dataDate || '--'}</p>
             </div>
             <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
               <p className="text-xs text-text-secondary">运行状态</p>

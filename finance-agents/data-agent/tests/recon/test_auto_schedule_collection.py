@@ -386,6 +386,298 @@ def test_check_dataset_ready_skips_manual_seed_collection(monkeypatch: pytest.Mo
     assert recon_ctx["missing_bindings"] == []
 
 
+def test_alipay_fund_source_only_suppression_removes_source_only_anomalies() -> None:
+    ctx = {
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {
+                        "role_code": "left_1",
+                        "dataset_name": "交易订单明细表",
+                        "resource_key": "public.order_detail",
+                    }
+                },
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "dataset_name": "支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺",
+                        "resource_key": "alipay_bill:signcustomer:shop-001",
+                    }
+                },
+            ]
+        },
+        "recon_observation": {
+            "summary": {
+                "matched_exact": 136,
+                "matched_with_diff": 0,
+                "source_only": 69,
+                "target_only": 0,
+                "total_records": 205,
+                "has_anomaly": True,
+            },
+            "anomaly_items": [
+                {"item_id": "source-1", "anomaly_type": "source_only"},
+                {"item_id": "source-2", "anomaly_type": "source_only"},
+            ],
+        },
+        "anomaly_items": [
+            {"item_id": "source-1", "anomaly_type": "source_only"},
+            {"item_id": "source-2", "anomaly_type": "source_only"},
+        ],
+    }
+
+    result = nodes.apply_alipay_fund_source_only_suppression_node({"recon_ctx": ctx})
+    updated = result["recon_ctx"]
+    summary = updated["recon_observation"]["summary"]
+
+    assert summary["source_only"] == 69
+    assert summary["pending_source_only"] == 0
+    assert summary["pending_target_only"] == 0
+    assert summary["pending_matched_with_diff"] == 0
+    assert summary["pending_total"] == 0
+    assert summary["has_anomaly"] is False
+    assert summary["temporary_suppression"] == {
+        "id": "alipay-fund-source-only-non-alipay-payment",
+        "enabled": True,
+        "suppressed_source_only": 69,
+        "label": "非支付宝支付订单",
+        "remove_when": "微信/其他支付资金账单接入后，重新纳入资金对账",
+    }
+    assert updated["anomaly_items"] == []
+    assert updated["recon_observation"]["anomaly_items"] == []
+    assert updated["recon_observation"]["anomaly_item_count"] == 0
+
+
+def test_alipay_fund_source_only_suppression_keeps_target_and_diff_anomalies() -> None:
+    ctx = {
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {
+                        "role_code": "left_1",
+                        "dataset_name": "交易订单明细表",
+                    }
+                },
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "dataset_name": "支付宝资金账单 - 测试商户",
+                        "resource_key": "alipay_bill:signcustomer:shop-001",
+                    }
+                },
+            ]
+        },
+        "recon_observation": {
+            "summary": {
+                "matched_exact": 10,
+                "matched_with_diff": 2,
+                "source_only": 3,
+                "target_only": 4,
+                "total_records": 19,
+                "has_anomaly": True,
+            },
+            "anomaly_items": [
+                {"item_id": "source-1", "anomaly_type": "source_only"},
+                {"item_id": "target-1", "anomaly_type": "target_only"},
+                {"item_id": "diff-1", "anomaly_type": "matched_with_diff"},
+            ],
+        },
+        "anomaly_items": [
+            {"item_id": "source-1", "anomaly_type": "source_only"},
+            {"item_id": "target-1", "anomaly_type": "target_only"},
+            {"item_id": "diff-1", "anomaly_type": "matched_with_diff"},
+        ],
+    }
+
+    result = nodes.apply_alipay_fund_source_only_suppression_node({"recon_ctx": ctx})
+    updated = result["recon_ctx"]
+    summary = updated["recon_observation"]["summary"]
+
+    assert summary["source_only"] == 3
+    assert summary["pending_source_only"] == 0
+    assert summary["pending_target_only"] == 4
+    assert summary["pending_matched_with_diff"] == 2
+    assert summary["pending_total"] == 6
+    assert summary["has_anomaly"] is True
+    assert [item["item_id"] for item in updated["anomaly_items"]] == ["target-1", "diff-1"]
+
+
+def test_summary_notification_uses_pending_counts_after_alipay_suppression() -> None:
+    ctx = {
+        "run_plan": {"plan_name": "泰斯支付宝对账"},
+        "run_context": {"biz_date": "2026-04-30"},
+        "recon_result_summary_json": {
+            "matched_exact": 136,
+            "source_only": 69,
+            "target_only": 0,
+            "matched_with_diff": 0,
+            "pending_source_only": 0,
+            "pending_target_only": 0,
+            "pending_matched_with_diff": 0,
+            "pending_total": 0,
+            "temporary_suppression": {
+                "id": "alipay-fund-source-only-non-alipay-payment",
+                "enabled": True,
+                "suppressed_source_only": 69,
+                "label": "非支付宝支付订单",
+            },
+        },
+        "source_collection_json": {
+            "collections": [
+                {"binding": {"role_code": "left_1", "dataset_name": "交易订单明细表"}},
+                {"binding": {"role_code": "right_1", "dataset_name": "支付宝资金账单 - 测试商户"}},
+            ]
+        },
+    }
+
+    _, content = nodes._compose_run_summary_notification_text(
+        ctx=ctx,
+        anomalies=[],
+        threshold=20,
+        explosion=False,
+        detail_url="https://dev.tallyai.cn/recon/runs/run-001/exceptions",
+    )
+
+    assert "待处理差异：\n0 条" in content
+    assert "无待处理差异" in content
+    assert "69 条" not in content
+    assert "非支付宝支付" not in content
+
+
+def test_alipay_fund_non_suppression_refreshes_stale_pending_counts() -> None:
+    ctx = {
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {
+                        "role_code": "left_1",
+                        "dataset_name": "支付宝资金账单 - 测试商户",
+                        "resource_key": "alipay_bill:signcustomer:shop-001",
+                    }
+                },
+                {"binding": {"role_code": "right_1", "dataset_name": "交易订单明细表"}},
+            ]
+        },
+        "recon_observation": {
+            "summary": {
+                "matched_exact": 8,
+                "matched_with_diff": 2,
+                "source_only": 3,
+                "target_only": 4,
+                "pending_source_only": 99,
+                "pending_target_only": 88,
+                "pending_matched_with_diff": 77,
+                "pending_total": 264,
+                "has_anomaly": True,
+            },
+            "anomaly_items": [
+                {"item_id": "source-1", "anomaly_type": "source_only"},
+                {"item_id": "target-1", "anomaly_type": "target_only"},
+                {"item_id": "diff-1", "anomaly_type": "matched_with_diff"},
+            ],
+        },
+        "anomaly_items": [{"item_id": "stale", "anomaly_type": "source_only"}],
+    }
+
+    result = nodes.apply_alipay_fund_source_only_suppression_node({"recon_ctx": ctx})
+    updated = result["recon_ctx"]
+    summary = updated["recon_observation"]["summary"]
+
+    assert summary["pending_source_only"] == 3
+    assert summary["pending_target_only"] == 4
+    assert summary["pending_matched_with_diff"] == 2
+    assert summary["pending_total"] == 9
+    assert summary["has_anomaly"] is True
+    assert updated["recon_observation"]["anomaly_item_count"] == 3
+    assert updated["anomaly_items"] == updated["recon_observation"]["anomaly_items"]
+
+
+def test_alipay_fund_suppression_noops_failed_execution_state() -> None:
+    ctx = {
+        "exec_status": "failed",
+        "source_collection_json": {
+            "collections": [
+                {"binding": {"role_code": "left_1", "dataset_name": "交易订单明细表"}},
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "dataset_name": "支付宝资金账单 - 测试商户",
+                        "resource_key": "alipay_bill:signcustomer:shop-001",
+                    }
+                },
+            ]
+        },
+        "recon_observation": {
+            "summary": {
+                "matched_exact": 10,
+                "matched_with_diff": 0,
+                "source_only": 3,
+                "target_only": 0,
+                "has_anomaly": True,
+            },
+            "anomaly_items": [{"item_id": "source-1", "anomaly_type": "source_only"}],
+        },
+        "anomaly_items": [{"item_id": "source-1", "anomaly_type": "source_only"}],
+    }
+
+    result = nodes.apply_alipay_fund_source_only_suppression_node({"recon_ctx": ctx})
+    updated = result["recon_ctx"]
+
+    assert updated["recon_observation"]["summary"] == ctx["recon_observation"]["summary"]
+    assert updated["recon_observation"]["anomaly_items"] == ctx["recon_observation"]["anomaly_items"]
+    assert updated["anomaly_items"] == ctx["anomaly_items"]
+    assert "recon_result_summary_json" not in updated
+
+
+def test_suppressed_source_only_does_not_create_execution_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        created_payloads.append({"name": name, "payload": payload})
+        return {"success": True, "exception": {"id": "unexpected"}}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+    ctx = {
+        "execution_run_record": {"id": "run-001"},
+        "scheme_code": "scheme-001",
+        "source_collection_json": {
+            "collections": [
+                {"binding": {"role_code": "left_1", "dataset_name": "交易订单明细表"}},
+                {
+                    "binding": {
+                        "role_code": "right_1",
+                        "dataset_name": "支付宝资金账单 - 测试商户",
+                        "resource_key": "alipay_bill:signcustomer:shop-001",
+                    }
+                },
+            ]
+        },
+        "recon_observation": {
+            "summary": {
+                "matched_exact": 10,
+                "matched_with_diff": 0,
+                "source_only": 2,
+                "target_only": 0,
+                "has_anomaly": True,
+            },
+            "anomaly_items": [
+                {"item_id": "source-1", "anomaly_type": "source_only"},
+                {"item_id": "source-2", "anomaly_type": "source_only"},
+            ],
+        },
+        "anomaly_items": [
+            {"item_id": "source-1", "anomaly_type": "source_only"},
+            {"item_id": "source-2", "anomaly_type": "source_only"},
+        ],
+    }
+    suppressed = nodes.apply_alipay_fund_source_only_suppression_node({"recon_ctx": ctx})["recon_ctx"]
+
+    result = asyncio.run(nodes.create_exception_tasks_node({"auth_token": "token", "recon_ctx": suppressed}))
+
+    assert result["recon_ctx"]["anomaly_items"] == []
+    assert created_payloads == []
+
+
 def test_execute_auto_task_run_schedule_collects_before_recon(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -656,7 +948,7 @@ def test_exception_reminder_uses_base_dataset_names_and_hides_type_line() -> Non
     assert "右侧数据" not in bot_content
     assert "源数据" not in bot_content
     assert "目标数据" not in bot_content
-    assert "异常详情：仅 FP订单表 存在（交易订单明细表 缺失）" in bot_content
+    assert "异常详情：\n仅 FP订单表 存在（交易订单明细表 缺失）" in bot_content
 
 
 def test_legacy_exception_reminder_replaces_source_target_labels() -> None:
@@ -1159,8 +1451,12 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert "仅 交易订单明细表 存在（支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺 缺失）" in owner_content
     assert len(adapter.bot_calls) == 1
     assert adapter.bot_calls[0]["content_type"] == "markdown"
+    summary_content = str(adapter.bot_calls[0]["content"])
+    assert "执行完成，待处理异常已催办责任人「周行」" in summary_content
+    assert "待处理异常已按责任人聚合催办" not in summary_content
+    assert "如异常数量或类型不符合预期，请检查方案配置或数据日期范围。" not in summary_content
     assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
-        adapter.bot_calls[0]["content"]
+        summary_content
     )
     assert len(updated_payloads) == 3
     for _exception_id, payload in updated_payloads:

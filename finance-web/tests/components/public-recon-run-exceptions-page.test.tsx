@@ -119,12 +119,13 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
 
     expect(headerView.getByText('成功')).toBeInTheDocument();
     expect(headerView.getByText('170')).toBeInTheDocument();
-    expect(headerView.getByText('差异总数')).toBeInTheDocument();
+    expect(headerView.getByText('待处理差异')).toBeInTheDocument();
     expect(headerView.getByText('60')).toBeInTheDocument();
     expect(headerView.getByText('交易订单明细表')).toBeInTheDocument();
     expect(headerView.getByText('支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺')).toBeInTheDocument();
     expect(headerView.getByText((_, element) => element?.textContent === '数据 235 条')).toBeInTheDocument();
     expect(headerView.getByText((_, element) => element?.textContent === '数据 187 条')).toBeInTheDocument();
+    expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
     expect(headerView.queryByText('本次读取数据')).not.toBeInTheDocument();
     expect(headerView.queryByText('新增 0 / 更新 340')).not.toBeInTheDocument();
     expect(headerView.queryByText((_, element) => element?.textContent === '本次读取 1 条')).not.toBeInTheDocument();
@@ -133,5 +134,84 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
       '/api/recon/public/runs/run-001/exceptions?limit=100&offset=0&owner=ding-user-001',
       undefined,
     );
+  });
+
+  it('shows pending difference metrics and source-only suppression note from run summary', async () => {
+    fetchMock.mockResolvedValueOnce(buildJsonResponse({
+      run: {
+        id: 'run-002',
+        run_code: 'run_code_002',
+        scheme_code: 'scheme-002',
+        plan_code: 'plan-002',
+        scheme_name: '泰斯支付宝对账方案',
+        plan_name: '泰斯支付宝对账',
+        execution_status: 'success',
+        started_at: '2026-05-12T09:00:00+08:00',
+        finished_at: '2026-05-12T09:05:00+08:00',
+        run_context_json: { biz_date: '2026-05-12' },
+        recon_result_summary_json: {
+          matched_exact: 136,
+          source_only: 69,
+          target_only: 0,
+          matched_with_diff: 0,
+          pending_total: 0,
+          temporary_suppression: {
+            suppressed_source_only: 69,
+            label: '非支付宝支付订单',
+          },
+        },
+        source_snapshot_json: {
+          collections: [
+            {
+              binding: {
+                dataset_id: 'dataset-left',
+                data_source_id: 'source-left',
+                dataset_name: '交易订单明细表',
+                resource_key: 'public.ods_yxst_trd_order_di_o',
+              },
+            },
+            {
+              binding: {
+                dataset_id: 'dataset-right',
+                data_source_id: 'source-right',
+                dataset_name: '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺',
+                resource_key: 'alipay_bill:signcustomer:shop-001',
+              },
+            },
+          ],
+        },
+      },
+      scheme: {
+        id: 'scheme-002',
+        scheme_code: 'scheme-002',
+        scheme_name: '泰斯支付宝对账方案',
+        scheme_meta_json: {},
+      },
+      run_plan: {
+        id: 'plan-002',
+        plan_code: 'plan-002',
+        plan_name: '泰斯支付宝对账',
+      },
+      exceptions: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    }));
+
+    render(<PublicReconRunExceptionsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('匹配成功')).toBeInTheDocument();
+    });
+
+    const header = screen.getByText('对账差异公开分享').closest('header');
+    expect(header).not.toBeNull();
+    const headerView = within(header as HTMLElement);
+
+    expect(headerView.getByText((_, element) => element?.textContent === '数据 205 条（其中 69 条为非支付宝支付订单）')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '数据 136 条')).toBeInTheDocument();
+    expect(headerView.getByText('待处理差异')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '待处理差异0')).toBeInTheDocument();
+    expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
   });
 });
