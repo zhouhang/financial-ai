@@ -29,6 +29,7 @@ from typing import Any, Optional
 import pandas as pd
 from security_utils import PROC_OUTPUT_ROOT, UPLOAD_ROOT, resolve_path_under_roots
 from tools.rule_schema import load_and_validate_rule
+from proc.mcp_server.steps_runtime import ProcUserDataError
 
 logger = logging.getLogger(__name__)
 
@@ -708,7 +709,11 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
     path = resolve_path_under_roots(file_path, [UPLOAD_ROOT, PROC_OUTPUT_ROOT])
     if not path.exists():
-        raise FileNotFoundError(f"文件不存在: {file_path}")
+        raise ProcUserDataError(
+            summary="数据整理找不到文件",
+            cause=f"文件「{file_path}」不存在。",
+            suggestion="请重新上传该文件。",
+        )
     ext = path.suffix.lower()
     if ext == ".csv":
         try:
@@ -721,7 +726,11 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
     elif ext in (".xlsx", ".xls"):
         return pd.read_excel(path)
     else:
-        raise ValueError(f"不支持的文件格式: {ext}")
+        raise ProcUserDataError(
+            summary="数据整理遇到不支持的文件格式",
+            cause=f"文件格式「{ext}」不受支持。",
+            suggestion="请上传 Excel 或 CSV 文件。",
+        )
 
 
 def _write_merged_file(df: pd.DataFrame, output_dir: str, rule_id: str, match_field: str = "") -> str:

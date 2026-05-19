@@ -32,8 +32,31 @@ from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import write_output_metadata, resolve_upload_file_path
 from tools.rule_schema import load_and_validate_rule
+from proc.mcp_server.steps_runtime import (
+    ProcRuntimeError,
+    ProcRuleConfigError,
+    ProcUserDataError,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def render_proc_failure(exc: BaseException) -> str:
+    """把数据整理执行抛出的异常翻译成面向用户的三段式成品文本。"""
+    if isinstance(exc, ProcRuntimeError):
+        return exc.format_detail()
+    if isinstance(exc, KeyError):
+        key = exc.args[0] if exc.args else str(exc)
+        return ProcUserDataError(
+            summary="数据整理找不到所需的列",
+            cause=f"执行过程中找不到列「{key}」。",
+            suggestion="请确认上传的文件包含该列，并检查列名是否一致。",
+        ).format_detail()
+    return ProcRuleConfigError(
+        summary="系统执行出错",
+        cause="数据整理过程中发生未预期的错误。",
+        suggestion="请联系管理员排查。",
+    ).format_detail()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -345,6 +368,148 @@ def _summarize_input_plan(input_plan_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _collect_table_field_references(rule_data: dict[str, Any]) -> dict[str, set[str]]:
+    """扫描 steps 规则，收集每个输入表被规则引用的列名集合。
+
+    用于判断规则在引用某个表时实际使用了别名组里的哪个写法（规则可能用别名而非规范名，
+    且不同表写法不一）。仅统计绑定到输入表的 alias 上的字段引用。
+    """
+    refs: dict[str, set[str]] = {}
+
+    def add(table: Any, field: Any) -> None:
+        table = str(table or "").strip()
+        field = str(field or "").strip()
+        if table and field:
+            refs.setdefault(table, set()).add(field)
+
+    def walk_value(node: Any, alias_to_table: dict[str, str]) -> None:
+        if isinstance(node, dict):
+            ntype = node.get("type")
+            if ntype == "source":
+                src = node.get("source") or {}
+                add(alias_to_table.get(str(src.get("alias") or "")), src.get("field"))
+            elif ntype == "lookup":
+                table = alias_to_table.get(str(node.get("source_alias") or ""))
+                add(table, node.get("value_field"))
+                for key in node.get("keys") or []:
+                    if isinstance(key, dict):
+                        add(table, key.get("lookup_field"))
+                        walk_value(key.get("input"), alias_to_table)
+            for value in node.values():
+                walk_value(value, alias_to_table)
+        elif isinstance(node, list):
+            for value in node:
+                walk_value(value, alias_to_table)
+
+    for step in rule_data.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        alias_to_table = {
+            str(s.get("alias") or ""): str(s.get("table") or "")
+            for s in step.get("sources") or []
+            if isinstance(s, dict) and s.get("alias") and s.get("table")
+        }
+        target_table = step.get("target_table")
+
+        for agg in step.get("aggregate") or []:
+            if not isinstance(agg, dict):
+                continue
+            table = alias_to_table.get(str(agg.get("source_alias") or ""))
+            for field in agg.get("group_fields") or []:
+                add(table, field)
+            for item in agg.get("aggregations") or []:
+                if isinstance(item, dict):
+                    add(table, item.get("field"))
+
+        for ms in (step.get("match") or {}).get("sources") or []:
+            if not isinstance(ms, dict):
+                continue
+            table = alias_to_table.get(str(ms.get("alias") or ""))
+            for key in ms.get("keys") or []:
+                if isinstance(key, dict):
+                    add(table, key.get("field"))
+                    add(target_table, key.get("target_field"))
+
+        for mapping in step.get("mappings") or []:
+            if not isinstance(mapping, dict):
+                continue
+            add(target_table, mapping.get("target_field"))
+            walk_value(mapping.get("value"), alias_to_table)
+            walk_value(mapping.get("bindings"), alias_to_table)
+
+        walk_value(step.get("filter"), alias_to_table)
+
+        rf = step.get("reference_filter") or {}
+        if isinstance(rf, dict) and rf:
+            src_table = alias_to_table.get(str(rf.get("source_alias") or ""))
+            ref_table = rf.get("reference_table")
+            for key in rf.get("keys") or []:
+                if isinstance(key, dict):
+                    add(src_table, key.get("source_field"))
+                    add(ref_table, key.get("reference_field"))
+
+    return refs
+
+
+def _build_column_alias_map(
+    file_rule_code: str,
+    user_id: str | None,
+    rule_data: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    """构建 表名 -> {归一化列名: 规则使用的列名} 映射，用于加载源表时统一列名。
+
+    proc 规则引用的列名与上传文件的列名可能不一致（不同店铺写法不一），且规则本身
+    可能用别名而非规范名。文件校验规则的 column_aliases 给出别名等价组；对每个表的
+    每个等价组，取规则实际引用的那个写法作为目标名，把组内其它写法都改名到它。
+    文件校验规则加载失败时返回空映射并降级（不阻断执行）。
+    """
+    from proc.mcp_server.steps_runtime import _normalize_alias_key
+
+    if not file_rule_code:
+        return {}
+    try:
+        fv = load_and_validate_rule(file_rule_code, expected_kind="file_validation", user_id=user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[proc_rule] 加载文件校验规则 %s 失败，跳过列名规范化: %s", file_rule_code, exc)
+        return {}
+    if not fv.get("success"):
+        logger.warning(
+            "[proc_rule] 文件校验规则 %s 不可用，跳过列名规范化: %s",
+            file_rule_code, fv.get("error"),
+        )
+        return {}
+
+    refs = _collect_table_field_references(rule_data)
+    schemas = (fv.get("rule") or {}).get("table_schemas") or []
+    alias_map: dict[str, dict[str, str]] = {}
+    for schema in schemas:
+        table_name = str(schema.get("table_name") or "").strip()
+        if not table_name:
+            continue
+        table_refs = refs.get(table_name, set())
+        table_map: dict[str, str] = {}
+        for canonical, aliases in (schema.get("column_aliases") or {}).items():
+            group = [str(canonical)] + [str(a) for a in (aliases or [])]
+            used = [name for name in group if name in table_refs]
+            if len(used) == 1:
+                target = used[0]
+            elif not used:
+                target = str(canonical)
+            else:
+                logger.warning(
+                    "[proc_rule] 表 '%s' 列别名组 %s 在规则中存在多个写法 %s，跳过该组规范化",
+                    table_name, group, used,
+                )
+                continue
+            for member in group:
+                key = _normalize_alias_key(member)
+                if key:
+                    table_map[key] = target
+        if table_map:
+            alias_map[table_name] = table_map
+    return alias_map
+
+
 async def _handle_proc_execute(arguments: dict) -> dict:
     """执行数据整理规则，生成输出文件"""
     from proc.config.config import OUTPUT_DIR
@@ -404,6 +569,12 @@ async def _handle_proc_execute(arguments: dict) -> dict:
     if rule_data.get("steps"):
         from proc.mcp_server.steps_runtime import execute_steps_rule_with_frames, register_proc_frame_outputs
 
+        column_aliases = _build_column_alias_map(
+            str(rule_data.get("file_rule_code") or "").strip(),
+            user_id,
+            rule_data,
+        )
+
         try:
             generated_files, frame_outputs = execute_steps_rule_with_frames(
                 rule_code=rule_code,
@@ -411,18 +582,20 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                 validated_files=uploaded_files,
                 output_dir=output_dir,
                 preloaded_frames=preloaded_frames if preloaded_frames else None,
+                column_aliases=column_aliases,
             )
             memory_outputs = register_proc_frame_outputs(rule_code=rule_code, frame_outputs=frame_outputs)
         except Exception as e:
             logger.error(f"[proc_rule] steps 规则执行失败: {e}", exc_info=True)
+            detail = render_proc_failure(e)
             return {
                 "success": False,
                 "rule_code": rule_code,
                 "generated_files": [],
                 "memory_outputs": [],
                 "generated_count": 0,
-                "errors": [str(e)],
-                "message": f"steps 规则执行失败: {e}",
+                "errors": [detail],
+                "message": detail,
                 "merged_files": [],
             }
 
@@ -575,9 +748,11 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                 f"输出文件：{result['output_file']}"
             )
         except Exception as e:
-            msg = f"规则 {rule.get('rule_id')!r} 执行失败: {e}"
-            logger.error(f"[proc_rule] {msg}", exc_info=True)
-            errors.append(msg)
+            detail = render_proc_failure(e)
+            logger.error(
+                f"[proc_rule] 规则 {rule.get('rule_id')!r} 执行失败: {e}", exc_info=True
+            )
+            errors.append(detail)
 
     # ── 生成下载链接 ──────────────────────────────────────────────────────────
     def _build_download_url(file_path: str) -> Optional[str]:

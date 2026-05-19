@@ -37,7 +37,7 @@ class FormulaEvaluationError(ValueError):
         self.binding_names = binding_names or []
 
 
-class ProcRuntimeError(Exception):
+class ProcRuntimeError(ValueError):
     """数据整理运行期错误基类,携带结构化的摘要/原因/建议。"""
 
     def __init__(self, *, summary: str, cause: str, suggestion: str) -> None:
@@ -67,6 +67,7 @@ class TableSchemaState:
     name: str
     primary_key: list[str] = field(default_factory=list)
     column_order: list[str] = field(default_factory=list)
+    nullable_fields: set[str] = field(default_factory=set)
     defaults: dict[str, Any] = field(default_factory=dict)
     data_types: dict[str, str] = field(default_factory=dict)
     export_layout: dict[str, Any] = field(default_factory=dict)
@@ -231,6 +232,30 @@ class StepsProcRuntime:
             key for key in self.preloaded_frames.keys() if str(key).startswith("__input_plan__::")
         }
 
+    def _rule_display_name(self) -> str:
+        name = str(self.rule_data.get("name") or "").strip()
+        return name or self.rule_code
+
+    def _describe_table(self, table_name: str) -> str:
+        if table_name in self.table_file_map:
+            return f"文件「{table_name}」"
+        return f"中间结果「{table_name}」"
+
+    def _require_columns(
+        self, df: pd.DataFrame, columns: list[str], table_name: str
+    ) -> None:
+        missing = [str(c) for c in columns if str(c) and str(c) not in df.columns]
+        if not missing:
+            return
+        table_desc = self._describe_table(table_name)
+        column_list = "「" + "」「".join(missing) + "」"
+        plural = "这些列" if len(missing) > 1 else "这一列"
+        raise ProcUserDataError(
+            summary=f"规则「{self._rule_display_name()}」无法处理{table_desc}",
+            cause=f"该规则需要{table_desc}包含列{column_list}，但其中没有{plural}。",
+            suggestion="请确认上传的文件含有上述列；若列名相近，检查是否有多余空格或命名不一致。",
+        )
+
     def execute(self) -> list[dict[str, Any]]:
         self.execute_to_frames()
         exports = self.export_tables()
@@ -269,8 +294,10 @@ class StepsProcRuntime:
                 ]
                 missing_dependencies = [item for item in dependencies if item not in known_step_ids]
                 if missing_dependencies:
-                    raise ValueError(
-                        f"step '{step_id or '<anonymous>'}' 依赖未定义: {', '.join(missing_dependencies)}"
+                    raise ProcRuleConfigError(
+                        summary=f"规则「{self._rule_display_name()}」配置有误",
+                        cause=f"step '{step_id or '<anonymous>'}' 依赖未定义: {', '.join(missing_dependencies)}",
+                        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
                     )
                 if not all(item in executed_step_ids for item in dependencies):
                     next_pending.append(step)
@@ -286,7 +313,11 @@ class StepsProcRuntime:
                     str(step.get("step_id") or "<anonymous>")
                     for step in next_pending
                 ]
-                raise ValueError(f"steps 依赖无法解析，可能存在循环依赖: {', '.join(unresolved)}")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause=f"steps 依赖无法解析，可能存在循环依赖: {', '.join(unresolved)}",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             pending_steps = next_pending
         logger.info(
             "[steps_runtime] steps 规则内存执行完成: rule_code=%s, materialized=%s",
@@ -312,11 +343,17 @@ class StepsProcRuntime:
             try:
                 self._write_dataset(step)
             except FormulaEvaluationError as exc:
-                raise ValueError(
-                    f"步骤 {step_id}（{step.get('description') or action}）执行失败：{exc}"
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」的步骤执行失败",
+                    cause=f"步骤「{step_id}」（{step.get('description') or action}）：{exc}",
+                    suggestion="若提示缺少列，请检查上传文件；否则请联系管理员核对规则。",
                 ) from exc
         else:
-            raise ValueError(f"不支持的 step action: {action}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"不支持的 step action: {action}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if target_table and target_table not in self.materialized_targets:
             self.materialized_targets.append(target_table)
         target_df = self.tables.get(target_table)
@@ -356,6 +393,7 @@ class StepsProcRuntime:
                     )
 
         column_order: list[str] = []
+        nullable_fields: set[str] = set()
         defaults: dict[str, Any] = {}
         data_types: dict[str, str] = {}
         for column in columns:
@@ -363,6 +401,8 @@ class StepsProcRuntime:
             if not name or name in column_order:
                 continue
             column_order.append(name)
+            if column.get("nullable") is True:
+                nullable_fields.add(name)
             defaults[name] = column.get("default")
             data_types[name] = str(column.get("data_type") or "").strip().lower()
 
@@ -370,6 +410,7 @@ class StepsProcRuntime:
             name=target_table,
             primary_key=list(schema_def.get("primary_key") or []),
             column_order=column_order,
+            nullable_fields=nullable_fields,
             defaults=defaults,
             data_types=data_types,
             export_layout=dict(schema_def.get("export_layout") or {}),
@@ -381,10 +422,15 @@ class StepsProcRuntime:
         target_table = str(step.get("target_table") or "").strip()
         row_write_mode = str(step.get("row_write_mode") or "").strip() or "upsert"
         if row_write_mode not in VALID_ROW_WRITE_MODES:
-            raise ValueError(f"不支持的 row_write_mode: {row_write_mode}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"不支持的 row_write_mode: {row_write_mode}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         alias_frames, alias_tables = self._load_alias_frames(step)
         self._active_alias_frames = alias_frames
         self._lookup_cache = {}
+        self._check_source_columns(step, alias_frames, alias_tables)
         self._apply_reference_filter(step, alias_frames)
         self._apply_filter(step, alias_frames, alias_tables, target_table)
         self._apply_aggregates(step, alias_frames, alias_tables)
@@ -439,6 +485,106 @@ class StepsProcRuntime:
             alias_tables[alias] = table_name
         return alias_frames, alias_tables
 
+    def _check_source_columns(
+        self,
+        step: dict[str, Any],
+        alias_frames: dict[str, pd.DataFrame],
+        alias_tables: dict[str, str],
+    ) -> None:
+        """Check fields that must exist before a step can run correctly.
+
+        Plain source-to-nullable-target mappings intentionally keep the historical runtime behavior:
+        a missing source column evaluates to null. Structural references such as filter, aggregate,
+        lookup, match, and non-null target writes still fail early with a user-facing message.
+        """
+        alias_required: dict[str, set[str]] = {}
+        target_table = str(step.get("target_table") or "").strip()
+
+        def _add_required(alias: str, field: Any) -> None:
+            alias = str(alias or "").strip()
+            field = str(field or "").strip()
+            if alias and field and alias in alias_frames:
+                alias_required.setdefault(alias, set()).add(field)
+
+        def _is_nullable_target_field(field: Any) -> bool:
+            target_field = str(field or "").strip()
+            if not target_field:
+                return False
+            schema = self.schemas.get(target_table)
+            if not schema:
+                return False
+            return target_field in schema.nullable_fields and target_field not in schema.primary_key
+
+        def _is_optional_direct_source_mapping(mapping: dict[str, Any]) -> bool:
+            value = mapping.get("value") or {}
+            if not isinstance(value, dict) or value.get("type") != "source":
+                return False
+            if "default" in value:
+                return True
+            return _is_nullable_target_field(mapping.get("target_field"))
+
+        def _collect_source_refs(node: Any) -> None:
+            if not isinstance(node, dict):
+                return
+            if node.get("type") in {"source", "template_source"}:
+                source = node.get("source") or {}
+                alias = str(source.get("alias") or "").strip()
+                field = str(source.get("field") or "").strip()
+                if "default" not in node:
+                    _add_required(alias, field)
+            if node.get("type") == "lookup":
+                source_alias = str(node.get("source_alias") or "").strip()
+                _add_required(source_alias, node.get("value_field"))
+                for key in node.get("keys") or []:
+                    if isinstance(key, dict):
+                        _add_required(source_alias, key.get("lookup_field"))
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    _collect_source_refs(value)
+
+        for mapping in step.get("mappings") or []:
+            if not isinstance(mapping, dict) or _is_optional_direct_source_mapping(mapping):
+                continue
+            _collect_source_refs(mapping.get("value") or {})
+            _collect_source_refs(mapping.get("bindings") or {})
+        _collect_source_refs(step.get("filter") or {})
+
+        reference_filter = step.get("reference_filter") or {}
+        if isinstance(reference_filter, dict) and reference_filter:
+            source_alias = str(reference_filter.get("source_alias") or "").strip()
+            reference_table = str(reference_filter.get("reference_table") or "").strip()
+            reference_df = self._ensure_table_loaded(reference_table) if reference_table else None
+            for key in reference_filter.get("keys") or []:
+                if isinstance(key, dict):
+                    _add_required(source_alias, key.get("source_field"))
+                    if reference_df is not None:
+                        self._require_columns(
+                            reference_df,
+                            [str(key.get("reference_field") or "").strip()],
+                            reference_table,
+                        )
+
+        for source_spec in (step.get("match") or {}).get("sources") or []:
+            if not isinstance(source_spec, dict):
+                continue
+            alias = str(source_spec.get("alias") or "").strip()
+            for key in source_spec.get("keys") or []:
+                if isinstance(key, dict):
+                    _add_required(alias, key.get("field"))
+
+        for agg in step.get("aggregate", []) or []:
+            source_alias = str(agg.get("source_alias") or "").strip()
+            for field in agg.get("group_fields") or []:
+                _add_required(source_alias, field)
+            for field_item in agg.get("aggregations") or []:
+                field = str(field_item.get("field") or "").strip()
+                _add_required(source_alias, field)
+
+        for alias, required_fields in alias_required.items():
+            df = alias_frames[alias]
+            table_name = alias_tables.get(alias, alias)
+            self._require_columns(df, sorted(required_fields), table_name)
+
     def _should_skip_unplanned_source(
         self,
         target_table: str,
@@ -469,14 +615,30 @@ class StepsProcRuntime:
         keys = list(filter_def.get("keys") or [])
 
         if source_alias not in alias_frames:
-            raise ValueError(f"reference_filter source_alias 不存在: {source_alias}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"reference_filter source_alias 不存在: {source_alias}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if not reference_table:
-            raise ValueError("reference_filter 缺少 reference_table")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="reference_filter 缺少 reference_table",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if not keys:
-            raise ValueError("reference_filter.keys 不能为空")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="reference_filter.keys 不能为空",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         for idx, item in enumerate(keys):
             if not item.get("source_field") or not item.get("reference_field"):
-                raise ValueError(f"reference_filter.keys[{idx}] 缺少 source_field/reference_field")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause=f"reference_filter.keys[{idx}] 缺少 source_field/reference_field",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
 
         source_df = alias_frames[source_alias]
         reference_df = self._ensure_table_loaded(reference_table)
@@ -506,11 +668,19 @@ class StepsProcRuntime:
             return
         primary_alias = str(source_defs[0].get("alias") or source_defs[0].get("table") or "").strip()
         if primary_alias not in alias_frames:
-            raise ValueError(f"filter source alias 不存在: {primary_alias}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"filter source alias 不存在: {primary_alias}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         filter_type = str(filter_def.get("type") or "").strip()
         if filter_type != "formula":
-            raise ValueError(f"不支持的 filter.type: {filter_type}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"不支持的 filter.type: {filter_type}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         bindings = filter_def.get("bindings") or {}
         expr = str(filter_def.get("expr") or "").strip()
@@ -561,13 +731,35 @@ class StepsProcRuntime:
             aggregations = list(aggregate.get("aggregations") or [])
 
             if source_alias not in alias_frames:
-                raise ValueError(f"aggregate source_alias 不存在: {source_alias}")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause=f"aggregate source_alias 不存在: {source_alias}",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             if not output_alias:
-                raise ValueError("aggregate 缺少 output_alias")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause="aggregate 缺少 output_alias",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             if not aggregations:
-                raise ValueError("aggregate.aggregations 不能为空")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause="aggregate.aggregations 不能为空",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
 
             source_df = alias_frames[source_alias]
+            _agg_fields = [
+                str(item.get("field"))
+                for item in aggregations
+                if item.get("field")
+            ]
+            self._require_columns(
+                source_df,
+                [str(f) for f in group_fields] + _agg_fields,
+                alias_tables.get(source_alias, source_alias),
+            )
             if not group_fields:
                 result_df = pd.DataFrame(
                     [
@@ -596,7 +788,11 @@ class StepsProcRuntime:
                 elif operator == "min":
                     series = grouped[field].agg(_series_min)
                 else:
-                    raise ValueError(f"不支持的 aggregate operator: {operator}")
+                    raise ProcRuleConfigError(
+                        summary=f"规则「{self._rule_display_name()}」配置有误",
+                        cause=f"不支持的 aggregate operator: {operator}",
+                        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                    )
                 agg_frames.append(series.rename(alias))
             result_df = pd.concat(agg_frames, axis=1).reset_index()
             alias_frames[output_alias] = result_df
@@ -619,7 +815,11 @@ class StepsProcRuntime:
                 alias = str(source_spec.get("alias") or "").strip()
                 source_df = alias_frames.get(alias)
                 if source_df is None:
-                    raise ValueError(f"match source alias 不存在: {alias}")
+                    raise ProcRuleConfigError(
+                        summary=f"规则「{self._rule_display_name()}」配置有误",
+                        cause=f"match source alias 不存在: {alias}",
+                        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                    )
                 relevant_mappings = self._select_relevant_mappings(mappings, alias, len(match_sources))
                 for _, source_row in source_df.iterrows():
                     key_map = {
@@ -650,7 +850,11 @@ class StepsProcRuntime:
 
         base_aliases = self._infer_base_aliases(step, alias_frames)
         if len(base_aliases) != 1:
-            raise ValueError("无 match 的 write_dataset 仅支持单一基础 alias")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="无 match 的 write_dataset 仅支持单一基础 alias",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         base_alias = base_aliases[0]
 
         fast_df = self._try_apply_standard_mappings_fast(
@@ -1018,7 +1222,11 @@ class StepsProcRuntime:
         months = self._resolve_month_range(dynamic_def)
 
         if not match_sources:
-            raise ValueError("dynamic_mappings 需要同时配置 match.sources")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="dynamic_mappings 需要同时配置 match.sources",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         for idx, month in enumerate(months):
             contexts = {
@@ -1030,7 +1238,11 @@ class StepsProcRuntime:
                 alias = str(source_spec.get("alias") or "").strip()
                 source_df = alias_frames.get(alias)
                 if source_df is None:
-                    raise ValueError(f"dynamic match source alias 不存在: {alias}")
+                    raise ProcRuleConfigError(
+                        summary=f"规则「{self._rule_display_name()}」配置有误",
+                        cause=f"dynamic match source alias 不存在: {alias}",
+                        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                    )
                 for _, source_row in source_df.iterrows():
                     key_map = {
                         item["target_field"]: source_row.get(item["field"])
@@ -1223,7 +1435,11 @@ class StepsProcRuntime:
             if not expr and isinstance(value_node.get("formula"), str):
                 expr = value_node.get("formula", "")
             return _evaluate_formula_expression(expr, env)
-        raise ValueError(f"不支持的 value.type: {node_type}")
+        raise ProcRuleConfigError(
+            summary=f"规则「{self._rule_display_name()}」配置有误",
+            cause=f"不支持的 value.type: {node_type}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     def _evaluate_value_spec(
         self,
@@ -1573,17 +1789,29 @@ class StepsProcRuntime:
             offset = int(args.get("offset") or 0)
             df = self._ensure_table_loaded(source_table)
             if date_field not in df.columns:
-                raise ValueError(f"earliest_date 字段不存在: {source_table}.{date_field}")
+                raise ProcUserDataError(
+                    summary=f"规则「{self._rule_display_name()}」无法计算日期",
+                    cause=f"{self._describe_table(source_table)}中没有列「{date_field}」。",
+                    suggestion="请确认该文件包含上述日期列。",
+                )
             series = pd.to_datetime(df[date_field], errors="coerce").dropna()
             if series.empty:
-                raise ValueError(f"earliest_date 无可用日期: {source_table}.{date_field}")
+                raise ProcUserDataError(
+                    summary=f"规则「{self._rule_display_name()}」无法计算日期",
+                    cause=f"{self._describe_table(source_table)}的列「{date_field}」中没有有效日期。",
+                    suggestion="请检查该列的日期是否填写完整、格式是否规范。",
+                )
             earliest = series.min()
             if output_format == "month":
                 return _offset_month(int(earliest.month), offset)
             if offset:
                 earliest = earliest + pd.DateOffset(months=offset)
             return earliest.date()
-        raise ValueError(f"不支持的 function: {function_name}")
+        raise ProcRuleConfigError(
+            summary=f"规则「{self._rule_display_name()}」配置有误",
+            cause=f"不支持的 function: {function_name}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     def _evaluate_lookup_node(
         self,
@@ -1600,13 +1828,29 @@ class StepsProcRuntime:
         default = node.get("default")
 
         if not source_alias:
-            raise ValueError("lookup 缺少 source_alias")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="lookup 缺少 source_alias",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if source_alias not in self._active_alias_frames:
-            raise ValueError(f"lookup source_alias 不存在: {source_alias}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"lookup source_alias 不存在: {source_alias}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if not value_field:
-            raise ValueError("lookup 缺少 value_field")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="lookup 缺少 value_field",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if not keys:
-            raise ValueError("lookup.keys 不能为空")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause="lookup.keys 不能为空",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         lookup_fields: list[str] = []
         lookup_key: list[Any] = []
@@ -1614,9 +1858,17 @@ class StepsProcRuntime:
             lookup_field = str(item.get("lookup_field") or "").strip()
             input_spec = item.get("input")
             if not lookup_field:
-                raise ValueError(f"lookup.keys[{idx}] 缺少 lookup_field")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause=f"lookup.keys[{idx}] 缺少 lookup_field",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             if not isinstance(input_spec, dict) or not input_spec:
-                raise ValueError(f"lookup.keys[{idx}] 缺少 input")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause=f"lookup.keys[{idx}] 缺少 input",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             lookup_fields.append(lookup_field)
             lookup_key.append(
                 _normalize_key(
@@ -1894,9 +2146,13 @@ class StepsProcRuntime:
             return self.preloaded_frames[input_plan_key]
         target_prefix = f"__input_plan__::{target_table}::"
         if any(key.startswith(target_prefix) for key in self._input_plan_frame_keys):
-            raise ValueError(
-                "input_plan 未加载到当前 source 数据："
-                f"{target_table}.{alias}({table_name})。请重新生成数据整理规则或检查运行计划数据绑定。"
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=(
+                    "input_plan 未加载到当前 source 数据："
+                    f"{target_table}.{alias}({table_name})。请重新生成数据整理规则或检查运行计划数据绑定。"
+                ),
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
             )
         return self._ensure_table_loaded(table_name)
 
@@ -1949,7 +2205,11 @@ class StepsProcRuntime:
             return df
         file_path = self.table_file_map.get(table_name)
         if not file_path:
-            raise ValueError(f"表 '{table_name}' 未在上传文件或中间结果中找到")
+            raise ProcUserDataError(
+                summary=f"规则「{self._rule_display_name()}」找不到所需的数据表",
+                cause=f"规则引用的表「{table_name}」既不在上传文件中，也不是前序步骤的结果。",
+                suggestion="请确认相关文件已上传，且文件名与规则要求一致。",
+            )
         df = _read_file_as_df(file_path)
         df = self._apply_column_aliases(table_name, df)
         self.tables[table_name] = df
@@ -1974,7 +2234,11 @@ class StepsProcRuntime:
             if months[-1] == end_month:
                 return months
             months.append(_next_month(months[-1]))
-        raise ValueError(f"月份范围无效: start={start_month}, end={end_month}")
+        raise ProcRuleConfigError(
+            summary=f"规则「{self._rule_display_name()}」配置有误",
+            cause=f"月份范围无效: start={start_month}, end={end_month}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     def _evaluate_boundary_definition(self, definition: dict[str, Any]) -> Any:
         function_name = str(definition.get("function") or "").strip()
@@ -1996,7 +2260,11 @@ class StepsProcRuntime:
         new_value: Any,
     ) -> Any:
         if field_write_mode not in VALID_FIELD_WRITE_MODES:
-            raise ValueError(f"不支持的 field_write_mode: {field_write_mode}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"不支持的 field_write_mode: {field_write_mode}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if field_write_mode == "increment":
             return (_coerce_number(current_value) or 0) + (_coerce_number(new_value) or 0)
         return new_value
@@ -2082,13 +2350,21 @@ class StepsProcRuntime:
             return column_spec, column_spec
 
         if not isinstance(column_spec, dict):
-            raise ValueError(f"导出列配置无效: {column_spec}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"导出列配置无效: {column_spec}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         source_field = str(column_spec.get("source_field") or "").strip()
         if not source_field:
             source_template = str(column_spec.get("source_template") or "").strip()
             if not source_template:
-                raise ValueError("导出列缺少 source_field/source_template")
+                raise ProcRuleConfigError(
+                    summary=f"规则「{self._rule_display_name()}」配置有误",
+                    cause="导出列缺少 source_field/source_template",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             source_field = _render_context_template(source_template, context, coerce_to_string=True)
 
         if "header" in column_spec:
@@ -2110,7 +2386,11 @@ class StepsProcRuntime:
     def _resolve_export_month_contexts(self, definition: dict[str, Any]) -> list[dict[str, Any]]:
         dimension = str(definition.get("dimension") or "month").strip()
         if dimension != "month":
-            raise ValueError(f"不支持的导出动态维度: {dimension}")
+            raise ProcRuleConfigError(
+                summary=f"规则「{self._rule_display_name()}」配置有误",
+                cause=f"不支持的导出动态维度: {dimension}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
 
         start_value = self._evaluate_boundary_definition(definition.get("start") or {})
         end_value = self._evaluate_boundary_definition(definition.get("end") or {})
@@ -2135,7 +2415,11 @@ class StepsProcRuntime:
             if next_month is None:
                 break
             current = _month_end(next_month)
-        raise ValueError(f"导出月份范围无效: start={start_date}, end={end_date}")
+        raise ProcRuleConfigError(
+            summary=f"规则「{self._rule_display_name()}」配置有误",
+            cause=f"导出月份范围无效: start={start_date}, end={end_date}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
 
 def _normalize_alias_key(name: Any) -> str:
@@ -2159,7 +2443,11 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
             return pd.read_csv(path, encoding=encoding)
     if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
         return pd.read_excel(path, dtype=object)
-    raise ValueError(f"不支持的文件格式: {suffix}")
+    raise ProcUserDataError(
+        summary="数据整理遇到不支持的文件格式",
+        cause=f"文件格式「{suffix}」不受支持。",
+        suggestion="请上传 Excel 或 CSV 文件。",
+    )
 
 
 def _normalize_excel_text_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -2253,7 +2541,11 @@ def _evaluate_aggregate_series(series: pd.Series, operator: str) -> Any:
         return _series_sum(series)
     if operator == "min":
         return _series_min(series)
-    raise ValueError(f"不支持的 aggregate operator: {operator}")
+    raise ProcRuleConfigError(
+        summary="规则配置有误",
+        cause=f"不支持的 aggregate operator: {operator}",
+        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+    )
 
 
 def _coerce_number(value: Any) -> Optional[float]:
@@ -2303,14 +2595,22 @@ def _coerce_date_value(value: Any) -> date:
         return value
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
-        raise ValueError(f"无法解析日期值: {value}")
+        raise ProcUserDataError(
+            summary="数据整理无法解析日期",
+            cause=f"值「{value}」不是有效的日期。",
+            suggestion="请检查相关列的日期格式是否规范。",
+        )
     return ts.date()
 
 
 def _month_end(value: Any) -> date:
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
-        raise ValueError(f"无法解析月份结束日期: {value}")
+        raise ProcUserDataError(
+            summary="数据整理无法解析日期",
+            cause=f"值「{value}」不是有效的月份。",
+            suggestion="请检查相关列的日期格式是否规范。",
+        )
     return (ts + pd.offsets.MonthEnd(0)).date()
 
 
@@ -2357,7 +2657,11 @@ def _coerce_month_offset(value: Any) -> int:
         match = re.search(r"[-+]?\d+", text)
         if match:
             return int(match.group())
-    raise ValueError(f"无法解析月份偏移量: {value}")
+    raise ProcRuleConfigError(
+        summary="规则配置有误",
+        cause=f"无法解析月份偏移量: {value}",
+        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+    )
 
 
 def _add_months(value: Any, months: Any) -> Optional[date]:
@@ -2365,7 +2669,11 @@ def _add_months(value: Any, months: Any) -> Optional[date]:
         return None
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
-        raise ValueError(f"无法解析日期值: {value}")
+        raise ProcUserDataError(
+            summary="数据整理无法解析日期",
+            cause=f"值「{value}」不是有效的日期。",
+            suggestion="请检查相关列的日期格式是否规范。",
+        )
     return (ts + pd.DateOffset(months=_coerce_month_offset(months))).date()
 
 
@@ -2393,10 +2701,18 @@ def _as_month(value: Any) -> int:
     else:
         ts = pd.to_datetime(value, errors="coerce")
         if pd.isna(ts):
-            raise ValueError(f"无法解析月份值: {value}")
+            raise ProcUserDataError(
+                summary="数据整理无法解析日期",
+                cause=f"值「{value}」不是有效的月份。",
+                suggestion="请检查相关列的日期格式是否规范。",
+            )
         month = int(ts.month)
     if month < 1 or month > 12:
-        raise ValueError(f"月份超出范围: {month}")
+        raise ProcUserDataError(
+            summary="数据整理遇到无效月份",
+            cause=f"月份值「{month}」超出有效范围。",
+            suggestion="请检查相关列的月份数据。",
+        )
     return month
 
 
@@ -2421,7 +2737,11 @@ def _to_decimal(value: Any) -> Optional[float]:
     try:
         return float(text)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"无法解析 decimal 值: {value}") from exc
+        raise ProcUserDataError(
+            summary="数据整理无法解析金额",
+            cause=f"值「{value}」不是有效的数字。",
+            suggestion="请检查相关列是否含有非数字字符。",
+        ) from exc
 
 
 def _normalize_decimal_cell(value: Any) -> Any:
@@ -2528,13 +2848,25 @@ def _compile_formula_expression(expr: str) -> ast.Expression:
     tree = ast.parse(translated, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_AST_NODES):
-            raise ValueError(f"公式包含不支持的语法: {type(node).__name__}")
+            raise ProcRuleConfigError(
+                summary="规则配置有误",
+                cause=f"公式包含不支持的语法: {type(node).__name__}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in {"coalesce", "is_null"}:
                 function_name = node.func.id if isinstance(node.func, ast.Name) else type(node.func).__name__
-                raise ValueError(f"公式包含不支持的函数: {function_name}")
+                raise ProcRuleConfigError(
+                    summary="规则配置有误",
+                    cause=f"公式包含不支持的函数: {function_name}",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
         if isinstance(node, ast.Name) and node.id not in {"__vars__", "coalesce", "is_null"}:
-            raise ValueError(f"公式包含不支持的标识符: {node.id}")
+            raise ProcRuleConfigError(
+                summary="规则配置有误",
+                cause=f"公式包含不支持的标识符: {node.id}",
+                suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+            )
     return tree
 
 
@@ -2577,7 +2909,11 @@ def _convert_top_level_ternary(expr: str) -> str:
         return expr
     colon = _find_matching_colon(expr, qmark)
     if colon == -1:
-        raise ValueError(f"三元表达式缺少冒号: {expr}")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=f"三元表达式缺少冒号: {expr}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
     condition = expr[:qmark].strip()
     when_true = expr[qmark + 1 : colon].strip()
     when_false = expr[colon + 1 :].strip()
@@ -2627,7 +2963,11 @@ def _find_matching_parenthesis(expr: str, start: int) -> int:
             depth -= 1
             if depth == 0:
                 return idx
-    raise ValueError(f"括号未闭合: {expr}")
+    raise ProcRuleConfigError(
+        summary="规则配置有误",
+        cause=f"括号未闭合: {expr}",
+        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+    )
 
 
 def _is_wrapped_by_outer_parentheses(expr: str) -> bool:
@@ -2661,7 +3001,11 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
             return _coalesce
         if node.id == "is_null":
             return _is_null
-        raise ValueError(f"不支持的公式标识符: {node.id}")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=f"不支持的公式标识符: {node.id}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     if isinstance(node, ast.Subscript):
         container = _evaluate_formula_ast(node.value, env)
@@ -2682,7 +3026,11 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
                 if bool(_evaluate_formula_ast(value_node, env)):
                     return True
             return False
-        raise ValueError(f"不支持的逻辑运算: {type(node.op).__name__}")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=f"不支持的逻辑运算: {type(node.op).__name__}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     if isinstance(node, ast.BinOp):
         left = _evaluate_formula_ast(node.left, env)
@@ -2700,7 +3048,11 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         if isinstance(node.op, ast.Div):
             left_num, right_num = _require_formula_numeric_operands(left, right, "/")
             return left_num / right_num
-        raise ValueError(f"不支持的算术运算: {type(node.op).__name__}")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=f"不支持的算术运算: {type(node.op).__name__}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     if isinstance(node, ast.UnaryOp):
         operand = _evaluate_formula_ast(node.operand, env)
@@ -2712,7 +3064,11 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
             return -operand
         if isinstance(node.op, ast.UAdd):
             return +operand
-        raise ValueError(f"不支持的单目运算: {type(node.op).__name__}")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=f"不支持的单目运算: {type(node.op).__name__}",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
     if isinstance(node, ast.IfExp):
         condition = _evaluate_formula_ast(node.test, env)
@@ -2752,11 +3108,23 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
             return _coalesce(*args)
         if func is _is_null:
             if len(args) != 1:
-                raise ValueError("is_null 需要 1 个参数")
+                raise ProcRuleConfigError(
+                    summary="规则配置有误",
+                    cause="is_null 需要 1 个参数",
+                    suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+                )
             return _is_null(args[0])
-        raise ValueError("公式包含不支持的函数调用")
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause="公式包含不支持的函数调用",
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+        )
 
-    raise ValueError(f"公式包含不支持的节点: {type(node).__name__}")
+    raise ProcRuleConfigError(
+        summary="规则配置有误",
+        cause=f"公式包含不支持的节点: {type(node).__name__}",
+        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+    )
 
 
 def _coerce_formula_numeric_operands(left: Any, right: Any) -> Optional[tuple[float, float]]:
@@ -2770,9 +3138,13 @@ def _coerce_formula_numeric_operands(left: Any, right: Any) -> Optional[tuple[fl
 def _require_formula_numeric_operands(left: Any, right: Any, operator: str) -> tuple[float, float]:
     operands = _coerce_formula_numeric_operands(left, right)
     if operands is None:
-        raise ValueError(
-            f"公式算术运算 {operator} 需要数值，实际为 "
-            f"{type(left).__name__}({left!r}) 和 {type(right).__name__}({right!r})"
+        raise ProcRuleConfigError(
+            summary="规则配置有误",
+            cause=(
+                f"公式算术运算 {operator} 需要数值，实际为 "
+                f"{type(left).__name__}({left!r}) 和 {type(right).__name__}({right!r})"
+            ),
+            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
         )
     return operands
 
@@ -2813,7 +3185,11 @@ def _apply_compare_operator(operator: ast.cmpop, left: Any, right: Any) -> bool:
         return left == right
     if isinstance(operator, ast.NotEq):
         return left != right
-    raise ValueError(f"不支持的比较运算: {type(operator).__name__}")
+    raise ProcRuleConfigError(
+        summary="规则配置有误",
+        cause=f"不支持的比较运算: {type(operator).__name__}",
+        suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
+    )
 
 
 def _comparison_involves_blank_string(left: Any, right: Any) -> bool:
