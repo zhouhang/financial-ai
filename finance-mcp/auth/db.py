@@ -1408,7 +1408,7 @@ def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> lis
                         """SELECT id, conversation_id, role, content, metadata, attachments, created_at
                            FROM messages
                            WHERE conversation_id = %s
-                           ORDER BY created_at ASC
+                           ORDER BY seq ASC
                            LIMIT %s OFFSET %s""",
                         (conversation_id, limit, offset)
                     )
@@ -1419,7 +1419,7 @@ def get_messages(conversation_id: str, limit: int = 100, offset: int = 0) -> lis
                         """SELECT id, conversation_id, role, content, metadata, created_at
                            FROM messages
                            WHERE conversation_id = %s
-                           ORDER BY created_at ASC
+                           ORDER BY seq ASC
                            LIMIT %s OFFSET %s""",
                         (conversation_id, limit, offset)
                     )

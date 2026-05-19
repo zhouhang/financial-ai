@@ -23,6 +23,7 @@ import type {
   UserTaskRule,
   WsOutgoing,
 } from './types';
+import { buildConversationTitle } from './utils/conversationTitles';
 import { ruleSupportsEntryMode } from './utils/ruleEntryModes';
 
 type MainPanelView = 'conversation' | 'data-connections';
@@ -693,7 +694,12 @@ function AppShell() {
                 updatedAt: new Date(),
                 title:
                   c.messages.length === 0 && msg.role === 'user'
-                    ? msg.content.slice(0, 20) + (msg.content.length > 20 ? '...' : '')
+                    ? buildConversationTitle({
+                        text: msg.content,
+                        attachments: msg.attachments,
+                        taskContext: c.taskContext ?? null,
+                        date: msg.timestamp,
+                      })
                     : c.title,
               }
             : c
@@ -1264,7 +1270,12 @@ function AppShell() {
         const newConv: Conversation = {
           ...baseConv,
           id: activeConvId,
-          title: text.slice(0, 20) + (text.length > 20 ? '...' : ''),
+          title: buildConversationTitle({
+            text,
+            attachments,
+            taskContext: baseConv.taskContext ?? null,
+            date: userMsg.timestamp,
+          }),
           messages: [userMsg],
         };
         pendingSendConvRef.current = { threadId: newConv.id, conv: newConv };
@@ -1274,7 +1285,19 @@ function AppShell() {
         const baseConv = pendingNewConvRef.current?.id === activeConvId
           ? pendingNewConvRef.current
           : createConversation();
-        const newConv: Conversation = { ...baseConv, id: activeConvId, title: text.slice(0, 20) + (text.length > 20 ? '...' : '') };
+        const createdAt = new Date();
+        const newConv: Conversation = {
+          ...baseConv,
+          id: activeConvId,
+          title: buildConversationTitle({
+            text,
+            attachments,
+            taskContext: baseConv.taskContext ?? null,
+            date: createdAt,
+          }),
+          createdAt,
+          updatedAt: createdAt,
+        };
         setConversations((prev) => [newConv, ...prev]);
         pendingNewConvRef.current = null;
       } else if (!silent) {
@@ -1463,9 +1486,6 @@ function AppShell() {
     setReconExecutionMode('upload');
     const conversation = createConversation(task);
     pendingNewConvRef.current = conversation;
-    setHiddenConversationIds((prev) =>
-      prev.includes(conversation.id) ? prev : [...prev, conversation.id],
-    );
     setActiveConvId(conversation.id);
     setTasks([]);
     setUploadedFiles([]);
@@ -1564,38 +1584,43 @@ function AppShell() {
   );
 
   // ── 合并本地和服务器会话 ────────────────────────────────────
-  // 服务器会话优先，本地会话补充（未同步的新会话）
-  // 如果刚登录，排除登录会话
-  // 无会话时，将待确认的新对话加入列表，确保对话框可正常显示和提交
+  // 本地有消息的同 ID 会话优先保留展示标题，服务端会话补充历史列表。
+  // 空草稿不进入历史列表；刚登录时排除登录会话。
   const mergedConversations = useCallback(() => {
     const loginLocalId = loginConvIdRef.current.localId;
     const loginServerId = loginConvIdRef.current.serverId;
-    
+
     const serverIds = new Set(serverConversations.map((c) => c.id));
+
+    const localDisplayConversations = new Map(
+      conversations
+        .filter(
+          (conversation) =>
+            conversation.messages.length > 0 &&
+            conversation.id !== loginLocalId &&
+            !hiddenConversationIds.includes(conversation.id),
+        )
+        .map((conversation) => [conversation.id, conversation] as const),
+    );
+
     // 本地会话中不在服务器列表中的（新创建的、未保存的），排除登录会话
-    const localOnly = conversations.filter(
+    const localOnly = Array.from(localDisplayConversations.values()).filter(
       (c) =>
         !serverIds.has(c.id) &&
-        c.id !== loginLocalId &&
         !hiddenConversationIds.includes(c.id),
     );
+
     // 服务器会话，如果刚登录则排除登录会话
     const serverFiltered = justLoggedInRef.current && loginServerId
       ? serverConversations.filter((c) => c.id !== loginServerId)
       : serverConversations;
-    const base = [...localOnly, ...serverFiltered.filter((c) => !hiddenConversationIds.includes(c.id))];
-    // 无会话时，将待确认的新对话加入列表（用户提交后即创建新对话）
-    const pending = pendingNewConvRef.current;
-    if (
-      pending &&
-      activeConvId === pending.id &&
-      !hiddenConversationIds.includes(pending.id) &&
-      !base.some((c) => c.id === pending.id)
-    ) {
-      return [pending, ...base];
-    }
-    return base;
-  }, [conversations, serverConversations, activeConvId, hiddenConversationIds]);
+
+    const serverDisplay = serverFiltered
+      .filter((c) => !hiddenConversationIds.includes(c.id))
+      .map((conversation) => localDisplayConversations.get(conversation.id) ?? conversation);
+
+    return [...localOnly, ...serverDisplay];
+  }, [conversations, serverConversations, hiddenConversationIds]);
 
   const displayConversations = mergedConversations();
   const activeSection: AppSection =

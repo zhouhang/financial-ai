@@ -6194,7 +6194,12 @@ export default function DataConnectionsPanel({
                 </span>
               </div>
 
-              {rows.length === 0 ? (
+              {loadingSources && rows.length === 0 ? (
+                <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载数据库连接列表
+                </div>
+              ) : rows.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
                   当前类型暂无连接，可先新增占位连接。
                 </div>
@@ -6308,7 +6313,12 @@ export default function DataConnectionsPanel({
                   </div>
                 )}
 
-                {rows.length === 0 ? (
+                {loadingSources && rows.length === 0 ? (
+                  <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    正在加载连接列表
+                  </div>
+                ) : rows.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
                     当前类型暂无连接，可先新增占位连接。
                   </div>

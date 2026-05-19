@@ -857,7 +857,9 @@ async def websocket_chat(ws: WebSocket):
                 router_mode = "detect"  # "detect" | "stream" | "json"
                 active_task_kind = effective_task_kind
                 event_count = 0
-                sent_contents: set[str] = set()
+                # 用 dict 作有序集合：既去重又保留插入(=展示/事件)顺序。
+                # 不能用 set —— set 迭代顺序不确定，会导致持久化时 seq 乱序、刷新后消息错位。
+                sent_contents: dict[str, None] = {}
                 baseline_message_len = 0
                 emitted_assistant_output = False
                 # 消息缓冲（防止每个 token 都单独发送导致分段）
@@ -951,7 +953,7 @@ async def websocket_chat(ws: WebSocket):
                                 emitted_assistant_output = True
                                 logger.info(f"router 流式输出完成，发送最后缓冲，长度={len(message_buffer)}")
                                 message_buffer = ""
-                            sent_contents.add(streamed_content.strip())
+                            sent_contents[streamed_content.strip()] = None
                             logger.info(f"router 流式输出完成，总长度={len(streamed_content)}")
                         elif router_mode == "detect" and router_buffer.strip():
                             # 只有少量 token，未触发检测，作为 message 发送
@@ -960,7 +962,7 @@ async def websocket_chat(ws: WebSocket):
                             if len(content) == 1 and content.isalpha():
                                 logger.info(f"忽略 router 单字符输出噪声: {content!r}")
                             elif content not in sent_contents:
-                                sent_contents.add(content)
+                                sent_contents[content] = None
                                 await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                                 emitted_assistant_output = True
                         router_buffer = ""
@@ -980,7 +982,7 @@ async def websocket_chat(ws: WebSocket):
                         if node_name not in NO_STREAM_NODES:
                             output = data_obj.get("output")
                             if output and hasattr(output, "content") and output.content:
-                                sent_contents.add(output.content.strip())
+                                sent_contents[output.content.strip()] = None
                     
                     # ④ 节点完成：发送手动 AIMessage + auth_token 更新
                     elif kind == "on_chain_end" and node_name:
@@ -1018,7 +1020,7 @@ async def websocket_chat(ws: WebSocket):
                                 if hasattr(msg, "type") and msg.type == "ai":
                                     content = (msg.content if hasattr(msg, "content") else "").strip()
                                     if content and content not in sent_contents:
-                                        sent_contents.add(content)
+                                        sent_contents[content] = None
                                         logger.info(f"实时发送 [{node_name}] 手动消息，长度={len(content)}")
                                         if _should_track_node_status(node_name) and not handled_node_completion:
                                             await ws.send_json({
@@ -1056,7 +1058,7 @@ async def websocket_chat(ws: WebSocket):
                             if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
                                 content = msg.content.strip()
                                 if content and content not in sent_contents:
-                                    sent_contents.add(content)
+                                    sent_contents[content] = None
                                     logger.info(f"[fallback] 补发新增消息，长度={len(content)}")
                                     await ws.send_json({"type": "message", "content": content, "thread_id": thread_id})
                                     emitted_assistant_output = True

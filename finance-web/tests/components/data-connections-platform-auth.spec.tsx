@@ -21,6 +21,41 @@ describe('电商平台授权入口', () => {
     vi.unstubAllGlobals();
   });
 
+  it('数据库连接列表加载中展示加载态而不是空态', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/data-sources') {
+          return new Promise<Response>(() => undefined);
+        }
+        if (url.startsWith('/api/platform-connections')) {
+          return Promise.resolve(mockJsonResponse({ platforms: [] }));
+        }
+        if (url === '/api/collaboration-channels') {
+          return Promise.resolve(mockJsonResponse({ channels: [] }));
+        }
+        if (url === '/api/auth/me') {
+          return Promise.resolve(mockJsonResponse({ user: { role: 'admin' } }));
+        }
+        return Promise.resolve(mockJsonResponse({}));
+      }),
+    );
+
+    render(
+      <DataConnectionsPanel
+        authToken="token"
+        selectedConnectionView="data_sources"
+        selectedSourceKind="database"
+        selectedCollaborationProvider="dingtalk_dws"
+      />,
+    );
+
+    expect(await screen.findByText('数据库连接列表')).toBeInTheDocument();
+    expect(screen.getByText('正在加载数据库连接列表')).toBeInTheDocument();
+    expect(screen.queryByText('当前类型暂无连接，可先新增占位连接。')).not.toBeInTheDocument();
+  });
+
   it('只展示淘宝天猫和支付宝平台卡片', async () => {
     vi.stubGlobal(
       'fetch',
