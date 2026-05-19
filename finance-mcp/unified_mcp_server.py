@@ -528,11 +528,11 @@ async def main():
     port = DEFAULT_PORT
 
     try:
-        applied = auth_db.ensure_unified_data_source_schema()
+        applied = auth_db.ensure_schema()
         if applied:
-            logger.info("启动时已补齐统一数据源 schema: %s", ", ".join(applied))
+            logger.info("启动时已补齐 auth schema: %s", ", ".join(applied))
     except Exception as e:
-        logger.error("统一数据源 schema 自检失败: %s", e, exc_info=True)
+        logger.error("auth schema 自检失败: %s", e, exc_info=True)
     
     # 动态获取工具列表用于显示
     try:

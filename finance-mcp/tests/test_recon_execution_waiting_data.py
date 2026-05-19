@@ -10,13 +10,20 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
 from auth import db as auth_db
 
 
-def test_recon_execution_queue_schema_has_waiting_data_columns() -> None:
-    auth_db.ensure_schema()
+def test_recon_execution_queue_schema_has_waiting_data_columns(monkeypatch) -> None:
+    monkeypatch.setattr(auth_db, "_table_exists", lambda table_name, schema="public": table_name == "recon_execution_queue")
+    monkeypatch.setattr(
+        auth_db,
+        "_column_exists",
+        lambda table_name, column_name, schema="public": column_name
+        in {
+            "next_retry_at",
+            "wait_deadline_at",
+            "waiting_reason",
+            "waiting_datasets",
+            "collection_job_ids",
+        },
+    )
+    monkeypatch.setattr(auth_db, "_constraint_exists", lambda *args, **kwargs: True)
 
-    assert {
-        "next_retry_at",
-        "wait_deadline_at",
-        "waiting_reason",
-        "waiting_datasets",
-        "collection_job_ids",
-    }.issubset(set(auth_db._table_columns("recon_execution_queue")))  # noqa: SLF001
+    assert auth_db._recon_execution_queue_schema_ready()  # noqa: SLF001

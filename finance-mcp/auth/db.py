@@ -29,6 +29,7 @@ _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
+_RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
@@ -120,6 +121,18 @@ _PLATFORM_ALIPAY_SEMANTIC_PROFILE_HIDDEN_FIELDS = (
     "payload",
     "meta",
     "metadata",
+)
+
+_RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS = (
+    "next_retry_at",
+    "wait_deadline_at",
+    "waiting_reason",
+    "waiting_datasets",
+    "collection_job_ids",
+)
+
+_RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS = (
+    "recon_execution_queue_status_check",
 )
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
@@ -481,6 +494,16 @@ def _platform_alipay_bill_lines_schema_ready() -> bool:
         )
 
 
+def _recon_execution_queue_schema_ready() -> bool:
+    if not _table_exists("recon_execution_queue"):
+        return False
+
+    return all(
+        _column_exists("recon_execution_queue", column_name)
+        for column_name in _RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS
+    ) and all(_constraint_exists("recon_execution_queue", constraint_name) for constraint_name in _RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS)
+
+
 def _browser_playbook_collection_schema_ready() -> bool:
     required_tables = (
         "playbooks",
@@ -512,6 +535,22 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "canary_completed_at",
             "status",
         ),
+        "browser_capture_files": (
+            "company_id",
+            "data_source_id",
+            "dataset_id",
+            "sync_job_id",
+            "resource_key",
+            "shop_id",
+            "playbook_id",
+            "biz_date",
+            "storage_path",
+            "encoding",
+            "checksum",
+            "row_count",
+            "created_at",
+            "updated_at",
+        ),
         "browser_collection_records": (
             "company_id",
             "data_source_id",
@@ -539,7 +578,15 @@ def _browser_playbook_collection_schema_ready() -> bool:
         _column_exists(table_name, column_name)
         for table_name, column_names in required_columns.items()
         for column_name in column_names
-    ) and "draft" in _constraint_definition("playbooks", "playbooks_status_check") and "deprecated" in _constraint_definition("playbooks", "playbooks_status_check")
+    ) and (
+        "draft" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "replayed" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "approved" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "canary" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "active" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "deprecated" in _constraint_definition("playbooks", "playbooks_status_check")
+        and _recon_execution_queue_schema_ready()
+    )
 
 
 def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
@@ -830,14 +877,35 @@ def ensure_platform_pending_authorizations_schema() -> list[str]:
     return [migration_name]
 
 
+def ensure_recon_execution_queue_schema() -> list[str]:
+    """确保 recon_execution_queue 已包含浏览器首店流程依赖的 waiting_data 结构。"""
+    global _RECON_EXECUTION_QUEUE_SCHEMA_READY
+    if _RECON_EXECUTION_QUEUE_SCHEMA_READY:
+        return []
+    if _recon_execution_queue_schema_ready():
+        _RECON_EXECUTION_QUEUE_SCHEMA_READY = True
+        return []
+
+    migration_name = "019_recon_execution_queue.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _recon_execution_queue_schema_ready():
+        raise RuntimeError("recon_execution_queue schema 升级失败，waiting_data 结构仍不完整")
+
+    _RECON_EXECUTION_QUEUE_SCHEMA_READY = True
+    logger.info("recon_execution_queue schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
 def ensure_browser_playbook_collection_schema() -> list[str]:
     """确保浏览器采集首店 schema 已安装。"""
     global _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY
     if _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY:
         return []
+    applied: list[str] = []
+    applied.extend(ensure_recon_execution_queue_schema())
     if _browser_playbook_collection_schema_ready():
         _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
-        return []
+        return applied
 
     migration_name = "031_browser_playbook_collection.sql"
     _execute_sql_script(_migration_path(migration_name))
@@ -846,7 +914,8 @@ def ensure_browser_playbook_collection_schema() -> list[str]:
 
     _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
     logger.info("browser_playbook collection schema 已自动补齐: %s", migration_name)
-    return [migration_name]
+    applied.append(migration_name)
+    return applied
 
 
 def ensure_schema() -> list[str]:

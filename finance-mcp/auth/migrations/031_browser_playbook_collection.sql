@@ -72,6 +72,33 @@ ALTER TABLE public.playbooks
 CREATE INDEX IF NOT EXISTS idx_playbooks_company_active
     ON public.playbooks (company_id, playbook_id, status, updated_at DESC);
 
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'playbooks_company_id_fkey') THEN
+        ALTER TABLE ONLY public.playbooks
+            ADD CONSTRAINT playbooks_company_id_fkey
+            FOREIGN KEY (company_id) REFERENCES public.company(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'playbooks_created_by_fkey') THEN
+        ALTER TABLE ONLY public.playbooks
+            ADD CONSTRAINT playbooks_created_by_fkey
+            FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'playbooks_approved_by_fkey') THEN
+        ALTER TABLE ONLY public.playbooks
+            ADD CONSTRAINT playbooks_approved_by_fkey
+            FOREIGN KEY (approved_by) REFERENCES public.users(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.agents (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL PRIMARY KEY,
     company_id uuid NOT NULL,
@@ -88,6 +115,20 @@ CREATE TABLE IF NOT EXISTS public.agents (
     ),
     CONSTRAINT agents_company_agent_key UNIQUE (company_id, agent_id)
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_company_id_fkey') THEN
+        ALTER TABLE ONLY public.agents
+            ADD CONSTRAINT agents_company_id_fkey
+            FOREIGN KEY (company_id) REFERENCES public.company(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS update_agents_updated_at ON public.agents;
+CREATE TRIGGER update_agents_updated_at
+    BEFORE UPDATE ON public.agents
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 CREATE TABLE IF NOT EXISTS public.shop_runtime_bindings (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL PRIMARY KEY,
@@ -115,6 +156,29 @@ CREATE TABLE IF NOT EXISTS public.shop_runtime_bindings (
 
 CREATE INDEX IF NOT EXISTS idx_shop_runtime_bindings_agent
     ON public.shop_runtime_bindings (agent_id, profile_status, playbook_status);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'shop_runtime_bindings_company_id_fkey') THEN
+        ALTER TABLE ONLY public.shop_runtime_bindings
+            ADD CONSTRAINT shop_runtime_bindings_company_id_fkey
+            FOREIGN KEY (company_id) REFERENCES public.company(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'shop_runtime_bindings_data_source_id_fkey') THEN
+        ALTER TABLE ONLY public.shop_runtime_bindings
+            ADD CONSTRAINT shop_runtime_bindings_data_source_id_fkey
+            FOREIGN KEY (data_source_id) REFERENCES public.data_sources(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS update_shop_runtime_bindings_updated_at ON public.shop_runtime_bindings;
+CREATE TRIGGER update_shop_runtime_bindings_updated_at
+    BEFORE UPDATE ON public.shop_runtime_bindings
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 CREATE TABLE IF NOT EXISTS public.browser_collection_records (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL PRIMARY KEY,
@@ -147,6 +211,38 @@ CREATE TABLE IF NOT EXISTS public.browser_collection_records (
 CREATE INDEX IF NOT EXISTS idx_browser_collection_records_lookup
     ON public.browser_collection_records (company_id, data_source_id, dataset_id, biz_date, record_status);
 
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_collection_records_company_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_collection_records
+            ADD CONSTRAINT browser_collection_records_company_id_fkey
+            FOREIGN KEY (company_id) REFERENCES public.company(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_collection_records_data_source_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_collection_records
+            ADD CONSTRAINT browser_collection_records_data_source_id_fkey
+            FOREIGN KEY (data_source_id) REFERENCES public.data_sources(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_collection_records_dataset_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_collection_records
+            ADD CONSTRAINT browser_collection_records_dataset_id_fkey
+            FOREIGN KEY (dataset_id) REFERENCES public.data_source_datasets(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS update_browser_collection_records_updated_at ON public.browser_collection_records;
+CREATE TRIGGER update_browser_collection_records_updated_at
+    BEFORE UPDATE ON public.browser_collection_records
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
 CREATE TABLE IF NOT EXISTS public.browser_capture_files (
     file_id uuid DEFAULT public.uuid_generate_v4() NOT NULL PRIMARY KEY,
     company_id uuid NOT NULL,
@@ -163,6 +259,38 @@ CREATE TABLE IF NOT EXISTS public.browser_capture_files (
     row_count integer NOT NULL DEFAULT 0,
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_capture_files_company_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_capture_files
+            ADD CONSTRAINT browser_capture_files_company_id_fkey
+            FOREIGN KEY (company_id) REFERENCES public.company(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_capture_files_data_source_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_capture_files
+            ADD CONSTRAINT browser_capture_files_data_source_id_fkey
+            FOREIGN KEY (data_source_id) REFERENCES public.data_sources(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'browser_capture_files_dataset_id_fkey') THEN
+        ALTER TABLE ONLY public.browser_capture_files
+            ADD CONSTRAINT browser_capture_files_dataset_id_fkey
+            FOREIGN KEY (dataset_id) REFERENCES public.data_source_datasets(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS update_browser_capture_files_updated_at ON public.browser_capture_files;
+CREATE TRIGGER update_browser_capture_files_updated_at
+    BEFORE UPDATE ON public.browser_capture_files
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 ALTER TABLE public.recon_execution_queue
     DROP CONSTRAINT IF EXISTS recon_execution_queue_status_check;
