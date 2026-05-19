@@ -29,6 +29,39 @@ class _FastPathNotSupported(RuntimeError):
     """Raised when a step cannot be executed by the vectorized fast path."""
 
 
+class FormulaEvaluationError(ValueError):
+    """Raised when a formula cannot be evaluated with user-facing context."""
+
+    def __init__(self, message: str, *, binding_names: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.binding_names = binding_names or []
+
+
+class ProcRuntimeError(Exception):
+    """数据整理运行期错误基类,携带结构化的摘要/原因/建议。"""
+
+    def __init__(self, *, summary: str, cause: str, suggestion: str) -> None:
+        self.summary = summary
+        self.cause = cause
+        self.suggestion = suggestion
+        super().__init__(self.format_detail())
+
+    def format_detail(self) -> str:
+        return (
+            f"数据整理失败：{self.summary}\n\n"
+            f"原因：{self.cause}\n"
+            f"建议：{self.suggestion}"
+        )
+
+
+class ProcUserDataError(ProcRuntimeError):
+    """类①:用户可自行修复的数据问题(文件缺列、日期格式错等)。"""
+
+
+class ProcRuleConfigError(ProcRuntimeError):
+    """类②:规则配置本身的问题,需规则作者/管理员修复。"""
+
+
 @dataclass
 class TableSchemaState:
     name: str
@@ -46,8 +79,12 @@ def execute_steps_rule(
     validated_files: list[dict[str, Any]],
     output_dir: str,
     preloaded_frames: dict[str, pd.DataFrame] | None = None,
+    column_aliases: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
+    runtime = StepsProcRuntime(
+        rule_code, rule_data, validated_files, output_dir,
+        preloaded_frames=preloaded_frames, column_aliases=column_aliases,
+    )
     return runtime.execute()
 
 
@@ -57,8 +94,12 @@ def execute_steps_rule_to_frames(
     validated_files: list[dict[str, Any]],
     output_dir: str,
     preloaded_frames: dict[str, pd.DataFrame] | None = None,
+    column_aliases: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
+    runtime = StepsProcRuntime(
+        rule_code, rule_data, validated_files, output_dir,
+        preloaded_frames=preloaded_frames, column_aliases=column_aliases,
+    )
     runtime.execute_to_frames()
     return runtime.export_frame_outputs()
 
@@ -69,8 +110,12 @@ def execute_steps_rule_with_frames(
     validated_files: list[dict[str, Any]],
     output_dir: str,
     preloaded_frames: dict[str, pd.DataFrame] | None = None,
+    column_aliases: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    runtime = StepsProcRuntime(rule_code, rule_data, validated_files, output_dir, preloaded_frames=preloaded_frames)
+    runtime = StepsProcRuntime(
+        rule_code, rule_data, validated_files, output_dir,
+        preloaded_frames=preloaded_frames, column_aliases=column_aliases,
+    )
     runtime.execute_to_frames()
     frame_outputs = runtime.export_frame_outputs()
     generated_files = runtime.export_tables()
@@ -159,6 +204,7 @@ class StepsProcRuntime:
         validated_files: list[dict[str, Any]],
         output_dir: str,
         preloaded_frames: dict[str, pd.DataFrame] | None = None,
+        column_aliases: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.rule_code = rule_code
         self.rule_data = rule_data
@@ -166,6 +212,7 @@ class StepsProcRuntime:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.validated_files = validated_files
         self.preloaded_frames: dict[str, pd.DataFrame] = preloaded_frames or {}
+        self.column_aliases: dict[str, dict[str, str]] = column_aliases or {}
         self.table_file_map = {
             str(item.get("table_name") or "").strip(): str(
                 item.get("file_path") or item.get("file_name") or ""
@@ -179,6 +226,7 @@ class StepsProcRuntime:
         self._active_alias_frames: dict[str, pd.DataFrame] = {}
         self._lookup_cache: dict[tuple[str, tuple[str, ...]], dict[tuple[Any, ...], dict[str, Any]]] = {}
         self._row_index_cache: dict[str, dict[tuple[Any, ...], int]] = {}
+        self._column_lineage: dict[tuple[str, str], dict[str, Any]] = {}
         self._input_plan_frame_keys = {
             key for key in self.preloaded_frames.keys() if str(key).startswith("__input_plan__::")
         }
@@ -261,7 +309,12 @@ class StepsProcRuntime:
         if action == "create_schema":
             self._create_schema(step)
         elif action == "write_dataset":
-            self._write_dataset(step)
+            try:
+                self._write_dataset(step)
+            except FormulaEvaluationError as exc:
+                raise ValueError(
+                    f"步骤 {step_id}（{step.get('description') or action}）执行失败：{exc}"
+                ) from exc
         else:
             raise ValueError(f"不支持的 step action: {action}")
         if target_table and target_table not in self.materialized_targets:
@@ -639,6 +692,7 @@ class StepsProcRuntime:
                 row_index,
                 target_row,
                 target_table,
+                alias_tables,
             )
         return target_df
 
@@ -743,6 +797,7 @@ class StepsProcRuntime:
             target_field = mapping.get("target_field")
             if not target_field:
                 raise _FastPathNotSupported("fast path 暂不支持 target_field_template")
+            self._record_column_lineage(target_table, str(target_field), mapping, alias_tables)
             values = self._evaluate_mapping_series(
                 mapping,
                 base_alias=base_alias,
@@ -1045,15 +1100,28 @@ class StepsProcRuntime:
             target_field = self._resolve_target_field(mapping, row_contexts, alias_tables, contexts)
             if not target_field:
                 continue
-            value = self._evaluate_mapping_value(
-                mapping,
-                row_contexts,
-                alias_tables,
-                target_table,
-                contexts,
-                current_target_row,
-            )
+            try:
+                value = self._evaluate_mapping_value(
+                    mapping,
+                    row_contexts,
+                    alias_tables,
+                    target_table,
+                    contexts,
+                    current_target_row,
+                )
+            except FormulaEvaluationError as exc:
+                raise self._build_formula_context_error(
+                    exc,
+                    mapping,
+                    target_table,
+                    target_field,
+                    row_contexts,
+                    alias_tables,
+                    current_target_row,
+                    contexts,
+                ) from exc
             self._ensure_column_exists(target_table, target_df, target_field)
+            self._record_column_lineage(target_table, target_field, mapping, alias_tables)
             current_value = current_target_row.get(target_field)
             field_write_mode = str(mapping.get("field_write_mode") or "overwrite")
             new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
@@ -1078,6 +1146,7 @@ class StepsProcRuntime:
         row_index: int,
         current_target_row: dict[str, Any],
         target_table: str,
+        alias_tables: dict[str, str],
     ) -> None:
         for mapping in mappings:
             target_field = mapping.get("target_field")
@@ -1089,6 +1158,7 @@ class StepsProcRuntime:
             new_value = self._apply_field_write_mode(field_write_mode, current_value, value)
             new_value = self._normalize_value_for_column(target_table, target_field, new_value)
             self._ensure_column_exists(target_table, target_df, target_field)
+            self._record_column_lineage(target_table, str(target_field), mapping, alias_tables)
             target_df.at[row_index, target_field] = new_value
             current_target_row[target_field] = new_value
             if (
@@ -1141,19 +1211,14 @@ class StepsProcRuntime:
             )
         if node_type == "formula":
             bindings = mapping.get("bindings") or value_node.get("bindings") or {}
-            env = {
-                name: _normalize_formula_value(
-                    self._evaluate_value_spec(
-                        spec,
-                        row_contexts,
-                        alias_tables,
-                        target_table,
-                        current_target_row,
-                        contexts,
-                    )
-                )
-                for name, spec in bindings.items()
-            }
+            env = self._evaluate_formula_bindings(
+                bindings,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
             expr = value_node.get("expr", "")
             if not expr and isinstance(value_node.get("formula"), str):
                 expr = value_node.get("formula", "")
@@ -1195,24 +1260,186 @@ class StepsProcRuntime:
                 contexts,
             )
         if spec_type == "formula":
-            env = {
-                name: _normalize_formula_value(
-                    self._evaluate_value_spec(
-                        value,
-                        row_contexts,
-                        alias_tables,
-                        target_table,
-                        current_target_row,
-                        contexts,
-                    )
-                )
-                for name, value in (spec.get("bindings") or {}).items()
-            }
+            env = self._evaluate_formula_bindings(
+                spec.get("bindings") or {},
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
             expr = spec.get("expr", "")
             if not expr and isinstance(spec.get("formula"), str):
                 expr = spec.get("formula", "")
             return _evaluate_formula_expression(expr, env)
         return spec
+
+    def _evaluate_formula_bindings(
+        self,
+        bindings: dict[str, Any],
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        target_table: str,
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> dict[str, Any]:
+        env: dict[str, Any] = {}
+        metadata: dict[str, dict[str, Any]] = {}
+        for name, spec in bindings.items():
+            raw_value = self._evaluate_value_spec(
+                spec,
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            env[name] = _normalize_formula_value(raw_value)
+            metadata[name] = self._describe_formula_binding_source(
+                spec,
+                raw_value,
+                row_contexts,
+                alias_tables,
+            )
+        env["__metadata__"] = metadata
+        return env
+
+    def _describe_formula_binding_source(
+        self,
+        spec: Any,
+        raw_value: Any,
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+    ) -> dict[str, Any]:
+        if not isinstance(spec, dict):
+            return {"value": raw_value, "type": type(raw_value).__name__}
+        spec_type = spec.get("type")
+        if spec_type == "source":
+            source = spec.get("source") or {}
+            alias = str(source.get("alias") or "").strip()
+            field = str(source.get("field") or "").strip()
+            table = alias_tables.get(alias, alias)
+            return {
+                "table": table,
+                "alias": alias,
+                "field": field,
+                "lineage": self._column_lineage.get((table, field)),
+                "value": raw_value,
+                "type": type(raw_value).__name__,
+            }
+        if spec_type == "function":
+            return {
+                "function": str(spec.get("function") or "").strip(),
+                "value": raw_value,
+                "type": type(raw_value).__name__,
+            }
+        if spec_type == "lookup":
+            source_alias = str(spec.get("source_alias") or "").strip()
+            return {
+                "table": alias_tables.get(source_alias, source_alias),
+                "alias": source_alias,
+                "field": str(spec.get("value_field") or "").strip(),
+                "value": raw_value,
+                "type": type(raw_value).__name__,
+            }
+        if spec_type == "formula":
+            return {"formula": str(spec.get("expr") or spec.get("formula") or ""), "value": raw_value, "type": type(raw_value).__name__}
+        return {"value": raw_value, "type": type(raw_value).__name__}
+
+    def _record_column_lineage(
+        self,
+        target_table: str,
+        target_field: str,
+        mapping: dict[str, Any],
+        alias_tables: dict[str, str],
+    ) -> None:
+        lineage = self._lineage_from_value_spec(mapping.get("value") or {}, alias_tables)
+        if not lineage:
+            return
+        self._column_lineage[(target_table, target_field)] = lineage
+
+    def _lineage_from_value_spec(
+        self,
+        spec: Any,
+        alias_tables: dict[str, str],
+    ) -> dict[str, Any] | None:
+        if not isinstance(spec, dict):
+            return None
+        spec_type = spec.get("type")
+        if spec_type == "source":
+            source = spec.get("source") or {}
+            alias = str(source.get("alias") or "").strip()
+            field = str(source.get("field") or "").strip()
+            if not alias or not field:
+                return None
+            return {
+                "table": alias_tables.get(alias, alias),
+                "alias": alias,
+                "field": field,
+            }
+        if spec_type == "lookup":
+            source_alias = str(spec.get("source_alias") or "").strip()
+            value_field = str(spec.get("value_field") or "").strip()
+            if not source_alias or not value_field:
+                return None
+            return {
+                "table": alias_tables.get(source_alias, source_alias),
+                "alias": source_alias,
+                "field": value_field,
+            }
+        if spec_type == "formula":
+            bindings = spec.get("bindings") or {}
+            if len(bindings) == 1:
+                return self._lineage_from_value_spec(next(iter(bindings.values())), alias_tables)
+        return None
+
+    def _build_formula_context_error(
+        self,
+        error: FormulaEvaluationError,
+        mapping: dict[str, Any],
+        target_table: str,
+        target_field: str,
+        row_contexts: dict[str, dict[str, Any]],
+        alias_tables: dict[str, str],
+        current_target_row: dict[str, Any],
+        contexts: dict[str, Any],
+    ) -> FormulaEvaluationError:
+        value_node = mapping.get("value") or {}
+        expr = str(value_node.get("expr") or value_node.get("formula") or "")
+        bindings = mapping.get("bindings") or value_node.get("bindings") or {}
+        details = [str(error)]
+        if target_table or target_field:
+            details.append(f"目标字段：{target_table}.{target_field}".strip("."))
+        if expr:
+            details.append(f"公式：{expr}")
+
+        related_names = list(error.binding_names or [])
+        if not related_names:
+            related_names = list(bindings.keys())
+        binding_lines: list[str] = []
+        for name in related_names:
+            if name not in bindings:
+                continue
+            raw_value = self._evaluate_value_spec(
+                bindings[name],
+                row_contexts,
+                alias_tables,
+                target_table,
+                current_target_row,
+                contexts,
+            )
+            source = self._describe_formula_binding_source(
+                bindings[name],
+                raw_value,
+                row_contexts,
+                alias_tables,
+            )
+            binding_lines.append(f"{name}={_format_binding_source_for_error(source)}")
+        if binding_lines:
+            details.append("相关变量：" + "；".join(binding_lines))
+
+        details.append("请检查上述字段是否为日期格式，空值请留空，不要使用 \\N、待确认 等文本。")
+        return FormulaEvaluationError("；".join(details), binding_names=error.binding_names)
 
     def _evaluate_source_node(
         self,
@@ -1677,11 +1904,38 @@ class StepsProcRuntime:
     def _input_plan_frame_key(target_table: str, alias: str, table_name: str) -> str:
         return f"__input_plan__::{target_table}::{alias}::{table_name}"
 
+    def _apply_column_aliases(self, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
+        """将上传文件的别名列重命名为规则使用的规范列名。
+
+        文件校验规则用 column_aliases 接受不同店铺的列名写法，但校验仅做匹配，
+        不改数据。proc 规则引用的是规范列名，因此在加载源表时统一改名，
+        否则 groupby/字段访问会因列名不一致抛 KeyError。
+        """
+        alias_map = self.column_aliases.get(table_name)
+        if not alias_map:
+            return df
+        existing = set(df.columns)
+        rename: dict[str, str] = {}
+        for col in df.columns:
+            canonical = alias_map.get(_normalize_alias_key(col))
+            if not canonical or canonical == col or canonical in existing:
+                continue
+            if canonical in rename.values():
+                continue
+            rename[col] = canonical
+        if rename:
+            df = df.rename(columns=rename)
+            logger.info(
+                "[steps_runtime] 表 '%s' 列名别名规范化: %s", table_name, rename
+            )
+        return df
+
     def _ensure_table_loaded(self, table_name: str) -> pd.DataFrame:
         if table_name in self.tables:
             return self.tables[table_name]
         if table_name in self.preloaded_frames:
             df = self.preloaded_frames[table_name].copy()
+            df = self._apply_column_aliases(table_name, df)
             self.tables[table_name] = df
             if table_name not in self.schemas:
                 self.schemas[table_name] = TableSchemaState(
@@ -1697,6 +1951,7 @@ class StepsProcRuntime:
         if not file_path:
             raise ValueError(f"表 '{table_name}' 未在上传文件或中间结果中找到")
         df = _read_file_as_df(file_path)
+        df = self._apply_column_aliases(table_name, df)
         self.tables[table_name] = df
         if table_name not in self.schemas:
             self.schemas[table_name] = TableSchemaState(
@@ -1883,6 +2138,11 @@ class StepsProcRuntime:
         raise ValueError(f"导出月份范围无效: start={start_date}, end={end_date}")
 
 
+def _normalize_alias_key(name: Any) -> str:
+    """列名别名归一化：去空白、去制表符、转小写，与文件校验保持一致。"""
+    return str(name or "").strip().replace(" ", "").replace("\t", "").lower()
+
+
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     path = resolve_upload_file_path(file_path)
     if not path.exists():
@@ -1959,6 +2219,8 @@ def _is_nullish(value: Any) -> bool:
         return True
     if isinstance(value, str) and value.strip() == "":
         return True
+    if _is_export_null_marker(value):
+        return True
     try:
         return bool(pd.isna(value))
     except TypeError:
@@ -2013,13 +2275,15 @@ def _coerce_number(value: Any) -> Optional[float]:
 
 
 def _normalize_formula_value(value: Any) -> Any:
+    if _is_export_null_marker(value):
+        return None
     if isinstance(value, pd.Timestamp):
         return value.date()
     if isinstance(value, datetime):
         return value.date()
-    if isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+    if isinstance(value, str) and _looks_like_date_text(value):
         try:
-            return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+            return _coerce_date_value(value)
         except ValueError:
             return value
     if hasattr(value, "item") and callable(getattr(value, "item")):
@@ -2459,6 +2723,8 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         left = _evaluate_formula_ast(node.left, env)
         for operator, comparator_node in zip(node.ops, node.comparators):
             right = _evaluate_formula_ast(comparator_node, env)
+            left_name = _formula_binding_name_for_node(node.left)
+            right_name = _formula_binding_name_for_node(comparator_node)
             if _comparison_involves_blank_string(left, right):
                 left_for_compare = _normalize_blank_compare_value(left)
                 right_for_compare = _normalize_blank_compare_value(right)
@@ -2467,6 +2733,13 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
             else:
                 left_for_compare = left
                 right_for_compare = right
+            if isinstance(operator, (ast.Gt, ast.GtE, ast.Lt, ast.LtE)):
+                left_for_compare, right_for_compare = _coerce_relational_compare_values(
+                    left_for_compare,
+                    right_for_compare,
+                    left_name=left_name,
+                    right_name=right_name,
+                )
             if not _apply_compare_operator(operator, left_for_compare, right_for_compare):
                 return False
             left = right
@@ -2513,6 +2786,20 @@ def _coerce_formula_number(value: Any) -> Optional[float]:
         return None
 
 
+def _formula_binding_name_for_node(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Subscript):
+        return None
+    value_node = node.value
+    if not isinstance(value_node, ast.Name) or value_node.id != "__vars__":
+        return None
+    slice_node = node.slice
+    if isinstance(slice_node, ast.Index):  # pragma: no cover
+        slice_node = slice_node.value
+    if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+        return slice_node.value
+    return None
+
+
 def _apply_compare_operator(operator: ast.cmpop, left: Any, right: Any) -> bool:
     if isinstance(operator, ast.Gt):
         return left > right
@@ -2543,3 +2830,76 @@ def _normalize_blank_compare_value(value: Any) -> Any:
     if isinstance(value, str):
         return value.strip()
     return value
+
+
+def _is_export_null_marker(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().upper() in {"\\N", "NULL", "N/A", "NA"}
+
+
+def _looks_like_date_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return bool(
+        re.match(r"^\d{4}[-/.年]\d{1,2}([-/.月]\d{1,2}日?)?(\s+\d{1,2}:\d{2}(:\d{2})?)?$", text)
+    )
+
+
+def _coerce_relational_compare_values(
+    left: Any,
+    right: Any,
+    *,
+    left_name: str | None = None,
+    right_name: str | None = None,
+) -> tuple[Any, Any]:
+    if not (_looks_date_like_value(left) or _looks_date_like_value(right)):
+        return left, right
+    return (
+        _coerce_formula_compare_date(left, binding_name=left_name),
+        _coerce_formula_compare_date(right, binding_name=right_name),
+    )
+
+
+def _looks_date_like_value(value: Any) -> bool:
+    return isinstance(value, (pd.Timestamp, datetime, date)) or _looks_like_date_text(value)
+
+
+def _coerce_formula_compare_date(value: Any, *, binding_name: str | None) -> date:
+    if isinstance(value, str) and not _looks_like_date_text(value):
+        raise FormulaEvaluationError(
+            f"公式比较失败：需要日期值，但实际是文本 {value!r}",
+            binding_names=[binding_name] if binding_name else [],
+        )
+    try:
+        return _coerce_date_value(value)
+    except ValueError as exc:
+        raise FormulaEvaluationError(
+            f"公式比较失败：无法将 {value!r} 解析为日期",
+            binding_names=[binding_name] if binding_name else [],
+        ) from exc
+
+
+def _format_binding_source_for_error(source: dict[str, Any]) -> str:
+    value = source.get("value")
+    parts: list[str] = []
+    table = str(source.get("table") or "").strip()
+    field = str(source.get("field") or "").strip()
+    alias = str(source.get("alias") or "").strip()
+    function_name = str(source.get("function") or "").strip()
+    if table and field:
+        parts.append(f"{table}.{field}")
+        lineage = source.get("lineage")
+        if isinstance(lineage, dict):
+            lineage_table = str(lineage.get("table") or "").strip()
+            lineage_field = str(lineage.get("field") or "").strip()
+            if lineage_table and lineage_field and (lineage_table != table or lineage_field != field):
+                parts.append(f"来源={lineage_table}.{lineage_field}")
+    elif alias and field:
+        parts.append(f"{alias}.{field}")
+    elif function_name:
+        parts.append(f"{function_name}()")
+    elif source.get("formula"):
+        parts.append("嵌套公式")
+    parts.append(f"值={value!r}")
+    parts.append(f"类型={source.get('type')}")
+    return "，".join(parts)
