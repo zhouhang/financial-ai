@@ -29,6 +29,7 @@ _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
+_BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -347,6 +348,27 @@ def _column_exists(table_name: str, column_name: str, *, schema: str = "public")
         raise
 
 
+def _table_columns(table_name: str, *, schema: str = "public") -> list[str]:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s
+                      AND table_name = %s
+                    ORDER BY ordinal_position ASC
+                    """,
+                    (schema, table_name),
+                )
+                return [str(row[0]) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"检查表列失败 (schema={schema}, table={table_name}): {e}")
+        raise
+
+
 def _constraint_definition(
     table_name: str,
     constraint_name: str,
@@ -456,7 +478,68 @@ def _platform_alipay_bill_lines_schema_ready() -> bool:
             for index_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES
         )
         and _trigger_exists(table_name, _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER)
+        )
+
+
+def _browser_playbook_collection_schema_ready() -> bool:
+    required_tables = (
+        "playbooks",
+        "agents",
+        "shop_runtime_bindings",
+        "browser_collection_records",
+        "browser_capture_files",
     )
+    if not all(_table_exists(table_name) for table_name in required_tables):
+        return False
+
+    required_columns = {
+        "playbooks": (
+            "company_id",
+            "playbook_id",
+            "version",
+            "description",
+            "schema_check_result",
+            "replay_result",
+            "sample_data_path",
+            "transcript_path",
+            "canary_shop_ids",
+            "emergency_page_changed",
+            "bypass_canary_reason",
+            "created_by",
+            "approved_by",
+            "approved_at",
+            "canary_started_at",
+            "canary_completed_at",
+            "status",
+        ),
+        "browser_collection_records": (
+            "company_id",
+            "data_source_id",
+            "dataset_id",
+            "biz_date",
+            "item_key",
+            "item_hash",
+            "payload",
+            "record_status",
+        ),
+        "shop_runtime_bindings": (
+            "profile_status",
+            "playbook_status",
+            "cron_pause_reason",
+        ),
+        "recon_execution_queue": (
+            "next_retry_at",
+            "wait_deadline_at",
+            "waiting_reason",
+            "waiting_datasets",
+            "collection_job_ids",
+        ),
+    }
+    return all(
+        _column_exists(table_name, column_name)
+        for table_name, column_names in required_columns.items()
+        for column_name in column_names
+    ) and "draft" in _constraint_definition("playbooks", "playbooks_status_check") and "deprecated" in _constraint_definition("playbooks", "playbooks_status_check")
 
 
 def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
@@ -652,7 +735,6 @@ def ensure_unified_data_source_schema() -> list[str]:
         )
     if not _platform_alipay_bill_lines_schema_ready():
         raise RuntimeError("支付宝账单行 schema 仍不完整，自动迁移后仍缺少必要列、约束、索引或触发器")
-
     _UNIFIED_DATA_SOURCE_SCHEMA_READY = True
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
@@ -746,6 +828,32 @@ def ensure_platform_pending_authorizations_schema() -> list[str]:
     _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = True
     logger.info("platform_pending_authorizations 表已自动补齐: %s", migration_name)
     return [migration_name]
+
+
+def ensure_browser_playbook_collection_schema() -> list[str]:
+    """确保浏览器采集首店 schema 已安装。"""
+    global _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY
+    if _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY:
+        return []
+    if _browser_playbook_collection_schema_ready():
+        _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
+        return []
+
+    migration_name = "031_browser_playbook_collection.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _browser_playbook_collection_schema_ready():
+        raise RuntimeError("browser_playbook collection schema 升级失败，仍缺少必要表或列")
+
+    _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
+    logger.info("browser_playbook collection schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_schema() -> list[str]:
+    """确保 auth 侧当前任务需要的基础 schema 已就绪。"""
+    applied = ensure_unified_data_source_schema()
+    applied.extend(ensure_browser_playbook_collection_schema())
+    return applied
 
 
 class _ConnectionContextManager:
