@@ -5575,6 +5575,114 @@ def create_or_reuse_dataset_collection_sync_job(
         return {"job": None, "reused": False, "reuse_reason": "", "error": str(e)}
 
 
+def claim_next_browser_sync_job(*, agent_max_concurrency: int = 2) -> dict | None:
+    """原子领取下一条待执行的 browser_playbook sync job。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'running',
+                        started_at = CURRENT_TIMESTAMP,
+                        current_attempt = COALESCE(current_attempt, 0) + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = (
+                        SELECT id
+                        FROM sync_jobs
+                        WHERE job_status = 'pending'
+                          AND (
+                              request_payload ->> 'collection_driver' = 'browser_playbook_remote'
+                              OR request_payload -> 'params' ->> 'collection_driver' = 'browser_playbook_remote'
+                          )
+                        ORDER BY created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, started_at, completed_at, created_at, updated_at
+                    """
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"领取 browser_playbook sync_job 失败: {e}")
+        return None
+
+
+def get_shop_runtime_binding_for_source(*, company_id: str, data_source_id: str) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM shop_runtime_bindings
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"查询 shop_runtime_bindings 失败 (company_id={company_id}, data_source_id={data_source_id}): {e}"
+        )
+        return {}
+
+
+def get_active_playbook(*, company_id: str, playbook_id: str) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM playbooks
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND status = 'active'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, playbook_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(f"查询 playbooks 失败 (company_id={company_id}, playbook_id={playbook_id}): {e}")
+        return {}
+
+
+def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
+    return update_unified_sync_job_status(
+        sync_job_id=sync_job_id,
+        job_status="success",
+        error_message="",
+        checkpoint_after={"browser_collection_summary": summary or {}},
+        finish_job=True,
+    )
+
+
+def mark_browser_sync_job_failed(*, sync_job_id: str, error_message: str, fail_reason: str) -> dict | None:
+    return update_unified_sync_job_status(
+        sync_job_id=sync_job_id,
+        job_status="failed",
+        error_message=f"{fail_reason}: {error_message}",
+        checkpoint_after={},
+        finish_job=True,
+    )
+
+
 def _clean_decimal_text(value: Any) -> str | None:
     if value is None:
         return None
