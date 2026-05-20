@@ -5565,6 +5565,22 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="browser_agent_heartbeat",
+            description="Worker 专用：browser-agent 上报心跳，标记采集节点 online 并更新 last_heartbeat_at。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "hostname": {"type": "string"},
+                    "version": {"type": "string"},
+                    "capabilities": {"type": "object"},
+                },
+                "required": ["worker_token", "company_id", "agent_id"],
+            },
+        ),
+        Tool(
             name="browser_sync_job_complete",
             description="Worker 专用：browser-agent 完成 sync_job 后回写 records / capture_files 并将 sync_job 标记 success。",
             inputSchema={
@@ -5667,6 +5683,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_preview(arguments)
         if name == "browser_sync_job_claim":
             return await _handle_browser_sync_job_claim(arguments)
+        if name == "browser_agent_heartbeat":
+            return await _handle_browser_agent_heartbeat(arguments)
         if name == "browser_sync_job_complete":
             return await _handle_browser_sync_job_complete(arguments)
         if name == "browser_sync_job_fail":
@@ -8628,6 +8646,27 @@ async def _handle_browser_sync_job_claim(arguments: dict[str, Any]) -> dict[str,
         agent_max_concurrency=max_concurrency,
     )
     return {"success": True, "job": job}
+
+
+async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    company_id = str(arguments.get("company_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not company_id:
+        return {"success": False, "error": "missing company_id"}
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    row = auth_db.upsert_browser_agent_heartbeat(
+        company_id=company_id,
+        agent_id=agent_id,
+        hostname=str(arguments.get("hostname") or "").strip(),
+        version=str(arguments.get("version") or "").strip(),
+        capabilities=dict(arguments.get("capabilities") or {}),
+    )
+    return {"success": bool(row), "agent": row}
 
 
 async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[str, Any]:

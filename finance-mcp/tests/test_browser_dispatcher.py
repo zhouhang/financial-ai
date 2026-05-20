@@ -438,6 +438,66 @@ def test_mark_browser_sync_job_failed_prefixes_error_exactly_once(monkeypatch) -
     assert "AUTH_EXPIRED: login expired" in params
 
 
+def test_mark_browser_sync_job_success_updates_binding_last_collection(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_update_unified_sync_job_status(**kwargs):
+        captured["status_kwargs"] = kwargs
+        return {
+            "id": kwargs["sync_job_id"],
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": kwargs["job_status"],
+        }
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["binding_sql"] = sql
+            captured["binding_params"] = params
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "update_unified_sync_job_status", fake_update_unified_sync_job_status)
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    row = auth_db.mark_browser_sync_job_success(
+        sync_job_id="sync-001",
+        summary={"record_count": 3},
+    )
+
+    assert row["job_status"] == "success"
+    assert "last_collection_at = CURRENT_TIMESTAMP" in captured["binding_sql"]
+    assert captured["binding_params"] == ("sync-001",)
+
+
 def test_apply_browser_binding_failure_transition_maps_reasons(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
@@ -485,6 +545,69 @@ def test_apply_browser_binding_failure_transition_maps_reasons(monkeypatch) -> N
     assert "cron_pause_reason" in sql
 
 
+def test_upsert_browser_agent_heartbeat_marks_online(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchone(self):
+            return {
+                "id": "agent-row-001",
+                "company_id": "company-001",
+                "agent_id": "browser-agent-local",
+                "status": "online",
+            }
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    row = auth_db.upsert_browser_agent_heartbeat(
+        company_id="company-001",
+        agent_id="browser-agent-local",
+        hostname="collector-01",
+        version="v1",
+        capabilities={"browser": "chrome"},
+    )
+
+    assert row["status"] == "online"
+    assert "INSERT INTO agents" in captured["sql"]
+    assert "last_heartbeat_at" in captured["sql"]
+    assert captured["params"][0] == "company-001"
+    assert captured["params"][1] == "browser-agent-local"
+
+
 def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
     import asyncio
 
@@ -511,6 +634,44 @@ def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
 
     assert result["success"] is True
     assert result["job"] == expected_job
+
+
+def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
+    import asyncio
+
+    from tools import data_sources
+
+    captured: dict[str, object] = {}
+
+    def fake_heartbeat(**kwargs):
+        captured.update(kwargs)
+        return {"agent_id": kwargs["agent_id"], "status": "online"}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system", "company_id": "company-001"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "upsert_browser_agent_heartbeat", fake_heartbeat)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_agent_heartbeat",
+            {
+                "worker_token": "tok",
+                "company_id": "company-001",
+                "agent_id": "browser-agent-local",
+                "hostname": "collector-01",
+                "version": "v1",
+                "capabilities": {"browser": "chrome"},
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["company_id"] == "company-001"
+    assert captured["agent_id"] == "browser-agent-local"
+    assert captured["capabilities"] == {"browser": "chrome"}
 
 
 def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
@@ -654,4 +815,3 @@ def test_dispatcher_persists_capture_files() -> None:
     assert hasattr(fake_db, "capture_files")
     assert fake_db.capture_files[0]["sync_job_id"] == "job-001"
     assert fake_db.capture_files[0]["capture_files"][0]["storage_path"] == "/tmp/qn.csv"
-

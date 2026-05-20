@@ -11,7 +11,24 @@ if str(FINANCE_BROWSER_AGENT_ROOT) not in sys.path:
 from runner import run_message
 
 
-def test_runner_reads_rows_from_input_file_and_emits_task_result(tmp_path: Path) -> None:
+def test_runner_defaults_to_real_playwright_mode(monkeypatch) -> None:
+    monkeypatch.delenv("BROWSER_AGENT_RUNNER_MODE", raising=False)
+
+    from finance_browser_agent import playwright_runner
+
+    monkeypatch.setattr(
+        playwright_runner,
+        "run_playbook_with_playwright",
+        lambda message: {"job_id": message["job_id"], "status": "playwright-called"},
+    )
+
+    result = run_message({"job_id": "job-001"})
+
+    assert result["status"] == "playwright-called"
+
+
+def test_runner_reads_rows_from_input_file_and_emits_task_result(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BROWSER_AGENT_RUNNER_MODE", "synthetic")
     input_path = tmp_path / "input.json"
     output_path = tmp_path / "output.json"
     rows_path = tmp_path / "rows.json"

@@ -35,16 +35,19 @@ _TOKEN_REFRESH_LEAD_SECONDS = 300  # refresh 5 min before expiry
 @dataclass(frozen=True)
 class BrowserAgentConfig:
     agent_id: str
+    company_id: str
     mcp_base_url: str
     poll_interval_seconds: float
     max_concurrency: int
     waiting_poll_interval_seconds: float
+    heartbeat_interval_seconds: float
 
     @classmethod
     def from_env(cls) -> "BrowserAgentConfig":
         hostname = socket.gethostname() or "local"
         return cls(
             agent_id=os.getenv("BROWSER_AGENT_ID", f"browser-agent-{hostname}"),
+            company_id=os.getenv("BROWSER_AGENT_COMPANY_ID", "").strip(),
             mcp_base_url=os.getenv("FINANCE_MCP_BASE_URL", "http://127.0.0.1:3335"),
             poll_interval_seconds=max(
                 1.0, float(os.getenv("BROWSER_AGENT_POLL_INTERVAL_SECONDS", "2"))
@@ -52,6 +55,9 @@ class BrowserAgentConfig:
             max_concurrency=max(1, int(os.getenv("BROWSER_AGENT_MAX_CONCURRENCY", "2"))),
             waiting_poll_interval_seconds=max(
                 5.0, float(os.getenv("BROWSER_AGENT_WAITING_POLL_INTERVAL_SECONDS", "30"))
+            ),
+            heartbeat_interval_seconds=max(
+                10.0, float(os.getenv("BROWSER_AGENT_HEARTBEAT_INTERVAL_SECONDS", "30"))
             ),
         )
 
@@ -107,6 +113,25 @@ class BrowserAgentTallyClient:
                 "worker_token": self.worker_token,
                 "agent_id": self.config.agent_id,
                 "max_concurrency": self.config.max_concurrency,
+            },
+        )
+
+    async def heartbeat(self, *, company_id: str | None = None) -> dict[str, Any]:
+        resolved_company_id = (company_id or self.config.company_id or "").strip()
+        return await self._call(
+            "browser_agent_heartbeat",
+            {
+                "worker_token": self.worker_token,
+                "company_id": resolved_company_id,
+                "agent_id": self.config.agent_id,
+                "hostname": socket.gethostname() or "",
+                "version": os.getenv("BROWSER_AGENT_VERSION", ""),
+                "capabilities": {
+                    "runner": os.getenv("BROWSER_AGENT_RUNNER_MODE", "playwright"),
+                    "browser_channel": os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome"),
+                    "headless": os.getenv("BROWSER_AGENT_HEADLESS", "0"),
+                    "max_concurrency": self.config.max_concurrency,
+                },
             },
         )
 

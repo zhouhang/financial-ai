@@ -52,6 +52,18 @@ async def _waiting_reconciler(client: BrowserAgentTallyClient, interval_seconds:
         await asyncio.sleep(interval_seconds)
 
 
+async def _heartbeat(client: BrowserAgentTallyClient, config: BrowserAgentConfig) -> None:
+    while not _shutdown:
+        try:
+            if config.company_id:
+                await client.heartbeat()
+            else:
+                logger.warning("未配置 BROWSER_AGENT_COMPANY_ID，跳过 browser-agent 心跳上报")
+        except Exception:
+            logger.exception("browser-agent 心跳上报异常")
+        await asyncio.sleep(config.heartbeat_interval_seconds)
+
+
 async def _dispatcher(client: BrowserAgentTallyClient, config: BrowserAgentConfig) -> None:
     loop = BrowserDispatcherLoop(
         client=client,
@@ -74,12 +86,14 @@ async def main() -> None:
     config = BrowserAgentConfig.from_env()
     client = BrowserAgentTallyClient(config=config)
     logger.info(
-        "browser-agent 启动: agent_id=%s max_concurrency=%s mcp=%s",
+        "browser-agent 启动: agent_id=%s company_id=%s max_concurrency=%s mcp=%s",
         config.agent_id,
+        config.company_id or "<missing>",
         config.max_concurrency,
         config.mcp_base_url,
     )
     await asyncio.gather(
+        _heartbeat(client, config),
         _dispatcher(client, config),
         _waiting_reconciler(client, config.waiting_poll_interval_seconds),
     )

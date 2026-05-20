@@ -14,12 +14,13 @@ def run_message(message: dict[str, Any]) -> dict[str, Any]:
     """Entry point invoked by ``dispatcher_loop.BrowserDispatcherLoop`` for each claimed job.
 
     Two execution modes:
-    - ``BROWSER_AGENT_RUNNER_MODE=playwright`` → real Chrome via Playwright persistent context
-      (production path; see ``playwright_runner.run_playbook_with_playwright``).
-    - default / "synthetic" → consume rows from ``params.rows`` or ``params.input_rows_path``;
-      used by unit tests and dry-runs without a browser. The playbook's quality_gate still runs.
+    - default / ``BROWSER_AGENT_RUNNER_MODE=playwright`` → real Chrome via Playwright
+      persistent context (production path; see ``playwright_runner.run_playbook_with_playwright``).
+    - ``BROWSER_AGENT_RUNNER_MODE=synthetic`` → consume rows from ``params.rows`` or
+      ``params.input_rows_path``; used by unit tests and dry-runs without a browser. The
+      playbook's quality_gate still runs.
     """
-    mode = (os.getenv("BROWSER_AGENT_RUNNER_MODE", "").strip() or "synthetic").lower()
+    mode = (os.getenv("BROWSER_AGENT_RUNNER_MODE", "").strip() or "playwright").lower()
     if mode == "playwright":
         from finance_browser_agent.playwright_runner import run_playbook_with_playwright
 

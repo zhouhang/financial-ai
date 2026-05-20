@@ -4,22 +4,26 @@
 > - `docs/superpowers/specs/2026-05-15-tally-collection-agent-architecture-design.md` (see "Playbook 注册时的首次验证流程")
 > - `docs/superpowers/specs/2026-05-20-browser-first-store-production-hardening-design.md` (see "Playbook Registration And First-Time Verification (v1)")
 >
-> **Supersedes**: an earlier version of this file documented a "manual first login on the
-> collection machine" flow. That model was wrong. First login happens server-side as part of
-> playbook registration; operators never SSH the collection box for normal onboarding.
+> **First-store default**: run the collection agent on the local Mac/Windows collection
+> machine with installed Google Chrome Stable, headed mode, and a persistent per-shop profile.
+> Playwright's bundled Chromium is a development fallback only and is not the recommended
+> QianNiu production path.
 
 ## Purpose
 
-Bring one new merchant shop online. The collection machine requires no per-shop human action;
-all binding state is established through Tally Cloud.
+Bring one new merchant shop online. The collection machine can be macOS, Windows, or Linux;
+for first-store validation we use the local machine that has already logged into QianNiu with
+the merchant sub-account and confirmed no captcha appears.
 
 ## Pre-flight (one-time per collection machine)
 
 Run the environment readiness check on the collection machine:
 ```bash
 cd finance-agents/browser-agent
-BROWSER_AGENT_PROFILE_ROOT=/var/lib/tally-agent/profiles \
-BROWSER_AGENT_DOWNLOAD_ROOT=/var/lib/tally-agent/downloads \
+BROWSER_AGENT_BROWSER_CHANNEL=chrome \
+BROWSER_AGENT_HEADLESS=0 \
+BROWSER_AGENT_PROFILE_ROOT="$HOME/tally-browser-agent/profiles" \
+BROWSER_AGENT_DOWNLOAD_ROOT="$HOME/tally-browser-agent/downloads" \
 python scripts/check_environment.py
 ```
 
@@ -27,11 +31,15 @@ Confirm the JSON report has:
 - `profile_root_writable: true`
 - `download_root_writable: true`
 - `playwright_importable: true`
-- `chromium_launchable: true`
+- `chrome_launchable: true`
+- `browser_channel: "chrome"`
+- `headless: false`
 - `timezone_id: "Asia/Shanghai"`
-- `font_probe: "ok"` (else `apt install fonts-noto-cjk fonts-wqy-zenhei`)
+- `font_probe: "ok"` when `fc-list` exists. On macOS, `font_probe="fc_list_missing"` is acceptable if Chrome renders the QianNiu Chinese pages normally.
 
-If any of the above is false, fix the host before onboarding any shop.
+If `chrome_launchable` is false, install Google Chrome Stable and re-run the check. If profile
+or download roots are not writable, fix the directory/env configuration before onboarding any
+shop.
 
 ## Per-Shop Onboarding (Tally backend only)
 
@@ -77,9 +85,9 @@ Submitting the form calls `POST /api/data-sources/{source_id}/browser-playbook/r
 which:
 1. Writes `playbooks` (`status='draft'`) and `shop_runtime_bindings`
    (`profile_status='verifying'`, `playbook_status='ok'`, `credential_ref=<encrypted>`).
-2. Creates one async browser sync_job with `is_verification=true`. browser-agent claims
-   it, logs in on the collection machine using the supplied credentials, runs the playbook
-   end-to-end against the real site, and reports back.
+2. Creates one async browser sync_job with `is_verification=true`. browser-agent claims it and
+   runs the playbook end-to-end against the real site using installed Chrome Stable in headed
+   mode with the persistent profile under `BROWSER_AGENT_PROFILE_ROOT/<shop_id>`.
 3. The panel polls `/api/sync-jobs/{verification_sync_job_id}` every 5s (max 20min).
 4. On `job_status='success'` → the panel surfaces an **激活** button; clicking it calls
    `POST /api/data-sources/browser-playbook/finalize` which atomically flips both rows to
@@ -107,21 +115,28 @@ binding transitions to `profile_status='risk_blocked'` and `cron_pause_reason='r
 Future scheduled collection is paused for that shop (claim SQL filters by
 `profile_status='active'`).
 
-The v1 fallback (until noVNC ships) requires one operator visit to the collection machine:
-1. SSH to the collection box.
-2. Open the shop's persistent profile in a non-headless browser:
+The v1 fallback (until noVNC ships) requires one operator visit to the collection machine. On
+the local Mac/Windows first-store machine, do this directly on that machine:
+1. Open the shop's persistent profile in a non-headless Chrome session:
    ```bash
    cd finance-agents/browser-agent
+   BROWSER_AGENT_BROWSER_CHANNEL=chrome \
    BROWSER_AGENT_HEADLESS=0 python -c "
    from playwright.sync_api import sync_playwright
    p = sync_playwright().start()
-   ctx = p.chromium.launch_persistent_context('/var/lib/tally-agent/profiles/<shop_id>', headless=False)
+   import os, pathlib
+   profile_root = pathlib.Path(os.environ.get('BROWSER_AGENT_PROFILE_ROOT', pathlib.Path.home() / 'tally-browser-agent' / 'profiles'))
+   ctx = p.chromium.launch_persistent_context(
+       str(profile_root / '<shop_id>'),
+       channel='chrome',
+       headless=False,
+   )
    input('Clear the verification then press enter to close.')
    ctx.close(); p.stop()
    "
    ```
-3. Complete the slider / SMS code / safety check manually.
-4. In Tally Cloud, trigger a **re-verify** through the same registration endpoint (it can
+2. Complete the slider / SMS code / safety check manually.
+3. In Tally Cloud, trigger a **re-verify** through the same registration endpoint (it can
    accept "re-verify only" without changing playbook or credentials). On success the binding
    flips back to `profile_status='active'`.
 

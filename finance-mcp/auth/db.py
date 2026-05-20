@@ -5851,13 +5851,90 @@ def get_active_playbook(*, company_id: str, playbook_id: str) -> dict:
 
 
 def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
-    return update_unified_sync_job_status(
+    row = update_unified_sync_job_status(
         sync_job_id=sync_job_id,
         job_status="success",
         error_message="",
         checkpoint_after={"browser_collection_summary": summary or {}},
         finish_job=True,
     )
+    if row:
+        mark_browser_binding_collection_seen(sync_job_id=sync_job_id)
+    return row
+
+
+def mark_browser_binding_collection_seen(*, sync_job_id: str) -> int:
+    """Record the latest successful browser collection timestamp on the shop binding."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings b
+                    SET last_collection_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM sync_jobs s
+                    WHERE s.id = %s
+                      AND b.company_id = s.company_id
+                      AND b.data_source_id = s.data_source_id
+                    """,
+                    (sync_job_id,),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"mark_browser_binding_collection_seen 失败: {e}")
+        return 0
+
+
+def upsert_browser_agent_heartbeat(
+    *,
+    company_id: str,
+    agent_id: str,
+    hostname: str = "",
+    version: str = "",
+    capabilities: dict[str, Any] | None = None,
+) -> dict | None:
+    """Upsert browser-agent heartbeat, marking the collection node online."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agents (
+                        company_id, agent_id, hostname, version, status,
+                        capabilities, last_heartbeat_at
+                    ) VALUES (
+                        %s, %s, %s, %s, 'online',
+                        %s::jsonb, CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (company_id, agent_id)
+                    DO UPDATE SET
+                        hostname = EXCLUDED.hostname,
+                        version = EXCLUDED.version,
+                        status = 'online',
+                        capabilities = EXCLUDED.capabilities,
+                        last_heartbeat_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        agent_id,
+                        hostname,
+                        version,
+                        json.dumps(capabilities or {}, ensure_ascii=False),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_browser_agent_heartbeat 失败 (company_id={company_id}, agent_id={agent_id}): {e}")
+        return None
 
 
 def mark_browser_sync_job_failed(

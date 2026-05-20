@@ -232,6 +232,16 @@ export interface Message {
 5. **Cursor Rules** (from `.cursorrules`):
    - After modifying data-agent, finance-mcp, or finance-web code, restart services with `./START_ALL_SERVICES.sh`
 
+6. **Large File Discipline**:
+   - Do not add new responsibilities to already-large files. Current hotspot examples include:
+     - `finance-web/src/components/DataConnectionsPanel.tsx`
+     - `finance-web/src/components/ReconWorkspace.tsx`
+     - `finance-mcp/auth/db.py`
+     - `finance-mcp/tools/data_sources.py`
+   - When touching related functionality, prefer a small-slice refactor first: extract a hook, service, repository, helper module, child component, type file, or validation module that matches the existing code boundary.
+   - Do not perform broad one-shot rewrites solely to reduce line count. Split by responsibility and keep each refactor behavior-preserving with focused tests or verification.
+   - If a change would make a large file larger, document why extraction is not practical in the final response and keep the added surface minimal.
+
 ## File Locations
 
 | Component | Path |

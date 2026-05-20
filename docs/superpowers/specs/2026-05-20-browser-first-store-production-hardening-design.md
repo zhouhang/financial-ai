@@ -25,6 +25,40 @@ Database, platform OAuth, and API collection remain unchanged. They may continue
 
 First-store v1 requires manual data-source dataset publication before collection. The browser-agent writes into the existing dataset id supplied by the queued sync job. Automatic dataset publication is deferred.
 
+## First-Store Launch Readiness Boundary
+
+First-store launch means one real customer shop runs real T-1 reconciliation under internal
+operator supervision. It is not yet customer self-service, but it still handles real merchant
+credentials and real financial data. The launch gate is therefore:
+
+1. Credentials are not stored in plaintext, never logged, and are never returned by normal
+   read APIs. The current sealed/encrypted credential path is acceptable for first-store only
+   if this invariant holds end to end. Formal KMS envelope encryption and key rotation are
+   deferred to the next rollout gate.
+2. Minimal operator alerting is implemented through the existing Tally collaboration channel
+   stack. Do not add a standalone DingTalk webhook. Browser collection alerts reuse
+   `services.notifications.get_notification_adapter(...)` and the existing
+   `DingTalkDwsAdapter` used by reconciliation exception reminders.
+3. First-store browser alerts are internal operator alerts sent to 周行 through DingTalk DWS.
+   The default delivery is `send_reminder`: bot message + DingTalk todo + best-effort DING
+   strong notification. Pure summary messages may use `send_bot_message`, but blocking
+   collection failures should create a todo so they are not missed.
+4. Alert events required before first-store launch:
+   - browser-agent down or offline beyond the configured grace window
+   - browser sync job terminal failure
+   - `RISK_VERIFICATION` / `risk_blocked`
+   - consecutive missed successful collections for the first-store shop
+   - reconciliation failed or stayed unavailable because browser data was not ready
+5. The collection machine, installed Google Chrome Stable, headed mode, profile root, and
+   download root are fixed for the first-store trial.
+6. SOPs exist for first login, risk verification, re-verification, page change, re-collection,
+   and re-reconciliation.
+7. Real QianNiu validation passes for three business dates and one real reconciliation loop.
+
+Customer authorization / operation-confirmation trail is not a first-store blocker because
+the first shop is run under internal operator supervision. It becomes mandatory before
+second/third customer expansion and is tracked in Deferred.
+
 ## Playbook Registration And First-Time Verification (v1)
 
 First login is **not** an operator action on the collection machine. It is part of Playbook
@@ -96,6 +130,11 @@ runs the same synchronous verification dry-run before activation.
 - Multi-machine fleet assignment UI.
 - Canary version routing in browser job claim (currently `p.status = 'active'` only; `canary_shop_ids` not consulted).
 - Automatic cleanup of stale pending browser sync_jobs whose binding turned unhealthy after creation.
+- Formal KMS envelope encryption, key rotation, and credential access audit export.
+- Customer authorization / operation-confirmation trail before second/third customer expansion.
+- Full alerting center and customer-facing notification preferences. First-store uses the
+  existing DWS collaboration channel with 周行 as the internal operator recipient.
+- Multi-node browser-agent failover and capacity dashboard.
 
 ## Soft Delete Limitation
 

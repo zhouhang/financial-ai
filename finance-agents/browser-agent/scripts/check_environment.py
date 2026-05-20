@@ -5,7 +5,7 @@ report covering everything that has to be in place for ``playwright_runner`` to 
 a real Chrome session against QianNiu:
 
 - profile / download directories are writable
-- Playwright module + Chromium browser binary are installable and launchable
+- Playwright module + configured installed browser channel are launchable
 - Chinese font support exists (the fund-bill page renders Chinese; missing CJK fonts cause
   rendering issues and confuse downstream OCR if ever added)
 - timezone is set to Asia/Shanghai (account/bill ledger expects China time)
@@ -20,11 +20,36 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from finance_browser_agent.playwright_runner import PlaywrightRunConfig
+
+
+def _probe_chrome_launch(config: PlaywrightRunConfig) -> tuple[bool, bool, str]:
+    playwright_importable = False
+    chrome_launchable = False
+    chrome_error = ""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        playwright_importable = True
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                channel=config.browser_channel,
+                headless=config.headless,
+            )
+            browser.close()
+            chrome_launchable = True
+    except Exception as exc:
+        chrome_error = str(exc)
+    return playwright_importable, chrome_launchable, chrome_error
 
 
 def build_environment_report(*, config: PlaywrightRunConfig) -> dict[str, Any]:
@@ -33,19 +58,7 @@ def build_environment_report(*, config: PlaywrightRunConfig) -> dict[str, Any]:
     profile_root.mkdir(parents=True, exist_ok=True)
     download_root.mkdir(parents=True, exist_ok=True)
 
-    playwright_importable = False
-    chromium_launchable = False
-    chromium_error = ""
-    try:
-        from playwright.sync_api import sync_playwright
-
-        playwright_importable = True
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            browser.close()
-            chromium_launchable = True
-    except Exception as exc:
-        chromium_error = str(exc)
+    playwright_importable, chrome_launchable, chrome_error = _probe_chrome_launch(config)
 
     font_probe_status = "fc_list_missing"
     if shutil.which("fc-list"):
@@ -73,9 +86,10 @@ def build_environment_report(*, config: PlaywrightRunConfig) -> dict[str, Any]:
         "timezone_id": config.timezone_id,
         "system_timezone": time.tzname,
         "headless": config.headless,
+        "browser_channel": config.browser_channel,
         "playwright_importable": playwright_importable,
-        "chromium_launchable": chromium_launchable,
-        "chromium_error": chromium_error,
+        "chrome_launchable": chrome_launchable,
+        "chrome_error": chrome_error,
         "font_probe": font_probe_status,
     }
 

@@ -5,9 +5,9 @@ Replaces the synthetic-row runner when ``BROWSER_AGENT_RUNNER_MODE=playwright`` 
 the call in ``asyncio.to_thread`` (see ``dispatcher_loop.py``); going async-Playwright would
 add no benefit and complicate persistent-context handling.
 
-Persistent profile: each shop binds to a directory under ``profile_root``. First login must
-happen out-of-band per ``docs/superpowers/specs/2026-05-20-browser-agent-first-login-sop.md``;
-this runner trusts the directory already contains a logged-in session.
+Persistent profile: each shop binds to a directory under ``profile_root``. First-store QianNiu
+collection should use the locally installed Google Chrome Stable channel in headed mode, not
+Playwright's bundled Chromium, to stay close to a normal merchant browser session.
 
 Fail-reason mapping:
 - selector timeout / not found → PAGE_CHANGED
@@ -53,14 +53,17 @@ class PlaywrightRunConfig:
     download_root: str
     headless: bool
     timezone_id: str
+    browser_channel: str
 
     @classmethod
     def from_env(cls) -> "PlaywrightRunConfig":
+        default_root = Path.home() / "tally-browser-agent"
         return cls(
-            profile_root=os.getenv("BROWSER_AGENT_PROFILE_ROOT", "/var/lib/tally-agent/profiles"),
-            download_root=os.getenv("BROWSER_AGENT_DOWNLOAD_ROOT", "/var/lib/tally-agent/downloads"),
-            headless=os.getenv("BROWSER_AGENT_HEADLESS", "1") != "0",
+            profile_root=os.getenv("BROWSER_AGENT_PROFILE_ROOT", str(default_root / "profiles")),
+            download_root=os.getenv("BROWSER_AGENT_DOWNLOAD_ROOT", str(default_root / "downloads")),
+            headless=os.getenv("BROWSER_AGENT_HEADLESS", "0") == "1",
             timezone_id=os.getenv("BROWSER_AGENT_TIMEZONE", "Asia/Shanghai"),
+            browser_channel=os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome").strip() or "chrome",
         )
 
 
@@ -218,7 +221,7 @@ def run_playbook_with_playwright(
     *,
     config: PlaywrightRunConfig | None = None,
 ) -> dict[str, Any]:
-    """Execute a v1 browser playbook against real pages via persistent-context Chromium.
+    """Execute a v1 browser playbook against real pages via persistent-context Chrome.
 
     Returns the same TASK_RESULT shape as ``runner.run_message``: success → records + capture
     files + quality_summary; failure → fail_reason + error_info.
@@ -245,6 +248,7 @@ def run_playbook_with_playwright(
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 headless=config.headless,
+                channel=config.browser_channel,
                 accept_downloads=True,
                 timezone_id=config.timezone_id,
                 downloads_path=str(download_dir),

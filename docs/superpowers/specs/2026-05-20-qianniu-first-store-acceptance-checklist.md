@@ -10,12 +10,38 @@ that wiring actually drives a real merchant browser session against the real fun
 
 ## Prerequisites
 
-- [ ] Collection machine passes `scripts/check_environment.py` (all four boolean fields true,
-      `font_probe="ok"`, `timezone_id="Asia/Shanghai"`).
+- [ ] Collection machine is the local Mac/Windows/Linux host that will run browser-agent.
+      For first-store validation, use the local Mac already verified with the merchant
+      sub-account in Google Chrome.
+- [ ] Collection machine uses installed Google Chrome Stable in headed mode:
+      `BROWSER_AGENT_BROWSER_CHANNEL=chrome`, `BROWSER_AGENT_HEADLESS=0`.
+- [ ] Collection machine passes `scripts/check_environment.py`:
+      `profile_root_writable=true`, `download_root_writable=true`,
+      `playwright_importable=true`, `chrome_launchable=true`,
+      `browser_channel="chrome"`, `headless=false`, `timezone_id="Asia/Shanghai"`.
+      On macOS, `font_probe="fc_list_missing"` is acceptable if Chrome renders QianNiu
+      Chinese pages normally; on Linux prefer `font_probe="ok"`.
 - [ ] `START_ALL_SERVICES.sh` starts browser-agent without errors.
 - [ ] One `browser_playbook` data source row exists for the test shop.
 - [ ] One **published** `data_source_datasets` row exists for that source with
       `source_type='browser_collection_records'`.
+- [ ] Credential safety verified:
+  - [ ] merchant sub-account password is not stored as plaintext in PostgreSQL
+  - [ ] normal data-source/read APIs return only `credential_ref`, never the plaintext password
+  - [ ] browser-agent, finance-mcp, and data-agent logs do not print the plaintext password
+- [ ] Minimal DingTalk alerting configured through the existing Tally DWS collaboration channel:
+  - [ ] `BROWSER_COLLECTION_ALERTS_ENABLED=true` is set only on the first-store runtime
+  - [ ] company channel config exists and works with provider `dingtalk_dws`
+  - [ ] `BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD=周行`
+  - [ ] recipient resolves to 周行's DingTalk user id
+  - [ ] a test `send_reminder` reaches 周行 as bot message + todo + DING
+  - [ ] no standalone DingTalk webhook is introduced for browser alerts
+- [ ] Browser alert events are wired or verified for first-store:
+  - [ ] browser-agent offline/down beyond grace window
+  - [ ] terminal browser sync failure
+  - [ ] `RISK_VERIFICATION` / `risk_blocked`
+  - [ ] consecutive missed successful collections
+  - [ ] reconciliation unavailable because browser data was not ready
 - [ ] **Playbook registration + first-time verification flow completed for the test shop** —
       see `2026-05-20-browser-agent-first-login-sop.md`. Operator submitted playbook +
       merchant credentials via finance-web 数据连接 → 浏览器 (`BrowserPlaybookPanel`,
@@ -25,8 +51,9 @@ that wiring actually drives a real merchant browser session against the real fun
   - [ ] `shop_runtime_bindings.profile_status='active'`, `playbook_status='ok'`,
         `credential_ref` populated (set by the verification flow, not by hand)
   - [ ] `shop_runtime_bindings.agent_id` matches the collection machine running browser-agent
-  - [ ] The persistent profile under `/var/lib/tally-agent/profiles/<shop_id>/` was created
-        as a byproduct of the verification dry-run (operator did NOT SSH the box manually)
+  - [ ] The persistent profile under `BROWSER_AGENT_PROFILE_ROOT/<shop_id>/` was created or
+        reused by the verification dry-run. For local Mac first-store testing, use
+        `$HOME/tally-browser-agent/profiles/<shop_id>`.
 
 ## Live-Run Evidence
 
@@ -38,8 +65,8 @@ trigger one collection per date and capture the following evidence:
 - [ ] `biz_date` chosen: ________________
 - [ ] `sync_job_id` created: ________________
 - [ ] Browser-agent claim happened within ≤ poll interval after trigger.
-- [ ] Playwright opens the real QianNiu fund-bill page using the persistent profile (no
-      AUTH_EXPIRED, no RISK_VERIFICATION).
+- [ ] Playwright opens the real QianNiu fund-bill page in installed Chrome Stable using the
+      persistent profile (no AUTH_EXPIRED, no RISK_VERIFICATION).
 - [ ] One file downloaded into `BROWSER_AGENT_DOWNLOAD_ROOT/<shop_id>/<sync_job_id>/`.
 - [ ] `browser_collection_records` row count > 0 for this `(shop_id, biz_date)`.
 - [ ] `browser_capture_files` has exactly one row referencing the downloaded file path with
@@ -80,6 +107,10 @@ Attach to the sign-off ticket:
 - Screenshots or logs of the real QianNiu export flow for at least one date (proof that
   Playwright really drove a real page, not a synthetic stand-in).
 - `browser-agent.log` excerpt for the three runs.
+- DingTalk alert proof:
+  - one successful test reminder to 周行
+  - one simulated or real browser failure alert to 周行
+  - one simulated or real `risk_blocked` alert to 周行
 
 ## Sign-off
 
@@ -89,3 +120,12 @@ Attach to the sign-off ticket:
 Sign-off means: first-store v1 is allowed to run unattended for the test shop. Onboarding a
 second shop or moving from T-1 to multiple-daily collection requires its own follow-up plan
 (see Deferred Work Register in the production hardening plan).
+
+## Deferred Before Second/Third Shop
+
+- Customer authorization / operation-confirmation trail for merchant sub-account delegation.
+- Formal KMS envelope encryption with key rotation and credential access audit export.
+- noVNC or an equivalent controlled remote verification channel so `RISK_VERIFICATION`
+  handling no longer depends on direct access to the collection machine.
+- Full alert management UI, recipient preferences, and alert deduplication controls.
+- Multi-node browser-agent capacity and failover validation.
