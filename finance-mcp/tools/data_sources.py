@@ -5348,7 +5348,7 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="data_source_register_browser_playbook",
-            description="手动注册 browser_playbook 数据源的 playbook 与店铺运行绑定。",
+            description="注册 browser_playbook 数据源的 playbook + 商家凭证,落 draft + verifying,触发首次验证 sync_job。验证通过后调 data_source_finalize_browser_playbook_registration 激活。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5361,9 +5361,10 @@ def create_tools() -> list[Tool]:
                     "shop_id": {"type": "string"},
                     "agent_id": {"type": "string"},
                     "egress_group": {"type": "string"},
-                    "credential_ref": {"type": "string"},
-                    "profile_status": {"type": "string"},
-                    "playbook_status": {"type": "string"},
+                    "credential_username": {"type": "string"},
+                    "credential_password": {"type": "string"},
+                    "dataset_id": {"type": "string"},
+                    "verification_biz_date": {"type": "string"},
                     "emergency_page_changed": {"type": "boolean"},
                     "bypass_canary_reason": {"type": "string"},
                 },
@@ -5376,8 +5377,22 @@ def create_tools() -> list[Tool]:
                     "playbook_body",
                     "shop_id",
                     "agent_id",
-                    "credential_ref",
+                    "credential_username",
+                    "credential_password",
+                    "verification_biz_date",
                 ],
+            },
+        ),
+        Tool(
+            name="data_source_finalize_browser_playbook_registration",
+            description="校验 verification sync_job 已 success,原子翻转 playbook(draft→active) + binding(verifying→active)。失败时返回 sync_job 的 fail_reason / error_message。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "verification_sync_job_id": {"type": "string"},
+                },
+                "required": ["auth_token", "verification_sync_job_id"],
             },
         ),
         Tool(
@@ -5630,6 +5645,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_test(arguments)
         if name == "data_source_register_browser_playbook":
             return await _handle_data_source_register_browser_playbook(arguments)
+        if name == "data_source_finalize_browser_playbook_registration":
+            return await _handle_data_source_finalize_browser_playbook_registration(arguments)
         if name == "data_source_authorize":
             return await _handle_data_source_authorize(arguments)
         if name == "data_source_handle_callback":
@@ -7006,6 +7023,18 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any]) -> dict[str, Any]:
+    """v1 browser playbook registration: draft + verifying + verification sync_job.
+
+    Operator submits: playbook body + merchant credentials (username/password) + verification
+    biz_date. Tally writes draft playbook + verifying binding (KMS-encrypted credential_ref)
+    + a one-shot verification sync_job (``is_verification=true``), then returns immediately
+    with the sync_job id. The UI polls for that sync_job's status; on ``success`` it calls
+    ``data_source_finalize_browser_playbook_registration`` to atomically activate both rows.
+
+    On verification failure the sync_job carries a ``browser_fail_reason``; the binding stays
+    ``verifying`` (or moves to ``risk_blocked`` for ``RISK_VERIFICATION``) and the operator
+    revises and re-submits.
+    """
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
     source_id = _source_id_from_args(arguments)
@@ -7016,8 +7045,6 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
         return {"success": False, "error": "仅 browser_playbook 数据源支持手动注册"}
 
     # 首店 v1:数据集发布是 prerequisite,不是 playbook 注册的副产品。
-    # 没有 published browser_collection_records 数据集就让注册失败,避免出现
-    # "playbook 注册成功但采集结果没人能消费"的悬空状态。
     datasets = auth_db.list_unified_data_source_datasets(
         company_id=company_id,
         data_source_id=source_id,
@@ -7035,14 +7062,21 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
                 return text
         return ""
 
-    has_browser_dataset = any(
-        _dataset_source_type(row) == "browser_collection_records" for row in datasets
-    )
-    if not has_browser_dataset:
+    browser_datasets = [row for row in datasets if _dataset_source_type(row) == "browser_collection_records"]
+    if not browser_datasets:
         return {
             "success": False,
             "error": "请先发布 browser_collection_records 数据集后再注册 playbook",
         }
+    # Verification needs a concrete dataset to write into; if multiple are published, the
+    # caller can pin ``dataset_id`` explicitly, else we pick the first.
+    verification_dataset = browser_datasets[0]
+    explicit_dataset_id = str(arguments.get("dataset_id") or "").strip()
+    if explicit_dataset_id:
+        match = next((row for row in browser_datasets if str(row.get("id") or "") == explicit_dataset_id), None)
+        if not match:
+            return {"success": False, "error": "指定的 dataset_id 不属于该数据源的已发布 browser dataset"}
+        verification_dataset = match
 
     playbook_id = str(arguments.get("playbook_id") or "").strip()
     version = str(arguments.get("version") or "").strip()
@@ -7051,32 +7085,139 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     if not playbook_id or not version or not title or not playbook_body:
         return {"success": False, "error": "playbook_id/version/title/playbook_body 不能为空"}
 
+    shop_id = str(arguments.get("shop_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    credential_username = str(arguments.get("credential_username") or "").strip()
+    credential_password = str(arguments.get("credential_password") or "")
+    verification_biz_date = str(arguments.get("verification_biz_date") or "").strip()
+    if not shop_id or not agent_id:
+        return {"success": False, "error": "shop_id 和 agent_id 不能为空"}
+    if not credential_username or not credential_password:
+        return {
+            "success": False,
+            "error": "必须提供 credential_username 和 credential_password 用于首次验证 dry-run",
+        }
+    if not verification_biz_date:
+        return {"success": False, "error": "verification_biz_date 不能为空(建议最近 T-1)"}
+
+    # KMS-encrypt the merchant credentials; only credential_ref leaves this function. The
+    # plaintext goes straight into _seal_json_payload (HMAC-sealed via auth.crypto.seal_secret).
+    credential_ref = auth_db._seal_json_payload(  # noqa: SLF001 — internal seal API
+        {"username": credential_username, "password": credential_password}
+    )
+
     playbook_row = auth_db.upsert_playbook(
         company_id=company_id,
         playbook_id=playbook_id,
         version=version,
         title=title,
         playbook_body=playbook_body,
-        status="active",
+        status="draft",
         emergency_page_changed=bool(arguments.get("emergency_page_changed", False)),
         bypass_canary_reason=str(arguments.get("bypass_canary_reason") or ""),
     )
     binding_row = auth_db.upsert_shop_runtime_binding(
         company_id=company_id,
         data_source_id=source_id,
-        shop_id=str(arguments.get("shop_id") or "").strip(),
+        shop_id=shop_id,
         playbook_id=playbook_id,
-        agent_id=str(arguments.get("agent_id") or "").strip(),
+        agent_id=agent_id,
         egress_group=str(arguments.get("egress_group") or "").strip(),
-        credential_ref=str(arguments.get("credential_ref") or "").strip(),
-        profile_status=str(arguments.get("profile_status") or "active").strip() or "active",
-        playbook_status=str(arguments.get("playbook_status") or "ok").strip() or "ok",
+        credential_ref=credential_ref,
+        profile_status="verifying",
+        playbook_status="ok",
     )
+
+    resource_key = f"{playbook_id}@{version}"
+    dataset_id = str(verification_dataset.get("id") or "")
+    dataset_code = str(verification_dataset.get("dataset_code") or "")
+    verification_payload = {
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "biz_date": verification_biz_date,
+        "verification": True,
+        "playbook_id": playbook_id,
+        "playbook_version": version,
+        # collection_driver kept for backwards-compat with any consumer that still inspects
+        # request_payload; claim SQL no longer uses it (T4).
+        "collection_driver": "browser_playbook_remote",
+        "params": {
+            "biz_date": verification_biz_date,
+            "playbook_id": playbook_id,
+            "playbook_version": version,
+        },
+    }
+    verification_job = auth_db.insert_browser_verification_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        resource_key=resource_key,
+        request_payload=verification_payload,
+    )
+    if not verification_job:
+        return {
+            "success": False,
+            "error": "创建 verification sync_job 失败",
+            "playbook": playbook_row,
+            "binding": binding_row,
+        }
     return {
         "success": True,
+        "status": "verification_pending",
         "playbook": playbook_row,
         "binding": binding_row,
-        "message": "浏览器 playbook 手动注册成功",
+        "verification_sync_job_id": str(verification_job.get("id") or ""),
+        "verification_biz_date": verification_biz_date,
+        "message": "浏览器 playbook 已注册并触发首次验证;请等待 sync_job 完成后调用 finalize 接口激活",
+    }
+
+
+async def _handle_data_source_finalize_browser_playbook_registration(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Activate playbook + binding atomically after a successful verification sync_job."""
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    sync_job_id = str(arguments.get("verification_sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "verification_sync_job_id 不能为空"}
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    if not job or str(job.get("company_id") or "") != company_id:
+        return {"success": False, "error": "verification sync_job 不存在"}
+    if not bool(job.get("is_verification")):
+        return {"success": False, "error": "该 sync_job 不是 verification 任务"}
+    job_status = str(job.get("job_status") or "")
+    if job_status != "success":
+        return {
+            "success": False,
+            "error": "verification 未通过,无法激活",
+            "job_status": job_status,
+            "browser_fail_reason": str(job.get("browser_fail_reason") or ""),
+            "error_message": str(job.get("error_message") or ""),
+        }
+
+    request_payload = job.get("request_payload") or {}
+    payload = request_payload if isinstance(request_payload, dict) else {}
+    playbook_id = str(payload.get("playbook_id") or "").strip()
+    version = str(payload.get("playbook_version") or "").strip()
+    if not playbook_id or not version:
+        return {"success": False, "error": "verification sync_job 缺少 playbook 标识"}
+
+    result = auth_db.activate_browser_playbook_and_binding(
+        company_id=company_id,
+        playbook_id=playbook_id,
+        version=version,
+        data_source_id=str(job.get("data_source_id") or ""),
+    )
+    if not result.get("playbook") or not result.get("binding"):
+        return {
+            "success": False,
+            "error": "激活失败:playbook 或 binding 不在 draft/verifying 状态",
+            **result,
+        }
+    return {
+        "success": True,
+        "message": "playbook 与 binding 已激活,采集已进入 cron 调度",
+        **result,
     }
 
 

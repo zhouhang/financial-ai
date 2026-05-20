@@ -186,10 +186,28 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
         lambda **kw: [
             {
                 "id": "dataset-001",
+                "dataset_code": "qianniu_fund_bill",
                 "source_type": "browser_collection_records",
                 "publish_status": "published",
             }
         ],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "_seal_json_payload",
+        lambda payload: f"sealed:{payload['username']}",
+    )
+
+    inserted_verification: dict[str, object] = {}
+
+    def fake_insert_verification(**kwargs):
+        inserted_verification.update(kwargs)
+        return {"id": "verif-sync-001", "job_status": "pending", "is_verification": True}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "insert_browser_verification_sync_job",
+        fake_insert_verification,
     )
 
     result = asyncio.run(
@@ -203,16 +221,27 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
                 "playbook_body": {"schema_version": "1.0"},
                 "shop_id": "shop-001",
                 "agent_id": "agent-001",
-                "credential_ref": "cred-001",
+                "credential_username": "biz-sub-001",
+                "credential_password": "p@ss",
+                "verification_biz_date": "2026-05-19",
                 "egress_group": "wan-1",
             }
         )
     )
 
     assert result["success"] is True
-    assert result["playbook"]["id"] == "playbook-001"
-    assert result["binding"]["id"] == "binding-001"
-    assert [item[0] for item in calls] == ["playbook", "binding"]
+    assert result["status"] == "verification_pending"
+    assert result["verification_sync_job_id"] == "verif-sync-001"
+    # playbook must land as draft, binding as verifying — atomic activation comes later via finalize.
+    playbook_kwargs = next(item for kind, item in calls if kind == "playbook")
+    binding_kwargs = next(item for kind, item in calls if kind == "binding")
+    assert playbook_kwargs["status"] == "draft"
+    assert binding_kwargs["profile_status"] == "verifying"
+    # Credentials encrypted, not stored as plaintext anywhere in the call args.
+    assert binding_kwargs["credential_ref"].startswith("sealed:")
+    assert "p@ss" not in str(binding_kwargs)
+    assert inserted_verification["request_payload"]["verification"] is True
+    assert inserted_verification["request_payload"]["playbook_id"] == "qianniu-daily-bill-export"
 
 
 def test_browser_dataset_collection_rejects_unhealthy_binding_before_sync_job(monkeypatch) -> None:
@@ -282,6 +311,84 @@ def test_browser_dataset_collection_rejects_unhealthy_binding_before_sync_job(mo
     assert result["queued"] is False
     assert result["failure_type"] == "browser_binding_unavailable"
     assert result["error_code"] == "RISK_VERIFICATION"
+
+
+def test_finalize_activates_playbook_and_binding_on_verification_success(monkeypatch) -> None:
+    activated: dict[str, object] = {}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "success",
+            "is_verification": True,
+            "request_payload": {
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+            },
+        },
+    )
+
+    def fake_activate(**kwargs):
+        activated.update(kwargs)
+        return {
+            "playbook": {"id": "pb-1", "status": "active"},
+            "binding": {"id": "bind-1", "profile_status": "active"},
+        }
+
+    monkeypatch.setattr(data_sources.auth_db, "activate_browser_playbook_and_binding", fake_activate)
+
+    result = asyncio.run(
+        data_sources._handle_data_source_finalize_browser_playbook_registration(
+            {"auth_token": "tok", "verification_sync_job_id": "verif-sync-001"}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["playbook"]["status"] == "active"
+    assert result["binding"]["profile_status"] == "active"
+    assert activated["playbook_id"] == "qianniu-daily-bill-export"
+    assert activated["data_source_id"] == "source-001"
+
+
+def test_finalize_rejects_when_verification_sync_job_failed(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "failed",
+            "is_verification": True,
+            "browser_fail_reason": "AUTH_EXPIRED",
+            "error_message": "AUTH_EXPIRED: login expired",
+            "request_payload": {
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+            },
+        },
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("activate must not run when verification failed")
+
+    monkeypatch.setattr(data_sources.auth_db, "activate_browser_playbook_and_binding", fail_if_called)
+
+    result = asyncio.run(
+        data_sources._handle_data_source_finalize_browser_playbook_registration(
+            {"auth_token": "tok", "verification_sync_job_id": "verif-sync-001"}
+        )
+    )
+
+    assert result["success"] is False
+    assert result["browser_fail_reason"] == "AUTH_EXPIRED"
+    assert "AUTH_EXPIRED" in result["error_message"]
 
 
 def test_register_browser_playbook_rejects_when_no_published_dataset(monkeypatch) -> None:

@@ -580,6 +580,7 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "next_retry_at",
             "browser_fail_reason",
             "max_attempts",
+            "is_verification",
         ),
     }
     return all(
@@ -5650,8 +5651,12 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
                           AND ds.status = 'active'
                           AND ds.is_enabled = TRUE
                           AND srb.agent_id = %s
-                          AND srb.profile_status = 'active'
-                          AND srb.playbook_status = 'ok'
+                          -- verification dry-run 允许在 verifying binding 上跑(注册时首验);
+                          -- 生产采集要求 binding 完全健康(profile=active AND playbook=ok)。
+                          AND (
+                              (sync_jobs.is_verification = TRUE AND srb.profile_status IN ('verifying', 'active'))
+                              OR (sync_jobs.is_verification = FALSE AND srb.profile_status = 'active' AND srb.playbook_status = 'ok')
+                          )
                           AND running_for_agent.running_count < %s
                           AND (sync_jobs.next_retry_at IS NULL OR sync_jobs.next_retry_at <= CURRENT_TIMESTAMP)
                         ORDER BY sync_jobs.created_at ASC
@@ -5686,6 +5691,115 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
     except Exception as e:
         logger.error(f"领取 browser_playbook sync_job 失败: {e}")
         return None
+
+
+def insert_browser_verification_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    resource_key: str,
+    request_payload: dict,
+    idempotency_key: str | None = None,
+) -> dict | None:
+    """Create a one-off browser verification sync_job for playbook registration.
+
+    Unlike production triggers, this never reuses an inflight or recently-successful job:
+    verification is an explicit "run this playbook + credential combo end-to-end before we
+    let it go live" action. The resulting sync_job is the same shape as any browser sync_job
+    except for ``is_verification=true``, which lets ``claim_next_browser_sync_job`` pull it
+    even when the shop binding is still ``profile_status='verifying'``.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sync_jobs (
+                        company_id, data_source_id, trigger_mode, resource_key, idempotency_key,
+                        request_payload, is_verification
+                    ) VALUES (
+                        %s, %s, 'manual', %s, %s,
+                        %s::jsonb, TRUE
+                    )
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, started_at, completed_at, created_at, updated_at,
+                              is_verification
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        resource_key,
+                        str(idempotency_key or "").strip() or None,
+                        psycopg2.extras.Json(request_payload or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"insert_browser_verification_sync_job 失败: {e}")
+        return None
+
+
+def activate_browser_playbook_and_binding(
+    *,
+    company_id: str,
+    playbook_id: str,
+    version: str,
+    data_source_id: str,
+) -> dict:
+    """Atomically flip a draft playbook + verifying binding to fully active.
+
+    Called by ``data_source_finalize_browser_playbook_registration`` after the verification
+    sync_job ends in ``success``. Resets ``cron_pause_reason`` so the binding immediately
+    becomes eligible for production claim.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE playbooks
+                    SET status = 'active',
+                        approved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND version = %s
+                      AND status IN ('draft', 'replayed', 'approved')
+                    RETURNING id, playbook_id, version, status
+                    """,
+                    (company_id, playbook_id, version),
+                )
+                playbook_row = cur.fetchone()
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings
+                    SET profile_status = 'active',
+                        playbook_status = 'ok',
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND profile_status = 'verifying'
+                    RETURNING id, company_id, data_source_id, shop_id, profile_status, playbook_status
+                    """,
+                    (company_id, data_source_id),
+                )
+                binding_row = cur.fetchone()
+                conn.commit()
+                return {
+                    "playbook": _normalize_record(dict(playbook_row)) if playbook_row else None,
+                    "binding": _normalize_record(dict(binding_row)) if binding_row else None,
+                }
+    except Exception as e:
+        logger.error(f"activate_browser_playbook_and_binding 失败: {e}")
+        return {"playbook": None, "binding": None}
 
 
 def get_shop_runtime_binding_for_source(*, company_id: str, data_source_id: str) -> dict:

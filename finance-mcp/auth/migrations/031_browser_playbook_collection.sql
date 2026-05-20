@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS public.shop_runtime_bindings (
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT shop_runtime_bindings_profile_status_check CHECK (
-        profile_status = ANY (ARRAY['none'::character varying, 'active'::character varying, 'needs_reauth'::character varying, 'risk_blocked'::character varying])
+        profile_status = ANY (ARRAY['none'::character varying, 'verifying'::character varying, 'active'::character varying, 'needs_reauth'::character varying, 'risk_blocked'::character varying])
     ),
     CONSTRAINT shop_runtime_bindings_playbook_status_check CHECK (
         playbook_status = ANY (ARRAY['ok'::character varying, 'stale'::character varying])
@@ -331,11 +331,33 @@ CREATE INDEX IF NOT EXISTS idx_recon_execution_queue_waiting_data
 -- claim SQL 用它筛掉还在退避窗口的 job。browser_fail_reason 与 error_message
 -- 分开存储:browser_fail_reason 是原因码(AUTH_EXPIRED 等),error_message
 -- 是带前缀的人类可读消息。
+-- is_verification 标记 playbook 注册时的首次验证 sync_job,允许 claim SQL 在
+-- binding profile_status='verifying' 的店上跑(生产 claim 仍要求 active)。
 ALTER TABLE public.sync_jobs
     ADD COLUMN IF NOT EXISTS next_retry_at timestamptz,
     ADD COLUMN IF NOT EXISTS browser_fail_reason character varying(64) NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 3;
+    ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS is_verification boolean NOT NULL DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_browser_pending_retry
     ON public.sync_jobs (next_retry_at ASC, created_at ASC)
     WHERE job_status = 'pending';
+
+-- v1 中,如果 shop_runtime_bindings 表升级前已有 CHECK 约束,DROP 然后重建以包含 'verifying' 状态。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'shop_runtime_bindings_profile_status_check'
+          AND conrelid = 'public.shop_runtime_bindings'::regclass
+    ) THEN
+        -- 重建约束以支持 'verifying' 状态
+        ALTER TABLE public.shop_runtime_bindings
+            DROP CONSTRAINT shop_runtime_bindings_profile_status_check;
+        ALTER TABLE public.shop_runtime_bindings
+            ADD CONSTRAINT shop_runtime_bindings_profile_status_check CHECK (
+                profile_status = ANY (ARRAY['none'::character varying, 'verifying'::character varying, 'active'::character varying, 'needs_reauth'::character varying, 'risk_blocked'::character varying])
+            );
+    END IF;
+END $$;
