@@ -320,3 +320,16 @@ ALTER TABLE public.recon_execution_queue
 CREATE INDEX IF NOT EXISTS idx_recon_execution_queue_waiting_data
     ON public.recon_execution_queue (next_retry_at ASC)
     WHERE status = 'waiting_data';
+
+-- Browser sync_job retry scheduling:transient 失败重排时回写 next_retry_at,
+-- claim SQL 用它筛掉还在退避窗口的 job。browser_fail_reason 与 error_message
+-- 分开存储:browser_fail_reason 是原因码(AUTH_EXPIRED 等),error_message
+-- 是带前缀的人类可读消息。
+ALTER TABLE public.sync_jobs
+    ADD COLUMN IF NOT EXISTS next_retry_at timestamptz,
+    ADD COLUMN IF NOT EXISTS browser_fail_reason character varying(64) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 3;
+
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_browser_pending_retry
+    ON public.sync_jobs (next_retry_at ASC, created_at ASC)
+    WHERE job_status = 'pending';

@@ -316,6 +316,175 @@ def test_claim_next_browser_sync_job_normalize_preserves_enriched_fields(monkeyp
     assert row["browser_binding"]["shop_id"] == "shop-001"
 
 
+def test_mark_browser_sync_job_failed_retryable_reschedules_pending(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchone(self):
+            return {"id": "sync-001", "job_status": "pending"}
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.mark_browser_sync_job_failed(
+        sync_job_id="sync-001",
+        error_message="timeout",
+        fail_reason="TIMEOUT",
+        retryable=True,
+        max_attempts=3,
+        retry_delay_seconds=1800,
+    )
+
+    sql = captured["sql"]
+    assert "job_status = CASE" in sql
+    assert "next_retry_at = CASE" in sql
+    assert "browser_fail_reason" in sql
+
+
+def test_mark_browser_sync_job_failed_prefixes_error_exactly_once(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["params"] = params
+
+        def fetchone(self):
+            return {"id": "sync-001", "job_status": "failed"}
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+    # Suppress side-effect call into binding transition (different cursor)
+    monkeypatch.setattr(auth_db, "apply_browser_binding_failure_transition", lambda **kw: 0)
+
+    # Plain message → gets prefixed.
+    auth_db.mark_browser_sync_job_failed(
+        sync_job_id="sync-001",
+        error_message="login expired",
+        fail_reason="AUTH_EXPIRED",
+    )
+    params = captured["params"]
+    assert "AUTH_EXPIRED: login expired" in params
+
+    # Already-prefixed message → not double-prefixed.
+    auth_db.mark_browser_sync_job_failed(
+        sync_job_id="sync-001",
+        error_message="AUTH_EXPIRED: login expired",
+        fail_reason="AUTH_EXPIRED",
+    )
+    params = captured["params"]
+    assert "AUTH_EXPIRED: AUTH_EXPIRED: login expired" not in params
+    assert "AUTH_EXPIRED: login expired" in params
+
+
+def test_apply_browser_binding_failure_transition_maps_reasons(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.apply_browser_binding_failure_transition(sync_job_id="sync-001", fail_reason="AUTH_EXPIRED")
+
+    sql = captured["sql"]
+    assert "profile_status = CASE" in sql
+    assert "playbook_status = CASE" in sql
+    assert "cron_pause_reason" in sql
+
+
 def test_dispatcher_persists_capture_files() -> None:
     fake_db = FakeDb()
     manager = FakeAgentConnectionManager()

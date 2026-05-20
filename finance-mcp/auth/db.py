@@ -574,6 +574,11 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "waiting_datasets",
             "collection_job_ids",
         ),
+        "sync_jobs": (
+            "next_retry_at",
+            "browser_fail_reason",
+            "max_attempts",
+        ),
     }
     return all(
         _column_exists(table_name, column_name)
@@ -5739,14 +5744,139 @@ def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | 
     )
 
 
-def mark_browser_sync_job_failed(*, sync_job_id: str, error_message: str, fail_reason: str) -> dict | None:
-    return update_unified_sync_job_status(
-        sync_job_id=sync_job_id,
-        job_status="failed",
-        error_message=f"{fail_reason}: {error_message}",
-        checkpoint_after={},
-        finish_job=True,
-    )
+def mark_browser_sync_job_failed(
+    *,
+    sync_job_id: str,
+    error_message: str,
+    fail_reason: str,
+    retryable: bool = False,
+    max_attempts: int = 3,
+    retry_delay_seconds: int = 1800,
+) -> dict | None:
+    """Terminal or transient browser sync_job failure handler.
+
+    Behavior:
+    - Always writes browser_fail_reason as the canonical code (AUTH_EXPIRED, etc.).
+    - Normalizes error_message to ``"{fail_reason}: {body}"`` exactly once. If the incoming
+      message already has the correct prefix, no double prefix is added.
+    - If retryable=True AND current_attempt < max_attempts: job goes back to ``pending`` with
+      ``next_retry_at = now + retry_delay_seconds`` and ``completed_at`` cleared. This lets the
+      claim SQL pick it up after the backoff.
+    - Otherwise the job is terminal ``failed`` and ``apply_browser_binding_failure_transition``
+      is called to flip shop_runtime_bindings into the right pause state.
+    - Binding transition is NOT triggered for transient retries — the binding stays healthy and
+      the shop continues to receive cron triggers.
+    """
+    canonical = str(fail_reason or "OTHER").strip().upper() or "OTHER"
+    raw_message = str(error_message or "").strip()
+    prefix = f"{canonical}: "
+    if raw_message.startswith(prefix):
+        prefixed_error = raw_message
+    elif raw_message:
+        prefixed_error = f"{canonical}: {raw_message}"
+    else:
+        prefixed_error = canonical
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN 'pending'
+                            ELSE 'failed'
+                        END,
+                        browser_fail_reason = %s,
+                        error_message = %s,
+                        max_attempts = GREATEST(COALESCE(max_attempts, 3), %s),
+                        next_retry_at = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN CURRENT_TIMESTAMP + (%s * INTERVAL '1 second')
+                            ELSE NULL
+                        END,
+                        completed_at = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN NULL
+                            ELSE CURRENT_TIMESTAMP
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (
+                        bool(retryable), int(max_attempts),
+                        canonical,
+                        prefixed_error,
+                        int(max_attempts),
+                        bool(retryable), int(max_attempts), int(retry_delay_seconds),
+                        bool(retryable), int(max_attempts),
+                        sync_job_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+    except Exception as e:
+        logger.error(f"mark_browser_sync_job_failed 失败: {e}")
+        return None
+
+    normalized = _normalize_record(dict(row)) if row else None
+    if normalized and str(normalized.get("job_status") or "") == "failed":
+        try:
+            apply_browser_binding_failure_transition(
+                sync_job_id=sync_job_id, fail_reason=canonical
+            )
+        except Exception as e:
+            logger.error(f"apply_browser_binding_failure_transition 调用失败: {e}")
+    return normalized
+
+
+def apply_browser_binding_failure_transition(*, sync_job_id: str, fail_reason: str) -> int:
+    """根据 fail_reason 切换 shop_runtime_bindings 的状态字段。
+
+    映射:
+      - AUTH_EXPIRED -> profile_status='needs_reauth', cron_pause_reason='AUTH_EXPIRED'
+      - RISK_VERIFICATION -> profile_status='risk_blocked', cron_pause_reason='RISK_VERIFICATION'
+      - PAGE_CHANGED -> playbook_status='stale', cron_pause_reason='PAGE_CHANGED'
+      - 其他 fail_reason 不动 binding
+
+    仅在 sync_job 进入最终 failed 状态时由 ``mark_browser_sync_job_failed`` 调用,
+    transient retry(reschedule 到 pending)不调用。
+    """
+    canonical = str(fail_reason or "").strip().upper()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings b
+                    SET profile_status = CASE
+                            WHEN %s = 'AUTH_EXPIRED' THEN 'needs_reauth'
+                            WHEN %s = 'RISK_VERIFICATION' THEN 'risk_blocked'
+                            ELSE b.profile_status
+                        END,
+                        playbook_status = CASE
+                            WHEN %s = 'PAGE_CHANGED' THEN 'stale'
+                            ELSE b.playbook_status
+                        END,
+                        cron_pause_reason = CASE
+                            WHEN %s IN ('AUTH_EXPIRED', 'RISK_VERIFICATION', 'PAGE_CHANGED') THEN %s
+                            ELSE b.cron_pause_reason
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM sync_jobs s
+                    WHERE s.id = %s
+                      AND b.company_id = s.company_id
+                      AND b.data_source_id = s.data_source_id
+                    """,
+                    (canonical, canonical, canonical, canonical, canonical, sync_job_id),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"apply_browser_binding_failure_transition 失败: {e}")
+        return 0
 
 
 def upsert_playbook(
