@@ -314,6 +314,48 @@ def _install_fake_connection(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeConne
     return connection, cursor
 
 
+def test_upsert_browser_collection_records_does_not_soft_delete_missing_keys(monkeypatch) -> None:
+    """Pin the v1 contract: upsert_browser_collection_records never marks missing rows deleted.
+
+    Soft delete is intentionally deferred until a later hardening plan adds
+    complete-success missing-key detection. See the design addendum
+    `docs/superpowers/specs/2026-05-20-browser-first-store-production-hardening-design.md`
+    section "Soft Delete Limitation" — this test exists so the contract can't regress silently.
+    """
+    connection, _cursor = _install_fake_connection(monkeypatch)
+
+    def fake_execute_values(cur, sql, values, template=None, page_size=None, fetch=False):
+        # Return one inserted row + one unchanged row to simulate a successful recapture
+        # where some previously seen rows would have been candidates for soft delete if the
+        # feature existed.
+        return [
+            {"id": "rec-1", "action": "inserted", "record_status": "active"},
+            {"id": "rec-2", "action": "unchanged", "record_status": "unchanged"},
+        ]
+
+    monkeypatch.setattr(auth_db.psycopg2.extras, "execute_values", fake_execute_values)
+
+    result = auth_db.upsert_browser_collection_records(
+        company_id="00000000-0000-0000-0000-000000000001",
+        data_source_id="00000000-0000-0000-0000-000000000002",
+        dataset_id="00000000-0000-0000-0000-000000000003",
+        dataset_code="qianniu_fund_bill",
+        resource_key="qianniu-daily-bill-export@1.0.0",
+        shop_id="shop-001",
+        playbook_id="qianniu-daily-bill-export",
+        biz_date="2026-05-18",
+        sync_job_id="00000000-0000-0000-0000-000000000004",
+        records=[
+            {"item_key": "B1", "payload": {"bill_no": "B1", "amount": "1.00"}},
+            {"item_key": "B2", "payload": {"bill_no": "B2", "amount": "2.00"}},
+        ],
+    )
+
+    # v1: soft delete is deferred. Any rows previously upserted but absent from this batch
+    # remain active and are NOT counted in deleted_count.
+    assert result["deleted_count"] == 0
+
+
 def test_upsert_browser_collection_records_computes_hashes_and_counts(monkeypatch) -> None:
     connection, _cursor = _install_fake_connection(monkeypatch)
     execute_values_call: dict[str, object] = {}

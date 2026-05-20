@@ -29,7 +29,23 @@ First-store v1 requires manual data-source dataset publication before collection
 
 - Full WS runner protocol with HELLO/HEARTBEAT/ack lease.
 - noVNC live browser UI.
-- Browser-record soft delete for rows missing from a later recapture.
+- Browser-record soft delete for rows missing from a later recapture (see "Soft Delete Limitation" below).
 - Multi-machine fleet assignment UI.
 - Canary version routing in browser job claim (currently `p.status = 'active'` only; `canary_shop_ids` not consulted).
 - Automatic cleanup of stale pending browser sync_jobs whose binding turned unhealthy after creation.
+
+## Soft Delete Limitation
+
+First-store v1 does not mark browser records missing from a later successful recapture as
+`deleted`. Repeated captures upsert seen rows and leave previously seen rows active. The
+`upsert_browser_collection_records` helper therefore always returns `deleted_count = 0` and a
+test pins this contract so the limitation cannot regress unnoticed.
+
+This is acceptable only for the first real-shop trial because the first target —
+`qianniu-daily-bill-export` — is an append-like daily fund bill: rows are added day by day,
+historical rows do not change. Before browser collection is used for mutable same-day datasets
+(where a row can vanish between two captures of the same `biz_date`), a later hardening plan
+must add complete-success missing-key soft delete: after a fully-successful recapture, mark
+rows present in storage but absent from the latest capture as `record_status = 'deleted'`, but
+**only after** the recapture passes all quality gates — partial captures must never trigger
+soft delete.
