@@ -180,6 +180,12 @@ CREATE TRIGGER update_shop_runtime_bindings_updated_at
     BEFORE UPDATE ON public.shop_runtime_bindings
     FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
+-- runtime_profile_ref:本店持久化 Chrome user-data-dir 在采集节点上的相对路径
+-- 例如 "profiles/shop-001"。claim 时 enrich 进 RUN_PLAYBOOK 消息,browser-agent
+-- 用它定位 persistent context 目录;空字符串表示默认按 shop_id 派生。
+ALTER TABLE public.shop_runtime_bindings
+    ADD COLUMN IF NOT EXISTS runtime_profile_ref text NOT NULL DEFAULT '';
+
 CREATE TABLE IF NOT EXISTS public.browser_collection_records (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL PRIMARY KEY,
     company_id uuid NOT NULL,

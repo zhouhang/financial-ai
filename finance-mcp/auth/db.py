@@ -565,6 +565,7 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "profile_status",
             "playbook_status",
             "cron_pause_reason",
+            "runtime_profile_ref",
         ),
         "recon_execution_queue": (
             "next_retry_at",
@@ -5575,37 +5576,102 @@ def create_or_reuse_dataset_collection_sync_job(
         return {"job": None, "reused": False, "reuse_reason": "", "error": str(e)}
 
 
-def claim_next_browser_sync_job(*, agent_max_concurrency: int = 2) -> dict | None:
-    """原子领取下一条待执行的 browser_playbook sync job。"""
+def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: int = 2) -> dict | None:
+    """原子领取下一条待执行的 browser_playbook sync job,带 enrich。
+
+    返回的 dict 在标准 sync_jobs 字段之外,额外携带 browser-agent 执行所需的所有运行时上下文:
+    shop_id / playbook_id / playbook_version / playbook_body / runtime_profile_ref /
+    egress_group / credential_ref / browser_binding。browser-agent 据此构造 RUN_PLAYBOOK 消息,
+    不再依赖 request_payload 自带 shop_id 或 playbook_body。
+
+    过滤条件:
+      - sync_job pending
+      - data_source.source_kind = 'browser_playbook',且 active + is_enabled
+      - shop_runtime_bindings.agent_id = :agent_id
+      - profile_status=active 且 playbook_status=ok(健康门下沉到 claim 层)
+      - 当前 agent in-flight 浏览器任务数 < agent_max_concurrency(DB 层并发硬保护)
+      - 已到 next_retry_at(为 NULL 视为可立即领取)
+      - playbook.status='active'(canary 版本路由暂未实现,见 Deferred)
+    """
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
+                    WITH claimed AS (
+                        SELECT sync_jobs.id,
+                               jsonb_build_object(
+                                   'shop_id', srb.shop_id,
+                                   'agent_id', srb.agent_id,
+                                   'playbook_id', srb.playbook_id,
+                                   'runtime_profile_ref', COALESCE(srb.runtime_profile_ref, ''),
+                                   'egress_group', COALESCE(srb.egress_group, ''),
+                                   'credential_ref', COALESCE(srb.credential_ref, ''),
+                                   'profile_status', srb.profile_status,
+                                   'playbook_status', srb.playbook_status
+                               ) AS browser_binding,
+                               srb.shop_id,
+                               srb.playbook_id,
+                               COALESCE(srb.runtime_profile_ref, '') AS runtime_profile_ref,
+                               COALESCE(srb.egress_group, '') AS egress_group,
+                               COALESCE(srb.credential_ref, '') AS credential_ref,
+                               p.version AS playbook_version,
+                               p.playbook_body
+                        FROM sync_jobs
+                        JOIN data_sources ds ON ds.id = sync_jobs.data_source_id
+                        JOIN shop_runtime_bindings srb
+                          ON srb.company_id = sync_jobs.company_id
+                         AND srb.data_source_id = sync_jobs.data_source_id
+                        JOIN playbooks p
+                          ON p.company_id = sync_jobs.company_id
+                         AND p.playbook_id = srb.playbook_id
+                         AND p.status = 'active'
+                        JOIN LATERAL (
+                            SELECT COUNT(*) AS running_count
+                            FROM sync_jobs running_jobs
+                            JOIN data_sources running_ds ON running_ds.id = running_jobs.data_source_id
+                            JOIN shop_runtime_bindings running_srb
+                              ON running_srb.company_id = running_jobs.company_id
+                             AND running_srb.data_source_id = running_jobs.data_source_id
+                            WHERE running_jobs.job_status = 'running'
+                              AND running_ds.source_kind = 'browser_playbook'
+                              AND running_srb.agent_id = %s
+                        ) running_for_agent ON TRUE
+                        WHERE sync_jobs.job_status = 'pending'
+                          AND ds.source_kind = 'browser_playbook'
+                          AND ds.status = 'active'
+                          AND ds.is_enabled = TRUE
+                          AND srb.agent_id = %s
+                          AND srb.profile_status = 'active'
+                          AND srb.playbook_status = 'ok'
+                          AND running_for_agent.running_count < %s
+                          AND (sync_jobs.next_retry_at IS NULL OR sync_jobs.next_retry_at <= CURRENT_TIMESTAMP)
+                        ORDER BY sync_jobs.created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
                     UPDATE sync_jobs
                     SET job_status = 'running',
                         started_at = CURRENT_TIMESTAMP,
                         current_attempt = COALESCE(current_attempt, 0) + 1,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = (
-                        SELECT id
-                        FROM sync_jobs
-                        WHERE job_status = 'pending'
-                          AND (
-                              request_payload ->> 'collection_driver' = 'browser_playbook_remote'
-                              OR request_payload -> 'params' ->> 'collection_driver' = 'browser_playbook_remote'
-                          )
-                        ORDER BY created_at ASC
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT 1
-                    )
-                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
-                              window_start, window_end, idempotency_key, job_status,
-                              request_payload, checkpoint_before, checkpoint_after,
-                              active_snapshot_id, published_snapshot_id, current_attempt,
-                              error_message, started_at, completed_at, created_at, updated_at
-                    """
+                    FROM claimed
+                    WHERE sync_jobs.id = claimed.id
+                    RETURNING sync_jobs.id, sync_jobs.company_id, sync_jobs.data_source_id,
+                              sync_jobs.trigger_mode, sync_jobs.resource_key,
+                              sync_jobs.window_start, sync_jobs.window_end,
+                              sync_jobs.idempotency_key, sync_jobs.job_status,
+                              sync_jobs.request_payload, sync_jobs.checkpoint_before,
+                              sync_jobs.checkpoint_after, sync_jobs.active_snapshot_id,
+                              sync_jobs.published_snapshot_id, sync_jobs.current_attempt,
+                              sync_jobs.error_message, sync_jobs.started_at,
+                              sync_jobs.completed_at, sync_jobs.created_at, sync_jobs.updated_at,
+                              claimed.browser_binding, claimed.shop_id, claimed.playbook_id,
+                              claimed.playbook_version, claimed.playbook_body,
+                              claimed.runtime_profile_ref, claimed.egress_group, claimed.credential_ref
+                    """,
+                    (agent_id, agent_id, agent_max_concurrency),
                 )
                 row = cur.fetchone()
                 conn.commit()

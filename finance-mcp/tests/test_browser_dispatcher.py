@@ -196,6 +196,126 @@ def test_dispatcher_marks_runner_failure() -> None:
     assert fake_db.failures[0]["fail_reason"] == "PAGE_CHANGED"
 
 
+def test_claim_next_browser_sync_job_filters_by_source_kind_agent_and_binding_health(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None):
+            captured["sql"] = sql
+
+        def fetchone(self):
+            return None
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.claim_next_browser_sync_job(agent_id="agent-001")
+
+    sql = captured["sql"]
+    assert "JOIN data_sources ds ON ds.id = sync_jobs.data_source_id" in sql
+    assert "JOIN shop_runtime_bindings srb" in sql
+    assert "ds.source_kind = 'browser_playbook'" in sql
+    assert "srb.agent_id = %s" in sql
+    assert "srb.profile_status = 'active'" in sql
+    assert "srb.playbook_status = 'ok'" in sql
+    assert "running_for_agent.running_count < %s" in sql
+    assert "request_payload ->" not in sql
+
+
+def test_claim_next_browser_sync_job_normalize_preserves_enriched_fields(monkeypatch) -> None:
+    """Safeguard: _normalize_record must pass through enriched browser fields untouched.
+
+    Hardening adds top-level shop_id/playbook_body/runtime_profile_ref/browser_binding into the
+    RETURNING clause. If _normalize_record ever gains a whitelist filter, browser-agent would
+    silently get an empty job. This test pins the passthrough behavior.
+    """
+    enriched_row = {
+        "id": "sync-001",
+        "company_id": "company-001",
+        "data_source_id": "source-001",
+        "shop_id": "shop-001",
+        "playbook_id": "qianniu-daily-bill-export",
+        "playbook_version": "1.0.0",
+        "playbook_body": {"steps": [], "output": {}},
+        "runtime_profile_ref": "profiles/shop-001",
+        "egress_group": "wan-1",
+        "credential_ref": "cred-001",
+        "browser_binding": {"shop_id": "shop-001", "profile_status": "active"},
+    }
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            return None
+
+        def fetchone(self):
+            return enriched_row
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    row = auth_db.claim_next_browser_sync_job(agent_id="agent-001")
+
+    assert row is not None
+    assert row["shop_id"] == "shop-001"
+    assert row["playbook_body"] == {"steps": [], "output": {}}
+    assert row["runtime_profile_ref"] == "profiles/shop-001"
+    assert row["browser_binding"]["shop_id"] == "shop-001"
+
+
 def test_dispatcher_persists_capture_files() -> None:
     fake_db = FakeDb()
     manager = FakeAgentConnectionManager()
