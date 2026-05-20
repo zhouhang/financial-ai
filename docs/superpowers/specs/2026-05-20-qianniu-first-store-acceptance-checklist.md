@@ -18,8 +18,9 @@ that wiring actually drives a real merchant browser session against the real fun
       `source_type='browser_collection_records'`.
 - [ ] **Playbook registration + first-time verification flow completed for the test shop** —
       see `2026-05-20-browser-agent-first-login-sop.md`. Operator submitted playbook +
-      merchant credentials via `data_source_register_browser_playbook`; the synchronous
-      verification dry-run returned success; both rows are now active automatically:
+      merchant credentials via finance-web 数据连接 → 浏览器抓取 (`BrowserPlaybookPanel`,
+      which replaces the legacy `source_kind='browser'` reserved card); the asynchronous
+      verification dry-run returned success and the operator clicked "激活" so both rows are now active:
   - [ ] `playbooks.status='active'` (set by the verification flow, not by hand)
   - [ ] `shop_runtime_bindings.profile_status='active'`, `playbook_status='ok'`,
         `credential_ref` populated (set by the verification flow, not by hand)

@@ -56,7 +56,9 @@ landing dataset for collected rows; without it, registration is rejected.
 
 ### Step 3 — Register playbook + credentials + run synchronous verification
 
-Submit `data_source_register_browser_playbook` (via Operator UI or MCP tool) with:
+Open finance-web → **数据连接 → 浏览器抓取**(`BrowserPlaybookPanel`). This card reuses the slot previously occupied by the legacy `source_kind='browser'` placeholder; in v1 it is the actual registration UI.
+
+In the form, submit:
 - `source_id` (the merchant's browser_playbook data source)
 - `playbook_id`, `version`, `title`, `playbook_body` (from Step 1)
 - `shop_id`, `agent_id` (the collection machine that owns this shop)
@@ -65,16 +67,19 @@ Submit `data_source_register_browser_playbook` (via Operator UI or MCP tool) wit
   any read path.
 - `verification_biz_date` (default: most recent T-1)
 
-Tally then **atomically**:
+Submitting the form calls `POST /api/data-sources/{source_id}/browser-playbook/register`,
+which:
 1. Writes `playbooks` (`status='draft'`) and `shop_runtime_bindings`
    (`profile_status='verifying'`, `playbook_status='ok'`, `credential_ref=<encrypted>`).
-2. Triggers one synchronous browser sync_job with `verification=true`. browser-agent claims
+2. Creates one async browser sync_job with `is_verification=true`. browser-agent claims
    it, logs in on the collection machine using the supplied credentials, runs the playbook
-   end-to-end against the real site, and returns the result.
-3. On success → both rows atomically flip to active (`playbooks.status='active'`,
-   `shop_runtime_bindings.profile_status='active'`) and the persistent profile is now on
-   the collection machine for cron to reuse.
-4. On failure → returns one of:
+   end-to-end against the real site, and reports back.
+3. The panel polls `/api/sync-jobs/{verification_sync_job_id}` every 5s (max 20min).
+4. On `job_status='success'` → the panel surfaces an **激活** button; clicking it calls
+   `POST /api/data-sources/browser-playbook/finalize` which atomically flips both rows to
+   active (`playbooks.status='active'`, `shop_runtime_bindings.profile_status='active'`).
+   The persistent profile is now on the collection machine for cron to reuse.
+5. On `job_status='failed'` → the panel shows `browser_fail_reason` + `error_message`:
    - `AUTH_EXPIRED` — credentials wrong; operator re-submits with corrected credentials.
    - `PAGE_CHANGED` / `DATA_MISMATCH` — playbook is wrong; operator revises and re-submits.
    - `RISK_VERIFICATION` — see fallback below.

@@ -172,7 +172,7 @@ shop ↔ 采集节点 ↔ 出口分组 ↔ profile 状态绑定。
 
 **Playbook 注册时的首次验证流程**（决定 `profile_status` 从 `verifying` 进 `active` 的唯一路径）：
 
-1. Operator 在 Tally 后台 **Playbook Registration** 页面提交：playbook JSON body + 商家分配的"具有订单和资金数据下载权限的"子账号用户名/密码 + 验证用的 `biz_date`（默认最近 T-1）。
+1. Operator 在 finance-web 的 **数据连接 → 浏览器抓取** 页面(`BrowserPlaybookPanel`,复用了之前 `source_kind='browser'` 占位卡的位置)提交：playbook JSON body + 商家分配的"具有订单和资金数据下载权限的"子账号用户名/密码 + 验证用的 `biz_date`(默认最近 T-1)。
 2. Tally 服务端：
    - 落 `playbooks` 行（`status='draft'`）和 `shop_runtime_bindings` 行（`profile_status='verifying'`、`playbook_status='ok'`、`credential_ref` 写入 KMS 加密的凭证引用）。
    - 同步触发**一次性验证采集** sync_job（同生产 RUN_PLAYBOOK 链路，下发 playbook + 凭证给绑定的 browser-agent），但带 `verification=true` 标志，让 agent 知道这是首次验证。
@@ -299,7 +299,7 @@ shop ↔ 采集节点 ↔ 出口分组 ↔ profile 状态绑定。
 #### Authoring Worker（独立 Python 进程，**v2**）
 
 > **v1 / v2 分级**:
-> - **v1（首店阶段）**：Operator 本机用 AI 编码工具（Claude Code 或 codex）+ DeepSeek-V4 Pro 协助跑出 playbook JSON,通过 Tally 后台「Playbook Registration」页面手动提交;首次验证由 Tally 服务端同步触发(见「Playbook 注册时的首次验证流程」)。这是 Operator 个人开发工具流,**不属于生产架构组件**。
+> - **v1（首店阶段）**：Operator 本机用 AI 编码工具(Claude Code 或 codex)+ DeepSeek-V4 Pro 协助跑出 playbook JSON;然后通过 finance-web 的「数据连接 → 浏览器抓取」页面(`BrowserPlaybookPanel`)粘贴 JSON + 凭证手动提交;首次验证由 Tally 服务端异步触发(见「Playbook 注册时的首次验证流程」),前端轮询 sync_job 状态后调 finalize 激活。Operator 本机的 AI 编码工具部分是个人开发工具流、**不属于生产架构组件**;前端注册页面**是 v1 必备**。
 > - **v2**：自研 Authoring Worker,**封装 Claude Agent SDK + DeepSeek-V4 Pro**,在 Tally 内置 web UI 提供与 v1 一致的自然语言生成 playbook 体验,但移除"Operator 本机依赖外部 AI IDE"。Authoring Worker 仍独立进程跑,首次验证仍走 v1 同一通道。
 
 模块路径(v2)：`finance-authoring/`。同 repo、同部署单元,但**独立 OS 进程**,不与 Tally Main 共用 Python 进程。
@@ -336,11 +336,19 @@ v2 职责:
 
 #### Operator UI
 
-接现有 Tally 后台，加 4 个页面：
-- 「Playbooks」列表 + 创建 + Review + Approve（含「页面改版紧急修复」勾选与旁路审批字段）
-- 「Authoring Jobs」列表 + 详情 + transcript 查看
-- 「Agents」状态板（在线/离线/最近心跳）
-- 「Shops」绑定表（shop ↔ 采集节点 ↔ 出口分组 ↔ profile 状态 + 最近失败原因码 + 缺失日期清单）
+> **v1 实际实现位置**:`finance-web/src/components/BrowserPlaybookPanel.tsx`,通过 `数据连接 → 浏览器抓取` 卡片进入。该卡片复用了原 `source_kind='browser'` 的预留位 —— v1 阶段 `browser` 占位卡彻底替换为 `browser_playbook` 真实功能。
+>
+> 「Playbooks」/「Authoring Jobs」/「Agents」/「Shops」4 个独立运营页面是 v2 范围;v1 通过 `数据连接 → 浏览器抓取` 单一入口完成首店上线所需的全部 Operator 操作(注册 playbook + 凭证 + 触发首验 + 激活)。
+
+**v1(已实现)**:`数据连接 → 浏览器抓取` 页面提供:
+- 列出当前公司所有 `source_kind='browser_playbook'` 的数据源,Operator 选一个作业。
+- 列出该数据源下所有已发布的 `browser_collection_records` 数据集(首验需要选一个作为采集落地)。
+- 表单录入:`playbook_id` / `version` / `title` / `playbook_body`(粘贴 Claude Code 或 codex 生成的 JSON 对象)+ `shop_id` / `agent_id` / `egress_group` + 商家子账号 `username` / `password` + `verification_biz_date`(默认昨天)。
+- 提交后调 `POST /api/data-sources/{source_id}/browser-playbook/register`,展示 `verification_sync_job_id`,**前端每 5s 轮询 sync_job 状态**(轮询上限 20 分钟)。
+- `job_status='success'` 时显示「激活」按钮 → 调 `POST /api/data-sources/browser-playbook/finalize` 原子激活 `playbook=active + binding=active`。
+- `job_status='failed'` 时直接展示 `browser_fail_reason` + `error_message`,Operator 修完表单重新提交即可(失败的 sync_job 沉淀为审计记录,不被生产 claim)。
+
+**v2(后续)**:在 `BrowserPlaybookPanel` 基础上扩出独立 Playbooks / Authoring Jobs / Agents / Shops 4 个页面 + 自研 Authoring Worker 在 web UI 提供自然语言生成 playbook(详见决策记录与子项目拆分 P4 / P5)。
 
 ### Local Browser Agent（固定采集节点，`finance-agents/browser-agent/`）
 
@@ -809,7 +817,7 @@ noVNC 是挂着商家已登录会话的高危入口，**不得常开**：
 
 P4 / P7 可放到首店跑通之后 sprint。
 
-**首店阶段 (v1) 的 playbook 生成流程**:Operator 本机用 **Claude Code 或 codex** + DeepSeek-V4 Pro 协助跑出 playbook JSON,通过 Tally 后台「Playbook Registration」页面手动提交(同时填入商家分配的子账号用户名/密码),Tally 服务端同步触发首次验证(见「Playbook 注册时的首次验证流程」)。这是 Operator 个人开发工具流,**不属于生产架构组件**。
+**首店阶段 (v1) 的 playbook 生成流程**:Operator 本机用 **Claude Code 或 codex** + DeepSeek-V4 Pro 协助跑出 playbook JSON,然后**在 finance-web 的「数据连接 → 浏览器抓取」页面**(`BrowserPlaybookPanel`)粘贴 JSON 并填入商家分配的子账号用户名/密码,前端调 `POST /api/data-sources/{source_id}/browser-playbook/register` 触发服务端同步首验流程(见「Playbook 注册时的首次验证流程」)。Operator 的本机 AI 编码部分**不属于生产架构组件**,但 finance-web 上的注册/验证/激活页面**是 v1 必备前端**——没有它,Operator 没法通过 UI 持久化凭证。
 
 **P4 (v2) 升级目标**:自研 Authoring Worker,**封装 Claude Agent SDK + DeepSeek-V4 Pro**,在 Tally 内置 web UI 提供与 v1 一致的"自然语言→playbook"能力,但移除"Operator 本机依赖外部 AI IDE"。首次验证流程不变,仍走 v1 同一通道。
 
@@ -830,6 +838,7 @@ P4 / P7 可放到首店跑通之后 sprint。
 | Runtime Profile 本地存储 | 云端管理 | profile 含设备绑定信息，跨机迁移破坏稳定性 |
 | 首次登录由采集节点完成 | cloud 侧登录 | 凭证只在采集节点本地使用，登录环境与采集环境一致 |
 | Playbook 注册时由 Tally 同步触发首次验证(`profile_status=verifying → active`) | Operator SSH 采集机本地手动首登 | 验证发生在 cloud + agent 真实生产链路,自动覆盖凭证正确性、playbook 可重放、Layer 2 口径,且能向 Operator 返回结构化错误。手动 SSH 流程依赖单点知识、无法审计、与生产链路脱节 |
+| v1 必须提供前端注册页面(`BrowserPlaybookPanel`),复用 `browser` 预留卡的位置改成 `browser_playbook` | v1 走 MCP / 命令行 / 等 v2 一起做 web UI | 没有前端 Operator 无法把商家凭证持久化进系统;`browser` 占位卡本就是给浏览器抓取留的位,直接换成 `browser_playbook` 比并存两个卡片清晰 |
 | v1 用 Claude Code / codex(Operator 本机 AI 编码工具) 手工生成 playbook;v2 用自研 Authoring Worker 封装 Claude Agent SDK + DeepSeek-V4 Pro 在 Tally 内置 web UI 完成 | v1 直接上自研 agent / v2 一直用外部 AI IDE | 首店 v1 不值得为单店投入 web 端 agent;30 店扩展或多平台 onboard 时,Operator 本机依赖外部 IDE 的方案不可扩展,需要切到自研封装 |
 | 2-3 条商业宽带分组共享 | 一店一固定出口 IP | 一台物理机本就需代理才能多出口；多店共享出口是「代运营办公室」正常画像，风控信号低于一店一 IP 的孤立访问；成本从 30 个 IP 塌缩成 2-3 条线 |
 | Operator 强制 review approve | LLM 自审 / 自动 promote | 数据错误代价高，必须人卡点 |
