@@ -485,6 +485,149 @@ def test_apply_browser_binding_failure_transition_maps_reasons(monkeypatch) -> N
     assert "cron_pause_reason" in sql
 
 
+def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
+    import asyncio
+
+    from tools import data_sources
+
+    expected_job = {"id": "sync-001", "shop_id": "shop-001", "playbook_body": {}}
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "claim_next_browser_sync_job",
+        lambda *, agent_id, agent_max_concurrency: expected_job,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_claim",
+            {"worker_token": "tok", "agent_id": "agent-001", "max_concurrency": 2},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["job"] == expected_job
+
+
+def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
+    import asyncio
+
+    from tools import data_sources
+
+    captured: dict[str, object] = {}
+
+    def fake_fail(**kwargs):
+        captured.update(kwargs)
+        return {"id": kwargs["sync_job_id"], "job_status": "pending"}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_failed", fake_fail)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_fail",
+            {
+                "worker_token": "tok",
+                "sync_job_id": "sync-001",
+                "fail_reason": "TIMEOUT",
+                "error_message": "timeout",
+                "retryable": True,
+                "max_attempts": 3,
+                "retry_delay_seconds": 1800,
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["fail_reason"] == "TIMEOUT"
+    assert captured["retryable"] is True
+    assert captured["max_attempts"] == 3
+    assert captured["retry_delay_seconds"] == 1800
+
+
+def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None:
+    import asyncio
+
+    from tools import data_sources
+
+    upserted: dict[str, object] = {}
+    files: dict[str, object] = {}
+    success: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "c1",
+            "data_source_id": "s1",
+            "resource_key": "qianniu-daily-bill-export@1.0.0",
+            "request_payload": {
+                "dataset_id": "d1",
+                "dataset_code": "qianniu_fund_bill",
+                "biz_date": "2026-05-18",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+        },
+    )
+
+    def fake_upsert(**kw):
+        upserted.update(kw)
+        return {"inserted_count": 1, "updated_count": 0, "unchanged_count": 0, "input_count": 1}
+
+    def fake_files(**kw):
+        files.update(kw)
+        return {"inserted_count": 1}
+
+    def fake_success(**kw):
+        success.update(kw)
+        return {"id": kw["sync_job_id"], "job_status": "success"}
+
+    monkeypatch.setattr(data_sources.auth_db, "upsert_browser_collection_records", fake_upsert)
+    monkeypatch.setattr(data_sources.auth_db, "insert_browser_capture_files", fake_files)
+    monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_success", fake_success)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {
+                "worker_token": "tok",
+                "sync_job_id": "sync-001",
+                "summary": {"quality_summary": {"row_count": 1}},
+                "records": [{"item_key": "B1", "payload": {"bill_no": "B1", "amount": "1.00"}}],
+                "capture_files": [{"storage_path": "/tmp/x.csv", "encoding": "utf-8"}],
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert upserted["dataset_id"] == "d1"
+    assert upserted["shop_id"] == "shop-001"
+    assert files["sync_job_id"] == "sync-001"
+    assert success["sync_job_id"] == "sync-001"
+    assert success["summary"]["capture_file_count"] == 1
+
+
 def test_dispatcher_persists_capture_files() -> None:
     fake_db = FakeDb()
     manager = FakeAgentConnectionManager()

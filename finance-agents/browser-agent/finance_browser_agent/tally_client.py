@@ -20,8 +20,11 @@ import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import jwt
+
+from finance_browser_agent.mcp_session import McpSession
 
 
 JWT_ALGORITHM = "HS256"
@@ -78,10 +81,11 @@ class BrowserAgentTallyClient:
     at the 2-hour mark.
     """
 
-    def __init__(self, *, config: BrowserAgentConfig) -> None:
+    def __init__(self, *, config: BrowserAgentConfig, session: McpSession | None = None) -> None:
         self.config = config
         self._token: str = ""
         self._token_expires_at: float = 0.0
+        self._session = session or McpSession(base_url=config.mcp_base_url)
 
     @property
     def worker_token(self) -> str:
@@ -92,3 +96,46 @@ class BrowserAgentTallyClient:
                 datetime.now(timezone.utc) + _TOKEN_LIFETIME
             ).timestamp()
         return self._token
+
+    async def _call(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return await self._session.call_tool(tool_name, args)
+
+    async def claim_browser_job(self) -> dict[str, Any]:
+        return await self._call(
+            "browser_sync_job_claim",
+            {
+                "worker_token": self.worker_token,
+                "agent_id": self.config.agent_id,
+                "max_concurrency": self.config.max_concurrency,
+            },
+        )
+
+    async def mark_browser_job_success(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._call(
+            "browser_sync_job_complete",
+            {"worker_token": self.worker_token, **payload},
+        )
+
+    async def mark_browser_job_failed(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._call(
+            "browser_sync_job_fail",
+            {"worker_token": self.worker_token, **payload},
+        )
+
+    async def requeue_ready_waiting(self) -> dict[str, Any]:
+        return await self._call(
+            "recon_queue_requeue_ready_waiting",
+            {"worker_token": self.worker_token},
+        )
+
+    async def fail_failed_waiting(self) -> dict[str, Any]:
+        return await self._call(
+            "recon_queue_fail_failed_collection_waiting",
+            {"worker_token": self.worker_token},
+        )
+
+    async def fail_expired_waiting(self) -> dict[str, Any]:
+        return await self._call(
+            "recon_queue_fail_expired_waiting",
+            {"worker_token": self.worker_token},
+        )

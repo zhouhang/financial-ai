@@ -5514,6 +5514,51 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "source_id"],
             },
         ),
+        Tool(
+            name="browser_sync_job_claim",
+            description="Worker 专用：从 finance-mcp 领取下一条 pending browser_playbook sync_job，并附带 enrich 的 shop 绑定/playbook body/runtime profile 等执行上下文。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "max_concurrency": {"type": "integer"},
+                },
+                "required": ["worker_token", "agent_id"],
+            },
+        ),
+        Tool(
+            name="browser_sync_job_complete",
+            description="Worker 专用：browser-agent 完成 sync_job 后回写 records / capture_files 并将 sync_job 标记 success。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "summary": {"type": "object"},
+                    "records": {"type": "array"},
+                    "capture_files": {"type": "array"},
+                },
+                "required": ["worker_token", "sync_job_id"],
+            },
+        ),
+        Tool(
+            name="browser_sync_job_fail",
+            description="Worker 专用：browser-agent 失败后回写原因码，按 retryable 决定 reschedule 或终态 failed（终态时会联动 shop_runtime_bindings 状态转换）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "fail_reason": {"type": "string"},
+                    "error_message": {"type": "string"},
+                    "retryable": {"type": "boolean"},
+                    "max_attempts": {"type": "integer"},
+                    "retry_delay_seconds": {"type": "integer"},
+                },
+                "required": ["worker_token", "sync_job_id", "fail_reason"],
+            },
+        ),
     ]
 
 
@@ -5581,6 +5626,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_list_collection_records(arguments)
         if name == "data_source_preview":
             return await _handle_data_source_preview(arguments)
+        if name == "browser_sync_job_claim":
+            return await _handle_browser_sync_job_claim(arguments)
+        if name == "browser_sync_job_complete":
+            return await _handle_browser_sync_job_complete(arguments)
+        if name == "browser_sync_job_fail":
+            return await _handle_browser_sync_job_fail(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except Exception as exc:
         logger.error("data_source tool error: %s", exc, exc_info=True)
@@ -8323,3 +8374,128 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
         "rows": rows[: max(1, min(limit, 100))],
         "message": str(result.get("message") or ""),
     }
+
+
+# ---------- browser-agent worker tools ----------
+#
+# The browser-agent service runs on a separate collection machine and reaches finance-mcp via
+# MCP only. These three tools are the entire surface area:
+#
+#   browser_sync_job_claim     -- pull next runnable browser sync_job, enriched with binding +
+#                                 active playbook body so the agent can build a RUN_PLAYBOOK
+#                                 message without any further DB calls.
+#   browser_sync_job_complete  -- agent finished successfully: upsert records, persist capture
+#                                 file metadata, then mark sync_job success.
+#   browser_sync_job_fail      -- agent failed: let auth.db.mark_browser_sync_job_failed decide
+#                                 retry vs terminal, normalize error prefix, and on terminal
+#                                 failure flip the shop binding state.
+
+
+async def _handle_browser_sync_job_claim(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    max_concurrency = max(1, int(arguments.get("max_concurrency") or 2))
+    job = auth_db.claim_next_browser_sync_job(
+        agent_id=agent_id,
+        agent_max_concurrency=max_concurrency,
+    )
+    return {"success": True, "job": job}
+
+
+async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    sync_job_id = str(arguments.get("sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "missing sync_job_id"}
+
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    company_id = str(job.get("company_id") or "")
+    data_source_id = str(job.get("data_source_id") or "")
+    resource_key = str(job.get("resource_key") or "")
+    request_payload = job.get("request_payload") or {}
+    payload_params = request_payload if isinstance(request_payload, dict) else {}
+    nested_params = payload_params.get("params") if isinstance(payload_params.get("params"), dict) else {}
+    biz_date = str(nested_params.get("biz_date") or payload_params.get("biz_date") or "")
+    dataset_id = str(nested_params.get("dataset_id") or payload_params.get("dataset_id") or "")
+    dataset_code = str(nested_params.get("dataset_code") or payload_params.get("dataset_code") or "")
+
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id, data_source_id=data_source_id
+    ) or {}
+    shop_id = str(binding.get("shop_id") or "")
+    playbook_id = str(binding.get("playbook_id") or "")
+
+    records = list(arguments.get("records") or [])
+    capture_files = list(arguments.get("capture_files") or [])
+    summary_in = dict(arguments.get("summary") or {})
+
+    record_summary: dict[str, Any] = {}
+    if records and dataset_id and biz_date:
+        record_summary = auth_db.upsert_browser_collection_records(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            shop_id=shop_id,
+            playbook_id=playbook_id,
+            biz_date=biz_date,
+            sync_job_id=sync_job_id,
+            records=records,
+        ) or {}
+
+    file_summary: dict[str, Any] = {}
+    if capture_files:
+        file_summary = auth_db.insert_browser_capture_files(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            sync_job_id=sync_job_id,
+            resource_key=resource_key,
+            shop_id=shop_id,
+            playbook_id=playbook_id,
+            biz_date=biz_date,
+            capture_files=capture_files,
+        ) or {}
+
+    final_summary = {
+        **summary_in,
+        "records": record_summary,
+        "capture_file_count": int(file_summary.get("inserted_count") or 0),
+    }
+    row = auth_db.mark_browser_sync_job_success(
+        sync_job_id=sync_job_id, summary=final_summary
+    )
+    return {"success": True, "job": row, "summary": final_summary}
+
+
+async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    sync_job_id = str(arguments.get("sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "missing sync_job_id"}
+    fail_reason = str(arguments.get("fail_reason") or "OTHER").strip()
+    error_message = str(arguments.get("error_message") or "")
+    retryable = bool(arguments.get("retryable", False))
+    max_attempts = int(arguments.get("max_attempts") or 3)
+    retry_delay_seconds = int(arguments.get("retry_delay_seconds") or 1800)
+    row = auth_db.mark_browser_sync_job_failed(
+        sync_job_id=sync_job_id,
+        error_message=error_message,
+        fail_reason=fail_reason,
+        retryable=retryable,
+        max_attempts=max_attempts,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+    return {"success": True, "job": row}
