@@ -96,7 +96,18 @@ class FakeBrowserDb:
 
     def upsert_browser_collection_records(self, **kwargs: Any) -> dict[str, Any]:
         self.records = list(kwargs["records"])
-        return {"inserted_count": len(self.records), "updated_count": 0, "unchanged_count": 0}
+        return {
+            "inserted_count": len(self.records),
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "deleted_count": 0,
+        }
+
+    def insert_browser_capture_files(self, **kwargs: Any) -> dict[str, Any]:
+        if not hasattr(self, "capture_files"):
+            self.capture_files: list[dict[str, Any]] = []
+        self.capture_files.append(kwargs)
+        return {"inserted_count": len(kwargs.get("capture_files") or [])}
 
     def mark_browser_sync_job_success(self, *, sync_job_id: str, summary: dict[str, Any]) -> dict[str, Any]:
         return {"id": sync_job_id, "job_status": "success", "summary": summary}
@@ -141,7 +152,14 @@ def test_first_store_browser_collection_to_recon_loader(monkeypatch) -> None:
                     },
                 }
             ],
-            "capture_files": [],
+            "capture_files": [
+                {
+                    "storage_path": "/var/lib/tally-agent/downloads/shop-001/sync-001/qn.csv",
+                    "encoding": "utf-8",
+                    "checksum": "sha256:abc",
+                    "row_count": 1,
+                }
+            ],
             "quality_summary": {"row_count": 1, "amount_total": "10.00"},
         },
     )
@@ -171,3 +189,98 @@ def test_first_store_browser_collection_to_recon_loader(monkeypatch) -> None:
             "customer_order_no": "TB-001",
         }
     ]
+    # Capture-file metadata audit trail is wired through the dispatcher pipeline.
+    assert getattr(fake_db, "capture_files", [])
+    assert fake_db.capture_files[0]["sync_job_id"] == "sync-001"
+    assert fake_db.capture_files[0]["capture_files"][0]["storage_path"].endswith("qn.csv")
+
+
+# ---------- Waiting-data queue guards (cross-checks of T2/T12 with DB layer) ----------
+
+
+class _WaitingCursor:
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def execute(self, sql: str, params=None):
+        self.executed.append(sql)
+
+
+class _WaitingConn:
+    def __init__(self, cursor: _WaitingCursor) -> None:
+        self.cursor_obj = cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def cursor(self, *args, **kwargs):
+        return self.cursor_obj
+
+    def commit(self):
+        return None
+
+
+class _WaitingConnManager:
+    def __init__(self, cursor: _WaitingCursor) -> None:
+        self.cursor = cursor
+
+    def __enter__(self):
+        return _WaitingConn(self.cursor)
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+
+def test_e2e_waiting_data_empty_collection_jobs_never_requeues(monkeypatch) -> None:
+    """End-to-end check that the empty collection_job_ids guard ships in the actual SQL."""
+    from auth import db as auth_db
+
+    cursor = _WaitingCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _WaitingConnManager(cursor))
+
+    auth_db.requeue_ready_waiting_recon_runs()
+
+    sql = "\n".join(cursor.executed)
+    assert "jsonb_array_length(collection_job_ids) > 0" in sql
+    assert "jsonb_typeof(collection_job_ids) = 'array'" in sql
+
+
+def test_e2e_waiting_data_failed_browser_job_fast_fails(monkeypatch) -> None:
+    """End-to-end check that fail_waiting_recon_runs_with_failed_collection_jobs exists and pulls
+    error_message from sync_jobs so the recon error carries the underlying fail_reason context."""
+    from auth import db as auth_db
+
+    cursor = _WaitingCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _WaitingConnManager(cursor))
+
+    auth_db.fail_waiting_recon_runs_with_failed_collection_jobs()
+
+    sql = "\n".join(cursor.executed)
+    assert "status = 'failed'" in sql
+    assert "s.job_status = 'failed'" in sql
+    assert "s.error_message" in sql
+
+
+def test_e2e_waiting_data_success_triggers_requeue_with_resume_metadata(monkeypatch) -> None:
+    """v1: requeue must bump resume metadata, not retry budget."""
+    from auth import db as auth_db
+
+    cursor = _WaitingCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _WaitingConnManager(cursor))
+
+    auth_db.requeue_ready_waiting_recon_runs()
+
+    sql = "\n".join(cursor.executed)
+    assert "data_wait_resume_count = COALESCE(data_wait_resume_count, 0) + 1" in sql
+    assert "last_data_wait_resumed_at = CURRENT_TIMESTAMP" in sql
+    assert "current_attempt" not in sql  # don't conflate with retries
