@@ -270,3 +270,157 @@ def test_browser_playbook_schema_ready_requires_browser_capture_files_and_recon_
     monkeypatch.setattr(auth_db, "_index_exists", lambda *args, **kwargs: False)
 
     assert not auth_db._browser_playbook_collection_schema_ready()  # noqa: SLF001
+
+
+class FakeCursor:
+    def __init__(self) -> None:
+        self.executed_sql: list[str] = []
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[object, ...] | None = None) -> None:
+        self.executed_sql.append(sql)
+
+    def fetchone(self) -> dict[str, object]:
+        return {"inserted": False, "record_status": "updated"}
+
+
+class FakeConnection:
+    def __init__(self, cursor: FakeCursor) -> None:
+        self.cursor_obj = cursor
+        self.committed = False
+
+    def __enter__(self) -> "FakeConnection":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def cursor(self, *args: object, **kwargs: object) -> FakeCursor:
+        return self.cursor_obj
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+def _install_fake_connection(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeConnection, FakeCursor]:
+    cursor = FakeCursor()
+    connection = FakeConnection(cursor)
+    monkeypatch.setattr(auth_db, "get_conn", lambda: connection)
+    return connection, cursor
+
+
+def test_upsert_browser_collection_records_computes_hashes_and_counts(monkeypatch) -> None:
+    connection, _cursor = _install_fake_connection(monkeypatch)
+    execute_values_call: dict[str, object] = {}
+
+    def fake_execute_values(
+        cur,
+        sql: str,
+        values: list[tuple[object, ...]],
+        template: str | None = None,
+        page_size: int | None = None,
+        fetch: bool = False,
+    ) -> list[dict[str, str]]:
+        execute_values_call.update(
+            {
+                "sql": sql,
+                "values": values,
+                "template": template,
+                "page_size": page_size,
+                "fetch": fetch,
+            }
+        )
+        return [
+            {"action": "inserted"},
+            {"action": "updated"},
+            {"action": "unchanged"},
+        ]
+
+    monkeypatch.setattr(auth_db.psycopg2.extras, "execute_values", fake_execute_values)
+
+    result = auth_db.upsert_browser_collection_records(
+        company_id="00000000-0000-0000-0000-000000000001",
+        data_source_id="00000000-0000-0000-0000-000000000002",
+        dataset_id="00000000-0000-0000-0000-000000000003",
+        dataset_code="qianniu_bill",
+        resource_key="qianniu:bill:shop-1",
+        shop_id="shop-1",
+        playbook_id="qianniu-daily-bill-export",
+        biz_date="2026-05-16",
+        sync_job_id="00000000-0000-0000-0000-000000000004",
+        records=[
+            {"item_key": "bill-1", "payload": {"bill_no": "bill-1", "amount": "12.30"}},
+            {
+                "item_key": "bill-2",
+                "item_key_values": {"bill_no": "bill-2"},
+                "item_hash": "caller-hash-must-not-win",
+                "payload": {"amount": "45.60", "bill_no": "bill-2"},
+            },
+            {"item_key": "bill-3", "payload": {"bill_no": "bill-3", "amount": "78.90"}},
+        ],
+    )
+
+    assert execute_values_call["fetch"] is True
+    assert execute_values_call["page_size"] == 1000
+    assert "INSERT INTO browser_collection_records" in str(execute_values_call["sql"])
+    assert "dataset_collection_records" not in str(execute_values_call["sql"])
+    values = execute_values_call["values"]
+    assert isinstance(values, list)
+    assert len(values) == 3
+    assert all(len(str(row[10])) == 64 for row in values)
+    assert str(values[1][10]) != "caller-hash-must-not-win"
+    assert connection.committed is True
+    assert result == {
+        "input_count": 3,
+        "upserted_count": 3,
+        "inserted_count": 1,
+        "updated_count": 1,
+        "unchanged_count": 1,
+        "deleted_count": 0,
+    }
+
+
+def test_upsert_browser_collection_records_updates_seen_and_captured_timestamps(monkeypatch) -> None:
+    _install_fake_connection(monkeypatch)
+    execute_values_call: dict[str, str] = {}
+
+    def fake_execute_values(
+        cur,
+        sql: str,
+        values: list[tuple[object, ...]],
+        template: str | None = None,
+        page_size: int | None = None,
+        fetch: bool = False,
+    ) -> list[dict[str, str]]:
+        execute_values_call["sql"] = " ".join(sql.split())
+        return [{"action": "unchanged"}]
+
+    monkeypatch.setattr(auth_db.psycopg2.extras, "execute_values", fake_execute_values)
+
+    auth_db.upsert_browser_collection_records(
+        company_id="00000000-0000-0000-0000-000000000001",
+        data_source_id="00000000-0000-0000-0000-000000000002",
+        dataset_id="00000000-0000-0000-0000-000000000003",
+        dataset_code="qianniu_bill",
+        resource_key="qianniu:bill:shop-1",
+        shop_id="shop-1",
+        playbook_id="qianniu-daily-bill-export",
+        biz_date="2026-05-16",
+        sync_job_id="00000000-0000-0000-0000-000000000004",
+        captured_at="2026-05-16T01:02:03+08:00",
+        records=[{"item_key": "bill-1", "payload": {"bill_no": "bill-1", "amount": "12.30"}}],
+    )
+
+    sql = execute_values_call["sql"]
+    assert "latest_seen_job_id = EXCLUDED.latest_seen_job_id" in sql
+    assert "latest_seen_at = CURRENT_TIMESTAMP" in sql
+    assert "captured_at = EXCLUDED.captured_at" in sql
+    assert (
+        "record_status = CASE WHEN browser_collection_records.item_hash = "
+        "EXCLUDED.item_hash THEN 'unchanged' ELSE 'updated' END"
+    ) in sql

@@ -6439,6 +6439,215 @@ def list_dataset_collection_records(
         return []
 
 
+def _browser_record_hash(payload: dict[str, Any]) -> str:
+    raw = json.dumps(
+        _json_safe_payload(payload or {}),
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def upsert_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    shop_id: str,
+    playbook_id: str,
+    biz_date: str,
+    sync_job_id: str | None = None,
+    captured_at: str | None = None,
+    records: list[dict] | None = None,
+) -> dict:
+    """按浏览器采集数据集主键 upsert 明细记录。"""
+    items = records or []
+    if not items:
+        return {
+            "input_count": 0,
+            "upserted_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "deleted_count": 0,
+        }
+
+    input_count = len(items)
+    values: list[tuple[Any, ...]] = []
+    for item in items:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        key_values = item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {}
+        item_key = str(item.get("item_key") or "").strip()
+        if not item_key:
+            raise ValueError("browser_collection_records item_key 不能为空")
+        values.append(
+            (
+                company_id,
+                data_source_id,
+                dataset_id,
+                dataset_code,
+                resource_key or "default",
+                shop_id,
+                playbook_id,
+                biz_date,
+                item_key,
+                psycopg2.extras.Json(_json_safe_payload(key_values)),
+                _browser_record_hash(payload),
+                psycopg2.extras.Json(_json_safe_payload(payload)),
+                sync_job_id,
+                sync_job_id,
+                captured_at,
+            )
+        )
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                rows = psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO browser_collection_records (
+                        company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                        shop_id, playbook_id, biz_date, item_key, item_key_values,
+                        item_hash, payload, record_status, first_seen_job_id,
+                        latest_seen_job_id, captured_at
+                    ) VALUES %s
+                    ON CONFLICT (company_id, dataset_id, biz_date, item_key)
+                    DO UPDATE SET
+                        data_source_id = EXCLUDED.data_source_id,
+                        dataset_code = EXCLUDED.dataset_code,
+                        resource_key = EXCLUDED.resource_key,
+                        shop_id = EXCLUDED.shop_id,
+                        playbook_id = EXCLUDED.playbook_id,
+                        item_key_values = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN browser_collection_records.item_key_values
+                            ELSE EXCLUDED.item_key_values
+                        END,
+                        payload = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN browser_collection_records.payload
+                            ELSE EXCLUDED.payload
+                        END,
+                        item_hash = EXCLUDED.item_hash,
+                        record_status = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash THEN 'unchanged'
+                            ELSE 'updated'
+                        END,
+                        latest_seen_job_id = EXCLUDED.latest_seen_job_id,
+                        latest_seen_at = CURRENT_TIMESTAMP,
+                        captured_at = EXCLUDED.captured_at,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING CASE
+                        WHEN (xmax = 0) THEN 'inserted'
+                        WHEN record_status = 'unchanged' THEN 'unchanged'
+                        ELSE 'updated'
+                    END AS action
+                    """,
+                    values,
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, "
+                        "%s, %s::jsonb, 'active', %s, %s, COALESCE(%s::timestamptz, CURRENT_TIMESTAMP))"
+                    ),
+                    page_size=1000,
+                    fetch=True,
+                )
+                inserted_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "inserted"
+                )
+                unchanged_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "unchanged"
+                )
+                updated_count = max(0, len(rows or []) - inserted_count - unchanged_count)
+            conn.commit()
+            return {
+                "input_count": input_count,
+                "upserted_count": inserted_count + updated_count + unchanged_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+                "unchanged_count": unchanged_count,
+                "deleted_count": 0,
+            }
+    except Exception as e:
+        logger.error(
+            f"写入 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}, records={input_count}): {e}"
+        )
+        raise
+
+
+def list_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+    item_key: str | None = None,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询浏览器采集明细记录。limit=None 表示不限条数，返回全量。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                           shop_id, playbook_id, biz_date, item_key, item_key_values,
+                           item_hash, payload, record_status, first_seen_job_id,
+                           latest_seen_job_id, first_seen_at, latest_seen_at,
+                           captured_at, created_at, updated_at
+                    FROM browser_collection_records
+                    WHERE company_id = %s
+                      AND record_status <> 'deleted'
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                if item_key:
+                    sql += " AND item_key = %s"
+                    params.append(item_key)
+                for field_name, filter_value in _normalize_payload_filters(filters).items():
+                    if isinstance(filter_value, list):
+                        sql += " AND payload ->> %s = ANY(%s)"
+                        params.extend([field_name, [str(item) for item in filter_value]])
+                    else:
+                        sql += " AND payload ->> %s = %s"
+                        params.extend([field_name, str(filter_value)])
+                sql += " ORDER BY biz_date DESC, captured_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(
+            f"查询 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return []
+
+
 def _normalize_payload_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(filters, dict):
         return {}
