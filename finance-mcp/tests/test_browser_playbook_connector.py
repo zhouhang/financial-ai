@@ -171,6 +171,17 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     monkeypatch.setattr(data_sources.auth_db, "upsert_playbook", fake_upsert_playbook)
     monkeypatch.setattr(data_sources.auth_db, "upsert_shop_runtime_binding", fake_upsert_binding)
     monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kw: [
+            {
+                "id": "dataset-001",
+                "source_type": "browser_collection_records",
+                "publish_status": "published",
+            }
+        ],
+    )
 
     result = asyncio.run(
         data_sources._handle_data_source_register_browser_playbook(
@@ -193,3 +204,47 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     assert result["playbook"]["id"] == "playbook-001"
     assert result["binding"]["id"] == "binding-001"
     assert [item[0] for item in calls] == ["playbook", "binding"]
+
+
+def test_register_browser_playbook_rejects_when_no_published_dataset(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "source_kind": "browser_playbook",
+            "provider_code": "qianniu",
+        },
+    )
+    # No published browser_collection_records dataset for this source.
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kw: [],
+    )
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("upsert must not run when dataset prerequisite is missing")
+
+    monkeypatch.setattr(data_sources.auth_db, "upsert_playbook", fail_if_called)
+    monkeypatch.setattr(data_sources.auth_db, "upsert_shop_runtime_binding", fail_if_called)
+
+    result = asyncio.run(
+        data_sources._handle_data_source_register_browser_playbook(
+            {
+                "auth_token": "token",
+                "source_id": "source-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "version": "1.0.0",
+                "title": "千牛资金日账单",
+                "playbook_body": {"schema_version": "1.0"},
+                "shop_id": "shop-001",
+                "agent_id": "agent-001",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "browser_collection_records" in result["error"]

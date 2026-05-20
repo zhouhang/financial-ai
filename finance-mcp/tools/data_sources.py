@@ -6991,6 +6991,35 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     if str(source_row.get("source_kind") or "") != "browser_playbook":
         return {"success": False, "error": "仅 browser_playbook 数据源支持手动注册"}
 
+    # 首店 v1:数据集发布是 prerequisite,不是 playbook 注册的副产品。
+    # 没有 published browser_collection_records 数据集就让注册失败,避免出现
+    # "playbook 注册成功但采集结果没人能消费"的悬空状态。
+    datasets = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        only_published=True,
+    )
+
+    def _dataset_source_type(row: dict[str, Any]) -> str:
+        for candidate in (
+            row.get("source_type"),
+            row.get("dataset_source_type"),
+            (row.get("meta") or {}).get("source_type"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
+    has_browser_dataset = any(
+        _dataset_source_type(row) == "browser_collection_records" for row in datasets
+    )
+    if not has_browser_dataset:
+        return {
+            "success": False,
+            "error": "请先发布 browser_collection_records 数据集后再注册 playbook",
+        }
+
     playbook_id = str(arguments.get("playbook_id") or "").strip()
     version = str(arguments.get("version") or "").strip()
     title = str(arguments.get("title") or "").strip()
