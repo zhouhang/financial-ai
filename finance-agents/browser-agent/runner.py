@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,23 @@ from finance_browser_agent.quality_gate import validate_rows
 
 
 def run_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Entry point invoked by ``dispatcher_loop.BrowserDispatcherLoop`` for each claimed job.
+
+    Two execution modes:
+    - ``BROWSER_AGENT_RUNNER_MODE=playwright`` → real Chrome via Playwright persistent context
+      (production path; see ``playwright_runner.run_playbook_with_playwright``).
+    - default / "synthetic" → consume rows from ``params.rows`` or ``params.input_rows_path``;
+      used by unit tests and dry-runs without a browser. The playbook's quality_gate still runs.
+    """
+    mode = (os.getenv("BROWSER_AGENT_RUNNER_MODE", "").strip() or "synthetic").lower()
+    if mode == "playwright":
+        from finance_browser_agent.playwright_runner import run_playbook_with_playwright
+
+        return run_playbook_with_playwright(message)
+    return _run_synthetic(message)
+
+
+def _run_synthetic(message: dict[str, Any]) -> dict[str, Any]:
     playbook = dict(message.get("playbook_body") or {})
     validate_step_actions(list(playbook.get("steps") or []))
     output = dict(playbook.get("output") or {})
