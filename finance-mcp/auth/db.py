@@ -573,6 +573,8 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "waiting_reason",
             "waiting_datasets",
             "collection_job_ids",
+            "data_wait_resume_count",
+            "last_data_wait_resumed_at",
         ),
         "sync_jobs": (
             "next_retry_at",
@@ -6099,6 +6101,12 @@ def mark_recon_run_waiting_data(
 
 
 def requeue_ready_waiting_recon_runs() -> int:
+    """Resume waiting-data recon jobs without consuming business retry budget.
+
+    Bumps data_wait_resume_count and last_data_wait_resumed_at so operators can audit how
+    many times a recon job had to wait for browser data; current_attempt is left alone so
+    retries from real failures stay independent.
+    """
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -6109,6 +6117,8 @@ def requeue_ready_waiting_recon_runs() -> int:
                     SET status = 'queued',
                         next_retry_at = NULL,
                         waiting_reason = '',
+                        data_wait_resume_count = COALESCE(data_wait_resume_count, 0) + 1,
+                        last_data_wait_resumed_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND next_retry_at <= CURRENT_TIMESTAMP

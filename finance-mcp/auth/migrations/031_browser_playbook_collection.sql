@@ -315,7 +315,13 @@ ALTER TABLE public.recon_execution_queue
     ADD COLUMN IF NOT EXISTS wait_deadline_at timestamptz,
     ADD COLUMN IF NOT EXISTS waiting_reason text NOT NULL DEFAULT ''::text,
     ADD COLUMN IF NOT EXISTS waiting_datasets jsonb NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS collection_job_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+    ADD COLUMN IF NOT EXISTS collection_job_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+    -- Resume metadata is separate from business retry budget. A waiting_data → queued
+    -- transition triggered by data readiness is NOT a retry; it's the same logical recon
+    -- request finally getting its data. Bumping current_attempt here would conflate the
+    -- two and starve retries.
+    ADD COLUMN IF NOT EXISTS data_wait_resume_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_data_wait_resumed_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_recon_execution_queue_waiting_data
     ON public.recon_execution_queue (next_retry_at ASC)

@@ -64,6 +64,9 @@ def test_requeue_ready_waiting_requires_non_empty_collection_jobs(monkeypatch) -
     sql = "\n".join(cursor.sql)
     assert "jsonb_array_length(collection_job_ids) > 0" in sql
     assert "status = 'waiting_data'" in sql
+    # Resume metadata must be bumped independently of business retry budget.
+    assert "data_wait_resume_count" in sql
+    assert "last_data_wait_resumed_at" in sql
 
 
 def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_ids(monkeypatch) -> None:
