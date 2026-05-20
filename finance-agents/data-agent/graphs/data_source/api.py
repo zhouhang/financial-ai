@@ -17,6 +17,8 @@ from starlette.responses import RedirectResponse
 
 from tools.mcp_client import (
     data_source_authorize,
+    data_source_finalize_browser_playbook_registration,
+    data_source_register_browser_playbook,
     data_source_create,
     data_source_delete,
     data_source_disable_dataset,
@@ -429,6 +431,44 @@ class DataSourceTriggerSyncRequest(BaseModel):
     window_end: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
     mode: str = ""
+
+
+class BrowserPlaybookRegisterRequest(BaseModel):
+    playbook_id: str
+    version: str
+    title: str
+    playbook_body: dict[str, Any]
+    shop_id: str
+    agent_id: str
+    credential_username: str
+    credential_password: str
+    verification_biz_date: str
+    dataset_id: str = ""
+    egress_group: str = ""
+
+
+class BrowserPlaybookRegisterResponse(BaseModel):
+    success: bool
+    status: str = "verification_pending"
+    source_id: str
+    verification_sync_job_id: str = ""
+    verification_biz_date: str = ""
+    playbook: dict[str, Any] | None = None
+    binding: dict[str, Any] | None = None
+    message: str = ""
+
+
+class BrowserPlaybookFinalizeRequest(BaseModel):
+    verification_sync_job_id: str
+
+
+class BrowserPlaybookFinalizeResponse(BaseModel):
+    success: bool
+    playbook: dict[str, Any] | None = None
+    binding: dict[str, Any] | None = None
+    browser_fail_reason: str = ""
+    error_message: str = ""
+    message: str = ""
 
 
 class DataSourceSyncJobResponse(BaseModel):
@@ -914,6 +954,80 @@ async def test_data_source(
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "数据源测试失败"))
     return result
+
+
+@router.post(
+    "/data-sources/{source_id}/browser-playbook/register",
+    response_model=BrowserPlaybookRegisterResponse,
+)
+async def register_browser_playbook(
+    source_id: str,
+    body: BrowserPlaybookRegisterRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Submit playbook + merchant credentials + verification biz_date.
+
+    Tally writes draft playbook + verifying binding (KMS-encrypted credentials) and creates
+    a one-shot verification sync_job. Returns the sync_job id; UI polls via
+    ``GET /sync-jobs/{id}`` and calls ``/data-sources/browser-playbook/finalize`` on success.
+    """
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_register_browser_playbook(
+        auth_token,
+        source_id,
+        playbook_id=body.playbook_id,
+        version=body.version,
+        title=body.title,
+        playbook_body=body.playbook_body,
+        shop_id=body.shop_id,
+        agent_id=body.agent_id,
+        credential_username=body.credential_username,
+        credential_password=body.credential_password,
+        verification_biz_date=body.verification_biz_date,
+        dataset_id=body.dataset_id,
+        egress_group=body.egress_group,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=str(result.get("error") or "playbook 注册失败"))
+    return BrowserPlaybookRegisterResponse(
+        success=True,
+        status=str(result.get("status") or "verification_pending"),
+        source_id=source_id,
+        verification_sync_job_id=str(result.get("verification_sync_job_id") or ""),
+        verification_biz_date=str(result.get("verification_biz_date") or body.verification_biz_date),
+        playbook=result.get("playbook"),
+        binding=result.get("binding"),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.post(
+    "/data-sources/browser-playbook/finalize",
+    response_model=BrowserPlaybookFinalizeResponse,
+)
+async def finalize_browser_playbook(
+    body: BrowserPlaybookFinalizeRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_finalize_browser_playbook_registration(
+        auth_token,
+        verification_sync_job_id=body.verification_sync_job_id,
+    )
+    return BrowserPlaybookFinalizeResponse(
+        success=bool(result.get("success")),
+        playbook=result.get("playbook"),
+        binding=result.get("binding"),
+        browser_fail_reason=str(result.get("browser_fail_reason") or ""),
+        error_message=str(result.get("error_message") or result.get("error") or ""),
+        message=str(result.get("message") or ""),
+    )
 
 
 @router.post("/data-sources/{source_id}/authorize", response_model=DataSourceAuthorizeResponse)

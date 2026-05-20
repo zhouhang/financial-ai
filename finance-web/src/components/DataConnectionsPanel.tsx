@@ -32,6 +32,7 @@ import {
   saveCollaborationChannelDrafts,
 } from '../collaborationChannelDrafts';
 import { SOURCE_TYPE_CARDS, sourceKindLabel } from '../dataSourceConfig';
+import { BrowserPlaybookPanel } from './BrowserPlaybookPanel';
 import type {
   AuthCallbackPayload,
   CollaborationChannelListItem,
@@ -1462,7 +1463,7 @@ function stabilizeDatasetRowOrder(
 }
 
 function isSourceKind(value: string): value is DataSourceKind {
-  return ['platform_oauth', 'database', 'api', 'file', 'browser', 'desktop_cli'].includes(value);
+  return ['platform_oauth', 'database', 'api', 'file', 'browser_playbook', 'browser', 'desktop_cli'].includes(value);
 }
 
 function inferDatabaseType(providerCode: string, dbType?: string): string {
@@ -2238,7 +2239,7 @@ function sourceKindIcon(kind: DataSourceKind) {
   if (kind === 'database') return <Database className="h-4 w-4" />;
   if (kind === 'api') return <Globe className="h-4 w-4" />;
   if (kind === 'file') return <FileSpreadsheet className="h-4 w-4" />;
-  if (kind === 'browser') return <MonitorSmartphone className="h-4 w-4" />;
+  if (kind === 'browser_playbook' || kind === 'browser') return <MonitorSmartphone className="h-4 w-4" />;
   return <Cpu className="h-4 w-4" />;
 }
 
@@ -8507,7 +8508,7 @@ export default function DataConnectionsPanel({
     );
   };
 
-  const renderReservedPanel = (kind: Extract<DataSourceKind, 'browser' | 'desktop_cli'>) => {
+  const renderReservedPanel = (kind: Extract<DataSourceKind, 'browser_playbook' | 'browser' | 'desktop_cli'>) => {
     const currentCard = SOURCE_TYPE_CARDS.find((item) => item.source_kind === kind);
     return (
       <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -9892,6 +9893,9 @@ export default function DataConnectionsPanel({
     }
     if (selectedSourceKind === 'database' || selectedSourceKind === 'api' || selectedSourceKind === 'file') {
       return renderSourceList(selectedSourceKind);
+    }
+    if (selectedSourceKind === 'browser_playbook') {
+      return <BrowserPlaybookPanel authToken={authToken} />;
     }
     return renderReservedPanel(selectedSourceKind);
   };

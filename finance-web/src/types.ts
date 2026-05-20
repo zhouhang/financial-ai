@@ -173,6 +173,7 @@ export type DataSourceKind =
   | 'database'
   | 'api'
   | 'file'
+  | 'browser_playbook'
   | 'browser'
   | 'desktop_cli';
 

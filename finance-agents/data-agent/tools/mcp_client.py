@@ -3451,6 +3451,73 @@ async def data_source_test(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_register_browser_playbook(
+    auth_token: str,
+    source_id: str,
+    *,
+    playbook_id: str,
+    version: str,
+    title: str,
+    playbook_body: dict[str, Any],
+    shop_id: str,
+    agent_id: str,
+    credential_username: str,
+    credential_password: str,
+    verification_biz_date: str,
+    dataset_id: str = "",
+    egress_group: str = "",
+) -> dict[str, Any]:
+    """Wrap finance-mcp's browser playbook registration tool.
+
+    Returns ``{success, status:'verification_pending', verification_sync_job_id, ...}``
+    on accept. The frontend then polls the verification sync_job status and calls
+    ``data_source_finalize_browser_playbook_registration`` after success.
+    """
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_register_browser_playbook",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "playbook_id": playbook_id,
+            "version": version,
+            "title": title,
+            "playbook_body": playbook_body,
+            "shop_id": shop_id,
+            "agent_id": agent_id,
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "verification_biz_date": verification_biz_date,
+            "dataset_id": dataset_id,
+            "egress_group": egress_group,
+        },
+    )
+
+
+async def data_source_finalize_browser_playbook_registration(
+    auth_token: str,
+    *,
+    verification_sync_job_id: str,
+) -> dict[str, Any]:
+    """Activate playbook + binding after the verification sync_job succeeded."""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not verification_sync_job_id:
+        return {"success": False, "error": "verification_sync_job_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_finalize_browser_playbook_registration",
+        {
+            "auth_token": auth_token,
+            "verification_sync_job_id": verification_sync_job_id,
+        },
+    )
+
+
 async def data_source_authorize(
     auth_token: str,
     source_id: str,
