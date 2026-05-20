@@ -28,16 +28,24 @@ First-store v1 requires manual data-source dataset publication before collection
 ## Playbook Registration And First-Time Verification (v1)
 
 First login is **not** an operator action on the collection machine. It is part of Playbook
-Registration in **finance-web's 数据连接 → 浏览器抓取 page** (`BrowserPlaybookPanel`):
+Registration in **finance-web's 数据连接 → 浏览器 page** (`BrowserPlaybookPanel`):
 
 1. Operator generates the playbook JSON with Claude Code or codex (v1) — local AI coding tool flow, not a production component.
-2. Operator opens the **浏览器抓取** tab in 数据连接 (this card reuses the slot previously occupied by the
+2. Operator opens the **浏览器** tab in 数据连接 (this card reuses the slot previously occupied by the
    legacy `source_kind='browser'` reserved placeholder; v1 replaces the placeholder with real UI).
    The panel form takes:
    - `playbook_body` (paste the JSON)
    - merchant-issued sub-account `username` / `password` for the shop (具备订单和资金数据下载权限)
    - `biz_date` for the verification dry-run (default = most recent T-1)
-   - `shop_id` / `agent_id` / `egress_group` and a pre-published browser dataset to land into.
+   - a pre-published browser dataset to land into (dropdown);
+     `egress_group` is optional.
+   - **`shop_id` / `agent_id` are not asked**:
+     - `shop_id` is derived server-side from `data_source.code` (one data source = one shop in this design).
+     - `agent_id` is picked server-side from the registered collection agents pool;
+       v1 has a single node, so the env default `BROWSER_AGENT_DEFAULT_AGENT_ID`
+       (fallback `browser-agent-local`) is used. Tally drops the verification +
+       production sync_jobs into the queue and whichever agent services that
+       `agent_id` picks them up.
 3. Submitting calls `POST /api/data-sources/{source_id}/browser-playbook/register`, which proxies to the
    MCP tool `data_source_register_browser_playbook`. Tally Cloud writes `playbooks`
    (`status='draft'`) and `shop_runtime_bindings` (`profile_status='verifying'`,

@@ -106,7 +106,7 @@ This plan does not auto-create or auto-publish datasets after collection. It add
 
 The first-store onboarding flow needs a real UI — operator cannot persist merchant credentials
 through MCP / CLI tools alone. v1 ships **`finance-web/src/components/BrowserPlaybookPanel.tsx`**,
-mounted on the `数据连接 → 浏览器抓取` card. This card **reuses the slot previously held by
+mounted on the `数据连接 → 浏览器` card. This card **reuses the slot previously held by
 the legacy `source_kind='browser'` placeholder**: the placeholder card text is gone, the slot
 now renders the real `browser_playbook` registration / verification / activation form.
 

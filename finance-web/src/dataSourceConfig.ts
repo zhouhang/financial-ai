@@ -49,8 +49,8 @@ export const SOURCE_TYPE_CARDS: SourceTypeCard[] = [
   },
   {
     source_kind: 'browser_playbook',
-    title: '浏览器抓取',
-    description: '确定性 Playbook 浏览器采集（千牛、淘宝等）。注册时填入商家凭证，触发首次验证 dry-run，通过后激活。',
+    title: '浏览器',
+    description: '确定性 Playbook 浏览器采集（千牛、淘宝等）。注册时填入商家凭证 + playbook,自动触发首次验证 dry-run,通过后激活。',
     execution_mode: 'deterministic',
     provider_code: 'qianniu',
     behavior: 'managed',
@@ -72,8 +72,8 @@ export function sourceKindLabel(kind: DataSourceKind): string {
   if (kind === 'database') return '数据库';
   if (kind === 'api') return 'API';
   if (kind === 'file') return '文件';
-  if (kind === 'browser_playbook') return '浏览器抓取';
-  if (kind === 'browser') return '浏览器（预留）';
+  if (kind === 'browser_playbook') return '浏览器';
+  if (kind === 'browser') return '浏览器（旧占位）';
   if (kind === 'desktop_cli') return '客户端/CLI';
   return kind;
 }

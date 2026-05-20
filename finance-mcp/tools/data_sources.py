@@ -5348,7 +5348,7 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="data_source_register_browser_playbook",
-            description="注册 browser_playbook 数据源的 playbook + 商家凭证,落 draft + verifying,触发首次验证 sync_job。验证通过后调 data_source_finalize_browser_playbook_registration 激活。",
+            description="注册 browser_playbook 数据源的 playbook + 商家凭证,落 draft + verifying,触发首次验证 sync_job。验证通过后调 data_source_finalize_browser_playbook_registration 激活。shop_id 默认取 data_source.code,agent_id 默认取 env BROWSER_AGENT_DEFAULT_AGENT_ID;Operator 通常不需要传。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5375,8 +5375,6 @@ def create_tools() -> list[Tool]:
                     "version",
                     "title",
                     "playbook_body",
-                    "shop_id",
-                    "agent_id",
                     "credential_username",
                     "credential_password",
                     "verification_biz_date",
@@ -7085,13 +7083,24 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     if not playbook_id or not version or not title or not playbook_body:
         return {"success": False, "error": "playbook_id/version/title/playbook_body 不能为空"}
 
-    shop_id = str(arguments.get("shop_id") or "").strip()
-    agent_id = str(arguments.get("agent_id") or "").strip()
+    # shop_id / agent_id are server-derived in v1:
+    #   - shop_id ← data_source.code (one data_source row = one shop in this design;
+    #     the code is the shop's stable human-readable id, e.g. 'qianniu-shop-001').
+    #   - agent_id ← env BROWSER_AGENT_DEFAULT_AGENT_ID (single-node v1); falls back to
+    #     'browser-agent-local'. Operators don't pick the agent; Tally drops the
+    #     verification + production sync_jobs into the queue and whichever agent
+    #     services that agent_id picks them up.
+    # Operator may still pass an explicit override (e.g. for multi-node testing),
+    # but the UI never exposes the field.
+    shop_id = str(arguments.get("shop_id") or "").strip() or str(source_row.get("code") or "").strip() or source_id
+    agent_id = (
+        str(arguments.get("agent_id") or "").strip()
+        or os.getenv("BROWSER_AGENT_DEFAULT_AGENT_ID", "").strip()
+        or "browser-agent-local"
+    )
     credential_username = str(arguments.get("credential_username") or "").strip()
     credential_password = str(arguments.get("credential_password") or "")
     verification_biz_date = str(arguments.get("verification_biz_date") or "").strip()
-    if not shop_id or not agent_id:
-        return {"success": False, "error": "shop_id 和 agent_id 不能为空"}
     if not credential_username or not credential_password:
         return {
             "success": False,

@@ -56,16 +56,22 @@ landing dataset for collected rows; without it, registration is rejected.
 
 ### Step 3 — Register playbook + credentials + run synchronous verification
 
-Open finance-web → **数据连接 → 浏览器抓取**(`BrowserPlaybookPanel`). This card reuses the slot previously occupied by the legacy `source_kind='browser'` placeholder; in v1 it is the actual registration UI.
+Open finance-web → **数据连接 → 浏览器**(`BrowserPlaybookPanel`). This card reuses the slot previously occupied by the legacy `source_kind='browser'` placeholder; in v1 it is the actual registration UI.
 
 In the form, submit:
-- `source_id` (the merchant's browser_playbook data source)
+- `source_id` (the merchant's browser_playbook data source — picked from the dropdown)
 - `playbook_id`, `version`, `title`, `playbook_body` (from Step 1)
-- `shop_id`, `agent_id` (the collection machine that owns this shop)
 - `credential_username` + `credential_password` (merchant-issued sub-account with order/fund
   download permissions). These are stored KMS-encrypted; only `credential_ref` is exposed in
   any read path.
 - `verification_biz_date` (default: most recent T-1)
+- a published browser dataset to land into (dropdown).
+- `egress_group` (optional).
+
+> `shop_id` and `agent_id` are **not** in the form. `shop_id` is derived from
+> `data_source.code` server-side; `agent_id` defaults to env `BROWSER_AGENT_DEFAULT_AGENT_ID`
+> (fallback `browser-agent-local`). The single-node v1 doesn't need operator-driven agent
+> picking; Tally queues the sync_job and the registered agent claims it.
 
 Submitting the form calls `POST /api/data-sources/{source_id}/browser-playbook/register`,
 which:
@@ -127,6 +133,8 @@ Do **not** keep retrying scheduled collection automatically while the binding is
 - One-off creation of a new persistent profile by hand. There is no such flow in v1; the
   profile is created server-side as a byproduct of the verification dry-run.
 - Operator selection of a specific collection agent. The Tally backend resolves this via
-  `shop_runtime_bindings.agent_id` configured at registration time.
+  `shop_runtime_bindings.agent_id`, defaulted server-side from env
+  `BROWSER_AGENT_DEFAULT_AGENT_ID` at registration time. v1 is single-node; multi-node
+  agent-assignment is a v2 concern.
 - Credential rotation. See the main spec's "凭证轮换与回收" section; rotation reuses the
   registration endpoint to re-verify with the new credentials before activating.

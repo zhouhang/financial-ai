@@ -164,6 +164,7 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
         lambda *, company_id, data_source_id: {
             "id": data_source_id,
             "company_id": company_id,
+            "code": "qianniu-shop-001",
             "source_kind": "browser_playbook",
             "provider_code": "qianniu",
         },
@@ -210,6 +211,7 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
         fake_insert_verification,
     )
 
+    # Operator does NOT pass shop_id or agent_id — backend derives both. v1 UI never asks.
     result = asyncio.run(
         data_sources._handle_data_source_register_browser_playbook(
             {
@@ -219,8 +221,6 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
                 "version": "1.0.0",
                 "title": "千牛资金日账单",
                 "playbook_body": {"schema_version": "1.0"},
-                "shop_id": "shop-001",
-                "agent_id": "agent-001",
                 "credential_username": "biz-sub-001",
                 "credential_password": "p@ss",
                 "verification_biz_date": "2026-05-19",
@@ -237,11 +237,68 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     binding_kwargs = next(item for kind, item in calls if kind == "binding")
     assert playbook_kwargs["status"] == "draft"
     assert binding_kwargs["profile_status"] == "verifying"
+    # shop_id derived from data_source.code; agent_id from env default.
+    assert binding_kwargs["shop_id"] == "qianniu-shop-001"
+    assert binding_kwargs["agent_id"] == "browser-agent-local"
     # Credentials encrypted, not stored as plaintext anywhere in the call args.
     assert binding_kwargs["credential_ref"].startswith("sealed:")
     assert "p@ss" not in str(binding_kwargs)
     assert inserted_verification["request_payload"]["verification"] is True
     assert inserted_verification["request_payload"]["playbook_id"] == "qianniu-daily-bill-export"
+
+
+def test_register_browser_playbook_respects_env_default_agent_id(monkeypatch) -> None:
+    """BROWSER_AGENT_DEFAULT_AGENT_ID env var overrides the built-in 'browser-agent-local' fallback."""
+    monkeypatch.setenv("BROWSER_AGENT_DEFAULT_AGENT_ID", "browser-agent-prod-1")
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: {
+            "id": data_source_id,
+            "code": "qianniu-shop-xyz",
+            "source_kind": "browser_playbook",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kw: [{"id": "dataset-001", "source_type": "browser_collection_records"}],
+    )
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+    monkeypatch.setattr(data_sources.auth_db, "_seal_json_payload", lambda p: "sealed")
+    monkeypatch.setattr(data_sources.auth_db, "upsert_playbook", lambda **kw: {"id": "p1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_shop_runtime_binding",
+        lambda **kw: captured.update(kw) or {"id": "b1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "insert_browser_verification_sync_job",
+        lambda **kw: {"id": "v1"},
+    )
+
+    asyncio.run(
+        data_sources._handle_data_source_register_browser_playbook(
+            {
+                "auth_token": "tok",
+                "source_id": "source-001",
+                "playbook_id": "pb",
+                "version": "1.0.0",
+                "title": "t",
+                "playbook_body": {"schema_version": "1.0"},
+                "credential_username": "u",
+                "credential_password": "p",
+                "verification_biz_date": "2026-05-19",
+            }
+        )
+    )
+
+    assert captured["agent_id"] == "browser-agent-prod-1"
+    assert captured["shop_id"] == "qianniu-shop-xyz"
 
 
 def test_browser_dataset_collection_rejects_unhealthy_binding_before_sync_job(monkeypatch) -> None:

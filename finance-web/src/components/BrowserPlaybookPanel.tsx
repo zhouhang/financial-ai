@@ -87,13 +87,13 @@ export function BrowserPlaybookPanel({ authToken }: BrowserPlaybookPanelProps) {
   const [version, setVersion] = useState('1.0.0');
   const [title, setTitle] = useState('千牛资金日账单');
   const [playbookBodyText, setPlaybookBodyText] = useState('');
-  const [shopId, setShopId] = useState('');
-  const [agentId, setAgentId] = useState('browser-agent-local');
   const [egressGroup, setEgressGroup] = useState('');
   const [credentialUsername, setCredentialUsername] = useState('');
   const [credentialPassword, setCredentialPassword] = useState('');
   const [verificationBizDate, setVerificationBizDate] = useState(yesterday());
   const [datasetId, setDatasetId] = useState('');
+  // shop_id is derived server-side from data_source.code; agent_id is picked server-side
+  // from the registered agents pool (single-node v1). Operators don't see either.
 
   const [submitting, setSubmitting] = useState(false);
   const [registerResult, setRegisterResult] = useState<RegisterResponse | null>(null);
@@ -228,8 +228,8 @@ export function BrowserPlaybookPanel({ authToken }: BrowserPlaybookPanelProps) {
           version,
           title,
           playbook_body: parsedBody,
-          shop_id: shopId,
-          agent_id: agentId,
+          // shop_id 与 agent_id 由服务端派生:shop_id 取自 data_source.code,
+          // agent_id 取自后端默认采集节点配置(v1 单节点)。
           credential_username: credentialUsername,
           credential_password: credentialPassword,
           verification_biz_date: verificationBizDate,
@@ -259,8 +259,6 @@ export function BrowserPlaybookPanel({ authToken }: BrowserPlaybookPanelProps) {
     playbookId,
     version,
     title,
-    shopId,
-    agentId,
     credentialUsername,
     credentialPassword,
     verificationBizDate,
@@ -385,8 +383,6 @@ export function BrowserPlaybookPanel({ authToken }: BrowserPlaybookPanelProps) {
           <Field label="playbook_id" value={playbookId} onChange={setPlaybookId} />
           <Field label="version" value={version} onChange={setVersion} />
           <Field label="title" value={title} onChange={setTitle} />
-          <Field label="shop_id" value={shopId} onChange={setShopId} />
-          <Field label="agent_id" value={agentId} onChange={setAgentId} />
           <Field label="egress_group(可选)" value={egressGroup} onChange={setEgressGroup} />
           <Field
             label="子账号 username(商家分配)"

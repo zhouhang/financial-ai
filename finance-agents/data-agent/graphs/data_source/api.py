@@ -438,11 +438,13 @@ class BrowserPlaybookRegisterRequest(BaseModel):
     version: str
     title: str
     playbook_body: dict[str, Any]
-    shop_id: str
-    agent_id: str
     credential_username: str
     credential_password: str
     verification_biz_date: str
+    # shop_id / agent_id are server-derived in v1 (data_source.code + env default);
+    # operators don't fill them. Kept as optional overrides for testing/multi-node.
+    shop_id: str = ""
+    agent_id: str = ""
     dataset_id: str = ""
     egress_group: str = ""
 

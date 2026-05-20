@@ -3459,11 +3459,11 @@ async def data_source_register_browser_playbook(
     version: str,
     title: str,
     playbook_body: dict[str, Any],
-    shop_id: str,
-    agent_id: str,
     credential_username: str,
     credential_password: str,
     verification_biz_date: str,
+    shop_id: str = "",
+    agent_id: str = "",
     dataset_id: str = "",
     egress_group: str = "",
 ) -> dict[str, Any]:
