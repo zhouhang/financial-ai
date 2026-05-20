@@ -1880,9 +1880,14 @@ def validate_dataset_completeness_node(state: AgentState) -> dict[str, Any]:
 
     required_missing = [b for b in missing_bindings if _get_binding_required(b)]
     if required_missing:
+        # 只有真正在浏览器采集 pending/running 中的 binding 才算 waiting_data。
+        # 非 browser_playbook_remote 的 binding 哪怕带了 waiting_data 字段也不能拖
+        # 整个对账任务进 waiting_data —— 否则数据库类数据源缺数据时也会被错误地
+        # 推入 waiting_data 队列,等不到事件唤醒。
         waiting_bindings = [
             b for b in required_missing
             if bool(b.get("waiting_data"))
+            and str(b.get("collection_driver") or "") == _BROWSER_COLLECTION_DRIVER
         ]
         if waiting_bindings and len(waiting_bindings) == len(required_missing):
             ctx["waiting_data"] = True

@@ -138,9 +138,10 @@ async def main() -> None:
         # 每 2 小时刷新一次系统令牌，避免过期
         system_token = _create_system_token()
 
+        # Waiting-data 调和(requeue ready / fail expired / fail failed)从 v2 起由
+        # browser-agent 的 _waiting_reconciler 单点拥有,这里不再 per-worker 重复轮询。
+        # recon-worker 只负责 dequeue 自己的 queued job、跑、必要时 park 到 waiting_data。
         try:
-            await recon_queue_requeue_ready_waiting(system_token)
-            await recon_queue_fail_expired_waiting(system_token)
             result = await recon_queue_dequeue(system_token)
             job = (result or {}).get("job")
             if job:

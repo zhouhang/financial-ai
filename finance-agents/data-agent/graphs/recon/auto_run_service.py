@@ -930,23 +930,28 @@ async def execute_auto_task_run(
             "missing_bindings": missing_bindings,
         }
 
-    if any(
-        str(item.get("collection_driver") or "") == "browser_playbook_remote"
-        and bool(item.get("queued"))
+    browser_queued = [
+        item
         for item in source_collections
-    ):
+        if str(item.get("collection_driver") or "") == "browser_playbook_remote"
+        and bool(item.get("queued"))
+    ]
+    if browser_queued:
+        # waiting_datasets 必须只包含真正在等浏览器采集的 dataset,
+        # 否则其他 driver 的 binding 会被一起塞进 waiting_data 上下文,导致 poller
+        # 无法判断"这条对账真正在等什么"。
         waiting_datasets = [
             {
-                "data_source_id": str(binding.get("data_source_id") or ""),
-                "dataset_id": str(binding.get("dataset_id") or ""),
+                "data_source_id": str(item.get("data_source_id") or item.get("binding", {}).get("data_source_id") or ""),
+                "dataset_id": str(item.get("dataset_id") or item.get("binding", {}).get("dataset_id") or ""),
                 "biz_date": normalized_biz_date,
             }
-            for binding in bindings
+            for item in browser_queued
         ]
         collection_job_ids = [
-            str(attempt.get("job_id") or attempt.get("id") or "")
-            for attempt in collection_attempts
-            if str(attempt.get("job_id") or attempt.get("id") or "")
+            str(item.get("job_id") or item.get("id") or "")
+            for item in browser_queued
+            if str(item.get("job_id") or item.get("id") or "")
         ]
         return {
             "success": False,
