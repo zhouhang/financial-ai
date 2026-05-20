@@ -124,6 +124,12 @@ class FakeDb:
         )
         return {"id": sync_job_id, "job_status": "failed"}
 
+    def insert_browser_capture_files(self, **kwargs: Any) -> dict[str, Any]:
+        if not hasattr(self, "capture_files"):
+            self.capture_files = []
+        self.capture_files.append(kwargs)
+        return {"inserted_count": len(kwargs.get("capture_files") or [])}
+
 
 def test_dispatcher_writes_success_records() -> None:
     fake_db = FakeDb()
@@ -188,4 +194,32 @@ def test_dispatcher_marks_runner_failure() -> None:
     assert result["status"] == "failed"
     assert result["reason"] == "PAGE_CHANGED"
     assert fake_db.failures[0]["fail_reason"] == "PAGE_CHANGED"
+
+
+def test_dispatcher_persists_capture_files() -> None:
+    fake_db = FakeDb()
+    manager = FakeAgentConnectionManager()
+    manager.register_result(
+        "agent-001",
+        {
+            "job_id": "job-001",
+            "status": "success",
+            "records": [],
+            "capture_files": [
+                {
+                    "storage_path": "/tmp/qn.csv",
+                    "encoding": "utf-8",
+                    "checksum": "sha256:abc",
+                    "row_count": 0,
+                }
+            ],
+        },
+    )
+
+    dispatcher = BrowserPlaybookDispatcher(db=fake_db, connections=manager)
+    dispatcher.run_once()
+
+    assert hasattr(fake_db, "capture_files")
+    assert fake_db.capture_files[0]["sync_job_id"] == "job-001"
+    assert fake_db.capture_files[0]["capture_files"][0]["storage_path"] == "/tmp/qn.csv"
 

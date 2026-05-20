@@ -7003,6 +7003,76 @@ def upsert_browser_collection_records(
         raise
 
 
+def insert_browser_capture_files(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    sync_job_id: str,
+    resource_key: str,
+    shop_id: str,
+    playbook_id: str,
+    biz_date: str,
+    capture_files: list[dict],
+) -> dict:
+    """Persist browser-agent capture file metadata as audit artifacts.
+
+    Original downloaded files (CSV / Excel) are referenced by storage_path; this table only
+    stores metadata + checksum so operators can audit "what file was downloaded for which
+    sync_job on which biz_date".
+    """
+    files = list(capture_files or [])
+    if not files:
+        return {"inserted_count": 0}
+
+    rows: list[tuple] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        storage_path = str(entry.get("storage_path") or "").strip()
+        if not storage_path:
+            continue
+        rows.append(
+            (
+                company_id,
+                data_source_id,
+                dataset_id or None,
+                sync_job_id or None,
+                resource_key,
+                shop_id,
+                playbook_id,
+                biz_date or None,
+                storage_path,
+                str(entry.get("encoding") or ""),
+                str(entry.get("checksum") or ""),
+                int(entry.get("row_count") or 0),
+            )
+        )
+    if not rows:
+        return {"inserted_count": 0}
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO browser_capture_files (
+                        company_id, data_source_id, dataset_id, sync_job_id, resource_key,
+                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count
+                    ) VALUES %s
+                    """,
+                    rows,
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s)",
+                )
+                conn.commit()
+        return {"inserted_count": len(rows)}
+    except Exception as e:
+        logger.error(f"insert_browser_capture_files 失败: {e}")
+        raise
+
+
 def list_browser_collection_records(
     *,
     company_id: str,

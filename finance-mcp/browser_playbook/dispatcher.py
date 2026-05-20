@@ -74,6 +74,19 @@ class BrowserPlaybookDispatcher:
             sync_job_id=str(job["id"]),
             records=list(result.get("records") or []),
         )
+        file_summary = self.db.insert_browser_capture_files(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=str(payload.get("dataset_id") or ""),
+            sync_job_id=str(job["id"]),
+            resource_key=str(job.get("resource_key") or ""),
+            shop_id=str(binding["shop_id"]),
+            playbook_id=str(playbook["playbook_id"]),
+            biz_date=str(payload.get("biz_date") or ""),
+            capture_files=list(result.get("capture_files") or []),
+        )
+        summary = dict(summary or {})
+        summary["capture_file_count"] = int((file_summary or {}).get("inserted_count") or 0)
         self.db.mark_browser_sync_job_success(sync_job_id=str(job["id"]), summary=summary)
         return {"status": "success", "summary": summary}
 
