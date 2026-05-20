@@ -12,16 +12,20 @@ that wiring actually drives a real merchant browser session against the real fun
 
 - [ ] Collection machine passes `scripts/check_environment.py` (all four boolean fields true,
       `font_probe="ok"`, `timezone_id="Asia/Shanghai"`).
-- [ ] First-login SOP completed for the test shop; persistent profile exists at
-      `/var/lib/tally-agent/profiles/<shop_id>/` and contains an authenticated session.
+- [ ] `START_ALL_SERVICES.sh` starts browser-agent without errors.
 - [ ] One `browser_playbook` data source row exists for the test shop.
 - [ ] One **published** `data_source_datasets` row exists for that source with
       `source_type='browser_collection_records'`.
-- [ ] One `playbooks` row exists with `status='active'` for `playbook_id` matching the binding.
-- [ ] One `shop_runtime_bindings` row exists with
-      `profile_status='active'` and `playbook_status='ok'` and
-      `agent_id` matching the collection machine.
-- [ ] `START_ALL_SERVICES.sh` starts browser-agent without errors.
+- [ ] **Playbook registration + first-time verification flow completed for the test shop** —
+      see `2026-05-20-browser-agent-first-login-sop.md`. Operator submitted playbook +
+      merchant credentials via `data_source_register_browser_playbook`; the synchronous
+      verification dry-run returned success; both rows are now active automatically:
+  - [ ] `playbooks.status='active'` (set by the verification flow, not by hand)
+  - [ ] `shop_runtime_bindings.profile_status='active'`, `playbook_status='ok'`,
+        `credential_ref` populated (set by the verification flow, not by hand)
+  - [ ] `shop_runtime_bindings.agent_id` matches the collection machine running browser-agent
+  - [ ] The persistent profile under `/var/lib/tally-agent/profiles/<shop_id>/` was created
+        as a byproduct of the verification dry-run (operator did NOT SSH the box manually)
 
 ## Live-Run Evidence
 

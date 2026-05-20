@@ -25,6 +25,47 @@ Database, platform OAuth, and API collection remain unchanged. They may continue
 
 First-store v1 requires manual data-source dataset publication before collection. The browser-agent writes into the existing dataset id supplied by the queued sync job. Automatic dataset publication is deferred.
 
+## Playbook Registration And First-Time Verification (v1)
+
+First login is **not** an operator action on the collection machine. It is part of Playbook
+Registration in the Tally backend:
+
+1. Operator generates the playbook JSON with Claude Code or codex (v1) — local AI coding tool flow, not a production component.
+2. Operator submits via the `data_source_register_browser_playbook` MCP tool with:
+   - `playbook_body` (the JSON)
+   - merchant-issued sub-account `username` / `password` for the shop (具备订单和资金数据下载权限)
+   - `biz_date` for the verification dry-run (default = most recent T-1)
+3. Tally Cloud writes `playbooks` row (`status='draft'`) and `shop_runtime_bindings`
+   (`profile_status='verifying'`, `credential_ref=<KMS-encrypted>`) **first**, then triggers
+   one synchronous browser sync_job marked `verification=true`. browser-agent claims it,
+   logs in with the supplied credentials, runs the playbook, returns the result.
+4. On success → `playbooks.status='active'` and `shop_runtime_bindings.profile_status='active'`
+   atomically. The persistent profile is now on the collection machine and production cron
+   can claim subsequent jobs for this shop.
+5. On failure → the failure reason (`AUTH_EXPIRED` / `PAGE_CHANGED` / `DATA_MISMATCH` /
+   `RISK_VERIFICATION`) is returned to the operator UI with actionable next steps. Binding
+   stays `verifying` (or moves to `risk_blocked` for RISK_VERIFICATION) — playbook never goes
+   active without a green dry-run.
+
+The collection machine therefore needs **no SSH access** and **no operator-driven local
+login** during normal onboarding. The only time someone touches the machine directly is the
+RISK_VERIFICATION fallback path (noVNC deferred for v1; operator goes to the box to clear a
+slider once).
+
+Production collection ships the same `(playbook + credential_ref)` pair via the RUN_PLAYBOOK
+message. browser-agent prefers the persistent profile (already logged in from the
+verification dry-run) and only re-uses the plaintext credentials when the profile is missing
+or stale.
+
+## Authoring Worker v2 (Out Of Scope For First-Store)
+
+After first-store stabilizes, `finance-authoring/` becomes a long-running worker that
+**wraps Claude Agent SDK + DeepSeek-V4 Pro** to provide the same natural-language → playbook
+experience as the v1 Claude-Code / codex flow, but inside the Tally web UI. Operators
+no longer rely on a local AI IDE. The first-time verification path stays the same — Authoring
+Worker hands the freshly-synthesized playbook to the existing registration endpoint, which
+runs the same synchronous verification dry-run before activation.
+
 ## Deferred
 
 - Full WS runner protocol with HELLO/HEARTBEAT/ack lease.
