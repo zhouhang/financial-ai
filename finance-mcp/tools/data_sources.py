@@ -55,6 +55,7 @@ SOURCE_KINDS = {
     "api",
     "file",
     "browser",
+    "browser_playbook",
     "desktop_cli",
 }
 
@@ -1903,6 +1904,7 @@ def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> boo
 COLLECTION_DRIVER_DB_QUERY = "db_query"
 COLLECTION_DRIVER_TAOBAO_ORDER_API = "taobao_order_api"
 COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT = "alipay_bill_download_import"
+COLLECTION_DRIVER_BROWSER_PLAYBOOK = "browser_playbook_remote"
 
 
 def _collection_config_value(dataset_row: dict[str, Any] | None, *keys: str) -> str:
@@ -1948,6 +1950,8 @@ def _resolve_collection_driver(
 
     source_kind = _safe_text(source.get("source_kind") or dataset.get("source_kind")).lower()
     provider_code = _safe_text(source.get("provider_code") or dataset.get("provider_code")).lower()
+    if source_kind == "browser_playbook":
+        return COLLECTION_DRIVER_BROWSER_PLAYBOOK
     if source_kind == "database":
         return COLLECTION_DRIVER_DB_QUERY
     if source_kind == "platform_oauth" and provider_code in {"taobao", "tmall"}:
@@ -7555,6 +7559,7 @@ async def _handle_data_source_trigger_sync(
     resource_key = _resource_key_from_args(arguments)
     window_start, window_end = _window_from_args(arguments)
     params = dict(arguments.get("params") or {})
+    collection_driver = _safe_text(params.get("collection_driver"))
     idempotency_key = _safe_text(arguments.get("idempotency_key"))
     if idempotency_key:
         existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
@@ -7676,6 +7681,17 @@ async def _handle_data_source_trigger_sync(
     if not attempt:
         return {"success": False, "error": "创建同步任务尝试失败"}
 
+    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+        return {
+            "success": True,
+            "source_id": source_id,
+            "job": _attach_aliases_to_job(auth_db.get_unified_sync_job_by_id(str(job["id"])) or job),
+            "reused": False,
+            "queued": True,
+            "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+            "message": "浏览器采集任务已创建，等待 Production Push Dispatcher 执行",
+        }
+
     execute_kwargs = {
         "company_id": company_id,
         "source_id": source_id,
@@ -7783,6 +7799,7 @@ async def _trigger_dataset_collection_resolved(
     uses_driver_managed_storage = collection_driver in {
         COLLECTION_DRIVER_TAOBAO_ORDER_API,
         COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT,
+        COLLECTION_DRIVER_BROWSER_PLAYBOOK,
     }
     if not key_fields and not uses_driver_managed_storage:
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
