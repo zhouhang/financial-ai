@@ -5916,6 +5916,8 @@ def requeue_ready_waiting_recon_runs() -> int:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND next_retry_at <= CURRENT_TIMESTAMP
+                      AND jsonb_typeof(collection_job_ids) = 'array'
+                      AND jsonb_array_length(collection_job_ids) > 0
                       AND NOT EXISTS (
                           SELECT 1
                           FROM jsonb_array_elements_text(collection_job_ids) job_id
@@ -5929,6 +5931,47 @@ def requeue_ready_waiting_recon_runs() -> int:
                 return count
     except Exception as e:
         logger.error(f"requeue_ready_waiting_recon_runs 失败: {e}")
+        return 0
+
+
+def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
+    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs already failed.
+
+    Without this, a deterministic browser failure (AUTH_EXPIRED / PAGE_CHANGED etc.) would leave
+    the recon job in waiting_data until wait_deadline_at (~90min) before surfacing a generic
+    "采集未就绪" error. This aggregates the failed sync_jobs' error_message into the recon error
+    so operators see the real reason immediately.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue q
+                    SET status = 'failed',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error = COALESCE(NULLIF(f.failed_error, ''), q.waiting_reason, '浏览器采集失败'),
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM (
+                        SELECT q0.id AS queue_id,
+                               string_agg(DISTINCT COALESCE(NULLIF(s.error_message, ''), '浏览器采集失败'), ' / ') AS failed_error
+                        FROM recon_execution_queue q0
+                        JOIN LATERAL jsonb_array_elements_text(collection_job_ids) job_id ON TRUE
+                        JOIN sync_jobs s ON s.id::text = job_id
+                        WHERE q0.status = 'waiting_data'
+                          AND s.job_status = 'failed'
+                        GROUP BY q0.id
+                    ) f
+                    WHERE q.id = f.queue_id
+                      AND q.status = 'waiting_data'
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"fail_waiting_recon_runs_with_failed_collection_jobs 失败: {e}")
         return 0
 
 

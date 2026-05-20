@@ -417,6 +417,17 @@ def create_tools() -> list[Tool]:
                 "required": ["worker_token"],
             },
         ),
+        Tool(
+            name="recon_queue_fail_failed_collection_waiting",
+            description="Worker 专用：当浏览器采集 sync_job 已 failed 时，立即把对应 waiting_data 对账任务也标记失败并带回 fail_reason，避免等满 wait_deadline_at。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
     ]
 
 
@@ -471,6 +482,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return _queue_requeue_ready_waiting(arguments)
     if name == "recon_queue_fail_expired_waiting":
         return _queue_fail_expired_waiting(arguments)
+    if name == "recon_queue_fail_failed_collection_waiting":
+        return _queue_fail_failed_collection_waiting(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -1012,3 +1025,14 @@ def _queue_fail_expired_waiting(arguments: dict[str, Any]) -> dict[str, Any]:
     except ValueError as e:
         return {"success": False, "error": str(e)}
     return {"success": True, "failed": auth_db.fail_expired_waiting_recon_runs()}
+
+
+def _queue_fail_failed_collection_waiting(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    return {
+        "success": True,
+        "failed": auth_db.fail_waiting_recon_runs_with_failed_collection_jobs(),
+    }
