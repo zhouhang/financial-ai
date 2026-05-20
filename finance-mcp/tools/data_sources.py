@@ -5323,6 +5323,40 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_register_browser_playbook",
+            description="手动注册 browser_playbook 数据源的 playbook 与店铺运行绑定。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "playbook_id": {"type": "string"},
+                    "version": {"type": "string"},
+                    "title": {"type": "string"},
+                    "playbook_body": {"type": "object"},
+                    "shop_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "egress_group": {"type": "string"},
+                    "credential_ref": {"type": "string"},
+                    "profile_status": {"type": "string"},
+                    "playbook_status": {"type": "string"},
+                    "emergency_page_changed": {"type": "boolean"},
+                    "bypass_canary_reason": {"type": "string"},
+                },
+                "required": [
+                    "auth_token",
+                    "source_id",
+                    "playbook_id",
+                    "version",
+                    "title",
+                    "playbook_body",
+                    "shop_id",
+                    "agent_id",
+                    "credential_ref",
+                ],
+            },
+        ),
+        Tool(
             name="data_source_authorize",
             description="发起授权（主要用于 platform_oauth）。",
             inputSchema={
@@ -5525,6 +5559,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_delete(arguments)
         if name == "data_source_test":
             return await _handle_data_source_test(arguments)
+        if name == "data_source_register_browser_playbook":
+            return await _handle_data_source_register_browser_playbook(arguments)
         if name == "data_source_authorize":
             return await _handle_data_source_authorize(arguments)
         if name == "data_source_handle_callback":
@@ -6892,6 +6928,52 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
     if not success:
         response["error"] = result["message"] or "数据源测试失败"
     return response
+
+
+async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持手动注册"}
+
+    playbook_id = str(arguments.get("playbook_id") or "").strip()
+    version = str(arguments.get("version") or "").strip()
+    title = str(arguments.get("title") or "").strip()
+    playbook_body = dict(arguments.get("playbook_body") or {})
+    if not playbook_id or not version or not title or not playbook_body:
+        return {"success": False, "error": "playbook_id/version/title/playbook_body 不能为空"}
+
+    playbook_row = auth_db.upsert_playbook(
+        company_id=company_id,
+        playbook_id=playbook_id,
+        version=version,
+        title=title,
+        playbook_body=playbook_body,
+        status="active",
+        emergency_page_changed=bool(arguments.get("emergency_page_changed", False)),
+        bypass_canary_reason=str(arguments.get("bypass_canary_reason") or ""),
+    )
+    binding_row = auth_db.upsert_shop_runtime_binding(
+        company_id=company_id,
+        data_source_id=source_id,
+        shop_id=str(arguments.get("shop_id") or "").strip(),
+        playbook_id=playbook_id,
+        agent_id=str(arguments.get("agent_id") or "").strip(),
+        egress_group=str(arguments.get("egress_group") or "").strip(),
+        credential_ref=str(arguments.get("credential_ref") or "").strip(),
+        profile_status=str(arguments.get("profile_status") or "active").strip() or "active",
+        playbook_status=str(arguments.get("playbook_status") or "ok").strip() or "ok",
+    )
+    return {
+        "success": True,
+        "playbook": playbook_row,
+        "binding": binding_row,
+        "message": "浏览器 playbook 手动注册成功",
+    }
 
 
 async def _handle_data_source_authorize(arguments: dict[str, Any]) -> dict[str, Any]:

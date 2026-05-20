@@ -10,7 +10,9 @@ FINANCE_MCP_ROOT = Path(__file__).resolve().parents[1]
 if str(FINANCE_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(FINANCE_MCP_ROOT))
 
+from browser_playbook.registry import validate_emergency_promote
 from browser_playbook.models import RunPlaybookMessage, TaskResult
+from auth import db as auth_db
 
 
 def _valid_playbook_body() -> dict[str, object]:
@@ -221,3 +223,89 @@ def test_task_result_accepts_success_records() -> None:
     )
 
     assert result.records[0].item_key == "BILL-001"
+
+
+def test_emergency_promote_requires_reason_and_validation_metadata() -> None:
+    ok = validate_emergency_promote(
+        {
+            "emergency_page_changed": True,
+            "bypass_canary_reason": "页面改版，验证店 shop-001，验证日期 2026-05-18，审批人 operator-001",
+        }
+    )
+
+    assert ok["success"] is True
+
+
+def test_emergency_promote_rejects_empty_reason() -> None:
+    result = validate_emergency_promote(
+        {
+            "emergency_page_changed": True,
+            "bypass_canary_reason": "",
+        }
+    )
+
+    assert result["success"] is False
+
+
+def test_upsert_playbook_and_binding_helpers_are_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *args, **kwargs) -> None:
+            calls.append("execute")
+
+        def fetchone(self):
+            return {
+                "id": "row-001",
+                "company_id": "company-001",
+            }
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self) -> None:
+            calls.append("commit")
+
+    class FakeConnManager:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager())
+
+    playbook = auth_db.upsert_playbook(
+        company_id="company-001",
+        playbook_id="qianniu-daily-bill-export",
+        version="1.0.0",
+        title="千牛资金日账单",
+        playbook_body={"schema_version": "1.0"},
+    )
+    binding = auth_db.upsert_shop_runtime_binding(
+        company_id="company-001",
+        data_source_id="source-001",
+        shop_id="shop-001",
+        playbook_id="qianniu-daily-bill-export",
+        agent_id="agent-001",
+        egress_group="wan-1",
+        credential_ref="cred-001",
+    )
+
+    assert playbook["id"] == "row-001"
+    assert binding["id"] == "row-001"
+    assert calls.count("execute") == 2
+    assert calls.count("commit") == 2

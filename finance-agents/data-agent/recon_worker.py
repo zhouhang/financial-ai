@@ -20,7 +20,10 @@ from tools.mcp_client import (
     recon_queue_complete,
     recon_queue_dequeue,
     recon_queue_fail,
+    recon_queue_fail_expired_waiting,
     recon_queue_reclaim_stale,
+    recon_queue_requeue_ready_waiting,
+    recon_queue_waiting_data,
 )
 
 logging.basicConfig(
@@ -87,13 +90,26 @@ async def _process_job(job: dict, system_token: str) -> None:
     logger.info("[recon-worker] 开始处理 job_id=%s run_plan_code=%s", job_id, run_plan_code)
     try:
         auth_token = _create_worker_token(company_id)
-        await execute_run_plan_run(
+        result = await execute_run_plan_run(
             auth_token=auth_token,
             run_plan_code=run_plan_code,
             biz_date=str(job.get("biz_date") or ""),
             trigger_mode=str(job.get("trigger_mode") or "schedule"),
             run_context=dict(job.get("run_context") or {}),
         )
+        if result.get("status") == "data_waiting":
+            await recon_queue_waiting_data(
+                system_token,
+                job_id,
+                {
+                    "waiting_reason": str(result.get("error") or "browser_collection_pending"),
+                    "waiting_datasets": list(result.get("waiting_datasets") or []),
+                    "collection_job_ids": [str(v) for v in result.get("collection_job_ids") or [] if str(v)],
+                    "wait_minutes": int(os.getenv("RECON_WAITING_DATA_TIMEOUT_MINUTES", "90")),
+                },
+            )
+            logger.info("[recon-worker] job_id=%s 进入 waiting_data", job_id)
+            return
         await recon_queue_complete(system_token, job_id)
         logger.info("[recon-worker] job_id=%s 完成", job_id)
     except Exception as exc:
@@ -123,6 +139,8 @@ async def main() -> None:
         system_token = _create_system_token()
 
         try:
+            await recon_queue_requeue_ready_waiting(system_token)
+            await recon_queue_fail_expired_waiting(system_token)
             result = await recon_queue_dequeue(system_token)
             job = (result or {}).get("job")
             if job:

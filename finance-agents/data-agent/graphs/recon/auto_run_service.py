@@ -735,6 +735,25 @@ async def execute_run_plan_run(
         run_context=run_context,
     )
     ctx = _safe_dict(output.get("recon_ctx"))
+    if bool(ctx.get("waiting_data")) or str(ctx.get("failed_stage") or "") == "data_waiting":
+        return {
+            "success": False,
+            "status": "data_waiting",
+            "error": str(
+                ctx.get("failed_reason")
+                or "浏览器采集任务已创建，等待采集完成后继续对账"
+            ),
+            "failed_stage": "data_waiting",
+            "failure_type": "data_waiting",
+            "run_plan_code": run_plan_code,
+            "scheme_code": str(ctx.get("scheme_code") or ""),
+            "biz_date": str(ctx.get("biz_date") or biz_date),
+            "waiting_datasets": _safe_list(ctx.get("waiting_datasets")),
+            "collection_job_ids": [
+                str(v) for v in _safe_list(ctx.get("collection_job_ids")) if str(v)
+            ],
+            "recon_ctx": ctx,
+        }
 
     run_record = _safe_dict(ctx.get("execution_run_record"))
     failed_reason = str(
@@ -909,6 +928,36 @@ async def execute_auto_task_run(
             "run": _safe_dict(run_detail.get("run")) or run,
             "run_job": run_job_record,
             "missing_bindings": missing_bindings,
+        }
+
+    if any(
+        str(item.get("collection_driver") or "") == "browser_playbook_remote"
+        and bool(item.get("queued"))
+        for item in source_collections
+    ):
+        waiting_datasets = [
+            {
+                "data_source_id": str(binding.get("data_source_id") or ""),
+                "dataset_id": str(binding.get("dataset_id") or ""),
+                "biz_date": normalized_biz_date,
+            }
+            for binding in bindings
+        ]
+        collection_job_ids = [
+            str(attempt.get("job_id") or attempt.get("id") or "")
+            for attempt in collection_attempts
+            if str(attempt.get("job_id") or attempt.get("id") or "")
+        ]
+        return {
+            "success": False,
+            "status": "data_waiting",
+            "error": "浏览器采集任务已创建，等待采集完成后继续对账",
+            "waiting_datasets": waiting_datasets,
+            "collection_job_ids": collection_job_ids,
+            "run_context": {
+                "source_collections": source_collections,
+                "missing_bindings": missing_bindings,
+            },
         }
 
     await recon_auto_run_update(

@@ -79,6 +79,9 @@ def route_after_ensure_dataset_ready(state: AgentState) -> str:
 
 
 def route_after_validate_dataset_completeness(state: AgentState) -> str:
+    ctx = _get_ctx(state)
+    if bool(ctx.get("waiting_data")) or str(ctx.get("failed_stage") or "") == "data_waiting":
+        return END
     if _has_failed_reason(state):
         return "persist_failed_run_node"
     return "build_auto_run_context_node"
@@ -159,6 +162,7 @@ def build_auto_scheme_run_graph() -> StateGraph:
         {
             "build_auto_run_context_node": "build_auto_run_context_node",
             "persist_failed_run_node": "persist_failed_run_node",
+            END: END,
         },
     )
     graph.add_edge("build_auto_run_context_node", "scheme_execution_graph")

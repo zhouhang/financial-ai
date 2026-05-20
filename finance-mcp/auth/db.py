@@ -5683,6 +5683,279 @@ def mark_browser_sync_job_failed(*, sync_job_id: str, error_message: str, fail_r
     )
 
 
+def upsert_playbook(
+    *,
+    company_id: str,
+    playbook_id: str,
+    version: str,
+    title: str,
+    playbook_body: dict,
+    description: str = "",
+    target: dict | None = None,
+    params_schema: dict | None = None,
+    status: str = "active",
+    schema_check_result: dict | None = None,
+    replay_result: dict | None = None,
+    sample_data_path: str = "",
+    transcript_path: str = "",
+    canary_shop_ids: list | None = None,
+    emergency_page_changed: bool = False,
+    bypass_canary_reason: str = "",
+    created_by: str | None = None,
+    approved_by: str | None = None,
+) -> dict | None:
+    body = dict(playbook_body or {})
+    resolved_target = dict(target or body.get("target") or {})
+    resolved_params_schema = dict(params_schema or body.get("params_schema") or {})
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO playbooks (
+                        company_id, playbook_id, version, title, description,
+                        target, params_schema, playbook_body,
+                        schema_check_result, replay_result, sample_data_path, transcript_path,
+                        canary_shop_ids, emergency_page_changed, bypass_canary_reason,
+                        created_by, approved_by, approved_at, status
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s::jsonb, %s::jsonb, %s, %s,
+                        %s::jsonb, %s, %s,
+                        %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, %s
+                    )
+                    ON CONFLICT (company_id, playbook_id, version)
+                    DO UPDATE SET
+                        title = EXCLUDED.title,
+                        description = EXCLUDED.description,
+                        target = EXCLUDED.target,
+                        params_schema = EXCLUDED.params_schema,
+                        playbook_body = EXCLUDED.playbook_body,
+                        schema_check_result = EXCLUDED.schema_check_result,
+                        replay_result = EXCLUDED.replay_result,
+                        sample_data_path = EXCLUDED.sample_data_path,
+                        transcript_path = EXCLUDED.transcript_path,
+                        canary_shop_ids = EXCLUDED.canary_shop_ids,
+                        emergency_page_changed = EXCLUDED.emergency_page_changed,
+                        bypass_canary_reason = EXCLUDED.bypass_canary_reason,
+                        approved_by = EXCLUDED.approved_by,
+                        approved_at = EXCLUDED.approved_at,
+                        status = EXCLUDED.status,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        playbook_id,
+                        version,
+                        title,
+                        description,
+                        json.dumps(resolved_target, ensure_ascii=False),
+                        json.dumps(resolved_params_schema, ensure_ascii=False),
+                        json.dumps(body, ensure_ascii=False),
+                        json.dumps(schema_check_result or {}, ensure_ascii=False),
+                        json.dumps(replay_result or {}, ensure_ascii=False),
+                        sample_data_path,
+                        transcript_path,
+                        json.dumps(canary_shop_ids or [], ensure_ascii=False),
+                        emergency_page_changed,
+                        bypass_canary_reason,
+                        created_by,
+                        approved_by,
+                        approved_by,
+                        status,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_playbook 失败 (company_id={company_id}, playbook_id={playbook_id}, version={version}): {e}")
+        return None
+
+
+def upsert_shop_runtime_binding(
+    *,
+    company_id: str,
+    data_source_id: str,
+    shop_id: str,
+    playbook_id: str,
+    agent_id: str,
+    egress_group: str,
+    credential_ref: str,
+    profile_status: str = "active",
+    playbook_status: str = "ok",
+) -> dict | None:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO shop_runtime_bindings (
+                        company_id, data_source_id, shop_id, playbook_id, agent_id,
+                        egress_group, credential_ref, profile_status, playbook_status, cron_pause_reason
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, NULL
+                    )
+                    ON CONFLICT (company_id, data_source_id)
+                    DO UPDATE SET
+                        shop_id = EXCLUDED.shop_id,
+                        playbook_id = EXCLUDED.playbook_id,
+                        agent_id = EXCLUDED.agent_id,
+                        egress_group = EXCLUDED.egress_group,
+                        credential_ref = EXCLUDED.credential_ref,
+                        profile_status = EXCLUDED.profile_status,
+                        playbook_status = EXCLUDED.playbook_status,
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        shop_id,
+                        playbook_id,
+                        agent_id,
+                        egress_group,
+                        credential_ref,
+                        profile_status,
+                        playbook_status,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_shop_runtime_binding 失败 (company_id={company_id}, data_source_id={data_source_id}): {e}")
+        return None
+
+
+def clear_page_changed_bindings_for_playbook(*, company_id: str, playbook_id: str) -> int:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings
+                    SET playbook_status = 'ok',
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND playbook_status = 'stale'
+                      AND cron_pause_reason = 'page_changed'
+                    """,
+                    (company_id, playbook_id),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"clear_page_changed_bindings_for_playbook 失败 (company_id={company_id}, playbook_id={playbook_id}): {e}")
+        return 0
+
+
+def mark_recon_run_waiting_data(
+    *,
+    job_id: str,
+    waiting_reason: str,
+    waiting_datasets: list[dict],
+    collection_job_ids: list[str],
+    wait_minutes: int = 90,
+) -> dict | None:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'waiting_data',
+                        started_at = NULL,
+                        next_retry_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                        wait_deadline_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
+                        waiting_reason = %s,
+                        waiting_datasets = %s::jsonb,
+                        collection_job_ids = %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (
+                        max(1, int(wait_minutes or 1)),
+                        waiting_reason,
+                        json.dumps(waiting_datasets or [], ensure_ascii=False),
+                        json.dumps(collection_job_ids or [], ensure_ascii=False),
+                        job_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 recon_execution_queue.waiting_data 失败 (job_id={job_id}): {e}")
+        return None
+
+
+def requeue_ready_waiting_recon_runs() -> int:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'queued',
+                        next_retry_at = NULL,
+                        waiting_reason = '',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'waiting_data'
+                      AND next_retry_at <= CURRENT_TIMESTAMP
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements_text(collection_job_ids) job_id
+                          JOIN sync_jobs s ON s.id::text = job_id
+                          WHERE s.job_status <> 'success'
+                      )
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"requeue_ready_waiting_recon_runs 失败: {e}")
+        return 0
+
+
+def fail_expired_waiting_recon_runs() -> int:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'failed',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error = COALESCE(NULLIF(waiting_reason, ''), '采集未就绪'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'waiting_data'
+                      AND wait_deadline_at <= CURRENT_TIMESTAMP
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"fail_expired_waiting_recon_runs 失败: {e}")
+        return 0
+
+
 def _clean_decimal_text(value: Any) -> str | None:
     if value is None:
         return None

@@ -144,3 +144,52 @@ def test_browser_playbook_dataset_collection_queues_sync_job_without_inline_exec
     assert result["collection_driver"] == data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK
     assert result["job"]["id"] == "job-001"
     assert created_request_payloads[0]["collection_driver"] == data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK
+
+
+def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "source_kind": "browser_playbook",
+            "provider_code": "qianniu",
+        },
+    )
+
+    def fake_upsert_playbook(**kwargs):
+        calls.append(("playbook", dict(kwargs)))
+        return {"id": "playbook-001", **kwargs}
+
+    def fake_upsert_binding(**kwargs):
+        calls.append(("binding", dict(kwargs)))
+        return {"id": "binding-001", **kwargs}
+
+    monkeypatch.setattr(data_sources.auth_db, "upsert_playbook", fake_upsert_playbook)
+    monkeypatch.setattr(data_sources.auth_db, "upsert_shop_runtime_binding", fake_upsert_binding)
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+
+    result = asyncio.run(
+        data_sources._handle_data_source_register_browser_playbook(
+            {
+                "auth_token": "token",
+                "source_id": "source-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "version": "1.0.0",
+                "title": "千牛资金日账单",
+                "playbook_body": {"schema_version": "1.0"},
+                "shop_id": "shop-001",
+                "agent_id": "agent-001",
+                "credential_ref": "cred-001",
+                "egress_group": "wan-1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["playbook"]["id"] == "playbook-001"
+    assert result["binding"]["id"] == "binding-001"
+    assert [item[0] for item in calls] == ["playbook", "binding"]

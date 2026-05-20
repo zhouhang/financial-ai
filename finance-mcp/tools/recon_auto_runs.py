@@ -379,6 +379,44 @@ def create_tools() -> list[Tool]:
                 "required": ["worker_token"],
             },
         ),
+        Tool(
+            name="recon_queue_waiting_data",
+            description="Worker 专用：将 recon job 置为 waiting_data，等待采集完成后继续。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "waiting_reason": {"type": "string"},
+                    "waiting_datasets": {"type": "array"},
+                    "collection_job_ids": {"type": "array"},
+                    "wait_minutes": {"type": "integer"},
+                },
+                "required": ["worker_token", "job_id"],
+            },
+        ),
+        Tool(
+            name="recon_queue_requeue_ready_waiting",
+            description="Worker 专用：将已就绪的 waiting_data job 重置回 queued。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
+        Tool(
+            name="recon_queue_fail_expired_waiting",
+            description="Worker 专用：将超时的 waiting_data job 标记失败。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
     ]
 
 
@@ -427,6 +465,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return _queue_fail(arguments)
     if name == "recon_queue_reclaim_stale":
         return _queue_reclaim_stale(arguments)
+    if name == "recon_queue_waiting_data":
+        return _queue_waiting_data(arguments)
+    if name == "recon_queue_requeue_ready_waiting":
+        return _queue_requeue_ready_waiting(arguments)
+    if name == "recon_queue_fail_expired_waiting":
+        return _queue_fail_expired_waiting(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -937,3 +981,34 @@ def _queue_reclaim_stale(arguments: dict[str, Any]) -> dict[str, Any]:
     timeout = int(arguments.get("timeout_minutes") or 15)
     count = auth_db.reclaim_stale_recon_runs(timeout_minutes=timeout)
     return {"success": True, "reclaimed": count}
+
+
+def _queue_waiting_data(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    job = auth_db.mark_recon_run_waiting_data(
+        job_id=str(arguments.get("job_id") or ""),
+        waiting_reason=str(arguments.get("waiting_reason") or "browser_collection_pending"),
+        waiting_datasets=list(arguments.get("waiting_datasets") or []),
+        collection_job_ids=[str(v) for v in arguments.get("collection_job_ids") or [] if str(v)],
+        wait_minutes=int(arguments.get("wait_minutes") or 90),
+    )
+    return {"success": bool(job), "job": job}
+
+
+def _queue_requeue_ready_waiting(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    return {"success": True, "requeued": auth_db.requeue_ready_waiting_recon_runs()}
+
+
+def _queue_fail_expired_waiting(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_system(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    return {"success": True, "failed": auth_db.fail_expired_waiting_recon_runs()}

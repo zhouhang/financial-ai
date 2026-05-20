@@ -54,6 +54,8 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
 
 _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
+_BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
+_COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
 ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID = "alipay-fund-source-only-non-alipay-payment"
 ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL = "非支付宝支付订单"
 ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN = "微信/其他支付资金账单接入后，重新纳入资金对账"
@@ -861,6 +863,23 @@ def _collection_count_from_result(result: dict[str, Any]) -> int:
     return 0
 
 
+def _is_browser_collection_waiting_result(result: dict[str, Any], binding: dict[str, Any]) -> bool:
+    driver = str(result.get("collection_driver") or binding.get("collection_driver") or "").strip()
+    if driver != _BROWSER_COLLECTION_DRIVER or not bool(result.get("success")):
+        return False
+    job = _safe_dict(result.get("job"))
+    return bool(result.get("queued")) or _sync_job_status(job) in _COLLECTION_WAITING_STATUSES
+
+
+def _waiting_dataset_from_binding(binding: dict[str, Any], *, biz_date: str) -> dict[str, Any]:
+    return {
+        "data_source_id": _get_binding_source_id(binding),
+        "dataset_id": str(binding.get("dataset_id") or "").strip(),
+        "resource_key": _get_binding_resource_key(binding),
+        "biz_date": biz_date,
+    }
+
+
 def _flatten_input_plan_entries(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
     input_plan = _safe_dict(scheme_meta.get("input_plan_json"))
     if not input_plan:
@@ -1072,7 +1091,7 @@ async def _wait_dataset_collection_job(
         await asyncio.sleep(poll_interval_seconds)
 
 
-async def _trigger_and_wait_collection(
+async def _trigger_collection(
     *,
     auth_token: str,
     source_id: str,
@@ -1081,7 +1100,7 @@ async def _trigger_and_wait_collection(
     biz_date: str,
     trigger_mode: str,
 ) -> dict[str, Any]:
-    collect_result = await data_source_trigger_dataset_collection(
+    return await data_source_trigger_dataset_collection(
         auth_token,
         source_id,
         dataset_id=dataset_id,
@@ -1091,11 +1110,36 @@ async def _trigger_and_wait_collection(
         background=True,
         mode="real",
     )
+
+
+async def _trigger_and_wait_collection(
+    *,
+    auth_token: str,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+    trigger_mode: str,
+    collection_driver: str = "",
+) -> dict[str, Any]:
+    collect_result = await _trigger_collection(
+        auth_token=auth_token,
+        source_id=source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        trigger_mode=trigger_mode,
+    )
     if not bool(collect_result.get("success")):
         return collect_result
 
     job = _safe_dict(collect_result.get("job"))
     status = _sync_job_status(job)
+    driver = str(collect_result.get("collection_driver") or collection_driver or "").strip()
+    if driver == _BROWSER_COLLECTION_DRIVER and (
+        bool(collect_result.get("queued")) or status in _COLLECTION_WAITING_STATUSES
+    ):
+        return {**collect_result, "collection_driver": driver}
     if not bool(collect_result.get("queued")) and status not in {"queued", "pending", "running"}:
         return collect_result
 
@@ -1695,41 +1739,59 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
         if should_collect_first and _should_trigger_collection_for_binding(binding):
+            collect_kwargs = {
+                "auth_token": auth_token,
+                "source_id": source_id,
+                "dataset_id": str(binding.get("dataset_id") or "").strip(),
+                "resource_key": _get_binding_resource_key(binding),
+                "biz_date": biz_date,
+                "trigger_mode": collection_trigger_mode,
+            }
             collect_result = await _trigger_and_wait_collection(
-                auth_token=auth_token,
-                source_id=source_id,
-                dataset_id=str(binding.get("dataset_id") or "").strip(),
-                resource_key=_get_binding_resource_key(binding),
-                biz_date=biz_date,
-                trigger_mode=collection_trigger_mode,
+                **collect_kwargs,
+                collection_driver=str(binding.get("collection_driver") or ""),
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(
                 collect_result.get("error") or collect_result.get("detail") or "采集失败"
+            )
+            collection_driver = str(
+                collect_result.get("collection_driver")
+                or binding.get("collection_driver")
+                or ""
             )
             collection_attempts.append(
                 {
                     "binding": binding,
                     "success": collection_success,
                     "job": _safe_dict(collect_result.get("job")),
+                    "job_id": _sync_job_id(collect_result.get("job")),
                     "error": collection_error,
-                    "collection_driver": str(
-                        collect_result.get("collection_driver")
-                        or binding.get("collection_driver")
-                        or ""
-                    ),
+                    "collection_driver": collection_driver,
                     "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                    "queued": bool(collect_result.get("queued")),
                 }
             )
+            if (
+                collection_success
+                and _is_browser_collection_waiting_result(collect_result, binding)
+            ):
+                missing_bindings.append(
+                    {
+                        **binding,
+                        "collection_driver": collection_driver,
+                        "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                        "error": "浏览器采集任务已创建，等待采集完成后继续对账",
+                        "waiting_data": True,
+                        "collection_job_id": _sync_job_id(collect_result.get("job")),
+                    }
+                )
+                continue
             if not collection_success:
                 missing_bindings.append(
                     {
                         **binding,
-                        "collection_driver": str(
-                            collect_result.get("collection_driver")
-                            or binding.get("collection_driver")
-                            or ""
-                        ),
+                        "collection_driver": collection_driver,
                         "dataset_source_type": str(binding.get("dataset_source_type") or ""),
                         "error": f"先同步失败：{collection_error}",
                     }
@@ -1818,6 +1880,24 @@ def validate_dataset_completeness_node(state: AgentState) -> dict[str, Any]:
 
     required_missing = [b for b in missing_bindings if _get_binding_required(b)]
     if required_missing:
+        waiting_bindings = [
+            b for b in required_missing
+            if bool(b.get("waiting_data"))
+        ]
+        if waiting_bindings and len(waiting_bindings) == len(required_missing):
+            ctx["waiting_data"] = True
+            ctx["failed_stage"] = "data_waiting"
+            ctx["failed_reason"] = "浏览器采集任务已创建，等待采集完成后继续对账"
+            ctx["waiting_datasets"] = [
+                _waiting_dataset_from_binding(b, biz_date=str(ctx.get("biz_date") or "").strip())
+                for b in waiting_bindings
+            ]
+            ctx["collection_job_ids"] = [
+                str(b.get("collection_job_id") or "").strip()
+                for b in waiting_bindings
+                if str(b.get("collection_job_id") or "").strip()
+            ]
+            return {"recon_ctx": ctx}
         names = [
             f"{_binding_display_name(b)}（{str(b.get('error') or '数据未就绪')}）"
             for b in required_missing
