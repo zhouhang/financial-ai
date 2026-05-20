@@ -115,6 +115,10 @@ lsof -ti:3335,8100,5173 | xargs kill -9 2>/dev/null || true
 rm -f /tmp/finance-cron.pid
 # 兜底清理 PID 文件丢失后遗留的旧 finance-cron。
 pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
+# 停止已有的 browser-agent 进程
+[ -f /tmp/browser-agent.pid ] && kill -9 "$(cat /tmp/browser-agent.pid)" 2>/dev/null || true
+rm -f /tmp/browser-agent.pid
+pkill -f "finance-agents/browser-agent/service.py" 2>/dev/null || true
 # 停止已有的 recon-worker 进程
 if [ -f /tmp/recon-workers.pids ]; then
     while IFS= read -r pid; do
@@ -169,6 +173,20 @@ sleep 2
 if ! kill -0 "$FINANCE_CRON_PID" 2>/dev/null; then
     echo "❌ finance-cron 启动后立即退出，请查看日志：tail -80 $LOG_DIR/finance-cron.log"
     exit 1
+fi
+
+# 启动 browser-agent（采集机上的浏览器采集 worker，本机开发用 1 个进程即可）
+echo ""
+echo "📌 步骤 4b: 启动 browser-agent..."
+cd "$PROJECT_ROOT"
+source .venv/bin/activate
+load_project_env
+BROWSER_AGENT_PID="$(start_detached "$LOG_DIR/browser-agent.log" "$PROJECT_ROOT/finance-agents/browser-agent" python service.py)"
+echo "$BROWSER_AGENT_PID" > /tmp/browser-agent.pid
+echo "✅ browser-agent 已启动 (PID: $BROWSER_AGENT_PID)"
+sleep 2
+if ! kill -0 "$BROWSER_AGENT_PID" 2>/dev/null; then
+    echo "⚠️  browser-agent 启动后立即退出，请查看日志：tail -80 $LOG_DIR/browser-agent.log"
 fi
 
 # 启动 recon-worker（默认 4 个进程，可通过 RECON_WORKER_COUNT 覆盖）
@@ -234,6 +252,13 @@ else
     SERVICES_OK=false
 fi
 
+# 检查 browser-agent
+if [ -f /tmp/browser-agent.pid ] && kill -0 "$(cat /tmp/browser-agent.pid)" 2>/dev/null; then
+    echo "✅ browser-agent (collection) - 运行正常"
+else
+    echo "⚠️  browser-agent - 未运行 (首店上线前可忽略)"
+fi
+
 # 检查 recon-worker
 WORKER_ALIVE=0
 if [ -f /tmp/recon-workers.pids ]; then
@@ -263,6 +288,7 @@ if [ "$SERVICES_OK" = true ]; then
     echo "   - finance-mcp:    tail -f $LOG_DIR/finance-mcp.log"
     echo "   - data-agent:     tail -f $LOG_DIR/data-agent.log"
     echo "   - finance-cron:   tail -f $LOG_DIR/finance-cron.log"
+    echo "   - browser-agent:  tail -f $LOG_DIR/browser-agent.log"
     echo "   - recon-worker-1: tail -f $LOG_DIR/recon-worker-1.log"
     echo "   - finance-web:    tail -f $LOG_DIR/finance-web.log"
     echo ""
