@@ -1718,6 +1718,30 @@ def _hash_payload(payload: Any) -> str:
     return hashlib.sha1(_json_safe(payload).encode("utf-8")).hexdigest()
 
 
+def _browser_binding_unavailable_result(binding: dict[str, Any]) -> dict[str, Any] | None:
+    """Returns a non-queued failure result if the browser binding is not runnable, else None.
+
+    Used by the trigger-time health gate. Mirrors the claim-side filter so a stale / blocked /
+    needs-reauth shop never gets a pending sync_job created in the first place.
+    """
+    profile_status = _safe_text(binding.get("profile_status")) or "unknown"
+    playbook_status = _safe_text(binding.get("playbook_status")) or "unknown"
+    pause_reason = _safe_text(binding.get("cron_pause_reason"))
+    if profile_status == "active" and playbook_status == "ok":
+        return None
+    error_code = pause_reason or profile_status or playbook_status or "UNHEALTHY_BINDING"
+    return {
+        "success": False,
+        "queued": False,
+        "failure_type": "browser_binding_unavailable",
+        "error_code": error_code,
+        "error": (
+            f"浏览器采集店铺状态不可用: profile_status={profile_status}, "
+            f"playbook_status={playbook_status}, pause_reason={pause_reason}"
+        ),
+    }
+
+
 def _require_user(auth_token: str) -> dict[str, Any]:
     token = str(auth_token or "").strip()
     if not token:
@@ -7965,6 +7989,26 @@ async def _trigger_dataset_collection_resolved(
     }
     if not key_fields and not uses_driver_managed_storage:
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
+
+    # Trigger-time health gate for browser collection. Symmetric with the claim-side check:
+    # if the binding is paused (auth expired / risk blocked / playbook stale), refuse to
+    # create a pending sync_job here. Otherwise recon would enter waiting_data on a job
+    # that no agent will ever claim (claim SQL filters profile_status=active AND
+    # playbook_status=ok), and surface a generic "采集未就绪" only after wait_deadline_at.
+    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+        binding = auth_db.get_shop_runtime_binding_for_source(
+            company_id=company_id, data_source_id=source_id
+        ) or {}
+        unavailable = _browser_binding_unavailable_result(binding)
+        if unavailable:
+            return {
+                **unavailable,
+                "dataset_id": _safe_text(dataset_row.get("id")),
+                "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                "resource_key": resource_key,
+                "biz_date": biz_date,
+                "collection_driver": collection_driver,
+            }
     query = dict(params.get("query") or {})
     date_field = _collection_date_field(config)
     date_format = _collection_date_format(config)

@@ -103,6 +103,15 @@ def test_browser_playbook_dataset_collection_queues_sync_job_without_inline_exec
         "get_latest_source_dataset_checkpoint",
         lambda **kwargs: {},
     )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-001",
+            "profile_status": "active",
+            "playbook_status": "ok",
+        },
+    )
 
     def fake_create_or_reuse_dataset_collection_sync_job(**kwargs):
         created_request_payloads.append(dict(kwargs["request_payload"]))
@@ -204,6 +213,75 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     assert result["playbook"]["id"] == "playbook-001"
     assert result["binding"]["id"] == "binding-001"
     assert [item[0] for item in calls] == ["playbook", "binding"]
+
+
+def test_browser_dataset_collection_rejects_unhealthy_binding_before_sync_job(monkeypatch) -> None:
+    """Trigger-time health gate must run before create_or_reuse_dataset_collection_sync_job."""
+    source = {
+        "id": "source-001",
+        "company_id": "company-001",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "status": "active",
+        "is_enabled": True,
+        "auth_config": {},
+        "connection_config": {},
+        "extract_config": {},
+        "mapping_config": {},
+        "runtime_config": {},
+    }
+    dataset = {
+        "id": "dataset-001",
+        "data_source_id": "source-001",
+        "dataset_code": "qianniu_daily_bill",
+        "resource_key": "daily_bill",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "sync_strategy": {},
+        "publish_status": "published",
+    }
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: source,
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_resolve_dataset_row",
+        lambda *, company_id, arguments: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-001",
+            "profile_status": "risk_blocked",
+            "playbook_status": "ok",
+            "cron_pause_reason": "RISK_VERIFICATION",
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "get_latest_source_dataset_checkpoint", lambda **kwargs: {})
+
+    def fail_if_created(**kwargs):
+        raise AssertionError("unhealthy browser binding must not create sync job")
+
+    monkeypatch.setattr(data_sources.auth_db, "create_or_reuse_dataset_collection_sync_job", fail_if_created)
+
+    result = asyncio.run(
+        data_sources.trigger_dataset_collection_for_company(
+            company_id="company-001",
+            source_id="source-001",
+            dataset_id="dataset-001",
+            trigger_mode="manual",
+            params={"biz_date": "2026-05-19"},
+        )
+    )
+
+    assert result["success"] is False
+    assert result["queued"] is False
+    assert result["failure_type"] == "browser_binding_unavailable"
+    assert result["error_code"] == "RISK_VERIFICATION"
 
 
 def test_register_browser_playbook_rejects_when_no_published_dataset(monkeypatch) -> None:
