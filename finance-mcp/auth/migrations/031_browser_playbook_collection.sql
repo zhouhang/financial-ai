@@ -257,8 +257,12 @@ CREATE TABLE IF NOT EXISTS public.browser_capture_files (
     encoding character varying(64) NOT NULL DEFAULT ''::character varying,
     checksum character varying(128) NOT NULL DEFAULT ''::character varying,
     row_count integer NOT NULL DEFAULT 0,
-    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE public.browser_capture_files
+    ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT CURRENT_TIMESTAMP;
 
 DO $$
 BEGIN
