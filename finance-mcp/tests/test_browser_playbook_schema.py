@@ -155,6 +155,36 @@ def test_playbook_rejects_unknown_action() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("step_index", "patch"),
+    [
+        (0, {"url": "/relative/path"}),
+        (1, {"value_from": "params.other_date"}),
+        (3, {"selector": ""}),
+        (5, {"mapping": {}}),
+        (7, {"source": "downloaded_file"}),
+    ],
+)
+def test_playbook_rejects_invalid_action_contract(step_index: int, patch: dict[str, object]) -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[step_index].update(patch)
+
+    with pytest.raises(ValidationError):
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
+
+
 def test_playbook_requires_biz_date_param_schema() -> None:
     playbook = _valid_playbook_body()
     playbook["params_schema"] = {"required": [], "properties": {}}  # type: ignore[index]

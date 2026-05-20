@@ -61,6 +61,24 @@ class PlaybookStep(BaseModel):
     format: Literal["csv", "xlsx"] | None = None
     download_timeout_ms: int | None = None
 
+    @model_validator(mode="after")
+    def validate_action_contract(self) -> "PlaybookStep":
+        if not self.id.strip():
+            raise ValueError("step.id cannot be empty")
+        if self.action == "navigate" and not str(self.url or "").startswith(("http://", "https://")):
+            raise ValueError("navigate requires an absolute URL")
+        if self.action in {"click", "fill", "set_date", "wait_for", "extract_text", "download"}:
+            if not str(self.selector or "").strip():
+                raise ValueError(f"{self.action} requires selector")
+        if self.action == "set_date" and self.value_from != "params.biz_date":
+            raise ValueError("set_date must use value_from=params.biz_date")
+        if self.action == "extract_summary" and not self.mapping:
+            raise ValueError("extract_summary requires mapping")
+        if self.action == "parse_table":
+            if self.source != "last_download" or self.format not in {"csv", "xlsx"}:
+                raise ValueError("parse_table requires source=last_download and format csv/xlsx")
+        return self
+
 
 class PlaybookColumn(BaseModel):
     name: str
@@ -177,4 +195,3 @@ class TaskResult(BaseModel):
     capture_files: list[CaptureFile] = Field(default_factory=list)
     quality_summary: dict[str, Any] = Field(default_factory=dict)
     error_info: dict[str, Any] = Field(default_factory=dict)
-
