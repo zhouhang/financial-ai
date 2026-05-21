@@ -59,6 +59,31 @@ def render_proc_failure(exc: BaseException) -> str:
     ).format_detail()
 
 
+def _build_proc_runtime_metrics(
+    *,
+    memory_outputs: list[dict[str, Any]],
+    generated_files: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    preparation: list[dict[str, Any]] = []
+    seen_targets: set[str] = set()
+    output_items = list(memory_outputs or []) or list(generated_files or [])
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
+        target_table = str(item.get("target_table") or "").strip()
+        if not target_table or target_table in seen_targets:
+            continue
+        seen_targets.add(target_table)
+        preparation.append(
+            {
+                "target_table": target_table,
+                "row_count": int(item.get("row_count") or 0),
+                "duration_seconds": float(item.get("duration_seconds") or 0),
+            }
+        )
+    return {"preparation": preparation}
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Tool 定义
 # ════════════════════════════════════════════════════════════════════════════
@@ -585,6 +610,10 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                 column_aliases=column_aliases,
             )
             memory_outputs = register_proc_frame_outputs(rule_code=rule_code, frame_outputs=frame_outputs)
+            runtime_metrics = _build_proc_runtime_metrics(
+                memory_outputs=memory_outputs,
+                generated_files=generated_files,
+            )
         except Exception as e:
             logger.error(f"[proc_rule] steps 规则执行失败: {e}", exc_info=True)
             detail = render_proc_failure(e)
@@ -630,6 +659,7 @@ async def _handle_proc_execute(arguments: dict) -> dict:
             "generated_files": generated_files,
             "memory_outputs": memory_outputs,
             "generated_count": len(generated_files),
+            "runtime_metrics": runtime_metrics,
             "errors": [],
             "message": f"成功生成 {len(generated_files)} 个文件",
             "merged_files": [],
