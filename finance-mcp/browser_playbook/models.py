@@ -143,6 +143,17 @@ class FailureMapping(BaseModel):
     quality_mismatch: FailureReason = "DATA_MISMATCH"
 
 
+class PlaybookAuthCheck(BaseModel):
+    logged_in_selector: str = ""
+    timeout_ms: int = 5000
+
+    @model_validator(mode="after")
+    def validate_auth_check(self) -> "PlaybookAuthCheck":
+        if self.timeout_ms <= 0:
+            raise ValueError("auth_check.timeout_ms must be positive")
+        return self
+
+
 class PlaybookBody(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     playbook_id: str
@@ -154,6 +165,7 @@ class PlaybookBody(BaseModel):
     quality_gate: PlaybookQualityGate
     accounting_policy: AccountingPolicy
     failure_mapping: FailureMapping
+    auth_check: PlaybookAuthCheck = Field(default_factory=PlaybookAuthCheck)
 
     @model_validator(mode="after")
     def validate_cross_references(self) -> "PlaybookBody":

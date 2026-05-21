@@ -194,6 +194,32 @@ def test_playbook_accepts_login_action_contract() -> None:
     assert msg.playbook_body.steps[1].action == "login_if_needed"
 
 
+def test_playbook_preserves_auth_check_for_login_state_detection() -> None:
+    playbook = _valid_playbook_body()
+    playbook["auth_check"] = {
+        "logged_in_selector": ".account-menu",
+        "timeout_ms": 1234,
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    dumped = msg.playbook_body.model_dump()
+    assert dumped["auth_check"] == {
+        "logged_in_selector": ".account-menu",
+        "timeout_ms": 1234,
+    }
+
+
 def test_playbook_rejects_login_action_without_required_selectors() -> None:
     playbook = _valid_playbook_body()
     steps = playbook["steps"]  # type: ignore[index]
