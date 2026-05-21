@@ -2056,6 +2056,41 @@ def update_shop_connection_status(
         return None
 
 
+def get_active_alipay_connection_for_shop(
+    *, company_id: str, merchant_display_name: str, external_shop_id: str = ""
+) -> dict | None:
+    """查该企业下是否已有匹配该店的有效(active)支付宝连接,用于落地页幂等。
+
+    匹配规则:同 company + platform='alipay' + status='active',且
+    external_shop_name == merchant_display_name 或(external_shop_id 非空且相等)。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, external_shop_id, external_shop_name, status
+                    FROM shop_connections
+                    WHERE company_id = %s
+                      AND platform_code = 'alipay'
+                      AND status = 'active'
+                      AND (
+                          external_shop_name = %s
+                          OR (%s <> '' AND external_shop_id = %s)
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, merchant_display_name, external_shop_id, external_shop_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"get_active_alipay_connection_for_shop 失败: {e}")
+        return None
+
+
 def create_shop_authorization(
     *,
     company_id: str,
