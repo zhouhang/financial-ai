@@ -36,13 +36,19 @@ credentials and real financial data. The launch gate is therefore:
    if this invariant holds end to end. Formal KMS envelope encryption and key rotation are
    deferred to the next rollout gate.
 2. Minimal operator alerting is implemented through the existing Tally collaboration channel
-   stack. Do not add a standalone DingTalk webhook. Browser collection alerts reuse
-   `services.notifications.get_notification_adapter(...)` and the existing
-   `DingTalkDwsAdapter` used by reconciliation exception reminders.
+   adapter. Do not add a standalone DingTalk webhook. Browser collection alerts instantiate
+   the existing `DingTalkDwsAdapter` used by reconciliation exception reminders, but use
+   first-store environment credentials directly instead of looking up a Tally
+   `company_channel_configs` row.
 3. First-store browser alerts are internal operator alerts sent to 周行 through DingTalk DWS.
-   The default delivery is `send_reminder`: bot message + DingTalk todo + best-effort DING
-   strong notification. Pure summary messages may use `send_bot_message`, but blocking
-   collection failures should create a todo so they are not missed.
+   They use the same `send_bot_message` path as reconciliation result summaries. They do not
+   create DingTalk todos; browser collection failures are technical availability issues owned
+   by the Tally operator, not customer task items.
+   The DingTalk channel is selected by external DWS credentials in environment variables
+   (`DINGTALK_CLIENT_ID`, `DINGTALK_CLIENT_SECRET`, `DINGTALK_ROBOT_CODE`), not by a Tally
+   internal `company_channel_configs.id`. The configured first-store credentials are the
+   Anhui Namai DingTalk DWS app/robot; the sample company, merchant company, and DingTalk
+   app owner are three separate concerns.
 4. Alert events required before first-store launch:
    - browser-agent down or offline beyond the configured grace window
    - browser sync job terminal failure
@@ -51,9 +57,55 @@ credentials and real financial data. The launch gate is therefore:
    - reconciliation failed or stayed unavailable because browser data was not ready
 5. The collection machine, installed Google Chrome Stable, headed mode, profile root, and
    download root are fixed for the first-store trial.
+   First-store uses the locally installed **Google Chrome Stable** via
+   `BROWSER_AGENT_BROWSER_CHANNEL=chrome`, not bundled Chromium. The local Mac is acceptable
+   as the first collection machine after
+   `finance-agents/browser-agent/scripts/check_environment.py` passes; Ubuntu is not required
+   for first-store validation.
 6. SOPs exist for first login, risk verification, re-verification, page change, re-collection,
    and re-reconciliation.
 7. Real QianNiu validation passes for three business dates and one real reconciliation loop.
+
+### DWS CLI Requirement
+
+`send_bot_message` ultimately calls `dws chat message send-by-bot`. DWS CLI `v1.0.17` can
+fail with `endpoint not resolved for product "bot"` because the discovery cache does not
+expose the `bot` product endpoint. First-store runtimes must use DWS CLI `v1.0.30` or newer
+and run `dws cache refresh` after upgrade. Verification command:
+
+```bash
+dws version --format json
+dws schema --format json --jq '.products[] | select(.id=="bot") | [.tools[].name]'
+```
+
+The second command must include `batch_send_robot_msg_to_users`.
+
+### First-Store Runtime Env
+
+Root `.env` carries the browser-agent and alert runtime defaults used by
+`START_ALL_SERVICES.sh`. For the local Mac first-store trial:
+
+```bash
+BROWSER_AGENT_ID=browser-agent-local
+BROWSER_AGENT_DEFAULT_AGENT_ID=browser-agent-local
+BROWSER_AGENT_COMPANY_ID=00000000-0000-0000-0000-00000000dd01
+BROWSER_AGENT_RUNNER_MODE=playwright
+BROWSER_AGENT_BROWSER_CHANNEL=chrome
+BROWSER_AGENT_HEADLESS=0
+BROWSER_AGENT_MAX_CONCURRENCY=1
+BROWSER_AGENT_PROFILE_ROOT=/Users/kevin/tally-browser-agent/profiles
+BROWSER_AGENT_DOWNLOAD_ROOT=/Users/kevin/tally-browser-agent/downloads
+BROWSER_AGENT_TIMEZONE=Asia/Shanghai
+
+BROWSER_COLLECTION_ALERTS_ENABLED=true
+BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD=周行
+DINGTALK_CLIENT_ID=<安徽纳迈 DingTalk AppKey>
+DINGTALK_CLIENT_SECRET=<安徽纳迈 DingTalk AppSecret>
+DINGTALK_ROBOT_CODE=dingmm03p1to5dq1jq1q
+```
+
+`BROWSER_AGENT_COMPANY_ID` identifies the Tally-operated collection node for heartbeat
+records only; it is not the merchant company and it is not the DingTalk app owner.
 
 Customer authorization / operation-confirmation trail is not a first-store blocker because
 the first shop is run under internal operator supervision. It becomes mandatory before

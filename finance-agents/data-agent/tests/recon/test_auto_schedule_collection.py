@@ -678,6 +678,103 @@ def test_runtime_summary_written_to_execution_run_artifacts() -> None:
     assert summary["reconciliation"]["duration_seconds"] == 2.24
 
 
+def test_runtime_summary_prefers_collection_job_metrics_over_sample_counts() -> None:
+    ctx = {
+        "biz_date": "2026-05-20",
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {"role_code": "left_1", "dataset_name": "交易订单明细表"},
+                    "collection_records": {"record_count": 1},
+                },
+                {
+                    "binding": {"role_code": "right_1", "dataset_name": "支付宝资金账单"},
+                    "collection_records": {"record_count": 0},
+                },
+            ],
+            "collection_attempts": [
+                {
+                    "binding": {"role_code": "left_1", "dataset_name": "交易订单明细表"},
+                    "job": {
+                        "metrics": {
+                            "row_count": 91852,
+                            "collection_timing": {"total_seconds": 64.816416},
+                        }
+                    },
+                },
+                {
+                    "binding": {"role_code": "right_1", "dataset_name": "支付宝资金账单"},
+                    "job": {
+                        "metrics": {
+                            "row_count": 329,
+                            "collection_timing": {"total_seconds": 1.249467},
+                        }
+                    },
+                },
+            ],
+        },
+        "runtime_metrics": {},
+    }
+
+    summary = nodes._build_runtime_summary(ctx)  # noqa: SLF001
+
+    assert summary["collections"][0]["row_count"] == 91852
+    assert summary["collections"][0]["duration_seconds"] == 64.816416
+    assert summary["collections"][1]["row_count"] == 329
+    assert summary["collections"][1]["duration_seconds"] == 1.249467
+
+
+def test_trigger_and_wait_collection_enriches_completed_job_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_calls: list[str] = []
+
+    async def fake_trigger_collection(**kwargs: object) -> dict[str, object]:
+        return {
+            "success": True,
+            "queued": False,
+            "job": {"id": "job-001", "status": "success"},
+        }
+
+    async def fake_get_sync_job(
+        auth_token: str,
+        sync_job_id: str,
+        *,
+        mode: str = "real",
+    ) -> dict[str, object]:
+        get_calls.append(sync_job_id)
+        return {
+            "success": True,
+            "job": {
+                "id": sync_job_id,
+                "status": "success",
+                "metrics": {
+                    "row_count": 91852,
+                    "collection_timing": {"total_seconds": 64.816416},
+                },
+            },
+        }
+
+    monkeypatch.setattr(nodes, "_trigger_collection", fake_trigger_collection)
+    monkeypatch.setattr(nodes, "data_source_get_sync_job", fake_get_sync_job)
+
+    result = asyncio.run(
+        nodes._trigger_and_wait_collection(  # noqa: SLF001
+            auth_token="token",
+            source_id="source-001",
+            dataset_id="dataset-001",
+            resource_key="orders",
+            biz_date="2026-05-20",
+            trigger_mode="manual",
+        )
+    )
+
+    assert get_calls == ["job-001"]
+    assert result["success"] is True
+    assert result["job"]["metrics"]["row_count"] == 91852
+    assert result["job"]["metrics"]["collection_timing"]["total_seconds"] == 64.816416
+
+
 def test_runtime_summary_notification_patch_preserves_existing_artifacts() -> None:
     artifacts = {"output_files": ["a.xlsx"], "runtime_summary": {"biz_date": "2026-05-20"}}
     patched = nodes._merge_runtime_summary_notification(  # noqa: SLF001

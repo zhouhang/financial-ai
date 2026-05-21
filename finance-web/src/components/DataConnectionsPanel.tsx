@@ -9895,7 +9895,7 @@ export default function DataConnectionsPanel({
       return renderSourceList(selectedSourceKind);
     }
     if (selectedSourceKind === 'browser_playbook') {
-      return <BrowserPlaybookPanel authToken={authToken} />;
+      return <BrowserPlaybookPanel authToken={authToken ?? null} />;
     }
     return renderReservedPanel(selectedSourceKind);
   };

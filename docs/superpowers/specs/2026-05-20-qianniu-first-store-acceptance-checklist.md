@@ -15,7 +15,15 @@ that wiring actually drives a real merchant browser session against the real fun
       sub-account in Google Chrome.
 - [ ] Collection machine uses installed Google Chrome Stable in headed mode:
       `BROWSER_AGENT_BROWSER_CHANNEL=chrome`, `BROWSER_AGENT_HEADLESS=0`.
-- [ ] Collection machine passes `scripts/check_environment.py`:
+- [ ] Runtime env exists in root `.env`:
+      `BROWSER_AGENT_ID=browser-agent-local`,
+      `BROWSER_AGENT_DEFAULT_AGENT_ID=browser-agent-local`,
+      `BROWSER_AGENT_COMPANY_ID=00000000-0000-0000-0000-00000000dd01`,
+      `BROWSER_AGENT_PROFILE_ROOT=/Users/kevin/tally-browser-agent/profiles`,
+      `BROWSER_AGENT_DOWNLOAD_ROOT=/Users/kevin/tally-browser-agent/downloads`.
+      `BROWSER_AGENT_COMPANY_ID` is the Tally service-provider node owner for heartbeat only;
+      it is not the merchant company and not the DingTalk channel owner.
+- [ ] Collection machine passes `finance-agents/browser-agent/scripts/check_environment.py`:
       `profile_root_writable=true`, `download_root_writable=true`,
       `playwright_importable=true`, `chrome_launchable=true`,
       `browser_channel="chrome"`, `headless=false`, `timezone_id="Asia/Shanghai"`.
@@ -30,11 +38,20 @@ that wiring actually drives a real merchant browser session against the real fun
   - [ ] normal data-source/read APIs return only `credential_ref`, never the plaintext password
   - [ ] browser-agent, finance-mcp, and data-agent logs do not print the plaintext password
 - [ ] Minimal DingTalk alerting configured through the existing Tally DWS collaboration channel:
+  - [ ] DWS CLI is `v1.0.30` or newer.
+  - [ ] `dws cache refresh` was run after upgrade.
+  - [ ] `dws schema --format json --jq '.products[] | select(.id=="bot") | [.tools[].name]'`
+        includes `batch_send_robot_msg_to_users`; otherwise `send-by-bot` can fail with
+        `endpoint not resolved for product "bot"`.
   - [ ] `BROWSER_COLLECTION_ALERTS_ENABLED=true` is set only on the first-store runtime
-  - [ ] company channel config exists and works with provider `dingtalk_dws`
+        after one real bot-message delivery to 周行 succeeds.
+  - [ ] `DINGTALK_CLIENT_ID`, `DINGTALK_CLIENT_SECRET`, and `DINGTALK_ROBOT_CODE` are set
+        to the Anhui Namai DingTalk DWS app/robot credentials. Do not configure a Tally
+        internal `company_channel_configs.id` such as `c991...` in runtime env.
   - [ ] `BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD=周行`
   - [ ] recipient resolves to 周行's DingTalk user id
-  - [ ] a test `send_reminder` reaches 周行 as bot message + todo + DING
+  - [ ] a test `send_bot_message` reaches 周行 as a DingTalk bot message
+  - [ ] no DingTalk todo is created for browser collection technical alerts
   - [ ] no standalone DingTalk webhook is introduced for browser alerts
 - [ ] Browser alert events are wired or verified for first-store:
   - [ ] browser-agent offline/down beyond grace window
@@ -108,7 +125,7 @@ Attach to the sign-off ticket:
   Playwright really drove a real page, not a synthetic stand-in).
 - `browser-agent.log` excerpt for the three runs.
 - DingTalk alert proof:
-  - one successful test reminder to 周行
+  - one successful bot-message-only test alert to 周行
   - one simulated or real browser failure alert to 周行
   - one simulated or real `risk_blocked` alert to 周行
 

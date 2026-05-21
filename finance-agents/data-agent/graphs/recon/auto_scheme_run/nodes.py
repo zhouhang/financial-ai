@@ -657,6 +657,29 @@ def _collection_duration(collection: dict[str, Any]) -> float | None:
     return _safe_float(timing.get("total_seconds"))
 
 
+def _collection_row_count(collection: dict[str, Any]) -> int:
+    job = _safe_dict(collection.get("job"))
+    metrics = _safe_dict(job.get("metrics"))
+    for key in ("row_count", "collection_input", "collection_upserted"):
+        value = _safe_int(metrics.get(key), -1)
+        if value >= 0:
+            return value
+    collection_records = _safe_dict(collection.get("collection_records"))
+    return _safe_int(collection_records.get("record_count"), 0)
+
+
+def _collection_attempts_by_side(source_snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    attempts: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(_safe_list(source_snapshot.get("collection_attempts"))):
+        if not isinstance(item, dict):
+            continue
+        binding = _safe_dict(item.get("binding"))
+        side = _runtime_metric_side(binding) or ("right" if index == 1 else "left")
+        if side:
+            attempts[side] = item
+    return attempts
+
+
 def _summary_count(summary: dict[str, Any], side: str) -> int | None:
     matched_exact = _safe_float(summary.get("matched_exact"))
     matched_with_diff = _safe_float(summary.get("matched_with_diff"))
@@ -683,13 +706,14 @@ def _build_runtime_summary(ctx: dict[str, Any]) -> dict[str, Any]:
     runtime_metrics = _safe_dict(ctx.get("runtime_metrics"))
     run_context = _safe_dict(ctx.get("run_context"))
     collections: list[dict[str, Any]] = []
+    collection_attempts_by_side = _collection_attempts_by_side(source_snapshot)
 
     for index, item in enumerate(_safe_list(source_snapshot.get("collections"))):
         if not isinstance(item, dict):
             continue
         binding = _safe_dict(item.get("binding"))
         side = _runtime_metric_side(binding) or ("right" if index == 1 else "left")
-        collection_records = _safe_dict(item.get("collection_records"))
+        runtime_collection = {**item, **_safe_dict(collection_attempts_by_side.get(side))}
         collections.append(
             {
                 "side": side,
@@ -697,8 +721,8 @@ def _build_runtime_summary(ctx: dict[str, Any]) -> dict[str, Any]:
                     binding,
                     "右侧数据源" if side == "right" else "左侧数据源",
                 ),
-                "row_count": _safe_int(collection_records.get("record_count"), 0),
-                "duration_seconds": _collection_duration(item),
+                "row_count": _collection_row_count(runtime_collection),
+                "duration_seconds": _collection_duration(runtime_collection),
             }
         )
 
@@ -1268,6 +1292,21 @@ async def _trigger_collection(
     )
 
 
+async def _enrich_completed_collection_job(
+    *,
+    auth_token: str,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    sync_job_id = _sync_job_id(job)
+    if not sync_job_id:
+        return job
+    result = await data_source_get_sync_job(auth_token, sync_job_id, mode="real")
+    if not bool(result.get("success")):
+        return job
+    enriched_job = _safe_dict(result.get("job"))
+    return enriched_job or job
+
+
 async def _trigger_and_wait_collection(
     *,
     auth_token: str,
@@ -1297,7 +1336,10 @@ async def _trigger_and_wait_collection(
     ):
         return {**collect_result, "collection_driver": driver}
     if not bool(collect_result.get("queued")) and status not in {"queued", "pending", "running"}:
-        return collect_result
+        return {
+            **collect_result,
+            "job": await _enrich_completed_collection_job(auth_token=auth_token, job=job),
+        }
 
     wait_result = await _wait_dataset_collection_job(
         auth_token=auth_token,

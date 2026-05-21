@@ -15,9 +15,7 @@ from config import (
     BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD,
     DATABASE_URL,
 )
-from services.notifications import get_notification_adapter
-from services.notifications.models import NotificationChannelConfig, ReminderResult
-from services.notifications.repository import load_company_channel_config
+from services.notifications.dingtalk_dws import DingTalkDwsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +55,11 @@ class BrowserAlertService:
     def __init__(
         self,
         *,
-        channel_loader: Callable[[str], NotificationChannelConfig | None] | None = None,
-        adapter_factory: Callable[[NotificationChannelConfig], Any] | None = None,
+        adapter_factory: Callable[[], Any] | None = None,
         dedupe_checker: Callable[[str], bool] | None = None,
         alert_recorder: Callable[[str, dict[str, Any]], None] | None = None,
         recipient_keyword: str = BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD,
     ) -> None:
-        self.channel_loader = channel_loader or self._load_channel
         self.adapter_factory = adapter_factory or self._build_adapter
         self.dedupe_checker = dedupe_checker or browser_alert_sent
         self.alert_recorder = alert_recorder or record_browser_alert_sent
@@ -74,43 +70,41 @@ class BrowserAlertService:
         if self.dedupe_checker(dedupe_key):
             return {"status": "skipped", "reason": "deduped", "dedupe_key": dedupe_key}
 
-        channel = self.channel_loader(event.company_id)
-        if channel is None:
-            return {"status": "skipped", "reason": "channel_missing", "dedupe_key": dedupe_key}
-
-        adapter = self.adapter_factory(channel)
+        adapter = self.adapter_factory()
         title = _compose_alert_title(event)
         content = _compose_alert_content(event)
-        reminder: ReminderResult = adapter.send_reminder(
+        resolved = adapter.resolve_user(keyword=self.recipient_keyword)
+        if not resolved.success or resolved.resolved_user is None:
+            return {
+                "status": "failed",
+                "reason": resolved.code or "user_resolve_failed",
+                "message": resolved.message or "无法定位浏览器采集告警接收人",
+                "provider": adapter.provider,
+                "dedupe_key": dedupe_key,
+            }
+        receiver = resolved.resolved_user
+        bot_result = adapter.send_bot_message(
             title=title,
             content=content,
-            todo_title=title,
-            keyword=self.recipient_keyword,
-            source_id=event.source_id,
+            to_user_id=str(receiver.user_id or ""),
+            content_type="markdown",
         )
         result = {
-            "status": "sent" if reminder.success else "failed",
-            "reason": "" if reminder.success else (reminder.code or "send_failed"),
-            "message": reminder.message,
-            "provider": reminder.provider,
+            "status": "sent" if bot_result.success else "failed",
+            "reason": "" if bot_result.success else (bot_result.code or "send_failed"),
+            "message": bot_result.message,
+            "provider": bot_result.provider,
             "dedupe_key": dedupe_key,
-            "todo_id": reminder.todo_result.todo.todo_id
-            if reminder.todo_result and reminder.todo_result.todo
-            else "",
-            "message_id": reminder.bot_result.message_id if reminder.bot_result else "",
-            "assignee_user_id": reminder.assignee_user_id,
+            "message_id": bot_result.message_id,
+            "receiver_user_id": str(receiver.user_id or ""),
         }
-        if reminder.success:
+        if bot_result.success:
             self.alert_recorder(dedupe_key, result)
         return result
 
     @staticmethod
-    def _load_channel(company_id: str) -> NotificationChannelConfig | None:
-        return load_company_channel_config(company_id=company_id)
-
-    @staticmethod
-    def _build_adapter(channel: NotificationChannelConfig) -> Any:
-        return get_notification_adapter(provider=channel.provider, channel_config=channel)
+    def _build_adapter() -> Any:
+        return DingTalkDwsAdapter()
 
 
 def ensure_browser_alerts_table() -> None:
