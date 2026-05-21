@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.playwright_runner import (
+    BrowserActionError,
     PlaywrightRunConfig,
     _execute_action,
     _profile_is_authenticated,
@@ -49,9 +50,14 @@ class FakePage:
     def __init__(self, *, url: str = "about:blank", selectors: set[str] | None = None) -> None:
         self.url = url
         self.selectors = selectors or set()
+        self.gotos: list[tuple[str, str, int]] = []
         self.fills: list[tuple[str, str, int]] = []
         self.clicks: list[tuple[str, int]] = []
         self.waits: list[tuple[str, int]] = []
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.gotos.append((url, wait_until, timeout))
+        self.url = url
 
     def content(self) -> str:
         return ""
@@ -118,6 +124,47 @@ def test_login_action_fills_credentials_clicks_submit_and_waits(tmp_path) -> Non
     ]
     assert page.clicks == [("button[type='submit']", 4321)]
     assert page.waits == [(".dashboard", 4321)]
+
+
+def test_navigate_allows_auth_redirect_when_login_step_follows(tmp_path) -> None:
+    page = FakePage(url="about:blank")
+
+    result = _execute_action(
+        page,
+        {
+            "action": "navigate",
+            "url": "https://login.taobao.com/member/login.htm",
+            "timeout_ms": 1234,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        allow_auth_redirect=True,
+    )
+
+    assert result == {"auth_required": True}
+    assert page.gotos == [("https://login.taobao.com/member/login.htm", "load", 1234)]
+
+
+def test_navigate_still_fails_auth_redirect_without_login_step(tmp_path) -> None:
+    page = FakePage(url="about:blank")
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "navigate",
+                "url": "https://login.taobao.com/member/login.htm",
+                "timeout_ms": 1234,
+            },
+            params={},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "AUTH_EXPIRED"
 
 
 def test_sanitize_profile_key_matches_runner_profile_dir() -> None:

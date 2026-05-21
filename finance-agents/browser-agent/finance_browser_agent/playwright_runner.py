@@ -154,6 +154,7 @@ def _execute_action(
     extracted: dict[str, Any],
     capture_files: list[dict[str, Any]],
     download_dir: Path,
+    allow_auth_redirect: bool = False,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -167,6 +168,8 @@ def _execute_action(
     if name == "navigate":
         page.goto(str(action.get("url") or ""), wait_until="load", timeout=timeout_ms)
         detected = _detect_auth_or_risk(page)
+        if detected == "AUTH_EXPIRED" and allow_auth_redirect:
+            return {"auth_required": True}
         if detected:
             raise BrowserActionError(detected, f"navigate detected {detected}")
         return {}
@@ -333,6 +336,7 @@ def run_playbook_with_playwright(
     rows: list[dict[str, Any]] = []
     capture_files: list[dict[str, Any]] = []
     extracted: dict[str, Any] = {}
+    steps = [dict(step) for step in playbook.get("steps") or []]
 
     try:
         with sync_playwright() as playwright:
@@ -346,13 +350,16 @@ def run_playbook_with_playwright(
             )
             page = context.pages[0] if context.pages else context.new_page()
             try:
-                for step in playbook.get("steps") or []:
-                    step_dict = dict(step)
+                for index, step_dict in enumerate(steps):
                     step_action = str(step_dict.get("action") or "").strip()
                     if step_action in {"login", "login_if_needed"}:
                         authenticated = _profile_is_authenticated(page, playbook)
                         if should_skip_login_action(step_dict, authenticated=authenticated):
                             continue
+                    allow_auth_redirect = step_action == "navigate" and any(
+                        str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
+                        for next_step in steps[index + 1 :]
+                    )
                     result = _execute_action(
                         page,
                         step_dict,
@@ -360,6 +367,7 @@ def run_playbook_with_playwright(
                         extracted=extracted,
                         capture_files=capture_files,
                         download_dir=download_dir,
+                        allow_auth_redirect=allow_auth_redirect,
                     )
                     if result.get("rows"):
                         rows.extend(result["rows"])
