@@ -2198,6 +2198,31 @@ def _generate_source_code(source_kind: str, provider_code: str, name: str) -> st
     return f"{base}__{digest}"
 
 
+def _browser_registration_slug(title: Any) -> str:
+    raw = str(title or "").strip().lower()
+    slug_chars: list[str] = []
+    previous_dash = False
+    for ch in raw:
+        if ch.isascii() and ch.isalnum():
+            slug_chars.append(ch)
+            previous_dash = False
+        elif ch in {" ", "-", "_", ".", "/"} and not previous_dash:
+            slug_chars.append("-")
+            previous_dash = True
+    slug = "".join(slug_chars).strip("-")
+    return slug or "browser-collection"
+
+
+def _browser_registration_code(*, title: str, company_id: str) -> str:
+    base = _browser_registration_slug(title)
+    suffix = hashlib.sha1(f"{company_id}:{title}".encode("utf-8")).hexdigest()[:8]
+    return f"{base}-{suffix}"
+
+
+def _default_browser_verification_biz_date() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
 def _resolve_provider_code(
     source_kind: str,
     *,
@@ -5347,6 +5372,27 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_register_browser_collection",
+            description="创建 source-less 浏览器采集注册: 自动创建 browser_playbook 数据源、同名 browser_collection_records 数据集、注册 playbook 并触发 T-1 首次验证。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "title": {"type": "string"},
+                    "credential_username": {"type": "string"},
+                    "credential_password": {"type": "string"},
+                    "playbook_body": {"type": "object"},
+                },
+                "required": [
+                    "auth_token",
+                    "title",
+                    "credential_username",
+                    "credential_password",
+                    "playbook_body",
+                ],
+            },
+        ),
+        Tool(
             name="data_source_register_browser_playbook",
             description="注册 browser_playbook 数据源的 playbook + 商家凭证,落 draft + verifying,触发首次验证 sync_job。验证通过后调 data_source_finalize_browser_playbook_registration 激活。shop_id 默认取 data_source.code,agent_id 默认取 env BROWSER_AGENT_DEFAULT_AGENT_ID;Operator 通常不需要传。",
             inputSchema={
@@ -5657,6 +5703,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_delete(arguments)
         if name == "data_source_test":
             return await _handle_data_source_test(arguments)
+        if name == "data_source_register_browser_collection":
+            return await _handle_data_source_register_browser_collection(arguments)
         if name == "data_source_register_browser_playbook":
             return await _handle_data_source_register_browser_playbook(arguments)
         if name == "data_source_finalize_browser_playbook_registration":
@@ -7036,6 +7084,92 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
     if not success:
         response["error"] = result["message"] or "数据源测试失败"
     return response
+
+
+async def _handle_data_source_register_browser_collection(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    title = str(arguments.get("title") or "").strip()
+    credential_username = str(arguments.get("credential_username") or "").strip()
+    credential_password = str(arguments.get("credential_password") or "")
+    playbook_body = dict(arguments.get("playbook_body") or {})
+
+    if not title:
+        return {"success": False, "error": "标题不能为空"}
+    if not credential_username or not credential_password:
+        return {"success": False, "error": "登录账号和密码不能为空"}
+    if not playbook_body:
+        return {"success": False, "error": "Playbook JSON 不能为空"}
+
+    source_code = _browser_registration_code(title=title, company_id=company_id)
+    playbook_id = _browser_registration_slug(title)
+    version = "1"
+
+    source_row = auth_db.upsert_unified_data_source(
+        company_id=company_id,
+        code=source_code,
+        name=title,
+        source_kind="browser_playbook",
+        domain_type="ecommerce",
+        provider_code="browser_playbook",
+        execution_mode="deterministic",
+        description=f"{title} 浏览器采集",
+        status="active",
+        is_enabled=True,
+        meta={"registration_title": title, "managed_by": "browser_collection_registration"},
+    )
+    if not source_row:
+        return {"success": False, "error": "创建浏览器采集数据源失败"}
+
+    source_id = str(source_row.get("id") or "")
+    dataset_row = auth_db.upsert_unified_data_source_dataset(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_code=playbook_id,
+        dataset_name=title,
+        resource_key=f"{playbook_id}@{version}",
+        dataset_kind="table",
+        origin_type="browser_playbook",
+        extract_config={
+            "source_type": "browser_collection_records",
+            "storage": "browser_collection_records",
+        },
+        schema_summary={
+            "source_type": "browser_collection_records",
+            "storage": "browser_collection_records",
+        },
+        sync_strategy={"mode": "browser_playbook"},
+        status="active",
+        is_enabled=True,
+        health_status="unknown",
+        publish_status="published",
+        business_domain="browser_collection",
+        business_object_type="browser_collection_records",
+        grain="row",
+        meta={
+            "source_type": "browser_collection_records",
+            "managed_by": "browser_collection_registration",
+        },
+    )
+    if not dataset_row:
+        return {"success": False, "error": "创建浏览器采集语义数据集失败", "source": source_row}
+
+    result = await _handle_data_source_register_browser_playbook(
+        {
+            **arguments,
+            "source_id": source_id,
+            "playbook_id": playbook_id,
+            "version": version,
+            "title": title,
+            "dataset_id": str(dataset_row.get("id") or ""),
+            "verification_biz_date": _default_browser_verification_biz_date(),
+            "egress_group": "",
+        }
+    )
+    if result.get("success"):
+        result["source"] = source_row
+        result["dataset"] = dataset_row
+    return result
 
 
 async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any]) -> dict[str, Any]:
