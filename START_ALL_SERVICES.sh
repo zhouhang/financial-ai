@@ -203,11 +203,20 @@ for i in $(seq 1 "$RECON_WORKER_COUNT"); do
     echo "  ✅ recon-worker-${i} 已启动 (PID: $WORKER_PID)"
 done
 
-# 启动 finance-web
+# 启动 finance-web(生产预览模式:先 build 出 dist,再用 vite preview 托管 —— 打包后少数带 hash
+# 的 bundle、可被浏览器/Cloudflare 缓存,dev.tallyai.cn 加载快且稳定。改前端代码后需重启本脚本
+# 重新 build 才生效;纯前端开发可临时改回 `npm run dev` 拿热更新。)
 echo ""
-echo "📌 步骤 6: 启动 finance-web (端口 5173)..."
-FINANCE_WEB_PID="$(start_detached "$LOG_DIR/finance-web.log" "$PROJECT_ROOT/finance-web" npm run dev)"
-echo "✅ finance-web 已启动 (PID: $FINANCE_WEB_PID)"
+echo "📌 步骤 6: 构建并启动 finance-web (端口 5173, build + preview)..."
+echo "   构建中(npm run build),日志: $LOG_DIR/finance-web-build.log ..."
+if (cd "$PROJECT_ROOT/finance-web" && npm run build > "$LOG_DIR/finance-web-build.log" 2>&1); then
+    echo "   ✅ 前端构建完成"
+else
+    echo "   ⚠️  前端构建失败(将用上次的 dist 启动,可能是旧版本),详见 $LOG_DIR/finance-web-build.log"
+fi
+FINANCE_WEB_PID="$(start_detached "$LOG_DIR/finance-web.log" "$PROJECT_ROOT/finance-web" npx vite preview --host 127.0.0.1 --port 5173)"
+echo "$FINANCE_WEB_PID" > /tmp/finance-web.pid
+echo "✅ finance-web 已启动 (PID: $FINANCE_WEB_PID, 预览模式)"
 
 # 等待所有服务完全启动
 sleep 5
