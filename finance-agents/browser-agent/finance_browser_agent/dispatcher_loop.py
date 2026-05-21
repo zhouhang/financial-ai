@@ -57,9 +57,9 @@ class BrowserDispatcherLoop:
     async def _process_job(self, job: dict[str, Any]) -> dict[str, Any]:
         sync_job_id = str(job.get("id") or "")
         payload = dict(job.get("request_payload") or {})
-        shop_id = str(job.get("shop_id") or "unknown")
+        profile_key = str(job.get("runtime_profile_ref") or job.get("shop_id") or "unknown")
         async with self.semaphore:
-            async with self.profile_locks.lock_for_shop(shop_id):
+            async with self.profile_locks.lock_for_shop(profile_key):
                 # Sync Playwright must run off the event loop, otherwise other workers stall.
                 result = await asyncio.to_thread(
                     self.runner, self._message_from_job(job, payload)

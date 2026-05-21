@@ -67,14 +67,24 @@ class PlaywrightRunConfig:
         )
 
 
-def build_user_data_dir(*, config: PlaywrightRunConfig, shop_id: str) -> str:
-    """Compose the persistent Chrome user-data-dir for one shop.
+def build_user_data_dir(
+    *,
+    config: PlaywrightRunConfig,
+    shop_id: str,
+    runtime_profile_ref: str = "",
+) -> str:
+    """Compose the persistent Chrome user-data-dir for one browser profile.
 
-    Sanitizes shop_id to alphanumerics and ``- _`` so a malicious or malformed shop_id can't
+    Sanitizes the profile key to alphanumerics and ``- _`` so a malicious or malformed key can't
     escape the profile_root (no ../ traversal, no path separators).
     """
-    safe = "".join(ch for ch in str(shop_id or "") if ch.isalnum() or ch in {"-", "_"})
+    raw_key = str(runtime_profile_ref or shop_id or "unknown")
+    safe = "".join(ch for ch in raw_key if ch.isalnum() or ch in {"-", "_"})
     return str(Path(config.profile_root) / (safe or "unknown"))
+
+
+def should_skip_login_action(action: dict[str, Any], *, authenticated: bool) -> bool:
+    return authenticated and str(action.get("action") or "").strip() in {"login", "login_if_needed"}
 
 
 def _detect_auth_or_risk(page: Any) -> str | None:
@@ -95,6 +105,20 @@ def _detect_auth_or_risk(page: Any) -> str | None:
     if any(marker in body or marker in lowered for marker in _RISK_MARKERS):
         return "RISK_VERIFICATION"
     return None
+
+
+def _profile_is_authenticated(page: Any, playbook: dict[str, Any]) -> bool:
+    """Detect whether the opened persistent profile already has a valid login state."""
+    auth_check = dict(playbook.get("auth_check") or {})
+    logged_in_selector = str(auth_check.get("logged_in_selector") or "").strip()
+    timeout_ms = int(auth_check.get("timeout_ms") or 5000)
+    if logged_in_selector:
+        try:
+            page.wait_for_selector(logged_in_selector, timeout=timeout_ms)
+            return True
+        except Exception:
+            return False
+    return _detect_auth_or_risk(page) is None
 
 
 def _resolve_value(action: dict[str, Any], params: dict[str, Any], extracted: dict[str, Any]) -> str:
@@ -230,9 +254,14 @@ def run_playbook_with_playwright(
     playbook = dict(message.get("playbook_body") or {})
     params = dict(message.get("params") or {})
     shop_id = str(message.get("shop_id") or params.get("shop_id") or "unknown")
+    runtime_profile_ref = str(message.get("runtime_profile_ref") or "")
     job_id = str(message.get("job_id") or "unknown")
 
-    user_data_dir = build_user_data_dir(config=config, shop_id=shop_id)
+    user_data_dir = build_user_data_dir(
+        config=config,
+        shop_id=shop_id,
+        runtime_profile_ref=runtime_profile_ref,
+    )
     download_dir = Path(config.download_root) / shop_id / job_id
     download_dir.mkdir(parents=True, exist_ok=True)
 
@@ -255,10 +284,14 @@ def run_playbook_with_playwright(
             )
             page = context.pages[0] if context.pages else context.new_page()
             try:
+                authenticated = _profile_is_authenticated(page, playbook)
                 for step in playbook.get("steps") or []:
+                    step_dict = dict(step)
+                    if should_skip_login_action(step_dict, authenticated=authenticated):
+                        continue
                     result = _execute_action(
                         page,
-                        dict(step),
+                        step_dict,
                         params=params,
                         extracted=extracted,
                         capture_files=capture_files,
