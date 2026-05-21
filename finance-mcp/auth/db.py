@@ -3,7 +3,9 @@
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +13,7 @@ import time
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from psycopg2 import OperationalError, InterfaceError
 
 try:
@@ -293,10 +296,39 @@ def _get_db_config() -> dict:
     return db_config.get_connection_params()
 
 
+_DB_POOL: "psycopg2.pool.ThreadedConnectionPool | None" = None
+_DB_POOL_LOCK = threading.Lock()
+
+
+def _db_pool_enabled() -> bool:
+    """连接池开关。env DB_POOL=0/false/no 可一键退回"每次新建连接"的旧行为。"""
+    return os.getenv("DB_POOL", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _get_pool() -> "psycopg2.pool.ThreadedConnectionPool":
+    global _DB_POOL
+    if _DB_POOL is None:
+        with _DB_POOL_LOCK:
+            if _DB_POOL is None:
+                maxconn = max(2, int(os.getenv("DB_POOL_MAXCONN", "16") or "16"))
+                _DB_POOL = psycopg2.pool.ThreadedConnectionPool(1, maxconn, **_get_db_config())
+                logger.info("数据库连接池已初始化 (maxconn=%d)", maxconn)
+    return _DB_POOL
+
+
 def get_conn(max_retries=3, retry_delay=1):
-    """获取数据库连接的上下文管理器，带重试机制"""
+    """获取数据库连接的上下文管理器，带重试机制。
+
+    默认从连接池借用，避免每次新建连接(~13ms)的开销;用完归还而非关闭。
+    陈旧连接由 `_ConnectionContextManager.cursor()` 的 SELECT 1 存活检测兜底。
+    设 env DB_POOL=0 可退回"每次新建连接"的旧行为(出问题时的安全阀)。
+    """
+    pooled = _db_pool_enabled()
     for attempt in range(max_retries):
         try:
+            if pooled:
+                pool = _get_pool()
+                return _ConnectionContextManager(pool.getconn(), pool=pool)
             conn = psycopg2.connect(**_get_db_config())
             return _ConnectionContextManager(conn)
         except (OperationalError, InterfaceError) as e:
@@ -955,16 +987,40 @@ def ensure_schema() -> list[str]:
 
 
 class _ConnectionContextManager:
-    """数据库连接的上下文管理器类"""
-    def __init__(self, conn):
+    """数据库连接的上下文管理器类。
+
+    `pool` 非空时连接来自连接池:退出时清理事务后归还(而非关闭);
+    `pool` 为空时为直连模式,退出时关闭连接(DB_POOL=0 的旧行为)。
+    """
+    def __init__(self, conn, pool=None):
         self.conn = conn
+        self._pool = pool
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.conn:
+        if not self.conn:
+            return
+        if self._pool is None:
+            # 直连模式:关闭
             self.conn.close()
+            self.conn = None
+            return
+        # 池化模式:清理未提交事务(写操作均已显式 commit,这里只清残留)后归还。
+        # 若连接已坏,标记 close=True 让池丢弃该槽并补建,保持池计数正确。
+        try:
+            self.conn.rollback()
+            self._pool.putconn(self.conn)
+        except Exception:
+            try:
+                self._pool.putconn(self.conn, close=True)
+            except Exception:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+        self.conn = None
 
     def cursor(self, cursor_factory=None):
         """获取游标，自动处理连接失效"""
@@ -974,10 +1030,21 @@ class _ConnectionContextManager:
                 test_cursor.execute('SELECT 1')
         except (OperationalError, InterfaceError):
             logger.warning("数据库连接已失效，尝试重新连接")
-            self.conn.close()
-            # 重新建立连接
-            self.conn = psycopg2.connect(**_get_db_config())
-        
+            if self._pool is not None:
+                # 把坏连接还给池并标记关闭,再借一个新的,保持池计数正确
+                try:
+                    self._pool.putconn(self.conn, close=True)
+                except Exception:
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                self.conn = self._pool.getconn()
+            else:
+                self.conn.close()
+                # 重新建立连接
+                self.conn = psycopg2.connect(**_get_db_config())
+
         return self.conn.cursor(cursor_factory=cursor_factory)
 
     def commit(self):
