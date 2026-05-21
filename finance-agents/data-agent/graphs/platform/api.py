@@ -725,13 +725,41 @@ def _build_callback_redirect_url(
 # 公开（无需登录）支付宝专属授权链接落地页
 # ===========================================================================
 
+_LOGO_DATA_URI_CACHE: str | None = None
+
+
+def _logo_data_uri() -> str:
+    """Base64 data URI for the Tally mark, loaded once and cached.
+
+    Inlined as a data URI (not a static URL) so the standalone landing page works regardless
+    of the reverse-proxy /api prefix. Falls back to empty string if the asset is missing —
+    the brand header then shows only the wordmark.
+    """
+    global _LOGO_DATA_URI_CACHE
+    if _LOGO_DATA_URI_CACHE is None:
+        import base64
+        from pathlib import Path
+
+        asset = Path(__file__).resolve().parents[2] / "assets" / "tally-mark.png"
+        try:
+            _LOGO_DATA_URI_CACHE = "data:image/png;base64," + base64.b64encode(asset.read_bytes()).decode("ascii")
+        except Exception:
+            _LOGO_DATA_URI_CACHE = ""
+    return _LOGO_DATA_URI_CACHE
+
+
 def _invite_html(*, title: str, inner: str) -> str:
     """Render a Tally-branded standalone landing page. `inner` is the card body HTML.
 
-    Self-contained inline CSS (no external assets / CDN) since this is served by data-agent,
-    not the finance-web SPA. Palette mirrors finance-web theme tokens:
-    primary #f97316 / surface #f5f7fb / text #0f172a/#475569 / warning #f59e0b.
+    Self-contained (inline CSS + base64 logo, no external assets / CDN) since this is served by
+    data-agent, not the finance-web SPA. Primary color is Tally blue (#2563eb); surface #f5f7fb;
+    text #0f172a/#475569; warning #f59e0b.
     """
+    logo = _logo_data_uri()
+    logo_html = (
+        f"<img class='logo' src='{logo}' alt='Tally'/>" if logo
+        else "<div class='logo logo-fallback'>T</div>"
+    )
     return f"""<!doctype html><html lang='zh'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{title} · Tally</title>
@@ -744,7 +772,8 @@ body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:
 .card{{width:100%;max-width:440px;background:#fff;border:1px solid #e2e8f0;border-radius:16px;
   box-shadow:0 8px 30px rgba(15,23,42,.06);overflow:hidden}}
 .brand{{display:flex;align-items:center;gap:10px;padding:18px 24px;border-bottom:1px solid #edf2f7}}
-.brand .logo{{width:28px;height:28px;border-radius:8px;background:#f97316;color:#fff;font-weight:800;
+.brand .logo{{width:28px;height:28px;border-radius:8px;object-fit:contain;display:block}}
+.brand .logo-fallback{{background:#2563eb;color:#fff;font-weight:800;
   display:flex;align-items:center;justify-content:center;font-size:16px}}
 .brand .name{{font-weight:700;font-size:15px;color:#0f172a}}
 .brand .sub{{font-size:12px;color:#94a3b8;margin-left:auto}}
@@ -755,8 +784,8 @@ body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:
   padding:10px 12px;font-size:13px;color:#b45309;margin:0 0 16px}}
 .desc{{font-size:14px;color:#475569;margin:0 0 20px}}
 .btn{{display:block;width:100%;border:0;border-radius:10px;padding:13px 18px;font-size:15px;font-weight:600;
-  cursor:pointer;background:#f97316;color:#fff;transition:background .15s}}
-.btn:hover{{background:#ea580c}}
+  cursor:pointer;background:#2563eb;color:#fff;transition:background .15s}}
+.btn:hover{{background:#1d4ed8}}
 .note{{font-size:12px;color:#94a3b8;text-align:center;margin:14px 0 0}}
 .status{{display:flex;align-items:center;gap:10px;margin:0 0 12px}}
 .status .ic{{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -767,7 +796,7 @@ body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:
 .foot{{padding:12px 24px;border-top:1px solid #edf2f7;font-size:12px;color:#94a3b8;text-align:center}}
 </style></head>
 <body><div class='card'>
-<div class='brand'><div class='logo'>T</div><div class='name'>Tally</div><div class='sub'>智能财务助手</div></div>
+<div class='brand'>{logo_html}<div class='name'>Tally</div><div class='sub'>智能财务助手</div></div>
 <div class='body'>{inner}</div>
 <div class='foot'>授权在支付宝官方页面完成 · Tally 不会获取你的支付宝密码</div>
 </div></body></html>"""
