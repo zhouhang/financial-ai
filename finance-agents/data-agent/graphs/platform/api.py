@@ -725,38 +725,92 @@ def _build_callback_redirect_url(
 # 公开（无需登录）支付宝专属授权链接落地页
 # ===========================================================================
 
-def _invite_html(*, title: str, body: str) -> str:
-    return (
-        "<!doctype html><html lang='zh'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>{title}</title></head>"
-        "<body style='font-family:system-ui;max-width:560px;margin:48px auto;padding:0 16px'>"
-        f"{body}</body></html>"
-    )
+def _invite_html(*, title: str, inner: str) -> str:
+    """Render a Tally-branded standalone landing page. `inner` is the card body HTML.
+
+    Self-contained inline CSS (no external assets / CDN) since this is served by data-agent,
+    not the finance-web SPA. Palette mirrors finance-web theme tokens:
+    primary #f97316 / surface #f5f7fb / text #0f172a/#475569 / warning #f59e0b.
+    """
+    return f"""<!doctype html><html lang='zh'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>{title} · Tally</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#f5f7fb;color:#0f172a;
+  font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  padding:24px;line-height:1.6}}
+.card{{width:100%;max-width:440px;background:#fff;border:1px solid #e2e8f0;border-radius:16px;
+  box-shadow:0 8px 30px rgba(15,23,42,.06);overflow:hidden}}
+.brand{{display:flex;align-items:center;gap:10px;padding:18px 24px;border-bottom:1px solid #edf2f7}}
+.brand .logo{{width:28px;height:28px;border-radius:8px;background:#f97316;color:#fff;font-weight:800;
+  display:flex;align-items:center;justify-content:center;font-size:16px}}
+.brand .name{{font-weight:700;font-size:15px;color:#0f172a}}
+.brand .sub{{font-size:12px;color:#94a3b8;margin-left:auto}}
+.body{{padding:24px}}
+.eyebrow{{font-size:13px;color:#64748b;margin:0 0 6px}}
+.shop{{font-size:20px;font-weight:700;color:#0f172a;margin:0 0 16px;word-break:break-all}}
+.hint{{background:#fff7ed;border:1px solid #fed7aa;border-left:3px solid #f59e0b;border-radius:10px;
+  padding:10px 12px;font-size:13px;color:#b45309;margin:0 0 16px}}
+.desc{{font-size:14px;color:#475569;margin:0 0 20px}}
+.btn{{display:block;width:100%;border:0;border-radius:10px;padding:13px 18px;font-size:15px;font-weight:600;
+  cursor:pointer;background:#f97316;color:#fff;transition:background .15s}}
+.btn:hover{{background:#ea580c}}
+.note{{font-size:12px;color:#94a3b8;text-align:center;margin:14px 0 0}}
+.status{{display:flex;align-items:center;gap:10px;margin:0 0 12px}}
+.status .ic{{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:20px;flex:none}}
+.ok .ic{{background:#dcfce7;color:#16a34a}}
+.err .ic{{background:#fee2e2;color:#dc2626}}
+.status .t{{font-size:17px;font-weight:700}}
+.foot{{padding:12px 24px;border-top:1px solid #edf2f7;font-size:12px;color:#94a3b8;text-align:center}}
+</style></head>
+<body><div class='card'>
+<div class='brand'><div class='logo'>T</div><div class='name'>Tally</div><div class='sub'>智能财务助手</div></div>
+<div class='body'>{inner}</div>
+<div class='foot'>授权在支付宝官方页面完成 · Tally 不会获取你的支付宝密码</div>
+</div></body></html>"""
 
 
 @router.get("/p/alipay-auth", response_class=HTMLResponse)
 async def alipay_invite_landing(t: str = Query("", description="invite token")):
+    import html as _html
+
     info = await alipay_auth_invite_describe(t)
     if not info.get("valid"):
-        return HTMLResponse(_invite_html(title="链接已失效",
-            body="<h3>链接已失效或无效</h3><p>请联系对接人重新生成专属授权链接。</p>"), status_code=400)
+        inner = (
+            "<div class='status err'><div class='ic'>!</div><div class='t'>链接无效或已过期</div></div>"
+            "<p class='desc'>该授权链接无法使用,可能已过期(默认 30 天)或被改动。请联系对接人重新生成专属授权链接。</p>"
+        )
+        return HTMLResponse(_invite_html(title="链接已失效", inner=inner), status_code=400)
+
+    shop = _html.escape(str(info.get("merchant_display_name", "")))
     if info.get("already_authorized"):
-        return HTMLResponse(_invite_html(title="已授权",
-            body=f"<h3>该店铺已完成支付宝授权</h3><p>{info.get('merchant_display_name','')}</p><p>无需重复操作。</p>"))
-    shop = info.get("merchant_display_name", "")
-    acct = info.get("expected_alipay_account", "")
-    acct_hint = (f"<p style='color:#b45309'><b>请务必使用账号 {acct} 登录支付宝</b>，登错账号会绑错主体。</p>" if acct else "")
-    # 表单不写死 action,提交到当前文档 URL(浏览器会自动带上反向代理前缀如 /api 与 ?t=),
-    # 避免 data-agent 不知道公网前缀导致 POST 丢失 /api 又落到 SPA 首页。
-    body = (
-        f"<h3>支付宝授权</h3><p>店铺：<b>{shop}</b></p>{acct_hint}"
+        inner = (
+            "<div class='status ok'><div class='ic'>✓</div><div class='t'>该店铺已完成授权</div></div>"
+            f"<p class='eyebrow'>店铺</p><p class='shop'>{shop}</p>"
+            "<p class='desc'>支付宝数据采集授权已生效,无需重复操作。</p>"
+        )
+        return HTMLResponse(_invite_html(title="已授权", inner=inner))
+
+    acct = _html.escape(str(info.get("expected_alipay_account", "")))
+    acct_hint = (
+        f"<div class='hint'>请务必使用账号 <b>{acct}</b> 登录支付宝,登错账号会把数据绑到错误的主体。</div>"
+        if acct else ""
+    )
+    # 表单不写死 action,提交到当前文档 URL(浏览器自动带上反向代理前缀如 /api 与 ?t=)。
+    inner = (
+        "<p class='eyebrow'>正在为以下店铺授权支付宝数据采集</p>"
+        f"<p class='shop'>{shop}</p>"
+        f"{acct_hint}"
+        "<p class='desc'>点击下方按钮前往支付宝完成授权,授权后 Tally 即可自动采集该店铺的资金/订单账单用于对账。</p>"
         "<form method='post'>"
-        f"<input type='hidden' name='t' value='{t}'/>"
-        "<button type='submit' style='padding:10px 18px;font-size:15px'>继续去支付宝授权</button>"
+        f"<input type='hidden' name='t' value='{_html.escape(t)}'/>"
+        "<button class='btn' type='submit'>前往支付宝授权</button>"
         "</form>"
     )
-    return HTMLResponse(_invite_html(title="支付宝授权", body=body))
+    return HTMLResponse(_invite_html(title="支付宝授权", inner=inner))
 
 
 @router.post("/p/alipay-auth")
@@ -766,6 +820,11 @@ async def alipay_invite_continue_route(request: Request):
     token = str(form.get("t") or request.query_params.get("t") or "")
     result = await alipay_auth_invite_continue(token)
     if not result.get("success") or not result.get("auth_url"):
-        return HTMLResponse(_invite_html(title="无法继续",
-            body=f"<h3>无法发起授权</h3><p>{result.get('error','请稍后重试')}</p>"), status_code=400)
+        import html as _html
+        msg = _html.escape(str(result.get("error") or "请稍后重试"))
+        inner = (
+            "<div class='status err'><div class='ic'>!</div><div class='t'>无法发起授权</div></div>"
+            f"<p class='desc'>{msg}</p>"
+        )
+        return HTMLResponse(_invite_html(title="无法继续", inner=inner), status_code=400)
     return RedirectResponse(url=str(result["auth_url"]), status_code=303)
