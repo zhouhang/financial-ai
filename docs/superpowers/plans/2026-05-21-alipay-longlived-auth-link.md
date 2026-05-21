@@ -238,7 +238,7 @@ def get_active_alipay_connection_for_shop(
                 cur.execute(
                     """
                     SELECT id, external_shop_id, external_shop_name, status
-                    FROM platform_shop_connections
+                    FROM shop_connections
                     WHERE company_id = %s
                       AND platform_code = 'alipay'
                       AND status = 'active'
@@ -258,7 +258,7 @@ def get_active_alipay_connection_for_shop(
         return None
 ```
 
-> 实现前确认连接表名:`grep -n "platform_shop_connections\|FROM platform_.*connections" finance-mcp/auth/db.py | head`。若实际表名/字段不同(如 `shop_connections`),按真实表名/字段调整 SQL(`external_shop_name`/`external_shop_id`/`status`/`platform_code`)。
+> 已核实:连接表为 `shop_connections`,含列 `company_id` / `platform_code` / `external_shop_id` / `external_shop_name` / `status`(default 'active',`update_shop_connection_status` 维护)。SQL 已按真实表名写好,无需再改。
 
 - [ ] **Step 4: 运行,确认通过**
 
