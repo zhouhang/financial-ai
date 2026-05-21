@@ -15,12 +15,14 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from starlette.responses import FileResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from config import FINANCE_MCP_UPLOAD_DIR, MAX_FILE_SIZE
 from tools.mcp_client import (
+    alipay_auth_invite_continue,
+    alipay_auth_invite_describe,
     platform_create_auth_session,
     platform_disable_shop,
     platform_get_app_config,
@@ -717,3 +719,48 @@ def _build_callback_redirect_url(
             "",
         )
     )
+
+
+# ===========================================================================
+# 公开（无需登录）支付宝专属授权链接落地页
+# ===========================================================================
+
+def _invite_html(*, title: str, body: str) -> str:
+    return (
+        "<!doctype html><html lang='zh'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{title}</title></head>"
+        "<body style='font-family:system-ui;max-width:560px;margin:48px auto;padding:0 16px'>"
+        f"{body}</body></html>"
+    )
+
+
+@router.get("/p/alipay-auth", response_class=HTMLResponse)
+async def alipay_invite_landing(t: str = Query("", description="invite token")):
+    info = await alipay_auth_invite_describe(t)
+    if not info.get("valid"):
+        return HTMLResponse(_invite_html(title="链接已失效",
+            body="<h3>链接已失效或无效</h3><p>请联系对接人重新生成专属授权链接。</p>"), status_code=400)
+    if info.get("already_authorized"):
+        return HTMLResponse(_invite_html(title="已授权",
+            body=f"<h3>该店铺已完成支付宝授权</h3><p>{info.get('merchant_display_name','')}</p><p>无需重复操作。</p>"))
+    shop = info.get("merchant_display_name", "")
+    acct = info.get("expected_alipay_account", "")
+    acct_hint = (f"<p style='color:#b45309'><b>请务必使用账号 {acct} 登录支付宝</b>，登错账号会绑错主体。</p>" if acct else "")
+    body = (
+        f"<h3>支付宝授权</h3><p>店铺：<b>{shop}</b></p>{acct_hint}"
+        "<form method='post' action='/p/alipay-auth/continue'>"
+        f"<input type='hidden' name='t' value='{t}'/>"
+        "<button type='submit' style='padding:10px 18px;font-size:15px'>继续去支付宝授权</button>"
+        "</form>"
+    )
+    return HTMLResponse(_invite_html(title="支付宝授权", body=body))
+
+
+@router.post("/p/alipay-auth/continue")
+async def alipay_invite_continue_route(t: str = Form("")):
+    result = await alipay_auth_invite_continue(t)
+    if not result.get("success") or not result.get("auth_url"):
+        return HTMLResponse(_invite_html(title="无法继续",
+            body=f"<h3>无法发起授权</h3><p>{result.get('error','请稍后重试')}</p>"), status_code=400)
+    return RedirectResponse(url=str(result["auth_url"]), status_code=303)

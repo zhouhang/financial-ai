@@ -4904,3 +4904,11 @@ async def recon_queue_requeue_ready_waiting(worker_token: str) -> dict[str, Any]
 
 async def recon_queue_fail_expired_waiting(worker_token: str) -> dict[str, Any]:
     return await call_mcp_tool("recon_queue_fail_expired_waiting", {"worker_token": worker_token})
+
+
+async def alipay_auth_invite_describe(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("alipay_auth_invite_describe", {"token": token})
+
+
+async def alipay_auth_invite_continue(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("alipay_auth_invite_continue", {"token": token})
