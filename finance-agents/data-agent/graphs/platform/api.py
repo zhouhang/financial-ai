@@ -747,9 +747,11 @@ async def alipay_invite_landing(t: str = Query("", description="invite token")):
     shop = info.get("merchant_display_name", "")
     acct = info.get("expected_alipay_account", "")
     acct_hint = (f"<p style='color:#b45309'><b>请务必使用账号 {acct} 登录支付宝</b>，登错账号会绑错主体。</p>" if acct else "")
+    # 表单不写死 action,提交到当前文档 URL(浏览器会自动带上反向代理前缀如 /api 与 ?t=),
+    # 避免 data-agent 不知道公网前缀导致 POST 丢失 /api 又落到 SPA 首页。
     body = (
         f"<h3>支付宝授权</h3><p>店铺：<b>{shop}</b></p>{acct_hint}"
-        "<form method='post' action='/p/alipay-auth/continue'>"
+        "<form method='post'>"
         f"<input type='hidden' name='t' value='{t}'/>"
         "<button type='submit' style='padding:10px 18px;font-size:15px'>继续去支付宝授权</button>"
         "</form>"
@@ -757,9 +759,12 @@ async def alipay_invite_landing(t: str = Query("", description="invite token")):
     return HTMLResponse(_invite_html(title="支付宝授权", body=body))
 
 
-@router.post("/p/alipay-auth/continue")
-async def alipay_invite_continue_route(t: str = Form("")):
-    result = await alipay_auth_invite_continue(t)
+@router.post("/p/alipay-auth")
+async def alipay_invite_continue_route(request: Request):
+    # token 同时可能在 query(?t=)和 form body(隐藏字段)里,取任一。
+    form = await request.form()
+    token = str(form.get("t") or request.query_params.get("t") or "")
+    result = await alipay_auth_invite_continue(token)
     if not result.get("success") or not result.get("auth_url"):
         return HTMLResponse(_invite_html(title="无法继续",
             body=f"<h3>无法发起授权</h3><p>{result.get('error','请稍后重试')}</p>"), status_code=400)
