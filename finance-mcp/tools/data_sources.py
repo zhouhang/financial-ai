@@ -2213,7 +2213,7 @@ def _browser_registration_slug(title: Any) -> str:
     return slug or "browser-collection"
 
 
-def _browser_registration_code(*, title: str, company_id: str) -> str:
+def _browser_registration_code(*, title: str) -> str:
     base = _browser_registration_slug(title)
     suffix = uuid.uuid4().hex[:10]
     max_base_len = 98 - len(suffix) - 1
@@ -7099,7 +7099,7 @@ async def _handle_data_source_register_browser_collection(arguments: dict[str, A
     title = str(arguments.get("title") or "").strip()
     credential_username = str(arguments.get("credential_username") or "").strip()
     credential_password = str(arguments.get("credential_password") or "")
-    raw_playbook_body = arguments.get("playbook_body") or {}
+    raw_playbook_body = arguments.get("playbook_body")
 
     if not title:
         return {"success": False, "error": "标题不能为空"}
@@ -7111,7 +7111,7 @@ async def _handle_data_source_register_browser_collection(arguments: dict[str, A
     if not playbook_body:
         return {"success": False, "error": "Playbook JSON 不能为空"}
 
-    source_code = _browser_registration_code(title=title, company_id=company_id)
+    source_code = _browser_registration_code(title=title)
     playbook_id = source_code
     version = "1"
 
@@ -7176,7 +7176,7 @@ async def _handle_data_source_register_browser_collection(arguments: dict[str, A
 
     result = await _handle_data_source_register_browser_playbook(
         {
-            **arguments,
+            "auth_token": arguments.get("auth_token", ""),
             "source_id": source_id,
             "playbook_id": playbook_id,
             "version": version,
@@ -7184,6 +7184,9 @@ async def _handle_data_source_register_browser_collection(arguments: dict[str, A
             "dataset_id": str(dataset_row.get("id") or ""),
             "verification_biz_date": _default_browser_verification_biz_date(),
             "egress_group": "",
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "playbook_body": playbook_body,
         }
     )
     if result.get("success"):
@@ -7251,7 +7254,7 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     playbook_id = str(arguments.get("playbook_id") or "").strip()
     version = str(arguments.get("version") or "").strip()
     title = str(arguments.get("title") or "").strip()
-    raw_playbook_body = arguments.get("playbook_body") or {}
+    raw_playbook_body = arguments.get("playbook_body")
     if not isinstance(raw_playbook_body, dict):
         return {"success": False, "error": "Playbook JSON 必须是对象"}
     playbook_body = dict(raw_playbook_body)

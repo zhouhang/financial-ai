@@ -22,8 +22,8 @@ def test_slug_from_browser_registration_title_handles_chinese_and_collisions() -
 def test_browser_registration_code_is_unique_and_bounded() -> None:
     title = "千牛每日资金账单" * 20
 
-    first = data_sources._browser_registration_code(title=title, company_id="company-1")
-    second = data_sources._browser_registration_code(title=title, company_id="company-1")
+    first = data_sources._browser_registration_code(title=title)
+    second = data_sources._browser_registration_code(title=title)
 
     assert first != second
     assert first.startswith("browser-collection-")
@@ -236,6 +236,16 @@ def test_register_browser_collection_creates_source_dataset_and_delegates(
                 "credential_username": "finance_ops@example.com",
                 "credential_password": "secret",
                 "playbook_body": {"schema_version": "1.0", "steps": []},
+                "shop_id": "attacker-shop",
+                "agent_id": "attacker-agent",
+                "emergency_page_changed": True,
+                "bypass_canary_reason": "skip safety",
+                "dataset_id": "attacker-dataset",
+                "source_id": "attacker-source",
+                "playbook_id": "attacker-playbook",
+                "version": "999",
+                "verification_biz_date": "2099-01-01",
+                "egress_group": "attacker-egress",
             }
         )
     )
@@ -267,6 +277,15 @@ def test_register_browser_collection_creates_source_dataset_and_delegates(
     playbook_call = next(payload for name, payload in calls if name == "playbook")
     assert playbook_call["playbook_id"] == source_call["code"]
     assert playbook_call["version"] == "1"
+    assert playbook_call["title"] == "千牛每日资金账单"
+    assert playbook_call["emergency_page_changed"] is False
+    assert playbook_call["bypass_canary_reason"] == ""
+
+    binding_call = next(payload for name, payload in calls if name == "binding")
+    assert binding_call["data_source_id"] == "source-1"
+    assert binding_call["shop_id"] == source_call["code"]
+    assert binding_call["agent_id"] == "browser-agent-local"
+    assert binding_call["egress_group"] == ""
 
     sync_call = next(payload for name, payload in calls if name == "sync_job")
     assert sync_call["request_payload"]["dataset_id"] == "dataset-1"
@@ -292,6 +311,30 @@ def test_register_browser_collection_rejects_non_dict_playbook_body(
                 "credential_username": "finance_ops@example.com",
                 "credential_password": "secret",
                 "playbook_body": ["not", "a", "dict"],
+            }
+        )
+    )
+
+    assert result == {"success": False, "error": "Playbook JSON 必须是对象"}
+
+
+def test_register_browser_collection_rejects_falsey_non_dict_playbook_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+
+    result = asyncio.run(
+        data_sources._handle_data_source_register_browser_collection(
+            {
+                "auth_token": "token",
+                "title": "千牛每日资金账单",
+                "credential_username": "finance_ops@example.com",
+                "credential_password": "secret",
+                "playbook_body": "",
             }
         )
     )

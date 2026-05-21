@@ -27,6 +27,7 @@ _DEFAULT_CONNECTOR_BY_KIND: dict[str, type[BaseDataSourceConnector]] = {
 # Provider-level registry for future expansion.
 # Phase-1 currently uses generic connectors for each source_kind.
 _CONNECTOR_BY_KIND_PROVIDER: dict[tuple[str, str], type[BaseDataSourceConnector]] = {
+    ("browser_playbook", "browser_playbook"): BrowserPlaybookRemoteConnector,
     ("browser_playbook", "qianniu"): BrowserPlaybookRemoteConnector,
 }
 

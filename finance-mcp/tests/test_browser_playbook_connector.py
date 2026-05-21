@@ -9,6 +9,7 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(FINANCE_MCP_ROOT))
 
 from connectors.factory import build_connector
+from connectors.providers import BrowserPlaybookRemoteConnector
 from tools import data_sources
 
 
@@ -36,6 +37,28 @@ def test_factory_builds_qianniu_browser_playbook_connector() -> None:
 
     assert connector.source_kind == "browser_playbook"
     assert connector.provider_code == "qianniu"
+    assert connector.execution_mode == "deterministic"
+
+
+def test_factory_builds_browser_playbook_provider_alias_connector() -> None:
+    connector = build_connector(
+        {
+            "id": "source-001",
+            "company_id": "company-001",
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "execution_mode": "deterministic",
+            "auth_config": {},
+            "connection_config": {},
+            "extract_config": {},
+            "mapping_config": {},
+            "runtime_config": {},
+        }
+    )
+
+    assert isinstance(connector, BrowserPlaybookRemoteConnector)
+    assert connector.ctx.provider_code == "browser_playbook"
+    assert connector.source_kind == "browser_playbook"
     assert connector.execution_mode == "deterministic"
 
 
