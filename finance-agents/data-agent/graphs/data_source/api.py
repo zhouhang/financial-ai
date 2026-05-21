@@ -18,6 +18,7 @@ from starlette.responses import RedirectResponse
 from tools.mcp_client import (
     data_source_authorize,
     data_source_finalize_browser_playbook_registration,
+    data_source_register_browser_collection,
     data_source_register_browser_playbook,
     data_source_create,
     data_source_delete,
@@ -455,6 +456,26 @@ class BrowserPlaybookRegisterResponse(BaseModel):
     source_id: str
     verification_sync_job_id: str = ""
     verification_biz_date: str = ""
+    playbook: dict[str, Any] | None = None
+    binding: dict[str, Any] | None = None
+    message: str = ""
+
+
+class BrowserCollectionRegistrationRequest(BaseModel):
+    title: str
+    credential_username: str
+    credential_password: str
+    playbook_body: dict[str, Any]
+
+
+class BrowserCollectionRegistrationResponse(BaseModel):
+    success: bool
+    status: str = "verification_pending"
+    source_id: str = ""
+    verification_sync_job_id: str = ""
+    verification_biz_date: str = ""
+    source: dict[str, Any] | None = None
+    dataset: dict[str, Any] | None = None
     playbook: dict[str, Any] | None = None
     binding: dict[str, Any] | None = None
     message: str = ""
@@ -956,6 +977,41 @@ async def test_data_source(
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "数据源测试失败"))
     return result
+
+
+@router.post(
+    "/data-sources/browser-playbook/registrations",
+    response_model=BrowserCollectionRegistrationResponse,
+)
+async def register_browser_collection(
+    body: BrowserCollectionRegistrationRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_register_browser_collection(
+        auth_token,
+        title=body.title,
+        credential_username=body.credential_username,
+        credential_password=body.credential_password,
+        playbook_body=body.playbook_body,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=str(result.get("error") or "浏览器采集注册失败"))
+    return BrowserCollectionRegistrationResponse(
+        success=True,
+        status=str(result.get("status") or "verification_pending"),
+        source_id=str(result.get("source_id") or (result.get("source") or {}).get("id") or ""),
+        verification_sync_job_id=str(result.get("verification_sync_job_id") or ""),
+        verification_biz_date=str(result.get("verification_biz_date") or ""),
+        source=result.get("source"),
+        dataset=result.get("dataset"),
+        playbook=result.get("playbook"),
+        binding=result.get("binding"),
+        message=str(result.get("message") or ""),
+    )
 
 
 @router.post(

@@ -3498,6 +3498,30 @@ async def data_source_register_browser_playbook(
     )
 
 
+async def data_source_register_browser_collection(
+    auth_token: str,
+    *,
+    title: str,
+    credential_username: str,
+    credential_password: str,
+    playbook_body: dict[str, Any],
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not title.strip():
+        return {"success": False, "error": "标题不能为空"}
+    return await call_mcp_tool(
+        "data_source_register_browser_collection",
+        {
+            "auth_token": auth_token,
+            "title": title,
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "playbook_body": playbook_body,
+        },
+    )
+
+
 async def data_source_finalize_browser_playbook_registration(
     auth_token: str,
     *,
