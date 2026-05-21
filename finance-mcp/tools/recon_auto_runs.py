@@ -970,8 +970,8 @@ def _queue_complete(arguments: dict[str, Any]) -> dict[str, Any]:
     job_id = str(arguments.get("job_id") or "").strip()
     if not job_id:
         return {"success": False, "error": "job_id 不能为空"}
-    auth_db.complete_recon_run(job_id)
-    return {"success": True}
+    job = auth_db.complete_recon_run(job_id)
+    return {"success": bool(job), "job": job}
 
 
 def _queue_fail(arguments: dict[str, Any]) -> dict[str, Any]:

@@ -17,6 +17,7 @@ import jwt
 
 from graphs.recon.auto_run_service import execute_run_plan_run
 from tools.mcp_client import (
+    execution_run_update,
     recon_queue_complete,
     recon_queue_dequeue,
     recon_queue_fail,
@@ -83,6 +84,15 @@ def _create_system_token() -> str:
     )
 
 
+def _queue_duration_seconds(started_at: object, finished_at: object) -> float | None:
+    try:
+        start = datetime.fromisoformat(str(started_at or "").replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(finished_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
 async def _process_job(job: dict, system_token: str) -> None:
     job_id = str(job["id"])
     company_id = str(job["company_id"])
@@ -95,7 +105,12 @@ async def _process_job(job: dict, system_token: str) -> None:
             run_plan_code=run_plan_code,
             biz_date=str(job.get("biz_date") or ""),
             trigger_mode=str(job.get("trigger_mode") or "schedule"),
-            run_context=dict(job.get("run_context") or {}),
+            run_context={
+                **dict(job.get("run_context") or {}),
+                "queue_job_id": job_id,
+                "queue_started_at": str(job.get("started_at") or ""),
+                "queue_created_at": str(job.get("created_at") or ""),
+            },
         )
         if result.get("status") == "data_waiting":
             await recon_queue_waiting_data(
@@ -110,7 +125,19 @@ async def _process_job(job: dict, system_token: str) -> None:
             )
             logger.info("[recon-worker] job_id=%s 进入 waiting_data", job_id)
             return
-        await recon_queue_complete(system_token, job_id)
+        complete_result = await recon_queue_complete(system_token, job_id)
+        completed_job = dict(complete_result.get("job") or {})
+        run = dict(result.get("run") or {})
+        run_id = str(run.get("id") or "")
+        artifacts = dict(run.get("artifacts_json") or {})
+        runtime_summary = dict(artifacts.get("runtime_summary") or {})
+        queue = dict(runtime_summary.get("queue") or {})
+        queue["finished_at"] = str(completed_job.get("finished_at") or queue.get("finished_at") or "")
+        queue["duration_seconds"] = _queue_duration_seconds(queue.get("started_at"), queue.get("finished_at"))
+        runtime_summary["queue"] = queue
+        artifacts["runtime_summary"] = runtime_summary
+        if run_id:
+            await execution_run_update(auth_token, run_id, {"artifacts_json": artifacts})
         logger.info("[recon-worker] job_id=%s 完成", job_id)
     except Exception as exc:
         logger.error("[recon-worker] job_id=%s 失败: %s", job_id, exc, exc_info=True)

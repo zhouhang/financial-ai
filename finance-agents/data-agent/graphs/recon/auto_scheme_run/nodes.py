@@ -606,6 +606,162 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _parse_runtime_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _runtime_duration_seconds(started_at: Any, finished_at: Any) -> float | None:
+    start = _parse_runtime_datetime(started_at)
+    finish = _parse_runtime_datetime(finished_at)
+    if not start or not finish:
+        return None
+    return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
+def _runtime_metric_name(binding: dict[str, Any], fallback: str) -> str:
+    for key in ("business_name", "dataset_name", "display_name", "name", "dataset_code"):
+        text = str(binding.get(key) or "").strip()
+        if text and not _looks_like_physical_table_name(text):
+            return text
+    return fallback
+
+
+def _runtime_metric_side(binding: dict[str, Any]) -> str:
+    text = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
+    target = str(binding.get("input_plan_target_table") or binding.get("target_table") or "").strip().lower()
+    if text == "left" or text.startswith("left_") or target == "left_recon_ready":
+        return "left"
+    if text == "right" or text.startswith("right_") or target == "right_recon_ready":
+        return "right"
+    return ""
+
+
+def _collection_duration(collection: dict[str, Any]) -> float | None:
+    job = _safe_dict(collection.get("job"))
+    metrics = _safe_dict(job.get("metrics"))
+    timing = _safe_dict(metrics.get("collection_timing"))
+    return _safe_float(timing.get("total_seconds"))
+
+
+def _summary_count(summary: dict[str, Any], side: str) -> int | None:
+    matched_exact = _safe_float(summary.get("matched_exact"))
+    matched_with_diff = _safe_float(summary.get("matched_with_diff"))
+    source_only = _safe_float(summary.get("source_only"))
+    target_only = _safe_float(summary.get("target_only"))
+    if None in {matched_exact, matched_with_diff, source_only, target_only}:
+        return None
+    if side == "right":
+        return int(matched_exact + matched_with_diff + target_only)
+    return int(matched_exact + matched_with_diff + source_only)
+
+
+def _runtime_business_name_by_side(collections: list[dict[str, Any]], side: str) -> str:
+    for item in collections:
+        if str(item.get("side") or "") == side:
+            return str(item.get("business_name") or "")
+    return "右侧数据源" if side == "right" else "左侧数据源"
+
+
+def _build_runtime_summary(ctx: dict[str, Any]) -> dict[str, Any]:
+    source_snapshot = _safe_dict(ctx.get("source_collection_json"))
+    recon_observation = _safe_dict(ctx.get("recon_observation"))
+    recon_summary = _safe_dict(recon_observation.get("summary"))
+    runtime_metrics = _safe_dict(ctx.get("runtime_metrics"))
+    run_context = _safe_dict(ctx.get("run_context"))
+    collections: list[dict[str, Any]] = []
+
+    for index, item in enumerate(_safe_list(source_snapshot.get("collections"))):
+        if not isinstance(item, dict):
+            continue
+        binding = _safe_dict(item.get("binding"))
+        side = _runtime_metric_side(binding) or ("right" if index == 1 else "left")
+        collection_records = _safe_dict(item.get("collection_records"))
+        collections.append(
+            {
+                "side": side,
+                "business_name": _runtime_metric_name(
+                    binding,
+                    "右侧数据源" if side == "right" else "左侧数据源",
+                ),
+                "row_count": _safe_int(collection_records.get("record_count"), 0),
+                "duration_seconds": _collection_duration(item),
+            }
+        )
+
+    preparation: list[dict[str, Any]] = []
+    for item in _safe_list(runtime_metrics.get("preparation")):
+        if not isinstance(item, dict):
+            continue
+        side = str(item.get("side") or "").strip()
+        preparation.append(
+            {
+                "side": side,
+                "business_name": str(item.get("business_name") or _runtime_business_name_by_side(collections, side)),
+                "row_count": _safe_int(item.get("row_count"), 0),
+                "duration_seconds": _safe_float(item.get("duration_seconds")),
+            }
+        )
+    if not preparation:
+        for collection in collections:
+            side = str(collection.get("side") or "")
+            preparation.append(
+                {
+                    "side": side,
+                    "business_name": str(collection.get("business_name") or ("右侧数据源" if side == "right" else "左侧数据源")),
+                    "row_count": _summary_count(recon_summary, side),
+                    "duration_seconds": None,
+                }
+            )
+
+    queue_started_at = str(run_context.get("queue_started_at") or "")
+    queue_finished_at = str(run_context.get("queue_finished_at") or "")
+    return {
+        "biz_date": str(ctx.get("biz_date") or run_context.get("biz_date") or "").strip(),
+        "queue": {
+            "job_id": str(run_context.get("queue_job_id") or ""),
+            "started_at": queue_started_at,
+            "finished_at": queue_finished_at,
+            "duration_seconds": _runtime_duration_seconds(queue_started_at, queue_finished_at),
+        },
+        "collections": collections,
+        "preparation": preparation,
+        "reconciliation": _safe_dict(runtime_metrics.get("reconciliation")),
+        "summary_notification": _safe_dict(_safe_dict(runtime_metrics.get("summary_notification"))),
+    }
+
+
+def _merge_runtime_summary_notification(
+    artifacts: dict[str, Any],
+    summary_result: dict[str, Any],
+) -> dict[str, Any]:
+    patched = dict(artifacts or {})
+    runtime_summary = _safe_dict(patched.get("runtime_summary"))
+    recipient = _safe_dict(summary_result.get("summary_recipient"))
+    runtime_summary["summary_notification"] = {
+        "status": str(summary_result.get("status") or ""),
+        "recipient_name": str(recipient.get("name") or recipient.get("display_name") or ""),
+        "recipient_identifier": str(recipient.get("identifier") or recipient.get("user_id") or ""),
+        "message_id": str(summary_result.get("message_id") or ""),
+        "error": str(summary_result.get("error") or ""),
+    }
+    patched["runtime_summary"] = runtime_summary
+    return patched
+
+
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
@@ -1339,6 +1495,7 @@ async def _persist_execution_run(
     recon_observation = _safe_dict(ctx.get("recon_observation"))
     summary = _safe_dict(recon_observation.get("summary"))
     artifacts = _safe_dict(recon_observation.get("artifacts"))
+    artifacts["runtime_summary"] = _build_runtime_summary(ctx)
     anomaly_items = _safe_list(recon_observation.get("anomaly_items"))
 
     if run_record.get("id"):
@@ -2365,6 +2522,33 @@ def _format_recon_result_summary_lines(summary: dict[str, Any], *, left_name: st
     ]
 
 
+def _summary_has_difference_counts(summary: dict[str, Any]) -> bool:
+    return any(
+        key in summary
+        for key in (
+            "pending_source_only",
+            "pending_target_only",
+            "pending_matched_with_diff",
+            "source_only",
+            "target_only",
+            "matched_with_diff",
+            "matched_exact",
+        )
+    )
+
+
+def _summary_pending_total(summary: dict[str, Any], fallback: int) -> int:
+    if "pending_total" in summary:
+        return _safe_int(summary.get("pending_total"), fallback)
+    if _summary_has_difference_counts(summary):
+        return (
+            _safe_int(summary.get("pending_source_only", summary.get("source_only")), 0)
+            + _safe_int(summary.get("pending_target_only", summary.get("target_only")), 0)
+            + _safe_int(summary.get("pending_matched_with_diff", summary.get("matched_with_diff")), 0)
+        )
+    return fallback
+
+
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
     policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
@@ -2564,11 +2748,7 @@ def _compose_run_summary_notification_text(
     left_name, right_name = _resolve_side_names(ctx)
 
     summary = _safe_dict(ctx.get("recon_result_summary_json"))
-    total = (
-        _safe_int(summary.get("pending_total"), len(anomalies))
-        if "pending_total" in summary
-        else len(anomalies)
-    )
+    total = _summary_pending_total(summary, len(anomalies))
     owner_names = _notified_owner_names_from_context(ctx)
     status = (
         f"执行完成，待处理异常已催办责任人「{'、'.join(owner_names)}」"
@@ -2585,15 +2765,7 @@ def _compose_run_summary_notification_text(
         f"待处理差异：\n{total} 条",
     ]
     count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
-    if not any(
-        _safe_int(summary.get(key), 0)
-        for key in (
-            "pending_source_only",
-            "pending_target_only",
-            "pending_matched_with_diff",
-            "matched_exact",
-        )
-    ):
+    if not _summary_has_difference_counts(summary):
         count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
@@ -3125,6 +3297,31 @@ async def _mark_created_exceptions_skipped(
     return updated_refs
 
 
+async def _persist_runtime_summary_notification(
+    *,
+    auth_token: str,
+    ctx: dict[str, Any],
+    summary_result: dict[str, Any],
+) -> None:
+    run = _safe_dict(ctx.get("execution_run_record"))
+    run_id = str(run.get("id") or "").strip()
+    if not auth_token or not run_id or not summary_result:
+        return
+    artifacts = _merge_runtime_summary_notification(
+        _safe_dict(run.get("artifacts_json")),
+        summary_result,
+    )
+    update_result = await call_mcp_tool(
+        "execution_run_update",
+        {"auth_token": auth_token, "run_id": run_id, "artifacts_json": artifacts},
+    )
+    if bool(update_result.get("success")):
+        ctx["execution_run_record"] = _safe_dict(update_result.get("run")) or {
+            **run,
+            "artifacts_json": artifacts,
+        }
+
+
 async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
@@ -3232,6 +3429,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "items": [],
             "summary_notification": summary_result,
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     if not channel_config_id:
@@ -3260,6 +3462,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 for item in updated_refs
             ],
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     if channel_config is None:
@@ -3288,6 +3495,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 for item in updated_refs
             ],
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     scheme = _safe_dict(ctx.get("scheme"))
@@ -3355,6 +3567,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "summary_notification": summary_result,
             "items": results,
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     total = len(created_exceptions)
@@ -3380,6 +3597,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         "summary_notification": summary_result,
         "items": results,
     }
+    await _persist_runtime_summary_notification(
+        auth_token=auth_token,
+        ctx=ctx,
+        summary_result=summary_result,
+    )
     return {"recon_ctx": ctx}
 
 

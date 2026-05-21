@@ -629,6 +629,73 @@ def test_alipay_fund_suppression_noops_failed_execution_state() -> None:
     assert "recon_result_summary_json" not in updated
 
 
+def test_runtime_summary_written_to_execution_run_artifacts() -> None:
+    ctx = {
+        "biz_date": "2026-05-20",
+        "run_context": {
+            "queue_job_id": "queue-001",
+            "queue_started_at": "2026-05-21T04:00:01+08:00",
+            "queue_finished_at": "2026-05-21T04:01:15+08:00",
+        },
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {"side": "left", "dataset_name": "交易订单明细表"},
+                    "collection_records": {"record_count": 205},
+                    "job": {"metrics": {"collection_timing": {"total_seconds": 38.42}}},
+                },
+                {
+                    "binding": {"side": "right", "dataset_name": "支付宝资金账单"},
+                    "collection_records": {"record_count": 136},
+                    "job": {"metrics": {"collection_timing": {"total_seconds": 31.06}}},
+                },
+            ]
+        },
+        "recon_observation": {
+            "summary": {"matched_exact": 136, "matched_with_diff": 0, "source_only": 69, "target_only": 0},
+            "artifacts": {},
+            "anomaly_items": [],
+        },
+        "runtime_metrics": {
+            "preparation": [
+                {"side": "left", "target_table": "left_recon_ready", "row_count": 205, "duration_seconds": 4.18},
+                {"side": "right", "target_table": "right_recon_ready", "row_count": 136, "duration_seconds": 3.77},
+            ],
+            "reconciliation": {"duration_seconds": 2.24},
+        },
+    }
+
+    summary = nodes._build_runtime_summary(ctx)  # noqa: SLF001
+
+    assert summary["biz_date"] == "2026-05-20"
+    assert summary["queue"]["job_id"] == "queue-001"
+    assert summary["queue"]["duration_seconds"] == 74
+    assert summary["collections"][0]["business_name"] == "交易订单明细表"
+    assert summary["collections"][0]["row_count"] == 205
+    assert summary["collections"][0]["duration_seconds"] == 38.42
+    assert summary["preparation"][1]["business_name"] == "支付宝资金账单"
+    assert summary["preparation"][1]["row_count"] == 136
+    assert summary["reconciliation"]["duration_seconds"] == 2.24
+
+
+def test_runtime_summary_notification_patch_preserves_existing_artifacts() -> None:
+    artifacts = {"output_files": ["a.xlsx"], "runtime_summary": {"biz_date": "2026-05-20"}}
+    patched = nodes._merge_runtime_summary_notification(  # noqa: SLF001
+        artifacts,
+        {
+            "status": "sent",
+            "summary_recipient": {"name": "张小毅", "identifier": "072007534524160438"},
+            "message_id": "msg-001",
+            "error": "",
+        },
+    )
+
+    assert patched["output_files"] == ["a.xlsx"]
+    assert patched["runtime_summary"]["biz_date"] == "2026-05-20"
+    assert patched["runtime_summary"]["summary_notification"]["status"] == "sent"
+    assert patched["runtime_summary"]["summary_notification"]["recipient_name"] == "张小毅"
+
+
 def test_suppressed_source_only_does_not_create_execution_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
     created_payloads: list[dict[str, object]] = []
 

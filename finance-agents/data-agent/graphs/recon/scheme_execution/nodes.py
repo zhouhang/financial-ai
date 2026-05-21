@@ -398,6 +398,10 @@ async def execute_recon_node(state: AgentState) -> dict[str, Any]:
             "run_context": pipeline_result.get("run_context")
             if isinstance(pipeline_result.get("run_context"), dict)
             else run_context,
+            "runtime_metrics": {
+                **_safe_dict(ctx.get("runtime_metrics")),
+                **_safe_dict(pipeline_result.get("runtime_metrics")),
+            },
         }
     )
 

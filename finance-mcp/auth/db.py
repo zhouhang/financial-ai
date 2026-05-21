@@ -10207,23 +10207,27 @@ def dequeue_recon_run() -> dict | None:
         return None
 
 
-def complete_recon_run(job_id: str) -> None:
+def complete_recon_run(job_id: str) -> dict | None:
     """将 job 标记为 done。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
                     UPDATE recon_execution_queue
                     SET status = 'done', finished_at = CURRENT_TIMESTAMP
                     WHERE id = %s
+                    RETURNING *
                     """,
                     (job_id,),
                 )
+                row = cur.fetchone()
                 conn.commit()
+                return _normalize_record(dict(row)) if row else None
     except Exception as e:
         logger.error(f"complete_recon_run 失败 (job_id={job_id}): {e}")
+        return None
 
 
 def fail_recon_run(job_id: str, error: str = "") -> None:
