@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -1246,20 +1247,31 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
 
     mode = _normalize_mode(arguments.get("mode"))
     merchant_display_name = str(arguments.get("merchant_display_name") or "").strip()
-    session_extra: dict[str, Any] = {}
     if platform_code == "alipay":
         if not merchant_display_name:
-            return {
-                "success": False,
-                "platform_code": platform_code,
-                "mode": mode,
-                "error": "支付宝授权需要填写商户显示名称",
-            }
-        session_extra = {
-            "merchant_display_name": merchant_display_name,
-            "connection_label": merchant_display_name,
-            "subject_type": "alipay_merchant",
+            return {"success": False, "platform_code": platform_code, "mode": mode,
+                    "error": "支付宝授权需要填写商户显示名称"}
+        base = os.getenv("TALLY_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        if not base:
+            return {"success": False, "platform_code": platform_code, "mode": mode,
+                    "error": "未配置 TALLY_PUBLIC_BASE_URL，无法生成长效授权链接"}
+        from auth.alipay_auth_invite import build_alipay_auth_invite_token
+        invite = build_alipay_auth_invite_token(
+            company_id=company_id,
+            operator_user_id=str(user.get("user_id") or ""),
+            merchant_display_name=merchant_display_name,
+            expected_alipay_account=str(arguments.get("expected_alipay_account") or ""),
+            external_shop_id=str(arguments.get("external_shop_id") or ""),
+        )
+        return {
+            "success": True,
+            "platform_code": "alipay",
+            "auth_mode": "longlived_invite",
+            "auth_url": f"{base}/p/alipay-auth?t={invite}",
+            "mode": mode,
+            "message": "已生成长效专属授权链接(30 天有效)",
         }
+    session_extra: dict[str, Any] = {}
     redirect_uri = str(arguments.get("redirect_uri") or "").strip()
     try:
         app_config = _load_app_config(company_id, platform_code, mode=mode, redirect_uri=redirect_uri)
