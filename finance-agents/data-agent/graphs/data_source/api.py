@@ -462,6 +462,8 @@ class BrowserPlaybookRegisterResponse(BaseModel):
 
 
 class BrowserCollectionRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     credential_username: str
     credential_password: str
@@ -999,7 +1001,7 @@ async def register_browser_collection(
         playbook_body=body.playbook_body,
     )
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=str(result.get("error") or "浏览器采集注册失败"))
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "浏览器采集注册失败"))
     return BrowserCollectionRegistrationResponse(
         success=True,
         status=str(result.get("status") or "verification_pending"),

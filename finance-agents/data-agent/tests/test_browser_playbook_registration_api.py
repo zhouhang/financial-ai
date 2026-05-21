@@ -13,6 +13,21 @@ if str(DATA_AGENT_ROOT) not in sys.path:
 from graphs.data_source import api
 
 
+def _client() -> TestClient:
+    app = FastAPI()
+    app.include_router(api.router)
+    return TestClient(app)
+
+
+def _valid_registration_payload() -> dict:
+    return {
+        "title": "千牛每日资金账单",
+        "credential_username": "finance_ops@example.com",
+        "credential_password": "secret",
+        "playbook_body": {"schema_version": "1.0", "steps": []},
+    }
+
+
 def test_source_less_browser_registration_route(monkeypatch) -> None:
     calls: list[dict] = []
 
@@ -48,18 +63,11 @@ def test_source_less_browser_registration_route(monkeypatch) -> None:
 
     monkeypatch.setattr(api, "data_source_register_browser_collection", fake_register)
 
-    app = FastAPI()
-    app.include_router(api.router)
-    client = TestClient(app)
+    client = _client()
     response = client.post(
         "/data-sources/browser-playbook/registrations",
         headers={"Authorization": "Bearer token-1"},
-        json={
-            "title": "千牛每日资金账单",
-            "credential_username": "finance_ops@example.com",
-            "credential_password": "secret",
-            "playbook_body": {"schema_version": "1.0", "steps": []},
-        },
+        json=_valid_registration_payload(),
     )
 
     assert response.status_code == 200
@@ -84,3 +92,70 @@ def test_source_less_browser_registration_route(monkeypatch) -> None:
         "binding": {"credential_ref": "sealed"},
         "message": "ok",
     }
+
+
+def test_source_less_browser_registration_rejects_hidden_fields(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_register(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(api, "data_source_register_browser_collection", fake_register)
+
+    payload = {
+        **_valid_registration_payload(),
+        "source_id": "source-hidden",
+        "playbook_id": "playbook-hidden",
+        "version": "99",
+        "verification_biz_date": "2026-05-20",
+        "dataset_id": "dataset-hidden",
+        "egress_group": "egress-hidden",
+    }
+    response = _client().post(
+        "/data-sources/browser-playbook/registrations",
+        headers={"Authorization": "Bearer token-1"},
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert calls == []
+
+
+def test_source_less_browser_registration_requires_authorization(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_register(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(api, "data_source_register_browser_collection", fake_register)
+
+    response = _client().post(
+        "/data-sources/browser-playbook/registrations",
+        json=_valid_registration_payload(),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "未提供认证 token，请先登录"}
+    assert calls == []
+
+
+def test_source_less_browser_registration_returns_400_when_wrapper_fails(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_register(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"success": False, "error": "后端拒绝注册"}
+
+    monkeypatch.setattr(api, "data_source_register_browser_collection", fake_register)
+
+    response = _client().post(
+        "/data-sources/browser-playbook/registrations",
+        headers={"Authorization": "Bearer token-1"},
+        json=_valid_registration_payload(),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "后端拒绝注册"}
+    assert len(calls) == 1
