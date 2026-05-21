@@ -79,8 +79,13 @@ def build_user_data_dir(
     escape the profile_root (no ../ traversal, no path separators).
     """
     raw_key = str(runtime_profile_ref or shop_id or "unknown")
-    safe = "".join(ch for ch in raw_key if ch.isalnum() or ch in {"-", "_"})
-    return str(Path(config.profile_root) / (safe or "unknown"))
+    return str(Path(config.profile_root) / sanitize_profile_key(raw_key))
+
+
+def sanitize_profile_key(value: str) -> str:
+    """Return the shared browser profile key used for profile paths and locks."""
+    safe = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})
+    return safe or "unknown"
 
 
 def should_skip_login_action(action: dict[str, Any], *, authenticated: bool) -> bool:
@@ -118,7 +123,7 @@ def _profile_is_authenticated(page: Any, playbook: dict[str, Any]) -> bool:
             return True
         except Exception:
             return False
-    return _detect_auth_or_risk(page) is None
+    return False
 
 
 def _resolve_value(action: dict[str, Any], params: dict[str, Any], extracted: dict[str, Any]) -> str:
@@ -177,6 +182,9 @@ def _execute_action(
     if name == "wait_for":
         page.wait_for_selector(selector, timeout=timeout_ms)
         return {}
+    if name in {"login", "login_if_needed"}:
+        _execute_login_action(page, action, params=params, extracted=extracted, timeout_ms=timeout_ms)
+        return {}
     if name == "extract_text":
         text = page.locator(selector).first.inner_text(timeout=timeout_ms)
         extracted[str(action.get("id") or selector)] = text.strip()
@@ -215,6 +223,60 @@ def _execute_action(
             raise BrowserActionError("DATA_MISMATCH", f"assert failed: {target} != {expected}")
         return {}
     raise BrowserActionError("OTHER", f"unsupported action: {name}")
+
+
+def _login_value(
+    action: dict[str, Any],
+    *,
+    field: str,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+) -> str:
+    value_from_key = f"{field}_from"
+    if value_from_key in action:
+        return _resolve_value(
+            {"value_from": action.get(value_from_key)},
+            params,
+            extracted,
+        )
+    return _resolve_value(
+        {"value": action.get(field)},
+        params,
+        extracted,
+    )
+
+
+def _execute_login_action(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    timeout_ms: int,
+) -> None:
+    username_selector = str(action.get("username_selector") or "").strip()
+    password_selector = str(action.get("password_selector") or "").strip()
+    submit_selector = str(action.get("submit_selector") or "").strip()
+    if not username_selector or not password_selector or not submit_selector:
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "login action requires username/password/submit selectors",
+        )
+
+    page.fill(
+        username_selector,
+        _login_value(action, field="username_value", params=params, extracted=extracted),
+        timeout=timeout_ms,
+    )
+    page.fill(
+        password_selector,
+        _login_value(action, field="password_value", params=params, extracted=extracted),
+        timeout=timeout_ms,
+    )
+    page.click(submit_selector, timeout=timeout_ms)
+    post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
+    if post_login_wait_selector:
+        page.wait_for_selector(post_login_wait_selector, timeout=timeout_ms)
 
 
 class BrowserActionError(Exception):
@@ -284,11 +346,13 @@ def run_playbook_with_playwright(
             )
             page = context.pages[0] if context.pages else context.new_page()
             try:
-                authenticated = _profile_is_authenticated(page, playbook)
                 for step in playbook.get("steps") or []:
                     step_dict = dict(step)
-                    if should_skip_login_action(step_dict, authenticated=authenticated):
-                        continue
+                    step_action = str(step_dict.get("action") or "").strip()
+                    if step_action in {"login", "login_if_needed"}:
+                        authenticated = _profile_is_authenticated(page, playbook)
+                        if should_skip_login_action(step_dict, authenticated=authenticated):
+                            continue
                     result = _execute_action(
                         page,
                         step_dict,

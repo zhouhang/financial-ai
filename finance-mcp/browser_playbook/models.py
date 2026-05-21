@@ -6,6 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 ActionType = Literal[
+    "login",
+    "login_if_needed",
     "navigate",
     "click",
     "fill",
@@ -60,6 +62,14 @@ class PlaybookStep(BaseModel):
     source: str | None = None
     format: Literal["csv", "xlsx"] | None = None
     download_timeout_ms: int | None = None
+    username_selector: str | None = None
+    password_selector: str | None = None
+    submit_selector: str | None = None
+    username_value: str | None = None
+    password_value: str | None = None
+    username_value_from: str | None = None
+    password_value_from: str | None = None
+    post_login_wait_selector: str | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "PlaybookStep":
@@ -67,6 +77,13 @@ class PlaybookStep(BaseModel):
             raise ValueError("step.id cannot be empty")
         if self.action == "navigate" and not str(self.url or "").startswith(("http://", "https://")):
             raise ValueError("navigate requires an absolute URL")
+        if self.action in {"login", "login_if_needed"}:
+            if (
+                not str(self.username_selector or "").strip()
+                or not str(self.password_selector or "").strip()
+                or not str(self.submit_selector or "").strip()
+            ):
+                raise ValueError(f"{self.action} requires username/password/submit selectors")
         if self.action in {"click", "fill", "set_date", "wait_for", "extract_text", "download"}:
             if not str(self.selector or "").strip():
                 raise ValueError(f"{self.action} requires selector")

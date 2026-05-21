@@ -27,6 +27,7 @@ from collections.abc import Callable
 from typing import Any
 
 from finance_browser_agent.failure_policy import classify_failure
+from finance_browser_agent.playwright_runner import sanitize_profile_key
 from finance_browser_agent.profile_locks import ProfileLockRegistry
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,9 @@ class BrowserDispatcherLoop:
     async def _process_job(self, job: dict[str, Any]) -> dict[str, Any]:
         sync_job_id = str(job.get("id") or "")
         payload = dict(job.get("request_payload") or {})
-        profile_key = str(job.get("runtime_profile_ref") or job.get("shop_id") or "unknown")
+        profile_key = sanitize_profile_key(
+            str(job.get("runtime_profile_ref") or job.get("shop_id") or "unknown")
+        )
         async with self.semaphore:
             async with self.profile_locks.lock_for_shop(profile_key):
                 # Sync Playwright must run off the event loop, otherwise other workers stall.

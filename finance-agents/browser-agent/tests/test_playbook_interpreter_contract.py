@@ -9,6 +9,7 @@ if str(FINANCE_BROWSER_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(FINANCE_BROWSER_AGENT_ROOT))
 
 from runner import run_message
+from finance_browser_agent.playbook_interpreter import validate_step_actions
 
 
 def test_runner_defaults_to_real_playwright_mode(monkeypatch) -> None:
@@ -25,6 +26,15 @@ def test_runner_defaults_to_real_playwright_mode(monkeypatch) -> None:
     result = run_message({"job_id": "job-001"})
 
     assert result["status"] == "playwright-called"
+
+
+def test_playbook_interpreter_accepts_login_actions() -> None:
+    validate_step_actions(
+        [
+            {"action": "login"},
+            {"action": "login_if_needed"},
+        ]
+    )
 
 
 def test_runner_reads_rows_from_input_file_and_emits_task_result(monkeypatch, tmp_path: Path) -> None:

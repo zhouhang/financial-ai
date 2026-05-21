@@ -157,6 +157,71 @@ def test_playbook_rejects_unknown_action() -> None:
         )
 
 
+def test_playbook_accepts_login_action_contract() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        1,
+        {
+            "id": "login_if_needed",
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".account-menu",
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {
+                "biz_date": "2026-05-18",
+                "login_username": "alice",
+                "login_password": "secret",
+            },
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[1].action == "login_if_needed"
+
+
+def test_playbook_rejects_login_action_without_required_selectors() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        1,
+        {
+            "id": "login_if_needed",
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+        },
+    )
+
+    with pytest.raises(ValidationError):
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("step_index", "patch"),
     [
