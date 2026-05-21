@@ -761,6 +761,7 @@ def ensure_unified_data_source_schema() -> list[str]:
     if _alipay_semantic_profiles_need_hidden_field_cleanup():
         _execute_sql_script(_migration_path("029_clean_alipay_semantic_profiles.sql"))
         applied.append("029_clean_alipay_semantic_profiles.sql")
+    applied.extend(ensure_data_sources_browser_playbook_kind_schema())
     applied.extend(ensure_sync_jobs_trigger_modes_schema())
 
     remaining_missing_tables = sorted(
@@ -819,6 +820,25 @@ def ensure_sync_jobs_trigger_modes_schema() -> list[str]:
 
     _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
     logger.info("sync_jobs.trigger_mode 约束已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_data_sources_browser_playbook_kind_schema() -> list[str]:
+    """确保 data_sources.source_kind 允许 browser_playbook。"""
+    if not _table_exists("data_sources"):
+        return []
+
+    constraint_def = _constraint_definition("data_sources", "data_sources_source_kind_check")
+    if "browser_playbook" in constraint_def:
+        return []
+
+    migration_name = "032_data_sources_browser_playbook_source_kind.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("data_sources", "data_sources_source_kind_check")
+    if "browser_playbook" not in applied_constraint_def:
+        raise RuntimeError("data_sources.source_kind 约束升级失败，browser_playbook 仍不可用")
+
+    logger.info("data_sources.source_kind 约束已自动补齐: %s", migration_name)
     return [migration_name]
 
 
