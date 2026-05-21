@@ -67,6 +67,11 @@ import {
   type RunPlanInputDatasetDraft,
 } from './recon/runPlanBindings';
 import {
+  buildRuntimeSummaryView,
+  formatCount,
+  formatDuration,
+} from './recon/runRuntimeSummary';
+import {
   cn,
   type ReconCenterRunItem,
   type ReconCenterTab,
@@ -742,7 +747,7 @@ function summarizeReconDraft(
   ].join('\n');
 }
 
-function formatDateTime(value: string): string {
+function formatDateTime(value: string, options: { includeSeconds?: boolean } = {}): string {
   if (!value) return '--';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -752,6 +757,7 @@ function formatDateTime(value: string): string {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    ...(options.includeSeconds ? { second: '2-digit' as const } : {}),
   });
 }
 
@@ -3203,6 +3209,7 @@ export default function ReconWorkspace({
   const [focusedRunId, setFocusedRunId] = useState<string | null>(null);
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
+  const [showRunRuntimeDetails, setShowRunRuntimeDetails] = useState(false);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
   const [procBuildMode, setProcBuildMode] = useState<ProcBuildMode>('ai_complex_rule');
   const [aiProcSideDrafts, setAiProcSideDrafts] = useState<Record<AiProcSide, AiProcSideDraft>>(() =>
@@ -7094,6 +7101,13 @@ export default function ReconWorkspace({
     const statusMeta = executionStatusMeta(run.executionStatus);
     const normalizedRunStatus = run.executionStatus.trim().toLowerCase();
     const shouldShowRunFailureInfo = !['success', 'succeeded', 'completed'].includes(normalizedRunStatus);
+    const runtimeSummary = buildRuntimeSummaryView(run);
+    const renderRuntimeMetric = (label: string, value: string, key?: string) => (
+      <div key={key} className="min-w-[180px] rounded-xl border border-border bg-surface-secondary px-3 py-2">
+        <p className="text-[11px] font-medium text-text-secondary">{label}</p>
+        <p className="mt-1 text-sm font-semibold text-text-primary">{value}</p>
+      </div>
+    );
 
     return (
       <>
@@ -7119,39 +7133,54 @@ export default function ReconWorkspace({
             </div>
           ) : null}
           {renderRerunNotice()}
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">所属方案</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.schemeName || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">数据日期</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.dataDate || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">运行状态</p>
-              <span className={cn('mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-medium', statusMeta.className)}>
-                {statusMeta.label}
-              </span>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">异常数</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.anomalyCount}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">开始时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(run.startedAt)}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">结束时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(run.finishedAt)}</p>
-            </div>
-            {shouldShowRunFailureInfo ? (
-              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                <p className="text-xs text-text-secondary">失败阶段</p>
-                <p className="mt-1 text-sm font-medium text-text-primary">{run.failedStage || '--'}</p>
+          <div className="flex flex-wrap gap-3">
+            {renderRuntimeMetric('对账数据日期', runtimeSummary.bizDate || run.dataDate || '--')}
+            {runtimeSummary.collectionMetrics.map((item, index) => renderRuntimeMetric(
+              `${item.businessName}采集`,
+              `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+              `collection-${item.side || item.businessName}-${index}`,
+            ))}
+            {runtimeSummary.preparationMetrics.map((item, index) => renderRuntimeMetric(
+              `整理后${item.businessName}`,
+              `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+              `preparation-${item.side || item.businessName}-${index}`,
+            ))}
+            {renderRuntimeMetric('对账耗时', formatDuration(runtimeSummary.reconciliationDurationSeconds))}
+          </div>
+
+          <div className="rounded-2xl border border-border bg-surface-secondary">
+            <button
+              type="button"
+              onClick={() => setShowRunRuntimeDetails((value) => !value)}
+              className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-text-primary"
+            >
+              <span>运行详情</span>
+              <span>{showRunRuntimeDetails ? '收起' : '展开'}</span>
+            </button>
+            {showRunRuntimeDetails ? (
+              <div className="divide-y divide-border-subtle border-t border-border-subtle px-4 py-2">
+                <DetailRow label="所属方案" value={run.schemeName || '--'} />
+                <DetailRow label="运行状态" value={statusMeta.label} />
+                <DetailRow label="队列开始时间" value={formatDateTime(runtimeSummary.queueStartedAt)} />
+                <DetailRow label="队列结束时间" value={formatDateTime(runtimeSummary.queueFinishedAt)} />
+                <DetailRow label="队列总耗时" value={formatDuration(runtimeSummary.queueDurationSeconds)} />
+                <DetailRow label="记录写入开始时间" value={formatDateTime(run.startedAt, { includeSeconds: true })} />
+                <DetailRow label="记录写入结束时间" value={formatDateTime(run.finishedAt, { includeSeconds: true })} />
+                <DetailRow label="汇总接收人" value={runtimeSummary.notification.recipientName || runtimeSummary.notification.recipientIdentifier || '--'} />
+                <DetailRow
+                  label="汇总消息推送状态"
+                  value={`${runtimeSummary.notification.label}${runtimeSummary.notification.messageId ? ` · ${runtimeSummary.notification.messageId}` : ''}${runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}`}
+                />
+                {shouldShowRunFailureInfo ? <DetailRow label="失败阶段" value={run.failedStage || '--'} /> : null}
               </div>
             ) : null}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h4 className="text-base font-semibold text-text-primary">差异列表</h4>
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
+              待处理差异 {formatCount(run.anomalyCount)} 条
+            </span>
           </div>
 
           {shouldShowRunFailureInfo ? (
