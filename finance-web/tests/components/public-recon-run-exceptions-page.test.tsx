@@ -28,7 +28,7 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     window.history.pushState({}, '', '/');
   });
 
-  it('shows matched success and per-source recon input counts from run summary', async () => {
+  it('shows runtime summary and list-level pending differences', async () => {
     fetchMock.mockResolvedValueOnce(buildJsonResponse({
       run: {
         id: 'run-001',
@@ -38,9 +38,36 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
         scheme_name: '泰斯支付宝对账方案',
         plan_name: '泰斯支付宝对账',
         execution_status: 'success',
-        started_at: '2026-05-12T09:00:00+08:00',
-        finished_at: '2026-05-12T09:05:00+08:00',
+        started_at: '2026-05-12T09:00:07+08:00',
+        finished_at: '2026-05-12T09:05:42+08:00',
         run_context_json: { biz_date: '2026-05-12' },
+        artifacts_json: {
+          runtime_summary: {
+            biz_date: '2026-05-12',
+            queue: {
+              job_id: 'queue-001',
+              started_at: '2026-05-21T04:00:01+08:00',
+              finished_at: '2026-05-21T04:01:15+08:00',
+              duration_seconds: 73.854,
+            },
+            collections: [
+              { side: 'left', business_name: '交易订单明细表', row_count: 205, duration_seconds: 38.42 },
+              { side: 'right', business_name: '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺', row_count: 136, duration_seconds: 31.06 },
+            ],
+            preparation: [
+              { side: 'left', business_name: '交易订单明细表', row_count: 205, duration_seconds: 4.18 },
+              { side: 'right', business_name: '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺', row_count: 136, duration_seconds: 3.77 },
+            ],
+            reconciliation: { duration_seconds: 2.24 },
+            summary_notification: {
+              status: 'sent',
+              recipient_name: '张小毅',
+              recipient_identifier: '072007534524160438',
+              message_id: 'msg-001',
+              error: '',
+            },
+          },
+        },
         recon_result_summary_json: {
           matched_exact: 170,
           source_only: 60,
@@ -110,7 +137,7 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     render(<PublicReconRunExceptionsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('匹配成功')).toBeInTheDocument();
+      expect(screen.getByText('对账数据日期')).toBeInTheDocument();
     });
 
     const header = screen.getByText('对账差异公开分享').closest('header');
@@ -118,17 +145,22 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     const headerView = within(header as HTMLElement);
 
     expect(headerView.getByText('成功')).toBeInTheDocument();
-    expect(headerView.getByText('170')).toBeInTheDocument();
-    expect(headerView.getByText('待处理差异')).toBeInTheDocument();
-    expect(headerView.getByText('60')).toBeInTheDocument();
-    expect(headerView.getByText('交易订单明细表')).toBeInTheDocument();
-    expect(headerView.getByText('支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺')).toBeInTheDocument();
-    expect(headerView.getByText((_, element) => element?.textContent === '数据 235 条')).toBeInTheDocument();
-    expect(headerView.getByText((_, element) => element?.textContent === '数据 187 条')).toBeInTheDocument();
+    expect(headerView.getByText('对账数据日期')).toBeInTheDocument();
+    expect(headerView.getByText('2026-05-12')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '交易订单明细表采集205 行耗时 38.42 秒')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺采集136 行耗时 31.06 秒')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '整理后交易订单明细表205 行耗时 4.18 秒')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '整理后支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺136 行耗时 3.77 秒')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '对账耗时2.24 秒')).toBeInTheDocument();
+    expect(headerView.queryByText('匹配成功')).not.toBeInTheDocument();
+    expect(headerView.queryByText('开始时间')).not.toBeInTheDocument();
+    expect(headerView.queryByText('结束时间')).not.toBeInTheDocument();
     expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
     expect(headerView.queryByText('本次读取数据')).not.toBeInTheDocument();
     expect(headerView.queryByText('新增 0 / 更新 340')).not.toBeInTheDocument();
     expect(headerView.queryByText((_, element) => element?.textContent === '本次读取 1 条')).not.toBeInTheDocument();
+    expect(screen.getByText('差异列表')).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === '待处理差异 60 条')).toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/recon/public/runs/run-001/exceptions?limit=100&offset=0&owner=ding-user-001',
@@ -136,7 +168,7 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     );
   });
 
-  it('shows pending difference metrics and source-only suppression note from run summary', async () => {
+  it('shows zero pending differences in the difference list header', async () => {
     fetchMock.mockResolvedValueOnce(buildJsonResponse({
       run: {
         id: 'run-002',
@@ -149,6 +181,20 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
         started_at: '2026-05-12T09:00:00+08:00',
         finished_at: '2026-05-12T09:05:00+08:00',
         run_context_json: { biz_date: '2026-05-12' },
+        artifacts_json: {
+          runtime_summary: {
+            biz_date: '2026-05-12',
+            collections: [
+              { side: 'left', business_name: '交易订单明细表', row_count: 205, duration_seconds: 40 },
+              { side: 'right', business_name: '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺', row_count: 136, duration_seconds: 30 },
+            ],
+            preparation: [
+              { side: 'left', business_name: '交易订单明细表', row_count: 205, duration_seconds: null },
+              { side: 'right', business_name: '支付宝资金账单 - 武汉泰斯网络科技有限公司-婉美de承诺', row_count: 136, duration_seconds: null },
+            ],
+            reconciliation: { duration_seconds: 2 },
+          },
+        },
         recon_result_summary_json: {
           matched_exact: 136,
           source_only: 69,
@@ -201,17 +247,17 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     render(<PublicReconRunExceptionsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('匹配成功')).toBeInTheDocument();
+      expect(screen.getByText('对账数据日期')).toBeInTheDocument();
     });
 
     const header = screen.getByText('对账差异公开分享').closest('header');
     expect(header).not.toBeNull();
     const headerView = within(header as HTMLElement);
 
-    expect(headerView.getByText((_, element) => element?.textContent === '数据 205 条（其中 69 条为非支付宝支付订单）')).toBeInTheDocument();
-    expect(headerView.getByText((_, element) => element?.textContent === '数据 136 条')).toBeInTheDocument();
-    expect(headerView.getByText('待处理差异')).toBeInTheDocument();
-    expect(headerView.getByText((_, element) => element?.textContent === '待处理差异0')).toBeInTheDocument();
+    expect(headerView.getByText('对账数据日期')).toBeInTheDocument();
+    expect(headerView.getByText((_, element) => element?.textContent === '对账耗时2 秒')).toBeInTheDocument();
+    expect(headerView.queryByText('待处理差异')).not.toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === '待处理差异 0 条')).toBeInTheDocument();
     expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
   });
 });
