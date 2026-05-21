@@ -36,3 +36,44 @@ def test_alipay_create_auth_session_requires_base_url(monkeypatch):
     }))
     assert result["success"] is False
     assert "TALLY_PUBLIC_BASE_URL" in result["error"]
+
+
+def test_invite_describe_valid_and_idempotent(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    from auth.alipay_auth_invite import build_alipay_auth_invite_token
+    tok = build_alipay_auth_invite_token(company_id="c1", operator_user_id="u1",
+        merchant_display_name="搜卡手游专营店武汉搜卡科技有限公司", expected_alipay_account="s4k4net@163.com")
+    monkeypatch.setattr(pc.auth_db, "get_active_alipay_connection_for_shop", lambda **k: None)
+    r = asyncio.run(pc.handle_tool_call("alipay_auth_invite_describe", {"token": tok}))
+    assert r["success"] and r["valid"] and r["already_authorized"] is False
+    assert r["merchant_display_name"].startswith("搜卡手游专营店")
+    assert r["expected_alipay_account"] == "s4k4net@163.com"
+    monkeypatch.setattr(pc.auth_db, "get_active_alipay_connection_for_shop", lambda **k: {"id": "conn-1"})
+    r2 = asyncio.run(pc.handle_tool_call("alipay_auth_invite_describe", {"token": tok}))
+    assert r2["already_authorized"] is True
+
+
+def test_invite_describe_invalid_token(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    r = asyncio.run(pc.handle_tool_call("alipay_auth_invite_describe", {"token": "garbage"}))
+    assert r["success"] is True and r["valid"] is False
+
+
+def test_invite_continue_creates_session_without_login(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    from auth.alipay_auth_invite import build_alipay_auth_invite_token
+    tok = build_alipay_auth_invite_token(company_id="c1", operator_user_id="u1",
+        merchant_display_name="搜卡手游专营店武汉搜卡科技有限公司")
+    captured = {}
+    monkeypatch.setattr(pc, "_create_alipay_session_for_invite",
+        lambda **k: captured.update(k) or {"success": True, "auth_url": "https://openauth.alipay.com/x?state=s1", "state": "s1"})
+    r = asyncio.run(pc.handle_tool_call("alipay_auth_invite_continue", {"token": tok}))
+    assert r["success"] is True
+    assert r["auth_url"].startswith("https://openauth.alipay.com/")
+    assert captured["company_id"] == "c1" and captured["operator_user_id"] == "u1"
+
+
+def test_invite_continue_invalid_token(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    r = asyncio.run(pc.handle_tool_call("alipay_auth_invite_continue", {"token": "garbage"}))
+    assert r["success"] is False

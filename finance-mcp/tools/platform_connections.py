@@ -239,6 +239,16 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "platform_code", "claim_code"],
             },
         ),
+        Tool(
+            name="alipay_auth_invite_describe",
+            description="校验支付宝长效授权 token,返回店铺名/应登账号/是否已授权(落地确认页用)。",
+            inputSchema={"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+        ),
+        Tool(
+            name="alipay_auth_invite_continue",
+            description="校验 token 后免登录创建一条 30min 支付宝授权会话,返回支付宝授权 url。",
+            inputSchema={"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+        ),
     ]
 
 
@@ -263,6 +273,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return await _handle_list_pending_authorizations(arguments)
     if name == "platform_claim_pending_authorization":
         return await _handle_claim_pending_authorization(arguments)
+    if name == "alipay_auth_invite_describe":
+        return await _handle_alipay_invite_describe(arguments)
+    if name == "alipay_auth_invite_continue":
+        return await _handle_alipay_invite_continue(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -1314,6 +1328,67 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
         "expires_in": 1800,
         "message": "已生成授权链接",
     }
+
+
+def _create_alipay_session_for_invite(
+    *, company_id: str, operator_user_id: str, merchant_display_name: str, return_path: str = "/"
+) -> dict[str, Any]:
+    """免登录:用显式 company/operator 建一条 30min alipay auth_session 并返回支付宝授权 url。"""
+    try:
+        app_config = _load_app_config(company_id, "alipay", mode="real")
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    connector = build_connector(app_config)
+    state_token = str(uuid.uuid4())
+    session = auth_db.create_auth_session(
+        company_id=company_id,
+        platform_code="alipay",
+        operator_user_id=operator_user_id or None,
+        state_token=state_token,
+        return_path=return_path,
+        redirect_uri=app_config.redirect_uri,
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        extra={"merchant_display_name": merchant_display_name,
+               "connection_label": merchant_display_name,
+               "subject_type": "alipay_merchant"},
+    )
+    if session is None:
+        return {"success": False, "error": "创建授权会话失败"}
+    return {"success": True,
+            "auth_url": connector.build_auth_url(state=str(session.get("state_token") or "")),
+            "state": str(session.get("state_token") or ""),
+            "session_id": str(session.get("id") or "")}
+
+
+async def _handle_alipay_invite_describe(arguments: dict[str, Any]) -> dict[str, Any]:
+    from auth.alipay_auth_invite import verify_alipay_auth_invite_token
+    payload = verify_alipay_auth_invite_token(str(arguments.get("token") or ""))
+    if not payload:
+        return {"success": True, "valid": False, "error": "链接已失效或无效"}
+    existing = auth_db.get_active_alipay_connection_for_shop(
+        company_id=str(payload["company_id"]),
+        merchant_display_name=str(payload["merchant_display_name"]),
+        external_shop_id=str(payload.get("external_shop_id") or ""),
+    )
+    return {
+        "success": True, "valid": True,
+        "already_authorized": bool(existing),
+        "merchant_display_name": str(payload["merchant_display_name"]),
+        "expected_alipay_account": str(payload.get("expected_alipay_account") or ""),
+    }
+
+
+async def _handle_alipay_invite_continue(arguments: dict[str, Any]) -> dict[str, Any]:
+    from auth.alipay_auth_invite import verify_alipay_auth_invite_token
+    payload = verify_alipay_auth_invite_token(str(arguments.get("token") or ""))
+    if not payload:
+        return {"success": False, "error": "链接已失效或无效"}
+    return _create_alipay_session_for_invite(
+        company_id=str(payload["company_id"]),
+        operator_user_id=str(payload.get("operator_user_id") or ""),
+        merchant_display_name=str(payload["merchant_display_name"]),
+        return_path=str(payload.get("return_path") or "/data-connections?mode=platform&platform=alipay"),
+    )
 
 
 async def _handle_alipay_merchant_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:
