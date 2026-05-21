@@ -220,6 +220,8 @@ _PLATFORM_TOOL_NAMES = {
     "platform_get_shop_detail",
     "platform_list_pending_authorizations",
     "platform_claim_pending_authorization",
+    "alipay_auth_invite_describe",
+    "alipay_auth_invite_continue",
 }
 
 _DATA_SOURCE_TOOL_NAMES = {
