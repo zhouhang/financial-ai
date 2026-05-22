@@ -6080,9 +6080,12 @@ export default function DataConnectionsPanel({
       selectedSource && selectedSource.source_kind === kind
         ? selectedSource
         : rows.find((item) => item.id === selectedSourceId) ?? rows[0] ?? null;
+    // database 与 api 都用「列表总览 → 进入详情」的导航式布局(由 databaseDetailSourceId 驱动);
+    // file 仍用左列表右详情的并排网格。
+    const usesListDetailLayout = kind === 'database' || kind === 'api';
     const activeSource =
-      kind === 'database' ? rows.find((item) => item.id === databaseDetailSourceId) ?? null : defaultActiveSource;
-    const showDatabaseOverview = kind === 'database' && !databaseDetailSourceId;
+      usesListDetailLayout ? rows.find((item) => item.id === databaseDetailSourceId) ?? null : defaultActiveSource;
+    const showListOverview = usesListDetailLayout && !databaseDetailSourceId;
     const detailState = activeSource ? sourceDetails[activeSource.id] ?? createDefaultSourceDetail() : createDefaultSourceDetail();
     const fallbackDatasets = detailState.datasets.length > 0 ? detailState.datasets : activeSource?.datasets ?? [];
     const isDraftSource = activeSource ? draftSourceIdSet.has(activeSource.id) : false;
@@ -6167,7 +6170,7 @@ export default function DataConnectionsPanel({
 
     return (
       <>
-        {showDatabaseOverview ? (
+        {showListOverview ? (
           <div className="space-y-4">
             {sourcesError && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
@@ -6187,9 +6190,11 @@ export default function DataConnectionsPanel({
             <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
               <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h3 className="text-base font-semibold text-text-primary">数据库连接列表</h3>
+                  <h3 className="text-base font-semibold text-text-primary">{kind === 'api' ? 'API 连接列表' : '数据库连接列表'}</h3>
                   <p className="mt-1 text-sm text-text-secondary">
-                    展示已配置数据库连接，点击可查看配置、数据集和目录。
+                    {kind === 'api'
+                      ? '展示已配置 API 连接，点击可进入查看配置与数据集。'
+                      : '展示已配置数据库连接，点击可查看配置、数据集和目录。'}
                   </p>
                 </div>
                 <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-xs text-text-secondary">
@@ -6200,7 +6205,7 @@ export default function DataConnectionsPanel({
               {loadingSources && rows.length === 0 ? (
                 <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在加载数据库连接列表
+                  正在加载连接列表
                 </div>
               ) : rows.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
@@ -6257,15 +6262,26 @@ export default function DataConnectionsPanel({
                                     )}
                                   </div>
                                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                                    <span className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary">
-                                      {databaseType}
-                                    </span>
-                                    <span
-                                      className="inline-flex max-w-full items-center rounded-full border border-border px-2.5 py-1 text-xs text-text-primary"
-                                      title={accountLabel}
-                                    >
-                                      <span className="truncate">{accountLabel}</span>
-                                    </span>
+                                    {kind === 'api' ? (
+                                      <span
+                                        className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary"
+                                        title={dataSourceSubtitle(source)}
+                                      >
+                                        <span className="truncate">{dataSourceSubtitle(source)}</span>
+                                      </span>
+                                    ) : (
+                                      <>
+                                        <span className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary">
+                                          {databaseType}
+                                        </span>
+                                        <span
+                                          className="inline-flex max-w-full items-center rounded-full border border-border px-2.5 py-1 text-xs text-text-primary"
+                                          title={accountLabel}
+                                        >
+                                          <span className="truncate">{accountLabel}</span>
+                                        </span>
+                                      </>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -6296,8 +6312,8 @@ export default function DataConnectionsPanel({
             </div>
           </div>
         ) : (
-          <div className={kind === 'database' ? 'space-y-4' : 'grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]'}>
-            {kind === 'database' ? (
+          <div className={usesListDetailLayout ? 'space-y-4' : 'grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]'}>
+            {usesListDetailLayout ? (
               <div className="flex items-center">
                 <button
                   type="button"
@@ -6305,7 +6321,7 @@ export default function DataConnectionsPanel({
                   className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
                 >
                   <ArrowLeft className="h-4 w-4" />
-                  返回数据库列表
+                  {kind === 'api' ? '返回 API 列表' : '返回数据库列表'}
                 </button>
               </div>
             ) : (
@@ -6384,7 +6400,7 @@ export default function DataConnectionsPanel({
             <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
               {!activeSource ? (
                 <div className="rounded-xl border border-dashed border-border px-4 py-12 text-center text-sm text-text-secondary">
-                  {kind === 'database' ? '未找到对应数据库连接，请返回列表重新选择。' : '选择左侧连接后，在这里查看连接详情和数据集目录。'}
+                  {usesListDetailLayout ? '未找到对应连接，请返回列表重新选择。' : '选择左侧连接后，在这里查看连接详情和数据集目录。'}
                 </div>
               ) : (
             <div className="space-y-5">
