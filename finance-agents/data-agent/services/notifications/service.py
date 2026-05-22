@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from config import DINGTALK_DWS_ENABLED, NOTIFICATION_PROVIDER
+from config import DINGTALK_DWS_ENABLED, FEISHU_LARK_ENABLED, NOTIFICATION_PROVIDER
 
 from .base import NotificationAdapter
-from .dingtalk_dws import DingTalkDWSNotificationAdapter
+from .dingtalk_dws import DingTalkDwsAdapter
+from .feishu_lark import FeishuLarkCliAdapter
 from .models import NotificationProvider
 
 AdapterFactory = Callable[[], NotificationAdapter]
@@ -31,7 +32,9 @@ class NotificationAdapterRegistry:
 def create_default_registry() -> NotificationAdapterRegistry:
     registry = NotificationAdapterRegistry()
     if DINGTALK_DWS_ENABLED:
-        registry.register(NotificationProvider.DINGTALK_DWS.value, DingTalkDWSNotificationAdapter)
+        registry.register(NotificationProvider.DINGTALK_DWS.value, DingTalkDwsAdapter)
+    if FEISHU_LARK_ENABLED:
+        registry.register(NotificationProvider.FEISHU.value, FeishuLarkCliAdapter)
     return registry
 
 

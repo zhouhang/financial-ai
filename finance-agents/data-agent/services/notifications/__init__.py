@@ -13,6 +13,7 @@ from config import (
 from .base import NotificationAdapter
 from .cli import CLIExecutionResult, SubprocessCLIExecutor
 from .dingtalk_dws import DingTalkDwsAdapter
+from .feishu_lark import FeishuLarkCliAdapter
 from .models import (
     BotMessageResult,
     NotificationChannelConfig,
@@ -52,6 +53,14 @@ def get_notification_adapter(
             client_secret=resolved_channel_config.client_secret if resolved_channel_config else DINGTALK_CLIENT_SECRET,
             robot_code=resolved_channel_config.robot_code if resolved_channel_config else DINGTALK_ROBOT_CODE,
         )
+    if provider_value == NotificationProvider.FEISHU.value:
+        return FeishuLarkCliAdapter(
+            executor=executor,
+            company_id=company_id or (resolved_channel_config.company_id if resolved_channel_config else ""),
+            app_id=resolved_channel_config.client_id if resolved_channel_config else "",
+            app_secret=resolved_channel_config.client_secret if resolved_channel_config else "",
+            target_chat=resolved_channel_config.robot_code if resolved_channel_config else "",
+        )
     raise ValueError(f"Unsupported notification provider: {provider_value}")
 
 
@@ -59,6 +68,7 @@ __all__ = [
     "BotMessageResult",
     "CLIExecutionResult",
     "DingTalkDwsAdapter",
+    "FeishuLarkCliAdapter",
     "NotificationAdapter",
     "NotificationChannelConfig",
     "NotificationProvider",
