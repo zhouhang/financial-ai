@@ -14,6 +14,7 @@ from finance_browser_agent.playwright_runner import (
     BrowserActionError,
     PlaywrightRunConfig,
     _execute_action,
+    _parse_downloaded_table,
     _profile_is_authenticated,
     build_user_data_dir,
     sanitize_profile_key,
@@ -149,6 +150,52 @@ def test_login_action_rejects_missing_resolved_credentials(tmp_path) -> None:
 
     assert exc.value.fail_reason == "AUTH_EXPIRED"
     assert page.fills == []
+
+
+def test_parse_downloaded_csv_uses_gb18030_and_preserves_long_ids(tmp_path) -> None:
+    path = tmp_path / "交易货款_20260521_20260521.csv"
+    path.write_bytes(
+        (
+            "账期,业务流水号,订单号,订单实际金额（元）,打款时间\n"
+            "20260521,2026052123001193261450560998,3302219424181023654,19.83,2026-05-21 22:32:44\t\n"
+        ).encode("gb18030")
+    )
+
+    rows = _parse_downloaded_table(path, fmt="csv")
+
+    assert rows == [
+        {
+            "账期": "20260521",
+            "业务流水号": "2026052123001193261450560998",
+            "订单号": "3302219424181023654",
+            "订单实际金额（元）": "19.83",
+            "打款时间": "2026-05-21 22:32:44\t",
+        }
+    ]
+
+
+def test_parse_table_records_detected_csv_encoding_in_capture_file(tmp_path) -> None:
+    path = tmp_path / "交易货款_20260521_20260521.csv"
+    path.write_bytes("账期,业务流水号\n20260521,2026052123001193261450560998\n".encode("gb18030"))
+    capture_files = [{"storage_path": str(path), "encoding": "", "checksum": "", "row_count": 0}]
+
+    result = _execute_action(
+        FakePage(),
+        {
+            "id": "parse_detail_file",
+            "action": "parse_table",
+            "source": "last_download",
+            "format": "csv",
+        },
+        params={},
+        extracted={"last_download": str(path)},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert result["rows"][0]["业务流水号"] == "2026052123001193261450560998"
+    assert capture_files[0]["encoding"] == "gb18030"
+    assert capture_files[0]["row_count"] == 1
 
 
 def test_navigate_allows_auth_redirect_when_login_step_follows(tmp_path) -> None:

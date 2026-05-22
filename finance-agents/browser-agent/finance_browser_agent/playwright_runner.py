@@ -217,7 +217,10 @@ def _execute_action(
         source = str(action.get("source") or "last_download")
         fmt = str(action.get("format") or "csv").lower()
         path = extracted.get(source) or capture_files[-1]["storage_path"]
-        rows = _parse_downloaded_table(Path(str(path)), fmt=fmt)
+        rows, encoding = _parse_downloaded_table_with_metadata(Path(str(path)), fmt=fmt)
+        if capture_files:
+            capture_files[-1]["encoding"] = encoding
+            capture_files[-1]["row_count"] = len(rows)
         return {"rows": rows}
     if name == "assert":
         target = _resolve_value(action, params, extracted)
@@ -295,21 +298,43 @@ class BrowserActionError(Exception):
         self.fail_reason = fail_reason
 
 
+def _read_csv_with_fallback(path: Path) -> tuple[Any, str]:
+    import pandas as pd
+
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "gb18030", "gbk"):
+        try:
+            return pd.read_csv(path, encoding=encoding, dtype=str, keep_default_na=False), encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return pd.read_csv(path, dtype=str, keep_default_na=False), ""
+
+
+def _parse_downloaded_table_with_metadata(path: Path, *, fmt: str) -> tuple[list[dict[str, Any]], str]:
+    """Parse a downloaded CSV/XLSX file and return rows plus detected encoding."""
+    import pandas as pd
+
+    if fmt == "xlsx":
+        df = pd.read_excel(path, dtype=str, keep_default_na=False)
+        encoding = ""
+    else:
+        df, encoding = _read_csv_with_fallback(path)
+    rows = [
+        {str(k): ("" if pd.isna(v) else v) for k, v in row.items()}
+        for row in df.to_dict("records")
+    ]
+    return rows, encoding
+
+
 def _parse_downloaded_table(path: Path, *, fmt: str) -> list[dict[str, Any]]:
     """Parse a downloaded CSV/XLSX file into a list of row dicts.
 
     pandas is lazy-imported because the synthetic test runner never needs it.
     """
-    import pandas as pd
-
-    if fmt == "xlsx":
-        df = pd.read_excel(path)
-    else:
-        df = pd.read_csv(path)
-    return [
-        {str(k): ("" if pd.isna(v) else v) for k, v in row.items()}
-        for row in df.to_dict("records")
-    ]
+    rows, _encoding = _parse_downloaded_table_with_metadata(path, fmt=fmt)
+    return rows
 
 
 def run_playbook_with_playwright(
