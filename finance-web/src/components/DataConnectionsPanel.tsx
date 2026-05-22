@@ -2498,6 +2498,7 @@ export default function DataConnectionsPanel({
   >({});
   const [currentUserRole, setCurrentUserRole] = useState<string>('');
   const [editingPlatformAppCode, setEditingPlatformAppCode] = useState<PlatformCode | null>(null);
+  const [browserCreateSignal, setBrowserCreateSignal] = useState(0);
 
   const openAlipayAuthDialog = useCallback((merchantDisplayName = '') => {
     setAlipayAuthDialog({
@@ -9895,7 +9896,14 @@ export default function DataConnectionsPanel({
       return renderSourceList(selectedSourceKind);
     }
     if (selectedSourceKind === 'browser_playbook') {
-      return <BrowserPlaybookPanel authToken={authToken ?? null} />;
+      return (
+        <BrowserPlaybookPanel
+          authToken={authToken ?? null}
+          sources={selectedKindSources}
+          openCreateSignal={browserCreateSignal}
+          onRegistered={refreshCurrentConnectionView}
+        />
+      );
     }
     return renderReservedPanel(selectedSourceKind);
   };
@@ -10125,6 +10133,16 @@ export default function DataConnectionsPanel({
                       新增
                     </button>
                   )}
+                {selectedConnectionView === 'data_sources' && selectedSourceKind === 'browser_playbook' && (
+                  <button
+                    type="button"
+                    onClick={() => setBrowserCreateSignal((current) => current + 1)}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary transition-colors hover:bg-surface-tertiary"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    新增
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => void refreshCurrentConnectionView()}
