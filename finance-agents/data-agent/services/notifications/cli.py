@@ -32,6 +32,7 @@ class SubprocessCLIExecutor:
         timeout_seconds: float,
         *,
         env: dict[str, str] | None = None,
+        input_text: str | None = None,
     ) -> CLIExecutionResult:
         merged_env = os.environ.copy()
         if env:
@@ -46,6 +47,7 @@ class SubprocessCLIExecutor:
                 errors="replace",
                 timeout=timeout_seconds,
                 env=merged_env,
+                input=input_text,
             )
             stdout = (completed.stdout or "").strip()
             stderr = (completed.stderr or "").strip()

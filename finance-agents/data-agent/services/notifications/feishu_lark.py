@@ -15,6 +15,7 @@ provisioning(用 `lark-cli config init --app-id .. --app-secret-stdin` 把每公
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from config import (
     FEISHU_LARK_BIN,
@@ -89,6 +90,9 @@ class FeishuLarkCliAdapter(NotificationAdapter):
         chat = conversation_id or to_user_id or self._target_chat
         if not chat:
             return BotMessageResult(success=False, provider=self.provider, message="发送飞书消息时缺少目标 chat-id", code="invalid_input")
+        prov_error = self._ensure_provisioned()
+        if prov_error is not None:
+            return prov_error
         # feishu im/v1/messages: content 为 JSON 字符串;text 类型为 {"text": "..."}
         body = {
             "receive_id": chat,
@@ -150,6 +154,37 @@ class FeishuLarkCliAdapter(NotificationAdapter):
     # ── helpers ──
     def _unsupported_todo(self) -> TodoResult:
         return TodoResult(success=False, provider=self.provider, message="飞书待办本次未接入", code=_UNSUPPORTED)
+
+    def _config_path(self) -> Path:
+        """该公司隔离配置目录下 lark-cli 的应用配置文件。"""
+        return Path(self._build_env()["HOME"]) / ".lark-cli" / "config.json"
+
+    def _ensure_provisioned(self) -> BotMessageResult | None:
+        """惰性 provision:该公司配置目录未初始化过应用时,用 DB 凭证跑一次
+        `lark-cli config init --app-id .. --app-secret-stdin`(secret 走 stdin,不进进程列表)。
+        已初始化则跳过。返回非 None 表示 provision 失败,调用方应短路返回。
+        """
+        if self._config_path().exists():
+            return None
+        if not self._app_id or not self._app_secret:
+            return BotMessageResult(
+                success=False, provider=self.provider,
+                message="飞书渠道缺少 app_id/app_secret，无法初始化飞书应用",
+                code="missing_credentials",
+            )
+        result = self._executor.run(
+            [self._cli_bin, "config", "init", "--app-id", self._app_id, "--app-secret-stdin", "--brand", "feishu"],
+            self._timeout_seconds,
+            env=self._build_env(),
+            input_text=f"{self._app_secret}\n",
+        )
+        if not result.success:
+            return BotMessageResult(
+                success=False, provider=self.provider,
+                message=self._build_cli_error_message("初始化飞书应用失败", result),
+                code="provision_failed", raw=result.payload,
+            )
+        return None
 
     def _run(self, args: list[str]) -> CLIExecutionResult:
         return self._executor.run([self._cli_bin, *args, "--format", "json"], self._timeout_seconds, env=self._build_env())
