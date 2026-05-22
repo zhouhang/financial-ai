@@ -84,6 +84,16 @@ class PlaybookStep(BaseModel):
                 or not str(self.submit_selector or "").strip()
             ):
                 raise ValueError(f"{self.action} requires username/password/submit selectors")
+            if not (
+                str(self.username_value or "").strip()
+                or str(self.username_value_from or "").strip()
+            ):
+                raise ValueError(f"{self.action} requires username_value or username_value_from")
+            if not (
+                str(self.password_value or "").strip()
+                or str(self.password_value_from or "").strip()
+            ):
+                raise ValueError(f"{self.action} requires password_value or password_value_from")
         if self.action in {"click", "fill", "set_date", "wait_for", "extract_text", "download"}:
             if not str(self.selector or "").strip():
                 raise ValueError(f"{self.action} requires selector")

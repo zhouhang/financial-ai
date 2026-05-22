@@ -126,6 +126,31 @@ def test_login_action_fills_credentials_clicks_submit_and_waits(tmp_path) -> Non
     assert page.waits == [(".dashboard", 4321)]
 
 
+def test_login_action_rejects_missing_resolved_credentials(tmp_path) -> None:
+    page = FakePage(url="https://login.example", selectors={".dashboard"})
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "login",
+                "username_selector": "#username",
+                "password_selector": "#password",
+                "submit_selector": "button[type='submit']",
+                "username_value_from": "params.login_username",
+                "password_value_from": "params.login_password",
+                "timeout_ms": 4321,
+            },
+            params={},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "AUTH_EXPIRED"
+    assert page.fills == []
+
+
 def test_navigate_allows_auth_redirect_when_login_step_follows(tmp_path) -> None:
     page = FakePage(url="about:blank")
 

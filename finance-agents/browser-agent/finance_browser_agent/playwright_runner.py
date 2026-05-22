@@ -265,15 +265,22 @@ def _execute_login_action(
             "PAGE_CHANGED",
             "login action requires username/password/submit selectors",
         )
+    username = _login_value(action, field="username_value", params=params, extracted=extracted)
+    password = _login_value(action, field="password_value", params=params, extracted=extracted)
+    if not username or not password:
+        raise BrowserActionError(
+            "AUTH_EXPIRED",
+            "login action missing resolved username or password",
+        )
 
     page.fill(
         username_selector,
-        _login_value(action, field="username_value", params=params, extracted=extracted),
+        username,
         timeout=timeout_ms,
     )
     page.fill(
         password_selector,
-        _login_value(action, field="password_value", params=params, extracted=extracted),
+        password,
         timeout=timeout_ms,
     )
     page.click(submit_selector, timeout=timeout_ms)
