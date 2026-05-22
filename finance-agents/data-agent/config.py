@@ -93,6 +93,14 @@ DINGTALK_ROBOT_CODE: str = os.getenv("DINGTALK_ROBOT_CODE", "").strip()
 DINGTALK_DEFAULT_TODO_PRIORITY: str = os.getenv("DINGTALK_DEFAULT_TODO_PRIORITY", "20").strip()
 DINGTALK_DEFAULT_TODO_PAGE_SIZE: int = int(os.getenv("DINGTALK_DEFAULT_TODO_PAGE_SIZE", "20"))
 
+# ── 飞书 CLI 通知 ────────────────────────────────────────────────────
+FEISHU_LARK_ENABLED: bool = _get_bool_env("FEISHU_LARK_ENABLED", True)
+FEISHU_LARK_BIN: str = os.getenv("FEISHU_LARK_BIN", "lark-cli").strip()
+# 每公司独立 CLI 配置目录的根，按 <root>/<provider>/<company_id> 隔离凭证
+NOTIFY_CLI_STATE_DIR: str = os.getenv(
+    "NOTIFY_CLI_STATE_DIR", os.path.expanduser("~/.local/state/tally-notify")
+).strip()
+
 # ── 浏览器采集首店最小告警 ────────────────────────────────────────────────────
 BROWSER_COLLECTION_ALERTS_ENABLED: bool = _get_bool_env("BROWSER_COLLECTION_ALERTS_ENABLED", False)
 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD: str = os.getenv(
