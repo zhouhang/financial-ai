@@ -1006,6 +1006,16 @@ def _create_logged_background_task(coroutine: Any, *, task_name: str) -> Any:
     return task
 
 
+# 这些错误是"该账单类型本就不支持下载"等永久性、商家无法处理的情况(如支付宝 sub_code
+# TYPE_NOT_SUPPORTED),不应把店铺标记为异常,否则"异常店铺"数会被这类误报长期占住。
+_NON_ACTIONABLE_ERROR_MARKERS = ("TYPE_NOT_SUPPORTED", "不支持下载")
+
+
+def _is_non_actionable_dataset_error(message: Any) -> bool:
+    text = str(message or "")
+    return any(marker in text for marker in _NON_ACTIONABLE_ERROR_MARKERS)
+
+
 def _platform_dataset_sync_summary(*, company_id: str, shop_connection_id: str) -> dict[str, Any]:
     """汇总平台固定数据集同步状态，用于补充店铺/商户列表展示。"""
     try:
@@ -1042,6 +1052,7 @@ def _platform_dataset_sync_summary(*, company_id: str, shop_connection_id: str) 
                 dataset.get("last_error_message")
                 for dataset in matched_datasets
                 if str(dataset.get("last_error_message") or "").strip()
+                and not _is_non_actionable_dataset_error(dataset.get("last_error_message"))
             ),
             "",
         )
