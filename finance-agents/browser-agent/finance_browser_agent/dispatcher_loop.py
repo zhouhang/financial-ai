@@ -26,6 +26,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from finance_browser_agent.credentials import inject_credentials_into_params
 from finance_browser_agent.failure_policy import classify_failure
 from finance_browser_agent.playwright_runner import sanitize_profile_key
 from finance_browser_agent.profile_locks import ProfileLockRegistry
@@ -114,6 +115,8 @@ class BrowserDispatcherLoop:
 
     def _message_from_job(self, job: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         params = dict(payload.get("params") or payload)
+        credential_ref = str(job.get("credential_ref") or "")
+        params = inject_credentials_into_params(params, credential_ref)
         return {
             "job_id": str(job.get("id") or ""),
             "shop_id": str(job.get("shop_id") or ""),
@@ -123,6 +126,6 @@ class BrowserDispatcherLoop:
             "params": params,
             "runtime_profile_ref": str(job.get("runtime_profile_ref") or ""),
             "egress_group": str(job.get("egress_group") or ""),
-            "credential_ref": str(job.get("credential_ref") or ""),
+            "credential_ref": credential_ref,
             "timeout_ms": int(params.get("timeout_ms") or payload.get("timeout_ms") or 900000),
         }

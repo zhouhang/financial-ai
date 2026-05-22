@@ -113,6 +113,34 @@ async def test_dispatcher_builds_message_from_claim_enrichment_not_raw_payload()
     assert captured["message"]["playbook_version"] == "1.0.0"
 
 
+def test_dispatcher_message_injects_credentials_without_overwriting() -> None:
+    loop = BrowserDispatcherLoop(client=FakeClient([], {}), runner=lambda message: message, max_concurrency=1)
+    job = {
+        "id": "sync-001",
+        "shop_id": "shop-001",
+        "playbook_id": "qianniu-income-daily-goods-bill-detail",
+        "playbook_version": "1.0.0",
+        "playbook_body": {"steps": []},
+        "runtime_profile_ref": "profile-001",
+        "egress_group": "",
+        "credential_ref": (
+            "enc:fallback:v1:"
+            "eyJwYXNzd29yZCI6ICJzZWNyZXQiLCAidXNlcm5hbWUiOiAiZmluYW5jZV9vcHMifQ=="
+        ),
+    }
+    payload = {
+        "params": {
+            "biz_date": "2026-05-21",
+            "login_username": "manual_user",
+        }
+    }
+
+    message = loop._message_from_job(job, payload)
+
+    assert message["params"]["login_username"] == "manual_user"
+    assert message["params"]["login_password"] == "secret"
+
+
 @pytest.mark.asyncio
 async def test_dispatcher_runs_sync_runner_in_thread(monkeypatch) -> None:
     """Critical: sync Playwright must NOT block the event loop. Verify asyncio.to_thread is the path."""
