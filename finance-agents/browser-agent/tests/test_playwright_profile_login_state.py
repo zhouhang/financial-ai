@@ -334,3 +334,124 @@ async def test_dispatcher_profile_lock_falls_back_to_shop_id() -> None:
     await loop.run_once()
 
     assert profile_locks.keys == ["shop-001"]
+
+
+class FakeDownload:
+    suggested_filename = "交易货款_20260521_20260521.csv"
+
+    def __init__(self) -> None:
+        self.saved_as = ""
+
+    def save_as(self, path: str) -> None:
+        self.saved_as = path
+        Path(path).write_text("账期,业务流水号\n20260521,2026052123001193261450560998\n", encoding="utf-8")
+
+
+class FakeDownloadInfo:
+    def __init__(self, download: FakeDownload) -> None:
+        self.value = download
+
+    def __enter__(self) -> "FakeDownloadInfo":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class FakeHistoryButton:
+    def __init__(self, row: "FakeHistoryRow") -> None:
+        self.row = row
+
+    def click(self, *, timeout: int) -> None:
+        self.row.clicked_timeout = timeout
+
+
+class FakeHistoryRow:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.clicked_timeout: int | None = None
+
+    def inner_text(self, *, timeout: int) -> str:
+        return self.text
+
+    def locator(self, selector: str) -> FakeHistoryButton:
+        assert selector == "button:has-text('下载')"
+        return FakeHistoryButton(self)
+
+
+class FakeHistoryLocator:
+    def __init__(self, rows: list[FakeHistoryRow]) -> None:
+        self.rows = rows
+
+    def count(self) -> int:
+        return len(self.rows)
+
+    def nth(self, index: int) -> FakeHistoryRow:
+        return self.rows[index]
+
+
+class FakeHistoryPage(FakePage):
+    def __init__(self, rows: list[FakeHistoryRow]) -> None:
+        super().__init__()
+        self.rows = rows
+        self.download = FakeDownload()
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        assert selector == ".history tr"
+        return FakeHistoryLocator(self.rows)
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        return None
+
+    def expect_download(self, *, timeout: int) -> FakeDownloadInfo:
+        return FakeDownloadInfo(self.download)
+
+
+def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
+    old_row = FakeHistoryRow("2026-05-20 ~ 2026-05-20 交易货款 已完成 下载")
+    target_row = FakeHistoryRow("2026-05-21 ~ 2026-05-21 交易货款 已完成 下载")
+    page = FakeHistoryPage([old_row, target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 900000,
+        },
+        params={"biz_date": "2026-05-21"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+    assert old_row.clicked_timeout is None
+    assert target_row.clicked_timeout == 900000
+    assert capture_files[0]["storage_path"] == result["last_download"]
+
+
+def test_download_history_file_times_out_without_matching_completed_row(tmp_path) -> None:
+    page = FakeHistoryPage([FakeHistoryRow("2026-05-20 ~ 2026-05-20 交易货款 已完成 下载")])
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "id": "download_completed_file",
+                "action": "download_history_file",
+                "selector": ".history tr",
+                "value_from": "params.biz_date",
+                "timeout_ms": 1,
+            },
+            params={"biz_date": "2026-05-21"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "PAGE_CHANGED"

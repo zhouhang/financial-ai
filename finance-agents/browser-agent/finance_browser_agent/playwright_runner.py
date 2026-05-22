@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -213,6 +214,16 @@ def _execute_action(
             }
         )
         return {"last_download": str(target)}
+    if name == "download_history_file":
+        return _download_history_file(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            capture_files=capture_files,
+            download_dir=download_dir,
+            timeout_ms=timeout_ms,
+        )
     if name == "parse_table":
         source = str(action.get("source") or "last_download")
         fmt = str(action.get("format") or "csv").lower()
@@ -290,6 +301,63 @@ def _execute_login_action(
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     if post_login_wait_selector:
         page.wait_for_selector(post_login_wait_selector, timeout=timeout_ms)
+
+
+def _date_tokens(value: str) -> set[str]:
+    text = str(value or "").strip()
+    tokens = {text} if text else set()
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        tokens.add(text.replace("-", ""))
+    if len(text) == 8 and text.isdigit():
+        tokens.add(f"{text[:4]}-{text[4:6]}-{text[6:8]}")
+    return {token for token in tokens if token}
+
+
+def _download_history_file(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    capture_files: list[dict[str, Any]],
+    download_dir: Path,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    selector = str(action.get("selector") or "").strip()
+    target_date = _resolve_value(action, params, extracted)
+    tokens = _date_tokens(target_date)
+    if not selector or not tokens:
+        raise BrowserActionError("PAGE_CHANGED", "download_history_file requires selector and target date")
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    row = None
+    while time.monotonic() <= deadline:
+        rows = page.locator(selector)
+        for index in range(rows.count()):
+            candidate = rows.nth(index)
+            text = candidate.inner_text(timeout=min(timeout_ms, 5000))
+            compact_text = " ".join(str(text or "").split())
+            if (
+                any(token in compact_text for token in tokens)
+                and "已完成" in compact_text
+                and "下载" in compact_text
+            ):
+                row = candidate
+                break
+        if row is not None:
+            break
+        page.wait_for_timeout(2000)
+
+    if row is None:
+        raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
+
+    with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
+        row.locator("button:has-text('下载')").click(timeout=timeout_ms)
+    download = info.value
+    target = download_dir / (download.suggested_filename or "download.bin")
+    download.save_as(str(target))
+    capture_files.append({"storage_path": str(target), "encoding": "", "checksum": "", "row_count": 0})
+    return {"last_download": str(target)}
 
 
 class BrowserActionError(Exception):
