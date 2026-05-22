@@ -2230,10 +2230,6 @@ function mergePlatformSummaries(platforms: PlatformConnectionSummary[]): Platfor
   return order.map((platformCode) => merged.get(platformCode)).filter(Boolean) as PlatformConnectionSummary[];
 }
 
-function executionModeLabel(mode: DataSourceExecutionMode): string {
-  return mode === 'agent_assisted' ? 'Agent Assisted' : 'Deterministic';
-}
-
 function sourceKindIcon(kind: DataSourceKind) {
   if (kind === 'platform_oauth') return <Store className="h-4 w-4" />;
   if (kind === 'database') return <Database className="h-4 w-4" />;
@@ -4208,6 +4204,11 @@ export default function DataConnectionsPanel({
   const selectedProviderChannels = useMemo(
     () => mergedChannels.filter((item) => item.provider === selectedCollaborationProvider),
     [mergedChannels, selectedCollaborationProvider],
+  );
+  // 电商平台授权的“连接数”应为各平台已授权店铺数之和(而非固定的支持平台目录条数)。
+  const totalAuthorizedShops = useMemo(
+    () => platforms.reduce((sum, item) => sum + (item.authorized_shop_count ?? 0), 0),
+    [platforms],
   );
   const selectedSource = useMemo(
     () => selectedKindSources.find((item) => item.id === selectedSourceId) ?? null,
@@ -6369,8 +6370,7 @@ export default function DataConnectionsPanel({
                               </span>
                             )}
                           </div>
-                          <div className="mt-3 flex items-center justify-between gap-3 text-xs text-text-secondary">
-                            <span>{executionModeLabel(source.execution_mode)}</span>
+                          <div className="mt-3 flex items-center justify-end gap-3 text-xs text-text-secondary">
                             <span>{formatTime(source.health_summary?.last_sync_at || source.updated_at)}</span>
                           </div>
                         </button>
@@ -6410,9 +6410,6 @@ export default function DataConnectionsPanel({
                         数据集{getStatusLabel(datasetStatus)}
                       </span>
                     )}
-                    <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs text-text-secondary">
-                      {executionModeLabel(activeSource.execution_mode)}
-                    </span>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -10152,12 +10149,11 @@ export default function DataConnectionsPanel({
                   刷新
                 </button>
                 <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">
-                  {selectedConnectionView === 'collaboration_channels'
-                    ? 'Company Scoped'
-                    : executionModeLabel(selectedSourceCard.execution_mode)}
-                </span>
-                <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">
-                  当前 {selectedConnectionView === 'collaboration_channels' ? `${selectedProviderChannels.length} 个通道` : `${selectedKindSources.length} 个连接`}
+                  当前 {selectedConnectionView === 'collaboration_channels'
+                    ? `${selectedProviderChannels.length} 个通道`
+                    : selectedSourceKind === 'platform_oauth'
+                    ? `${totalAuthorizedShops} 个连接`
+                    : `${selectedKindSources.length} 个连接`}
                 </span>
                 {selectedConnectionView === 'collaboration_channels' && loadingChannels && (
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">
