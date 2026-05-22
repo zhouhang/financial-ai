@@ -136,4 +136,73 @@ describe('BrowserPlaybookPanel', () => {
     await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('dialog', { name: '新增浏览器采集' })).not.toBeInTheDocument();
   });
+
+  it('新增浮窗显示 playbook JSON 行号，并自动修复字符串内断行后提交', async () => {
+    const onRegistered = vi.fn();
+    let resolveRegistration: ((value: Response) => void) | undefined;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/browser-playbook/registrations') {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          title: '千牛收入账单',
+          credential_username: 'qianniu-user',
+          credential_password: 'qianniu-pass',
+          playbook_body: {
+            selector: "input[name='TPL_password'], input[type='password']",
+            label: '历史下载记录',
+          },
+        });
+        return new Promise<Response>((resolve) => {
+          resolveRegistration = resolve;
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const { rerender } = render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={0}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    rerender(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={1}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: '新增浏览器采集' });
+    expect(within(dialog).getByText('1')).toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '千牛收入账单' } });
+    fireEvent.change(within(dialog).getByLabelText('登录账号'), { target: { value: 'qianniu-user' } });
+    fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'qianniu-pass' } });
+    fireEvent.change(within(dialog).getByLabelText('playbook_body JSON'), {
+      target: {
+        value: `{
+          "selector": "input[name='TPL_password'],
+            input[type='password']",
+          "label": "历史下载记
+录"
+        }`,
+      },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '注册' }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    expect(await within(dialog).findByText(/已自动修复/)).toBeInTheDocument();
+    resolveRegistration?.(
+      new Response(JSON.stringify({ success: true, source_id: 'source-3', message: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+  });
 });

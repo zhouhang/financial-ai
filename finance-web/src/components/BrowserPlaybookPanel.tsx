@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Loader2, MonitorSmartphone, X } from 'lucide-react';
 
 import type { DataSourceListItem } from '../types';
 import type { ReactNode } from 'react';
+import { parsePlaybookJsonInput } from '../utils/playbookJsonInput';
 
 interface BrowserPlaybookPanelProps {
   authToken: string | null;
@@ -95,6 +96,7 @@ export function BrowserPlaybookPanel({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [form, setForm] = useState<BrowserCollectionFormState>(emptyForm);
   const [submitError, setSubmitError] = useState('');
+  const [submitWarning, setSubmitWarning] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [selectedRow, setSelectedRow] = useState<BrowserCollectionRow | null>(null);
 
@@ -102,6 +104,7 @@ export function BrowserPlaybookPanel({
     if (openCreateSignal <= 0) return;
     setForm(emptyForm);
     setSubmitError('');
+    setSubmitWarning('');
     setIsCreateOpen(true);
   }, [openCreateSignal]);
 
@@ -122,20 +125,26 @@ export function BrowserPlaybookPanel({
       return;
     }
 
-    let playbookBody: unknown;
-    try {
-      playbookBody = JSON.parse(form.playbookBodyText || '{}');
-    } catch (error) {
-      setSubmitError(`playbook_body JSON 解析失败: ${error instanceof Error ? error.message : String(error)}`);
+    const parsedPlaybook = parsePlaybookJsonInput(form.playbookBodyText);
+    if (parsedPlaybook.error) {
+      setSubmitWarning('');
+      setSubmitError(`playbook_body JSON 解析失败: ${parsedPlaybook.error}`);
       return;
     }
+    const playbookBody = parsedPlaybook.value;
     if (!isRecord(playbookBody) || Object.keys(playbookBody).length === 0) {
+      setSubmitWarning('');
       setSubmitError('playbook_body JSON 必须是非空对象');
       return;
     }
 
     setSubmitting(true);
     setSubmitError('');
+    setSubmitWarning(
+      parsedPlaybook.repairCount > 0
+        ? `已自动修复 ${parsedPlaybook.repairCount} 处 playbook JSON 字符串内换行/控制字符`
+        : '',
+    );
     try {
       const response = await fetch('/api/data-sources/browser-playbook/registrations', {
         method: 'POST',
@@ -157,6 +166,7 @@ export function BrowserPlaybookPanel({
       }
       setForm(emptyForm);
       setIsCreateOpen(false);
+      setSubmitWarning('');
       await onRegistered?.();
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : '浏览器采集注册失败');
@@ -243,23 +253,20 @@ export function BrowserPlaybookPanel({
                 onChange={(credentialPassword) => setForm((prev) => ({ ...prev, credentialPassword }))}
               />
             </div>
-            <label className="block text-sm font-medium text-text-primary">
-              playbook_body JSON
-              <textarea
-                aria-label="playbook_body JSON"
-                value={form.playbookBodyText}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, playbookBodyText: event.target.value }))
-                }
-                className="mt-2 h-56 w-full rounded-xl border border-border bg-surface px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-blue-300"
-                placeholder='{"schema_version":"1.0","steps":[]}'
-              />
-            </label>
+            <PlaybookJsonEditor
+              value={form.playbookBodyText}
+              onChange={(playbookBodyText) => setForm((prev) => ({ ...prev, playbookBodyText }))}
+            />
 
             {submitError && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>{submitError}</span>
+              </div>
+            )}
+            {submitWarning && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                {submitWarning}
               </div>
             )}
 
@@ -323,6 +330,50 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none focus:border-blue-300"
       />
+    </label>
+  );
+}
+
+function PlaybookJsonEditor({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const lineNumberRef = useRef<HTMLDivElement | null>(null);
+  const lineCount = Math.max(1, value.split('\n').length);
+  const lineNumbers = Array.from({ length: lineCount }, (_, index) => index + 1);
+
+  return (
+    <label className="block text-sm font-medium text-text-primary">
+      playbook_body JSON
+      <div className="mt-2 flex h-56 overflow-hidden rounded-xl border border-border bg-surface font-mono text-xs text-text-primary focus-within:border-blue-300">
+        <div
+          ref={lineNumberRef}
+          aria-hidden="true"
+          className="w-12 shrink-0 overflow-hidden border-r border-border-subtle bg-surface-secondary px-2 py-2 text-right leading-5 text-text-muted"
+        >
+          {lineNumbers.map((lineNumber) => (
+            <div key={lineNumber} className="h-5">
+              {lineNumber}
+            </div>
+          ))}
+        </div>
+        <textarea
+          aria-label="playbook_body JSON"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onScroll={(event) => {
+            if (lineNumberRef.current) {
+              lineNumberRef.current.scrollTop = event.currentTarget.scrollTop;
+            }
+          }}
+          className="h-full min-w-0 flex-1 resize-none overflow-auto bg-surface px-3 py-2 leading-5 text-text-primary outline-none"
+          placeholder='{"schema_version":"1.0","steps":[]}'
+          spellCheck={false}
+        />
+      </div>
     </label>
   );
 }
