@@ -194,6 +194,34 @@ def test_playbook_accepts_login_action_contract() -> None:
     assert msg.playbook_body.steps[1].action == "login_if_needed"
 
 
+def test_playbook_accepts_download_history_file_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[6] = {
+        "id": "download_completed_file",
+        "action": "download_history_file",
+        "selector": ".HistoryDataLists--drawer-conent--3FJMg52 tr.next-table-row",
+        "value_from": "params.biz_date",
+        "download_timeout_ms": 600000,
+        "timeout_ms": 900000,
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[6].action == "download_history_file"
+
+
 def test_playbook_preserves_auth_check_for_login_state_detection() -> None:
     playbook = _valid_playbook_body()
     playbook["auth_check"] = {

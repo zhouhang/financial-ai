@@ -16,6 +16,7 @@ ActionType = Literal[
     "extract_text",
     "extract_summary",
     "download",
+    "download_history_file",
     "parse_table",
     "assert",
 ]
@@ -94,11 +95,21 @@ class PlaybookStep(BaseModel):
                 or str(self.password_value_from or "").strip()
             ):
                 raise ValueError(f"{self.action} requires password_value or password_value_from")
-        if self.action in {"click", "fill", "set_date", "wait_for", "extract_text", "download"}:
+        if self.action in {
+            "click",
+            "fill",
+            "set_date",
+            "wait_for",
+            "extract_text",
+            "download",
+            "download_history_file",
+        }:
             if not str(self.selector or "").strip():
                 raise ValueError(f"{self.action} requires selector")
         if self.action == "set_date" and self.value_from != "params.biz_date":
             raise ValueError("set_date must use value_from=params.biz_date")
+        if self.action == "download_history_file" and self.value_from != "params.biz_date":
+            raise ValueError("download_history_file must use value_from=params.biz_date")
         if self.action == "extract_summary" and not self.mapping:
             raise ValueError("extract_summary requires mapping")
         if self.action == "parse_table":

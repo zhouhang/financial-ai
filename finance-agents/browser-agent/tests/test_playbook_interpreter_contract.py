@@ -37,6 +37,10 @@ def test_playbook_interpreter_accepts_login_actions() -> None:
     )
 
 
+def test_playbook_interpreter_accepts_download_history_file_action() -> None:
+    validate_step_actions([{"action": "download_history_file"}])
+
+
 def test_runner_reads_rows_from_input_file_and_emits_task_result(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BROWSER_AGENT_RUNNER_MODE", "synthetic")
     input_path = tmp_path / "input.json"

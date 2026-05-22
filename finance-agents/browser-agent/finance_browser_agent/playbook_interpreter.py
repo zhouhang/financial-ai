@@ -14,6 +14,7 @@ VALID_ACTIONS = {
     "extract_text",
     "extract_summary",
     "download",
+    "download_history_file",
     "parse_table",
     "assert",
 }
