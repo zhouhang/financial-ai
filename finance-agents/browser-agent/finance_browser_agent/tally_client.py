@@ -1,16 +1,13 @@
-"""Browser-agent → Tally Cloud MCP client.
+"""Browser-agent → Tally Cloud data-agent WS client.
 
 Owns:
-- ``BrowserAgentConfig``: env-loaded service configuration (agent id, base URL, polling,
+- ``BrowserAgentConfig``: env-loaded service configuration (agent id, WS URL, polling,
   concurrency).
-- ``create_system_token``: mint a short-lived JWT with ``role="system"`` so finance-mcp's
-  ``_require_system`` gate accepts the worker.
+- ``create_system_token``: mint a short-lived JWT with ``role="system"`` so the data-agent
+  gate accepts the worker.
 - ``BrowserAgentTallyClient``: stateful client. ``worker_token`` is a refresh-aware property
   that re-mints the JWT 5 minutes before expiry, so a multi-hour browser-agent process never
-  ships expired tokens to MCP.
-
-Async MCP tool wrappers (claim / complete / fail / waiting-data reconciler) are added in T7
-once the corresponding finance-mcp tools exist.
+  ships expired tokens. Communicates via domain messages over WebSocket to the data-agent.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ from typing import Any
 
 import jwt
 
-from finance_browser_agent.mcp_session import McpSession
+from finance_browser_agent.data_agent_ws import DataAgentWsClient
 
 
 JWT_ALGORITHM = "HS256"
@@ -36,7 +33,7 @@ _TOKEN_REFRESH_LEAD_SECONDS = 300  # refresh 5 min before expiry
 class BrowserAgentConfig:
     agent_id: str
     company_id: str
-    mcp_base_url: str
+    data_agent_ws_url: str
     poll_interval_seconds: float
     max_concurrency: int
     waiting_poll_interval_seconds: float
@@ -48,7 +45,7 @@ class BrowserAgentConfig:
         return cls(
             agent_id=os.getenv("BROWSER_AGENT_ID", f"browser-agent-{hostname}"),
             company_id=os.getenv("BROWSER_AGENT_COMPANY_ID", "").strip(),
-            mcp_base_url=os.getenv("FINANCE_MCP_BASE_URL", "http://127.0.0.1:3335"),
+            data_agent_ws_url=os.getenv("DATA_AGENT_WS_URL", "ws://127.0.0.1:8100/browser-agent"),
             poll_interval_seconds=max(
                 1.0, float(os.getenv("BROWSER_AGENT_POLL_INTERVAL_SECONDS", "2"))
             ),
@@ -79,19 +76,24 @@ def create_system_token(*, agent_id: str) -> str:
 
 
 class BrowserAgentTallyClient:
-    """MCP client shell with self-refreshing system token.
+    """Data-agent WS client with self-refreshing system token.
 
-    Async tool wrappers (``claim_browser_job`` / ``mark_browser_job_success`` /
-    ``mark_browser_job_failed`` / waiting-data reconciler tools) are filled in by T7. T6 only
-    establishes the config + token-refresh seam so long-running services don't hit a hard 401
-    at the 2-hour mark.
+    Communicates with the data-agent over WebSocket using domain message types.
+    The data-agent injects ``worker_token`` into outbound messages, except for
+    ``heartbeat`` which explicitly carries the current token so the data-agent
+    can refresh it.
     """
 
-    def __init__(self, *, config: BrowserAgentConfig, session: McpSession | None = None) -> None:
+    def __init__(self, *, config: BrowserAgentConfig, ws_client: "DataAgentWsClient | None" = None) -> None:
         self.config = config
         self._token: str = ""
         self._token_expires_at: float = 0.0
-        self._session = session or McpSession(base_url=config.mcp_base_url)
+        self._client = ws_client or DataAgentWsClient(
+            ws_url=config.data_agent_ws_url,
+            agent_id=config.agent_id,
+            max_concurrency=config.max_concurrency,
+            token_provider=lambda: self.worker_token,
+        )
 
     @property
     def worker_token(self) -> str:
@@ -103,64 +105,35 @@ class BrowserAgentTallyClient:
             ).timestamp()
         return self._token
 
-    async def _call(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-        return await self._session.call_tool(tool_name, args)
-
     async def claim_browser_job(self) -> dict[str, Any]:
-        return await self._call(
-            "browser_sync_job_claim",
-            {
-                "worker_token": self.worker_token,
-                "agent_id": self.config.agent_id,
-                "max_concurrency": self.config.max_concurrency,
-            },
-        )
+        return await self._client.request("claim", {})
 
     async def heartbeat(self, *, company_id: str | None = None) -> dict[str, Any]:
         resolved_company_id = (company_id or self.config.company_id or "").strip()
-        return await self._call(
-            "browser_agent_heartbeat",
-            {
-                "worker_token": self.worker_token,
-                "company_id": resolved_company_id,
-                "agent_id": self.config.agent_id,
-                "hostname": socket.gethostname() or "",
-                "version": os.getenv("BROWSER_AGENT_VERSION", ""),
-                "capabilities": {
-                    "runner": os.getenv("BROWSER_AGENT_RUNNER_MODE", "playwright"),
-                    "browser_channel": os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome"),
-                    "headless": os.getenv("BROWSER_AGENT_HEADLESS", "0"),
-                    "max_concurrency": self.config.max_concurrency,
-                },
+        return await self._client.request("heartbeat", {
+            "token": self.worker_token,
+            "company_id": resolved_company_id,
+            "hostname": socket.gethostname() or "",
+            "version": os.getenv("BROWSER_AGENT_VERSION", ""),
+            "capabilities": {
+                "runner": os.getenv("BROWSER_AGENT_RUNNER_MODE", "playwright"),
+                "browser_channel": os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome"),
+                "headless": os.getenv("BROWSER_AGENT_HEADLESS", "0"),
+                "max_concurrency": self.config.max_concurrency,
             },
-        )
+        })
 
     async def mark_browser_job_success(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._call(
-            "browser_sync_job_complete",
-            {"worker_token": self.worker_token, **payload},
-        )
+        return await self._client.request("job_complete", dict(payload))
 
     async def mark_browser_job_failed(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._call(
-            "browser_sync_job_fail",
-            {"worker_token": self.worker_token, **payload},
-        )
+        return await self._client.request("job_fail", dict(payload))
 
     async def requeue_ready_waiting(self) -> dict[str, Any]:
-        return await self._call(
-            "recon_queue_requeue_ready_waiting",
-            {"worker_token": self.worker_token},
-        )
+        return await self._client.request("queue_requeue_ready", {})
 
     async def fail_failed_waiting(self) -> dict[str, Any]:
-        return await self._call(
-            "recon_queue_fail_failed_collection_waiting",
-            {"worker_token": self.worker_token},
-        )
+        return await self._client.request("queue_fail_failed", {})
 
     async def fail_expired_waiting(self) -> dict[str, Any]:
-        return await self._call(
-            "recon_queue_fail_expired_waiting",
-            {"worker_token": self.worker_token},
-        )
+        return await self._client.request("queue_fail_expired", {})

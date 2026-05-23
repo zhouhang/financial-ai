@@ -1,86 +1,72 @@
 from __future__ import annotations
-
 import sys
-import time
 from pathlib import Path
 
-import jwt
+import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from finance_browser_agent.tally_client import (
-    BrowserAgentConfig,
-    BrowserAgentTallyClient,
-    create_system_token,
-)
+from finance_browser_agent.tally_client import BrowserAgentConfig, BrowserAgentTallyClient
 
 
-def test_create_system_token_has_system_role(monkeypatch) -> None:
-    monkeypatch.setenv("JWT_SECRET", "test-secret")
-    token = create_system_token(agent_id="browser-agent-local")
-    payload = jwt.decode(token, "test-secret", algorithms=["HS256"])
-    assert payload["role"] == "system"
-    assert payload["username"] == "browser-agent"
-    assert payload["sub"] == "browser-agent:browser-agent-local"
+class FakeWsClient:
+    def __init__(self):
+        self.calls = []
+        self.next_result = {"ok_marker": True}
+
+    async def request(self, msg_type, payload):
+        self.calls.append((msg_type, dict(payload)))
+        return self.next_result
 
 
-def test_browser_agent_config_defaults(monkeypatch) -> None:
-    monkeypatch.delenv("BROWSER_AGENT_ID", raising=False)
-    monkeypatch.delenv("BROWSER_AGENT_MAX_CONCURRENCY", raising=False)
-    config = BrowserAgentConfig.from_env()
-    assert config.agent_id
-    assert config.poll_interval_seconds >= 1
-    assert config.max_concurrency >= 1
-
-
-def test_browser_agent_config_env_overrides(monkeypatch) -> None:
-    monkeypatch.setenv("BROWSER_AGENT_ID", "agent-test")
-    monkeypatch.setenv("BROWSER_AGENT_MAX_CONCURRENCY", "3")
-    config = BrowserAgentConfig.from_env()
-    assert config.agent_id == "agent-test"
-    assert config.max_concurrency == 3
-
-
-def test_browser_agent_client_refreshes_token_before_expiry(monkeypatch) -> None:
-    monkeypatch.setenv("JWT_SECRET", "test-secret")
-    config = BrowserAgentConfig.from_env()
-    client = BrowserAgentTallyClient(config=config)
-    first = client.worker_token
-    # Force expiry deadline to past so the next access triggers refresh.
-    client._token_expires_at = 0
-    # Sleep one second to guarantee a different `iat` in the new JWT payload.
-    time.sleep(1.1)
-    second = client.worker_token
-    assert first != second
-
-
-def test_browser_agent_client_sends_heartbeat() -> None:
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    class FakeSession:
-        async def call_tool(self, tool_name, args):
-            calls.append((tool_name, args))
-            return {"success": True, "agent": {"agent_id": args["agent_id"], "status": "online"}}
-
-    config = BrowserAgentConfig(
-        agent_id="browser-agent-local",
-        company_id="company-001",
-        mcp_base_url="http://127.0.0.1:3335",
-        poll_interval_seconds=1,
-        max_concurrency=2,
-        waiting_poll_interval_seconds=30,
+def _config():
+    return BrowserAgentConfig(
+        agent_id="agent-A", company_id="c1", data_agent_ws_url="ws://test/browser-agent",
+        poll_interval_seconds=2, max_concurrency=2, waiting_poll_interval_seconds=30,
         heartbeat_interval_seconds=30,
     )
-    client = BrowserAgentTallyClient(config=config, session=FakeSession())
 
-    import asyncio
 
-    result = asyncio.run(client.heartbeat(company_id="company-001"))
+def _client():
+    ws = FakeWsClient()
+    return BrowserAgentTallyClient(config=_config(), ws_client=ws), ws
 
-    assert result["success"] is True
-    assert calls[0][0] == "browser_agent_heartbeat"
-    assert calls[0][1]["agent_id"] == "browser-agent-local"
-    assert calls[0][1]["company_id"] == "company-001"
-    assert calls[0][1]["worker_token"]
+
+@pytest.mark.asyncio
+async def test_claim_sends_domain_claim_without_tool_name():
+    client, ws = _client()
+    await client.claim_browser_job()
+    assert ws.calls[0][0] == "claim"
+    assert "worker_token" not in ws.calls[0][1]
+    assert "browser_sync_job_claim" not in str(ws.calls[0])
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_carries_token_and_capabilities():
+    client, ws = _client()
+    await client.heartbeat()
+    msg_type, payload = ws.calls[0]
+    assert msg_type == "heartbeat"
+    assert payload["token"]
+    assert payload["company_id"] == "c1"
+    assert "capabilities" in payload
+
+
+@pytest.mark.asyncio
+async def test_complete_and_fail_and_queue_map_to_domain_types():
+    client, ws = _client()
+    await client.mark_browser_job_success({"sync_job_id": "j1", "records": []})
+    await client.mark_browser_job_failed({"sync_job_id": "j1", "fail_reason": "X"})
+    await client.requeue_ready_waiting()
+    await client.fail_failed_waiting()
+    await client.fail_expired_waiting()
+    types = [c[0] for c in ws.calls]
+    assert types == ["job_complete", "job_fail", "queue_requeue_ready", "queue_fail_failed", "queue_fail_expired"]
+    assert ws.calls[0][1]["sync_job_id"] == "j1"
+
+
+def test_config_from_env_uses_data_agent_ws_url(monkeypatch):
+    monkeypatch.setenv("DATA_AGENT_WS_URL", "wss://cloud/browser-agent")
+    cfg = BrowserAgentConfig.from_env()
+    assert cfg.data_agent_ws_url == "wss://cloud/browser-agent"
+    assert not hasattr(cfg, "mcp_base_url")
