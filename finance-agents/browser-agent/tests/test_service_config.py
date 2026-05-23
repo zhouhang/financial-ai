@@ -15,13 +15,13 @@ def test_browser_agent_env_overrides(monkeypatch) -> None:
     monkeypatch.setenv("BROWSER_AGENT_MAX_CONCURRENCY", "3")
     monkeypatch.setenv("BROWSER_AGENT_POLL_INTERVAL_SECONDS", "5")
     monkeypatch.setenv("BROWSER_AGENT_WAITING_POLL_INTERVAL_SECONDS", "60")
-    monkeypatch.setenv("FINANCE_MCP_BASE_URL", "http://10.0.0.1:3335")
+    monkeypatch.setenv("DATA_AGENT_WS_URL", "wss://10.0.0.1/browser-agent")
     config = BrowserAgentConfig.from_env()
     assert config.agent_id == "agent-test"
     assert config.max_concurrency == 3
     assert config.poll_interval_seconds == 5
     assert config.waiting_poll_interval_seconds == 60
-    assert config.mcp_base_url == "http://10.0.0.1:3335"
+    assert config.data_agent_ws_url == "wss://10.0.0.1/browser-agent"
 
 
 def test_browser_agent_config_min_concurrency(monkeypatch) -> None:
