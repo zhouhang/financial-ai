@@ -1,152 +1,171 @@
-# Browser Agent Risk Handoff Design
+# 浏览器采集风控兜底设计
 
-Date: 2026-05-23
+日期：2026-05-23
 
-## Context
+## 背景
 
-Browser collection must remain an automatic collection solution for cloud Tally. The collection
-machine runs `browser-agent`; it receives playbook jobs, launches a local browser, uses saved
-merchant credentials when needed, downloads source data, and reports records back to Tally.
+浏览器采集必须是云端 Tally 自动对账的数据获取能力。采集机部署 `browser-agent`，
+负责根据云端下发的 playbook 和凭证，在本机打开浏览器、完成登录态检查、下载源数据，
+并把采集结果回传到 Tally。
 
-QianNiu / Taobao login can still trigger slider, SMS, or other risk verification. This cannot be
-fully eliminated and must not be bypassed. The product requirement is therefore:
+千牛 / 淘宝登录可能触发滑块、短信验证码、手机确认或其他安全校验。这个风险不能
+100% 杜绝，也不能通过破解验证码的方式绕过。因此设计目标不是“完全不触发验证码”，
+而是：
 
-1. Avoid triggering risk verification as much as practical.
-2. When risk verification appears, pause the same browser session.
-3. Notify the responsible operator in DingTalk with a one-time link.
-4. Let the operator complete verification remotely.
-5. Resume the original playbook in the same Chrome page after login state is restored.
+1. 尽可能降低触发风控的概率。
+2. 触发风控后，不让采集任务直接失败。
+3. 保持同一个浏览器会话不关闭。
+4. 通过钉钉给负责人发送一次性链接。
+5. 负责人远程接管当前浏览器页面，完成验证码或安全确认。
+6. 验证完成后，browser-agent 检测登录态恢复，并继续执行原 playbook。
 
-Production collection machines will run on Windows or macOS. They may be inside customer or
-operator networks and should not require inbound public ports.
+生产采集机会运行在 Windows 或 macOS。采集机可能在客户内网、NAT 或安全策略后面，
+所以不应要求云端 Tally 直接访问采集机端口。
 
-## Decision
+## 总体决策
 
-Use cloud-mediated handoff with browser-agent outbound connectivity:
+采用“云端 Tally 中转 + browser-agent 主动出站连接 + 同会话人工接管”的架构。
 
-- browser-agent owns Chrome, profiles, downloads, and Playwright execution locally.
-- browser-agent establishes outbound communication with Tally Cloud for job claim, heartbeat,
-  and future handoff streaming.
-- Tally Cloud generates the DingTalk one-time handoff link.
-- Operators open a Tally Cloud page. Cloud forwards screen frames and input events through the
-  browser-agent outbound channel to the active browser session.
-- The first implementation uses Playwright screenshot frames plus mouse/keyboard event forwarding.
-- If slider verification proves sensitive to Playwright-level events, the same handoff session
-  interface can be backed later by OS-level remote desktop for Windows/macOS.
+- browser-agent 仍然拥有本机 Chrome、采集 profile、下载目录和 Playwright 执行权。
+- browser-agent 主动连接云端 Tally，用于任务领取、心跳、状态上报，以及后续远程接管通道。
+- 云端 Tally 负责创建人工验证会话，生成一次性钉钉链接，并把操作页面提供给负责人。
+- 负责人打开的是云端 Tally 页面，不是采集机本地地址。
+- 云端通过 browser-agent 的出站通道，把画面帧和输入事件转发到正在运行的浏览器会话。
+- 第一版远程接管使用 Playwright 截图流 + 鼠标/键盘事件转发。
+- 如果千牛滑块对 Playwright 级输入事件仍然敏感，再把同一套 handoff session 后端升级为
+  Windows/macOS 的 OS 级远程桌面接管。
 
-Do not require Tally Cloud to connect directly to a browser-agent host or local browser port.
+这套设计明确拒绝“采集机直连 URL”作为生产方案，因为它要求采集机暴露公网或内网可访问端口，
+不适合云端 Tally 调用分布式采集机的部署形态。
 
-## Goals
+## 第一层：降低触发风控概率
 
-1. Keep normal browser collection automatic: credentials + playbook should run without operator
-   action when login state is valid or password login succeeds.
-2. Reduce risk triggers by making Chrome startup and interaction closer to normal headed Chrome.
-3. Convert risk verification from a terminal failure into a waiting state with operator handoff.
-4. Preserve the original browser page, profile, download directory, and job context while waiting.
-5. Support Windows and macOS collection machines.
-6. Keep the handoff link short-lived, single-use, auditable, and scoped to one sync job.
+当前 runner 使用：
 
-## Non-Goals
+```python
+playwright.chromium.launch_persistent_context(channel="chrome")
+```
 
-- Do not crack, bypass, or automate CAPTCHA/risk verification.
-- Do not expose browser-agent or Chrome debug ports to the public internet.
-- Do not require customers to install a full remote desktop stack for the first implementation.
-- Do not make ordinary collection dependent on manual login.
-- Do not store merchant plaintext credentials in playbooks, logs, or handoff payloads.
-- Do not build a general browser automation IDE in this change.
+这确实打开的是本机 Google Chrome，不是 Playwright 自带 Chromium。但它仍然是 Playwright
+直接 launch 出来的 Chrome，会带自动化控制通道和一组与普通用户手动启动不同的运行特征。
 
-## Approach Options
+第一层改造目标是让浏览器运行方式更接近普通浏览器，同时保留自动采集能力：
 
-### Option A: Cloud-mediated screenshot and input handoff
+1. browser-agent 自己启动本机 Google Chrome。
+2. 使用采集专属 persistent profile。
+3. Chrome 只监听本机 `127.0.0.1` 调试端口。
+4. Playwright 通过 CDP attach 到这个 Chrome。
+5. 保留 headed 模式，不使用 headless。
+6. 保留每个采集 profile 独立的下载目录。
+7. 每次采集先检查 `auth_check.logged_in_selector`。
+8. 如果 profile 已有登录态，直接跳过 `login_if_needed`。
+9. 如果没有登录态，再使用 UI 保存的凭证自动登录。
+10. 登录输入继续使用慢速逐字输入。
+11. 步骤之间和点击之前继续保留 1 到 3 秒左右的随机等待。
 
-browser-agent captures screenshots from the active Playwright page and sends them to Tally Cloud.
-The Tally handoff page renders frames and forwards operator mouse/keyboard events back to
-browser-agent, which applies them to the same page.
+这不会消除所有自动化特征，也不能保证千牛永不触发滑块。但它能减少不必要的差异：
 
-Pros:
+- 不再由 Playwright 直接创建完整浏览器进程。
+- Chrome 以普通本机程序形式启动。
+- profile 是长期持久化的采集 profile，能积累设备信任信息。
+- CDP 只绑定本机，不暴露给公网。
+- 采集流程仍然由 Playwright 控制，不影响 playbook 执行。
 
-- No inbound port requirement.
-- Works with the existing Playwright runner.
-- Cross-platform for Windows/macOS.
-- Smallest production path for the current architecture.
+## 第二层：验证码兜底闭环
 
-Cons:
+当千牛仍然触发滑块、短信验证码或安全验证时，新增“人工验证会话”。
 
-- Some slider implementations may reject Playwright-generated pointer events.
-- Video latency and drag fidelity need careful tuning.
+触发条件：
 
-This is the recommended first implementation.
+- 页面出现滑块 / 拖动滑块 / 安全校验 / 手机验证 / 验证码等强风控标记。
+- 登录后仍停留在登录域名或安全验证页。
+- playbook 无法继续，但浏览器页面仍然可被人工处理。
 
-### Option B: Cloud-mediated OS-level remote desktop
+处理流程：
 
-browser-agent starts or integrates with a local remote-control process and streams the desktop or
-browser window through Tally Cloud.
+1. browser-agent 检测到滑块、验证码或手机验证。
+2. browser-agent 不关闭 Chrome，不销毁 Playwright context，不立即把 sync job 标记为失败。
+3. browser-agent 创建或请求云端创建 `verification handoff session`。
+4. sync job 进入 `waiting_human_verification` 状态。
+5. 云端 Tally 通过现有钉钉通知能力给周行发送消息。
+6. 钉钉消息包含一个短期有效、一次性使用的云端 Tally 链接。
+7. 周行打开链接后，看到当前浏览器页面画面。
+8. 周行可以点击、拖拽、输入，完成滑块或其他验证码。
+9. browser-agent 持续检测登录态 selector 和风控标记。
+10. 登录态恢复后，sync job 进入 `resuming` 状态。
+11. browser-agent 从被阻塞的步骤继续执行原 playbook。
+12. playbook 完成后，正常上传 records 和 capture files，并标记 sync job 成功。
+13. 如果链接过期、无人处理、采集机离线或登录态没有恢复，最终标记为 `RISK_VERIFICATION` 失败。
 
-Pros:
+关键约束：
 
-- Best chance to satisfy hard anti-automation slider checks because input is OS-level.
-- Closer to a real human sitting at the collection machine.
+- 人工处理的是同一个 Chrome 页面，不是重新打开一个浏览器。
+- 人工验证完成后，原 playbook 继续跑，不重新领取任务。
+- 验证期间凭证不暴露给钉钉链接或接管页面。
+- 这个人工环节只处理验证码，不改变自动采集主路径。
 
-Cons:
+## 远程接管实现
 
-- Larger deployment surface on Windows/macOS.
-- More security review, installer work, and permissions handling.
-- Harder to ship quickly.
+第一版使用 Playwright screenshot + 鼠标键盘事件转发。
 
-This is the fallback backend if Option A cannot clear QianNiu slider reliably.
+原因：
 
-### Option C: Direct browser-agent URL
+- 不要求采集机额外部署 VNC/noVNC。
+- 不要求采集机暴露公网端口。
+- browser-agent 只需要主动连接云端。
+- Windows 和 macOS 都能支持。
+- 与现有 Playwright runner 集成成本最低。
 
-browser-agent hosts a local web UI and sends that URL in DingTalk.
+第一版能力：
 
-Pros:
+1. browser-agent 对当前 page 周期性截图。
+2. 截图通过 browser-agent 的出站连接发送到云端。
+3. 云端 Tally handoff 页面展示当前画面。
+4. 用户在页面上的鼠标移动、点击、拖拽、键盘输入被发送回云端。
+5. 云端把事件转发给对应 browser-agent。
+6. browser-agent 在当前 Playwright page 上执行对应鼠标/键盘事件。
+7. browser-agent 同时轮询登录态，发现验证通过后结束 handoff。
 
-- Fast to prototype on a trusted local network.
+风险：
 
-Cons:
+- 某些滑块可能识别 Playwright 级鼠标事件，导致人工拖动仍然失败。
+- 截图流会有延迟，拖拽手感可能不如真实远程桌面。
 
-- Requires reachable inbound network path.
-- Hard to secure in customer NAT/firewall environments.
-- Does not fit cloud Tally production deployment.
+升级路径：
 
-This is rejected for production.
+如果 Playwright 级事件无法稳定通过千牛滑块，则保持云端 handoff session、钉钉链接、
+状态机和审计模型不变，只替换 browser-agent 本地控制后端：
 
-## Browser Launch Hardening
+- Windows 采集机使用 OS 级远程桌面或原生输入注入。
+- macOS 采集机使用系统辅助功能权限或远程桌面后端。
+- 云端仍然只看到“画面帧 + 输入事件”的抽象接口。
+- browser-agent 仍然通过出站连接和云端通信。
 
-Current runner uses `playwright.chromium.launch_persistent_context(channel="chrome")`, which does
-start local Google Chrome, not bundled Chromium. The next hardening step is to make launch closer
-to normal headed Chrome:
+## 状态模型
 
-1. browser-agent starts local Google Chrome itself with a dedicated persistent profile.
-2. Chrome listens only on `127.0.0.1` for a local CDP endpoint.
-3. Playwright attaches via CDP to the existing Chrome process.
-4. Browser windows use normal headed mode.
-5. Profile and download directories remain per browser collection profile.
-6. The runner still checks `auth_check.logged_in_selector` before any login step.
-7. Login actions keep slow typing and randomized step/click delay.
+为浏览器采集增加人工验证等待状态，避免把可人工恢复的风控直接当成终态失败。
 
-This does not remove all automation signals. It reduces avoidable differences while preserving the
-ability to run playbooks automatically.
+状态：
 
-## Handoff State Model
+- `running`：browser-agent 正在执行 playbook。
+- `waiting_human_verification`：检测到风控，等待人工验证。
+- `resuming`：人工验证完成，正在确认登录态并准备继续执行。
+- `success`：playbook 完成并上传数据。
+- `failed`：任务无法继续，或人工验证过期/取消/失败。
 
-Add a waiting state distinct from terminal failure:
+失败码：
 
-- `running`: browser-agent is executing the playbook.
-- `waiting_human_verification`: risk verification is visible and the browser session is paused.
-- `resuming`: operator finished verification and browser-agent is checking login state.
-- `success`: playbook completed and records were uploaded.
-- `failed`: playbook cannot continue or handoff expired.
+- `RISK_VERIFICATION`：验证码无人处理、处理超时或登录态未恢复。
+- `AUTH_EXPIRED`：登录凭证失效、登录页无法完成、或登录后仍未获得有效登录态。
+- `PAGE_CHANGED`：页面结构变化导致 playbook 无法继续。
+- `DATA_MISMATCH`：下载数据通过不了质量校验。
+- `AGENT_OFFLINE`：采集机离线或失联。
 
-`RISK_VERIFICATION` should not immediately finalize the sync job as failed while the handoff window
-is active. It becomes terminal only after the handoff session expires, is cancelled, or login state
-does not recover.
+## Handoff Session 数据
 
-## Handoff Session Data
+新增人工验证会话，绑定一个 sync job 和一个 browser-agent 运行中的浏览器会话。
 
-Create a handoff session associated with one sync job and one browser-agent runtime session.
-
-Fields:
+字段：
 
 - `handoff_session_id`
 - `sync_job_id`
@@ -163,143 +182,180 @@ Fields:
 - `completed_at`
 - `audit_events`
 
-The one-time DingTalk URL points to Tally Cloud and contains only a signed opaque token. It must
-not contain credentials, profile paths, local debug ports, or playbook contents.
+一次性链接只包含签名后的不透明 token，不包含：
 
-## Runtime Flow
+- 商户登录账号或密码。
+- 本机 profile 路径。
+- Chrome CDP 端口。
+- playbook JSON。
+- 下载文件路径。
 
-Normal automatic flow:
+## 正常自动采集流程
 
-1. Cloud creates a browser sync job.
-2. browser-agent claims the job.
-3. browser-agent opens Chrome with the target profile.
-4. Runner checks whether the profile is authenticated.
-5. If authenticated, `login_if_needed` is skipped.
-6. If unauthenticated, runner uses sealed credentials injected into params and logs in.
-7. Runner executes the playbook and uploads records/capture files.
+1. 云端创建 browser sync job。
+2. browser-agent 领取任务。
+3. browser-agent 打开采集 profile 对应的 Chrome。
+4. runner 检查 profile 是否已有登录态。
+5. 有登录态则跳过登录步骤。
+6. 无登录态则注入凭证并自动登录。
+7. 登录成功后继续执行 playbook。
+8. 下载并解析数据。
+9. 通过质量校验后上传 records 和 capture files。
+10. sync job 标记成功。
 
-Risk handoff flow:
+## 风控人工兜底流程
 
-1. Runner detects strong risk markers such as slider, SMS verification, or security verification.
-2. Runner pauses the step deadline and keeps Chrome open.
-3. browser-agent reports `waiting_human_verification` to Cloud with screenshot availability.
-4. Cloud creates a handoff session and sends DingTalk message to the configured operator.
-5. Operator opens the one-time link and claims the session.
-6. Cloud streams screenshots from browser-agent to the page.
-7. Operator sends mouse/keyboard events through Cloud to browser-agent.
-8. browser-agent applies events to the same page.
-9. Runner polls login-state selectors and risk markers.
-10. When login state is restored, runner resumes the original playbook from the blocked step.
-11. If handoff expires, runner marks the job failed with `RISK_VERIFICATION`.
+1. runner 检测到强风控标记。
+2. runner 暂停当前步骤 deadline，并保持 Chrome 打开。
+3. browser-agent 上报 `waiting_human_verification`。
+4. 云端创建 handoff session。
+5. 云端发送钉钉消息给周行。
+6. 周行打开一次性链接并领取 session。
+7. 云端页面展示当前浏览器截图流。
+8. 周行操作页面，输入事件经云端转发给 browser-agent。
+9. browser-agent 在同一个页面执行输入事件。
+10. browser-agent 检测到登录态恢复。
+11. runner 继续执行原 playbook。
+12. 成功则正常完成；超时则 `RISK_VERIFICATION` 失败。
 
-## Security
+## 安全要求
 
-- Handoff links are single-use and short-lived.
-- Links must require an authenticated Tally user or a signed DingTalk identity check before control
-  is granted.
-- The session is scoped to one sync job and one browser page.
-- Only one operator can control a session at a time.
-- Every claim, input-control start, completion, timeout, and cancellation is audited.
-- Screenshots should be treated as sensitive financial data.
-- Clipboard access is disabled in the first implementation.
-- File download access through the handoff UI is disabled; downloaded files continue through the
-  existing capture-file upload path.
-- Cloud never receives merchant plaintext credentials through the handoff channel.
+- handoff 链接必须短期有效。
+- handoff 链接必须一次性使用。
+- handoff 页面必须要求 Tally 登录态，或至少完成钉钉身份校验。
+- 一个 session 同一时间只能被一个用户控制。
+- 所有领取、开始控制、结束控制、超时、取消、失败都要审计。
+- 截图画面按敏感财务数据处理。
+- 第一版禁用剪贴板能力。
+- 第一版不允许通过 handoff 页面下载文件。
+- 下载文件仍然通过现有 capture file 上传链路进入系统。
+- 云端不通过 handoff 通道接收商户明文密码。
+- Chrome CDP 端口只监听 `127.0.0.1`。
+- 采集机不暴露公网端口。
 
-## Error Handling
+## 组件边界
 
-- If browser-agent disconnects during handoff, Cloud marks the session `agent_offline` and keeps
-  the sync job waiting until the runner timeout decides final state.
-- If the operator link expires, Cloud marks the session `expired`; browser-agent fails the job as
-  `RISK_VERIFICATION`.
-- If login state does not recover after operator action, browser-agent keeps waiting until timeout
-  or fails as `RISK_VERIFICATION`.
-- If the page changes after verification, normal playbook failure mapping applies (`PAGE_CHANGED`,
-  `AUTH_EXPIRED`, or `DATA_MISMATCH`).
-- If screenshot streaming works but event forwarding fails, the UI must show a clear "control
-  unavailable" state and the job remains paused until timeout or cancellation.
+### browser-agent
 
-## Data And API Boundaries
+负责：
 
-MCP / Cloud responsibilities:
+- 启动本机 Chrome。
+- 管理采集 profile 和下载目录。
+- 通过 CDP attach Chrome。
+- 执行 playbook。
+- 检测登录态和风控标记。
+- 风控时保持页面不关闭。
+- 生成截图帧。
+- 接收并执行远程输入事件。
+- 登录态恢复后继续 playbook。
+- 超时或失败时上报明确失败码。
 
-- Persist handoff sessions.
-- Issue and verify one-time tokens.
-- Send DingTalk handoff messages through the existing notification adapter.
-- Proxy operator WebSocket events to the correct browser-agent connection.
-- Expose handoff status to the browser collection UI and sync job detail.
+### 云端 Tally / finance-mcp
 
-browser-agent responsibilities:
+负责：
 
-- Detect risk state.
-- Hold the Chrome page open.
-- Produce screenshot frames.
-- Apply input events to the active page.
-- Continue polling login state.
-- Resume or fail the original playbook.
+- 持久化 handoff session。
+- 生成和校验一次性 token。
+- 维护 sync job 的 `waiting_human_verification` / `resuming` 状态。
+- 通过现有钉钉通知适配器发送消息。
+- 代理 handoff 页面和 browser-agent 之间的事件通道。
+- 把 handoff 状态暴露给浏览器采集列表和 sync job 详情。
 
-finance-web responsibilities:
+### finance-web
 
-- Render the handoff page.
-- Show session metadata, expiry, frame stream, and control state.
-- Send mouse/keyboard events.
-- Show completion/timeout/failure result.
+负责：
 
-## Testing
+- 提供 handoff 页面。
+- 展示 session 状态、剩余时间、错误信息。
+- 展示 browser-agent 传来的截图流。
+- 捕获鼠标、拖拽、键盘输入。
+- 把输入事件发送给云端。
+- 显示验证完成、过期、失败或采集机离线状态。
 
-Unit tests:
+## 错误处理
 
-- Risk detection creates a waiting handoff result instead of immediate terminal failure.
-- Handoff token payload excludes credentials and local paths.
-- Expired handoff session maps to `RISK_VERIFICATION`.
-- Only the owning sync job can resume from a handoff session.
-- Browser launch config never binds CDP to a public interface.
+- browser-agent 在 handoff 期间离线：session 标记 `agent_offline`，sync job 保持等待，
+  最终由 runner timeout 决定失败。
+- 一次性链接过期：session 标记 `expired`，sync job 失败为 `RISK_VERIFICATION`。
+- 用户完成操作但登录态未恢复：继续等待直到超时，最终 `RISK_VERIFICATION`。
+- 登录态恢复后页面结构变化：按原 playbook 映射为 `PAGE_CHANGED`。
+- 登录后仍回到登录页：`AUTH_EXPIRED`。
+- 数据下载后校验不一致：`DATA_MISMATCH`。
+- 截图可用但事件转发不可用：handoff 页面显示“无法控制”，任务继续等待直到取消或超时。
 
-Integration tests:
+## 测试计划
 
-- Simulated risk page creates a handoff session and sends one DingTalk notification.
-- Simulated operator completion lets the runner continue the next playbook step.
-- Agent disconnect during handoff is reflected in handoff status.
-- Duplicate link open cannot create a second controller.
+单元测试：
 
-Manual validation:
+- Chrome 启动配置只绑定 `127.0.0.1`。
+- runner 检测到风控时返回等待 handoff，而不是立即终态失败。
+- handoff token payload 不包含凭证、profile 路径或 CDP 端口。
+- handoff 过期会映射为 `RISK_VERIFICATION`。
+- 同一个 handoff session 不能被两个用户同时控制。
+- 登录态恢复后 runner 能继续执行下一步。
 
-- macOS collection machine: QianNiu login risk page can be viewed through the Tally handoff page.
-- Windows collection machine: same validation with Chrome Stable.
-- If screenshot/event forwarding cannot clear QianNiu slider, run the same handoff flow with the
-  OS-level remote desktop backend before production expansion.
+集成测试：
 
-## Rollout
+- 模拟风险页面后创建 handoff session，并只发送一次钉钉消息。
+- 模拟用户完成验证后，runner 继续执行 playbook。
+- browser-agent 断连时，云端能看到 session 离线状态。
+- 重复打开一次性链接时，第二个打开者不能获得控制权。
+- sync job 状态能从 `running` 到 `waiting_human_verification` 到 `resuming` 到 `success`。
 
-Phase 1: Browser launch hardening and state plumbing.
+人工验证：
 
-- Start Chrome in local CDP attach mode.
-- Add `waiting_human_verification` state and avoid terminal failure while waiting.
-- Keep current local/manual window fallback for development validation.
+- macOS 采集机上，千牛风险页面能通过 Tally handoff 页面看到。
+- Windows 采集机上，千牛风险页面能通过 Tally handoff 页面看到。
+- Playwright 截图 + 事件转发能否完成真实千牛滑块。
+- 如果不能完成，切换 OS 级远程桌面后端前，云端 session 模型不需要重做。
 
-Phase 2: Cloud handoff session.
+## 分阶段落地
 
-- Persist handoff sessions.
-- Add one-time token and DingTalk message.
-- Add cloud-to-agent event channel.
-- Add handoff status to sync job detail.
+### 阶段 1：降低风控概率
 
-Phase 3: Handoff UI.
+- browser-agent 改为自己启动本机 Chrome。
+- Chrome 使用采集专属 persistent profile。
+- Chrome CDP 只监听 `127.0.0.1`。
+- Playwright 通过 CDP attach。
+- 保留慢速输入、随机等待和登录态优先检查。
+- 保留现有下载、解析和质量校验逻辑。
 
-- Build the Tally handoff page.
-- Stream screenshots and forward mouse/keyboard events.
-- Audit control events.
+### 阶段 2：人工验证状态
 
-Phase 4: Production validation.
+- 增加 `waiting_human_verification` / `resuming` 状态。
+- 检测到风控时不立即终态失败。
+- browser-agent 保持 Chrome 页面打开。
+- 超时后仍然按 `RISK_VERIFICATION` 失败。
 
-- Validate macOS and Windows collection machines.
-- Run QianNiu verification with real credentials.
-- Confirm normal automatic collection still passes when login state is valid.
-- Confirm expired or failed handoff produces actionable `RISK_VERIFICATION` alerts.
+### 阶段 3：云端 handoff session
 
-## Open Design Constraint
+- 新增 handoff session 持久化。
+- 新增一次性 token。
+- 新增钉钉消息内容和链接。
+- 新增云端到 browser-agent 的出站事件通道。
+- sync job 详情显示 handoff 状态。
 
-The first implementation intentionally starts with Playwright-level screenshot and event forwarding
-because it is cross-platform and does not require inbound network access. If QianNiu slider
-verification rejects those events, the architecture stays the same but the browser-agent-side
-control backend changes to OS-level remote desktop for Windows/macOS.
+### 阶段 4：handoff 页面
+
+- finance-web 新增 handoff 页面。
+- 页面显示当前浏览器截图流。
+- 页面捕获点击、拖拽、键盘输入。
+- 云端转发输入事件给 browser-agent。
+- browser-agent 执行事件并继续检测登录态。
+
+### 阶段 5：生产验证
+
+- macOS 采集机验证。
+- Windows 采集机验证。
+- 真实千牛账号验证自动登录、风控等待、人工兜底和继续 playbook。
+- 验证登录态已存在时不重复登录。
+- 验证无人处理时产生可行动的 `RISK_VERIFICATION` 告警。
+
+## 重要约束
+
+第一版远程接管先做 Playwright screenshot + 鼠标键盘事件转发，因为它不要求采集机额外部署
+VNC/noVNC，也不要求采集机暴露公网端口。
+
+如果真实千牛滑块仍然因为 Playwright 级输入事件而失败，则不推翻云端中转、钉钉链接、
+handoff session、状态机和审计设计，只替换 browser-agent 本地控制后端为 Windows/macOS
+的 OS 级远程桌面接管。
