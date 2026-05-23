@@ -65,6 +65,11 @@ from graphs.platform.api import router as platform_router
 from graphs.data_source.api import router as data_source_router
 from graphs.collaboration.api import router as collaboration_router
 from services.browser_alerts import send_pending_browser_alerts
+from services.browser_agent_gateway import (
+    BrowserAgentConnection,
+    handle_domain_message,
+    verify_system_token,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1188,6 +1193,44 @@ async def websocket_chat(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket 连接已断开")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WebSocket /browser-agent — 采集机接入
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.websocket("/browser-agent")
+async def websocket_browser_agent(ws: WebSocket):
+    """采集机 WS 端点:首帧 hello 鉴权(role=system),之后中转领域消息到 finance-mcp。"""
+    await ws.accept()
+    conn: BrowserAgentConnection | None = None
+    try:
+        hello = json.loads(await ws.receive_text())
+        payload = verify_system_token(str(hello.get("token") or "")) if hello.get("type") == "hello" else None
+        if payload is None:
+            await ws.send_json({"type": "hello_ack", "ok": False, "error": "鉴权失败:需要 role=system 的 token"})
+            await ws.close()
+            return
+        conn = BrowserAgentConnection(
+            token=str(hello.get("token")),
+            agent_id=str(hello.get("agent_id") or ""),
+            max_concurrency=int(hello.get("max_concurrency") or 1),
+        )
+        logger.info("browser-agent WS 已连接: agent_id=%s", conn.agent_id)
+        await ws.send_json({"type": "hello_ack", "ok": True})
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await ws.send_json({"type": "result", "id": "", "ok": False, "error": "无效的 JSON"})
+                continue
+            reply = await handle_domain_message(conn, msg)
+            await ws.send_json(reply)
+    except WebSocketDisconnect:
+        logger.info("browser-agent WS 断开: agent_id=%s", conn.agent_id if conn else "?")
+    except Exception:
+        logger.exception("browser-agent WS 处理异常")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
