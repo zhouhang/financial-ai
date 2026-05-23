@@ -86,11 +86,11 @@ async def main() -> None:
     config = BrowserAgentConfig.from_env()
     client = BrowserAgentTallyClient(config=config)
     logger.info(
-        "browser-agent 启动: agent_id=%s company_id=%s max_concurrency=%s mcp=%s",
+        "browser-agent 启动: agent_id=%s company_id=%s max_concurrency=%s data_agent_ws=%s",
         config.agent_id,
         config.company_id or "<missing>",
         config.max_concurrency,
-        config.mcp_base_url,
+        config.data_agent_ws_url,
     )
     await asyncio.gather(
         _heartbeat(client, config),

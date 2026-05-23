@@ -1,5 +1,9 @@
 """Minimal MCP SSE session client for browser-agent.
 
+DEPRECATED (2026-05-23 阶段0 通信迁移后停用,保留备查):browser-agent 不再直连 finance-mcp。
+生产路径改为经 WebSocket 连 data-agent,见 ``data_agent_ws.py`` 的 ``DataAgentWsClient``。
+本文件已无生产引用,暂不删除以备回退/对照。
+
 Mirrors the SSE handshake/dispatch logic in
 ``finance-agents/data-agent/tools/mcp_client.py``. Kept self-contained inside the browser-agent
 package so the collection machine deployment does not pull in the data-agent project.
