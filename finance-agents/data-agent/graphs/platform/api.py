@@ -23,6 +23,7 @@ from config import FINANCE_MCP_UPLOAD_DIR, MAX_FILE_SIZE
 from tools.mcp_client import (
     alipay_auth_invite_continue,
     alipay_auth_invite_describe,
+    browser_handoff_session_describe,
     platform_create_auth_session,
     platform_disable_shop,
     platform_get_app_config,
@@ -857,3 +858,29 @@ async def alipay_invite_continue_route(request: Request):
         )
         return HTMLResponse(_invite_html(title="无法继续", inner=inner), status_code=400)
     return RedirectResponse(url=str(result["auth_url"]), status_code=303)
+
+
+@router.get("/p/handoff", response_class=HTMLResponse)
+async def handoff_landing(t: str = Query("", description="handoff token")):
+    import html as _html
+
+    info = await browser_handoff_session_describe(t)
+    if not info.get("success"):
+        inner = (
+            "<div class='status err'><div class='ic'>!</div><div class='t'>链接无效或已过期</div></div>"
+            "<p class='desc'>该验证链接无法使用,可能已过期或被改动。请联系对接人重新触发。</p>"
+        )
+        return HTMLResponse(_invite_html(title="链接已失效", inner=inner), status_code=400)
+    s = info.get("session") or {}
+    shop = _html.escape(str(s.get("profile_key") or ""))
+    reason = _html.escape(str(s.get("reason") or ""))
+    agent = _html.escape(str(s.get("agent_id") or ""))
+    status = _html.escape(str(s.get("status") or ""))
+    inner = (
+        "<p class='eyebrow'>该采集店铺需要人工验证</p>"
+        f"<p class='shop'>{shop}</p>"
+        f"<div class='hint'>验证类型: <b>{reason}</b> · 采集机: {agent} · 状态: {status}</div>"
+        "<p class='desc'>请在该采集机上打开的浏览器窗口中完成验证(滑块/手机验证码等);"
+        "采集任务正保持会话等待,完成后会自动继续并下载数据。本页暂不支持远程操作。</p>"
+    )
+    return HTMLResponse(_invite_html(title="人工验证", inner=inner))

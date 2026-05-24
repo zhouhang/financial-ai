@@ -4936,3 +4936,7 @@ async def alipay_auth_invite_describe(token: str) -> dict[str, Any]:
 
 async def alipay_auth_invite_continue(token: str) -> dict[str, Any]:
     return await call_mcp_tool("alipay_auth_invite_continue", {"token": token})
+
+
+async def browser_handoff_session_describe(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_describe", {"token": token})
