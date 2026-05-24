@@ -246,6 +246,8 @@ def _execute_action(
         detected = _detect_auth_or_risk(page)
         if detected == "AUTH_EXPIRED" and allow_auth_redirect:
             return {"auth_required": True}
+        if detected == "RISK_VERIFICATION":
+            detected = _await_navigate_risk_clearance(page, run_config=run_config)
         if detected:
             raise BrowserActionError(detected, f"navigate detected {detected}")
         return {}
@@ -531,6 +533,25 @@ def _wait_for_risk_to_clear(
         wait_ms = min(max(1, poll_interval_ms), remaining_ms)
         _wait_for_timeout(last_context, wait_ms)
     return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
+
+
+def _await_navigate_risk_clearance(page: Any, *, run_config: "PlaywrightRunConfig | None") -> str | None:
+    """navigate 落到风控页时,不立即失败:保持页面打开,轮询等待人工清除,
+    上限 risk_manual_timeout_ms。清除返回 None(继续 playbook);超时或未配置超时返回
+    'RISK_VERIFICATION'(由调用方抛出)。"""
+    manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
+    if manual_timeout_ms <= 0:
+        return "RISK_VERIFICATION"
+    logger.warning(
+        "browser navigate risk verification waiting for manual completion: timeout_ms=%s",
+        manual_timeout_ms,
+    )
+    cleared = _wait_for_risk_to_clear(
+        _login_candidates(page),
+        timeout_ms=manual_timeout_ms,
+        poll_interval_ms=1000,
+    )
+    return None if cleared else "RISK_VERIFICATION"
 
 
 def _random_delay_ms(min_ms: int, max_ms: int) -> int:
