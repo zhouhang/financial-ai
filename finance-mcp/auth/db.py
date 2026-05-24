@@ -3543,11 +3543,7 @@ def get_sync_job(
                 if company_id:
                     cur.execute(
                         """
-                        SELECT id, company_id, data_source_id, job_type, trigger_type, status,
-                               idempotency_key, resource_scope, requested_window_start,
-                               requested_window_end, requested_cursor, active_attempt_no,
-                               requested_by, run_context, error_summary, started_at, finished_at,
-                               created_at, updated_at
+                        SELECT *
                         FROM sync_jobs
                         WHERE id = %s AND company_id = %s
                         LIMIT 1
@@ -3557,11 +3553,7 @@ def get_sync_job(
                 else:
                     cur.execute(
                         """
-                        SELECT id, company_id, data_source_id, job_type, trigger_type, status,
-                               idempotency_key, resource_scope, requested_window_start,
-                               requested_window_end, requested_cursor, active_attempt_no,
-                               requested_by, run_context, error_summary, started_at, finished_at,
-                               created_at, updated_at
+                        SELECT *
                         FROM sync_jobs
                         WHERE id = %s
                         LIMIT 1

@@ -58,3 +58,37 @@ def test_create_then_describe_by_token():
 def test_describe_rejects_bad_token():
     described = asyncio.run(_handle_browser_handoff_session_describe({"token": "garbage"}))
     assert described["success"] is False
+
+
+def test_create_reads_channel_and_owner_from_sync_job(monkeypatch):
+    auth_db.ensure_browser_handoff_schema()
+    import uuid as _uuid
+    import auth.db as _db
+    sj = str(_uuid.uuid4())
+    fake_job = {"request_payload": {"params": {
+        "handoff_channel_config_id": "11111111-1111-1111-1111-111111111111",
+        "handoff_owner": {"name": "周行", "identifier": "u-zhou"},
+    }}}
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: fake_job)
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": sj, "agent_id": "browser-agent-local",
+        "profile_key": "shop-x", "reason": "RISK_VERIFICATION",
+    }))
+    assert created["success"] is True
+    assert created["channel_config_id"] == "11111111-1111-1111-1111-111111111111"
+    assert created["owner"]["identifier"] == "u-zhou"
+
+
+def test_create_without_sync_job_payload_has_empty_owner(monkeypatch):
+    auth_db.ensure_browser_handoff_schema()
+    import uuid as _uuid
+    import auth.db as _db
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: None)
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": str(_uuid.uuid4()), "agent_id": "a", "profile_key": "s", "reason": "RISK_VERIFICATION",
+    }))
+    assert created["success"] is True and created["owner"] == {}

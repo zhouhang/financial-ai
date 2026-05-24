@@ -9041,6 +9041,14 @@ async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> d
     if not company_id or not sync_job_id:
         return {"success": False, "error": "missing company_id or sync_job_id"}
     expires_in = int(arguments.get("expires_in_seconds") or 900)
+    job_row = auth_db.get_sync_job(sync_job_id=sync_job_id) or {}
+    rp = job_row.get("request_payload") or {}
+    if isinstance(rp, str):
+        import json as _json
+        rp = _json.loads(rp or "{}")
+    payload_params = rp.get("params") or {}
+    channel_config_id = arguments.get("channel_config_id") or payload_params.get("handoff_channel_config_id") or None
+    owner = payload_params.get("handoff_owner") or {}
     row = auth_db.insert_handoff_session(
         company_id=company_id,
         sync_job_id=sync_job_id,
@@ -9048,7 +9056,7 @@ async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> d
         agent_id=str(arguments.get("agent_id") or ""),
         profile_key=str(arguments.get("profile_key") or ""),
         reason=str(arguments.get("reason") or "RISK_VERIFICATION"),
-        channel_config_id=(arguments.get("channel_config_id") or None),
+        channel_config_id=channel_config_id,
         expires_in_seconds=expires_in,
     )
     if not row:
@@ -9062,6 +9070,8 @@ async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> d
         "handoff_session_id": str(row["id"]),
         "handoff_token": token,
         "status": row["status"],
+        "channel_config_id": channel_config_id,
+        "owner": owner,
     }
 
 
