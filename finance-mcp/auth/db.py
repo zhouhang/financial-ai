@@ -34,6 +34,7 @@ _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
 _RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
+_BROWSER_HANDOFF_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -979,10 +980,37 @@ def ensure_browser_playbook_collection_schema() -> list[str]:
     return applied
 
 
+def _browser_handoff_schema_ready() -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("select to_regclass('public.browser_handoff_sessions')")
+                return cur.fetchone()[0] is not None
+    except Exception:
+        return False
+
+
+def ensure_browser_handoff_schema() -> list[str]:
+    global _BROWSER_HANDOFF_SCHEMA_READY
+    if _BROWSER_HANDOFF_SCHEMA_READY:
+        return []
+    if _browser_handoff_schema_ready():
+        _BROWSER_HANDOFF_SCHEMA_READY = True
+        return []
+    migration_name = "033_browser_handoff_sessions.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _browser_handoff_schema_ready():
+        raise RuntimeError("browser_handoff schema 升级失败")
+    _BROWSER_HANDOFF_SCHEMA_READY = True
+    logger.info("browser_handoff schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
 def ensure_schema() -> list[str]:
     """确保 auth 侧当前任务需要的基础 schema 已就绪。"""
     applied = ensure_unified_data_source_schema()
     applied.extend(ensure_browser_playbook_collection_schema())
+    applied.extend(ensure_browser_handoff_schema())
     return applied
 
 
