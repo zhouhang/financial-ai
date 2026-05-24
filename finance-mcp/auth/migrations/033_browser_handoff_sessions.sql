@@ -18,3 +18,6 @@ CREATE TABLE IF NOT EXISTS browser_handoff_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_handoff_sessions_sync_job ON browser_handoff_sessions(sync_job_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_sessions_company_status ON browser_handoff_sessions(company_id, status);
+
+-- 加宽 sync_jobs.job_status 以容纳新状态 'waiting_human_verification'(26 字符,旧 varchar(20) 装不下)。
+ALTER TABLE sync_jobs ALTER COLUMN job_status TYPE varchar(32);

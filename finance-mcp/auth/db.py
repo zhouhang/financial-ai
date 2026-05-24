@@ -10393,3 +10393,64 @@ def reclaim_stale_recon_runs(timeout_minutes: int = 15) -> int:
     except Exception as e:
         logger.error(f"reclaim_stale_recon_runs 失败: {e}")
         return 0
+
+
+# ---------------------------------------------------------------------------
+# browser_handoff_sessions CRUD
+# ---------------------------------------------------------------------------
+
+def insert_handoff_session(*, company_id, sync_job_id, data_source_id, agent_id,
+                           profile_key, reason, channel_config_id, expires_in_seconds=900):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO browser_handoff_sessions
+                   (sync_job_id, company_id, data_source_id, agent_id, profile_key, reason,
+                    channel_config_id, expires_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s, now() + (%s || ' seconds')::interval)
+                   RETURNING *""",
+                (sync_job_id, company_id, data_source_id, agent_id, profile_key, reason,
+                 channel_config_id, str(int(expires_in_seconds))),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def get_handoff_session(*, handoff_session_id):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM browser_handoff_sessions WHERE id = %s", (handoff_session_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def mark_handoff_session_status(*, handoff_session_id, status, claimed_by_user_id=None):
+    completed = status in ("completed", "expired", "cancelled")
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE browser_handoff_sessions
+                   SET status=%s,
+                       claimed_by_user_id = COALESCE(%s, claimed_by_user_id),
+                       claimed_at = CASE WHEN %s='claimed' THEN now() ELSE claimed_at END,
+                       completed_at = CASE WHEN %s THEN now() ELSE completed_at END,
+                       updated_at = now()
+                   WHERE id=%s RETURNING *""",
+                (status, claimed_by_user_id, status, completed, handoff_session_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def set_browser_sync_job_status(*, sync_job_id, status):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sync_jobs SET job_status=%s, updated_at=now() WHERE id=%s",
+                (status, sync_job_id),
+            )
+            affected = cur.rowcount
+            conn.commit()
+            return affected
