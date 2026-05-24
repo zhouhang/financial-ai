@@ -262,6 +262,8 @@ _DATA_SOURCE_TOOL_NAMES = {
     "browser_sync_job_claim",
     "browser_sync_job_complete",
     "browser_sync_job_fail",
+    "browser_handoff_session_create",
+    "browser_handoff_session_describe",
 }
 
 _RECON_AUTO_TOOL_NAMES = {
