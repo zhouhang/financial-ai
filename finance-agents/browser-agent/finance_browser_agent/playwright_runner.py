@@ -29,7 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from finance_browser_agent.chrome_launcher import launch_chrome
 from finance_browser_agent.quality_gate import validate_rows
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
 
@@ -791,9 +794,6 @@ def run_playbook_with_playwright(
     download_dir = Path(config.download_root) / shop_id / job_id
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-
     rows: list[dict[str, Any]] = []
     capture_files: list[dict[str, Any]] = []
     extracted: dict[str, Any] = {}
@@ -811,59 +811,65 @@ def run_playbook_with_playwright(
     )
 
     try:
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=config.headless,
-                channel=config.browser_channel,
-                accept_downloads=True,
-                timezone_id=config.timezone_id,
-                downloads_path=str(download_dir),
-            )
-            page = context.pages[0] if context.pages else context.new_page()
-            try:
-                for index, step_dict in enumerate(steps):
-                    step_action = str(step_dict.get("action") or "").strip()
-                    step_id = str(step_dict.get("id") or "").strip()
-                    if step_action in {"login", "login_if_needed"}:
-                        authenticated = _profile_is_authenticated(page, playbook)
-                        if should_skip_login_action(step_dict, authenticated=authenticated):
+        chrome = launch_chrome(
+            user_data_dir=user_data_dir,
+            headless=config.headless,
+            channel=config.browser_channel,
+            timezone_id=config.timezone_id,
+        )
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(chrome.cdp_url)
+                context = browser.contexts[0] if browser.contexts else browser.new_context(accept_downloads=True)
+                page = context.pages[0] if context.pages else context.new_page()
+                try:
+                    for index, step_dict in enumerate(steps):
+                        step_action = str(step_dict.get("action") or "").strip()
+                        step_id = str(step_dict.get("id") or "").strip()
+                        if step_action in {"login", "login_if_needed"}:
+                            authenticated = _profile_is_authenticated(page, playbook)
+                            if should_skip_login_action(step_dict, authenticated=authenticated):
+                                logger.info(
+                                    "browser login skipped because profile is authenticated: "
+                                    "job_id=%s step_id=%s",
+                                    job_id,
+                                    step_dict.get("id") or "",
+                                )
+                                continue
                             logger.info(
-                                "browser login skipped because profile is authenticated: "
-                                "job_id=%s step_id=%s",
+                                "browser login required for profile: job_id=%s step_id=%s",
                                 job_id,
-                                step_dict.get("id") or "",
+                                step_id,
                             )
-                            continue
-                        logger.info(
-                            "browser login required for profile: job_id=%s step_id=%s",
-                            job_id,
-                            step_id,
+                        _pause_before_step(
+                            page,
+                            run_config=config,
+                            step_id=step_id,
+                            action_name=step_action,
                         )
-                    _pause_before_step(
-                        page,
-                        run_config=config,
-                        step_id=step_id,
-                        action_name=step_action,
-                    )
-                    allow_auth_redirect = step_action == "navigate" and any(
-                        str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
-                        for next_step in steps[index + 1 :]
-                    )
-                    result = _execute_action(
-                        page,
-                        step_dict,
-                        params=params,
-                        extracted=extracted,
-                        capture_files=capture_files,
-                        download_dir=download_dir,
-                        allow_auth_redirect=allow_auth_redirect,
-                        run_config=config,
-                    )
-                    if result.get("rows"):
-                        rows.extend(result["rows"])
-            finally:
-                context.close()
+                        allow_auth_redirect = step_action == "navigate" and any(
+                            str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
+                            for next_step in steps[index + 1 :]
+                        )
+                        result = _execute_action(
+                            page,
+                            step_dict,
+                            params=params,
+                            extracted=extracted,
+                            capture_files=capture_files,
+                            download_dir=download_dir,
+                            allow_auth_redirect=allow_auth_redirect,
+                            run_config=config,
+                        )
+                        if result.get("rows"):
+                            rows.extend(result["rows"])
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        finally:
+            chrome.terminate()
     except BrowserActionError as exc:
         logger.warning(
             "playwright browser run failed: job_id=%s fail_reason=%s error=%s",
