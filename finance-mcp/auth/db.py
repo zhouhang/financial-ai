@@ -5167,7 +5167,8 @@ def get_unified_sync_job_by_id(sync_job_id: str) -> dict | None:
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE id = %s
                     LIMIT 1
@@ -5198,7 +5199,8 @@ def find_unified_sync_job_by_idempotency_key(
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE company_id = %s
                       AND data_source_id = %s
@@ -5233,7 +5235,8 @@ def list_unified_sync_jobs(
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE company_id = %s
                 """
@@ -5718,7 +5721,8 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
       - sync_job pending
       - data_source.source_kind = 'browser_playbook',且 active + is_enabled
       - shop_runtime_bindings.agent_id = :agent_id
-      - profile_status=active 且 playbook_status=ok(健康门下沉到 claim 层)
+      - verification 允许重新领取登录态异常的 binding,便于人工/凭证重验;
+        生产采集要求 profile_status=active 且 playbook_status=ok(健康门下沉到 claim 层)
       - 当前 agent in-flight 浏览器任务数 < agent_max_concurrency(DB 层并发硬保护)
       - 已到 next_retry_at(为 NULL 视为可立即领取)
       - playbook.status='active'(canary 版本路由暂未实现,见 Deferred)
@@ -5729,7 +5733,18 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    WITH claimed AS (
+                    WITH running_for_agent AS (
+                        SELECT COUNT(*) AS running_count
+                        FROM sync_jobs running_jobs
+                        JOIN data_sources running_ds ON running_ds.id = running_jobs.data_source_id
+                        JOIN shop_runtime_bindings running_srb
+                          ON running_srb.company_id = running_jobs.company_id
+                         AND running_srb.data_source_id = running_jobs.data_source_id
+                        WHERE running_jobs.job_status = 'running'
+                          AND running_ds.source_kind = 'browser_playbook'
+                          AND running_srb.agent_id = %s
+                    ),
+                    claimed AS (
                         SELECT sync_jobs.id,
                                jsonb_build_object(
                                    'shop_id', srb.shop_id,
@@ -5749,6 +5764,7 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
                                p.version AS playbook_version,
                                p.playbook_body
                         FROM sync_jobs
+                        CROSS JOIN running_for_agent
                         JOIN data_sources ds ON ds.id = sync_jobs.data_source_id
                         JOIN shop_runtime_bindings srb
                           ON srb.company_id = sync_jobs.company_id
@@ -5756,27 +5772,19 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
                         JOIN playbooks p
                           ON p.company_id = sync_jobs.company_id
                          AND p.playbook_id = srb.playbook_id
-                         AND p.status = 'active'
-                        JOIN LATERAL (
-                            SELECT COUNT(*) AS running_count
-                            FROM sync_jobs running_jobs
-                            JOIN data_sources running_ds ON running_ds.id = running_jobs.data_source_id
-                            JOIN shop_runtime_bindings running_srb
-                              ON running_srb.company_id = running_jobs.company_id
-                             AND running_srb.data_source_id = running_jobs.data_source_id
-                            WHERE running_jobs.job_status = 'running'
-                              AND running_ds.source_kind = 'browser_playbook'
-                              AND running_srb.agent_id = %s
-                        ) running_for_agent ON TRUE
+                         AND (
+                              (sync_jobs.is_verification = TRUE AND p.status IN ('draft', 'active'))
+                              OR (sync_jobs.is_verification = FALSE AND p.status = 'active')
+                         )
                         WHERE sync_jobs.job_status = 'pending'
                           AND ds.source_kind = 'browser_playbook'
                           AND ds.status = 'active'
                           AND ds.is_enabled = TRUE
                           AND srb.agent_id = %s
-                          -- verification dry-run 允许在 verifying binding 上跑(注册时首验);
+                          -- verification dry-run 允许重验登录态异常 binding;
                           -- 生产采集要求 binding 完全健康(profile=active AND playbook=ok)。
                           AND (
-                              (sync_jobs.is_verification = TRUE AND srb.profile_status IN ('verifying', 'active'))
+                              (sync_jobs.is_verification = TRUE AND srb.profile_status IN ('verifying', 'active', 'needs_reauth', 'risk_blocked'))
                               OR (sync_jobs.is_verification = FALSE AND srb.profile_status = 'active' AND srb.playbook_status = 'ok')
                           )
                           AND running_for_agent.running_count < %s

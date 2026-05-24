@@ -72,6 +72,37 @@ describe('BrowserPlaybookPanel', () => {
     expect(within(dialog).queryByText('落地数据集')).not.toBeInTheDocument();
   });
 
+  it('列表和详情展示历史浏览器验证失败原因', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            browser_verification: {
+              sync_job_id: 'sync-failed-1',
+              job_status: 'failed',
+              browser_fail_reason: 'PAGE_CHANGED',
+              error_message: 'PAGE_CHANGED: login selector missing',
+              updated_at: '2026-05-22T13:32:56.000+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('验证失败')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /千牛每日资金账单/ }));
+
+    const dialog = screen.getByRole('dialog', { name: '浏览器采集详情' });
+    expect(within(dialog).getByText('验证任务')).toBeInTheDocument();
+    expect(within(dialog).getByText('sync-failed-1')).toBeInTheDocument();
+    expect(within(dialog).getByText('失败原因')).toBeInTheDocument();
+    expect(within(dialog).getByText('PAGE_CHANGED: login selector missing')).toBeInTheDocument();
+  });
+
   it('通过外部新增信号打开新增浮窗并提交 source-less 注册', async () => {
     const onRegistered = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -135,6 +166,146 @@ describe('BrowserPlaybookPanel', () => {
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('dialog', { name: '新增浏览器采集' })).not.toBeInTheDocument();
+  });
+
+  it('注册返回验证任务后轮询任务状态，成功时自动激活 playbook', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/browser-playbook/registrations') {
+        return jsonResponse({
+          success: true,
+          status: 'verification_pending',
+          source_id: 'source-verify',
+          verification_sync_job_id: 'sync-verify-1',
+          verification_biz_date: '2026-05-21',
+          message: '验证任务已创建',
+        });
+      }
+      if (url === '/api/sync-jobs/sync-verify-1') {
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        return jsonResponse({
+          success: true,
+          job: {
+            id: 'sync-verify-1',
+            job_status: 'success',
+            current_attempt: 1,
+            error_message: '',
+          },
+        });
+      }
+      if (url === '/api/data-sources/browser-playbook/finalize') {
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          verification_sync_job_id: 'sync-verify-1',
+        });
+        return jsonResponse({
+          success: true,
+          message: '浏览器采集已激活',
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const { rerender } = render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={0}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    rerender(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={1}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: '新增浏览器采集' });
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '单枪旗舰店-收支明细' } });
+    fireEvent.change(within(dialog).getByLabelText('登录账号'), { target: { value: 'qianniu-user' } });
+    fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'qianniu-pass' } });
+    fireEvent.change(within(dialog).getByLabelText('playbook_body JSON'), {
+      target: { value: '{"schema_version":"1.0","steps":[]}' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '注册' }));
+
+    expect(await within(dialog).findByText(/验证任务已创建/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/data-sources/browser-playbook/finalize',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    );
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+    expect(within(dialog).getByText(/浏览器采集已激活/)).toBeInTheDocument();
+  });
+
+  it('注册返回验证任务后轮询失败状态并展示 browser-agent 失败原因', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/data-sources/browser-playbook/registrations') {
+        return jsonResponse({
+          success: true,
+          status: 'verification_pending',
+          verification_sync_job_id: 'sync-failed-1',
+          verification_biz_date: '2026-05-21',
+          message: '验证任务已创建',
+        });
+      }
+      if (url === '/api/sync-jobs/sync-failed-1') {
+        return jsonResponse({
+          success: true,
+          job: {
+            id: 'sync-failed-1',
+            job_status: 'failed',
+            browser_fail_reason: 'PAGE_CHANGED',
+            error_message: 'PAGE_CHANGED: login selector missing',
+          },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const { rerender } = render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={0}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    rerender(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[]}
+        openCreateSignal={1}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: '新增浏览器采集' });
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '单枪旗舰店-收支明细' } });
+    fireEvent.change(within(dialog).getByLabelText('登录账号'), { target: { value: 'qianniu-user' } });
+    fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'qianniu-pass' } });
+    fireEvent.change(within(dialog).getByLabelText('playbook_body JSON'), {
+      target: { value: '{"schema_version":"1.0","steps":[]}' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '注册' }));
+
+    expect(await within(dialog).findByText(/浏览器验证失败/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/PAGE_CHANGED: login selector missing/)).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalledWith(
+      '/api/data-sources/browser-playbook/finalize',
+      expect.anything(),
+    );
+    expect(onRegistered).not.toHaveBeenCalled();
   });
 
   it('新增浮窗显示 playbook JSON 行号，并自动修复字符串内断行后提交', async () => {

@@ -54,6 +54,15 @@ class BrowserDispatcherLoop:
         job = claim.get("job") if isinstance(claim, dict) else None
         if not job:
             return {"status": "idle"}
+        logger.info(
+            "browser job claimed: sync_job_id=%s playbook_id=%s shop_id=%s "
+            "runtime_profile_ref=%s is_verification=%s",
+            job.get("id") or "",
+            job.get("playbook_id") or "",
+            job.get("shop_id") or "",
+            job.get("runtime_profile_ref") or "",
+            job.get("is_verification"),
+        )
         return await self._process_job(dict(job))
 
     async def _process_job(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -65,6 +74,14 @@ class BrowserDispatcherLoop:
         async with self.semaphore:
             async with self.profile_locks.lock_for_shop(profile_key):
                 # Sync Playwright must run off the event loop, otherwise other workers stall.
+                logger.info(
+                    "browser runner starting: sync_job_id=%s playbook_id=%s shop_id=%s "
+                    "profile_key=%s",
+                    sync_job_id,
+                    job.get("playbook_id") or "",
+                    job.get("shop_id") or "",
+                    profile_key,
+                )
                 result = await asyncio.to_thread(
                     self.runner, self._message_from_job(job, payload)
                 )
@@ -80,18 +97,32 @@ class BrowserDispatcherLoop:
                     "capture_files": list(result.get("capture_files") or []),
                 }
             )
+            logger.info(
+                "browser runner succeeded: sync_job_id=%s record_count=%s capture_file_count=%s",
+                sync_job_id,
+                len(result.get("records") or []),
+                len(result.get("capture_files") or []),
+            )
             return {"status": "success", "sync_job_id": sync_job_id}
         result = result if isinstance(result, dict) else {}
         policy = classify_failure(str(result.get("fail_reason") or "OTHER"))
+        error_message = str((result.get("error_info") or {}).get("message") or "browser task failed")
         await self.client.mark_browser_job_failed(
             {
                 "sync_job_id": sync_job_id,
                 "fail_reason": policy.normalized_reason,
-                "error_message": str((result.get("error_info") or {}).get("message") or "browser task failed"),
+                "error_message": error_message,
                 "retryable": policy.retryable,
                 "max_attempts": policy.max_attempts,
                 "retry_delay_seconds": policy.retry_delay_seconds,
             }
+        )
+        logger.warning(
+            "browser runner failed: sync_job_id=%s fail_reason=%s retryable=%s error=%s",
+            sync_job_id,
+            policy.normalized_reason,
+            policy.retryable,
+            error_message,
         )
         return {"status": "failed", "sync_job_id": sync_job_id, "retryable": policy.retryable}
 

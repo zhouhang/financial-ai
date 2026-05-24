@@ -317,6 +317,16 @@ export interface DataSourceCapabilities {
   can_manage_datasets?: boolean;
 }
 
+export interface BrowserVerificationSummary {
+  sync_job_id?: string;
+  job_status?: string;
+  browser_fail_reason?: string;
+  error_message?: string;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  is_verification?: boolean;
+}
+
 export interface DataSourceListItem {
   id: string;
   source_kind: DataSourceKind;
@@ -343,6 +353,7 @@ export interface DataSourceListItem {
   };
   discover_summary?: DataSourceDiscoverSummary;
   capabilities?: DataSourceCapabilities;
+  browser_verification?: BrowserVerificationSummary;
   metadata?: Record<string, unknown>;
 }
 

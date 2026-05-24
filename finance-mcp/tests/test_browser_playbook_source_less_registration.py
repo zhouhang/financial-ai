@@ -340,3 +340,144 @@ def test_register_browser_collection_rejects_falsey_non_dict_playbook_body(
     )
 
     assert result == {"success": False, "error": "Playbook JSON 必须是对象"}
+
+
+def test_register_browser_collection_normalizes_action_internal_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_unified_data_source",
+        lambda **kwargs: {
+            "id": "source-1",
+            "company_id": kwargs["company_id"],
+            "code": kwargs["code"],
+            "name": kwargs["name"],
+            "source_kind": kwargs["source_kind"],
+            "domain_type": kwargs["domain_type"],
+            "provider_code": kwargs["provider_code"],
+            "execution_mode": kwargs["execution_mode"],
+            "status": kwargs["status"],
+            "is_enabled": kwargs["is_enabled"],
+            "meta": kwargs["meta"],
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_unified_data_source_dataset",
+        lambda **kwargs: {
+            "id": "dataset-1",
+            "data_source_id": kwargs["data_source_id"],
+            "dataset_code": kwargs["dataset_code"],
+            "dataset_name": kwargs["dataset_name"],
+            "resource_key": kwargs["resource_key"],
+            "source_type": "browser_collection_records",
+            "publish_status": "published",
+            "meta": {"source_type": "browser_collection_records"},
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **kwargs: {
+            "id": "source-1",
+            "company_id": "company-1",
+            "code": "browser-collection-qn",
+            "name": "千牛每日资金账单",
+            "source_kind": "browser_playbook",
+            "domain_type": "ecommerce",
+            "provider_code": "browser_playbook",
+            "execution_mode": "deterministic",
+            "status": "active",
+            "is_enabled": True,
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [
+            {
+                "id": "dataset-1",
+                "dataset_code": "browser-collection-qn",
+                "dataset_name": "千牛每日资金账单",
+                "source_type": "browser_collection_records",
+                "publish_status": "published",
+                "meta": {"source_type": "browser_collection_records"},
+            }
+        ],
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(data_sources, "_load_source_configs", lambda source_id: {})
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_credentials", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources.auth_db, "_seal_json_payload", lambda payload: "sealed-secret")
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_playbook",
+        lambda **kwargs: captured.setdefault("playbook", kwargs)
+        or {
+            "playbook_id": kwargs["playbook_id"],
+            "version": kwargs["version"],
+            "title": kwargs["title"],
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_shop_runtime_binding",
+        lambda **kwargs: {"data_source_id": kwargs["data_source_id"]},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "insert_browser_verification_sync_job", lambda **kwargs: {"id": "sync-1"})
+    monkeypatch.setattr(data_sources, "_default_browser_verification_biz_date", lambda: "2026-05-20")
+
+    result = asyncio.run(
+        data_sources._handle_data_source_register_browser_collection(
+            {
+                "auth_token": "token",
+                "title": "千牛每日资金账单",
+                "credential_username": "finance_ops@example.com",
+                "credential_password": "secret",
+                "playbook_body": {
+                    "schema_version": "1.0",
+                    "steps": [{"id": "request_detail_file", "action": "c lick"}],
+                },
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["playbook"]["playbook_body"]["steps"][0]["action"] == "click"
+
+
+def test_register_browser_collection_rejects_unknown_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+
+    result = asyncio.run(
+        data_sources._handle_data_source_register_browser_collection(
+            {
+                "auth_token": "token",
+                "title": "千牛每日资金账单",
+                "credential_username": "finance_ops@example.com",
+                "credential_password": "secret",
+                "playbook_body": {
+                    "schema_version": "1.0",
+                    "steps": [{"id": "bad", "action": "ask_llm"}],
+                },
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "action 不支持" in result["error"]

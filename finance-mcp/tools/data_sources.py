@@ -78,6 +78,21 @@ AUTO_SAMPLE_ROW_LIMIT = 10
 SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "llm_generated", "manual_updated"}
 SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
 SEMANTIC_SAMPLE_ROW_LIMIT = 10
+VALID_BROWSER_PLAYBOOK_ACTIONS = {
+    "login",
+    "login_if_needed",
+    "navigate",
+    "click",
+    "fill",
+    "set_date",
+    "wait_for",
+    "extract_text",
+    "extract_summary",
+    "download",
+    "download_history_file",
+    "parse_table",
+    "assert",
+}
 PUBLISH_STATUS_VALUES = {"published", "unpublished", "draft", "archived"}
 DATASET_CANDIDATE_SCENES = {"recon", "proc", "insight"}
 DATASET_CANDIDATE_ROLES = {"left", "right", "source", "target"}
@@ -2221,6 +2236,30 @@ def _browser_registration_code(*, title: str) -> str:
     return f"{base}-{suffix}"
 
 
+def _normalize_browser_playbook_body(playbook_body: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    normalized = dict(playbook_body)
+    steps = normalized.get("steps")
+    if steps is None:
+        return normalized, ""
+    if not isinstance(steps, list):
+        return normalized, "playbook.steps 必须是数组"
+
+    normalized_steps: list[Any] = []
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            return normalized, f"playbook.steps 第 {index} 项必须是对象"
+        normalized_step = dict(step)
+        action = str(normalized_step.get("action") or "").strip()
+        compact_action = re.sub(r"\s+", "", action)
+        if compact_action:
+            normalized_step["action"] = compact_action
+        if compact_action not in VALID_BROWSER_PLAYBOOK_ACTIONS:
+            return normalized, f"playbook.steps 第 {index} 项 action 不支持: {action or '<empty>'}"
+        normalized_steps.append(normalized_step)
+    normalized["steps"] = normalized_steps
+    return normalized, ""
+
+
 def _default_browser_verification_biz_date() -> str:
     return (date.today() - timedelta(days=1)).isoformat()
 
@@ -3813,6 +3852,10 @@ def _build_data_source_view(
         limit=1,
     )
     latest_job = latest_jobs[0] if latest_jobs else None
+    browser_verification = _build_browser_verification_summary(
+        source_row,
+        latest_jobs=latest_jobs,
+    )
     meta = dict(source_row.get("meta") or {})
     result = {
         "id": str(source_row.get("id") or ""),
@@ -3840,6 +3883,7 @@ def _build_data_source_view(
         "last_sync_at": (latest_job or {}).get("completed_at") or (latest_job or {}).get("updated_at"),
         "last_sync_job_id": str((latest_job or {}).get("id") or ""),
         "last_sync_status": str((latest_job or {}).get("job_status") or ""),
+        "browser_verification": browser_verification,
         "created_at": source_row.get("created_at"),
         "updated_at": source_row.get("updated_at"),
         "discover_summary": dict(meta.get("discover_summary") or {}),
@@ -3848,6 +3892,30 @@ def _build_data_source_view(
     if include_dataset_details:
         result["datasets"] = [_build_dataset_view(row) for row in dataset_rows]
     return result
+
+
+def _build_browser_verification_summary(
+    source_row: dict[str, Any],
+    *,
+    latest_jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {}
+    verification_job = next(
+        (job for job in latest_jobs if bool(job.get("is_verification"))),
+        latest_jobs[0] if latest_jobs else None,
+    )
+    if not verification_job:
+        return {}
+    return {
+        "sync_job_id": str(verification_job.get("id") or ""),
+        "job_status": str(verification_job.get("job_status") or ""),
+        "browser_fail_reason": str(verification_job.get("browser_fail_reason") or ""),
+        "error_message": str(verification_job.get("error_message") or ""),
+        "updated_at": verification_job.get("updated_at"),
+        "completed_at": verification_job.get("completed_at"),
+        "is_verification": bool(verification_job.get("is_verification")),
+    }
 
 
 def _update_source_meta(source_row: dict[str, Any], *, meta_updates: dict[str, Any]) -> dict[str, Any] | None:
@@ -7110,6 +7178,9 @@ async def _handle_data_source_register_browser_collection(arguments: dict[str, A
     playbook_body = dict(raw_playbook_body)
     if not playbook_body:
         return {"success": False, "error": "Playbook JSON 不能为空"}
+    playbook_body, playbook_error = _normalize_browser_playbook_body(playbook_body)
+    if playbook_error:
+        return {"success": False, "error": playbook_error}
 
     source_code = _browser_registration_code(title=title)
     playbook_id = source_code
@@ -7260,6 +7331,9 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     playbook_body = dict(raw_playbook_body)
     if not playbook_id or not version or not title or not playbook_body:
         return {"success": False, "error": "playbook_id/version/title/playbook_body 不能为空"}
+    playbook_body, playbook_error = _normalize_browser_playbook_body(playbook_body)
+    if playbook_error:
+        return {"success": False, "error": playbook_error}
 
     # shop_id / agent_id are server-derived in v1:
     #   - shop_id ← data_source.code (one data_source row = one shop in this design;

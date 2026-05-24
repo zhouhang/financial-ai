@@ -83,6 +83,63 @@ async def test_data_source_list_includes_platform_fixed_datasets(monkeypatch) ->
     assert datasets[0]["business_object_type"] == "payment_trade"
 
 
+@pytest.mark.anyio
+async def test_data_source_list_includes_browser_verification_summary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_sources",
+        lambda **kwargs: [
+            {
+                "id": "source-browser-1",
+                "company_id": "company-1",
+                "code": "browser-collection-qn",
+                "name": "单枪旗舰店-收支明细",
+                "source_kind": "browser_playbook",
+                "domain_type": "ecommerce",
+                "provider_code": "browser_playbook",
+                "execution_mode": "deterministic",
+                "status": "active",
+                "is_enabled": True,
+                "health_status": "unknown",
+                "meta": {"registration_title": "单枪旗舰店-收支明细"},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_data_source_datasets", lambda **kwargs: [])
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_credentials", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_load_source_configs", lambda source_id: {})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_sync_jobs",
+        lambda **kwargs: [
+            {
+                "id": "sync-verify-1",
+                "job_status": "failed",
+                "is_verification": True,
+                "browser_fail_reason": "PAGE_CHANGED",
+                "error_message": "PAGE_CHANGED: login selector missing",
+                "updated_at": "2026-05-22T13:32:56+08:00",
+            }
+        ],
+        raising=False,
+    )
+
+    result = await data_sources._handle_data_source_list({"auth_token": "token"})
+
+    assert result["success"] is True
+    summary = result["sources"][0]["browser_verification"]
+    assert summary["sync_job_id"] == "sync-verify-1"
+    assert summary["job_status"] == "failed"
+    assert summary["browser_fail_reason"] == "PAGE_CHANGED"
+    assert summary["error_message"] == "PAGE_CHANGED: login selector missing"
+
+
 def test_ensure_sync_jobs_trigger_modes_schema_runs_migration_when_initial_missing(monkeypatch) -> None:
     calls: list[str] = []
     definitions = iter(

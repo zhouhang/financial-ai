@@ -50,6 +50,12 @@ def test_playwright_config_defaults_to_persistent_profile(monkeypatch) -> None:
     assert config.timezone_id == "Asia/Shanghai"
     assert config.headless is False
     assert config.browser_channel == "chrome"
+    assert config.step_delay_min_ms == 1000
+    assert config.step_delay_max_ms == 3000
+    assert config.click_delay_min_ms == 800
+    assert config.click_delay_max_ms == 1800
+    assert config.type_delay_ms == 160
+    assert config.risk_manual_timeout_ms == 300000
 
 
 def test_playwright_config_env_overrides(monkeypatch, tmp_path) -> None:
@@ -58,9 +64,21 @@ def test_playwright_config_env_overrides(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("BROWSER_AGENT_HEADLESS", "1")
     monkeypatch.setenv("BROWSER_AGENT_TIMEZONE", "UTC")
     monkeypatch.setenv("BROWSER_AGENT_BROWSER_CHANNEL", "msedge")
+    monkeypatch.setenv("BROWSER_AGENT_STEP_DELAY_MIN_MS", "1200")
+    monkeypatch.setenv("BROWSER_AGENT_STEP_DELAY_MAX_MS", "2400")
+    monkeypatch.setenv("BROWSER_AGENT_CLICK_DELAY_MIN_MS", "400")
+    monkeypatch.setenv("BROWSER_AGENT_CLICK_DELAY_MAX_MS", "800")
+    monkeypatch.setenv("BROWSER_AGENT_TYPE_DELAY_MS", "120")
+    monkeypatch.setenv("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", "600000")
     config = PlaywrightRunConfig.from_env()
     assert config.profile_root == str(tmp_path / "profiles")
     assert config.download_root == str(tmp_path / "downloads")
     assert config.headless is True
     assert config.timezone_id == "UTC"
     assert config.browser_channel == "msedge"
+    assert config.step_delay_min_ms == 1200
+    assert config.step_delay_max_ms == 2400
+    assert config.click_delay_min_ms == 400
+    assert config.click_delay_max_ms == 800
+    assert config.type_delay_ms == 120
+    assert config.risk_manual_timeout_ms == 600000

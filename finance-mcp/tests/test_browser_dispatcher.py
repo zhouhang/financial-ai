@@ -243,9 +243,19 @@ def test_claim_next_browser_sync_job_filters_by_source_kind_agent_and_binding_he
     assert "JOIN shop_runtime_bindings srb" in sql
     assert "ds.source_kind = 'browser_playbook'" in sql
     assert "srb.agent_id = %s" in sql
-    assert "srb.profile_status = 'active'" in sql
-    assert "srb.playbook_status = 'ok'" in sql
+    assert (
+        "sync_jobs.is_verification = TRUE AND srb.profile_status IN "
+        "('verifying', 'active', 'needs_reauth', 'risk_blocked')"
+    ) in sql
+    assert (
+        "sync_jobs.is_verification = FALSE AND srb.profile_status = 'active' "
+        "AND srb.playbook_status = 'ok'"
+    ) in sql
     assert "running_for_agent.running_count < %s" in sql
+    assert "running_for_agent AS (" in sql
+    assert "JOIN LATERAL" not in sql
+    assert "sync_jobs.is_verification = TRUE AND p.status IN ('draft', 'active')" in sql
+    assert "sync_jobs.is_verification = FALSE AND p.status = 'active'" in sql
     assert "request_payload ->" not in sql
 
 
@@ -314,6 +324,57 @@ def test_claim_next_browser_sync_job_normalize_preserves_enriched_fields(monkeyp
     assert row["playbook_body"] == {"steps": [], "output": {}}
     assert row["runtime_profile_ref"] == "profiles/shop-001"
     assert row["browser_binding"]["shop_id"] == "shop-001"
+
+
+def test_get_and_list_unified_sync_jobs_select_browser_diagnostics(monkeypatch) -> None:
+    captured_sql: list[str] = []
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured_sql.append(sql)
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.get_unified_sync_job_by_id("sync-001")
+    auth_db.list_unified_sync_jobs(company_id="company-001")
+
+    assert len(captured_sql) == 2
+    for sql in captured_sql:
+        assert "next_retry_at" in sql
+        assert "browser_fail_reason" in sql
+        assert "max_attempts" in sql
+        assert "is_verification" in sql
 
 
 def test_mark_browser_sync_job_failed_retryable_reschedules_pending(monkeypatch) -> None:

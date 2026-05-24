@@ -245,6 +245,9 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_disable",
     "data_source_delete",
     "data_source_test",
+    "data_source_register_browser_collection",
+    "data_source_register_browser_playbook",
+    "data_source_finalize_browser_playbook_registration",
     "data_source_authorize",
     "data_source_handle_callback",
     "data_source_trigger_sync",
@@ -255,6 +258,10 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_get_dataset_collection_detail",
     "data_source_list_collection_records",
     "data_source_preview",
+    "browser_agent_heartbeat",
+    "browser_sync_job_claim",
+    "browser_sync_job_complete",
+    "browser_sync_job_fail",
 }
 
 _RECON_AUTO_TOOL_NAMES = {

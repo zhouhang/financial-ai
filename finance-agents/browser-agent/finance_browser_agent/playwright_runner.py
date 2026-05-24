@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,12 +41,39 @@ _AUTH_REDIRECT_MARKERS = (
     "登录后继续",
 )
 _RISK_MARKERS = (
-    "验证",
+    "验证码",
     "滑块",
+    "拖动滑块",
+    "滑动验证",
+    "向右滑动验证",
     "安全校验",
+    "安全验证",
+    "身份验证",
+    "手机验证",
     "verify",
     "captcha",
+    "risk",
 )
+_STRONG_RISK_MARKERS = (
+    "滑块",
+    "拖动滑块",
+    "滑动验证",
+    "向右滑动验证",
+    "安全校验",
+    "安全验证",
+    "身份验证",
+    "手机验证",
+    "captcha",
+)
+_DEFAULT_PASSWORD_LOGIN_SELECTORS = (
+    "text=密码登录",
+    "text=账号密码登录",
+    "text=账户密码登录",
+    "text=使用密码登录",
+    ".password-login",
+    ".login-switch",
+)
+_LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -55,6 +83,12 @@ class PlaywrightRunConfig:
     headless: bool
     timezone_id: str
     browser_channel: str
+    step_delay_min_ms: int = 1000
+    step_delay_max_ms: int = 3000
+    click_delay_min_ms: int = 800
+    click_delay_max_ms: int = 1800
+    type_delay_ms: int = 160
+    risk_manual_timeout_ms: int = 300000
 
     @classmethod
     def from_env(cls) -> "PlaywrightRunConfig":
@@ -65,7 +99,20 @@ class PlaywrightRunConfig:
             headless=os.getenv("BROWSER_AGENT_HEADLESS", "0") == "1",
             timezone_id=os.getenv("BROWSER_AGENT_TIMEZONE", "Asia/Shanghai"),
             browser_channel=os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome").strip() or "chrome",
+            step_delay_min_ms=_env_int("BROWSER_AGENT_STEP_DELAY_MIN_MS", 1000),
+            step_delay_max_ms=_env_int("BROWSER_AGENT_STEP_DELAY_MAX_MS", 3000),
+            click_delay_min_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MIN_MS", 800),
+            click_delay_max_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MAX_MS", 1800),
+            type_delay_ms=_env_int("BROWSER_AGENT_TYPE_DELAY_MS", 160),
+            risk_manual_timeout_ms=_env_int("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", 300000),
         )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 
 def build_user_data_dir(
@@ -95,22 +142,44 @@ def should_skip_login_action(action: dict[str, Any], *, authenticated: bool) -> 
 
 def _detect_auth_or_risk(page: Any) -> str | None:
     """Inspect the current page for login redirect or risk verification markers."""
+    visible_text = ""
+    try:
+        locator_factory = getattr(page, "locator", None)
+        if callable(locator_factory):
+            visible_text = locator_factory("body").first.inner_text(timeout=500) or ""
+    except Exception:
+        visible_text = ""
+    try:
+        body = page.content() or ""
+    except Exception:
+        body = ""
+    risk_text = visible_text or body
+    lowered = body.lower()
+    lowered_risk_text = risk_text.lower()
+    # Risk pages often live under login/passport URLs. Prefer strong in-page risk signals
+    # so operators see the actionable cause instead of a generic auth-expired result.
+    if any(marker in risk_text or marker in lowered_risk_text for marker in _STRONG_RISK_MARKERS):
+        return "RISK_VERIFICATION"
+    if ("验证码" in risk_text and any(marker in risk_text for marker in ("请输入", "获取", "发送", "手机"))) or any(
+        marker in lowered_risk_text for marker in ("captcha", "risk")
+    ):
+        return "RISK_VERIFICATION"
     try:
         url = (page.url or "").lower()
     except Exception:
         url = ""
     if any(marker in url for marker in ("login.taobao.com", "passport")):
         return "AUTH_EXPIRED"
-    try:
-        body = page.content() or ""
-    except Exception:
-        body = ""
-    lowered = body.lower()
     if any(marker in body or marker in lowered for marker in _AUTH_REDIRECT_MARKERS):
         return "AUTH_EXPIRED"
-    if any(marker in body or marker in lowered for marker in _RISK_MARKERS):
-        return "RISK_VERIFICATION"
     return None
+
+
+def _page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""
 
 
 def _profile_is_authenticated(page: Any, playbook: dict[str, Any]) -> bool:
@@ -156,6 +225,7 @@ def _execute_action(
     capture_files: list[dict[str, Any]],
     download_dir: Path,
     allow_auth_redirect: bool = False,
+    run_config: PlaywrightRunConfig | None = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -163,8 +233,10 @@ def _execute_action(
     failure so the outer loop maps it to the right TASK_RESULT shape.
     """
     name = str(action.get("action") or "").strip()
+    step_id = str(action.get("id") or "").strip()
     selector = str(action.get("selector") or "").strip()
     timeout_ms = int(action.get("timeout_ms") or 30000)
+    logger.info("browser step starting: step_id=%s action=%s", step_id or "<unnamed>", name)
 
     if name == "navigate":
         page.goto(str(action.get("url") or ""), wait_until="load", timeout=timeout_ms)
@@ -175,7 +247,7 @@ def _execute_action(
             raise BrowserActionError(detected, f"navigate detected {detected}")
         return {}
     if name == "click":
-        page.click(selector, timeout=timeout_ms)
+        _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
         return {}
     if name == "fill":
         page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
@@ -187,7 +259,14 @@ def _execute_action(
         page.wait_for_selector(selector, timeout=timeout_ms)
         return {}
     if name in {"login", "login_if_needed"}:
-        _execute_login_action(page, action, params=params, extracted=extracted, timeout_ms=timeout_ms)
+        _execute_login_action(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+        )
         return {}
     if name == "extract_text":
         text = page.locator(selector).first.inner_text(timeout=timeout_ms)
@@ -201,7 +280,7 @@ def _execute_action(
         return {}
     if name == "download":
         with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-            page.click(selector, timeout=timeout_ms)
+            _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
         download = info.value
         target = download_dir / (download.suggested_filename or "download.bin")
         download.save_as(str(target))
@@ -270,6 +349,7 @@ def _execute_login_action(
     params: dict[str, Any],
     extracted: dict[str, Any],
     timeout_ms: int,
+    run_config: PlaywrightRunConfig | None = None,
 ) -> None:
     username_selector = str(action.get("username_selector") or "").strip()
     password_selector = str(action.get("password_selector") or "").strip()
@@ -287,20 +367,301 @@ def _execute_login_action(
             "login action missing resolved username or password",
         )
 
-    page.fill(
-        username_selector,
-        username,
-        timeout=timeout_ms,
+    login_context = _find_login_context(
+        page,
+        username_selector=username_selector,
+        password_selector=password_selector,
+        submit_selector=submit_selector,
+        username=username,
+        password=password,
+        timeout_ms=timeout_ms,
+        run_config=run_config,
     )
-    page.fill(
-        password_selector,
-        password,
-        timeout=timeout_ms,
-    )
-    page.click(submit_selector, timeout=timeout_ms)
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     if post_login_wait_selector:
-        page.wait_for_selector(post_login_wait_selector, timeout=timeout_ms)
+        _wait_for_post_login_selector(
+            page,
+            login_context=login_context,
+            selector=post_login_wait_selector,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+        )
+
+
+def _find_login_context(
+    page: Any,
+    *,
+    username_selector: str,
+    password_selector: str,
+    submit_selector: str,
+    username: str,
+    password: str,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None = None,
+) -> Any:
+    attempt_timeout_ms = min(timeout_ms, _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS)
+    last_error: Exception | None = None
+    password_mode_clicked = False
+    risk_deadline: float | None = None
+    deadline = time.monotonic() + (max(timeout_ms, attempt_timeout_ms) / 1000)
+    while time.monotonic() <= deadline:
+        candidates = _login_candidates(page)
+        for candidate in candidates:
+            try:
+                controls_ready = _ensure_login_controls_ready(
+                    candidate,
+                    username_selector=username_selector,
+                    password_selector=password_selector,
+                    submit_selector=submit_selector,
+                    timeout_ms=attempt_timeout_ms,
+                )
+                interaction_timeout_ms = timeout_ms if controls_ready else attempt_timeout_ms
+                _type_like_human(
+                    candidate,
+                    username_selector,
+                    username,
+                    timeout_ms=interaction_timeout_ms,
+                    run_config=run_config,
+                )
+                _type_like_human(
+                    candidate,
+                    password_selector,
+                    password,
+                    timeout_ms=interaction_timeout_ms,
+                    run_config=run_config,
+                )
+                _click_like_human(
+                    candidate,
+                    submit_selector,
+                    timeout_ms=interaction_timeout_ms,
+                    run_config=run_config,
+                )
+                return candidate
+            except Exception as exc:
+                last_error = exc
+        detected_states = [_detect_auth_or_risk(candidate) for candidate in candidates]
+        if "RISK_VERIFICATION" in detected_states:
+            manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
+            if manual_timeout_ms <= 0:
+                raise BrowserActionError("RISK_VERIFICATION", "login page requires risk verification")
+            now = time.monotonic()
+            if risk_deadline is None:
+                risk_deadline = now + manual_timeout_ms / 1000
+                deadline = max(deadline, risk_deadline)
+                logger.warning(
+                    "browser login risk verification waiting for manual completion: timeout_ms=%s",
+                    manual_timeout_ms,
+                )
+            if now <= risk_deadline:
+                risk_cleared = _wait_for_risk_to_clear(
+                    candidates,
+                    timeout_ms=int(max(1, (risk_deadline - now) * 1000)),
+                    poll_interval_ms=1000,
+                )
+                if risk_cleared:
+                    continue
+            raise BrowserActionError(
+                "RISK_VERIFICATION",
+                "login page risk verification was not completed",
+            )
+        if not password_mode_clicked:
+            password_mode_clicked = _try_click_password_login_mode(
+                candidates,
+                timeout_ms=attempt_timeout_ms,
+            )
+        _wait_for_timeout(page, min(1000, attempt_timeout_ms))
+    raise BrowserActionError(
+        "PAGE_CHANGED",
+        f"login fields not found in page or child frames: {last_error}",
+    )
+
+
+def _login_candidates(page: Any) -> list[Any]:
+    return [page, *list(getattr(page, "frames", []) or [])]
+
+
+def _try_click_password_login_mode(candidates: list[Any], *, timeout_ms: int) -> bool:
+    for candidate in candidates:
+        for selector in _DEFAULT_PASSWORD_LOGIN_SELECTORS:
+            try:
+                candidate.click(selector, timeout=timeout_ms)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _ensure_login_controls_ready(
+    context: Any,
+    *,
+    username_selector: str,
+    password_selector: str,
+    submit_selector: str,
+    timeout_ms: int,
+) -> bool:
+    locator_factory = getattr(context, "locator", None)
+    if not callable(locator_factory):
+        return False
+    for selector in (username_selector, password_selector, submit_selector):
+        try:
+            locator = locator_factory(selector).first
+        except Exception:
+            return False
+        wait_for = getattr(locator, "wait_for", None)
+        if callable(wait_for):
+            wait_for(timeout=timeout_ms)
+    return True
+
+
+def _wait_for_risk_to_clear(
+    contexts: list[Any],
+    *,
+    timeout_ms: int,
+    poll_interval_ms: int = 1000,
+) -> bool:
+    deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
+    last_context = contexts[0] if contexts else None
+    while time.monotonic() <= deadline:
+        if not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts):
+            return True
+        remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
+        wait_ms = min(max(1, poll_interval_ms), remaining_ms)
+        _wait_for_timeout(last_context, wait_ms)
+    return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
+
+
+def _random_delay_ms(min_ms: int, max_ms: int) -> int:
+    lower = max(0, int(min_ms or 0))
+    upper = max(0, int(max_ms or 0))
+    if upper < lower:
+        upper = lower
+    if upper <= 0:
+        return 0
+    return random.randint(lower, upper)
+
+
+def _wait_for_timeout(context: Any, delay_ms: int) -> None:
+    if delay_ms <= 0:
+        return
+    wait_for_timeout = getattr(context, "wait_for_timeout", None)
+    if callable(wait_for_timeout):
+        wait_for_timeout(delay_ms)
+        return
+    time.sleep(delay_ms / 1000)
+
+
+def _pause_before_step(
+    page: Any,
+    *,
+    run_config: PlaywrightRunConfig,
+    step_id: str,
+    action_name: str,
+) -> None:
+    delay_ms = _random_delay_ms(run_config.step_delay_min_ms, run_config.step_delay_max_ms)
+    if delay_ms <= 0:
+        return
+    logger.info(
+        "browser human pacing before step: step_id=%s action=%s delay_ms=%s",
+        step_id or "<unnamed>",
+        action_name or "<unknown>",
+        delay_ms,
+    )
+    _wait_for_timeout(page, delay_ms)
+
+
+def _pause_before_click(context: Any, *, run_config: PlaywrightRunConfig | None) -> None:
+    if not run_config:
+        return
+    delay_ms = _random_delay_ms(run_config.click_delay_min_ms, run_config.click_delay_max_ms)
+    _wait_for_timeout(context, delay_ms)
+
+
+def _click_like_human(
+    context: Any,
+    selector: str,
+    *,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None,
+) -> None:
+    _pause_before_click(context, run_config=run_config)
+    context.click(selector, timeout=timeout_ms)
+
+
+def _type_like_human(
+    context: Any,
+    selector: str,
+    value: str,
+    *,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None,
+) -> None:
+    type_delay_ms = int(run_config.type_delay_ms if run_config else 0)
+    locator_factory = getattr(context, "locator", None)
+    if not callable(locator_factory) or type_delay_ms <= 0:
+        context.fill(selector, value, timeout=timeout_ms)
+        return
+    locator = locator_factory(selector).first
+    locator.click(timeout=timeout_ms)
+    try:
+        if locator.input_value(timeout=timeout_ms) == value:
+            return
+    except Exception:
+        pass
+    locator.fill("", timeout=timeout_ms)
+    locator.type(value, delay=type_delay_ms, timeout=timeout_ms)
+
+
+def _wait_for_post_login_selector(
+    page: Any,
+    *,
+    login_context: Any,
+    selector: str,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None = None,
+) -> None:
+    contexts = [login_context]
+    if page is not login_context:
+        contexts.append(page)
+    last_error: Exception | None = None
+    last_detected: str | None = None
+    risk_detected = False
+    deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
+    while time.monotonic() <= deadline:
+        for context in contexts:
+            detected = _detect_auth_or_risk(context)
+            if detected:
+                last_detected = detected
+                logger.warning(
+                    "browser post-login state detected: state=%s url=%s",
+                    detected,
+                    _page_url(context),
+                )
+                if detected == "RISK_VERIFICATION" and not risk_detected:
+                    risk_detected = True
+                    manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
+                    if manual_timeout_ms > 0:
+                        deadline = max(deadline, time.monotonic() + manual_timeout_ms / 1000)
+                        logger.warning(
+                            "browser risk verification waiting for manual completion: timeout_ms=%s",
+                            manual_timeout_ms,
+                        )
+                        _wait_for_risk_to_clear(
+                            contexts,
+                            timeout_ms=manual_timeout_ms,
+                            poll_interval_ms=1000,
+                        )
+        for context in contexts:
+            remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
+            try:
+                context.wait_for_selector(selector, timeout=min(remaining_ms, 2000))
+                return
+            except Exception as exc:
+                last_error = exc
+    if risk_detected:
+        raise BrowserActionError("RISK_VERIFICATION", f"post-login risk verification not completed: {last_error}")
+    if last_detected:
+        raise BrowserActionError(last_detected, f"post-login detected {last_detected}: {last_error}")
+    raise BrowserActionError("PAGE_CHANGED", f"post-login selector not found after login: {last_error}")
 
 
 def _date_tokens(value: str) -> set[str]:
@@ -437,6 +798,17 @@ def run_playbook_with_playwright(
     capture_files: list[dict[str, Any]] = []
     extracted: dict[str, Any] = {}
     steps = [dict(step) for step in playbook.get("steps") or []]
+    logger.info(
+        "playwright browser run starting: job_id=%s shop_id=%s playbook_id=%s "
+        "user_data_dir=%s download_dir=%s headless=%s browser_channel=%s",
+        job_id,
+        shop_id,
+        message.get("playbook_id") or playbook.get("playbook_id") or "",
+        user_data_dir,
+        str(download_dir),
+        config.headless,
+        config.browser_channel,
+    )
 
     try:
         with sync_playwright() as playwright:
@@ -452,10 +824,28 @@ def run_playbook_with_playwright(
             try:
                 for index, step_dict in enumerate(steps):
                     step_action = str(step_dict.get("action") or "").strip()
+                    step_id = str(step_dict.get("id") or "").strip()
                     if step_action in {"login", "login_if_needed"}:
                         authenticated = _profile_is_authenticated(page, playbook)
                         if should_skip_login_action(step_dict, authenticated=authenticated):
+                            logger.info(
+                                "browser login skipped because profile is authenticated: "
+                                "job_id=%s step_id=%s",
+                                job_id,
+                                step_dict.get("id") or "",
+                            )
                             continue
+                        logger.info(
+                            "browser login required for profile: job_id=%s step_id=%s",
+                            job_id,
+                            step_id,
+                        )
+                    _pause_before_step(
+                        page,
+                        run_config=config,
+                        step_id=step_id,
+                        action_name=step_action,
+                    )
                     allow_auth_redirect = step_action == "navigate" and any(
                         str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
                         for next_step in steps[index + 1 :]
@@ -468,12 +858,19 @@ def run_playbook_with_playwright(
                         capture_files=capture_files,
                         download_dir=download_dir,
                         allow_auth_redirect=allow_auth_redirect,
+                        run_config=config,
                     )
                     if result.get("rows"):
                         rows.extend(result["rows"])
             finally:
                 context.close()
     except BrowserActionError as exc:
+        logger.warning(
+            "playwright browser run failed: job_id=%s fail_reason=%s error=%s",
+            job_id,
+            exc.fail_reason,
+            str(exc),
+        )
         return {
             "job_id": job_id,
             "status": "failed",
@@ -481,6 +878,11 @@ def run_playbook_with_playwright(
             "error_info": {"message": str(exc)},
         }
     except PlaywrightTimeoutError as exc:
+        logger.warning(
+            "playwright browser run timeout: job_id=%s fail_reason=PAGE_CHANGED error=%s",
+            job_id,
+            str(exc),
+        )
         return {
             "job_id": job_id,
             "status": "failed",
@@ -512,6 +914,12 @@ def run_playbook_with_playwright(
         expected_amount_total=summary_amount_total if summary_step_id else params.get("expected_amount_total"),
     )
     if not quality.get("success"):
+        logger.warning(
+            "playwright browser quality gate failed: job_id=%s fail_reason=%s error=%s",
+            job_id,
+            quality.get("fail_reason") or "DATA_MISMATCH",
+            quality.get("error") or "quality gate failed",
+        )
         return {
             "job_id": job_id,
             "status": "failed",

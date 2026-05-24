@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import finance_browser_agent.playwright_runner as playwright_runner
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.playwright_runner import (
     BrowserActionError,
@@ -48,20 +49,28 @@ def test_should_skip_login_action_only_skips_login_steps_when_authenticated() ->
 
 
 class FakePage:
-    def __init__(self, *, url: str = "about:blank", selectors: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        url: str = "about:blank",
+        selectors: set[str] | None = None,
+        content_text: str = "",
+    ) -> None:
         self.url = url
         self.selectors = selectors or set()
+        self.content_text = content_text
         self.gotos: list[tuple[str, str, int]] = []
         self.fills: list[tuple[str, str, int]] = []
         self.clicks: list[tuple[str, int]] = []
         self.waits: list[tuple[str, int]] = []
+        self.timeouts: list[int] = []
 
     def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
         self.gotos.append((url, wait_until, timeout))
         self.url = url
 
     def content(self) -> str:
-        return ""
+        return self.content_text
 
     def wait_for_selector(self, selector: str, *, timeout: int) -> None:
         self.waits.append((selector, timeout))
@@ -73,6 +82,306 @@ class FakePage:
 
     def click(self, selector: str, *, timeout: int) -> None:
         self.clicks.append((selector, timeout))
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.timeouts.append(timeout)
+
+
+class FailingFillPage(FakePage):
+    def fill(self, selector: str, value: str, *, timeout: int) -> None:
+        raise TimeoutError(selector)
+
+    def click(self, selector: str, *, timeout: int) -> None:
+        raise TimeoutError(selector)
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        raise TimeoutError(selector)
+
+
+class RecordingFailingFillPage(FailingFillPage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example")
+        self.fill_timeouts: list[int] = []
+
+    def fill(self, selector: str, value: str, *, timeout: int) -> None:
+        self.fill_timeouts.append(timeout)
+        raise TimeoutError(selector)
+
+
+class FakePageWithFrames(FailingFillPage):
+    def __init__(self, *, frames: list[FakePage]) -> None:
+        super().__init__(url="https://login.example")
+        self.frames = frames
+
+
+class PasswordModePage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example", selectors={".dashboard"})
+        self.password_mode = False
+
+    def fill(self, selector: str, value: str, *, timeout: int) -> None:
+        if not self.password_mode:
+            raise TimeoutError(selector)
+        super().fill(selector, value, timeout=timeout)
+
+    def click(self, selector: str, *, timeout: int) -> None:
+        if selector == "text=密码登录":
+            self.password_mode = True
+        super().click(selector, timeout=timeout)
+
+
+class PasswordModeCreatesFramePage(FailingFillPage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example")
+        self.frames: list[FakePage] = []
+        self.password_mode_clicks = 0
+
+    def click(self, selector: str, *, timeout: int) -> None:
+        if selector == "text=密码登录":
+            self.password_mode_clicks += 1
+            self.frames = [FakePage(url="https://login.example/password-frame", selectors={".dashboard"})]
+            return
+        raise TimeoutError(selector)
+
+
+class DelayedFramePage(FailingFillPage):
+    def __init__(self, *, frame_after_calls: int) -> None:
+        super().__init__(url="https://login.example")
+        self.frame_after_calls = frame_after_calls
+        self.frame_calls = 0
+        self.login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
+        self.timeouts: list[int] = []
+
+    @property
+    def frames(self) -> list[FakePage]:
+        self.frame_calls += 1
+        if self.frame_calls >= self.frame_after_calls:
+            return [self.login_frame]
+        return []
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.timeouts.append(timeout)
+
+
+class LocatorBackedPage(FakePage):
+    def __init__(
+        self,
+        *,
+        visible_text: str,
+        content_text: str,
+        selectors: set[str] | None = None,
+    ) -> None:
+        super().__init__(url="https://login.example", selectors=selectors, content_text=content_text)
+        self.visible_text = visible_text
+
+    def locator(self, selector: str):
+        if selector != "body":
+            raise TimeoutError(selector)
+        page = self
+
+        class _BodyLocator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                return page.visible_text
+
+        return _BodyLocator()
+
+
+class RiskThenFramePage(FailingFillPage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example")
+        self.timeouts: list[int] = []
+        self.risk_checks = 0
+        self.login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
+
+    @property
+    def frames(self) -> list[FakePage]:
+        if self.risk_checks >= 2:
+            return [self.login_frame]
+        return []
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.timeouts.append(timeout)
+
+    def locator(self, selector: str):
+        if selector != "body":
+            raise TimeoutError(selector)
+        page = self
+
+        class _BodyLocator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                page.risk_checks += 1
+                if page.risk_checks == 1:
+                    return "向右滑动验证"
+                return "密码登录"
+
+        return _BodyLocator()
+
+
+class ReappearingRiskThenFramePage(FailingFillPage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example")
+        self.risk_checks = 0
+        self.login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
+
+    @property
+    def frames(self) -> list[FakePage]:
+        if self.risk_checks >= 4:
+            return [self.login_frame]
+        return []
+
+    def locator(self, selector: str):
+        if selector != "body":
+            raise TimeoutError(selector)
+        page = self
+
+        class _BodyLocator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                page.risk_checks += 1
+                if page.risk_checks in {1, 3}:
+                    return "向右滑动验证"
+                return "密码登录"
+
+        return _BodyLocator()
+
+
+class FakePageWithFramesAndPostLogin(FailingFillPage):
+    def __init__(self, *, frames: list[FakePage], selectors: set[str]) -> None:
+        super().__init__(url="https://login.example")
+        self.frames = frames
+        self.selectors = selectors
+        self.waits: list[tuple[str, int]] = []
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        self.waits.append((selector, timeout))
+        if selector not in self.selectors:
+            raise TimeoutError(selector)
+
+
+class RetryLoginWithExistingUsernamePage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example", selectors={".dashboard"})
+        self.values: dict[str, str] = {}
+        self.username_type_count = 0
+        self.password_attempts = 0
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Locator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                return ""
+
+            def input_value(self, *, timeout: int) -> str:
+                return page.values.get(selector, "")
+
+            def click(self, *, timeout: int) -> None:
+                return None
+
+            def fill(self, value: str, *, timeout: int) -> None:
+                page.values[selector] = value
+
+            def type(self, value: str, *, delay: int, timeout: int) -> None:
+                if selector == "#username":
+                    page.username_type_count += 1
+                if selector == "#password":
+                    page.password_attempts += 1
+                    if page.password_attempts == 1:
+                        raise TimeoutError(selector)
+                page.values[selector] = page.values.get(selector, "") + value
+
+        return _Locator()
+
+
+class MissingPasswordControlPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example")
+        self.values: dict[str, str] = {}
+        self.waited_selectors: list[str] = []
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Locator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                return ""
+
+            def wait_for(self, *, timeout: int) -> None:
+                page.waited_selectors.append(selector)
+                if selector == "#password":
+                    raise TimeoutError(selector)
+
+            def click(self, *, timeout: int) -> None:
+                return None
+
+            def fill(self, value: str, *, timeout: int) -> None:
+                page.values[selector] = value
+
+            def type(self, value: str, *, delay: int, timeout: int) -> None:
+                page.values[selector] = page.values.get(selector, "") + value
+
+        return _Locator()
+
+
+class SlowTypeLongUsernamePage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example", selectors={".dashboard"})
+        self.values: dict[str, str] = {}
+        self.username_type_timeouts: list[int] = []
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Locator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                return ""
+
+            def wait_for(self, *, timeout: int) -> None:
+                return None
+
+            def input_value(self, *, timeout: int) -> str:
+                return page.values.get(selector, "")
+
+            def click(self, *, timeout: int) -> None:
+                return None
+
+            def fill(self, value: str, *, timeout: int) -> None:
+                page.values[selector] = value
+
+            def type(self, value: str, *, delay: int, timeout: int) -> None:
+                if selector == "#username":
+                    page.username_type_timeouts.append(timeout)
+                required_timeout = len(value) * delay
+                if timeout < required_timeout:
+                    partial_len = max(1, timeout // max(1, delay))
+                    page.values[selector] = page.values.get(selector, "") + value[:partial_len]
+                    raise TimeoutError(selector)
+                page.values[selector] = page.values.get(selector, "") + value
+
+        return _Locator()
 
 
 def test_login_if_needed_without_logged_in_selector_is_not_skipped_on_about_blank() -> None:
@@ -120,11 +429,463 @@ def test_login_action_fills_credentials_clicks_submit_and_waits(tmp_path) -> Non
     )
 
     assert page.fills == [
-        ("#username", "alice", 4321),
-        ("#password", "secret", 4321),
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
     ]
-    assert page.clicks == [("button[type='submit']", 4321)]
-    assert page.waits == [(".dashboard", 4321)]
+    assert page.clicks == [("button[type='submit']", 1000)]
+    assert page.waits == [(".dashboard", 2000)]
+
+
+def test_login_action_falls_back_to_child_frame_when_main_page_has_no_fields(tmp_path) -> None:
+    login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
+    page = FakePageWithFrames(frames=[login_frame])
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert login_frame.fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
+    assert login_frame.clicks == [("button[type='submit']", 1000)]
+    assert login_frame.waits == [(".dashboard", 2000)]
+
+
+def test_login_action_uses_bounded_selector_timeout_before_child_frame(tmp_path) -> None:
+    login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
+    main_page = RecordingFailingFillPage()
+    main_page.frames = [login_frame]
+
+    _execute_action(
+        main_page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 120000,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert main_page.fill_timeouts
+    assert max(main_page.fill_timeouts) <= 1000
+    assert login_frame.fills[0] == ("#username", "alice", 1000)
+
+
+def test_login_action_clicks_common_password_login_mode_before_fill(tmp_path) -> None:
+    page = PasswordModePage()
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert ("text=密码登录", 1000) in page.clicks
+    assert ("#username", "alice", 1000) in page.fills
+    assert ("#password", "secret", 1000) in page.fills
+    assert page.clicks[-1] == ("button[type='submit']", 1000)
+
+
+def test_login_action_refreshes_frames_after_password_login_mode_click(tmp_path) -> None:
+    page = PasswordModeCreatesFramePage()
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.password_mode_clicks == 1
+    assert page.frames[0].fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
+    assert page.frames[0].clicks == [("button[type='submit']", 1000)]
+
+
+def test_login_action_waits_for_delayed_login_iframe_before_failing(tmp_path) -> None:
+    page = DelayedFramePage(frame_after_calls=4)
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.frame_calls >= 4
+    assert page.login_frame.fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
+    assert page.timeouts
+
+
+def test_login_action_waits_on_main_page_when_frame_post_login_selector_is_missing(tmp_path) -> None:
+    login_frame = FakePage(url="https://login.example/iframe")
+    page = FakePageWithFramesAndPostLogin(frames=[login_frame], selectors={".dashboard"})
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert login_frame.clicks == [("button[type='submit']", 1000)]
+    assert login_frame.waits == [(".dashboard", 2000)]
+    assert page.waits == [(".dashboard", 2000)]
+
+
+def test_login_action_maps_post_login_risk_verification_to_risk_failure(tmp_path) -> None:
+    page = FakePage(url="https://login.example", content_text="请拖动滑块完成安全验证")
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "login_if_needed",
+                "username_selector": "#username",
+                "password_selector": "#password",
+                "submit_selector": "button[type='submit']",
+                "username_value_from": "params.login_username",
+                "password_value_from": "params.login_password",
+                "post_login_wait_selector": ".dashboard",
+                "timeout_ms": 4321,
+            },
+            params={"login_username": "alice", "login_password": "secret"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "RISK_VERIFICATION"
+
+
+def test_login_action_waits_for_manual_risk_in_login_form_before_retrying(tmp_path) -> None:
+    page = RiskThenFramePage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        risk_manual_timeout_ms=3210,
+    )
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        run_config=config,
+    )
+
+    assert page.risk_checks >= 2
+    assert 3210 not in page.timeouts
+    assert all(timeout < 3210 for timeout in page.timeouts)
+    assert page.login_frame.fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
+
+
+def test_login_action_keeps_waiting_when_form_risk_reappears_before_manual_clear(tmp_path) -> None:
+    page = ReappearingRiskThenFramePage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        risk_manual_timeout_ms=3000,
+    )
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        run_config=config,
+    )
+
+    assert page.risk_checks >= 4
+    assert page.login_frame.fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
+
+
+def test_login_action_does_not_retype_existing_username_during_retry(tmp_path) -> None:
+    page = RetryLoginWithExistingUsernamePage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        type_delay_ms=160,
+    )
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        run_config=config,
+    )
+
+    assert page.username_type_count == 1
+    assert page.values["#username"] == "alice"
+    assert page.password_attempts == 2
+
+
+def test_login_action_allows_long_username_to_finish_human_typing(tmp_path) -> None:
+    page = SlowTypeLongUsernamePage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        type_delay_ms=160,
+    )
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "单枪旗舰店:yang", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        run_config=config,
+    )
+
+    assert page.values["#username"] == "单枪旗舰店:yang"
+    assert page.username_type_timeouts == [4321]
+
+
+def test_login_action_does_not_mutate_username_before_all_controls_are_ready(tmp_path) -> None:
+    page = MissingPasswordControlPage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        type_delay_ms=160,
+    )
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "login_if_needed",
+                "username_selector": "#username",
+                "password_selector": "#password",
+                "submit_selector": "button[type='submit']",
+                "username_value_from": "params.login_username",
+                "password_value_from": "params.login_password",
+                "post_login_wait_selector": ".dashboard",
+                "timeout_ms": 1,
+            },
+            params={"login_username": "alice", "login_password": "secret"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+            run_config=config,
+        )
+
+    assert exc.value.fail_reason == "PAGE_CHANGED"
+    assert "#password" in page.waited_selectors
+    assert page.values == {}
+
+
+def test_login_action_maps_uncleared_form_risk_to_risk_failure(monkeypatch, tmp_path) -> None:
+    page = FailingFillPage(url="https://login.example", content_text="向右滑动验证")
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        risk_manual_timeout_ms=3000,
+    )
+    monotonic_values = iter([0.0, 0.0, 0.0, 10.0])
+    monkeypatch.setattr(
+        playwright_runner.time,
+        "monotonic",
+        lambda: next(monotonic_values, 10.0),
+    )
+    monkeypatch.setattr(
+        playwright_runner,
+        "_wait_for_risk_to_clear",
+        lambda contexts, *, timeout_ms, poll_interval_ms=1000: False,
+    )
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "login_if_needed",
+                "username_selector": "#username",
+                "password_selector": "#password",
+                "submit_selector": "button[type='submit']",
+                "username_value_from": "params.login_username",
+                "password_value_from": "params.login_password",
+                "post_login_wait_selector": ".dashboard",
+                "timeout_ms": 1,
+            },
+            params={"login_username": "alice", "login_password": "secret"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+            run_config=config,
+        )
+
+    assert exc.value.fail_reason == "RISK_VERIFICATION"
+
+
+def test_login_risk_detection_ignores_hidden_slider_text_when_visible_body_is_normal(tmp_path) -> None:
+    page = LocatorBackedPage(
+        visible_text="密码登录 短信登录 登录",
+        content_text="<div style='display:none'>请按住滑块，拖动到最右边</div>",
+        selectors={".dashboard"},
+    )
+
+    _execute_action(
+        page,
+        {
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "post_login_wait_selector": ".dashboard",
+            "timeout_ms": 4321,
+        },
+        params={"login_username": "alice", "login_password": "secret"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.fills == [
+        ("#username", "alice", 1000),
+        ("#password", "secret", 1000),
+    ]
 
 
 def test_login_action_rejects_missing_resolved_credentials(tmp_path) -> None:

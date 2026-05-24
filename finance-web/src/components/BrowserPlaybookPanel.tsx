@@ -14,7 +14,30 @@ interface BrowserPlaybookPanelProps {
 
 interface BrowserCollectionRegistrationResponse {
   success: boolean;
+  status?: string;
+  source_id?: string;
+  verification_sync_job_id?: string;
+  verification_biz_date?: string;
   message?: string;
+  detail?: string;
+  error?: string;
+}
+
+interface BrowserSyncJobResponse {
+  success?: boolean;
+  job?: Record<string, unknown> | null;
+  detail?: string;
+  error?: string;
+  message?: string;
+}
+
+interface BrowserPlaybookFinalizeResponse {
+  success?: boolean;
+  browser_fail_reason?: string;
+  error_message?: string;
+  message?: string;
+  detail?: string;
+  error?: string;
 }
 
 interface BrowserCollectionFormState {
@@ -28,7 +51,20 @@ interface BrowserCollectionRow {
   source: DataSourceListItem;
   title: string;
   status: string;
+  verificationLabel: string;
+  verificationError: string;
+  verificationUpdatedAt: string;
   updatedAt: string;
+}
+
+type VerificationStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed' | 'finalizing' | 'finalized';
+
+interface VerificationState {
+  syncJobId: string;
+  bizDate: string;
+  status: VerificationStatus;
+  message: string;
+  errorMessage: string;
 }
 
 const emptyForm: BrowserCollectionFormState = {
@@ -59,11 +95,63 @@ function statusLabel(status: string): string {
   return status || '未知';
 }
 
+function verificationLabel(source: DataSourceListItem): string {
+  const verification = source.browser_verification || {};
+  const jobStatus = text(verification.job_status).toLowerCase();
+  if (jobStatus === 'success' || jobStatus === 'completed') return '已激活';
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(jobStatus)) return '验证失败';
+  if (jobStatus === 'running') return '验证中';
+  if (jobStatus === 'pending') return '等待验证';
+  return '未记录';
+}
+
+function verificationError(source: DataSourceListItem): string {
+  const verification = source.browser_verification || {};
+  const reason = text(verification.browser_fail_reason);
+  const message = text(verification.error_message) || text(source.last_error_message);
+  if (reason && message && !message.startsWith(`${reason}:`)) return `${reason}: ${message}`;
+  return message || reason;
+}
+
+function verificationUpdatedAt(source: DataSourceListItem): string {
+  const verification = source.browser_verification || {};
+  return text(verification.completed_at) || text(verification.updated_at);
+}
+
 function formatDateTime(value: string): string {
   if (!value) return '未记录';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function verificationStatusLabel(status: VerificationStatus): string {
+  if (status === 'pending') return '验证任务已创建';
+  if (status === 'running') return '正在执行浏览器验证';
+  if (status === 'success') return '浏览器验证通过';
+  if (status === 'finalizing') return '正在激活浏览器采集';
+  if (status === 'finalized') return '浏览器采集已激活';
+  if (status === 'failed') return '浏览器验证失败';
+  return '';
+}
+
+function syncJobStatus(job: Record<string, unknown> | null | undefined): string {
+  return text(job?.job_status) || text(job?.status);
+}
+
+function syncJobError(job: Record<string, unknown> | null | undefined): string {
+  const reason = text(job?.browser_fail_reason);
+  const message = text(job?.error_message) || text(job?.message);
+  if (reason && message && !message.startsWith(`${reason}:`)) return `${reason}: ${message}`;
+  return message || reason;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function verificationIsBusy(status: VerificationStatus): boolean {
+  return ['pending', 'running', 'success', 'finalizing'].includes(status);
 }
 
 export function BrowserPlaybookPanel({
@@ -88,6 +176,9 @@ export function BrowserPlaybookPanel({
           source,
           title: registrationTitle(source),
           status: source.status || source.health_status || 'unknown',
+          verificationLabel: verificationLabel(source),
+          verificationError: verificationError(source),
+          verificationUpdatedAt: verificationUpdatedAt(source),
           updatedAt: source.updated_at || source.last_checked_at || '',
         })),
     [sources],
@@ -99,14 +190,111 @@ export function BrowserPlaybookPanel({
   const [submitWarning, setSubmitWarning] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [selectedRow, setSelectedRow] = useState<BrowserCollectionRow | null>(null);
+  const [verification, setVerification] = useState<VerificationState>({
+    syncJobId: '',
+    bizDate: '',
+    status: 'idle',
+    message: '',
+    errorMessage: '',
+  });
 
   useEffect(() => {
     if (openCreateSignal <= 0) return;
     setForm(emptyForm);
     setSubmitError('');
     setSubmitWarning('');
+    setVerification({ syncJobId: '', bizDate: '', status: 'idle', message: '', errorMessage: '' });
     setIsCreateOpen(true);
   }, [openCreateSignal]);
+
+  const finalizeRegistration = useCallback(
+    async (syncJobId: string) => {
+      setVerification((prev) => ({
+        ...prev,
+        status: 'finalizing',
+        message: verificationStatusLabel('finalizing'),
+        errorMessage: '',
+      }));
+      const response = await fetch('/api/data-sources/browser-playbook/finalize', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ verification_sync_job_id: syncJobId }),
+      });
+      const body = (await response.json().catch(() => ({}))) as BrowserPlaybookFinalizeResponse;
+      if (!response.ok || !body.success) {
+        const message = String(
+          body.detail || body.error_message || body.error || body.message || '浏览器采集激活失败',
+        );
+        setVerification((prev) => ({
+          ...prev,
+          status: 'failed',
+          message: verificationStatusLabel('failed'),
+          errorMessage: message,
+        }));
+        return;
+      }
+      setVerification((prev) => ({
+        ...prev,
+        status: 'finalized',
+        message: String(body.message || verificationStatusLabel('finalized')),
+        errorMessage: '',
+      }));
+      await onRegistered?.();
+    },
+    [authHeaders, onRegistered],
+  );
+
+  const pollVerificationJob = useCallback(
+    async (syncJobId: string) => {
+      await delay(50);
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const response = await fetch(`/api/sync-jobs/${encodeURIComponent(syncJobId)}`, {
+          headers: authHeaders,
+        });
+        const body = (await response.json().catch(() => ({}))) as BrowserSyncJobResponse;
+        if (!response.ok || !body.success) {
+          throw new Error(String(body.detail || body.error || body.message || '获取验证任务状态失败'));
+        }
+
+        const job = isRecord(body.job) ? body.job : null;
+        const status = syncJobStatus(job).toLowerCase();
+        if (status === 'success' || status === 'completed') {
+          setVerification((prev) => ({
+            ...prev,
+            status: 'success',
+            message: verificationStatusLabel('success'),
+            errorMessage: '',
+          }));
+          await finalizeRegistration(syncJobId);
+          return;
+        }
+        if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) {
+          setVerification((prev) => ({
+            ...prev,
+            status: 'failed',
+            message: verificationStatusLabel('failed'),
+            errorMessage: syncJobError(job) || '浏览器验证失败',
+          }));
+          return;
+        }
+
+        setVerification((prev) => ({
+          ...prev,
+          status: status === 'running' ? 'running' : 'pending',
+          message: status === 'running' ? verificationStatusLabel('running') : verificationStatusLabel('pending'),
+          errorMessage: '',
+        }));
+        await delay(2000);
+      }
+      setVerification((prev) => ({
+        ...prev,
+        status: 'failed',
+        message: verificationStatusLabel('failed'),
+        errorMessage: '验证任务超时，请稍后刷新查看任务状态。',
+      }));
+    },
+    [authHeaders, finalizeRegistration],
+  );
 
   const submitRegistration = useCallback(async () => {
     if (!authToken) {
@@ -140,6 +328,7 @@ export function BrowserPlaybookPanel({
 
     setSubmitting(true);
     setSubmitError('');
+    setVerification({ syncJobId: '', bizDate: '', status: 'idle', message: '', errorMessage: '' });
     setSubmitWarning(
       parsedPlaybook.repairCount > 0
         ? `已自动修复 ${parsedPlaybook.repairCount} 处 playbook JSON 字符串内换行/控制字符`
@@ -156,24 +345,42 @@ export function BrowserPlaybookPanel({
           playbook_body: playbookBody,
         }),
       });
-      const body = (await response.json().catch(() => ({}))) as BrowserCollectionRegistrationResponse & {
-        detail?: string;
-        error?: string;
-      };
+      const body = (await response.json().catch(() => ({}))) as BrowserCollectionRegistrationResponse;
       if (!response.ok || !body.success) {
         setSubmitError(String(body.detail || body.error || body.message || '浏览器采集注册失败'));
         return;
       }
-      setForm(emptyForm);
-      setIsCreateOpen(false);
-      setSubmitWarning('');
-      await onRegistered?.();
+      const syncJobId = String(body.verification_sync_job_id || '');
+      if (!syncJobId) {
+        setForm(emptyForm);
+        setIsCreateOpen(false);
+        setSubmitWarning('');
+        await onRegistered?.();
+        return;
+      }
+      setVerification({
+        syncJobId,
+        bizDate: String(body.verification_biz_date || ''),
+        status: 'pending',
+        message: String(body.message || verificationStatusLabel('pending')),
+        errorMessage: '',
+      });
+      void pollVerificationJob(syncJobId).catch((error) => {
+        setVerification((prev) => ({
+          ...prev,
+          status: 'failed',
+          message: verificationStatusLabel('failed'),
+          errorMessage: error instanceof Error ? error.message : '浏览器验证失败',
+        }));
+      });
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : '浏览器采集注册失败');
     } finally {
       setSubmitting(false);
     }
-  }, [authHeaders, authToken, form, onRegistered]);
+  }, [authHeaders, authToken, form, onRegistered, pollVerificationJob]);
+
+  const verificationBusy = verificationIsBusy(verification.status);
 
   return (
     <>
@@ -198,13 +405,15 @@ export function BrowserPlaybookPanel({
           <div className="overflow-hidden rounded-xl border border-border">
             <table className="min-w-[720px] w-full table-fixed text-sm">
               <colgroup>
-                <col className="w-[54%]" />
+                <col className="w-[44%]" />
                 <col className="w-[20%]" />
-                <col className="w-[26%]" />
+                <col className="w-[16%]" />
+                <col className="w-[20%]" />
               </colgroup>
               <thead className="bg-surface-secondary text-left text-text-secondary">
                 <tr>
                   <th className="px-4 py-3 font-medium">标题</th>
+                  <th className="px-4 py-3 font-medium">验证状态</th>
                   <th className="px-4 py-3 font-medium">状态</th>
                   <th className="px-4 py-3 font-medium">最近更新</th>
                 </tr>
@@ -223,10 +432,19 @@ export function BrowserPlaybookPanel({
                       </button>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="inline-flex rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary">
-                        {statusLabel(row.status)}
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs ${
+                          row.verificationLabel === '验证失败'
+                            ? 'bg-red-50 text-red-700'
+                            : row.verificationLabel === '已激活'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-surface-secondary text-text-secondary'
+                        }`}
+                      >
+                        {row.verificationLabel}
                       </span>
                     </td>
+                    <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
                     <td className="px-4 py-3 text-text-secondary">{formatDateTime(row.updatedAt)}</td>
                   </tr>
                 ))}
@@ -269,25 +487,30 @@ export function BrowserPlaybookPanel({
                 {submitWarning}
               </div>
             )}
+            {verification.status !== 'idle' && (
+              <VerificationStatusPanel verification={verification} />
+            )}
 
             <div className="flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setIsCreateOpen(false)}
-                disabled={submitting}
+                disabled={(submitting || verificationBusy) && verification.status !== 'finalized'}
                 className="inline-flex items-center rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
               >
-                取消
+                {verification.status === 'finalized' ? '关闭' : '取消'}
               </button>
-              <button
-                type="button"
-                onClick={() => void submitRegistration()}
-                disabled={submitting}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60"
-              >
-                {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                注册
-              </button>
+              {verification.status !== 'finalized' && (
+                <button
+                  type="button"
+                  onClick={() => void submitRegistration()}
+                  disabled={submitting || verificationBusy}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+                >
+                  {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                  注册
+                </button>
+              )}
             </div>
           </div>
         </Dialog>
@@ -298,6 +521,16 @@ export function BrowserPlaybookPanel({
           <div className="space-y-4">
             <DetailItem label="标题" value={selectedRow.title} />
             <DetailItem label="状态" value={statusLabel(selectedRow.status)} />
+            <DetailItem label="验证状态" value={selectedRow.verificationLabel} />
+            {selectedRow.source.browser_verification?.sync_job_id && (
+              <DetailItem label="验证任务" value={selectedRow.source.browser_verification.sync_job_id} />
+            )}
+            {selectedRow.verificationUpdatedAt && (
+              <DetailItem label="最近验证" value={formatDateTime(selectedRow.verificationUpdatedAt)} />
+            )}
+            {selectedRow.verificationError && (
+              <DetailItem label="失败原因" value={selectedRow.verificationError} />
+            )}
             <DetailItem label="最近更新" value={formatDateTime(selectedRow.updatedAt)} />
             {selectedRow.source.description && (
               <DetailItem label="说明" value={selectedRow.source.description} />
@@ -306,6 +539,45 @@ export function BrowserPlaybookPanel({
         </Dialog>
       )}
     </>
+  );
+}
+
+function VerificationStatusPanel({ verification }: { verification: VerificationState }) {
+  const isFailed = verification.status === 'failed';
+  const isDone = verification.status === 'finalized';
+  const isBusy = !isFailed && !isDone;
+  return (
+    <div
+      className={`rounded-xl border px-3 py-2 text-sm ${
+        isFailed
+          ? 'border-red-200 bg-red-50 text-red-700'
+          : isDone
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            : 'border-blue-200 bg-blue-50 text-blue-700'
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        {isBusy ? (
+          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
+        ) : isDone ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+        )}
+        <div className="min-w-0">
+          <p className="font-medium">{verification.message || verificationStatusLabel(verification.status)}</p>
+          {verification.syncJobId && (
+            <p className="mt-1 break-all text-xs opacity-80">验证任务：{verification.syncJobId}</p>
+          )}
+          {verification.bizDate && (
+            <p className="mt-1 text-xs opacity-80">验证日期：{verification.bizDate}</p>
+          )}
+          {verification.errorMessage && (
+            <p className="mt-1 break-words text-xs">{verification.errorMessage}</p>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
