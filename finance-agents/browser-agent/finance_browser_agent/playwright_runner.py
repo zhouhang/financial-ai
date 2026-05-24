@@ -21,6 +21,7 @@ Exact-match Layer 2 quality gate is delegated to ``finance_browser_agent.quality
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import random
@@ -35,6 +36,17 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
+
+_risk_waiting_cb: contextvars.ContextVar = contextvars.ContextVar("risk_waiting_cb", default=None)
+
+
+def _notify_risk_waiting() -> None:
+    cb = _risk_waiting_cb.get()
+    if cb:
+        try:
+            cb("RISK_VERIFICATION")
+        except Exception:
+            logger.exception("on_risk_waiting callback failed")
 
 
 _AUTH_REDIRECT_MARKERS = (
@@ -457,6 +469,7 @@ def _find_login_context(
                     "browser login risk verification waiting for manual completion: timeout_ms=%s",
                     manual_timeout_ms,
                 )
+                _notify_risk_waiting()
             if now <= risk_deadline:
                 risk_cleared = _wait_for_risk_to_clear(
                     candidates,
@@ -546,6 +559,7 @@ def _await_navigate_risk_clearance(page: Any, *, run_config: "PlaywrightRunConfi
         "browser navigate risk verification waiting for manual completion: timeout_ms=%s",
         manual_timeout_ms,
     )
+    _notify_risk_waiting()
     cleared = _wait_for_risk_to_clear(
         _login_candidates(page),
         timeout_ms=manual_timeout_ms,
@@ -669,6 +683,7 @@ def _wait_for_post_login_selector(
                             "browser risk verification waiting for manual completion: timeout_ms=%s",
                             manual_timeout_ms,
                         )
+                        _notify_risk_waiting()
                         _wait_for_risk_to_clear(
                             contexts,
                             timeout_ms=manual_timeout_ms,
@@ -800,6 +815,18 @@ def run_playbook_with_playwright(
     Returns the same TASK_RESULT shape as ``runner.run_message``: success → records + capture
     files + quality_summary; failure → fail_reason + error_info.
     """
+    _risk_token = _risk_waiting_cb.set(message.get("on_risk_waiting"))
+    try:
+        return _run_playbook_with_playwright_inner(message, config=config)
+    finally:
+        _risk_waiting_cb.reset(_risk_token)
+
+
+def _run_playbook_with_playwright_inner(
+    message: dict[str, Any],
+    *,
+    config: PlaywrightRunConfig | None = None,
+) -> dict[str, Any]:
     config = config or PlaywrightRunConfig.from_env()
     playbook = dict(message.get("playbook_body") or {})
     params = dict(message.get("params") or {})

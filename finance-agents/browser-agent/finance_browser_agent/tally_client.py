@@ -137,3 +137,6 @@ class BrowserAgentTallyClient:
 
     async def fail_expired_waiting(self) -> dict[str, Any]:
         return await self._client.request("queue_fail_expired", {})
+
+    async def report_risk_waiting(self, **kwargs):
+        return await self._client.report_risk_waiting(**kwargs)

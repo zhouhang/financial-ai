@@ -121,3 +121,10 @@ class DataAgentWsClient:
             return {"success": False, "error": str(result.get("error") or "data-agent 返回失败")}
         data = result.get("data")
         return data if isinstance(data, dict) else {"success": True, "data": data}
+
+    async def report_risk_waiting(self, *, sync_job_id: str, reason: str, company_id: str = "",
+                                  shop_id: str = "", data_source_id: str = "") -> dict:
+        return await self.request("risk_waiting", {
+            "sync_job_id": sync_job_id, "reason": reason, "company_id": company_id,
+            "shop_id": shop_id, "data_source_id": data_source_id,
+        })

@@ -82,9 +82,26 @@ class BrowserDispatcherLoop:
                     job.get("shop_id") or "",
                     profile_key,
                 )
-                result = await asyncio.to_thread(
-                    self.runner, self._message_from_job(job, payload)
-                )
+                loop = asyncio.get_running_loop()
+
+                def _on_risk_waiting(reason: str = "RISK_VERIFICATION") -> None:
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self.client.report_risk_waiting(
+                                sync_job_id=str(job.get("id") or ""),
+                                reason=str(reason or "RISK_VERIFICATION"),
+                                company_id=str(job.get("company_id") or ""),
+                                shop_id=str(job.get("shop_id") or ""),
+                                data_source_id=str(job.get("data_source_id") or ""),
+                            ),
+                            loop,
+                        )
+                    except Exception:
+                        logger.exception("report_risk_waiting schedule failed")
+
+                message = self._message_from_job(job, payload)
+                message["on_risk_waiting"] = _on_risk_waiting
+                result = await asyncio.to_thread(self.runner, message)
         if isinstance(result, dict) and result.get("status") == "success":
             await self.client.mark_browser_job_success(
                 {
