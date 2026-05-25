@@ -190,7 +190,7 @@ def test_public_token_cannot_mark_handoff_completed(monkeypatch):
     assert statuses == []
 
 
-def test_worker_token_can_mark_handoff_completed(monkeypatch):
+def test_worker_token_can_mark_handoff_completed_with_canonical_event(monkeypatch):
     import uuid as _uuid
     import auth.db as _db
     from tools.data_sources import (
@@ -211,12 +211,90 @@ def test_worker_token_can_mark_handoff_completed(monkeypatch):
     event = asyncio.run(_handle_browser_handoff_session_event({
         "worker_token": _system_token(),
         "handoff_session_id": created["handoff_session_id"],
-        "event_type": "handoff_completed",
+        "event_type": "completed",
         "status": "completed",
     }))
 
     assert event["success"] is True
     assert event["session"]["status"] == "completed"
+    row = _db.get_handoff_session(handoff_session_id=created["handoff_session_id"])
+    assert row["audit_events"][-1]["event_type"] == "completed"
+    assert row["audit_events"][-1]["handoff_session_id"] == created["handoff_session_id"]
+
+
+def test_worker_token_can_mark_handoff_failed_with_canonical_event(monkeypatch):
+    import uuid as _uuid
+    import auth.db as _db
+    from tools.data_sources import (
+        _handle_browser_handoff_session_create,
+        _handle_browser_handoff_session_event,
+    )
+
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: None)
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": str(_uuid.uuid4()),
+        "agent_id": "agent-A",
+        "profile_key": "店铺A",
+        "reason": "RISK_VERIFICATION",
+    }))
+
+    event = asyncio.run(_handle_browser_handoff_session_event({
+        "worker_token": _system_token(),
+        "handoff_session_id": created["handoff_session_id"],
+        "event_type": "failed",
+        "status": "failed",
+        "reason": "unit failure",
+    }))
+
+    assert event["success"] is True
+    assert event["session"]["status"] == "failed"
+    row = _db.get_handoff_session(handoff_session_id=created["handoff_session_id"])
+    assert row["audit_events"][-1]["event_type"] == "failed"
+    assert row["audit_events"][-1]["reason"] == "unit failure"
+
+
+def test_handoff_event_tool_accepts_stream_and_agent_offline_metadata(monkeypatch):
+    import uuid as _uuid
+    import auth.db as _db
+    from tools.data_sources import (
+        _handle_browser_handoff_session_create,
+        _handle_browser_handoff_session_event,
+    )
+
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: None)
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": str(_uuid.uuid4()),
+        "agent_id": "agent-A",
+        "profile_key": "店铺A",
+        "reason": "RISK_VERIFICATION",
+    }))
+
+    stream = asyncio.run(_handle_browser_handoff_session_event({
+        "worker_token": _system_token(),
+        "handoff_session_id": created["handoff_session_id"],
+        "event_type": "stream_started",
+        "status": "active",
+        "metadata": {"frame_width": 100, "data": "raw-base64"},
+    }))
+    offline = asyncio.run(_handle_browser_handoff_session_event({
+        "token": created["handoff_token"],
+        "controller_id": "ctrl-1",
+        "event_type": "agent_offline",
+        "status": "waiting_agent",
+        "agent_id": "agent-A",
+    }))
+
+    assert stream["success"] is True
+    assert offline["success"] is True
+    row = _db.get_handoff_session(handoff_session_id=created["handoff_session_id"])
+    assert row["audit_events"][-2]["event_type"] == "stream_started"
+    assert row["audit_events"][-2]["frame_width"] == 100
+    assert "raw-base64" not in str(row["audit_events"][-2])
+    assert row["audit_events"][-1]["event_type"] == "agent_offline"
 
 
 def test_open_final_handoff_session_returns_error(monkeypatch):

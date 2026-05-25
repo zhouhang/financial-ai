@@ -69,6 +69,7 @@ def test_handoff_status_transition_appends_metadata_only_audit():
     assert updated["status"] == "active"
     audit = updated["audit_events"]
     assert audit[-1]["event_type"] == "page_opened"
+    assert audit[-1]["handoff_session_id"] == str(row["id"])
     assert audit[-1]["controller_id"] == "ctrl-1"
     assert "base64" not in str(audit).lower()
     assert "验证码" not in str(audit)

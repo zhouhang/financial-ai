@@ -9172,18 +9172,34 @@ def _handoff_public_session(row: dict[str, Any], *, controller_id: str = "") -> 
 
 
 _HANDOFF_PUBLIC_EVENT_STATUS_BY_TYPE = {
+    "agent_offline": "waiting_agent",
     "controller_connected": "active",
     "controller_disconnected": "waiting_agent",
     "controller_waiting_agent": "waiting_agent",
     "resume_requested": "resuming",
+    "resuming": "resuming",
+    "stream_started": "active",
+    "stream_stopped": "active",
 }
 _HANDOFF_WORKER_EVENT_STATUS_BY_TYPE = {
     "agent_connected": "active",
+    "agent_offline": "waiting_agent",
     "agent_disconnected": "waiting_agent",
+    "completed": "completed",
+    "failed": "failed",
     "still_blocked": "active",
     "risk_cleared": "completed",
     "handoff_completed": "completed",
     "handoff_failed": "failed",
+    "stream_started": "active",
+    "stream_stopped": "active",
+}
+_HANDOFF_CANONICAL_EVENT_TYPES = {
+    "agent_disconnected": "agent_offline",
+    "controller_waiting_agent": "agent_offline",
+    "handoff_completed": "completed",
+    "handoff_failed": "failed",
+    "risk_cleared": "completed",
 }
 
 
@@ -9203,6 +9219,10 @@ def _handoff_status_for_event(
     if requested_status and requested_status != expected:
         return None
     return expected
+
+
+def _canonical_handoff_event_type(event_type: str) -> str:
+    return _HANDOFF_CANONICAL_EVENT_TYPES.get(event_type, event_type)
 
 
 async def _handle_browser_handoff_session_describe(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -9272,6 +9292,7 @@ async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> di
     event_type = str(arguments.get("event_type") or "").strip()
     if not event_type:
         return {"success": False, "error": "missing event_type"}
+    canonical_event_type = _canonical_handoff_event_type(event_type)
     status = _handoff_status_for_event(
         event_type=event_type,
         requested_status=str(arguments.get("status") or "").strip(),
@@ -9284,13 +9305,13 @@ async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> di
     updated = auth_db.transition_handoff_session_status(
         handoff_session_id=str(row["id"]),
         status=status,
-        event_type=event_type,
+        event_type=canonical_event_type,
         controller_id=controller_id,
         agent_id=agent_id,
         reason=str(arguments.get("reason") or ""),
         metadata=dict(arguments.get("metadata") or {}),
     )
-    if event_type == "resume_requested" or status == "resuming":
+    if canonical_event_type in {"resume_requested", "resuming"} or status == "resuming":
         auth_db.set_browser_sync_job_status(
             sync_job_id=str(row["sync_job_id"]),
             status="resuming",

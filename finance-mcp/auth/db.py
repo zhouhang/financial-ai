@@ -10501,6 +10501,7 @@ def _handoff_audit_safe_value(value: Any) -> Any:
 def _handoff_audit_event(
     *,
     event_type: str,
+    handoff_session_id: str = "",
     controller_id: str = "",
     agent_id: str = "",
     reason: str = "",
@@ -10510,6 +10511,8 @@ def _handoff_audit_event(
         "event_type": str(event_type or ""),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+    if handoff_session_id:
+        event["handoff_session_id"] = str(handoff_session_id)
     if controller_id:
         event["controller_id"] = str(controller_id)
     if agent_id:
@@ -10534,6 +10537,7 @@ def transition_handoff_session_status(
     completed = is_handoff_final_status(normalized_status)
     event = _handoff_audit_event(
         event_type=event_type,
+        handoff_session_id=handoff_session_id,
         controller_id=controller_id,
         agent_id=agent_id,
         reason=reason,
