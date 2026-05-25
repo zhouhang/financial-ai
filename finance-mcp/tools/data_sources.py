@@ -9145,7 +9145,10 @@ def _handoff_row_for_token(token: str, *, allow_expired: bool = False) -> tuple[
 
 
 def _public_handoff_session_view(row: dict[str, Any]) -> dict[str, Any]:
-    """落地页可见字段:不含凭证 / profile 路径 / CDP / playbook。"""
+    """落地页可见字段:不含凭证 / profile 路径 / CDP / playbook。
+
+    profile_key 是店铺/运行 profile 的展示标识,不是本机 profile 路径。
+    """
     return {
         "handoff_session_id": str(row.get("id") or ""),
         "status": str(row.get("status") or ""),

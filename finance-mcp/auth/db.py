@@ -994,16 +994,23 @@ def ensure_browser_handoff_schema() -> list[str]:
     global _BROWSER_HANDOFF_SCHEMA_READY
     if _BROWSER_HANDOFF_SCHEMA_READY:
         return []
-    if _browser_handoff_schema_ready():
-        _BROWSER_HANDOFF_SCHEMA_READY = True
-        return []
-    migration_name = "033_browser_handoff_sessions.sql"
-    _execute_sql_script(_migration_path(migration_name))
+    applied: list[str] = []
+    if not _browser_handoff_schema_ready():
+        migration_name = "033_browser_handoff_sessions.sql"
+        _execute_sql_script(_migration_path(migration_name))
+        applied.append(migration_name)
     if not _browser_handoff_schema_ready():
         raise RuntimeError("browser_handoff schema 升级失败")
+
+    lifecycle_migration = "034_browser_handoff_lifecycle.sql"
+    _execute_sql_script(_migration_path(lifecycle_migration))
+    applied.append(lifecycle_migration)
+    if not applied:
+        _BROWSER_HANDOFF_SCHEMA_READY = True
+        return []
     _BROWSER_HANDOFF_SCHEMA_READY = True
-    logger.info("browser_handoff schema 已自动补齐: %s", migration_name)
-    return [migration_name]
+    logger.info("browser_handoff schema 已自动补齐: %s", ", ".join(applied))
+    return applied
 
 
 def ensure_schema() -> list[str]:
@@ -10418,6 +10425,33 @@ def get_handoff_session(*, handoff_session_id):
 
 
 _HANDOFF_FINAL_STATUSES = {"completed", "expired", "failed", "cancelled"}
+_HANDOFF_AUDIT_SENSITIVE_KEYS = {
+    "base64",
+    "content",
+    "data",
+    "frame",
+    "frames",
+    "input",
+    "input_text",
+    "screenshot",
+    "screenshot_frame",
+    "text",
+}
+
+
+def _handoff_audit_safe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key or "")
+            lowered = key_text.lower()
+            if any(marker in lowered for marker in _HANDOFF_AUDIT_SENSITIVE_KEYS):
+                continue
+            safe[key_text] = _handoff_audit_safe_value(nested)
+        return safe
+    if isinstance(value, list):
+        return [_handoff_audit_safe_value(item) for item in value]
+    return value
 
 
 def _handoff_audit_event(
@@ -10439,8 +10473,11 @@ def _handoff_audit_event(
     if reason:
         event["reason"] = str(reason)
     for key, value in (metadata or {}).items():
-        if key not in {"data", "text", "input", "screenshot", "base64"}:
-            event[str(key)] = value
+        key_text = str(key or "")
+        lowered = key_text.lower()
+        if any(marker in lowered for marker in _HANDOFF_AUDIT_SENSITIVE_KEYS):
+            continue
+        event[key_text] = _handoff_audit_safe_value(value)
     return event
 
 

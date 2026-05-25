@@ -74,6 +74,33 @@ def test_handoff_status_transition_appends_metadata_only_audit():
     assert "验证码" not in str(audit)
 
 
+def test_handoff_audit_filters_sensitive_nested_metadata():
+    import auth.db as auth_db
+
+    event = auth_db._handoff_audit_event(
+        event_type="unit",
+        metadata={
+            "frame": "raw-frame",
+            "content": "sms-code",
+            "safe_reason": "manual",
+            "nested": {
+                "input_text": "123456",
+                "safe_count": 2,
+                "deep": {"screenshot_frame": "abc", "label": "ok"},
+            },
+        },
+    )
+
+    text = str(event)
+    assert "raw-frame" not in text
+    assert "sms-code" not in text
+    assert "123456" not in text
+    assert "abc" not in text
+    assert event["safe_reason"] == "manual"
+    assert event["nested"]["safe_count"] == 2
+    assert event["nested"]["deep"]["label"] == "ok"
+
+
 def test_expire_handoff_session_marks_sync_job_failed(monkeypatch):
     import auth.db as auth_db
 
@@ -112,3 +139,17 @@ def test_expire_handoff_session_marks_sync_job_failed(monkeypatch):
             "retry_delay_seconds": 0,
         }
     ]
+
+
+def test_ensure_browser_handoff_schema_applies_lifecycle_migration(monkeypatch):
+    import auth.db as auth_db
+
+    executed = []
+    monkeypatch.setattr(auth_db, "_BROWSER_HANDOFF_SCHEMA_READY", False)
+    monkeypatch.setattr(auth_db, "_browser_handoff_schema_ready", lambda: True)
+    monkeypatch.setattr(auth_db, "_execute_sql_script", lambda path: executed.append(path.name))
+
+    applied = auth_db.ensure_browser_handoff_schema()
+
+    assert applied == ["034_browser_handoff_lifecycle.sql"]
+    assert executed == ["034_browser_handoff_lifecycle.sql"]
