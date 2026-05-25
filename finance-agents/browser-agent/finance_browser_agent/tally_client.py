@@ -22,6 +22,7 @@ from typing import Any
 import jwt
 
 from finance_browser_agent.data_agent_ws import DataAgentWsClient
+from finance_browser_agent.remote_control import RemoteControlCoordinator
 
 
 JWT_ALGORITHM = "HS256"
@@ -88,12 +89,27 @@ class BrowserAgentTallyClient:
         self.config = config
         self._token: str = ""
         self._token_expires_at: float = 0.0
-        self._client = ws_client or DataAgentWsClient(
-            ws_url=config.data_agent_ws_url,
-            agent_id=config.agent_id,
-            max_concurrency=config.max_concurrency,
-            token_provider=lambda: self.worker_token,
-        )
+
+        async def _handoff_unavailable(payload: dict[str, Any]) -> dict[str, Any]:
+            return {"success": False, "error": "handoff unavailable"}
+
+        if ws_client is None:
+            self.handoff_coordinator = RemoteControlCoordinator(
+                send_event=lambda payload: self._client.send_event(payload)
+            )
+            self._client = DataAgentWsClient(
+                ws_url=config.data_agent_ws_url,
+                agent_id=config.agent_id,
+                max_concurrency=config.max_concurrency,
+                token_provider=lambda: self.worker_token,
+                event_handler=self.handoff_coordinator.handle_event,
+            )
+        else:
+            send_event = getattr(ws_client, "send_event", None)
+            self.handoff_coordinator = RemoteControlCoordinator(
+                send_event=send_event if callable(send_event) else _handoff_unavailable
+            )
+            self._client = ws_client
 
     @property
     def worker_token(self) -> str:

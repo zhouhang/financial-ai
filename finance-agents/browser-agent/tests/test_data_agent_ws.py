@@ -87,3 +87,41 @@ async def test_hello_ack_failure_blocks_request():
     client = _client(fake)
     res = await client.request("claim", {})
     assert res["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_reader_dispatches_event_frames_to_handler():
+    seen = []
+
+    async def on_event(msg):
+        seen.append(msg)
+
+    fake = FakeWs([json.dumps({"type": "hello_ack", "ok": True})])
+
+    async def connector(url):
+        return fake
+
+    client = DataAgentWsClient(
+        ws_url="ws://test/browser-agent",
+        agent_id="agent-A",
+        max_concurrency=2,
+        token_provider=lambda: "tok-1",
+        connector=connector,
+        event_handler=on_event,
+    )
+    assert await client.connect() is True
+    fake.feed({"type": "event", "event": "handoff_start", "handoff_session_id": "h1"})
+    await asyncio.sleep(0.05)
+
+    assert seen == [{"type": "event", "event": "handoff_start", "handoff_session_id": "h1"}]
+
+
+@pytest.mark.asyncio
+async def test_send_event_sends_without_result_roundtrip():
+    fake = FakeWs([json.dumps({"type": "hello_ack", "ok": True})])
+    client = _client(fake)
+
+    result = await client.send_event({"type": "handoff_frame", "handoff_session_id": "h1"})
+
+    assert result == {"success": True}
+    assert fake.sent[-1] == {"type": "handoff_frame", "handoff_session_id": "h1"}

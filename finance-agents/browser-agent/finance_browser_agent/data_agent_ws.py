@@ -1,8 +1,8 @@
 """Browser-agent → data-agent WebSocket 传输。
 
 单条主动出站 WS:connect 时发 hello 帧(system JWT + agent_id)鉴权;之后发"领域消息"
-(客户端生成 id),等待匹配的 result 帧。后台 reader 解析响应并兑现挂起的 future,event 帧
-本轮忽略(handoff 用)。断线时挂起请求以异常结束,下次 request 自动重连。
+(客户端生成 id),等待匹配的 result 帧。后台 reader 解析响应并兑现挂起的 future,
+event 帧交给 handoff 事件处理器。断线时挂起请求以异常结束,下次 request 自动重连。
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 120.0
 _CONNECT_TIMEOUT = 10.0
+EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 async def _default_connector(url: str):
@@ -33,12 +34,14 @@ class DataAgentWsClient:
         max_concurrency: int,
         token_provider: Callable[[], str],
         connector: Callable[[str], Awaitable[Any]] = _default_connector,
+        event_handler: EventHandler | None = None,
     ) -> None:
         self._ws_url = ws_url
         self._agent_id = agent_id
         self._max_concurrency = max_concurrency
         self._token_provider = token_provider
         self._connector = connector
+        self._event_handler = event_handler
         self._ws: Any = None
         self._pending: dict[str, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
@@ -95,7 +98,8 @@ class DataAgentWsClient:
                     fut = self._pending.pop(str(msg.get("id") or ""), None)
                     if fut and not fut.done():
                         fut.set_result(msg)
-                # 其它类型(event)本轮忽略
+                elif msg.get("type") == "event" and self._event_handler is not None:
+                    asyncio.create_task(self._event_handler(msg))
         except Exception as exc:  # noqa: BLE001
             logger.warning("data-agent WS 读取中断: %s", exc)
         finally:
@@ -121,6 +125,16 @@ class DataAgentWsClient:
             return {"success": False, "error": str(result.get("error") or "data-agent 返回失败")}
         data = result.get("data")
         return data if isinstance(data, dict) else {"success": True, "data": data}
+
+    async def send_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._ws is None or (self._reader_task and self._reader_task.done()):
+            if not await self.connect():
+                return {"success": False, "error": "无法建立 data-agent WS 连接"}
+        try:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+            return {"success": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": f"data-agent WS 发送失败: {exc}"}
 
     async def report_risk_waiting(self, *, sync_job_id: str, reason: str, company_id: str = "",
                                   shop_id: str = "", data_source_id: str = "") -> dict:

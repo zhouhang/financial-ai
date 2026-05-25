@@ -21,6 +21,7 @@ Exact-match Layer 2 quality gate is delegated to ``finance_browser_agent.quality
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import os
@@ -32,6 +33,7 @@ from typing import Any
 
 from finance_browser_agent.chrome_launcher import launch_chrome
 from finance_browser_agent.quality_gate import validate_rows
+from finance_browser_agent.remote_control import PlaywrightControlBackend, RemoteControlCoordinator
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -103,7 +105,7 @@ class PlaywrightRunConfig:
     click_delay_min_ms: int = 800
     click_delay_max_ms: int = 1800
     type_delay_ms: int = 160
-    risk_manual_timeout_ms: int = 300000
+    risk_manual_timeout_ms: int = 900000
 
     @classmethod
     def from_env(cls) -> "PlaywrightRunConfig":
@@ -119,7 +121,7 @@ class PlaywrightRunConfig:
             click_delay_min_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MIN_MS", 800),
             click_delay_max_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MAX_MS", 1800),
             type_delay_ms=_env_int("BROWSER_AGENT_TYPE_DELAY_MS", 160),
-            risk_manual_timeout_ms=_env_int("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", 300000),
+            risk_manual_timeout_ms=_env_int("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", 900000),
         )
 
 
@@ -241,6 +243,8 @@ def _execute_action(
     download_dir: Path,
     allow_auth_redirect: bool = False,
     run_config: PlaywrightRunConfig | None = None,
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -259,7 +263,12 @@ def _execute_action(
         if detected == "AUTH_EXPIRED" and allow_auth_redirect:
             return {"auth_required": True}
         if detected == "RISK_VERIFICATION":
-            detected = _await_navigate_risk_clearance(page, run_config=run_config)
+            detected = _await_navigate_risk_clearance(
+                page,
+                run_config=run_config,
+                sync_job_id=sync_job_id,
+                handoff_coordinator=handoff_coordinator,
+            )
         if detected:
             raise BrowserActionError(detected, f"navigate detected {detected}")
         return {}
@@ -283,6 +292,8 @@ def _execute_action(
             extracted=extracted,
             timeout_ms=timeout_ms,
             run_config=run_config,
+            sync_job_id=sync_job_id,
+            handoff_coordinator=handoff_coordinator,
         )
         return {}
     if name == "extract_text":
@@ -367,6 +378,8 @@ def _execute_login_action(
     extracted: dict[str, Any],
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None = None,
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
 ) -> None:
     username_selector = str(action.get("username_selector") or "").strip()
     password_selector = str(action.get("password_selector") or "").strip()
@@ -393,6 +406,8 @@ def _execute_login_action(
         password=password,
         timeout_ms=timeout_ms,
         run_config=run_config,
+        sync_job_id=sync_job_id,
+        handoff_coordinator=handoff_coordinator,
     )
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     if post_login_wait_selector:
@@ -402,6 +417,8 @@ def _execute_login_action(
             selector=post_login_wait_selector,
             timeout_ms=timeout_ms,
             run_config=run_config,
+            sync_job_id=sync_job_id,
+            handoff_coordinator=handoff_coordinator,
         )
 
 
@@ -415,6 +432,8 @@ def _find_login_context(
     password: str,
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None = None,
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
 ) -> Any:
     attempt_timeout_ms = min(timeout_ms, _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS)
     last_error: Exception | None = None
@@ -471,10 +490,13 @@ def _find_login_context(
                 )
                 _notify_risk_waiting()
             if now <= risk_deadline:
-                risk_cleared = _wait_for_risk_to_clear(
+                risk_cleared = _wait_for_risk_to_clear_with_handoff(
+                    page,
                     candidates,
                     timeout_ms=int(max(1, (risk_deadline - now) * 1000)),
                     poll_interval_ms=1000,
+                    sync_job_id=sync_job_id,
+                    coordinator=handoff_coordinator,
                 )
                 if risk_cleared:
                     continue
@@ -548,7 +570,76 @@ def _wait_for_risk_to_clear(
     return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
 
 
-def _await_navigate_risk_clearance(page: Any, *, run_config: "PlaywrightRunConfig | None") -> str | None:
+def _run_async_safely(coro: Any) -> None:
+    try:
+        asyncio.run(coro)
+    except Exception:
+        logger.exception("handoff async callback failed")
+
+
+def _risk_cleared(contexts: list[Any]) -> bool:
+    return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
+
+
+def _wait_for_risk_to_clear_with_handoff(
+    page: Any,
+    contexts: list[Any],
+    *,
+    timeout_ms: int,
+    poll_interval_ms: int,
+    sync_job_id: str,
+    coordinator: RemoteControlCoordinator | None,
+) -> bool:
+    if coordinator is None:
+        return _wait_for_risk_to_clear(
+            contexts,
+            timeout_ms=timeout_ms,
+            poll_interval_ms=poll_interval_ms,
+        )
+    backend = PlaywrightControlBackend(page=page, risk_contexts=contexts)
+    coordinator.register_backend(sync_job_id=sync_job_id, backend=backend)
+    deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
+    try:
+        while time.monotonic() <= deadline:
+            backend.drain_pending_input()
+            if backend.should_capture_frame():
+                _run_async_safely(coordinator.emit_frame(
+                    sync_job_id=sync_job_id,
+                    backend=backend,
+                    frame=backend.capture_frame(),
+                ))
+            if _risk_cleared(contexts):
+                _run_async_safely(coordinator.emit_status({
+                    "type": "handoff_completed",
+                    "sync_job_id": sync_job_id,
+                    "handoff_session_id": backend.handoff_session_id,
+                    "controller_id": backend.controller_id,
+                }))
+                return True
+            if backend.pop_resume_check_requested() and not _risk_cleared(contexts):
+                _run_async_safely(coordinator.emit_status({
+                    "type": "handoff_still_blocked",
+                    "sync_job_id": sync_job_id,
+                    "handoff_session_id": backend.handoff_session_id,
+                    "controller_id": backend.controller_id,
+                    "reason": "risk verification still blocked",
+                }))
+            remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
+            wait_ms = min(max(1, poll_interval_ms), remaining_ms)
+            _wait_for_timeout(page, wait_ms)
+        return _risk_cleared(contexts)
+    finally:
+        backend.stop_stream()
+        coordinator.unregister_backend(sync_job_id=sync_job_id)
+
+
+def _await_navigate_risk_clearance(
+    page: Any,
+    *,
+    run_config: "PlaywrightRunConfig | None",
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
+) -> str | None:
     """navigate 落到风控页时,不立即失败:保持页面打开,轮询等待人工清除,
     上限 risk_manual_timeout_ms。清除返回 None(继续 playbook);超时或未配置超时返回
     'RISK_VERIFICATION'(由调用方抛出)。"""
@@ -560,10 +651,13 @@ def _await_navigate_risk_clearance(page: Any, *, run_config: "PlaywrightRunConfi
         manual_timeout_ms,
     )
     _notify_risk_waiting()
-    cleared = _wait_for_risk_to_clear(
+    cleared = _wait_for_risk_to_clear_with_handoff(
+        page,
         _login_candidates(page),
         timeout_ms=manual_timeout_ms,
         poll_interval_ms=1000,
+        sync_job_id=sync_job_id,
+        coordinator=handoff_coordinator,
     )
     return None if cleared else "RISK_VERIFICATION"
 
@@ -656,6 +750,8 @@ def _wait_for_post_login_selector(
     selector: str,
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None = None,
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
 ) -> None:
     contexts = [login_context]
     if page is not login_context:
@@ -684,10 +780,13 @@ def _wait_for_post_login_selector(
                             manual_timeout_ms,
                         )
                         _notify_risk_waiting()
-                        _wait_for_risk_to_clear(
+                        _wait_for_risk_to_clear_with_handoff(
+                            page,
                             contexts,
                             timeout_ms=manual_timeout_ms,
                             poll_interval_ms=1000,
+                            sync_job_id=sync_job_id,
+                            coordinator=handoff_coordinator,
                         )
         for context in contexts:
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
@@ -833,6 +932,7 @@ def _run_playbook_with_playwright_inner(
     shop_id = str(message.get("shop_id") or params.get("shop_id") or "unknown")
     runtime_profile_ref = str(message.get("runtime_profile_ref") or "")
     job_id = str(message.get("job_id") or "unknown")
+    handoff_coordinator = message.get("handoff_coordinator")
 
     user_data_dir = build_user_data_dir(
         config=config,
@@ -908,6 +1008,8 @@ def _run_playbook_with_playwright_inner(
                             download_dir=download_dir,
                             allow_auth_redirect=allow_auth_redirect,
                             run_config=config,
+                            sync_job_id=job_id,
+                            handoff_coordinator=handoff_coordinator,
                         )
                         if result.get("rows"):
                             rows.extend(result["rows"])

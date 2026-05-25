@@ -141,6 +141,19 @@ def test_dispatcher_message_injects_credentials_without_overwriting() -> None:
     assert message["params"]["login_password"] == "secret"
 
 
+def test_dispatcher_message_includes_handoff_coordinator_when_available() -> None:
+    client = FakeClient([], {})
+    client.handoff_coordinator = object()
+    loop = BrowserDispatcherLoop(client=client, runner=lambda message: message, max_concurrency=1)
+
+    message = loop._message_from_job(
+        {"id": "j1", "shop_id": "s1", "playbook_body": {}},
+        {},
+    )
+
+    assert message["handoff_coordinator"] is client.handoff_coordinator
+
+
 @pytest.mark.asyncio
 async def test_dispatcher_runs_sync_runner_in_thread(monkeypatch) -> None:
     """Critical: sync Playwright must NOT block the event loop. Verify asyncio.to_thread is the path."""

@@ -176,4 +176,5 @@ class BrowserDispatcherLoop:
             "egress_group": str(job.get("egress_group") or ""),
             "credential_ref": credential_ref,
             "timeout_ms": int(params.get("timeout_ms") or payload.get("timeout_ms") or 900000),
+            "handoff_coordinator": getattr(self.client, "handoff_coordinator", None),
         }
