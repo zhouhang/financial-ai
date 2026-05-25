@@ -1,44 +1,147 @@
 from __future__ import annotations
-import asyncio, sys
+
+import asyncio
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services import browser_agent_gateway as gw
 
 
-def _conn():
+def _conn() -> gw.BrowserAgentConnection:
     return gw.BrowserAgentConnection(token="tok", agent_id="A", max_concurrency=1)
 
 
-def test_risk_waiting_creates_session_and_notifies(monkeypatch):
-    calls={"create":0,"notify":[]}
-    async def fake_call(tool,args):
-        if tool=="browser_handoff_session_create":
-            calls["create"]+=1
-            return {"success":True,"handoff_session_id":"h1","handoff_token":"TKN","status":"pending"}
-        return {"success":True}
-    monkeypatch.setattr(gw,"call_mcp_tool",fake_call)
+def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
+    gw._NOTIFIED_RISK_JOBS.clear()
+    calls = {"create": 0, "load_channel": [], "resolve": [], "notify": []}
+
+    async def fake_call(tool, args):
+        if tool == "browser_handoff_session_create":
+            calls["create"] += 1
+            assert "channel_config_id" not in args
+            return {
+                "success": True,
+                "handoff_session_id": "h1",
+                "handoff_token": "TKN",
+                "status": "pending",
+                "channel_config_id": "chan1",
+                "owner": {"identifier": "u1", "name": "周行"},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(gw, "call_mcp_tool", fake_call)
+
+    class FakeResolved:
+        success = True
+        resolved_user = type("U", (), {"user_id": "ding-u1"})()
 
     class FakeAdapter:
-        def send_bot_message(self,*,content,to_user_id="",**k):
-            calls["notify"].append(content)
-            class R: success=True; message="ok"
-            return R()
-    monkeypatch.setattr(gw,"get_notification_adapter",lambda **k: FakeAdapter())
-    monkeypatch.setattr(gw,"load_company_channel_config",lambda **k: type("C",(),{"id":"chan1","provider":"feishu"})())
-    monkeypatch.setenv("TALLY_PUBLIC_BASE_URL","https://dev.tallyai.cn/api")
+        def resolve_user(self, *, user_id="", mobile="", keyword=""):
+            calls["resolve"].append({"user_id": user_id, "mobile": mobile, "keyword": keyword})
+            return FakeResolved()
 
-    conn=_conn()
-    r1=asyncio.run(gw.handle_domain_message(conn, {"type":"risk_waiting","id":"e1",
-        "sync_job_id":"j1","reason":"RISK_VERIFICATION","company_id":"c1","shop_id":"s1"}))
-    assert r1["ok"] is True and calls["create"]==1
-    assert len(calls["notify"])==1 and "/p/handoff?t=TKN" in calls["notify"][0]
+        def send_bot_message(self, *, content, to_user_id="", **kwargs):
+            calls["notify"].append({"content": content, "to_user_id": to_user_id})
+            return type("R", (), {"success": True, "message": "ok"})()
 
-    r2=asyncio.run(gw.handle_domain_message(conn, {"type":"risk_waiting","id":"e2",
-        "sync_job_id":"j1","reason":"RISK_VERIFICATION","company_id":"c1","shop_id":"s1"}))
-    assert r2["ok"] is True and calls["create"]==1 and len(calls["notify"])==1  # idempotent
+    monkeypatch.setattr(gw, "get_notification_adapter", lambda **kwargs: FakeAdapter())
+    monkeypatch.setattr(
+        gw,
+        "load_company_channel_config_by_id",
+        lambda **kwargs: calls["load_channel"].append(kwargs) or type("C", (), {"id": "chan1", "provider": "feishu"})(),
+    )
+    monkeypatch.setenv("TALLY_PUBLIC_BASE_URL", "https://dev.tallyai.cn/api")
+
+    result = asyncio.run(
+        gw.handle_domain_message(
+            _conn(),
+            {
+                "type": "risk_waiting",
+                "id": "e1",
+                "sync_job_id": "j-owner",
+                "reason": "RISK_VERIFICATION",
+                "company_id": "c1",
+                "shop_id": "s1",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert calls["create"] == 1
+    assert calls["load_channel"] == [{"channel_id": "chan1"}]
+    assert calls["resolve"] == [{"user_id": "u1", "mobile": "", "keyword": "周行"}]
+    assert len(calls["notify"]) == 1
+    assert calls["notify"][0]["to_user_id"] == "ding-u1"
+    assert "/p/handoff?t=TKN" in calls["notify"][0]["content"]
+
+    deduped = asyncio.run(
+        gw.handle_domain_message(
+            _conn(),
+            {
+                "type": "risk_waiting",
+                "id": "e2",
+                "sync_job_id": "j-owner",
+                "reason": "RISK_VERIFICATION",
+                "company_id": "c1",
+                "shop_id": "s1",
+            },
+        )
+    )
+    assert deduped["ok"] is True
+    assert calls["create"] == 1 and len(calls["notify"]) == 1
+
+
+def test_risk_waiting_without_owner_skips_notification(monkeypatch):
+    gw._NOTIFIED_RISK_JOBS.clear()
+    calls = {"adapter": 0, "load_channel": 0}
+
+    async def fake_call(tool, args):
+        if tool == "browser_handoff_session_create":
+            return {
+                "success": True,
+                "handoff_session_id": "h2",
+                "handoff_token": "TKN2",
+                "status": "pending",
+                "channel_config_id": "chan1",
+                "owner": {},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(gw, "call_mcp_tool", fake_call)
+
+    def unexpected_adapter(**kwargs):
+        calls["adapter"] += 1
+        raise AssertionError("owner-less handoff must not notify")
+
+    def unexpected_load_channel(**kwargs):
+        calls["load_channel"] += 1
+        raise AssertionError("owner-less handoff must not load notification channel")
+
+    monkeypatch.setattr(gw, "get_notification_adapter", unexpected_adapter)
+    monkeypatch.setattr(gw, "load_company_channel_config_by_id", unexpected_load_channel)
+
+    result = asyncio.run(
+        gw.handle_domain_message(
+            _conn(),
+            {
+                "type": "risk_waiting",
+                "id": "e1",
+                "sync_job_id": "j-no-owner",
+                "reason": "RISK_VERIFICATION",
+                "company_id": "c1",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["notified"] is False
+    assert calls == {"adapter": 0, "load_channel": 0}
 
 
 def test_risk_waiting_missing_company_errors(monkeypatch):
-    r=asyncio.run(gw.handle_domain_message(_conn(), {"type":"risk_waiting","id":"e","sync_job_id":"j2"}))
-    assert r["ok"] is False
+    result = asyncio.run(
+        gw.handle_domain_message(_conn(), {"type": "risk_waiting", "id": "e", "sync_job_id": "j2"})
+    )
+    assert result["ok"] is False

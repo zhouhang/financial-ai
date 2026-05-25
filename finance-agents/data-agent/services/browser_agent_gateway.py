@@ -11,7 +11,8 @@ from typing import Any
 
 import jwt
 
-from services.notifications import get_notification_adapter, load_company_channel_config
+from services.notifications import get_notification_adapter
+from services.notifications.repository import load_company_channel_config_by_id
 from tools.mcp_client import call_mcp_tool
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,23 @@ _DOMAIN_TOOL_MAP: dict[str, str] = {
     "queue_fail_failed": "recon_queue_fail_failed_collection_waiting",
     "queue_fail_expired": "recon_queue_fail_expired_waiting",
 }
+
+
+def _resolve_handoff_recipient(adapter: Any, owner: dict[str, Any]) -> str:
+    recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
+    owner_name = str(owner.get("name") or owner.get("display_name") or "").strip()
+    if not recipient:
+        return ""
+    try:
+        resolved = adapter.resolve_user(user_id=recipient, keyword=owner_name)
+    except Exception:
+        logger.exception("handoff 责任人解析失败 owner=%s", owner)
+        return recipient
+    resolved_user = getattr(resolved, "resolved_user", None)
+    resolved_user_id = str(getattr(resolved_user, "user_id", "") or "").strip()
+    if bool(getattr(resolved, "success", False)) and resolved_user_id:
+        return resolved_user_id
+    return recipient
 
 
 def verify_system_token(token: str) -> dict[str, Any] | None:
@@ -95,29 +113,44 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
         return {"type": "result", "id": req_id, "ok": False, "error": "risk_waiting 缺 sync_job_id/company_id"}
     if sync_job_id in _NOTIFIED_RISK_JOBS:
         return {"type": "result", "id": req_id, "ok": True, "data": {"deduped": True}}
-    channel = load_company_channel_config(company_id=company_id)
-    channel_id = getattr(channel, "id", None) if channel else None
     created = await call_mcp_tool("browser_handoff_session_create", {
         "worker_token": conn.token, "company_id": company_id, "sync_job_id": sync_job_id,
         "agent_id": conn.agent_id, "profile_key": str(msg.get("shop_id") or ""),
         "reason": str(msg.get("reason") or "RISK_VERIFICATION"),
         "data_source_id": (msg.get("data_source_id") or None),
-        "channel_config_id": channel_id,
     })
     if not created.get("success"):
         return {"type": "result", "id": req_id, "ok": False, "error": str(created.get("error") or "create session failed")}
     token = created.get("handoff_token") or ""
     base = os.getenv("TALLY_PUBLIC_BASE_URL", "").rstrip("/")
     link = f"{base}/p/handoff?t={token}" if base else f"/p/handoff?t={token}"
-    if channel is not None:
-        try:
-            adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
-            adapter.send_bot_message(
-                content=f"采集店铺需要人工验证({msg.get('reason') or 'RISK_VERIFICATION'})。请在采集机上完成验证,或查看详情:{link}",
-                to_user_id="",
-            )
-        except Exception:
-            logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
+    owner = created.get("owner") or {}
+    if not isinstance(owner, dict):
+        owner = {}
+    channel_id = str(created.get("channel_config_id") or "").strip()
+    recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
+    notified = False
+    if channel_id and recipient:
+        channel = load_company_channel_config_by_id(channel_id=channel_id)
+        if channel is None:
+            logger.warning("handoff 通知通道不存在或不可用 channel_id=%s sync_job_id=%s", channel_id, sync_job_id)
+        else:
+            try:
+                adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
+                target = _resolve_handoff_recipient(adapter, owner)
+                if target:
+                    adapter.send_bot_message(
+                        content=(
+                            f"采集店铺需要人工验证({msg.get('reason') or 'RISK_VERIFICATION'})。"
+                            f"请在采集机上完成验证,或查看详情:{link}"
+                        ),
+                        to_user_id=target,
+                    )
+                    notified = True
+            except Exception:
+                logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
+    else:
+        logger.info("handoff 无对账任务责任人,跳过通知 sync_job_id=%s", sync_job_id)
     _NOTIFIED_RISK_JOBS.add(sync_job_id)
     return {"type": "result", "id": req_id, "ok": True,
-            "data": {"handoff_session_id": created.get("handoff_session_id"), "notified": channel is not None}}
+            "data": {"handoff_session_id": created.get("handoff_session_id"), "notified": notified}}
