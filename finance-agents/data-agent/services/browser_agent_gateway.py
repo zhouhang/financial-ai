@@ -123,7 +123,7 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
         return {"type": "result", "id": req_id, "ok": False, "error": str(created.get("error") or "create session failed")}
     token = created.get("handoff_token") or ""
     base = os.getenv("TALLY_PUBLIC_BASE_URL", "").rstrip("/")
-    link = f"{base}/p/handoff?t={token}" if base else f"/p/handoff?t={token}"
+    link = f"{base}/handoff?t={token}" if base else f"/handoff?t={token}"
     owner = created.get("owner") or {}
     if not isinstance(owner, dict):
         owner = {}
@@ -142,7 +142,7 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
                     adapter.send_bot_message(
                         content=(
                             f"采集店铺需要人工验证({msg.get('reason') or 'RISK_VERIFICATION'})。"
-                            f"请在采集机上完成验证,或查看详情:{link}"
+                            f"请打开链接远程完成验证:{link}"
                         ),
                         to_user_id=target,
                     )

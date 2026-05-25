@@ -4940,3 +4940,26 @@ async def alipay_auth_invite_continue(token: str) -> dict[str, Any]:
 
 async def browser_handoff_session_describe(token: str) -> dict[str, Any]:
     return await call_mcp_tool("browser_handoff_session_describe", {"token": token})
+
+
+async def browser_handoff_session_control_open(
+    token: str,
+    controller_id: str,
+    agent_online: bool,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "browser_handoff_session_control_open",
+        {
+            "token": token,
+            "controller_id": controller_id,
+            "agent_online": agent_online,
+        },
+    )
+
+
+async def browser_handoff_session_event(payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_event", payload)
+
+
+async def browser_handoff_session_expire(payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_expire", payload)

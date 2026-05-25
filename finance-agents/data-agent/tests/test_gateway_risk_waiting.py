@@ -74,7 +74,8 @@ def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
     assert calls["resolve"] == [{"user_id": "u1", "mobile": "", "keyword": "周行"}]
     assert len(calls["notify"]) == 1
     assert calls["notify"][0]["to_user_id"] == "ding-u1"
-    assert "/p/handoff?t=TKN" in calls["notify"][0]["content"]
+    assert "/handoff?t=TKN" in calls["notify"][0]["content"]
+    assert "/p/handoff" not in calls["notify"][0]["content"]
 
     deduped = asyncio.run(
         gw.handle_domain_message(
