@@ -5735,7 +5735,7 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="browser_handoff_session_create",
-            description="风控时为某 sync_job 创建人工验证 handoff session,返回一次性链接 token,并把 sync_job 置为 waiting_human_verification。",
+            description="风控时为某 sync_job 创建人工验证 handoff session,返回短有效期 capability token,并把 sync_job 置为 waiting_human_verification。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5754,11 +5754,56 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="browser_handoff_session_describe",
-            description="按一次性 token 查 handoff session 概要,供责任人落地页展示(不含凭证/profile/CDP)。",
+            description="按 capability token 查 handoff session 概要,供责任人落地页展示(不含凭证/profile/CDP)。",
             inputSchema={
                 "type": "object",
                 "properties": {"token": {"type": "string"}},
                 "required": ["token"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_control_open",
+            description="责任人打开 handoff 控制页时登记 controller 并激活 session,只返回元数据。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "controller_id": {"type": "string"},
+                    "agent_online": {"type": "boolean"},
+                },
+                "required": ["token", "controller_id"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_event",
+            description="记录 handoff 控制页事件并更新 session 状态,审计仅保留元数据。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "handoff_session_id": {"type": "string"},
+                    "worker_token": {"type": "string"},
+                    "controller_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "status": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["event_type"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_expire",
+            description="按 token 将 handoff session 标记过期,允许解码已过期 token 仅用于落库。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "handoff_session_id": {"type": "string"},
+                    "worker_token": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
             },
         ),
     ]
@@ -5844,6 +5889,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_browser_handoff_session_create(arguments)
         if name == "browser_handoff_session_describe":
             return await _handle_browser_handoff_session_describe(arguments)
+        if name == "browser_handoff_session_control_open":
+            return await _handle_browser_handoff_session_control_open(arguments)
+        if name == "browser_handoff_session_event":
+            return await _handle_browser_handoff_session_event(arguments)
+        if name == "browser_handoff_session_expire":
+            return await _handle_browser_handoff_session_expire(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except Exception as exc:
         logger.error("data_source tool error: %s", exc, exc_info=True)
@@ -9075,6 +9126,24 @@ async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> d
     }
 
 
+def _handoff_row_for_token(token: str, *, allow_expired: bool = False) -> tuple[dict[str, Any] | None, str]:
+    from auth.handoff_token import decode_handoff_token_unverified, verify_handoff_token
+
+    payload = (
+        decode_handoff_token_unverified(token)
+        if allow_expired
+        else verify_handoff_token(token)
+    )
+    if payload is None:
+        return None, "链接无效或已过期"
+    row = auth_db.get_handoff_session(handoff_session_id=str(payload["handoff_session_id"]))
+    if not row:
+        return None, "handoff session 不存在"
+    if str(row.get("company_id") or "") != str(payload.get("company_id") or ""):
+        return None, "handoff token 与 session 不匹配"
+    return row, ""
+
+
 def _public_handoff_session_view(row: dict[str, Any]) -> dict[str, Any]:
     """落地页可见字段:不含凭证 / profile 路径 / CDP / playbook。"""
     return {
@@ -9087,13 +9156,117 @@ def _public_handoff_session_view(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _handle_browser_handoff_session_describe(arguments: dict[str, Any]) -> dict[str, Any]:
-    from auth.handoff_token import verify_handoff_token
+def _handoff_public_session(row: dict[str, Any], *, controller_id: str = "") -> dict[str, Any]:
+    view = _public_handoff_session_view(row)
+    view.update(
+        {
+            "sync_job_id": str(row.get("sync_job_id") or ""),
+            "data_source_id": str(row.get("data_source_id") or ""),
+            "controller_id": controller_id,
+        }
+    )
+    return view
 
-    payload = verify_handoff_token(str(arguments.get("token") or ""))
-    if payload is None:
-        return {"success": False, "error": "链接无效或已过期"}
-    row = auth_db.get_handoff_session(handoff_session_id=str(payload["handoff_session_id"]))
+
+async def _handle_browser_handoff_session_describe(arguments: dict[str, Any]) -> dict[str, Any]:
+    row, error = _handoff_row_for_token(str(arguments.get("token") or ""))
+    if not row:
+        return {"success": False, "error": error}
+    return {"success": True, "session": _public_handoff_session_view(row)}
+
+
+async def _handle_browser_handoff_session_control_open(arguments: dict[str, Any]) -> dict[str, Any]:
+    token = str(arguments.get("token") or "")
+    controller_id = str(arguments.get("controller_id") or "").strip()
+    if not controller_id:
+        return {"success": False, "error": "missing controller_id"}
+    row, error = _handoff_row_for_token(token)
+    if not row:
+        return {"success": False, "error": error}
+    status = "active" if bool(arguments.get("agent_online", False)) else "waiting_agent"
+    updated = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status=status,
+        event_type="page_opened",
+        controller_id=controller_id,
+        agent_id=str(row.get("agent_id") or ""),
+    )
+    auth_db.append_handoff_audit_event(
+        handoff_session_id=str(row["id"]),
+        event_type="controller_changed",
+        controller_id=controller_id,
+        agent_id=str(row.get("agent_id") or ""),
+    )
+    updated = auth_db.get_handoff_session(handoff_session_id=str(row["id"])) or updated or row
+    return {
+        "success": True,
+        "session": _handoff_public_session(updated, controller_id=controller_id),
+    }
+
+
+async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> dict[str, Any]:
+    token = str(arguments.get("token") or "")
+    handoff_session_id = str(arguments.get("handoff_session_id") or "").strip()
+    worker_token = str(arguments.get("worker_token") or "")
+    row: dict[str, Any] | None = None
+    if token:
+        row, error = _handoff_row_for_token(token)
+        if not row:
+            return {"success": False, "error": error}
+    elif handoff_session_id and worker_token:
+        try:
+            _require_scheduler_user(worker_token)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        row = auth_db.get_handoff_session(handoff_session_id=handoff_session_id)
     if not row:
         return {"success": False, "error": "handoff session 不存在"}
-    return {"success": True, "session": _public_handoff_session_view(row)}
+
+    event_type = str(arguments.get("event_type") or "").strip()
+    if not event_type:
+        return {"success": False, "error": "missing event_type"}
+    status = str(arguments.get("status") or row.get("status") or "pending").strip()
+    controller_id = str(arguments.get("controller_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or row.get("agent_id") or "").strip()
+    updated = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status=status,
+        event_type=event_type,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=str(arguments.get("reason") or ""),
+        metadata=dict(arguments.get("metadata") or {}),
+    )
+    if event_type == "resume_requested" or status == "resuming":
+        auth_db.set_browser_sync_job_status(
+            sync_job_id=str(row["sync_job_id"]),
+            status="resuming",
+        )
+    return {
+        "success": True,
+        "session": _handoff_public_session(updated or row, controller_id=controller_id),
+    }
+
+
+async def _handle_browser_handoff_session_expire(arguments: dict[str, Any]) -> dict[str, Any]:
+    row: dict[str, Any] | None = None
+    token = str(arguments.get("token") or "")
+    if token:
+        row, error = _handoff_row_for_token(token, allow_expired=True)
+        if not row:
+            return {"success": False, "error": error}
+    elif arguments.get("worker_token") and arguments.get("handoff_session_id"):
+        try:
+            _require_scheduler_user(str(arguments.get("worker_token") or ""))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        row = auth_db.get_handoff_session(
+            handoff_session_id=str(arguments.get("handoff_session_id"))
+        )
+    if not row:
+        return {"success": False, "error": "handoff session 不存在"}
+    expired = auth_db.expire_handoff_session(
+        handoff_session_id=str(row["id"]),
+        reason=str(arguments.get("reason") or "expired"),
+    )
+    return {"success": True, "session": _handoff_public_session(expired or row)}

@@ -1,7 +1,7 @@
-"""浏览器风控 handoff 的一次性 HS256 token。
+"""浏览器风控 handoff 的 15 分钟 capability token。
 
 token 是无状态 bearer 能力,只编码 handoff_session_id + company_id,供责任人链接打开时
-换取 session 描述。不编码任何凭证/profile 路径/CDP 端口。
+换取 session 描述和临时控制能力。不编码任何凭证/profile 路径/CDP 端口。
 """
 from __future__ import annotations
 
@@ -37,6 +37,27 @@ def build_handoff_token(*, handoff_session_id: str, company_id: str, ttl_seconds
 def verify_handoff_token(token: str) -> Optional[dict]:
     try:
         payload = jwt.decode(str(token or ""), _secret(), algorithms=[_ALG])
+    except jwt.InvalidTokenError:
+        return None
+    if payload.get("purpose") != _PURPOSE:
+        return None
+    if not payload.get("handoff_session_id") or not payload.get("company_id"):
+        return None
+    return payload
+
+
+def decode_handoff_token_unverified(token: str) -> Optional[dict]:
+    """解码 handoff token 的非敏感 claims,仅用于过期落库。
+
+    仍然校验签名和 purpose,但不校验 exp。调用方不得据此授予控制能力。
+    """
+    try:
+        payload = jwt.decode(
+            str(token or ""),
+            _secret(),
+            algorithms=[_ALG],
+            options={"verify_exp": False},
+        )
     except jwt.InvalidTokenError:
         return None
     if payload.get("purpose") != _PURPOSE:

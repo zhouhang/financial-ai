@@ -10417,8 +10417,122 @@ def get_handoff_session(*, handoff_session_id):
             return dict(row) if row else None
 
 
+_HANDOFF_FINAL_STATUSES = {"completed", "expired", "failed", "cancelled"}
+
+
+def _handoff_audit_event(
+    *,
+    event_type: str,
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    event = {
+        "event_type": str(event_type or ""),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if controller_id:
+        event["controller_id"] = str(controller_id)
+    if agent_id:
+        event["agent_id"] = str(agent_id)
+    if reason:
+        event["reason"] = str(reason)
+    for key, value in (metadata or {}).items():
+        if key not in {"data", "text", "input", "screenshot", "base64"}:
+            event[str(key)] = value
+    return event
+
+
+def transition_handoff_session_status(
+    *,
+    handoff_session_id: str,
+    status: str,
+    event_type: str,
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict | None:
+    completed = str(status or "") in _HANDOFF_FINAL_STATUSES
+    event = _handoff_audit_event(
+        event_type=event_type,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=reason,
+        metadata=metadata,
+    )
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE browser_handoff_sessions
+                SET status = %s,
+                    audit_events = audit_events || %s::jsonb,
+                    completed_at = CASE WHEN %s THEN COALESCE(completed_at, now()) ELSE completed_at END,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    str(status or ""),
+                    psycopg2.extras.Json([event]),
+                    completed,
+                    handoff_session_id,
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def append_handoff_audit_event(
+    *,
+    handoff_session_id: str,
+    event_type: str,
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict | None:
+    row = get_handoff_session(handoff_session_id=handoff_session_id)
+    if not row:
+        return None
+    return transition_handoff_session_status(
+        handoff_session_id=handoff_session_id,
+        status=str(row.get("status") or "pending"),
+        event_type=event_type,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=reason,
+        metadata=metadata,
+    )
+
+
+def expire_handoff_session(*, handoff_session_id: str, reason: str = "expired") -> dict | None:
+    row = transition_handoff_session_status(
+        handoff_session_id=handoff_session_id,
+        status="expired",
+        event_type="expired",
+        reason=reason,
+    )
+    if not row:
+        return None
+    sync_job_id = str(row.get("sync_job_id") or "")
+    if sync_job_id:
+        mark_browser_sync_job_failed(
+            sync_job_id=sync_job_id,
+            error_message=f"handoff expired: {reason}",
+            fail_reason="RISK_VERIFICATION",
+            retryable=False,
+            max_attempts=1,
+            retry_delay_seconds=0,
+        )
+    return row
+
+
 def mark_handoff_session_status(*, handoff_session_id, status, claimed_by_user_id=None):
-    completed = status in ("completed", "expired", "cancelled")
+    completed = str(status or "") in _HANDOFF_FINAL_STATUSES
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(

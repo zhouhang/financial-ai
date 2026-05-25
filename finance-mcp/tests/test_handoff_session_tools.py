@@ -92,3 +92,65 @@ def test_create_without_sync_job_payload_has_empty_owner(monkeypatch):
         "sync_job_id": str(_uuid.uuid4()), "agent_id": "a", "profile_key": "s", "reason": "RISK_VERIFICATION",
     }))
     assert created["success"] is True and created["owner"] == {}
+
+
+def test_open_marks_controller_and_active(monkeypatch):
+    import uuid as _uuid
+    import auth.db as _db
+    from tools.data_sources import (
+        _handle_browser_handoff_session_control_open,
+        _handle_browser_handoff_session_create,
+    )
+
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: None)
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": str(_uuid.uuid4()),
+        "agent_id": "agent-A",
+        "profile_key": "店铺A",
+        "reason": "RISK_VERIFICATION",
+    }))
+
+    opened = asyncio.run(_handle_browser_handoff_session_control_open({
+        "token": created["handoff_token"],
+        "controller_id": "ctrl-1",
+        "agent_online": True,
+    }))
+
+    assert opened["success"] is True
+    assert opened["session"]["status"] == "active"
+    assert opened["session"]["controller_id"] == "ctrl-1"
+
+
+def test_resume_requested_records_resuming_and_sync_status(monkeypatch):
+    import uuid as _uuid
+    import auth.db as _db
+    from tools.data_sources import (
+        _handle_browser_handoff_session_create,
+        _handle_browser_handoff_session_event,
+    )
+
+    statuses = []
+    monkeypatch.setattr(_db, "get_sync_job", lambda *, sync_job_id: None)
+    monkeypatch.setattr(_db, "set_browser_sync_job_status", lambda **kwargs: statuses.append(kwargs) or 1)
+
+    created = asyncio.run(_handle_browser_handoff_session_create({
+        "worker_token": _system_token(),
+        "company_id": "00000000-0000-0000-0000-000000000001",
+        "sync_job_id": str(_uuid.uuid4()),
+        "agent_id": "agent-A",
+        "profile_key": "店铺A",
+        "reason": "RISK_VERIFICATION",
+    }))
+
+    event = asyncio.run(_handle_browser_handoff_session_event({
+        "token": created["handoff_token"],
+        "controller_id": "ctrl-1",
+        "event_type": "resume_requested",
+        "status": "resuming",
+    }))
+
+    assert event["success"] is True
+    assert event["session"]["status"] == "resuming"
+    assert statuses[-1]["status"] == "resuming"
