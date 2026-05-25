@@ -16,6 +16,7 @@ import psycopg2.extras
 
 from config import DATABASE_URL
 from graphs.recon.binding_date_fields import normalize_binding_query_date_field
+from graphs.recon.handoff_collection import build_handoff_collection_params
 from models import AgentState
 from services.notifications import get_notification_adapter
 from services.notifications.repository import load_company_channel_config_by_id
@@ -1279,7 +1280,14 @@ async def _trigger_collection(
     resource_key: str,
     biz_date: str,
     trigger_mode: str,
+    handoff_channel_config_id: str = "",
+    handoff_owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if handoff_channel_config_id:
+        params["handoff_channel_config_id"] = handoff_channel_config_id
+    if handoff_owner:
+        params["handoff_owner"] = handoff_owner
     return await data_source_trigger_dataset_collection(
         auth_token,
         source_id,
@@ -1289,6 +1297,7 @@ async def _trigger_collection(
         trigger_mode=trigger_mode,
         background=True,
         mode="real",
+        params=params,
     )
 
 
@@ -1316,6 +1325,8 @@ async def _trigger_and_wait_collection(
     biz_date: str,
     trigger_mode: str,
     collection_driver: str = "",
+    handoff_channel_config_id: str = "",
+    handoff_owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     collect_result = await _trigger_collection(
         auth_token=auth_token,
@@ -1324,6 +1335,8 @@ async def _trigger_and_wait_collection(
         resource_key=resource_key,
         biz_date=biz_date,
         trigger_mode=trigger_mode,
+        handoff_channel_config_id=handoff_channel_config_id,
+        handoff_owner=handoff_owner,
     )
     if not bool(collect_result.get("success")):
         return collect_result
@@ -1930,6 +1943,7 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
     run_context = _safe_dict(ctx.get("run_context"))
     collection_trigger_mode = _normalize_collection_trigger_mode(run_context.get("trigger_type"))
     should_collect_first = _should_collect_before_recon(run_context.get("trigger_type"))
+    handoff_params = build_handoff_collection_params(_safe_dict(ctx.get("run_plan")))
 
     for binding in bindings:
         source_id = _get_binding_source_id(binding)
@@ -1949,6 +1963,8 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             collect_result = await _trigger_and_wait_collection(
                 **collect_kwargs,
                 collection_driver=str(binding.get("collection_driver") or ""),
+                handoff_channel_config_id=str(handoff_params.get("handoff_channel_config_id") or ""),
+                handoff_owner=_safe_dict(handoff_params.get("handoff_owner")) or None,
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(

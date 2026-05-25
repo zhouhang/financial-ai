@@ -16,6 +16,7 @@ from graphs.recon.execution_service import (
     build_recon_observation,
     run_recon_execution,
 )
+from graphs.recon.handoff_collection import build_handoff_collection_params
 from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from services.notifications import get_notification_adapter
 from services.notifications.models import UnifiedTodoStatus
@@ -804,6 +805,7 @@ async def execute_auto_task_run(
     collection_attempts: list[dict[str, Any]] = []
     collection_trigger_mode = _normalize_collection_trigger_mode(trigger_mode)
     should_collect_first = _should_collect_before_recon(trigger_mode)
+    handoff_params = build_handoff_collection_params(task)
     for binding in bindings:
         if should_collect_first:
             collect_result = await data_source_trigger_dataset_collection(
@@ -814,6 +816,7 @@ async def execute_auto_task_run(
                 biz_date=normalized_biz_date,
                 trigger_mode=collection_trigger_mode,
                 mode="real",
+                params=handoff_params,
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(
