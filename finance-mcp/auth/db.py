@@ -990,6 +990,23 @@ def _browser_handoff_schema_ready() -> bool:
         return False
 
 
+def _browser_handoff_lifecycle_schema_ready() -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        to_regclass('public.idx_handoff_sessions_agent_status'),
+                        to_regclass('public.idx_handoff_sessions_expires_at')
+                    """
+                )
+                row = cur.fetchone()
+                return bool(row and row[0] is not None and row[1] is not None)
+    except Exception:
+        return False
+
+
 def ensure_browser_handoff_schema() -> list[str]:
     global _BROWSER_HANDOFF_SCHEMA_READY
     if _BROWSER_HANDOFF_SCHEMA_READY:
@@ -1002,14 +1019,16 @@ def ensure_browser_handoff_schema() -> list[str]:
     if not _browser_handoff_schema_ready():
         raise RuntimeError("browser_handoff schema 升级失败")
 
-    lifecycle_migration = "034_browser_handoff_lifecycle.sql"
-    _execute_sql_script(_migration_path(lifecycle_migration))
-    applied.append(lifecycle_migration)
-    if not applied:
-        _BROWSER_HANDOFF_SCHEMA_READY = True
-        return []
+    if not _browser_handoff_lifecycle_schema_ready():
+        lifecycle_migration = "034_browser_handoff_lifecycle.sql"
+        _execute_sql_script(_migration_path(lifecycle_migration))
+        applied.append(lifecycle_migration)
+    if not _browser_handoff_lifecycle_schema_ready():
+        raise RuntimeError("browser_handoff lifecycle schema 升级失败")
+
     _BROWSER_HANDOFF_SCHEMA_READY = True
-    logger.info("browser_handoff schema 已自动补齐: %s", ", ".join(applied))
+    if applied:
+        logger.info("browser_handoff schema 已自动补齐: %s", ", ".join(applied))
     return applied
 
 
@@ -10425,33 +10444,58 @@ def get_handoff_session(*, handoff_session_id):
 
 
 _HANDOFF_FINAL_STATUSES = {"completed", "expired", "failed", "cancelled"}
-_HANDOFF_AUDIT_SENSITIVE_KEYS = {
-    "base64",
-    "content",
-    "data",
-    "frame",
-    "frames",
-    "input",
-    "input_text",
-    "screenshot",
-    "screenshot_frame",
-    "text",
+_HANDOFF_AUDIT_METADATA_KEYS = {
+    "agent_id",
+    "browser_url_host",
+    "controller_id",
+    "drag_steps",
+    "error_code",
+    "event_id",
+    "frame_height",
+    "frame_id",
+    "frame_mime",
+    "frame_width",
+    "height",
+    "message_code",
+    "profile_key",
+    "reason",
+    "status",
+    "target",
+    "width",
+    "x",
+    "y",
 }
 
 
-def _handoff_audit_safe_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        safe: dict[str, Any] = {}
-        for key, nested in value.items():
-            key_text = str(key or "")
-            lowered = key_text.lower()
-            if any(marker in lowered for marker in _HANDOFF_AUDIT_SENSITIVE_KEYS):
-                continue
-            safe[key_text] = _handoff_audit_safe_value(nested)
+def is_handoff_final_status(status: str | None) -> bool:
+    return str(status or "") in _HANDOFF_FINAL_STATUSES
+
+
+def _handoff_audit_safe_scalar(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _handoff_audit_safe_metadata(metadata: dict | None) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    if not isinstance(metadata, dict):
         return safe
+    for key, value in metadata.items():
+        key_text = str(key or "")
+        if key_text not in _HANDOFF_AUDIT_METADATA_KEYS:
+            continue
+        safe[key_text] = _handoff_audit_safe_scalar(value)
+    return safe
+
+
+def _handoff_audit_safe_value(value: Any) -> Any:
+    """兼容旧测试入口:审计 metadata 只保留白名单标量字段。"""
+    if isinstance(value, dict):
+        return _handoff_audit_safe_metadata(value)
     if isinstance(value, list):
-        return [_handoff_audit_safe_value(item) for item in value]
-    return value
+        return []
+    return _handoff_audit_safe_scalar(value)
 
 
 def _handoff_audit_event(
@@ -10472,12 +10516,7 @@ def _handoff_audit_event(
         event["agent_id"] = str(agent_id)
     if reason:
         event["reason"] = str(reason)
-    for key, value in (metadata or {}).items():
-        key_text = str(key or "")
-        lowered = key_text.lower()
-        if any(marker in lowered for marker in _HANDOFF_AUDIT_SENSITIVE_KEYS):
-            continue
-        event[key_text] = _handoff_audit_safe_value(value)
+    event.update(_handoff_audit_safe_metadata(metadata))
     return event
 
 
@@ -10491,7 +10530,8 @@ def transition_handoff_session_status(
     reason: str = "",
     metadata: dict | None = None,
 ) -> dict | None:
-    completed = str(status or "") in _HANDOFF_FINAL_STATUSES
+    normalized_status = str(status or "")
+    completed = is_handoff_final_status(normalized_status)
     event = _handoff_audit_event(
         event_type=event_type,
         controller_id=controller_id,
@@ -10509,13 +10549,19 @@ def transition_handoff_session_status(
                     completed_at = CASE WHEN %s THEN COALESCE(completed_at, now()) ELSE completed_at END,
                     updated_at = now()
                 WHERE id = %s
+                  AND (
+                      status <> ALL(%s)
+                      OR status = %s
+                  )
                 RETURNING *
                 """,
                 (
-                    str(status or ""),
+                    normalized_status,
                     psycopg2.extras.Json([event]),
                     completed,
                     handoff_session_id,
+                    list(_HANDOFF_FINAL_STATUSES),
+                    normalized_status,
                 ),
             )
             row = cur.fetchone()
@@ -10547,6 +10593,11 @@ def append_handoff_audit_event(
 
 
 def expire_handoff_session(*, handoff_session_id: str, reason: str = "expired") -> dict | None:
+    current = get_handoff_session(handoff_session_id=handoff_session_id)
+    if not current:
+        return None
+    if is_handoff_final_status(current.get("status")):
+        return current
     row = transition_handoff_session_status(
         handoff_session_id=handoff_session_id,
         status="expired",

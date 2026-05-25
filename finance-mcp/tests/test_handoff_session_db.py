@@ -82,12 +82,14 @@ def test_handoff_audit_filters_sensitive_nested_metadata():
         metadata={
             "frame": "raw-frame",
             "content": "sms-code",
-            "safe_reason": "manual",
+            "reason": "manual",
             "nested": {
                 "input_text": "123456",
                 "safe_count": 2,
                 "deep": {"screenshot_frame": "abc", "label": "ok"},
             },
+            "frame_width": 1280,
+            "frame_height": 720,
         },
     )
 
@@ -96,9 +98,10 @@ def test_handoff_audit_filters_sensitive_nested_metadata():
     assert "sms-code" not in text
     assert "123456" not in text
     assert "abc" not in text
-    assert event["safe_reason"] == "manual"
-    assert event["nested"]["safe_count"] == 2
-    assert event["nested"]["deep"]["label"] == "ok"
+    assert event["reason"] == "manual"
+    assert event["frame_width"] == 1280
+    assert event["frame_height"] == 720
+    assert "nested" not in event
 
 
 def test_expire_handoff_session_marks_sync_job_failed(monkeypatch):
@@ -147,9 +150,71 @@ def test_ensure_browser_handoff_schema_applies_lifecycle_migration(monkeypatch):
     executed = []
     monkeypatch.setattr(auth_db, "_BROWSER_HANDOFF_SCHEMA_READY", False)
     monkeypatch.setattr(auth_db, "_browser_handoff_schema_ready", lambda: True)
+    monkeypatch.setattr(auth_db, "_browser_handoff_lifecycle_schema_ready", lambda: False)
+    monkeypatch.setattr(auth_db, "_execute_sql_script", lambda path: executed.append(path.name))
+
+    try:
+        auth_db.ensure_browser_handoff_schema()
+        assert False, "expected lifecycle readiness check to fail after migration"
+    except RuntimeError as exc:
+        assert "lifecycle" in str(exc)
+
+    assert executed == ["034_browser_handoff_lifecycle.sql"]
+
+
+def test_ensure_browser_handoff_schema_does_not_reapply_lifecycle_migration(monkeypatch):
+    import auth.db as auth_db
+
+    executed = []
+    monkeypatch.setattr(auth_db, "_BROWSER_HANDOFF_SCHEMA_READY", False)
+    monkeypatch.setattr(auth_db, "_browser_handoff_schema_ready", lambda: True)
+    monkeypatch.setattr(auth_db, "_browser_handoff_lifecycle_schema_ready", lambda: True)
     monkeypatch.setattr(auth_db, "_execute_sql_script", lambda path: executed.append(path.name))
 
     applied = auth_db.ensure_browser_handoff_schema()
 
-    assert applied == ["034_browser_handoff_lifecycle.sql"]
-    assert executed == ["034_browser_handoff_lifecycle.sql"]
+    assert applied == []
+    assert executed == []
+
+
+def test_final_handoff_session_cannot_be_reopened_or_expired(monkeypatch):
+    import auth.db as auth_db
+
+    calls = []
+    monkeypatch.setattr(
+        auth_db,
+        "mark_browser_sync_job_failed",
+        lambda **kwargs: calls.append(kwargs) or {"id": kwargs["sync_job_id"], "job_status": "failed"},
+    )
+
+    auth_db.ensure_browser_handoff_schema()
+    row = auth_db.insert_handoff_session(
+        company_id="00000000-0000-0000-0000-000000000001",
+        sync_job_id="00000000-0000-0000-0000-000000000004",
+        data_source_id=None,
+        agent_id="agent-A",
+        profile_key="店铺A",
+        reason="RISK_VERIFICATION",
+        channel_config_id=None,
+        expires_in_seconds=900,
+    )
+
+    completed = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status="completed",
+        event_type="risk_cleared",
+    )
+    reopened = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status="active",
+        event_type="page_opened",
+    )
+    expired = auth_db.expire_handoff_session(
+        handoff_session_id=str(row["id"]),
+        reason="late expire",
+    )
+
+    assert completed["status"] == "completed"
+    assert reopened is None
+    assert expired["status"] == "completed"
+    assert calls == []

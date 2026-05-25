@@ -9171,6 +9171,40 @@ def _handoff_public_session(row: dict[str, Any], *, controller_id: str = "") -> 
     return view
 
 
+_HANDOFF_PUBLIC_EVENT_STATUS_BY_TYPE = {
+    "controller_connected": "active",
+    "controller_disconnected": "waiting_agent",
+    "controller_waiting_agent": "waiting_agent",
+    "resume_requested": "resuming",
+}
+_HANDOFF_WORKER_EVENT_STATUS_BY_TYPE = {
+    "agent_connected": "active",
+    "agent_disconnected": "waiting_agent",
+    "still_blocked": "active",
+    "risk_cleared": "completed",
+    "handoff_completed": "completed",
+    "handoff_failed": "failed",
+}
+
+
+def _handoff_status_for_event(
+    *,
+    event_type: str,
+    requested_status: str,
+    worker_authenticated: bool,
+) -> str | None:
+    if worker_authenticated:
+        allowed = _HANDOFF_WORKER_EVENT_STATUS_BY_TYPE
+    else:
+        allowed = _HANDOFF_PUBLIC_EVENT_STATUS_BY_TYPE
+    if event_type not in allowed:
+        return None
+    expected = allowed[event_type]
+    if requested_status and requested_status != expected:
+        return None
+    return expected
+
+
 async def _handle_browser_handoff_session_describe(arguments: dict[str, Any]) -> dict[str, Any]:
     row, error = _handoff_row_for_token(str(arguments.get("token") or ""))
     if not row:
@@ -9186,6 +9220,12 @@ async def _handle_browser_handoff_session_control_open(arguments: dict[str, Any]
     row, error = _handoff_row_for_token(token)
     if not row:
         return {"success": False, "error": error}
+    if auth_db.is_handoff_final_status(row.get("status")):
+        return {
+            "success": False,
+            "error": "handoff session 已结束",
+            "session": _handoff_public_session(row, controller_id=controller_id),
+        }
     status = "active" if bool(arguments.get("agent_online", False)) else "waiting_agent"
     updated = auth_db.transition_handoff_session_status(
         handoff_session_id=str(row["id"]),
@@ -9212,6 +9252,7 @@ async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> di
     handoff_session_id = str(arguments.get("handoff_session_id") or "").strip()
     worker_token = str(arguments.get("worker_token") or "")
     row: dict[str, Any] | None = None
+    worker_authenticated = False
     if token:
         row, error = _handoff_row_for_token(token)
         if not row:
@@ -9221,14 +9262,23 @@ async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> di
             _require_scheduler_user(worker_token)
         except ValueError as e:
             return {"success": False, "error": str(e)}
+        worker_authenticated = True
         row = auth_db.get_handoff_session(handoff_session_id=handoff_session_id)
     if not row:
         return {"success": False, "error": "handoff session 不存在"}
+    if auth_db.is_handoff_final_status(row.get("status")):
+        return {"success": False, "error": "handoff session 已结束"}
 
     event_type = str(arguments.get("event_type") or "").strip()
     if not event_type:
         return {"success": False, "error": "missing event_type"}
-    status = str(arguments.get("status") or row.get("status") or "pending").strip()
+    status = _handoff_status_for_event(
+        event_type=event_type,
+        requested_status=str(arguments.get("status") or "").strip(),
+        worker_authenticated=worker_authenticated,
+    )
+    if status is None:
+        return {"success": False, "error": "handoff event/status 不允许"}
     controller_id = str(arguments.get("controller_id") or "").strip()
     agent_id = str(arguments.get("agent_id") or row.get("agent_id") or "").strip()
     updated = auth_db.transition_handoff_session_status(
