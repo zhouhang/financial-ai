@@ -3310,6 +3310,31 @@ async def data_source_get(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_get_browser_playbook_detail(
+    auth_token: str,
+    source_id: str,
+    *,
+    record_limit: int = 100,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    result = await call_mcp_tool(
+        "data_source_get_browser_playbook_detail",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "record_limit": record_limit,
+            "mode": normalized_mode,
+        },
+    )
+    return _attach_mode(result, normalized_mode)
+
+
 async def data_source_create(
     auth_token: str,
     payload: dict[str, Any],
@@ -3449,6 +3474,123 @@ async def data_source_test(
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_test_data_source(auth_token, source_id)
     return _attach_mode(result, normalized_mode)
+
+
+async def data_source_register_browser_playbook(
+    auth_token: str,
+    source_id: str,
+    *,
+    playbook_id: str,
+    version: str,
+    title: str,
+    playbook_body: dict[str, Any],
+    credential_username: str,
+    credential_password: str,
+    verification_biz_date: str,
+    shop_id: str = "",
+    agent_id: str = "",
+    dataset_id: str = "",
+    egress_group: str = "",
+) -> dict[str, Any]:
+    """Wrap finance-mcp's browser playbook registration tool.
+
+    Returns ``{success, status:'verification_pending', verification_sync_job_id, ...}``
+    on accept. The frontend then polls the verification sync_job status and calls
+    ``data_source_finalize_browser_playbook_registration`` after success.
+    """
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_register_browser_playbook",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "playbook_id": playbook_id,
+            "version": version,
+            "title": title,
+            "playbook_body": playbook_body,
+            "shop_id": shop_id,
+            "agent_id": agent_id,
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "verification_biz_date": verification_biz_date,
+            "dataset_id": dataset_id,
+            "egress_group": egress_group,
+        },
+    )
+
+
+async def data_source_register_browser_collection(
+    auth_token: str,
+    *,
+    title: str,
+    credential_username: str,
+    credential_password: str,
+    playbook_body: dict[str, Any],
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not title.strip():
+        return {"success": False, "error": "标题不能为空"}
+    return await call_mcp_tool(
+        "data_source_register_browser_collection",
+        {
+            "auth_token": auth_token,
+            "title": title,
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "playbook_body": playbook_body,
+        },
+    )
+
+
+async def data_source_retry_browser_playbook_verification(
+    auth_token: str,
+    source_id: str,
+    *,
+    verification_biz_date: str = "",
+    dataset_id: str = "",
+    force_collection: bool = True,
+) -> dict[str, Any]:
+    """Create a new verification sync job for an existing browser task."""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_retry_browser_playbook_verification",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "verification_biz_date": verification_biz_date,
+            "dataset_id": dataset_id,
+            "force_collection": bool(force_collection),
+        },
+    )
+
+
+async def data_source_finalize_browser_playbook_registration(
+    auth_token: str,
+    *,
+    verification_sync_job_id: str,
+) -> dict[str, Any]:
+    """Activate playbook + binding after the verification sync_job succeeded."""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not verification_sync_job_id:
+        return {"success": False, "error": "verification_sync_job_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_finalize_browser_playbook_registration",
+        {
+            "auth_token": auth_token,
+            "verification_sync_job_id": verification_sync_job_id,
+        },
+    )
 
 
 async def data_source_authorize(
@@ -4825,3 +4967,50 @@ async def recon_queue_reclaim_stale(worker_token: str, timeout_minutes: int = 15
         "worker_token": worker_token,
         "timeout_minutes": timeout_minutes,
     })
+
+
+async def recon_queue_waiting_data(worker_token: str, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_waiting_data", {"worker_token": worker_token, "job_id": job_id, **payload})
+
+
+async def recon_queue_requeue_ready_waiting(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_requeue_ready_waiting", {"worker_token": worker_token})
+
+
+async def recon_queue_fail_expired_waiting(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool("recon_queue_fail_expired_waiting", {"worker_token": worker_token})
+
+
+async def alipay_auth_invite_describe(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("alipay_auth_invite_describe", {"token": token})
+
+
+async def alipay_auth_invite_continue(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("alipay_auth_invite_continue", {"token": token})
+
+
+async def browser_handoff_session_describe(token: str) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_describe", {"token": token})
+
+
+async def browser_handoff_session_control_open(
+    token: str,
+    controller_id: str,
+    agent_online: bool,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "browser_handoff_session_control_open",
+        {
+            "token": token,
+            "controller_id": controller_id,
+            "agent_online": agent_online,
+        },
+    )
+
+
+async def browser_handoff_session_event(payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_event", payload)
+
+
+async def browser_handoff_session_expire(payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool("browser_handoff_session_expire", payload)

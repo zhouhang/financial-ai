@@ -6,6 +6,10 @@ import {
   normalizeOutputFieldSemanticRole,
   type OutputFieldDraft,
 } from './schemeWizardState';
+import {
+  filterBrowserCollectionFieldItems,
+  isBrowserCollectionTechnicalSchemaSummary,
+} from './browserCollectionSchema';
 import type {
   AiProcQuestionCandidate,
   AiProcQuestion,
@@ -16,7 +20,7 @@ import type {
 
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 type PreviewCellValue = string | number | null;
@@ -41,6 +45,7 @@ export interface RuleGenerationSourceOption {
   resourceKey?: string;
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 export interface RuleGenerationEventDraftUpdate {
@@ -260,11 +265,27 @@ function resolveSourceFieldLabelMap(
 }
 
 function collectSourceFieldCandidates(source: RuleGenerationSourceOption) {
-  const fieldLabelMap = resolveSourceFieldLabelMap(source) || {};
+  const isTechnicalOnlyBrowserSchema = isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  });
+  const rawFieldLabelMap = resolveSourceFieldLabelMap(source) || {};
+  const fieldLabelMap = Object.fromEntries(
+    filterBrowserCollectionFieldItems(
+      Object.entries(rawFieldLabelMap).map(([raw_name, display_name]) => ({ raw_name, display_name })),
+      {
+        schemaSummary: source.schemaSummary,
+        extractConfig: source.extractConfig,
+        sourceKind: source.sourceKind,
+      },
+    ).map((field) => [field.raw_name, field.display_name]),
+  );
   const keyFieldSet = new Set(normalizeStringList(source.keyFields).map((item) => item.trim()));
+  const schemaFieldNames = isTechnicalOnlyBrowserSchema ? [] : extractSchemaFieldNames(source.schemaSummary);
   const rawNames = Array.from(
     new Set<string>([
-      ...extractSchemaFieldNames(source.schemaSummary),
+      ...schemaFieldNames,
       ...Object.keys(fieldLabelMap),
     ]),
   ).map((item) => item.trim()).filter(Boolean);
@@ -361,6 +382,16 @@ export function serializeSchemeSourceForRuleGeneration(
   source: RuleGenerationSourceOption,
   sampleRows: PreviewTableRow[] = [],
 ): Record<string, unknown> {
+  const fieldLabelMap = Object.fromEntries(
+    filterBrowserCollectionFieldItems(
+      Object.entries(source.fieldLabelMap || {}).map(([raw_name, display_name]) => ({ raw_name, display_name })),
+      {
+        schemaSummary: source.schemaSummary,
+        extractConfig: source.extractConfig,
+        sourceKind: source.sourceKind,
+      },
+    ).map((field) => [field.raw_name, field.display_name]),
+  );
   return {
     source_id: source.sourceId,
     dataset_id: source.id,
@@ -372,7 +403,7 @@ export function serializeSchemeSourceForRuleGeneration(
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     description: source.description || '',
-    field_label_map: source.fieldLabelMap || {},
+    field_label_map: fieldLabelMap,
     fields: collectSourceFieldCandidates(source).map((field) => ({
       name: field.rawName,
       label: field.label || field.rawName,

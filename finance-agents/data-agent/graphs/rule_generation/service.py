@@ -2196,21 +2196,13 @@ def _match_field_mention(mention: str, candidates: list[dict[str, str]]) -> dict
     exact_matches = [candidate for candidate in candidates if normalized_mention in _field_match_terms(candidate)]
     if len(exact_matches) == 1:
         exact_candidate = exact_matches[0]
-        more_specific = [
-            candidate
-            for candidate in candidates
-            if candidate is not exact_candidate
-            and any(
-                normalized_mention in term and normalized_mention != term
-                for term in _field_match_terms(candidate)
-            )
-        ]
-        if more_specific:
-            return {
-                "status": "ambiguous",
-                "candidates": [exact_candidate, *more_specific],
-                "evidence": [f"规则描述中的“{mention}”同时可能对应多个更具体字段"],
-            }
+        # An exact full field-name match is authoritative: bind it directly even
+        # when other fields contain the mention as a substring (e.g. 订单号 vs
+        # 子订单号/商户订单号). If the user wanted the more-specific field, they
+        # would write its full name (which would itself be the exact match).
+        # The previous "more specific" escalation made a complete, unambiguous
+        # field name unresolvable — and the suggested "改成完整字段名" was a no-op
+        # because the mention was already the complete name.
         return {
             "status": "bound",
             "selected_field": exact_candidate,

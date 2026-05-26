@@ -17,6 +17,7 @@ load_dotenv(LOCAL_ENV_PATH, override=True)
 import json
 import logging
 import uuid
+import asyncio
 from datetime import datetime
 from typing import Any, Optional
 
@@ -35,6 +36,8 @@ from config import (
     MAX_FILE_SIZE,
     LANGGRAPH_CHECKPOINT_DATABASE_URL,
     LANGGRAPH_CHECKPOINT_SCHEMA,
+    BROWSER_COLLECTION_ALERTS_ENABLED,
+    BROWSER_COLLECTION_ALERT_POLL_SECONDS,
 )
 from graphs.main_graph import create_app
 from utils.db import ensure_tables
@@ -62,6 +65,13 @@ from graphs.recon.scheme_design.api import router as recon_scheme_design_router
 from graphs.platform.api import router as platform_router
 from graphs.data_source.api import router as data_source_router
 from graphs.collaboration.api import router as collaboration_router
+from services.browser_alerts import send_pending_browser_alerts
+from services.browser_agent_gateway import (
+    BrowserAgentConnection,
+    handle_domain_message,
+    verify_system_token,
+)
+from services import browser_handoff_gateway
 
 logging.basicConfig(
     level=logging.INFO,
@@ -336,6 +346,7 @@ app.add_middleware(
 
 langgraph_app = None
 _checkpoint_stack: AsyncExitStack | None = None
+_browser_alert_task = None
 
 # 用于跟踪每个 thread 上传的文件
 _thread_files: dict[str, list[dict]] = {}  # 保存文件信息，包含 file_path 和 original_filename
@@ -382,12 +393,25 @@ async def _close_langgraph_app() -> None:
     langgraph_app = None
 
 
+async def _browser_alert_loop() -> None:
+    import asyncio
+
+    while True:
+        try:
+            send_pending_browser_alerts()
+        except Exception as exc:
+            logger.error("浏览器采集告警巡检失败: %s", exc)
+        await asyncio.sleep(max(10.0, float(BROWSER_COLLECTION_ALERT_POLL_SECONDS)))
+
+
 # ── 启动时初始化 ──────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def on_startup():
+    global _browser_alert_task
     # 启动时打印 LangSmith 追踪配置（便于排查追踪不生效问题）
     import os
+    import asyncio
     tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
     project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT")
     api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
@@ -404,10 +428,17 @@ async def on_startup():
         ensure_tables()
     except Exception as e:
         logger.warning(f"数据库初始化失败（可稍后重试）: {e}")
+    if BROWSER_COLLECTION_ALERTS_ENABLED and _browser_alert_task is None:
+        _browser_alert_task = asyncio.create_task(_browser_alert_loop())
+        logger.info("浏览器采集最小告警巡检已启动，interval=%ss", BROWSER_COLLECTION_ALERT_POLL_SECONDS)
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _browser_alert_task
+    if _browser_alert_task is not None:
+        _browser_alert_task.cancel()
+        _browser_alert_task = None
     await _close_langgraph_app()
 
 
@@ -1164,6 +1195,92 @@ async def websocket_chat(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket 连接已断开")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WebSocket /browser-agent — 采集机接入
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.websocket("/browser-agent")
+async def websocket_browser_agent(ws: WebSocket):
+    """采集机 WS 端点:首帧 hello 鉴权(role=system),之后中转领域消息到 finance-mcp。"""
+    await ws.accept()
+    conn: BrowserAgentConnection | None = None
+    send_lock = asyncio.Lock()
+
+    async def _send_to_agent(payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await ws.send_json(payload)
+
+    try:
+        hello = json.loads(await ws.receive_text())
+        payload = verify_system_token(str(hello.get("token") or "")) if hello.get("type") == "hello" else None
+        if payload is None:
+            await _send_to_agent({"type": "hello_ack", "ok": False, "error": "鉴权失败:需要 role=system 的 token"})
+            await ws.close()
+            return
+        conn = BrowserAgentConnection(
+            token=str(hello.get("token")),
+            agent_id=str(hello.get("agent_id") or ""),
+            max_concurrency=int(hello.get("max_concurrency") or 1),
+        )
+        await browser_handoff_gateway.register_browser_agent(
+            agent_id=conn.agent_id,
+            token=conn.token,
+            send_event=_send_to_agent,
+        )
+        logger.info("browser-agent WS 已连接: agent_id=%s", conn.agent_id)
+        await _send_to_agent({"type": "hello_ack", "ok": True})
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await _send_to_agent({"type": "result", "id": "", "ok": False, "error": "无效的 JSON"})
+                continue
+            if await browser_handoff_gateway.route_agent_message(
+                agent_id=conn.agent_id,
+                token=conn.token,
+                msg=msg,
+            ):
+                continue
+            reply = await handle_domain_message(conn, msg)
+            await _send_to_agent(reply)
+    except WebSocketDisconnect:
+        logger.info("browser-agent WS 断开: agent_id=%s", conn.agent_id if conn else "?")
+    except Exception:
+        logger.exception("browser-agent WS 处理异常")
+    finally:
+        if conn is not None:
+            await browser_handoff_gateway.unregister_browser_agent(conn.agent_id)
+
+
+@app.websocket("/handoff/ws")
+async def websocket_handoff(ws: WebSocket, t: str = ""):
+    """责任人远程接管页 WS:用 handoff token 换取临时控制连接。"""
+    await ws.accept()
+
+    async def _send(payload: dict[str, Any]) -> None:
+        await ws.send_json(payload)
+
+    controller: browser_handoff_gateway.HandoffController | None = None
+    try:
+        controller = await browser_handoff_gateway.open_controller(token=t, send_json=_send)
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await ws.send_json({"type": "error", "error": "无效的 JSON"})
+                continue
+            await browser_handoff_gateway.route_controller_message(controller, msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("handoff WS ended: %s", exc)
+    finally:
+        if controller is not None:
+            await browser_handoff_gateway.close_controller(controller)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

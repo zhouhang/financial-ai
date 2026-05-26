@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+BROWSER_COLLECTION_TECHNICAL_FIELDS = {"storage", "source_type", "dataset_source_type"}
+
 
 def _extract_semantic_profile(dataset: dict[str, Any]) -> dict[str, Any]:
     direct_profile = dataset.get("semantic_profile")
@@ -28,6 +30,52 @@ def _normalize_string_map(raw: Any) -> dict[str, str]:
         value = str(raw_value or "").strip()
         result[key] = value or key
     return result
+
+
+def _dataset_source_kind(dataset: dict[str, Any]) -> str:
+    return str(dataset.get("source_kind") or "").strip().lower()
+
+
+def _browser_collection_source_type(dataset: dict[str, Any]) -> str:
+    candidates: list[Any] = []
+    for key in ("schema_summary", "extract_config", "meta", "metadata", "dataset_meta"):
+        container = dataset.get(key)
+        if isinstance(container, dict):
+            candidates.extend(
+                [
+                    container.get("source_type"),
+                    container.get("dataset_source_type"),
+                    container.get("storage"),
+                ]
+            )
+    candidates.extend(
+        [
+            dataset.get("source_type"),
+            dataset.get("dataset_source_type"),
+            dataset.get("storage"),
+        ]
+    )
+    for value in candidates:
+        text = str(value or "").strip().lower()
+        if text:
+            return text
+    return ""
+
+
+def is_browser_collection_dataset(dataset: dict[str, Any]) -> bool:
+    return (
+        _dataset_source_kind(dataset) in {"browser", "browser_playbook"}
+        and _browser_collection_source_type(dataset) == "browser_collection_records"
+    )
+
+
+def _filter_browser_collection_technical_fields(
+    names: list[str],
+    dataset: dict[str, Any],
+) -> list[str]:
+    if not is_browser_collection_dataset(dataset):
+        return names
+    return [name for name in names if name.strip() not in BROWSER_COLLECTION_TECHNICAL_FIELDS]
 
 
 def _field_names_from_schema(schema_summary: Any) -> list[str]:
@@ -68,14 +116,14 @@ def infer_raw_field_names(dataset: dict[str, Any]) -> list[str]:
     for name in [*from_schema, *from_rows]:
         if name and name not in names:
             names.append(name)
-    return names
+    return _filter_browser_collection_technical_fields(names, dataset)
 
 
 def infer_authoritative_raw_field_names(dataset: dict[str, Any]) -> list[str]:
     """Prefer fields observed in published snapshot rows over stale schema metadata."""
     from_rows = _field_names_from_rows(dataset.get("sample_rows"))
     if from_rows:
-        return from_rows
+        return _filter_browser_collection_technical_fields(from_rows, dataset)
 
     names: list[str] = []
     raw_fields = dataset.get("fields")
@@ -97,7 +145,7 @@ def infer_authoritative_raw_field_names(dataset: dict[str, Any]) -> list[str]:
             if raw_name and raw_name not in names:
                 names.append(raw_name)
     if names:
-        return names
+        return _filter_browser_collection_technical_fields(names, dataset)
 
     direct_map = _normalize_string_map(dataset.get("field_label_map"))
     profile_map = _normalize_string_map(_extract_semantic_profile(dataset).get("field_label_map"))
@@ -105,7 +153,7 @@ def infer_authoritative_raw_field_names(dataset: dict[str, Any]) -> list[str]:
         if raw_name and raw_name not in names:
             names.append(raw_name)
     if names:
-        return names
+        return _filter_browser_collection_technical_fields(names, dataset)
 
     return infer_raw_field_names(dataset)
 
@@ -183,6 +231,17 @@ def ensure_dataset_semantic_context(
     if not isinstance(raw_fields, list):
         raw_fields = profile.get("fields")
     fields = _normalize_fields_list(raw_fields, merged_map)
+    if is_browser_collection_dataset(resolved):
+        fields = [
+            item
+            for item in fields
+            if str(item.get("raw_name") or "").strip() not in BROWSER_COLLECTION_TECHNICAL_FIELDS
+        ]
+        merged_map = {
+            key: value
+            for key, value in merged_map.items()
+            if str(key or "").strip() not in BROWSER_COLLECTION_TECHNICAL_FIELDS
+        }
     for item in fields:
         raw_name = str(item.get("raw_name") or "").strip()
         display_name = str(item.get("display_name") or "").strip()

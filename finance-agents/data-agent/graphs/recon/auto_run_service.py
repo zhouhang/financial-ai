@@ -16,6 +16,7 @@ from graphs.recon.execution_service import (
     build_recon_observation,
     run_recon_execution,
 )
+from graphs.recon.handoff_collection import build_handoff_collection_params
 from graphs.recon.pipeline_service import execute_headless_recon_pipeline
 from services.notifications import get_notification_adapter
 from services.notifications.models import UnifiedTodoStatus
@@ -735,6 +736,25 @@ async def execute_run_plan_run(
         run_context=run_context,
     )
     ctx = _safe_dict(output.get("recon_ctx"))
+    if bool(ctx.get("waiting_data")) or str(ctx.get("failed_stage") or "") == "data_waiting":
+        return {
+            "success": False,
+            "status": "data_waiting",
+            "error": str(
+                ctx.get("failed_reason")
+                or "浏览器采集任务已创建，等待采集完成后继续对账"
+            ),
+            "failed_stage": "data_waiting",
+            "failure_type": "data_waiting",
+            "run_plan_code": run_plan_code,
+            "scheme_code": str(ctx.get("scheme_code") or ""),
+            "biz_date": str(ctx.get("biz_date") or biz_date),
+            "waiting_datasets": _safe_list(ctx.get("waiting_datasets")),
+            "collection_job_ids": [
+                str(v) for v in _safe_list(ctx.get("collection_job_ids")) if str(v)
+            ],
+            "recon_ctx": ctx,
+        }
 
     run_record = _safe_dict(ctx.get("execution_run_record"))
     failed_reason = str(
@@ -785,6 +805,7 @@ async def execute_auto_task_run(
     collection_attempts: list[dict[str, Any]] = []
     collection_trigger_mode = _normalize_collection_trigger_mode(trigger_mode)
     should_collect_first = _should_collect_before_recon(trigger_mode)
+    handoff_params = build_handoff_collection_params(task)
     for binding in bindings:
         if should_collect_first:
             collect_result = await data_source_trigger_dataset_collection(
@@ -795,6 +816,7 @@ async def execute_auto_task_run(
                 biz_date=normalized_biz_date,
                 trigger_mode=collection_trigger_mode,
                 mode="real",
+                params=handoff_params,
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(
@@ -909,6 +931,41 @@ async def execute_auto_task_run(
             "run": _safe_dict(run_detail.get("run")) or run,
             "run_job": run_job_record,
             "missing_bindings": missing_bindings,
+        }
+
+    browser_queued = [
+        item
+        for item in source_collections
+        if str(item.get("collection_driver") or "") == "browser_playbook_remote"
+        and bool(item.get("queued"))
+    ]
+    if browser_queued:
+        # waiting_datasets 必须只包含真正在等浏览器采集的 dataset,
+        # 否则其他 driver 的 binding 会被一起塞进 waiting_data 上下文,导致 poller
+        # 无法判断"这条对账真正在等什么"。
+        waiting_datasets = [
+            {
+                "data_source_id": str(item.get("data_source_id") or item.get("binding", {}).get("data_source_id") or ""),
+                "dataset_id": str(item.get("dataset_id") or item.get("binding", {}).get("dataset_id") or ""),
+                "biz_date": normalized_biz_date,
+            }
+            for item in browser_queued
+        ]
+        collection_job_ids = [
+            str(item.get("job_id") or item.get("id") or "")
+            for item in browser_queued
+            if str(item.get("job_id") or item.get("id") or "")
+        ]
+        return {
+            "success": False,
+            "status": "data_waiting",
+            "error": "浏览器采集任务已创建，等待采集完成后继续对账",
+            "waiting_datasets": waiting_datasets,
+            "collection_job_ids": collection_job_ids,
+            "run_context": {
+                "source_collections": source_collections,
+                "missing_bindings": missing_bindings,
+            },
         }
 
     await recon_auto_run_update(

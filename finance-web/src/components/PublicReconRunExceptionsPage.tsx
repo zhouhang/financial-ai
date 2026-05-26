@@ -3,6 +3,13 @@ import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Eye, Filter, Refre
 import { fetchReconAutoApi } from './recon/autoApi';
 import { cn } from './recon/types';
 import { parsePublicReconRunExceptionsRunId } from './publicReconRunExceptionsRoute';
+import {
+  buildRuntimeSummaryView,
+  formatCount,
+  formatDuration,
+  looksLikeTechnicalName,
+  runtimeBusinessName,
+} from './recon/runRuntimeSummary';
 
 interface ReconCenterRunItem {
   id: string;
@@ -101,19 +108,6 @@ interface CompareValueLine {
   diffValue: string;
 }
 
-interface SourceReadCountMetric {
-  id: string;
-  name: string;
-  count: number | null;
-  note: string;
-}
-
-interface RunMetricsViewModel {
-  matchedSuccessCount: number | null;
-  pendingDifferenceTotal: number;
-  sourceReadCounts: SourceReadCountMetric[];
-}
-
 const PAGE_SIZE = 100;
 const ANYWHERE_WRAP_STYLE = { overflowWrap: 'anywhere' } as const;
 
@@ -151,13 +145,6 @@ function toInt(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function toOptionalInt(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
-}
-
 function toBool(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') return value;
   return fallback;
@@ -192,39 +179,10 @@ function normalizeValue(value: unknown): string {
   }
 }
 
-function formatCount(value: number | null | undefined): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
-  return value.toLocaleString('zh-CN');
-}
-
-function containsChinese(value: string): boolean {
-  return /[\u4e00-\u9fff]/.test(value);
-}
-
-function looksLikeTechnicalName(value: string): boolean {
-  const text = value.trim();
-  if (!text || containsChinese(text)) return false;
-  const normalized = text.toLowerCase();
-  return (
-    /^[a-z_][\w$]*\.[a-z_][\w$]*$/.test(normalized)
-    || /^(ods|dwd|dws|dim|fact|stg|tmp|raw)_/.test(normalized)
-    || /^(public|ods|dwd|dws|dim|fact|stg|tmp|raw)[._]/.test(normalized)
-    || /^[a-z0-9_]+:[a-z0-9_:/.-]+$/.test(normalized)
-  );
-}
-
 function firstText(...values: unknown[]): string {
   for (const value of values) {
     const text = toText(value).trim();
     if (text) return text;
-  }
-  return '';
-}
-
-function firstFriendlyText(...values: unknown[]): string {
-  for (const value of values) {
-    const text = toText(value).trim();
-    if (text && !looksLikeTechnicalName(text)) return text;
   }
   return '';
 }
@@ -239,6 +197,7 @@ function formatDateTime(value: string): string {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
   });
 }
 
@@ -363,42 +322,6 @@ function mapBundle(rawBundle: unknown): PublicExceptionBundle {
   };
 }
 
-function sourceDisplayName(rawSource: unknown): string {
-  const source = asRecord(rawSource);
-  const semanticProfile = asRecord(source.semantic_profile);
-  const metadata = asRecord(source.dataset_metadata);
-  const metadataProfile = asRecord(metadata.semantic_profile);
-  return firstFriendlyText(
-    source.dataset_name,
-    source.business_name,
-    source.display_name,
-    metadata.dataset_name,
-    metadata.business_name,
-    metadata.display_name,
-    metadataProfile.business_name,
-    metadataProfile.display_name,
-    semanticProfile.business_name,
-    semanticProfile.display_name,
-    source.data_source_name,
-    source.name,
-    source.dataset_code,
-  ) || firstText(
-    source.dataset_name,
-    source.business_name,
-    source.display_name,
-    metadata.dataset_name,
-    metadata.business_name,
-    metadata.display_name,
-    metadataProfile.business_name,
-    metadataProfile.display_name,
-    semanticProfile.business_name,
-    source.name,
-    source.dataset_code,
-    source.resource_key,
-    source.table_name,
-  );
-}
-
 function sourceNameAliases(rawSource: unknown, displayName: string): string[] {
   const source = asRecord(rawSource);
   const metadata = asRecord(source.dataset_metadata);
@@ -417,115 +340,20 @@ function sourceNameAliases(rawSource: unknown, displayName: string): string[] {
   ].filter((value) => value && value !== displayName && looksLikeTechnicalName(value))));
 }
 
-function sourceIdentityValues(rawSource: unknown): Set<string> {
-  const source = asRecord(rawSource);
-  const query = asRecord(source.query);
-  const metadata = asRecord(source.dataset_metadata);
-  const records = asRecord(source.collection_records);
-  const values = [
-    source.id,
-    source.dataset_id,
-    source.data_source_id,
-    source.resource_key,
-    source.table_name,
-    source.dataset_code,
-    query.dataset_id,
-    query.resource_key,
-    records.dataset_id,
-    records.resource_key,
-    metadata.external_shop_id,
-    metadata.shop_connection_id,
-  ].map((value) => toText(value).trim()).filter(Boolean);
-  return new Set(values);
-}
-
-function collectionIdentityValues(collection: unknown): Set<string> {
-  const item = asRecord(collection);
-  const binding = asRecord(item.binding);
-  return new Set([
-    ...sourceIdentityValues(item),
-    ...sourceIdentityValues(binding),
-  ]);
-}
-
-function sourceIdentitiesOverlap(a: unknown, b: unknown): boolean {
-  const left = collectionIdentityValues(a);
-  const right = collectionIdentityValues(b);
-  for (const value of left) {
-    if (right.has(value)) return true;
-  }
-  return false;
-}
-
-function firstOptionalInt(...values: unknown[]): number | null {
-  for (const value of values) {
-    const parsed = toOptionalInt(value);
-    if (parsed !== null) return parsed;
-  }
-  return null;
-}
-
-function buildRunMetrics(bundle: PublicExceptionBundle | null): RunMetricsViewModel {
-  const rawRun = asRecord(bundle?.run?.raw);
-  const summary = asRecord(rawRun.recon_result_summary_json);
-  const sourceSnapshot = asRecord(rawRun.source_snapshot_json);
-  const temporarySuppression = asRecord(summary.temporary_suppression);
-  const matchedExact = toOptionalInt(summary.matched_exact);
-  const matchedWithDiff = toOptionalInt(summary.matched_with_diff);
-  const sourceOnly = toOptionalInt(summary.source_only);
-  const targetOnly = toOptionalInt(summary.target_only);
-  const pendingTotal = toOptionalInt(summary.pending_total);
-  const suppressedSourceOnly = toOptionalInt(temporarySuppression.suppressed_source_only);
-  const suppressionLabel = toText(temporarySuppression.label).trim() || '非支付宝支付订单';
-  const hasSummaryCounts = (
-    matchedExact !== null
-    && matchedWithDiff !== null
-    && sourceOnly !== null
-    && targetOnly !== null
-  );
-  const sideCounts = hasSummaryCounts
-    ? [
-      matchedExact + matchedWithDiff + sourceOnly,
-      matchedExact + matchedWithDiff + targetOnly,
-    ]
-    : [null, null];
-  const sourceReadCounts = asList(sourceSnapshot.collections)
-    .slice(0, 2)
-    .map((collection, index): SourceReadCountMetric => {
-      const item = asRecord(collection);
-      const binding = asRecord(item.binding);
-      const name = sourceDisplayName(binding) || sourceDisplayName(item) || `数据源 ${index + 1}`;
-      const note = index === 0 && suppressedSourceOnly !== null && suppressedSourceOnly > 0
-        ? `其中 ${formatCount(suppressedSourceOnly)} 条为${suppressionLabel}`
-        : '';
-      return {
-        id: firstText(
-          binding.input_plan_key,
-          binding.dataset_id,
-          binding.resource_key,
-          binding.table_name,
-          String(index),
-        ),
-        name,
-        count: sideCounts[index] ?? null,
-        note,
-      };
-    });
-
-  return {
-    matchedSuccessCount: matchedExact,
-    pendingDifferenceTotal: pendingTotal ?? bundle?.total ?? (bundle?.exceptions || []).length,
-    sourceReadCounts,
-  };
-}
-
 function normalizeSources(value: unknown): SchemeSourceSummary[] {
   return asList(value)
     .map((item) => {
       const record = asRecord(item);
       const semanticProfile = asRecord(record.semantic_profile);
       const id = toText(record.dataset_id, toText(record.id)).trim();
-      const name = sourceDisplayName(record) || '数据集';
+      const name = runtimeBusinessName(
+        {
+          ...record,
+          business_name: record.business_name || semanticProfile.business_name,
+          display_name: record.display_name || semanticProfile.display_name,
+        },
+        firstText(record.resource_key, record.table_name) || '数据集',
+      );
       return {
         id,
         name,
@@ -1039,6 +867,7 @@ export default function PublicReconRunExceptionsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [keyword, setKeyword] = useState('');
   const [selectedException, setSelectedException] = useState<ReconRunExceptionDetail | null>(null);
+  const [showRunDetails, setShowRunDetails] = useState(false);
 
   const loadBundle = useCallback(async (nextOffset: number) => {
     if (!runId) {
@@ -1099,10 +928,30 @@ export default function PublicReconRunExceptionsPage() {
   const selectedJoinLines = selectedException ? getJoinKeyLines(selectedException, displayContext) : [];
   const selectedCompareLines = selectedException ? getCompareValueLines(selectedException, displayContext) : [];
   const statusMeta = formatExecutionStatus(bundle?.run?.executionStatus || '');
-  const runMetrics = useMemo(() => buildRunMetrics(bundle), [bundle]);
+  const runtimeSummary = useMemo(() => buildRuntimeSummaryView(bundle?.run), [bundle?.run]);
+  const pendingDifferenceTotal = bundle?.total ?? (bundle?.exceptions || []).length;
   const hasPrevious = offset > 0;
   const hasNext = bundle ? offset + bundle.limit < bundle.total : false;
   const uniqueStatuses = statusOptions(bundle?.exceptions || []);
+
+  const renderRuntimeMetric = (label: string, value: string, key?: string) => (
+    <div key={key} className="min-w-[180px] rounded-xl border border-border bg-surface-secondary px-3 py-2">
+      <p className="text-[11px] font-medium text-text-secondary">{label}</p>
+      <p className="mt-1 text-sm font-semibold text-text-primary">{value}</p>
+    </div>
+  );
+
+  const collectionMetricNodes = runtimeSummary.collectionMetrics.map((item, index) => renderRuntimeMetric(
+    `${item.businessName}采集`,
+    `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+    `collection-${item.side || item.businessName}-${index}`,
+  ));
+
+  const preparationMetricNodes = runtimeSummary.preparationMetrics.map((item, index) => renderRuntimeMetric(
+    `整理后${item.businessName}`,
+    `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+    `preparation-${item.side || item.businessName}-${index}`,
+  ));
 
   return (
     <main className="h-screen overflow-y-auto bg-surface-secondary text-text-primary">
@@ -1134,35 +983,66 @@ export default function PublicReconRunExceptionsPage() {
               刷新
             </button>
           </div>
-          {runMetrics.sourceReadCounts.length > 0 ? (
-            <div className="mt-5 grid gap-3 lg:grid-cols-2">
-              {runMetrics.sourceReadCounts.map((item) => (
-                <div key={item.id} className="min-w-0 rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                  <p className="break-words text-sm font-medium text-text-primary">{item.name}</p>
-                  <p className="mt-2 text-lg font-semibold text-text-primary">
-                    数据 {formatCount(item.count)} 条{item.note ? `（${item.note}）` : ''}
+          <div className="mt-5 flex flex-wrap gap-3">
+            {renderRuntimeMetric('对账数据日期', runtimeSummary.bizDate || '--')}
+            {collectionMetricNodes}
+            {preparationMetricNodes}
+            {renderRuntimeMetric('对账耗时', formatDuration(runtimeSummary.reconciliationDurationSeconds))}
+          </div>
+          <div className="mt-4 rounded-2xl border border-border bg-surface-secondary">
+            <button
+              type="button"
+              onClick={() => setShowRunDetails((value) => !value)}
+              className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-text-primary"
+            >
+              <span>运行详情</span>
+              <ChevronDown className={cn('h-4 w-4 transition', showRunDetails && 'rotate-180')} />
+            </button>
+            {showRunDetails ? (
+              <div className="grid gap-3 border-t border-border-subtle px-4 py-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <p className="text-xs text-text-secondary">所属方案</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{bundle?.scheme?.name || bundle?.run?.schemeName || '--'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">运行状态</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{statusMeta.label}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">队列开始时间</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(runtimeSummary.queueStartedAt)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">队列结束时间</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(runtimeSummary.queueFinishedAt)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">队列总耗时</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{formatDuration(runtimeSummary.queueDurationSeconds)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">记录写入开始时间</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(bundle?.run?.startedAt || '')}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">记录写入结束时间</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(bundle?.run?.finishedAt || '')}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary">汇总接收人</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">
+                    {runtimeSummary.notification.recipientName || runtimeSummary.notification.recipientIdentifier || '--'}
                   </p>
                 </div>
-              ))}
-            </div>
-          ) : null}
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">匹配成功</p>
-              <p className="mt-1 text-lg font-semibold text-emerald-700">{formatCount(runMetrics.matchedSuccessCount)}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">待处理差异</p>
-              <p className="mt-1 text-lg font-semibold text-text-primary">{formatCount(runMetrics.pendingDifferenceTotal)}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">开始时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(bundle?.run?.startedAt || '')}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">结束时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(bundle?.run?.finishedAt || '')}</p>
-            </div>
+                <div>
+                  <p className="text-xs text-text-secondary">汇总消息推送状态</p>
+                  <p className="mt-1 text-sm font-medium text-text-primary">
+                    {runtimeSummary.notification.label}
+                    {runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}
+                  </p>
+                </div>
+              </div>
+            ) : null}
           </div>
         </header>
 
@@ -1203,6 +1083,12 @@ export default function PublicReconRunExceptionsPage() {
         ) : null}
 
         <section className="overflow-hidden rounded-[28px] border border-border bg-surface shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-5 py-4">
+            <h2 className="text-base font-semibold text-text-primary">差异列表</h2>
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
+              待处理差异 {formatCount(pendingDifferenceTotal)} 条
+            </span>
+          </div>
           {loading ? (
             <div className="flex min-h-[280px] items-center justify-center gap-2 text-sm text-text-secondary">
               <RefreshCw className="h-4 w-4 animate-spin" />

@@ -30,6 +30,23 @@ def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
 
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _safe_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _proc_side_from_target(target_table: str) -> str:
+    normalized = str(target_table or "").strip().lower()
+    if normalized == "left_recon_ready":
+        return "left"
+    if normalized == "right_recon_ready":
+        return "right"
+    return ""
+
+
 def decide_prepare_node(state: AgentState) -> dict[str, Any]:
     """Decide whether proc prepare is required before recon."""
     ctx = _get_recon_ctx(state)
@@ -237,6 +254,20 @@ async def execute_proc_node(state: AgentState) -> dict[str, Any]:
         ctx["proc_result"] = proc_result
         return {"recon_ctx": ctx}
 
+    runtime_metrics = _safe_dict(ctx.get("runtime_metrics"))
+    preparation_metrics: list[dict[str, Any]] = []
+    proc_runtime_metrics = _safe_dict(proc_result.get("runtime_metrics"))
+    for item in _safe_list(proc_runtime_metrics.get("preparation")):
+        if not isinstance(item, dict):
+            continue
+        target_table = str(item.get("target_table") or "").strip()
+        metric = dict(item)
+        metric["side"] = str(metric.get("side") or _proc_side_from_target(target_table))
+        preparation_metrics.append(metric)
+    if preparation_metrics:
+        runtime_metrics["preparation"] = preparation_metrics
+    ctx["runtime_metrics"] = runtime_metrics
+
     ctx["recon_inputs"] = proc_recon_inputs
     ctx["proc_result"] = proc_result
     ctx["prepare_status"] = "success"
@@ -367,6 +398,10 @@ async def execute_recon_node(state: AgentState) -> dict[str, Any]:
             "run_context": pipeline_result.get("run_context")
             if isinstance(pipeline_result.get("run_context"), dict)
             else run_context,
+            "runtime_metrics": {
+                **_safe_dict(ctx.get("runtime_metrics")),
+                **_safe_dict(pipeline_result.get("runtime_metrics")),
+            },
         }
     )
 

@@ -25,6 +25,14 @@ async def test_execute_proc_preserves_dataset_source_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    preparation_metrics = [
+        {
+            "side": "right",
+            "target_table": "right_recon_ready",
+            "row_count": 1,
+            "duration_seconds": 0.42,
+        }
+    ]
 
     async def fake_execute_proc_rule(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
@@ -38,6 +46,7 @@ async def test_execute_proc_preserves_dataset_source_type(
                 }
             ],
             "generated_files": [],
+            "runtime_metrics": {"preparation": preparation_metrics},
         }
 
     monkeypatch.setattr(nodes, "execute_proc_rule", fake_execute_proc_rule)
@@ -81,6 +90,7 @@ async def test_execute_proc_preserves_dataset_source_type(
     assert dataset_ref["query"]["filters"] == {"业务类型": "交易付款"}
     assert result["recon_ctx"]["prepare_status"] == "success"
     assert result["recon_ctx"]["recon_inputs"][0]["input_type"] == "memory"
+    assert result["recon_ctx"]["runtime_metrics"]["preparation"] == preparation_metrics
 
 
 def test_route_after_execute_proc_stops_on_prepare_error() -> None:

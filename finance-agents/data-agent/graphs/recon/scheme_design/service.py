@@ -45,7 +45,7 @@ from .rule_text_renderer import (
     render_recon_draft_text,
     render_recon_rule_summary,
 )
-from .semantic_utils import ensure_dataset_semantic_context, infer_raw_field_names
+from .semantic_utils import ensure_dataset_semantic_context, infer_raw_field_names, is_browser_collection_dataset
 from .session_store import InMemorySchemeDesignSessionStore
 
 JWT_SECRET = os.getenv("JWT_SECRET", "tally-secret-change-in-production")
@@ -1510,10 +1510,18 @@ class SchemeDesignService:
         if not result.get("success") or not isinstance(result.get("dataset"), dict):
             return {"success": False, "fields": [], "business_name": ""}
         dataset = result["dataset"]
+        source_summary = result.get("source_summary") if isinstance(result.get("source_summary"), dict) else {}
+        if source_summary and not dataset.get("source_kind"):
+            dataset = {
+                **dataset,
+                "source_kind": source_summary.get("source_kind"),
+                "provider_code": source_summary.get("provider_code"),
+            }
         normalized = ensure_dataset_semantic_context(dict(dataset))
         business_name = str(normalized.get("business_name") or "").strip()
         field_label_map = dict(normalized.get("field_label_map") or {})
         fields = normalized.get("fields") if isinstance(normalized.get("fields"), list) else []
+        technical_field_names = {"storage", "source_type", "dataset_source_type"} if is_browser_collection_dataset(normalized) else set()
         # Build display list: prefer explicit fields list, fall back to field_label_map
         field_items: list[dict[str, str]] = []
         seen: set[str] = set()
@@ -1521,12 +1529,16 @@ class SchemeDesignService:
             if not isinstance(field, dict):
                 continue
             raw_name = str(field.get("raw_name") or "").strip()
+            if raw_name in technical_field_names:
+                continue
             if not raw_name or raw_name in seen:
                 continue
             display_name = str(field.get("display_name") or field_label_map.get(raw_name) or raw_name).strip()
             field_items.append({"raw_name": raw_name, "display_name": display_name})
             seen.add(raw_name)
         for raw_name, display_name in field_label_map.items():
+            if raw_name in technical_field_names:
+                continue
             if raw_name in seen:
                 continue
             field_items.append({"raw_name": raw_name, "display_name": display_name or raw_name})

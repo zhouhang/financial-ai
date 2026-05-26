@@ -8,6 +8,7 @@ reuse the same core pipeline steps.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Awaitable, Callable
 
 from graphs.recon.execution_service import (
@@ -76,6 +77,7 @@ async def execute_headless_recon_pipeline(
         }
     """
     display_name_map = dict(ref_to_display_name or {})
+    runtime_metrics: dict[str, Any] = {}
     normalized_run_context = _normalize_run_context(
         run_context=run_context,
         trigger_type=trigger_type,
@@ -101,9 +103,14 @@ async def execute_headless_recon_pipeline(
             "execution_result": {},
             "recon_observation": {},
             "ctx_update": {},
+            "runtime_metrics": runtime_metrics,
         }
 
+    recon_started_at = time.perf_counter()
     recon_result, exec_call_error = await run_recon_execution_fn(execution_request)
+    runtime_metrics["reconciliation"] = {
+        "duration_seconds": round(max(0.0, time.perf_counter() - recon_started_at), 6)
+    }
     if exec_call_error:
         return {
             "ok": False,
@@ -115,6 +122,7 @@ async def execute_headless_recon_pipeline(
             "execution_result": {},
             "recon_observation": {},
             "ctx_update": {},
+            "runtime_metrics": runtime_metrics,
         }
 
     recon_observation = build_recon_observation_fn(
@@ -153,4 +161,5 @@ async def execute_headless_recon_pipeline(
         "execution_result": recon_result if isinstance(recon_result, dict) else {},
         "recon_observation": recon_observation if isinstance(recon_observation, dict) else {},
         "ctx_update": ctx_update,
+        "runtime_metrics": runtime_metrics,
     }

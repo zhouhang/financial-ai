@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -238,6 +239,16 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "platform_code", "claim_code"],
             },
         ),
+        Tool(
+            name="alipay_auth_invite_describe",
+            description="校验支付宝长效授权 token,返回店铺名/应登账号/是否已授权(落地确认页用)。",
+            inputSchema={"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+        ),
+        Tool(
+            name="alipay_auth_invite_continue",
+            description="校验 token 后免登录创建一条 30min 支付宝授权会话,返回支付宝授权 url。",
+            inputSchema={"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+        ),
     ]
 
 
@@ -262,6 +273,10 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return await _handle_list_pending_authorizations(arguments)
     if name == "platform_claim_pending_authorization":
         return await _handle_claim_pending_authorization(arguments)
+    if name == "alipay_auth_invite_describe":
+        return await _handle_alipay_invite_describe(arguments)
+    if name == "alipay_auth_invite_continue":
+        return await _handle_alipay_invite_continue(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -991,6 +1006,16 @@ def _create_logged_background_task(coroutine: Any, *, task_name: str) -> Any:
     return task
 
 
+# 这些错误是"该账单类型本就不支持下载"等永久性、商家无法处理的情况(如支付宝 sub_code
+# TYPE_NOT_SUPPORTED),不应把店铺标记为异常,否则"异常店铺"数会被这类误报长期占住。
+_NON_ACTIONABLE_ERROR_MARKERS = ("TYPE_NOT_SUPPORTED", "不支持下载")
+
+
+def _is_non_actionable_dataset_error(message: Any) -> bool:
+    text = str(message or "")
+    return any(marker in text for marker in _NON_ACTIONABLE_ERROR_MARKERS)
+
+
 def _platform_dataset_sync_summary(*, company_id: str, shop_connection_id: str) -> dict[str, Any]:
     """汇总平台固定数据集同步状态，用于补充店铺/商户列表展示。"""
     try:
@@ -1027,6 +1052,7 @@ def _platform_dataset_sync_summary(*, company_id: str, shop_connection_id: str) 
                 dataset.get("last_error_message")
                 for dataset in matched_datasets
                 if str(dataset.get("last_error_message") or "").strip()
+                and not _is_non_actionable_dataset_error(dataset.get("last_error_message"))
             ),
             "",
         )
@@ -1246,20 +1272,31 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
 
     mode = _normalize_mode(arguments.get("mode"))
     merchant_display_name = str(arguments.get("merchant_display_name") or "").strip()
-    session_extra: dict[str, Any] = {}
     if platform_code == "alipay":
         if not merchant_display_name:
-            return {
-                "success": False,
-                "platform_code": platform_code,
-                "mode": mode,
-                "error": "支付宝授权需要填写商户显示名称",
-            }
-        session_extra = {
-            "merchant_display_name": merchant_display_name,
-            "connection_label": merchant_display_name,
-            "subject_type": "alipay_merchant",
+            return {"success": False, "platform_code": platform_code, "mode": mode,
+                    "error": "支付宝授权需要填写商户显示名称"}
+        base = os.getenv("TALLY_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        if not base:
+            return {"success": False, "platform_code": platform_code, "mode": mode,
+                    "error": "未配置 TALLY_PUBLIC_BASE_URL，无法生成长效授权链接"}
+        from auth.alipay_auth_invite import build_alipay_auth_invite_token
+        invite = build_alipay_auth_invite_token(
+            company_id=company_id,
+            operator_user_id=str(user.get("user_id") or ""),
+            merchant_display_name=merchant_display_name,
+            expected_alipay_account=str(arguments.get("expected_alipay_account") or ""),
+            external_shop_id=str(arguments.get("external_shop_id") or ""),
+        )
+        return {
+            "success": True,
+            "platform_code": "alipay",
+            "auth_mode": "longlived_invite",
+            "auth_url": f"{base}/p/alipay-auth?t={invite}",
+            "mode": mode,
+            "message": "已生成长效专属授权链接(30 天有效)",
         }
+    session_extra: dict[str, Any] = {}
     redirect_uri = str(arguments.get("redirect_uri") or "").strip()
     try:
         app_config = _load_app_config(company_id, platform_code, mode=mode, redirect_uri=redirect_uri)
@@ -1302,6 +1339,67 @@ async def _handle_create_auth_session(arguments: dict[str, Any]) -> dict[str, An
         "expires_in": 1800,
         "message": "已生成授权链接",
     }
+
+
+def _create_alipay_session_for_invite(
+    *, company_id: str, operator_user_id: str, merchant_display_name: str, return_path: str = "/"
+) -> dict[str, Any]:
+    """免登录:用显式 company/operator 建一条 30min alipay auth_session 并返回支付宝授权 url。"""
+    try:
+        app_config = _load_app_config(company_id, "alipay", mode="real")
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    connector = build_connector(app_config)
+    state_token = str(uuid.uuid4())
+    session = auth_db.create_auth_session(
+        company_id=company_id,
+        platform_code="alipay",
+        operator_user_id=operator_user_id or None,
+        state_token=state_token,
+        return_path=return_path,
+        redirect_uri=app_config.redirect_uri,
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        extra={"merchant_display_name": merchant_display_name,
+               "connection_label": merchant_display_name,
+               "subject_type": "alipay_merchant"},
+    )
+    if session is None:
+        return {"success": False, "error": "创建授权会话失败"}
+    return {"success": True,
+            "auth_url": connector.build_auth_url(state=str(session.get("state_token") or "")),
+            "state": str(session.get("state_token") or ""),
+            "session_id": str(session.get("id") or "")}
+
+
+async def _handle_alipay_invite_describe(arguments: dict[str, Any]) -> dict[str, Any]:
+    from auth.alipay_auth_invite import verify_alipay_auth_invite_token
+    payload = verify_alipay_auth_invite_token(str(arguments.get("token") or ""))
+    if not payload:
+        return {"success": True, "valid": False, "error": "链接已失效或无效"}
+    existing = auth_db.get_active_alipay_connection_for_shop(
+        company_id=str(payload["company_id"]),
+        merchant_display_name=str(payload["merchant_display_name"]),
+        external_shop_id=str(payload.get("external_shop_id") or ""),
+    )
+    return {
+        "success": True, "valid": True,
+        "already_authorized": bool(existing),
+        "merchant_display_name": str(payload["merchant_display_name"]),
+        "expected_alipay_account": str(payload.get("expected_alipay_account") or ""),
+    }
+
+
+async def _handle_alipay_invite_continue(arguments: dict[str, Any]) -> dict[str, Any]:
+    from auth.alipay_auth_invite import verify_alipay_auth_invite_token
+    payload = verify_alipay_auth_invite_token(str(arguments.get("token") or ""))
+    if not payload:
+        return {"success": False, "error": "链接已失效或无效"}
+    return _create_alipay_session_for_invite(
+        company_id=str(payload["company_id"]),
+        operator_user_id=str(payload.get("operator_user_id") or ""),
+        merchant_display_name=str(payload["merchant_display_name"]),
+        return_path=str(payload.get("return_path") or "/data-connections?mode=platform&platform=alipay"),
+    )
 
 
 async def _handle_alipay_merchant_auth_callback(arguments: dict[str, Any]) -> dict[str, Any]:

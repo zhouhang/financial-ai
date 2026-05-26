@@ -22,6 +22,10 @@ import type {
   UserTaskRule,
 } from '../types';
 import { fetchReconAutoApi } from './recon/autoApi';
+import {
+  filterBrowserCollectionFieldItems,
+  isBrowserCollectionTechnicalSchemaSummary,
+} from './recon/browserCollectionSchema';
 import SchemeWizardIntentStep from './recon/SchemeWizardIntentStep';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
@@ -67,6 +71,11 @@ import {
   type RunPlanInputDatasetDraft,
 } from './recon/runPlanBindings';
 import {
+  buildRuntimeSummaryView,
+  formatCount,
+  formatDuration,
+} from './recon/runRuntimeSummary';
+import {
   cn,
   type ReconCenterRunItem,
   type ReconCenterTab,
@@ -102,7 +111,7 @@ type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 interface SchemeSourceOption {
@@ -742,7 +751,7 @@ function summarizeReconDraft(
   ].join('\n');
 }
 
-function formatDateTime(value: string): string {
+function formatDateTime(value: string, options: { includeSeconds?: boolean } = {}): string {
   if (!value) return '--';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -752,6 +761,7 @@ function formatDateTime(value: string): string {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    ...(options.includeSeconds ? { second: '2-digit' as const } : {}),
   });
 }
 
@@ -1349,7 +1359,19 @@ function resolveSourceFieldLabelMap(
   source: SchemeSourceOption | SchemeSourceDraft | null | undefined,
 ): Record<string, string> | undefined {
   if (!source) return undefined;
-  return normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap);
+  const fieldLabelMap = normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap);
+  if (!fieldLabelMap) return undefined;
+  const filtered = filterBrowserCollectionFieldItems(
+    Object.entries(fieldLabelMap).map(([raw_name, display_name]) => ({ raw_name, display_name })),
+    {
+      schemaSummary: source.schemaSummary,
+      extractConfig: source.extractConfig,
+      sourceKind: source.sourceKind,
+    },
+  );
+  return filtered.length > 0
+    ? Object.fromEntries(filtered.map((field) => [field.raw_name, field.display_name]))
+    : undefined;
 }
 
 function resolveSampleOriginMeta(
@@ -1535,7 +1557,14 @@ function buildRawSourceRows(
   seedText: string,
 ): PreviewTableRow[] {
   const seed = hashText(`${source.id}-${side}-${seedText}`);
-  const schemaSummaryEntries = Object.entries(asRecord(source.schemaSummary));
+  const schemaSummary = isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })
+    ? {}
+    : asRecord(source.schemaSummary);
+  const schemaSummaryEntries = Object.entries(schemaSummary);
   if (schemaSummaryEntries.length > 0) {
     return Array.from({ length: 3 }, (_, index) => {
       const seq = index + 1;
@@ -1545,6 +1574,9 @@ function buildRawSourceRows(
       ]);
       return Object.fromEntries(rowEntries) as PreviewTableRow;
     });
+  }
+  if (source.sourceKind === 'browser_playbook' || source.sourceKind === 'browser') {
+    return [];
   }
 
   return Array.from({ length: 3 }, (_, index) => {
@@ -1580,6 +1612,15 @@ function buildRawSourceRows(
   });
 }
 
+export function buildDatasetSamplePayloadForTest(
+  source: SchemeSourceOption,
+  side: 'left' | 'right',
+  description = '',
+  seedText = '',
+): Record<string, unknown> {
+  return buildDatasetSamplePayload(source, side, description, seedText);
+}
+
 function buildDatasetSamplePayload(
   source: SchemeSourceOption,
   side: 'left' | 'right',
@@ -1594,6 +1635,7 @@ function buildDatasetSamplePayload(
 ): Record<string, unknown> {
   const tableName = options?.tableName || resolveDatasetTableName(source);
   const sampleRows = options?.sampleRows || buildRawSourceRows(source, side, seedText);
+  const fieldLabelMap = resolveSourceFieldLabelMap(source);
   return {
     side,
     dataset_name: source.name,
@@ -1607,7 +1649,7 @@ function buildDatasetSamplePayload(
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     description,
-    field_label_map: source.fieldLabelMap || undefined,
+    field_label_map: fieldLabelMap,
     prepared_output_fields: options?.preparedOutputFields,
     sample_rows: sampleRows,
   };
@@ -2653,9 +2695,16 @@ interface SourceFieldCandidate {
 function collectSourceFieldCandidates(source: SchemeSourceOption): SourceFieldCandidate[] {
   const fieldLabelMap = resolveSourceFieldLabelMap(source) || {};
   const keyFieldSet = new Set(normalizeStringList(source.keyFields).map((item) => item.trim()));
+  const schemaFieldNames = isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })
+    ? []
+    : extractSchemaFieldNames(source.schemaSummary);
   const rawNames = Array.from(
     new Set<string>([
-      ...extractSchemaFieldNames(source.schemaSummary),
+      ...schemaFieldNames,
       ...Object.keys(fieldLabelMap),
     ]),
   ).map((item) => item.trim()).filter(Boolean);
@@ -2732,8 +2781,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sourceHasRecommendationMetadata(source: SchemeSourceOption): boolean {
-  if (source.fieldLabelMap && Object.keys(source.fieldLabelMap).length > 0) {
+  if (resolveSourceFieldLabelMap(source) && Object.keys(resolveSourceFieldLabelMap(source) || {}).length > 0) {
     return true;
+  }
+  if (isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })) {
+    return false;
   }
   return extractSchemaFieldNames(source.schemaSummary).length > 0;
 }
@@ -3203,6 +3259,7 @@ export default function ReconWorkspace({
   const [focusedRunId, setFocusedRunId] = useState<string | null>(null);
   const [channelLoadError, setChannelLoadError] = useState('');
   const [modalState, setModalState] = useState<CenterModalState | null>(null);
+  const [showRunRuntimeDetails, setShowRunRuntimeDetails] = useState(false);
   const [schemeWizardStep, setSchemeWizardStep] = useState<SchemeWizardStep>(1);
   const [procBuildMode, setProcBuildMode] = useState<ProcBuildMode>('ai_complex_rule');
   const [aiProcSideDrafts, setAiProcSideDrafts] = useState<Record<AiProcSide, AiProcSideDraft>>(() =>
@@ -4214,12 +4271,19 @@ export default function ReconWorkspace({
               return source;
             }
 
-            const fieldEntries = (data.fields as Array<Record<string, string>>)
+            const fieldEntries = filterBrowserCollectionFieldItems(
+              (data.fields as Array<Record<string, string>>)
               .map((item) => ({
-                rawName: toText(item.raw_name).trim(),
-                displayName: toText(item.display_name, toText(item.raw_name)).trim(),
+                raw_name: toText(item.raw_name).trim(),
+                display_name: toText(item.display_name, toText(item.raw_name)).trim(),
               }))
-              .filter((item) => item.rawName);
+              .filter((item) => item.raw_name),
+              {
+                schemaSummary: source.schemaSummary,
+                extractConfig: source.extractConfig,
+                sourceKind: source.sourceKind,
+              },
+            );
             if (fieldEntries.length === 0) {
               return source;
             }
@@ -4227,12 +4291,12 @@ export default function ReconWorkspace({
             return {
               ...source,
               fieldLabelMap: Object.fromEntries(
-                fieldEntries.map((item) => [item.rawName, item.displayName || item.rawName]),
+                fieldEntries.map((item) => [item.raw_name, item.display_name || item.raw_name]),
               ),
               schemaSummary: {
                 ...(source.schemaSummary || {}),
                 columns: fieldEntries.map((item) => ({
-                  name: item.rawName,
+                  name: item.raw_name,
                 })),
               },
             } satisfies SchemeSourceOption;
@@ -7094,6 +7158,13 @@ export default function ReconWorkspace({
     const statusMeta = executionStatusMeta(run.executionStatus);
     const normalizedRunStatus = run.executionStatus.trim().toLowerCase();
     const shouldShowRunFailureInfo = !['success', 'succeeded', 'completed'].includes(normalizedRunStatus);
+    const runtimeSummary = buildRuntimeSummaryView(run);
+    const renderRuntimeMetric = (label: string, value: string, key?: string) => (
+      <div key={key} className="min-w-[180px] rounded-xl border border-border bg-surface-secondary px-3 py-2">
+        <p className="text-[11px] font-medium text-text-secondary">{label}</p>
+        <p className="mt-1 text-sm font-semibold text-text-primary">{value}</p>
+      </div>
+    );
 
     return (
       <>
@@ -7119,39 +7190,54 @@ export default function ReconWorkspace({
             </div>
           ) : null}
           {renderRerunNotice()}
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">所属方案</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.schemeName || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">数据日期</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.dataDate || '--'}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">运行状态</p>
-              <span className={cn('mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-medium', statusMeta.className)}>
-                {statusMeta.label}
-              </span>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">异常数</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{run.anomalyCount}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">开始时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(run.startedAt)}</p>
-            </div>
-            <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-              <p className="text-xs text-text-secondary">结束时间</p>
-              <p className="mt-1 text-sm font-medium text-text-primary">{formatDateTime(run.finishedAt)}</p>
-            </div>
-            {shouldShowRunFailureInfo ? (
-              <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-3">
-                <p className="text-xs text-text-secondary">失败阶段</p>
-                <p className="mt-1 text-sm font-medium text-text-primary">{run.failedStage || '--'}</p>
+          <div className="flex flex-wrap gap-3">
+            {renderRuntimeMetric('对账数据日期', runtimeSummary.bizDate || run.dataDate || '--')}
+            {runtimeSummary.collectionMetrics.map((item, index) => renderRuntimeMetric(
+              `${item.businessName}采集`,
+              `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+              `collection-${item.side || item.businessName}-${index}`,
+            ))}
+            {runtimeSummary.preparationMetrics.map((item, index) => renderRuntimeMetric(
+              `整理后${item.businessName}`,
+              `${formatCount(item.rowCount)} 行耗时 ${formatDuration(item.durationSeconds)}`,
+              `preparation-${item.side || item.businessName}-${index}`,
+            ))}
+            {renderRuntimeMetric('对账耗时', formatDuration(runtimeSummary.reconciliationDurationSeconds))}
+          </div>
+
+          <div className="rounded-2xl border border-border bg-surface-secondary">
+            <button
+              type="button"
+              onClick={() => setShowRunRuntimeDetails((value) => !value)}
+              className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-text-primary"
+            >
+              <span>运行详情</span>
+              <span>{showRunRuntimeDetails ? '收起' : '展开'}</span>
+            </button>
+            {showRunRuntimeDetails ? (
+              <div className="divide-y divide-border-subtle border-t border-border-subtle px-4 py-2">
+                <DetailRow label="所属方案" value={run.schemeName || '--'} />
+                <DetailRow label="运行状态" value={statusMeta.label} />
+                <DetailRow label="队列开始时间" value={formatDateTime(runtimeSummary.queueStartedAt)} />
+                <DetailRow label="队列结束时间" value={formatDateTime(runtimeSummary.queueFinishedAt)} />
+                <DetailRow label="队列总耗时" value={formatDuration(runtimeSummary.queueDurationSeconds)} />
+                <DetailRow label="记录写入开始时间" value={formatDateTime(run.startedAt, { includeSeconds: true })} />
+                <DetailRow label="记录写入结束时间" value={formatDateTime(run.finishedAt, { includeSeconds: true })} />
+                <DetailRow label="汇总接收人" value={runtimeSummary.notification.recipientName || runtimeSummary.notification.recipientIdentifier || '--'} />
+                <DetailRow
+                  label="汇总消息推送状态"
+                  value={`${runtimeSummary.notification.label}${runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}`}
+                />
+                {shouldShowRunFailureInfo ? <DetailRow label="失败阶段" value={run.failedStage || '--'} /> : null}
               </div>
             ) : null}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h4 className="text-base font-semibold text-text-primary">差异列表</h4>
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
+              待处理差异 {formatCount(run.anomalyCount)} 条
+            </span>
           </div>
 
           {shouldShowRunFailureInfo ? (

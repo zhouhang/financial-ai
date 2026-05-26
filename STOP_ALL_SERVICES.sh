@@ -29,6 +29,9 @@ stop_pid_file() {
 stop_pid_file "finance-cron" "/tmp/finance-cron.pid"
 pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
 
+stop_pid_file "browser-agent" "/tmp/browser-agent.pid"
+pkill -f "finance-agents/browser-agent/service.py" 2>/dev/null || true
+
 if [ -f /tmp/recon-workers.pids ]; then
   while IFS= read -r pid; do
     if kill -0 "$pid" 2>/dev/null; then

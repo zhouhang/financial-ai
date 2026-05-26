@@ -6,6 +6,7 @@ import ReconWorkspace from './components/ReconWorkspace';
 import PublicReconRunExceptionsPage from './components/PublicReconRunExceptionsPage';
 import { isPublicReconRunExceptionsPath } from './components/publicReconRunExceptionsRoute';
 import LoginModal from './components/LoginModal';
+import HandoffPage from './handoff/HandoffPage';
 import type { ReconExecutionMode } from './components/recon/ReconConversationBar';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useConversations } from './hooks/useConversations';
@@ -1744,6 +1745,10 @@ function AppShell() {
 }
 
 export default function App() {
+  if (window.location.pathname.toLowerCase() === '/handoff') {
+    return <HandoffPage />;
+  }
+
   if (isPublicReconRunExceptionsPath()) {
     return <PublicReconRunExceptionsPage />;
   }

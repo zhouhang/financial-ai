@@ -224,6 +224,7 @@ class StepsProcRuntime:
         self.tables: dict[str, pd.DataFrame] = {}
         self.schemas: dict[str, TableSchemaState] = {}
         self.materialized_targets: list[str] = []
+        self.target_runtime_seconds: dict[str, float] = {}
         self._active_alias_frames: dict[str, pd.DataFrame] = {}
         self._lookup_cache: dict[tuple[str, tuple[str, ...]], dict[tuple[Any, ...], dict[str, Any]]] = {}
         self._row_index_cache: dict[str, dict[tuple[Any, ...], int]] = {}
@@ -354,6 +355,11 @@ class StepsProcRuntime:
                 cause=f"不支持的 step action: {action}",
                 suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
             )
+        elapsed_seconds = time.perf_counter() - start_time
+        if target_table:
+            self.target_runtime_seconds[target_table] = (
+                self.target_runtime_seconds.get(target_table, 0.0) + elapsed_seconds
+            )
         if target_table and target_table not in self.materialized_targets:
             self.materialized_targets.append(target_table)
         target_df = self.tables.get(target_table)
@@ -361,7 +367,7 @@ class StepsProcRuntime:
             "[steps_runtime] step done: rule_code=%s step_id=%s elapsed=%.3fs rows=%s cols=%s",
             self.rule_code,
             step_id,
-            time.perf_counter() - start_time,
+            elapsed_seconds,
             len(target_df) if target_df is not None else "NA",
             len(target_df.columns) if target_df is not None else "NA",
         )
@@ -2289,6 +2295,7 @@ class StepsProcRuntime:
                     "target_table": table_name,
                     "output_file": str(output_path),
                     "row_count": int(len(df)),
+                    "duration_seconds": round(self.target_runtime_seconds.get(table_name, 0.0), 6),
                 }
             )
         return exports
@@ -2308,6 +2315,7 @@ class StepsProcRuntime:
                     "rule_id": table_name,
                     "target_table": table_name,
                     "row_count": int(len(df)),
+                    "duration_seconds": round(self.target_runtime_seconds.get(table_name, 0.0), 6),
                     "dataframe": export_df.copy(),
                 }
             )

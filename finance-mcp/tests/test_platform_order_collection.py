@@ -2439,6 +2439,85 @@ async def test_collection_detail_routes_platform_order_dataset_to_order_line_hel
 
 
 @pytest.mark.anyio
+async def test_collection_detail_routes_browser_dataset_to_browser_collection_records(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_resolve_dataset_row",
+        lambda **kwargs: {
+            "id": "dataset-browser-1",
+            "data_source_id": "source-browser-1",
+            "dataset_code": "browser-collection-af74d2b25a",
+            "dataset_name": "单枪旗舰店-收支账单",
+            "resource_key": "browser-collection-af74d2b25a@1",
+            "extract_config": {
+                "source_type": "browser_collection_records",
+                "storage": "browser_collection_records",
+            },
+            "meta": {"source_type": "browser_collection_records"},
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_sync_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(data_sources, "_enrich_jobs_with_latest_attempts", lambda company_id, jobs: jobs)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_dataset_collection_record_stats",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_browser_collection_record_stats",
+        lambda **kwargs: {"total_count": 2},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        lambda **kwargs: [
+            {
+                "id": "record-browser-1",
+                "payload": {"订单号": "T1", "金额": "12.30"},
+                "biz_date": "2026-05-24",
+            },
+            {
+                "id": "record-browser-2",
+                "payload": {"订单号": "T2", "金额": "45.60"},
+                "biz_date": "2026-05-24",
+            },
+        ],
+    )
+
+    result = await data_sources._handle_data_source_get_dataset_collection_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-browser-1",
+            "dataset_id": "dataset-browser-1",
+            "sample_limit": 10,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["collection_stats"]["total_count"] == 2
+    assert result["rows"] == [{"订单号": "T1", "金额": "12.30"}, {"订单号": "T2", "金额": "45.60"}]
+    assert result["row_count"] == 2
+
+
+@pytest.mark.anyio
 async def test_list_collection_records_reads_alipay_platform_bill_lines(
     monkeypatch,
 ) -> None:

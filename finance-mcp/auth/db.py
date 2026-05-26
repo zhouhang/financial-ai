@@ -3,7 +3,9 @@
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +13,7 @@ import time
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from psycopg2 import OperationalError, InterfaceError
 
 try:
@@ -29,6 +32,9 @@ _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
+_RECON_EXECUTION_QUEUE_SCHEMA_READY = False
+_BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
+_BROWSER_HANDOFF_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
     "data_sources",
@@ -119,6 +125,18 @@ _PLATFORM_ALIPAY_SEMANTIC_PROFILE_HIDDEN_FIELDS = (
     "payload",
     "meta",
     "metadata",
+)
+
+_RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS = (
+    "next_retry_at",
+    "wait_deadline_at",
+    "waiting_reason",
+    "waiting_datasets",
+    "collection_job_ids",
+)
+
+_RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS = (
+    "recon_execution_queue_status_check",
 )
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
@@ -279,10 +297,39 @@ def _get_db_config() -> dict:
     return db_config.get_connection_params()
 
 
+_DB_POOL: "psycopg2.pool.ThreadedConnectionPool | None" = None
+_DB_POOL_LOCK = threading.Lock()
+
+
+def _db_pool_enabled() -> bool:
+    """连接池开关。env DB_POOL=0/false/no 可一键退回"每次新建连接"的旧行为。"""
+    return os.getenv("DB_POOL", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _get_pool() -> "psycopg2.pool.ThreadedConnectionPool":
+    global _DB_POOL
+    if _DB_POOL is None:
+        with _DB_POOL_LOCK:
+            if _DB_POOL is None:
+                maxconn = max(2, int(os.getenv("DB_POOL_MAXCONN", "16") or "16"))
+                _DB_POOL = psycopg2.pool.ThreadedConnectionPool(1, maxconn, **_get_db_config())
+                logger.info("数据库连接池已初始化 (maxconn=%d)", maxconn)
+    return _DB_POOL
+
+
 def get_conn(max_retries=3, retry_delay=1):
-    """获取数据库连接的上下文管理器，带重试机制"""
+    """获取数据库连接的上下文管理器，带重试机制。
+
+    默认从连接池借用，避免每次新建连接(~13ms)的开销;用完归还而非关闭。
+    陈旧连接由 `_ConnectionContextManager.cursor()` 的 SELECT 1 存活检测兜底。
+    设 env DB_POOL=0 可退回"每次新建连接"的旧行为(出问题时的安全阀)。
+    """
+    pooled = _db_pool_enabled()
     for attempt in range(max_retries):
         try:
+            if pooled:
+                pool = _get_pool()
+                return _ConnectionContextManager(pool.getconn(), pool=pool)
             conn = psycopg2.connect(**_get_db_config())
             return _ConnectionContextManager(conn)
         except (OperationalError, InterfaceError) as e:
@@ -344,6 +391,27 @@ def _column_exists(table_name: str, column_name: str, *, schema: str = "public")
         logger.error(
             f"检查列是否存在失败 (schema={schema}, table={table_name}, column={column_name}): {e}"
         )
+        raise
+
+
+def _table_columns(table_name: str, *, schema: str = "public") -> list[str]:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s
+                      AND table_name = %s
+                    ORDER BY ordinal_position ASC
+                    """,
+                    (schema, table_name),
+                )
+                return [str(row[0]) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"检查表列失败 (schema={schema}, table={table_name}): {e}")
         raise
 
 
@@ -456,6 +524,110 @@ def _platform_alipay_bill_lines_schema_ready() -> bool:
             for index_name in _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_INDEXES
         )
         and _trigger_exists(table_name, _PLATFORM_ALIPAY_BILL_LINES_REQUIRED_TRIGGER)
+        )
+
+
+def _recon_execution_queue_schema_ready() -> bool:
+    if not _table_exists("recon_execution_queue"):
+        return False
+
+    return all(
+        _column_exists("recon_execution_queue", column_name)
+        for column_name in _RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS
+    ) and all(_constraint_exists("recon_execution_queue", constraint_name) for constraint_name in _RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS)
+
+
+def _browser_playbook_collection_schema_ready() -> bool:
+    required_tables = (
+        "playbooks",
+        "agents",
+        "shop_runtime_bindings",
+        "browser_collection_records",
+        "browser_capture_files",
+    )
+    if not all(_table_exists(table_name) for table_name in required_tables):
+        return False
+
+    required_columns = {
+        "playbooks": (
+            "company_id",
+            "playbook_id",
+            "version",
+            "description",
+            "schema_check_result",
+            "replay_result",
+            "sample_data_path",
+            "transcript_path",
+            "canary_shop_ids",
+            "emergency_page_changed",
+            "bypass_canary_reason",
+            "created_by",
+            "approved_by",
+            "approved_at",
+            "canary_started_at",
+            "canary_completed_at",
+            "status",
+        ),
+        "browser_capture_files": (
+            "company_id",
+            "data_source_id",
+            "dataset_id",
+            "sync_job_id",
+            "resource_key",
+            "shop_id",
+            "playbook_id",
+            "biz_date",
+            "storage_path",
+            "encoding",
+            "checksum",
+            "row_count",
+            "created_at",
+            "updated_at",
+        ),
+        "browser_collection_records": (
+            "company_id",
+            "data_source_id",
+            "dataset_id",
+            "biz_date",
+            "item_key",
+            "item_hash",
+            "payload",
+            "record_status",
+        ),
+        "shop_runtime_bindings": (
+            "profile_status",
+            "playbook_status",
+            "cron_pause_reason",
+            "runtime_profile_ref",
+        ),
+        "recon_execution_queue": (
+            "next_retry_at",
+            "wait_deadline_at",
+            "waiting_reason",
+            "waiting_datasets",
+            "collection_job_ids",
+            "data_wait_resume_count",
+            "last_data_wait_resumed_at",
+        ),
+        "sync_jobs": (
+            "next_retry_at",
+            "browser_fail_reason",
+            "max_attempts",
+            "is_verification",
+        ),
+    }
+    return all(
+        _column_exists(table_name, column_name)
+        for table_name, column_names in required_columns.items()
+        for column_name in column_names
+    ) and (
+        "draft" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "replayed" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "approved" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "canary" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "active" in _constraint_definition("playbooks", "playbooks_status_check")
+        and "deprecated" in _constraint_definition("playbooks", "playbooks_status_check")
+        and _recon_execution_queue_schema_ready()
     )
 
 
@@ -622,6 +794,7 @@ def ensure_unified_data_source_schema() -> list[str]:
     if _alipay_semantic_profiles_need_hidden_field_cleanup():
         _execute_sql_script(_migration_path("029_clean_alipay_semantic_profiles.sql"))
         applied.append("029_clean_alipay_semantic_profiles.sql")
+    applied.extend(ensure_data_sources_browser_playbook_kind_schema())
     applied.extend(ensure_sync_jobs_trigger_modes_schema())
 
     remaining_missing_tables = sorted(
@@ -652,7 +825,6 @@ def ensure_unified_data_source_schema() -> list[str]:
         )
     if not _platform_alipay_bill_lines_schema_ready():
         raise RuntimeError("支付宝账单行 schema 仍不完整，自动迁移后仍缺少必要列、约束、索引或触发器")
-
     _UNIFIED_DATA_SOURCE_SCHEMA_READY = True
     if applied:
         logger.info("统一数据源 schema 已自动补齐: %s", ", ".join(applied))
@@ -681,6 +853,25 @@ def ensure_sync_jobs_trigger_modes_schema() -> list[str]:
 
     _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
     logger.info("sync_jobs.trigger_mode 约束已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_data_sources_browser_playbook_kind_schema() -> list[str]:
+    """确保 data_sources.source_kind 允许 browser_playbook。"""
+    if not _table_exists("data_sources"):
+        return []
+
+    constraint_def = _constraint_definition("data_sources", "data_sources_source_kind_check")
+    if "browser_playbook" in constraint_def:
+        return []
+
+    migration_name = "032_data_sources_browser_playbook_source_kind.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("data_sources", "data_sources_source_kind_check")
+    if "browser_playbook" not in applied_constraint_def:
+        raise RuntimeError("data_sources.source_kind 约束升级失败，browser_playbook 仍不可用")
+
+    logger.info("data_sources.source_kind 约束已自动补齐: %s", migration_name)
     return [migration_name]
 
 
@@ -748,17 +939,142 @@ def ensure_platform_pending_authorizations_schema() -> list[str]:
     return [migration_name]
 
 
+def ensure_recon_execution_queue_schema() -> list[str]:
+    """确保 recon_execution_queue 已包含浏览器首店流程依赖的 waiting_data 结构。"""
+    global _RECON_EXECUTION_QUEUE_SCHEMA_READY
+    if _RECON_EXECUTION_QUEUE_SCHEMA_READY:
+        return []
+    if _recon_execution_queue_schema_ready():
+        _RECON_EXECUTION_QUEUE_SCHEMA_READY = True
+        return []
+
+    migration_name = "019_recon_execution_queue.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _recon_execution_queue_schema_ready():
+        raise RuntimeError("recon_execution_queue schema 升级失败，waiting_data 结构仍不完整")
+
+    _RECON_EXECUTION_QUEUE_SCHEMA_READY = True
+    logger.info("recon_execution_queue schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_browser_playbook_collection_schema() -> list[str]:
+    """确保浏览器采集首店 schema 已安装。"""
+    global _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY
+    if _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY:
+        return []
+    applied: list[str] = []
+    applied.extend(ensure_recon_execution_queue_schema())
+    if _browser_playbook_collection_schema_ready():
+        _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
+        return applied
+
+    migration_name = "031_browser_playbook_collection.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _browser_playbook_collection_schema_ready():
+        raise RuntimeError("browser_playbook collection schema 升级失败，仍缺少必要表或列")
+
+    _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = True
+    logger.info("browser_playbook collection schema 已自动补齐: %s", migration_name)
+    applied.append(migration_name)
+    return applied
+
+
+def _browser_handoff_schema_ready() -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("select to_regclass('public.browser_handoff_sessions')")
+                return cur.fetchone()[0] is not None
+    except Exception:
+        return False
+
+
+def _browser_handoff_lifecycle_schema_ready() -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        to_regclass('public.idx_handoff_sessions_agent_status'),
+                        to_regclass('public.idx_handoff_sessions_expires_at')
+                    """
+                )
+                row = cur.fetchone()
+                return bool(row and row[0] is not None and row[1] is not None)
+    except Exception:
+        return False
+
+
+def ensure_browser_handoff_schema() -> list[str]:
+    global _BROWSER_HANDOFF_SCHEMA_READY
+    if _BROWSER_HANDOFF_SCHEMA_READY:
+        return []
+    applied: list[str] = []
+    if not _browser_handoff_schema_ready():
+        migration_name = "033_browser_handoff_sessions.sql"
+        _execute_sql_script(_migration_path(migration_name))
+        applied.append(migration_name)
+    if not _browser_handoff_schema_ready():
+        raise RuntimeError("browser_handoff schema 升级失败")
+
+    if not _browser_handoff_lifecycle_schema_ready():
+        lifecycle_migration = "034_browser_handoff_lifecycle.sql"
+        _execute_sql_script(_migration_path(lifecycle_migration))
+        applied.append(lifecycle_migration)
+    if not _browser_handoff_lifecycle_schema_ready():
+        raise RuntimeError("browser_handoff lifecycle schema 升级失败")
+
+    _BROWSER_HANDOFF_SCHEMA_READY = True
+    if applied:
+        logger.info("browser_handoff schema 已自动补齐: %s", ", ".join(applied))
+    return applied
+
+
+def ensure_schema() -> list[str]:
+    """确保 auth 侧当前任务需要的基础 schema 已就绪。"""
+    applied = ensure_unified_data_source_schema()
+    applied.extend(ensure_browser_playbook_collection_schema())
+    applied.extend(ensure_browser_handoff_schema())
+    return applied
+
+
 class _ConnectionContextManager:
-    """数据库连接的上下文管理器类"""
-    def __init__(self, conn):
+    """数据库连接的上下文管理器类。
+
+    `pool` 非空时连接来自连接池:退出时清理事务后归还(而非关闭);
+    `pool` 为空时为直连模式,退出时关闭连接(DB_POOL=0 的旧行为)。
+    """
+    def __init__(self, conn, pool=None):
         self.conn = conn
+        self._pool = pool
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.conn:
+        if not self.conn:
+            return
+        if self._pool is None:
+            # 直连模式:关闭
             self.conn.close()
+            self.conn = None
+            return
+        # 池化模式:清理未提交事务(写操作均已显式 commit,这里只清残留)后归还。
+        # 若连接已坏,标记 close=True 让池丢弃该槽并补建,保持池计数正确。
+        try:
+            self.conn.rollback()
+            self._pool.putconn(self.conn)
+        except Exception:
+            try:
+                self._pool.putconn(self.conn, close=True)
+            except Exception:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+        self.conn = None
 
     def cursor(self, cursor_factory=None):
         """获取游标，自动处理连接失效"""
@@ -768,10 +1084,21 @@ class _ConnectionContextManager:
                 test_cursor.execute('SELECT 1')
         except (OperationalError, InterfaceError):
             logger.warning("数据库连接已失效，尝试重新连接")
-            self.conn.close()
-            # 重新建立连接
-            self.conn = psycopg2.connect(**_get_db_config())
-        
+            if self._pool is not None:
+                # 把坏连接还给池并标记关闭,再借一个新的,保持池计数正确
+                try:
+                    self._pool.putconn(self.conn, close=True)
+                except Exception:
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                self.conn = self._pool.getconn()
+            else:
+                self.conn.close()
+                # 重新建立连接
+                self.conn = psycopg2.connect(**_get_db_config())
+
         return self.conn.cursor(cursor_factory=cursor_factory)
 
     def commit(self):
@@ -1867,6 +2194,41 @@ def update_shop_connection_status(
                 return _normalize_record(dict(row)) if row else None
     except Exception as e:
         logger.error(f"更新 shop_connections 状态失败 (id={shop_connection_id}, status={status}): {e}")
+        return None
+
+
+def get_active_alipay_connection_for_shop(
+    *, company_id: str, merchant_display_name: str, external_shop_id: str = ""
+) -> dict | None:
+    """查该企业下是否已有匹配该店的有效(active)支付宝连接,用于落地页幂等。
+
+    匹配规则:同 company + platform='alipay' + status='active',且
+    external_shop_name == merchant_display_name 或(external_shop_id 非空且相等)。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, external_shop_id, external_shop_name, status
+                    FROM shop_connections
+                    WHERE company_id = %s
+                      AND platform_code = 'alipay'
+                      AND status = 'active'
+                      AND (
+                          external_shop_name = %s
+                          OR (%s <> '' AND external_shop_id = %s)
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, merchant_display_name, external_shop_id, external_shop_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"get_active_alipay_connection_for_shop 失败: {e}")
         return None
 
 
@@ -3207,11 +3569,7 @@ def get_sync_job(
                 if company_id:
                     cur.execute(
                         """
-                        SELECT id, company_id, data_source_id, job_type, trigger_type, status,
-                               idempotency_key, resource_scope, requested_window_start,
-                               requested_window_end, requested_cursor, active_attempt_no,
-                               requested_by, run_context, error_summary, started_at, finished_at,
-                               created_at, updated_at
+                        SELECT *
                         FROM sync_jobs
                         WHERE id = %s AND company_id = %s
                         LIMIT 1
@@ -3221,11 +3579,7 @@ def get_sync_job(
                 else:
                     cur.execute(
                         """
-                        SELECT id, company_id, data_source_id, job_type, trigger_type, status,
-                               idempotency_key, resource_scope, requested_window_start,
-                               requested_window_end, requested_cursor, active_attempt_no,
-                               requested_by, run_context, error_summary, started_at, finished_at,
-                               created_at, updated_at
+                        SELECT *
                         FROM sync_jobs
                         WHERE id = %s
                         LIMIT 1
@@ -4384,6 +4738,37 @@ def update_unified_data_source_dataset_catalog(
         return None
 
 
+def update_unified_data_source_dataset_schema_columns(
+    *,
+    dataset_id: str,
+    columns: list[dict[str, Any]],
+) -> dict | None:
+    """写入数据集 schema_summary.columns（浏览器采集数据集发布后物化字段 schema，
+    供对账向导选择日期/匹配字段；浏览器数据集"直接发布"不走语义档，否则没有列结构）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE data_source_datasets
+                    SET schema_summary = jsonb_set(
+                            COALESCE(schema_summary, '{}'::jsonb), '{columns}', %s::jsonb, true
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id, schema_summary
+                    """,
+                    (json.dumps(columns or [], ensure_ascii=False), dataset_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"更新 data_source_datasets schema_summary.columns 失败 (id={dataset_id}): {e}")
+        return None
+
+
 def touch_unified_data_source_dataset_usage(
     *,
     company_id: str,
@@ -4859,7 +5244,8 @@ def get_unified_sync_job_by_id(sync_job_id: str) -> dict | None:
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE id = %s
                     LIMIT 1
@@ -4890,7 +5276,8 @@ def find_unified_sync_job_by_idempotency_key(
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE company_id = %s
                       AND data_source_id = %s
@@ -4925,7 +5312,8 @@ def list_unified_sync_jobs(
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, next_retry_at, browser_fail_reason, max_attempts,
+                           is_verification, started_at, completed_at, created_at, updated_at
                     FROM sync_jobs
                     WHERE company_id = %s
                 """
@@ -5189,7 +5577,7 @@ def find_inflight_dataset_collection_sync_job(
                     WHERE company_id = %s
                       AND data_source_id = %s
                       AND resource_key = %s
-                      AND job_status IN ('pending', 'running')
+                      AND job_status IN ('pending', 'running', 'waiting_human_verification', 'resuming')
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                       AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
@@ -5259,6 +5647,48 @@ def find_recent_success_dataset_collection_sync_job(
         return None
 
 
+def find_success_dataset_collection_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> dict | None:
+    """查找同一数据集业务日期最近一次成功采集任务，不按 completed_at 做 TTL 限制。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                           window_start, window_end, idempotency_key, job_status,
+                           request_payload, checkpoint_before, checkpoint_after,
+                           active_snapshot_id, published_snapshot_id, current_attempt,
+                           error_message, started_at, completed_at, created_at, updated_at
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status = 'success'
+                      AND request_payload ->> 'dataset_id' = %s
+                      AND request_payload ->> 'biz_date' = %s
+                    ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id, resource_key, dataset_id, biz_date),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            "查询成功采集任务失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return None
+
+
 def create_or_reuse_dataset_collection_sync_job(
     *,
     company_id: str,
@@ -5294,7 +5724,7 @@ def create_or_reuse_dataset_collection_sync_job(
                     WHERE company_id = %s
                       AND data_source_id = %s
                       AND resource_key = %s
-                      AND job_status IN ('pending', 'running')
+                      AND job_status IN ('pending', 'running', 'waiting_human_verification', 'resuming')
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                       AND updated_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
@@ -5396,6 +5826,897 @@ def create_or_reuse_dataset_collection_sync_job(
             f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
         )
         return {"job": None, "reused": False, "reuse_reason": "", "error": str(e)}
+
+
+def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: int = 2) -> dict | None:
+    """原子领取下一条待执行的 browser_playbook sync job,带 enrich。
+
+    返回的 dict 在标准 sync_jobs 字段之外,额外携带 browser-agent 执行所需的所有运行时上下文:
+    shop_id / playbook_id / playbook_version / playbook_body / runtime_profile_ref /
+    egress_group / credential_ref / browser_binding。browser-agent 据此构造 RUN_PLAYBOOK 消息,
+    不再依赖 request_payload 自带 shop_id 或 playbook_body。
+
+    过滤条件:
+      - sync_job pending
+      - data_source.source_kind = 'browser_playbook',且 active + is_enabled
+      - shop_runtime_bindings.agent_id = :agent_id
+      - verification 允许重新领取登录态异常的 binding,便于人工/凭证重验;
+        生产采集要求 profile_status=active 且 playbook_status=ok(健康门下沉到 claim 层)
+      - 当前 agent in-flight 浏览器任务数 < agent_max_concurrency(DB 层并发硬保护)
+      - 已到 next_retry_at(为 NULL 视为可立即领取)
+      - playbook.status='active'(canary 版本路由暂未实现,见 Deferred)
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    WITH running_for_agent AS (
+                        SELECT COUNT(*) AS running_count
+                        FROM sync_jobs running_jobs
+                        JOIN data_sources running_ds ON running_ds.id = running_jobs.data_source_id
+                        JOIN shop_runtime_bindings running_srb
+                          ON running_srb.company_id = running_jobs.company_id
+                         AND running_srb.data_source_id = running_jobs.data_source_id
+                        WHERE running_jobs.job_status = 'running'
+                          AND running_ds.source_kind = 'browser_playbook'
+                          AND running_srb.agent_id = %s
+                    ),
+                    claimed AS (
+                        SELECT sync_jobs.id,
+                               jsonb_build_object(
+                                   'shop_id', srb.shop_id,
+                                   'agent_id', srb.agent_id,
+                                   'playbook_id', srb.playbook_id,
+                                   'runtime_profile_ref', COALESCE(srb.runtime_profile_ref, ''),
+                                   'egress_group', COALESCE(srb.egress_group, ''),
+                                   'credential_ref', COALESCE(srb.credential_ref, ''),
+                                   'profile_status', srb.profile_status,
+                                   'playbook_status', srb.playbook_status
+                               ) AS browser_binding,
+                               srb.shop_id,
+                               srb.playbook_id,
+                               COALESCE(srb.runtime_profile_ref, '') AS runtime_profile_ref,
+                               COALESCE(srb.egress_group, '') AS egress_group,
+                               COALESCE(srb.credential_ref, '') AS credential_ref,
+                               p.version AS playbook_version,
+                               p.playbook_body
+                        FROM sync_jobs
+                        CROSS JOIN running_for_agent
+                        JOIN data_sources ds ON ds.id = sync_jobs.data_source_id
+                        JOIN shop_runtime_bindings srb
+                          ON srb.company_id = sync_jobs.company_id
+                         AND srb.data_source_id = sync_jobs.data_source_id
+                        JOIN playbooks p
+                          ON p.company_id = sync_jobs.company_id
+                         AND p.playbook_id = srb.playbook_id
+                         AND (
+                              (sync_jobs.is_verification = TRUE AND p.status IN ('draft', 'active'))
+                              OR (sync_jobs.is_verification = FALSE AND p.status = 'active')
+                         )
+                        WHERE sync_jobs.job_status = 'pending'
+                          AND ds.source_kind = 'browser_playbook'
+                          AND ds.status = 'active'
+                          AND ds.is_enabled = TRUE
+                          AND srb.agent_id = %s
+                          -- verification dry-run 允许重验登录态异常 binding;
+                          -- 生产采集要求 binding 完全健康(profile=active AND playbook=ok)。
+                          AND (
+                              (sync_jobs.is_verification = TRUE AND srb.profile_status IN ('verifying', 'active', 'needs_reauth', 'risk_blocked'))
+                              OR (sync_jobs.is_verification = FALSE AND srb.profile_status = 'active' AND srb.playbook_status = 'ok')
+                          )
+                          AND running_for_agent.running_count < %s
+                          AND (sync_jobs.next_retry_at IS NULL OR sync_jobs.next_retry_at <= CURRENT_TIMESTAMP)
+                        ORDER BY sync_jobs.created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE sync_jobs
+                    SET job_status = 'running',
+                        started_at = CURRENT_TIMESTAMP,
+                        current_attempt = COALESCE(current_attempt, 0) + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM claimed
+                    WHERE sync_jobs.id = claimed.id
+                    RETURNING sync_jobs.id, sync_jobs.company_id, sync_jobs.data_source_id,
+                              sync_jobs.trigger_mode, sync_jobs.resource_key,
+                              sync_jobs.window_start, sync_jobs.window_end,
+                              sync_jobs.idempotency_key, sync_jobs.job_status,
+                              sync_jobs.request_payload, sync_jobs.checkpoint_before,
+                              sync_jobs.checkpoint_after, sync_jobs.active_snapshot_id,
+                              sync_jobs.published_snapshot_id, sync_jobs.current_attempt,
+                              sync_jobs.error_message, sync_jobs.started_at,
+                              sync_jobs.completed_at, sync_jobs.created_at, sync_jobs.updated_at,
+                              claimed.browser_binding, claimed.shop_id, claimed.playbook_id,
+                              claimed.playbook_version, claimed.playbook_body,
+                              claimed.runtime_profile_ref, claimed.egress_group, claimed.credential_ref
+                    """,
+                    (agent_id, agent_id, agent_max_concurrency),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"领取 browser_playbook sync_job 失败: {e}")
+        return None
+
+
+def insert_browser_verification_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    resource_key: str,
+    request_payload: dict,
+    idempotency_key: str | None = None,
+) -> dict | None:
+    """Create a one-off browser verification sync_job for playbook registration.
+
+    Unlike production triggers, this never reuses an inflight or recently-successful job:
+    verification is an explicit "run this playbook + credential combo end-to-end before we
+    let it go live" action. The resulting sync_job is the same shape as any browser sync_job
+    except for ``is_verification=true``, which lets ``claim_next_browser_sync_job`` pull it
+    even when the shop binding is still ``profile_status='verifying'``.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sync_jobs (
+                        company_id, data_source_id, trigger_mode, resource_key, idempotency_key,
+                        request_payload, is_verification
+                    ) VALUES (
+                        %s, %s, 'manual', %s, %s,
+                        %s::jsonb, TRUE
+                    )
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, started_at, completed_at, created_at, updated_at,
+                              is_verification
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        resource_key,
+                        str(idempotency_key or "").strip() or None,
+                        psycopg2.extras.Json(request_payload or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"insert_browser_verification_sync_job 失败: {e}")
+        return None
+
+
+def activate_browser_playbook_and_binding(
+    *,
+    company_id: str,
+    playbook_id: str,
+    version: str,
+    data_source_id: str,
+) -> dict:
+    """Atomically flip a draft playbook + verifying binding to fully active.
+
+    Called by ``data_source_finalize_browser_playbook_registration`` after the verification
+    sync_job ends in ``success``. Resets ``cron_pause_reason`` so the binding immediately
+    becomes eligible for production claim.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE playbooks
+                    SET status = 'active',
+                        approved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND version = %s
+                      AND status IN ('draft', 'replayed', 'approved')
+                    RETURNING id, playbook_id, version, status
+                    """,
+                    (company_id, playbook_id, version),
+                )
+                playbook_row = cur.fetchone()
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings
+                    SET profile_status = 'active',
+                        playbook_status = 'ok',
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND profile_status = 'verifying'
+                    RETURNING id, company_id, data_source_id, shop_id, profile_status, playbook_status
+                    """,
+                    (company_id, data_source_id),
+                )
+                binding_row = cur.fetchone()
+                conn.commit()
+                return {
+                    "playbook": _normalize_record(dict(playbook_row)) if playbook_row else None,
+                    "binding": _normalize_record(dict(binding_row)) if binding_row else None,
+                }
+    except Exception as e:
+        logger.error(f"activate_browser_playbook_and_binding 失败: {e}")
+        return {"playbook": None, "binding": None}
+
+
+def get_shop_runtime_binding_for_source(*, company_id: str, data_source_id: str) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM shop_runtime_bindings
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"查询 shop_runtime_bindings 失败 (company_id={company_id}, data_source_id={data_source_id}): {e}"
+        )
+        return {}
+
+
+def get_active_playbook(*, company_id: str, playbook_id: str) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM playbooks
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND status = 'active'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, playbook_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(f"查询 playbooks 失败 (company_id={company_id}, playbook_id={playbook_id}): {e}")
+        return {}
+
+
+def get_playbook(*, company_id: str, playbook_id: str, version: str | None = None) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                params: list[Any] = [company_id, playbook_id]
+                sql = """
+                    SELECT *
+                    FROM playbooks
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                """
+                if version:
+                    sql += " AND version = %s"
+                    params.append(version)
+                sql += """
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"查询 playbooks 失败 (company_id={company_id}, playbook_id={playbook_id}, version={version or ''}): {e}"
+        )
+        return {}
+
+
+def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
+    row = update_unified_sync_job_status(
+        sync_job_id=sync_job_id,
+        job_status="success",
+        error_message="",
+        checkpoint_after={"browser_collection_summary": summary or {}},
+        finish_job=True,
+    )
+    if row:
+        mark_browser_binding_collection_seen(sync_job_id=sync_job_id)
+    return row
+
+
+def mark_browser_binding_collection_seen(*, sync_job_id: str) -> int:
+    """Record the latest successful browser collection timestamp on the shop binding."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings b
+                    SET last_collection_at = CURRENT_TIMESTAMP,
+                        profile_status = 'active',
+                        playbook_status = 'ok',
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM sync_jobs s
+                    WHERE s.id = %s
+                      AND b.company_id = s.company_id
+                      AND b.data_source_id = s.data_source_id
+                    """,
+                    (sync_job_id,),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"mark_browser_binding_collection_seen 失败: {e}")
+        return 0
+
+
+def upsert_browser_agent_heartbeat(
+    *,
+    company_id: str,
+    agent_id: str,
+    hostname: str = "",
+    version: str = "",
+    capabilities: dict[str, Any] | None = None,
+) -> dict | None:
+    """Upsert browser-agent heartbeat, marking the collection node online."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agents (
+                        company_id, agent_id, hostname, version, status,
+                        capabilities, last_heartbeat_at
+                    ) VALUES (
+                        %s, %s, %s, %s, 'online',
+                        %s::jsonb, CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (company_id, agent_id)
+                    DO UPDATE SET
+                        hostname = EXCLUDED.hostname,
+                        version = EXCLUDED.version,
+                        status = 'online',
+                        capabilities = EXCLUDED.capabilities,
+                        last_heartbeat_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        agent_id,
+                        hostname,
+                        version,
+                        json.dumps(capabilities or {}, ensure_ascii=False),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_browser_agent_heartbeat 失败 (company_id={company_id}, agent_id={agent_id}): {e}")
+        return None
+
+
+def fail_running_browser_sync_jobs_for_agent(*, agent_id: str) -> dict[str, Any]:
+    """Mark browser jobs left running by a previous process for this agent as interrupted."""
+    resolved_agent_id = str(agent_id or "").strip()
+    if not resolved_agent_id:
+        return {"failed_count": 0, "sync_job_ids": []}
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'failed',
+                        browser_fail_reason = 'AGENT_INTERRUPTED',
+                        error_message = 'AGENT_INTERRUPTED: browser-agent restarted while this job was running',
+                        next_retry_at = NULL,
+                        completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE sync_jobs.job_status = 'running'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM data_sources ds
+                          JOIN shop_runtime_bindings srb
+                            ON srb.company_id = sync_jobs.company_id
+                           AND srb.data_source_id = sync_jobs.data_source_id
+                          WHERE ds.id = sync_jobs.data_source_id
+                            AND ds.source_kind = 'browser_playbook'
+                            AND srb.agent_id = %s
+                      )
+                    RETURNING sync_jobs.id
+                    """,
+                    (resolved_agent_id,),
+                )
+                rows = cur.fetchall()
+                conn.commit()
+    except Exception as e:
+        logger.error(f"fail_running_browser_sync_jobs_for_agent 失败 (agent_id={resolved_agent_id}): {e}")
+        return {"failed_count": 0, "sync_job_ids": [], "error": str(e)}
+    sync_job_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
+
+
+def mark_browser_sync_job_failed(
+    *,
+    sync_job_id: str,
+    error_message: str,
+    fail_reason: str,
+    retryable: bool = False,
+    max_attempts: int = 3,
+    retry_delay_seconds: int = 1800,
+) -> dict | None:
+    """Terminal or transient browser sync_job failure handler.
+
+    Behavior:
+    - Always writes browser_fail_reason as the canonical code (AUTH_EXPIRED, etc.).
+    - Normalizes error_message to ``"{fail_reason}: {body}"`` exactly once. If the incoming
+      message already has the correct prefix, no double prefix is added.
+    - If retryable=True AND current_attempt < max_attempts: job goes back to ``pending`` with
+      ``next_retry_at = now + retry_delay_seconds`` and ``completed_at`` cleared. This lets the
+      claim SQL pick it up after the backoff.
+    - Otherwise the job is terminal ``failed`` and ``apply_browser_binding_failure_transition``
+      is called to flip shop_runtime_bindings into the right pause state.
+    - Binding transition is NOT triggered for transient retries — the binding stays healthy and
+      the shop continues to receive cron triggers.
+    """
+    canonical = str(fail_reason or "OTHER").strip().upper() or "OTHER"
+    raw_message = str(error_message or "").strip()
+    prefix = f"{canonical}: "
+    if raw_message.startswith(prefix):
+        prefixed_error = raw_message
+    elif raw_message:
+        prefixed_error = f"{canonical}: {raw_message}"
+    else:
+        prefixed_error = canonical
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN 'pending'
+                            ELSE 'failed'
+                        END,
+                        browser_fail_reason = %s,
+                        error_message = %s,
+                        max_attempts = GREATEST(COALESCE(max_attempts, 3), %s),
+                        next_retry_at = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN CURRENT_TIMESTAMP + (%s * INTERVAL '1 second')
+                            ELSE NULL
+                        END,
+                        completed_at = CASE
+                            WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN NULL
+                            ELSE CURRENT_TIMESTAMP
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (
+                        bool(retryable), int(max_attempts),
+                        canonical,
+                        prefixed_error,
+                        int(max_attempts),
+                        bool(retryable), int(max_attempts), int(retry_delay_seconds),
+                        bool(retryable), int(max_attempts),
+                        sync_job_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+    except Exception as e:
+        logger.error(f"mark_browser_sync_job_failed 失败: {e}")
+        return None
+
+    normalized = _normalize_record(dict(row)) if row else None
+    if normalized and str(normalized.get("job_status") or "") == "failed":
+        try:
+            apply_browser_binding_failure_transition(
+                sync_job_id=sync_job_id, fail_reason=canonical
+            )
+        except Exception as e:
+            logger.error(f"apply_browser_binding_failure_transition 调用失败: {e}")
+    return normalized
+
+
+def apply_browser_binding_failure_transition(*, sync_job_id: str, fail_reason: str) -> int:
+    """根据 fail_reason 切换 shop_runtime_bindings 的状态字段。
+
+    映射:
+      - AUTH_EXPIRED -> profile_status='needs_reauth', cron_pause_reason='AUTH_EXPIRED'
+      - RISK_VERIFICATION -> profile_status='risk_blocked', cron_pause_reason='RISK_VERIFICATION'
+      - PAGE_CHANGED -> playbook_status='stale', cron_pause_reason='PAGE_CHANGED'
+      - 其他 fail_reason 不动 binding
+
+    仅在 sync_job 进入最终 failed 状态时由 ``mark_browser_sync_job_failed`` 调用,
+    transient retry(reschedule 到 pending)不调用。
+    """
+    canonical = str(fail_reason or "").strip().upper()
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings b
+                    SET profile_status = CASE
+                            WHEN %s = 'AUTH_EXPIRED' THEN 'needs_reauth'
+                            WHEN %s = 'RISK_VERIFICATION' THEN 'risk_blocked'
+                            ELSE b.profile_status
+                        END,
+                        playbook_status = CASE
+                            WHEN %s = 'PAGE_CHANGED' THEN 'stale'
+                            ELSE b.playbook_status
+                        END,
+                        cron_pause_reason = CASE
+                            WHEN %s IN ('AUTH_EXPIRED', 'RISK_VERIFICATION', 'PAGE_CHANGED') THEN %s
+                            ELSE b.cron_pause_reason
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM sync_jobs s
+                    WHERE s.id = %s
+                      AND b.company_id = s.company_id
+                      AND b.data_source_id = s.data_source_id
+                    """,
+                    (canonical, canonical, canonical, canonical, canonical, sync_job_id),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"apply_browser_binding_failure_transition 失败: {e}")
+        return 0
+
+
+def upsert_playbook(
+    *,
+    company_id: str,
+    playbook_id: str,
+    version: str,
+    title: str,
+    playbook_body: dict,
+    description: str = "",
+    target: dict | None = None,
+    params_schema: dict | None = None,
+    status: str = "active",
+    schema_check_result: dict | None = None,
+    replay_result: dict | None = None,
+    sample_data_path: str = "",
+    transcript_path: str = "",
+    canary_shop_ids: list | None = None,
+    emergency_page_changed: bool = False,
+    bypass_canary_reason: str = "",
+    created_by: str | None = None,
+    approved_by: str | None = None,
+) -> dict | None:
+    body = dict(playbook_body or {})
+    resolved_target = dict(target or body.get("target") or {})
+    resolved_params_schema = dict(params_schema or body.get("params_schema") or {})
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO playbooks (
+                        company_id, playbook_id, version, title, description,
+                        target, params_schema, playbook_body,
+                        schema_check_result, replay_result, sample_data_path, transcript_path,
+                        canary_shop_ids, emergency_page_changed, bypass_canary_reason,
+                        created_by, approved_by, approved_at, status
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s::jsonb, %s::jsonb, %s, %s,
+                        %s::jsonb, %s, %s,
+                        %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, %s
+                    )
+                    ON CONFLICT (company_id, playbook_id, version)
+                    DO UPDATE SET
+                        title = EXCLUDED.title,
+                        description = EXCLUDED.description,
+                        target = EXCLUDED.target,
+                        params_schema = EXCLUDED.params_schema,
+                        playbook_body = EXCLUDED.playbook_body,
+                        schema_check_result = EXCLUDED.schema_check_result,
+                        replay_result = EXCLUDED.replay_result,
+                        sample_data_path = EXCLUDED.sample_data_path,
+                        transcript_path = EXCLUDED.transcript_path,
+                        canary_shop_ids = EXCLUDED.canary_shop_ids,
+                        emergency_page_changed = EXCLUDED.emergency_page_changed,
+                        bypass_canary_reason = EXCLUDED.bypass_canary_reason,
+                        approved_by = EXCLUDED.approved_by,
+                        approved_at = EXCLUDED.approved_at,
+                        status = EXCLUDED.status,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        playbook_id,
+                        version,
+                        title,
+                        description,
+                        json.dumps(resolved_target, ensure_ascii=False),
+                        json.dumps(resolved_params_schema, ensure_ascii=False),
+                        json.dumps(body, ensure_ascii=False),
+                        json.dumps(schema_check_result or {}, ensure_ascii=False),
+                        json.dumps(replay_result or {}, ensure_ascii=False),
+                        sample_data_path,
+                        transcript_path,
+                        json.dumps(canary_shop_ids or [], ensure_ascii=False),
+                        emergency_page_changed,
+                        bypass_canary_reason,
+                        created_by,
+                        approved_by,
+                        approved_by,
+                        status,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_playbook 失败 (company_id={company_id}, playbook_id={playbook_id}, version={version}): {e}")
+        return None
+
+
+def upsert_shop_runtime_binding(
+    *,
+    company_id: str,
+    data_source_id: str,
+    shop_id: str,
+    playbook_id: str,
+    agent_id: str,
+    egress_group: str,
+    credential_ref: str,
+    profile_status: str = "active",
+    playbook_status: str = "ok",
+) -> dict | None:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO shop_runtime_bindings (
+                        company_id, data_source_id, shop_id, playbook_id, agent_id,
+                        egress_group, credential_ref, profile_status, playbook_status, cron_pause_reason
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, NULL
+                    )
+                    ON CONFLICT (company_id, data_source_id)
+                    DO UPDATE SET
+                        shop_id = EXCLUDED.shop_id,
+                        playbook_id = EXCLUDED.playbook_id,
+                        agent_id = EXCLUDED.agent_id,
+                        egress_group = EXCLUDED.egress_group,
+                        credential_ref = EXCLUDED.credential_ref,
+                        profile_status = EXCLUDED.profile_status,
+                        playbook_status = EXCLUDED.playbook_status,
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    (
+                        company_id,
+                        data_source_id,
+                        shop_id,
+                        playbook_id,
+                        agent_id,
+                        egress_group,
+                        credential_ref,
+                        profile_status,
+                        playbook_status,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"upsert_shop_runtime_binding 失败 (company_id={company_id}, data_source_id={data_source_id}): {e}")
+        return None
+
+
+def clear_page_changed_bindings_for_playbook(*, company_id: str, playbook_id: str) -> int:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shop_runtime_bindings
+                    SET playbook_status = 'ok',
+                        cron_pause_reason = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                      AND playbook_status = 'stale'
+                      AND cron_pause_reason = 'page_changed'
+                    """,
+                    (company_id, playbook_id),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"clear_page_changed_bindings_for_playbook 失败 (company_id={company_id}, playbook_id={playbook_id}): {e}")
+        return 0
+
+
+def mark_recon_run_waiting_data(
+    *,
+    job_id: str,
+    waiting_reason: str,
+    waiting_datasets: list[dict],
+    collection_job_ids: list[str],
+    wait_minutes: int = 90,
+) -> dict | None:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'waiting_data',
+                        started_at = NULL,
+                        next_retry_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                        wait_deadline_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
+                        waiting_reason = %s,
+                        waiting_datasets = %s::jsonb,
+                        collection_job_ids = %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (
+                        max(1, int(wait_minutes or 1)),
+                        waiting_reason,
+                        json.dumps(waiting_datasets or [], ensure_ascii=False),
+                        json.dumps(collection_job_ids or [], ensure_ascii=False),
+                        job_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 recon_execution_queue.waiting_data 失败 (job_id={job_id}): {e}")
+        return None
+
+
+def requeue_ready_waiting_recon_runs() -> int:
+    """Resume waiting-data recon jobs without consuming business retry budget.
+
+    Bumps data_wait_resume_count and last_data_wait_resumed_at so operators can audit how
+    many times a recon job had to wait for browser data; current_attempt is left alone so
+    retries from real failures stay independent.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'queued',
+                        next_retry_at = NULL,
+                        waiting_reason = '',
+                        data_wait_resume_count = COALESCE(data_wait_resume_count, 0) + 1,
+                        last_data_wait_resumed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'waiting_data'
+                      AND next_retry_at <= CURRENT_TIMESTAMP
+                      AND jsonb_typeof(collection_job_ids) = 'array'
+                      AND jsonb_array_length(collection_job_ids) > 0
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements_text(collection_job_ids) job_id
+                          JOIN sync_jobs s ON s.id::text = job_id
+                          WHERE s.job_status <> 'success'
+                      )
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"requeue_ready_waiting_recon_runs 失败: {e}")
+        return 0
+
+
+def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
+    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs already failed.
+
+    Without this, a deterministic browser failure (AUTH_EXPIRED / PAGE_CHANGED etc.) would leave
+    the recon job in waiting_data until wait_deadline_at (~90min) before surfacing a generic
+    "采集未就绪" error. This aggregates the failed sync_jobs' error_message into the recon error
+    so operators see the real reason immediately.
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue q
+                    SET status = 'failed',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error = COALESCE(NULLIF(f.failed_error, ''), q.waiting_reason, '浏览器采集失败'),
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM (
+                        SELECT q0.id AS queue_id,
+                               string_agg(DISTINCT COALESCE(NULLIF(s.error_message, ''), '浏览器采集失败'), ' / ') AS failed_error
+                        FROM recon_execution_queue q0
+                        JOIN LATERAL jsonb_array_elements_text(collection_job_ids) job_id ON TRUE
+                        JOIN sync_jobs s ON s.id::text = job_id
+                        WHERE q0.status = 'waiting_data'
+                          AND s.job_status = 'failed'
+                        GROUP BY q0.id
+                    ) f
+                    WHERE q.id = f.queue_id
+                      AND q.status = 'waiting_data'
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"fail_waiting_recon_runs_with_failed_collection_jobs 失败: {e}")
+        return 0
+
+
+def fail_expired_waiting_recon_runs() -> int:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE recon_execution_queue
+                    SET status = 'failed',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error = COALESCE(NULLIF(waiting_reason, ''), '采集未就绪'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'waiting_data'
+                      AND wait_deadline_at <= CURRENT_TIMESTAMP
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"fail_expired_waiting_recon_runs 失败: {e}")
+        return 0
 
 
 def _clean_decimal_text(value: Any) -> str | None:
@@ -6262,6 +7583,301 @@ def list_dataset_collection_records(
         return []
 
 
+def _clean_collection_payload(payload: Any) -> Any:
+    """Strip surrounding whitespace (incl. tabs/newlines) from collected string
+    keys/values. 千牛/淘宝 exports embed trailing tabs that otherwise break
+    match-key / amount / date comparison at reconciliation time."""
+    if isinstance(payload, dict):
+        return {
+            (key.strip() if isinstance(key, str) else key): _clean_collection_payload(value)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_clean_collection_payload(item) for item in payload]
+    if isinstance(payload, str):
+        return payload.strip()
+    return payload
+
+
+def _browser_record_hash(payload: dict[str, Any]) -> str:
+    raw = json.dumps(
+        _json_safe_payload(payload or {}),
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def upsert_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    dataset_code: str,
+    resource_key: str,
+    shop_id: str,
+    playbook_id: str,
+    biz_date: str,
+    sync_job_id: str | None = None,
+    captured_at: str | None = None,
+    records: list[dict] | None = None,
+) -> dict:
+    """按浏览器采集数据集主键 upsert 明细记录。"""
+    items = records or []
+    if not items:
+        return {
+            "input_count": 0,
+            "upserted_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "deleted_count": 0,
+        }
+
+    input_count = len(items)
+    values: list[tuple[Any, ...]] = []
+    for item in items:
+        payload = _clean_collection_payload(item.get("payload") if isinstance(item.get("payload"), dict) else {})
+        key_values = _clean_collection_payload(item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {})
+        item_key = str(item.get("item_key") or "").strip()
+        if not item_key:
+            raise ValueError("browser_collection_records item_key 不能为空")
+        values.append(
+            (
+                company_id,
+                data_source_id,
+                dataset_id,
+                dataset_code,
+                resource_key or "default",
+                shop_id,
+                playbook_id,
+                biz_date,
+                item_key,
+                psycopg2.extras.Json(_json_safe_payload(key_values)),
+                _browser_record_hash(payload),
+                psycopg2.extras.Json(_json_safe_payload(payload)),
+                sync_job_id,
+                sync_job_id,
+                captured_at,
+            )
+        )
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                rows = psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO browser_collection_records (
+                        company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                        shop_id, playbook_id, biz_date, item_key, item_key_values,
+                        item_hash, payload, record_status, first_seen_job_id,
+                        latest_seen_job_id, captured_at
+                    ) VALUES %s
+                    ON CONFLICT (company_id, dataset_id, biz_date, item_key)
+                    DO UPDATE SET
+                        data_source_id = EXCLUDED.data_source_id,
+                        dataset_code = EXCLUDED.dataset_code,
+                        resource_key = EXCLUDED.resource_key,
+                        shop_id = EXCLUDED.shop_id,
+                        playbook_id = EXCLUDED.playbook_id,
+                        item_key_values = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN browser_collection_records.item_key_values
+                            ELSE EXCLUDED.item_key_values
+                        END,
+                        payload = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash
+                            THEN browser_collection_records.payload
+                            ELSE EXCLUDED.payload
+                        END,
+                        item_hash = EXCLUDED.item_hash,
+                        record_status = CASE
+                            WHEN browser_collection_records.item_hash = EXCLUDED.item_hash THEN 'unchanged'
+                            ELSE 'updated'
+                        END,
+                        latest_seen_job_id = EXCLUDED.latest_seen_job_id,
+                        latest_seen_at = CURRENT_TIMESTAMP,
+                        captured_at = EXCLUDED.captured_at,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING CASE
+                        WHEN (xmax = 0) THEN 'inserted'
+                        WHEN record_status = 'unchanged' THEN 'unchanged'
+                        ELSE 'updated'
+                    END AS action
+                    """,
+                    values,
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, "
+                        "%s, %s::jsonb, 'active', %s, %s, COALESCE(%s::timestamptz, CURRENT_TIMESTAMP))"
+                    ),
+                    page_size=1000,
+                    fetch=True,
+                )
+                inserted_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "inserted"
+                )
+                unchanged_count = sum(
+                    1 for row in rows or [] if str(row.get("action") or "") == "unchanged"
+                )
+                updated_count = max(0, len(rows or []) - inserted_count - unchanged_count)
+            conn.commit()
+            return {
+                "input_count": input_count,
+                "upserted_count": inserted_count + updated_count + unchanged_count,
+                "inserted_count": inserted_count,
+                "updated_count": updated_count,
+                "unchanged_count": unchanged_count,
+                "deleted_count": 0,
+            }
+    except Exception as e:
+        logger.error(
+            f"写入 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}, records={input_count}): {e}"
+        )
+        raise
+
+
+def insert_browser_capture_files(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    sync_job_id: str,
+    resource_key: str,
+    shop_id: str,
+    playbook_id: str,
+    biz_date: str,
+    capture_files: list[dict],
+) -> dict:
+    """Persist browser-agent capture file metadata as audit artifacts.
+
+    Original downloaded files (CSV / Excel) are referenced by storage_path; this table only
+    stores metadata + checksum so operators can audit "what file was downloaded for which
+    sync_job on which biz_date".
+    """
+    files = list(capture_files or [])
+    if not files:
+        return {"inserted_count": 0}
+
+    rows: list[tuple] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        storage_path = str(entry.get("storage_path") or "").strip()
+        if not storage_path:
+            continue
+        rows.append(
+            (
+                company_id,
+                data_source_id,
+                dataset_id or None,
+                sync_job_id or None,
+                resource_key,
+                shop_id,
+                playbook_id,
+                biz_date or None,
+                storage_path,
+                str(entry.get("encoding") or ""),
+                str(entry.get("checksum") or ""),
+                int(entry.get("row_count") or 0),
+            )
+        )
+    if not rows:
+        return {"inserted_count": 0}
+
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO browser_capture_files (
+                        company_id, data_source_id, dataset_id, sync_job_id, resource_key,
+                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count
+                    ) VALUES %s
+                    """,
+                    rows,
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s)",
+                )
+                conn.commit()
+        return {"inserted_count": len(rows)}
+    except Exception as e:
+        logger.error(f"insert_browser_capture_files 失败: {e}")
+        raise
+
+
+def list_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+    item_key: str | None = None,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """查询浏览器采集明细记录。limit=None 表示不限条数，返回全量。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT id, company_id, data_source_id, dataset_id, dataset_code, resource_key,
+                           shop_id, playbook_id, biz_date, item_key, item_key_values,
+                           item_hash, payload, record_status, first_seen_job_id,
+                           latest_seen_job_id, first_seen_at, latest_seen_at,
+                           captured_at, created_at, updated_at
+                    FROM browser_collection_records
+                    WHERE company_id = %s
+                      AND record_status <> 'deleted'
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                if item_key:
+                    sql += " AND item_key = %s"
+                    params.append(item_key)
+                for field_name, filter_value in _normalize_payload_filters(filters).items():
+                    if isinstance(filter_value, list):
+                        sql += " AND payload ->> %s = ANY(%s)"
+                        params.extend([field_name, [str(item) for item in filter_value]])
+                    else:
+                        sql += " AND payload ->> %s = %s"
+                        params.extend([field_name, str(filter_value)])
+                sql += " ORDER BY biz_date DESC, captured_at DESC, id DESC OFFSET %s"
+                params.append(max(0, offset))
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(1, min(limit, 1000)))
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        logger.error(
+            f"查询 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return []
+
+
 def _normalize_payload_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(filters, dict):
         return {}
@@ -6340,6 +7956,58 @@ def get_dataset_collection_record_stats(
     except Exception as e:
         logger.error(
             f"统计 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return {}
+
+
+def get_browser_collection_record_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计浏览器采集明细记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(*) FILTER (WHERE record_status = 'active')::bigint AS active_count,
+                           COUNT(*) FILTER (WHERE record_status = 'updated')::bigint AS updated_count,
+                           COUNT(*) FILTER (WHERE record_status = 'unchanged')::bigint AS unchanged_count,
+                           COUNT(DISTINCT biz_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM browser_collection_records
+                    WHERE company_id = %s
+                      AND record_status <> 'deleted'
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"统计 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
         )
         return {}
 
@@ -8895,23 +10563,27 @@ def dequeue_recon_run() -> dict | None:
         return None
 
 
-def complete_recon_run(job_id: str) -> None:
+def complete_recon_run(job_id: str) -> dict | None:
     """将 job 标记为 done。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
                     UPDATE recon_execution_queue
                     SET status = 'done', finished_at = CURRENT_TIMESTAMP
                     WHERE id = %s
+                    RETURNING *
                     """,
                     (job_id,),
                 )
+                row = cur.fetchone()
                 conn.commit()
+                return _normalize_record(dict(row)) if row else None
     except Exception as e:
         logger.error(f"complete_recon_run 失败 (job_id={job_id}): {e}")
+        return None
 
 
 def fail_recon_run(job_id: str, error: str = "") -> None:
@@ -8954,3 +10626,244 @@ def reclaim_stale_recon_runs(timeout_minutes: int = 15) -> int:
     except Exception as e:
         logger.error(f"reclaim_stale_recon_runs 失败: {e}")
         return 0
+
+
+# ---------------------------------------------------------------------------
+# browser_handoff_sessions CRUD
+# ---------------------------------------------------------------------------
+
+def insert_handoff_session(*, company_id, sync_job_id, data_source_id, agent_id,
+                           profile_key, reason, channel_config_id, expires_in_seconds=900):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO browser_handoff_sessions
+                   (sync_job_id, company_id, data_source_id, agent_id, profile_key, reason,
+                    channel_config_id, expires_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s, now() + (%s || ' seconds')::interval)
+                   RETURNING *""",
+                (sync_job_id, company_id, data_source_id, agent_id, profile_key, reason,
+                 channel_config_id, str(int(expires_in_seconds))),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def get_handoff_session(*, handoff_session_id):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM browser_handoff_sessions WHERE id = %s", (handoff_session_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+_HANDOFF_FINAL_STATUSES = {"completed", "expired", "failed", "cancelled"}
+_HANDOFF_AUDIT_METADATA_KEYS = {
+    "agent_id",
+    "browser_url_host",
+    "controller_id",
+    "drag_steps",
+    "error_code",
+    "event_id",
+    "frame_height",
+    "frame_id",
+    "frame_mime",
+    "frame_width",
+    "height",
+    "message_code",
+    "profile_key",
+    "reason",
+    "status",
+    "target",
+    "width",
+    "x",
+    "y",
+}
+
+
+def is_handoff_final_status(status: str | None) -> bool:
+    return str(status or "") in _HANDOFF_FINAL_STATUSES
+
+
+def _handoff_audit_safe_scalar(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _handoff_audit_safe_metadata(metadata: dict | None) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    if not isinstance(metadata, dict):
+        return safe
+    for key, value in metadata.items():
+        key_text = str(key or "")
+        if key_text not in _HANDOFF_AUDIT_METADATA_KEYS:
+            continue
+        safe[key_text] = _handoff_audit_safe_scalar(value)
+    return safe
+
+
+def _handoff_audit_safe_value(value: Any) -> Any:
+    """兼容旧测试入口:审计 metadata 只保留白名单标量字段。"""
+    if isinstance(value, dict):
+        return _handoff_audit_safe_metadata(value)
+    if isinstance(value, list):
+        return []
+    return _handoff_audit_safe_scalar(value)
+
+
+def _handoff_audit_event(
+    *,
+    event_type: str,
+    handoff_session_id: str = "",
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    event = {
+        "event_type": str(event_type or ""),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if handoff_session_id:
+        event["handoff_session_id"] = str(handoff_session_id)
+    if controller_id:
+        event["controller_id"] = str(controller_id)
+    if agent_id:
+        event["agent_id"] = str(agent_id)
+    if reason:
+        event["reason"] = str(reason)
+    event.update(_handoff_audit_safe_metadata(metadata))
+    return event
+
+
+def transition_handoff_session_status(
+    *,
+    handoff_session_id: str,
+    status: str,
+    event_type: str,
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict | None:
+    normalized_status = str(status or "")
+    completed = is_handoff_final_status(normalized_status)
+    event = _handoff_audit_event(
+        event_type=event_type,
+        handoff_session_id=handoff_session_id,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=reason,
+        metadata=metadata,
+    )
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE browser_handoff_sessions
+                SET status = %s,
+                    audit_events = audit_events || %s::jsonb,
+                    completed_at = CASE WHEN %s THEN COALESCE(completed_at, now()) ELSE completed_at END,
+                    updated_at = now()
+                WHERE id = %s
+                  AND (
+                      status <> ALL(%s)
+                      OR status = %s
+                  )
+                RETURNING *
+                """,
+                (
+                    normalized_status,
+                    psycopg2.extras.Json([event]),
+                    completed,
+                    handoff_session_id,
+                    list(_HANDOFF_FINAL_STATUSES),
+                    normalized_status,
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def append_handoff_audit_event(
+    *,
+    handoff_session_id: str,
+    event_type: str,
+    controller_id: str = "",
+    agent_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> dict | None:
+    row = get_handoff_session(handoff_session_id=handoff_session_id)
+    if not row:
+        return None
+    return transition_handoff_session_status(
+        handoff_session_id=handoff_session_id,
+        status=str(row.get("status") or "pending"),
+        event_type=event_type,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=reason,
+        metadata=metadata,
+    )
+
+
+def expire_handoff_session(*, handoff_session_id: str, reason: str = "expired") -> dict | None:
+    current = get_handoff_session(handoff_session_id=handoff_session_id)
+    if not current:
+        return None
+    if is_handoff_final_status(current.get("status")):
+        return current
+    row = transition_handoff_session_status(
+        handoff_session_id=handoff_session_id,
+        status="expired",
+        event_type="expired",
+        reason=reason,
+    )
+    if not row:
+        return None
+    sync_job_id = str(row.get("sync_job_id") or "")
+    if sync_job_id:
+        mark_browser_sync_job_failed(
+            sync_job_id=sync_job_id,
+            error_message=f"handoff expired: {reason}",
+            fail_reason="RISK_VERIFICATION",
+            retryable=False,
+            max_attempts=1,
+            retry_delay_seconds=0,
+        )
+    return row
+
+
+def mark_handoff_session_status(*, handoff_session_id, status, claimed_by_user_id=None):
+    completed = str(status or "") in _HANDOFF_FINAL_STATUSES
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE browser_handoff_sessions
+                   SET status=%s,
+                       claimed_by_user_id = COALESCE(%s, claimed_by_user_id),
+                       claimed_at = CASE WHEN %s='claimed' THEN now() ELSE claimed_at END,
+                       completed_at = CASE WHEN %s THEN now() ELSE completed_at END,
+                       updated_at = now()
+                   WHERE id=%s RETURNING *""",
+                (status, claimed_by_user_id, status, completed, handoff_session_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+
+def set_browser_sync_job_status(*, sync_job_id, status):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sync_jobs SET job_status=%s, updated_at=now() WHERE id=%s",
+                (status, sync_job_id),
+            )
+            affected = cur.rowcount
+            conn.commit()
+            return affected

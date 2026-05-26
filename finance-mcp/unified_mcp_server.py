@@ -220,11 +220,14 @@ _PLATFORM_TOOL_NAMES = {
     "platform_get_shop_detail",
     "platform_list_pending_authorizations",
     "platform_claim_pending_authorization",
+    "alipay_auth_invite_describe",
+    "alipay_auth_invite_continue",
 }
 
 _DATA_SOURCE_TOOL_NAMES = {
     "data_source_list",
     "data_source_get",
+    "data_source_get_browser_playbook_detail",
     "data_source_discover_datasets",
     "data_source_list_datasets",
     "data_source_get_dataset",
@@ -243,6 +246,10 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_disable",
     "data_source_delete",
     "data_source_test",
+    "data_source_register_browser_collection",
+    "data_source_register_browser_playbook",
+    "data_source_finalize_browser_playbook_registration",
+    "data_source_retry_browser_playbook_verification",
     "data_source_authorize",
     "data_source_handle_callback",
     "data_source_trigger_sync",
@@ -253,6 +260,16 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_get_dataset_collection_detail",
     "data_source_list_collection_records",
     "data_source_preview",
+    "browser_agent_heartbeat",
+    "browser_sync_job_claim",
+    "browser_sync_job_startup_cleanup",
+    "browser_sync_job_complete",
+    "browser_sync_job_fail",
+    "browser_handoff_session_create",
+    "browser_handoff_session_describe",
+    "browser_handoff_session_control_open",
+    "browser_handoff_session_event",
+    "browser_handoff_session_expire",
 }
 
 _RECON_AUTO_TOOL_NAMES = {
@@ -528,11 +545,11 @@ async def main():
     port = DEFAULT_PORT
 
     try:
-        applied = auth_db.ensure_unified_data_source_schema()
+        applied = auth_db.ensure_schema()
         if applied:
-            logger.info("启动时已补齐统一数据源 schema: %s", ", ".join(applied))
+            logger.info("启动时已补齐 auth schema: %s", ", ".join(applied))
     except Exception as e:
-        logger.error("统一数据源 schema 自检失败: %s", e, exc_info=True)
+        logger.error("auth schema 自检失败: %s", e, exc_info=True)
     
     # 动态获取工具列表用于显示
     try:

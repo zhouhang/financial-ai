@@ -115,6 +115,10 @@ lsof -ti:3335,8100,5173 | xargs kill -9 2>/dev/null || true
 rm -f /tmp/finance-cron.pid
 # 兜底清理 PID 文件丢失后遗留的旧 finance-cron。
 pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
+# 停止已有的 browser-agent 进程
+[ -f /tmp/browser-agent.pid ] && kill -9 "$(cat /tmp/browser-agent.pid)" 2>/dev/null || true
+rm -f /tmp/browser-agent.pid
+pkill -f "finance-agents/browser-agent/service.py" 2>/dev/null || true
 # 停止已有的 recon-worker 进程
 if [ -f /tmp/recon-workers.pids ]; then
     while IFS= read -r pid; do
@@ -171,6 +175,20 @@ if ! kill -0 "$FINANCE_CRON_PID" 2>/dev/null; then
     exit 1
 fi
 
+# 启动 browser-agent（采集机上的浏览器采集 worker，本机开发用 1 个进程即可）
+echo ""
+echo "📌 步骤 4b: 启动 browser-agent..."
+cd "$PROJECT_ROOT"
+source .venv/bin/activate
+load_project_env
+BROWSER_AGENT_PID="$(start_detached "$LOG_DIR/browser-agent.log" "$PROJECT_ROOT/finance-agents/browser-agent" python service.py)"
+echo "$BROWSER_AGENT_PID" > /tmp/browser-agent.pid
+echo "✅ browser-agent 已启动 (PID: $BROWSER_AGENT_PID)"
+sleep 2
+if ! kill -0 "$BROWSER_AGENT_PID" 2>/dev/null; then
+    echo "⚠️  browser-agent 启动后立即退出，请查看日志：tail -80 $LOG_DIR/browser-agent.log"
+fi
+
 # 启动 recon-worker（默认 4 个进程，可通过 RECON_WORKER_COUNT 覆盖）
 echo ""
 RECON_WORKER_COUNT="${RECON_WORKER_COUNT:-4}"
@@ -185,11 +203,20 @@ for i in $(seq 1 "$RECON_WORKER_COUNT"); do
     echo "  ✅ recon-worker-${i} 已启动 (PID: $WORKER_PID)"
 done
 
-# 启动 finance-web
+# 启动 finance-web(生产预览模式:先 build 出 dist,再用 vite preview 托管 —— 打包后少数带 hash
+# 的 bundle、可被浏览器/Cloudflare 缓存,dev.tallyai.cn 加载快且稳定。改前端代码后需重启本脚本
+# 重新 build 才生效;纯前端开发可临时改回 `npm run dev` 拿热更新。)
 echo ""
-echo "📌 步骤 6: 启动 finance-web (端口 5173)..."
-FINANCE_WEB_PID="$(start_detached "$LOG_DIR/finance-web.log" "$PROJECT_ROOT/finance-web" npm run dev)"
-echo "✅ finance-web 已启动 (PID: $FINANCE_WEB_PID)"
+echo "📌 步骤 6: 构建并启动 finance-web (端口 5173, build + preview)..."
+echo "   构建中(npm run build),日志: $LOG_DIR/finance-web-build.log ..."
+if (cd "$PROJECT_ROOT/finance-web" && npm run build > "$LOG_DIR/finance-web-build.log" 2>&1); then
+    echo "   ✅ 前端构建完成"
+else
+    echo "   ⚠️  前端构建失败(将用上次的 dist 启动,可能是旧版本),详见 $LOG_DIR/finance-web-build.log"
+fi
+FINANCE_WEB_PID="$(start_detached "$LOG_DIR/finance-web.log" "$PROJECT_ROOT/finance-web" npx vite preview --host 127.0.0.1 --port 5173)"
+echo "$FINANCE_WEB_PID" > /tmp/finance-web.pid
+echo "✅ finance-web 已启动 (PID: $FINANCE_WEB_PID, 预览模式)"
 
 # 等待所有服务完全启动
 sleep 5
@@ -234,6 +261,13 @@ else
     SERVICES_OK=false
 fi
 
+# 检查 browser-agent
+if [ -f /tmp/browser-agent.pid ] && kill -0 "$(cat /tmp/browser-agent.pid)" 2>/dev/null; then
+    echo "✅ browser-agent (collection) - 运行正常"
+else
+    echo "⚠️  browser-agent - 未运行 (首店上线前可忽略)"
+fi
+
 # 检查 recon-worker
 WORKER_ALIVE=0
 if [ -f /tmp/recon-workers.pids ]; then
@@ -263,6 +297,7 @@ if [ "$SERVICES_OK" = true ]; then
     echo "   - finance-mcp:    tail -f $LOG_DIR/finance-mcp.log"
     echo "   - data-agent:     tail -f $LOG_DIR/data-agent.log"
     echo "   - finance-cron:   tail -f $LOG_DIR/finance-cron.log"
+    echo "   - browser-agent:  tail -f $LOG_DIR/browser-agent.log"
     echo "   - recon-worker-1: tail -f $LOG_DIR/recon-worker-1.log"
     echo "   - finance-web:    tail -f $LOG_DIR/finance-web.log"
     echo ""

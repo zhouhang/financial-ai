@@ -48,6 +48,18 @@ DATASET_COLLECTION_INFLIGHT_WAIT_SECONDS = int(
 DATASET_COLLECTION_INFLIGHT_POLL_SECONDS = float(
     os.getenv("DATASET_COLLECTION_INFLIGHT_POLL_SECONDS", "2")
 )
+DATASET_COLLECTION_INFLIGHT_JOB_STATUSES = {
+    "pending",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_COLLECTION_ASYNC_JOB_STATUSES = {
+    "pending",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -55,6 +67,7 @@ SOURCE_KINDS = {
     "api",
     "file",
     "browser",
+    "browser_playbook",
     "desktop_cli",
 }
 
@@ -77,6 +90,21 @@ AUTO_SAMPLE_ROW_LIMIT = 10
 SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "llm_generated", "manual_updated"}
 SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
 SEMANTIC_SAMPLE_ROW_LIMIT = 10
+VALID_BROWSER_PLAYBOOK_ACTIONS = {
+    "login",
+    "login_if_needed",
+    "navigate",
+    "click",
+    "fill",
+    "set_date",
+    "wait_for",
+    "extract_text",
+    "extract_summary",
+    "download",
+    "download_history_file",
+    "parse_table",
+    "assert",
+}
 PUBLISH_STATUS_VALUES = {"published", "unpublished", "draft", "archived"}
 DATASET_CANDIDATE_SCENES = {"recon", "proc", "insight"}
 DATASET_CANDIDATE_ROLES = {"left", "right", "source", "target"}
@@ -114,6 +142,83 @@ def _dataset_collection_reuse_ttl_seconds(params: dict[str, Any]) -> int:
         return max(0, min(int(raw_value), 3600))
     except (TypeError, ValueError):
         return DATASET_COLLECTION_REUSE_TTL_SECONDS
+
+
+def _skip_browser_success_reuse(
+    params: dict[str, Any], arguments: dict[str, Any] | None = None
+) -> bool:
+    arguments = arguments or {}
+    nested_params = params.get("params") if isinstance(params.get("params"), dict) else {}
+    return any(
+        _normalize_bool(value, default=False)
+        for value in (
+            params.get("force_collection"),
+            params.get("skip_recent_success_reuse"),
+            params.get("retry_verification"),
+            nested_params.get("force_collection"),
+            nested_params.get("skip_recent_success_reuse"),
+            nested_params.get("retry_verification"),
+            arguments.get("force_collection"),
+            arguments.get("skip_recent_success_reuse"),
+        )
+    )
+
+
+def _browser_collection_records_exist(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> bool:
+    records = auth_db.list_browser_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        limit=1,
+    )
+    return bool(records)
+
+
+def _find_reusable_browser_success_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> dict[str, Any] | None:
+    job = auth_db.find_success_dataset_collection_sync_job(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+    )
+    if not job:
+        return None
+    if not _browser_collection_records_exist(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+    ):
+        logger.warning(
+            "跳过浏览器同账期成功任务复用: success job has no records "
+            "company_id=%s data_source_id=%s dataset_id=%s resource_key=%s biz_date=%s job_id=%s",
+            company_id,
+            data_source_id,
+            dataset_id,
+            resource_key,
+            biz_date,
+            job.get("id"),
+        )
+        return None
+    return job
 
 
 def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
@@ -847,6 +952,63 @@ def _extract_dataset_columns(dataset_row: dict[str, Any], sample_rows: list[dict
                 }
             )
     return ordered
+
+
+_BROWSER_DATE_VALUE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")
+_BROWSER_COMPACT_DATE_RE = re.compile(r"^\d{8}$")
+_BROWSER_TEMPORAL_NAME_RE = re.compile(r"(时间|日期|账期)")
+
+
+def _infer_browser_column_type(name: str, sample_values: list[Any]) -> str:
+    """Conservative type inference for browser-collected columns.
+
+    Only temporal types are inferred (datetime/date); everything else stays
+    "string". We deliberately do NOT infer "number": collected identifiers like
+    19-digit 订单号 are numeric-looking but must never become numbers (precision
+    loss / corruption), and amounts are safe as strings. Values may carry export
+    artifacts (trailing tabs), so we strip before matching.
+    """
+    samples = [str(value).strip() for value in sample_values if value is not None and str(value).strip()]
+    samples = samples[:50]
+    if samples and all(_BROWSER_DATE_VALUE_RE.match(value) for value in samples):
+        return "datetime" if any((" " in value or "T" in value) for value in samples) else "date"
+    if (
+        samples
+        and _BROWSER_TEMPORAL_NAME_RE.search(str(name or ""))
+        and all(_BROWSER_COMPACT_DATE_RE.match(value) for value in samples)
+    ):
+        return "date"
+    return "string"
+
+
+def _build_browser_collection_columns(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Build a schema_summary.columns list (name + conservative data_type) from
+    collected browser records' payloads, preserving first-seen field order. This
+    materializes the dataset schema so the recon wizard can offer date/match
+    fields (browser datasets publish directly and otherwise have no columns)."""
+    order: list[str] = []
+    samples: dict[str, list[Any]] = {}
+    for record in records or []:
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        for raw_key, value in payload.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if key not in samples:
+                samples[key] = []
+                order.append(key)
+            if value is not None and len(samples[key]) < 50:
+                samples[key].append(value)
+    return [
+        {
+            "name": name,
+            "data_type": _infer_browser_column_type(name, samples.get(name) or []),
+            "nullable": True,
+        }
+        for name in order
+    ]
 
 
 def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any] | None = None) -> str:
@@ -1717,6 +1879,30 @@ def _hash_payload(payload: Any) -> str:
     return hashlib.sha1(_json_safe(payload).encode("utf-8")).hexdigest()
 
 
+def _browser_binding_unavailable_result(binding: dict[str, Any]) -> dict[str, Any] | None:
+    """Returns a non-queued failure result if the browser binding is not runnable, else None.
+
+    Used by the trigger-time health gate. Mirrors the claim-side filter so a stale / blocked /
+    needs-reauth shop never gets a pending sync_job created in the first place.
+    """
+    profile_status = _safe_text(binding.get("profile_status")) or "unknown"
+    playbook_status = _safe_text(binding.get("playbook_status")) or "unknown"
+    pause_reason = _safe_text(binding.get("cron_pause_reason"))
+    if profile_status == "active" and playbook_status == "ok":
+        return None
+    error_code = pause_reason or profile_status or playbook_status or "UNHEALTHY_BINDING"
+    return {
+        "success": False,
+        "queued": False,
+        "failure_type": "browser_binding_unavailable",
+        "error_code": error_code,
+        "error": (
+            f"浏览器采集店铺状态不可用: profile_status={profile_status}, "
+            f"playbook_status={playbook_status}, pause_reason={pause_reason}"
+        ),
+    }
+
+
 def _require_user(auth_token: str) -> dict[str, Any]:
     token = str(auth_token or "").strip()
     if not token:
@@ -1891,6 +2077,10 @@ def _dataset_uses_platform_alipay_bill_lines(dataset_row: dict[str, Any] | None)
     return _dataset_storage_value(dataset_row) in {"platform_alipay_bill_lines", "alipay_bill_lines"}
 
 
+def _dataset_uses_browser_collection_records(dataset_row: dict[str, Any] | None) -> bool:
+    return _dataset_storage_value(dataset_row) == "browser_collection_records"
+
+
 def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> bool:
     config = _dataset_collection_config(dataset_row)
     resource_key = _safe_text((dataset_row or {}).get("resource_key"))
@@ -1903,6 +2093,7 @@ def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> boo
 COLLECTION_DRIVER_DB_QUERY = "db_query"
 COLLECTION_DRIVER_TAOBAO_ORDER_API = "taobao_order_api"
 COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT = "alipay_bill_download_import"
+COLLECTION_DRIVER_BROWSER_PLAYBOOK = "browser_playbook_remote"
 
 
 def _collection_config_value(dataset_row: dict[str, Any] | None, *keys: str) -> str:
@@ -1948,6 +2139,8 @@ def _resolve_collection_driver(
 
     source_kind = _safe_text(source.get("source_kind") or dataset.get("source_kind")).lower()
     provider_code = _safe_text(source.get("provider_code") or dataset.get("provider_code")).lower()
+    if source_kind == "browser_playbook":
+        return COLLECTION_DRIVER_BROWSER_PLAYBOOK
     if source_kind == "database":
         return COLLECTION_DRIVER_DB_QUERY
     if source_kind == "platform_oauth" and provider_code in {"taobao", "tmall"}:
@@ -2170,6 +2363,80 @@ def _generate_source_code(source_kind: str, provider_code: str, name: str) -> st
     return f"{base}__{digest}"
 
 
+def _browser_registration_slug(title: Any) -> str:
+    raw = str(title or "").strip().lower()
+    slug_chars: list[str] = []
+    previous_dash = False
+    for ch in raw:
+        if ch.isascii() and ch.isalnum():
+            slug_chars.append(ch)
+            previous_dash = False
+        elif ch in {" ", "-", "_", ".", "/"} and not previous_dash:
+            slug_chars.append("-")
+            previous_dash = True
+    slug = "".join(slug_chars).strip("-")
+    return slug or "browser-collection"
+
+
+def _browser_registration_code(*, title: str) -> str:
+    base = _browser_registration_slug(title)
+    suffix = uuid.uuid4().hex[:10]
+    max_base_len = 98 - len(suffix) - 1
+    base = (base[:max_base_len].strip("-") or "browser-collection")
+    return f"{base}-{suffix}"
+
+
+def _normalize_browser_playbook_body(playbook_body: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    normalized = dict(playbook_body)
+    target = normalized.get("target") if isinstance(normalized.get("target"), dict) else {}
+    output = normalized.get("output") if isinstance(normalized.get("output"), dict) else {}
+    if str(target.get("platform") or "").strip().lower() == "qianniu" and output:
+        columns = output.get("columns") if isinstance(output.get("columns"), list) else []
+        column_names = {
+            _safe_text(column.get("name"))
+            for column in columns
+            if isinstance(column, dict) and _safe_text(column.get("name"))
+        }
+        item_key_fields = [
+            _safe_text(field)
+            for field in output.get("item_key_fields") or []
+            if _safe_text(field)
+        ]
+        if (
+            item_key_fields == ["业务流水号"]
+            and "业务流水号" in column_names
+            and "退款单号" in column_names
+        ):
+            normalized_output = dict(output)
+            normalized_output["item_key_fields"] = ["业务流水号", "退款单号"]
+            normalized["output"] = normalized_output
+
+    steps = normalized.get("steps")
+    if steps is None:
+        return normalized, ""
+    if not isinstance(steps, list):
+        return normalized, "playbook.steps 必须是数组"
+
+    normalized_steps: list[Any] = []
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            return normalized, f"playbook.steps 第 {index} 项必须是对象"
+        normalized_step = dict(step)
+        action = str(normalized_step.get("action") or "").strip()
+        compact_action = re.sub(r"\s+", "", action)
+        if compact_action:
+            normalized_step["action"] = compact_action
+        if compact_action not in VALID_BROWSER_PLAYBOOK_ACTIONS:
+            return normalized, f"playbook.steps 第 {index} 项 action 不支持: {action or '<empty>'}"
+        normalized_steps.append(normalized_step)
+    normalized["steps"] = normalized_steps
+    return normalized, ""
+
+
+def _default_browser_verification_biz_date() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
 def _resolve_provider_code(
     source_kind: str,
     *,
@@ -2258,6 +2525,27 @@ def _load_dataset_sample_rows_from_collection_records(
     return _extract_collection_payload_rows(records, limit=limit)
 
 
+def _load_dataset_sample_rows_from_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    limit: int = SEMANTIC_SAMPLE_ROW_LIMIT,
+) -> list[dict[str, Any]]:
+    records = auth_db.list_browser_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=_safe_text(dataset_id) or None,
+        dataset_code=_safe_text(dataset_code) or None,
+        resource_key=_safe_text(resource_key) or None,
+        limit=max(1, min(limit, 100)),
+        offset=0,
+    )
+    return _extract_collection_payload_rows(records, limit=limit)
+
+
 def _flatten_platform_sample_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     raw = payload.get("raw")
@@ -2324,6 +2612,17 @@ def _load_dataset_semantic_sample_rows(
             if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
         return rows, "platform_alipay_bill_lines" if rows else "none"
+
+    if _dataset_uses_browser_collection_records(dataset_row):
+        rows = _load_dataset_sample_rows_from_browser_collection_records(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id or "",
+            dataset_code=dataset_code or "",
+            resource_key=resource_key,
+            limit=normalized_limit,
+        )
+        return rows, "browser_collection_records" if rows else "none"
 
     rows = _load_dataset_sample_rows_from_collection_records(
         company_id=company_id,
@@ -2809,8 +3108,13 @@ def _load_runtime_source(
         "runtime_config": configs.get("runtime") or {},
         "auth_config": dict((credential or {}).get("credential_payload") or {}),
     }
-    connector = build_connector(runtime_source)
-    runtime_source["capabilities"] = connector.capabilities
+    try:
+        connector = build_connector(runtime_source)
+        runtime_source["capabilities"] = connector.capabilities
+    except ValueError:
+        if str(source_row.get("source_kind") or "") != "browser_playbook":
+            raise
+        runtime_source["capabilities"] = ["test", "discover", "sync", "collection_records"]
     return runtime_source
 
 
@@ -3750,9 +4054,13 @@ def _build_data_source_view(
     latest_jobs = auth_db.list_unified_sync_jobs(
         company_id=company_id,
         data_source_id=source_id,
-        limit=1,
+        limit=10 if str(source_row.get("source_kind") or "") == "browser_playbook" else 1,
     )
     latest_job = latest_jobs[0] if latest_jobs else None
+    browser_verification = _build_browser_verification_summary(
+        source_row,
+        latest_jobs=latest_jobs,
+    )
     meta = dict(source_row.get("meta") or {})
     result = {
         "id": str(source_row.get("id") or ""),
@@ -3780,6 +4088,7 @@ def _build_data_source_view(
         "last_sync_at": (latest_job or {}).get("completed_at") or (latest_job or {}).get("updated_at"),
         "last_sync_job_id": str((latest_job or {}).get("id") or ""),
         "last_sync_status": str((latest_job or {}).get("job_status") or ""),
+        "browser_verification": browser_verification,
         "created_at": source_row.get("created_at"),
         "updated_at": source_row.get("updated_at"),
         "discover_summary": dict(meta.get("discover_summary") or {}),
@@ -3788,6 +4097,30 @@ def _build_data_source_view(
     if include_dataset_details:
         result["datasets"] = [_build_dataset_view(row) for row in dataset_rows]
     return result
+
+
+def _build_browser_verification_summary(
+    source_row: dict[str, Any],
+    *,
+    latest_jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {}
+    verification_job = next(
+        (job for job in latest_jobs if bool(job.get("is_verification"))),
+        latest_jobs[0] if latest_jobs else None,
+    )
+    if not verification_job:
+        return {}
+    return {
+        "sync_job_id": str(verification_job.get("id") or ""),
+        "job_status": str(verification_job.get("job_status") or ""),
+        "browser_fail_reason": str(verification_job.get("browser_fail_reason") or ""),
+        "error_message": str(verification_job.get("error_message") or ""),
+        "updated_at": verification_job.get("updated_at"),
+        "completed_at": verification_job.get("completed_at"),
+        "is_verification": bool(verification_job.get("is_verification")),
+    }
 
 
 def _update_source_meta(source_row: dict[str, Any], *, meta_updates: dict[str, Any]) -> dict[str, Any] | None:
@@ -4750,7 +5083,7 @@ async def _wait_for_collection_job_completion(
     while True:
         job = auth_db.get_unified_sync_job_by_id(sync_job_id)
         status = _safe_text((job or {}).get("job_status")).lower()
-        if status not in {"pending", "running"}:
+        if status not in DATASET_COLLECTION_INFLIGHT_JOB_STATUSES:
             return job
         if monotonic_time.monotonic() >= deadline:
             return job
@@ -4981,6 +5314,19 @@ def create_tools() -> list[Tool]:
                 "properties": {
                     "auth_token": {"type": "string"},
                     **source_id_schema,
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
+            name="data_source_get_browser_playbook_detail",
+            description="获取 browser_playbook 任务详情: 最新采集记录、playbook JSON 和安全凭证摘要。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "record_limit": {"type": "integer"},
                 },
                 "required": ["auth_token", "source_id"],
             },
@@ -5319,6 +5665,88 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_register_browser_collection",
+            description="创建 source-less 浏览器采集注册: 自动创建 browser_playbook 数据源、同名 browser_collection_records 数据集、注册 playbook 并触发 T-1 首次验证。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "title": {"type": "string"},
+                    "credential_username": {"type": "string"},
+                    "credential_password": {"type": "string"},
+                    "playbook_body": {"type": "object"},
+                },
+                "required": [
+                    "auth_token",
+                    "title",
+                    "credential_username",
+                    "credential_password",
+                    "playbook_body",
+                ],
+            },
+        ),
+        Tool(
+            name="data_source_register_browser_playbook",
+            description="注册 browser_playbook 数据源的 playbook + 商家凭证,落 draft + verifying,触发首次验证 sync_job。验证通过后调 data_source_finalize_browser_playbook_registration 激活。shop_id 默认取 data_source.code,agent_id 默认取 env BROWSER_AGENT_DEFAULT_AGENT_ID;Operator 通常不需要传。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "playbook_id": {"type": "string"},
+                    "version": {"type": "string"},
+                    "title": {"type": "string"},
+                    "playbook_body": {"type": "object"},
+                    "shop_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "egress_group": {"type": "string"},
+                    "credential_username": {"type": "string"},
+                    "credential_password": {"type": "string"},
+                    "dataset_id": {"type": "string"},
+                    "verification_biz_date": {"type": "string"},
+                    "emergency_page_changed": {"type": "boolean"},
+                    "bypass_canary_reason": {"type": "string"},
+                },
+                "required": [
+                    "auth_token",
+                    "source_id",
+                    "playbook_id",
+                    "version",
+                    "title",
+                    "playbook_body",
+                    "credential_username",
+                    "credential_password",
+                    "verification_biz_date",
+                ],
+            },
+        ),
+        Tool(
+            name="data_source_finalize_browser_playbook_registration",
+            description="校验 verification sync_job 已 success,原子翻转 playbook(draft→active) + binding(verifying→active)。失败时返回 sync_job 的 fail_reason / error_message。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "verification_sync_job_id": {"type": "string"},
+                },
+                "required": ["auth_token", "verification_sync_job_id"],
+            },
+        ),
+        Tool(
+            name="data_source_retry_browser_playbook_verification",
+            description="基于 browser_playbook 数据源现有运行时绑定重新创建 verification sync_job,用于重新下发凭证+playbook 到采集机验证采集链路。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "verification_biz_date": {"type": "string"},
+                    "dataset_id": {"type": "string"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_authorize",
             description="发起授权（主要用于 platform_oauth）。",
             inputSchema={
@@ -5476,6 +5904,152 @@ def create_tools() -> list[Tool]:
                 "required": ["auth_token", "source_id"],
             },
         ),
+        Tool(
+            name="browser_sync_job_claim",
+            description="Worker 专用：从 finance-mcp 领取下一条 pending browser_playbook sync_job，并附带 enrich 的 shop 绑定/playbook body/runtime profile 等执行上下文。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "max_concurrency": {"type": "integer"},
+                },
+                "required": ["worker_token", "agent_id"],
+            },
+        ),
+        Tool(
+            name="browser_agent_heartbeat",
+            description="Worker 专用：browser-agent 上报心跳，标记采集节点 online 并更新 last_heartbeat_at。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "hostname": {"type": "string"},
+                    "version": {"type": "string"},
+                    "capabilities": {"type": "object"},
+                },
+                "required": ["worker_token", "company_id", "agent_id"],
+            },
+        ),
+        Tool(
+            name="browser_sync_job_startup_cleanup",
+            description="Worker 专用：browser-agent 启动后清理本 agent 上次进程遗留的 running browser_playbook sync_job。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+                "required": ["worker_token", "agent_id"],
+            },
+        ),
+        Tool(
+            name="browser_sync_job_complete",
+            description="Worker 专用：browser-agent 完成 sync_job 后回写 records / capture_files 并将 sync_job 标记 success。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "summary": {"type": "object"},
+                    "records": {"type": "array"},
+                    "capture_files": {"type": "array"},
+                },
+                "required": ["worker_token", "sync_job_id"],
+            },
+        ),
+        Tool(
+            name="browser_sync_job_fail",
+            description="Worker 专用：browser-agent 失败后回写原因码，按 retryable 决定 reschedule 或终态 failed（终态时会联动 shop_runtime_bindings 状态转换）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "fail_reason": {"type": "string"},
+                    "error_message": {"type": "string"},
+                    "retryable": {"type": "boolean"},
+                    "max_attempts": {"type": "integer"},
+                    "retry_delay_seconds": {"type": "integer"},
+                },
+                "required": ["worker_token", "sync_job_id", "fail_reason"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_create",
+            description="风控时为某 sync_job 创建人工验证 handoff session,返回短有效期 capability token,并把 sync_job 置为 waiting_human_verification。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "profile_key": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "data_source_id": {"type": "string"},
+                    "channel_config_id": {"type": "string"},
+                    "expires_in_seconds": {"type": "integer"},
+                },
+                "required": ["worker_token", "company_id", "sync_job_id"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_describe",
+            description="按 capability token 查 handoff session 概要,供责任人落地页展示(不含凭证/profile/CDP)。",
+            inputSchema={
+                "type": "object",
+                "properties": {"token": {"type": "string"}},
+                "required": ["token"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_control_open",
+            description="责任人打开 handoff 控制页时登记 controller 并激活 session,只返回元数据。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "controller_id": {"type": "string"},
+                    "agent_online": {"type": "boolean"},
+                },
+                "required": ["token", "controller_id"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_event",
+            description="记录 handoff 控制页事件并更新 session 状态,审计仅保留元数据。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "handoff_session_id": {"type": "string"},
+                    "worker_token": {"type": "string"},
+                    "controller_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "status": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["event_type"],
+            },
+        ),
+        Tool(
+            name="browser_handoff_session_expire",
+            description="按 token 将 handoff session 标记过期,允许解码已过期 token 仅用于落库。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "handoff_session_id": {"type": "string"},
+                    "worker_token": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            },
+        ),
     ]
 
 
@@ -5485,6 +6059,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_list(arguments)
         if name == "data_source_get":
             return await _handle_data_source_get(arguments)
+        if name == "data_source_get_browser_playbook_detail":
+            return await _handle_data_source_get_browser_playbook_detail(arguments)
         if name == "data_source_discover_datasets":
             return await _handle_data_source_discover_datasets(arguments)
         if name == "data_source_list_datasets":
@@ -5521,6 +6097,14 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_delete(arguments)
         if name == "data_source_test":
             return await _handle_data_source_test(arguments)
+        if name == "data_source_register_browser_collection":
+            return await _handle_data_source_register_browser_collection(arguments)
+        if name == "data_source_register_browser_playbook":
+            return await _handle_data_source_register_browser_playbook(arguments)
+        if name == "data_source_finalize_browser_playbook_registration":
+            return await _handle_data_source_finalize_browser_playbook_registration(arguments)
+        if name == "data_source_retry_browser_playbook_verification":
+            return await _handle_data_source_retry_browser_playbook_verification(arguments)
         if name == "data_source_authorize":
             return await _handle_data_source_authorize(arguments)
         if name == "data_source_handle_callback":
@@ -5541,6 +6125,26 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_list_collection_records(arguments)
         if name == "data_source_preview":
             return await _handle_data_source_preview(arguments)
+        if name == "browser_sync_job_claim":
+            return await _handle_browser_sync_job_claim(arguments)
+        if name == "browser_agent_heartbeat":
+            return await _handle_browser_agent_heartbeat(arguments)
+        if name == "browser_sync_job_startup_cleanup":
+            return await _handle_browser_sync_job_startup_cleanup(arguments)
+        if name == "browser_sync_job_complete":
+            return await _handle_browser_sync_job_complete(arguments)
+        if name == "browser_sync_job_fail":
+            return await _handle_browser_sync_job_fail(arguments)
+        if name == "browser_handoff_session_create":
+            return await _handle_browser_handoff_session_create(arguments)
+        if name == "browser_handoff_session_describe":
+            return await _handle_browser_handoff_session_describe(arguments)
+        if name == "browser_handoff_session_control_open":
+            return await _handle_browser_handoff_session_control_open(arguments)
+        if name == "browser_handoff_session_event":
+            return await _handle_browser_handoff_session_event(arguments)
+        if name == "browser_handoff_session_expire":
+            return await _handle_browser_handoff_session_expire(arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     except Exception as exc:
         logger.error("data_source tool error: %s", exc, exc_info=True)
@@ -5623,6 +6227,106 @@ async def _handle_data_source_get(arguments: dict[str, Any]) -> dict[str, Any]:
         "source_summary": dict(source_view.get("source_summary") or {}),
         "dataset_summary": dict(source_view.get("dataset_summary") or {}),
         "health_summary": dict(source_view.get("health_summary") or {}),
+    }
+
+
+def _browser_collection_dataset(row: dict[str, Any]) -> bool:
+    return _browser_collection_dataset_source_type(row) == "browser_collection_records"
+
+
+def _browser_detail_record_view(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "dataset_id": str(row.get("dataset_id") or ""),
+        "dataset_code": str(row.get("dataset_code") or ""),
+        "biz_date": str(row.get("biz_date") or ""),
+        "item_key": str(row.get("item_key") or ""),
+        "payload": dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {},
+        "captured_at": row.get("captured_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _browser_playbook_detail_credential(binding: dict[str, Any]) -> dict[str, Any]:
+    credential_ref = str(binding.get("credential_ref") or "")
+    credential_payload = auth_db._open_json_payload(credential_ref) if credential_ref else {}  # noqa: SLF001
+    return {
+        "username": str(credential_payload.get("username") or ""),
+        "password_saved": bool(credential_payload.get("password")),
+    }
+
+
+def _browser_playbook_detail_playbook(
+    *,
+    company_id: str,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    playbook_id = str(binding.get("playbook_id") or "").strip()
+    if not playbook_id:
+        return {}
+    playbook = auth_db.get_active_playbook(company_id=company_id, playbook_id=playbook_id) or {}
+    if not playbook:
+        playbook = auth_db.get_playbook(company_id=company_id, playbook_id=playbook_id) or {}
+    if not playbook:
+        return {"playbook_id": playbook_id}
+    return {
+        "playbook_id": str(playbook.get("playbook_id") or playbook_id),
+        "version": str(playbook.get("version") or ""),
+        "title": str(playbook.get("title") or ""),
+        "status": str(playbook.get("status") or ""),
+        "playbook_body": dict(playbook.get("playbook_body") or {})
+        if isinstance(playbook.get("playbook_body"), dict)
+        else {},
+        "updated_at": playbook.get("updated_at"),
+    }
+
+
+async def _handle_data_source_get_browser_playbook_detail(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(
+        company_id=company_id,
+        data_source_id=source_id,
+    )
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持查看浏览器任务详情"}
+
+    dataset_rows = _load_source_datasets(company_id, source_id)
+    source_view = _build_data_source_view(
+        source_row,
+        datasets=dataset_rows,
+        include_dataset_details=True,
+    )
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id,
+        data_source_id=source_id,
+    ) or {}
+    browser_datasets = [row for row in dataset_rows if _browser_collection_dataset(row)]
+    record_limit = max(1, min(int(arguments.get("record_limit") or 100), 100))
+    latest_records: list[dict[str, Any]] = []
+    for dataset in browser_datasets[:1]:
+        latest_records = [
+            _browser_detail_record_view(row)
+            for row in auth_db.list_browser_collection_records(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=str(dataset.get("id") or ""),
+                limit=record_limit,
+            )
+        ]
+
+    return {
+        "success": True,
+        "source": source_view,
+        "browser_verification": dict(source_view.get("browser_verification") or {}),
+        "record_count": len(latest_records),
+        "latest_records": latest_records,
+        "playbook": _browser_playbook_detail_playbook(company_id=company_id, binding=binding),
+        "credential": _browser_playbook_detail_credential(binding),
+        "message": "",
     }
 
 
@@ -6890,6 +7594,471 @@ async def _handle_data_source_test(arguments: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+async def _handle_data_source_register_browser_collection(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    title = str(arguments.get("title") or "").strip()
+    credential_username = str(arguments.get("credential_username") or "").strip()
+    credential_password = str(arguments.get("credential_password") or "")
+    raw_playbook_body = arguments.get("playbook_body")
+
+    if not title:
+        return {"success": False, "error": "标题不能为空"}
+    if not credential_username or not credential_password:
+        return {"success": False, "error": "登录账号和密码不能为空"}
+    if not isinstance(raw_playbook_body, dict):
+        return {"success": False, "error": "Playbook JSON 必须是对象"}
+    playbook_body = dict(raw_playbook_body)
+    if not playbook_body:
+        return {"success": False, "error": "Playbook JSON 不能为空"}
+    playbook_body, playbook_error = _normalize_browser_playbook_body(playbook_body)
+    if playbook_error:
+        return {"success": False, "error": playbook_error}
+
+    source_code = _browser_registration_code(title=title)
+    playbook_id = source_code
+    version = "1"
+
+    source_row = auth_db.upsert_unified_data_source(
+        company_id=company_id,
+        code=source_code,
+        name=title,
+        source_kind="browser_playbook",
+        domain_type="ecommerce",
+        provider_code="browser_playbook",
+        execution_mode="deterministic",
+        description=f"{title} 浏览器采集",
+        status="active",
+        is_enabled=True,
+        meta={"registration_title": title, "managed_by": "browser_collection_registration"},
+    )
+    if not source_row:
+        return {"success": False, "error": "创建浏览器采集数据源失败"}
+
+    source_id = str(source_row.get("id") or "")
+    dataset_row = auth_db.upsert_unified_data_source_dataset(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_code=playbook_id,
+        dataset_name=title,
+        resource_key=f"{playbook_id}@{version}",
+        dataset_kind="table",
+        origin_type="manual",
+        extract_config={
+            "source_type": "browser_collection_records",
+            "storage": "browser_collection_records",
+            "registration_kind": "browser_playbook",
+            "playbook_id": playbook_id,
+            "playbook_version": version,
+        },
+        schema_summary={
+            "source_type": "browser_collection_records",
+            "storage": "browser_collection_records",
+        },
+        sync_strategy={"mode": "browser_playbook"},
+        status="active",
+        is_enabled=True,
+        health_status="unknown",
+        publish_status="published",
+        business_domain="browser_collection",
+        business_object_type="browser_collection_records",
+        grain="row",
+        meta={
+            "source_type": "browser_collection_records",
+            "managed_by": "browser_collection_registration",
+            "registration_kind": "browser_playbook",
+            "playbook_id": playbook_id,
+            "playbook_version": version,
+        },
+    )
+    if not dataset_row:
+        return {
+            "success": False,
+            "error": "创建浏览器采集语义数据集失败",
+            "source": _build_data_source_view(source_row, datasets=[]),
+        }
+
+    result = await _handle_data_source_register_browser_playbook(
+        {
+            "auth_token": arguments.get("auth_token", ""),
+            "source_id": source_id,
+            "playbook_id": playbook_id,
+            "version": version,
+            "title": title,
+            "dataset_id": str(dataset_row.get("id") or ""),
+            "verification_biz_date": _default_browser_verification_biz_date(),
+            "egress_group": "",
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+            "playbook_body": playbook_body,
+        }
+    )
+    if result.get("success"):
+        result["source"] = _build_data_source_view(source_row, datasets=[dataset_row])
+        result["dataset"] = _build_dataset_view(dataset_row)
+    return result
+
+
+async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any]) -> dict[str, Any]:
+    """v1 browser playbook registration: draft + verifying + verification sync_job.
+
+    Operator submits: playbook body + merchant credentials (username/password) + verification
+    biz_date. Tally writes draft playbook + verifying binding (KMS-encrypted credential_ref)
+    + a one-shot verification sync_job (``is_verification=true``), then returns immediately
+    with the sync_job id. The UI polls for that sync_job's status; on ``success`` it calls
+    ``data_source_finalize_browser_playbook_registration`` to atomically activate both rows.
+
+    On verification failure the sync_job carries a ``browser_fail_reason``; the binding stays
+    ``verifying`` (or moves to ``risk_blocked`` for ``RISK_VERIFICATION``) and the operator
+    revises and re-submits.
+    """
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持手动注册"}
+
+    # 首店 v1:数据集发布是 prerequisite,不是 playbook 注册的副产品。
+    datasets = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        only_published=True,
+    )
+
+    def _dataset_source_type(row: dict[str, Any]) -> str:
+        for candidate in (
+            row.get("source_type"),
+            row.get("dataset_source_type"),
+            (row.get("meta") or {}).get("source_type"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
+    browser_datasets = [row for row in datasets if _dataset_source_type(row) == "browser_collection_records"]
+    if not browser_datasets:
+        return {
+            "success": False,
+            "error": "请先发布 browser_collection_records 数据集后再注册 playbook",
+        }
+    # Verification needs a concrete dataset to write into; if multiple are published, the
+    # caller can pin ``dataset_id`` explicitly, else we pick the first.
+    verification_dataset = browser_datasets[0]
+    explicit_dataset_id = str(arguments.get("dataset_id") or "").strip()
+    if explicit_dataset_id:
+        match = next((row for row in browser_datasets if str(row.get("id") or "") == explicit_dataset_id), None)
+        if not match:
+            return {"success": False, "error": "指定的 dataset_id 不属于该数据源的已发布 browser dataset"}
+        verification_dataset = match
+
+    playbook_id = str(arguments.get("playbook_id") or "").strip()
+    version = str(arguments.get("version") or "").strip()
+    title = str(arguments.get("title") or "").strip()
+    raw_playbook_body = arguments.get("playbook_body")
+    if not isinstance(raw_playbook_body, dict):
+        return {"success": False, "error": "Playbook JSON 必须是对象"}
+    playbook_body = dict(raw_playbook_body)
+    if not playbook_id or not version or not title or not playbook_body:
+        return {"success": False, "error": "playbook_id/version/title/playbook_body 不能为空"}
+    playbook_body, playbook_error = _normalize_browser_playbook_body(playbook_body)
+    if playbook_error:
+        return {"success": False, "error": playbook_error}
+
+    # shop_id / agent_id are server-derived in v1:
+    #   - shop_id ← data_source.code (one data_source row = one shop in this design;
+    #     the code is the shop's stable human-readable id, e.g. 'qianniu-shop-001').
+    #   - agent_id ← env BROWSER_AGENT_DEFAULT_AGENT_ID (single-node v1); falls back to
+    #     'browser-agent-local'. Operators don't pick the agent; Tally drops the
+    #     verification + production sync_jobs into the queue and whichever agent
+    #     services that agent_id picks them up.
+    # Operator may still pass an explicit override (e.g. for multi-node testing),
+    # but the UI never exposes the field.
+    shop_id = str(arguments.get("shop_id") or "").strip() or str(source_row.get("code") or "").strip() or source_id
+    agent_id = (
+        str(arguments.get("agent_id") or "").strip()
+        or os.getenv("BROWSER_AGENT_DEFAULT_AGENT_ID", "").strip()
+        or "browser-agent-local"
+    )
+    credential_username = str(arguments.get("credential_username") or "").strip()
+    credential_password = str(arguments.get("credential_password") or "")
+    verification_biz_date = str(arguments.get("verification_biz_date") or "").strip()
+    if not credential_username or not credential_password:
+        return {
+            "success": False,
+            "error": "必须提供 credential_username 和 credential_password 用于首次验证 dry-run",
+        }
+    if not verification_biz_date:
+        return {"success": False, "error": "verification_biz_date 不能为空(建议最近 T-1)"}
+
+    # KMS-encrypt the merchant credentials; only credential_ref leaves this function. The
+    # plaintext goes straight into _seal_json_payload (HMAC-sealed via auth.crypto.seal_secret).
+    credential_ref = auth_db._seal_json_payload(  # noqa: SLF001 — internal seal API
+        {"username": credential_username, "password": credential_password}
+    )
+
+    playbook_row = auth_db.upsert_playbook(
+        company_id=company_id,
+        playbook_id=playbook_id,
+        version=version,
+        title=title,
+        playbook_body=playbook_body,
+        status="draft",
+        emergency_page_changed=bool(arguments.get("emergency_page_changed", False)),
+        bypass_canary_reason=str(arguments.get("bypass_canary_reason") or ""),
+    )
+    binding_row = auth_db.upsert_shop_runtime_binding(
+        company_id=company_id,
+        data_source_id=source_id,
+        shop_id=shop_id,
+        playbook_id=playbook_id,
+        agent_id=agent_id,
+        egress_group=str(arguments.get("egress_group") or "").strip(),
+        credential_ref=credential_ref,
+        profile_status="verifying",
+        playbook_status="ok",
+    )
+
+    resource_key = f"{playbook_id}@{version}"
+    dataset_id = str(verification_dataset.get("id") or "")
+    dataset_code = str(verification_dataset.get("dataset_code") or "")
+    verification_payload = {
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "biz_date": verification_biz_date,
+        "verification": True,
+        "playbook_id": playbook_id,
+        "playbook_version": version,
+        # collection_driver kept for backwards-compat with any consumer that still inspects
+        # request_payload; claim SQL no longer uses it (T4).
+        "collection_driver": "browser_playbook_remote",
+        "params": {
+            "biz_date": verification_biz_date,
+            "playbook_id": playbook_id,
+            "playbook_version": version,
+        },
+    }
+    verification_job = auth_db.insert_browser_verification_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        resource_key=resource_key,
+        request_payload=verification_payload,
+    )
+    if not verification_job:
+        return {
+            "success": False,
+            "error": "创建 verification sync_job 失败",
+            "playbook": playbook_row,
+            "binding": binding_row,
+        }
+    return {
+        "success": True,
+        "status": "verification_pending",
+        "playbook": playbook_row,
+        "binding": binding_row,
+        "verification_sync_job_id": str(verification_job.get("id") or ""),
+        "verification_biz_date": verification_biz_date,
+        "message": "浏览器 playbook 已注册并触发首次验证;请等待 sync_job 完成后调用 finalize 接口激活",
+    }
+
+
+def _browser_collection_dataset_source_type(row: dict[str, Any]) -> str:
+    for candidate in (
+        row.get("source_type"),
+        row.get("dataset_source_type"),
+        (row.get("meta") or {}).get("source_type"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _playbook_version_from_resource_key(resource_key: str, playbook_id: str) -> str:
+    resource_key = str(resource_key or "").strip()
+    playbook_id = str(playbook_id or "").strip()
+    if resource_key and "@" in resource_key:
+        prefix, version = resource_key.rsplit("@", 1)
+        if (not playbook_id or prefix == playbook_id) and version.strip():
+            return version.strip()
+    return ""
+
+
+async def _handle_data_source_retry_browser_playbook_verification(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a fresh verification sync job from an existing browser task binding."""
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(
+        company_id=company_id,
+        data_source_id=source_id,
+    )
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持重试"}
+
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id,
+        data_source_id=source_id,
+    ) or {}
+    playbook_id = str(binding.get("playbook_id") or "").strip()
+    if not binding or not playbook_id:
+        return {"success": False, "error": "浏览器任务缺少运行时绑定，无法重试"}
+
+    datasets = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        only_published=True,
+    )
+    browser_datasets = [
+        row
+        for row in datasets
+        if _browser_collection_dataset_source_type(row) == "browser_collection_records"
+    ]
+    if not browser_datasets:
+        return {"success": False, "error": "请先发布 browser_collection_records 数据集后再重试"}
+
+    verification_dataset = browser_datasets[0]
+    explicit_dataset_id = str(arguments.get("dataset_id") or "").strip()
+    if explicit_dataset_id:
+        match = next(
+            (row for row in browser_datasets if str(row.get("id") or "") == explicit_dataset_id),
+            None,
+        )
+        if not match:
+            return {"success": False, "error": "指定的 dataset_id 不属于该数据源的已发布 browser dataset"}
+        verification_dataset = match
+
+    dataset_id = str(verification_dataset.get("id") or "")
+    dataset_code = str(verification_dataset.get("dataset_code") or "")
+    resource_key = str(verification_dataset.get("resource_key") or "").strip()
+    playbook_version = (
+        str(arguments.get("version") or "").strip()
+        or _playbook_version_from_resource_key(resource_key, playbook_id)
+        or "1"
+    )
+    if not resource_key:
+        resource_key = f"{playbook_id}@{playbook_version}"
+    verification_biz_date = (
+        str(arguments.get("verification_biz_date") or "").strip()
+        or _default_browser_verification_biz_date()
+    )
+
+    existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=verification_biz_date,
+    )
+    if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+        return {
+            "success": True,
+            "status": "verification_pending",
+            "source_id": source_id,
+            "verification_sync_job_id": _safe_text((existing_job or {}).get("id")),
+            "verification_biz_date": verification_biz_date,
+            "source": _build_data_source_view(source_row, datasets=[verification_dataset]),
+            "reused": True,
+            "queued": True,
+            "reuse_reason": "inflight",
+            "message": "同一浏览器任务正在执行或等待人工验证，已复用",
+        }
+
+    verification_payload = {
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "biz_date": verification_biz_date,
+        "verification": True,
+        "retry_verification": True,
+        "force_collection": True,
+        "skip_recent_success_reuse": True,
+        "playbook_id": playbook_id,
+        "playbook_version": playbook_version,
+        "collection_driver": "browser_playbook_remote",
+        "params": {
+            "biz_date": verification_biz_date,
+            "playbook_id": playbook_id,
+            "playbook_version": playbook_version,
+            "force_collection": True,
+            "skip_recent_success_reuse": True,
+        },
+    }
+    verification_job = auth_db.insert_browser_verification_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        resource_key=resource_key,
+        request_payload=verification_payload,
+    )
+    if not verification_job:
+        return {"success": False, "error": "创建 verification sync_job 失败"}
+    return {
+        "success": True,
+        "status": "verification_pending",
+        "source_id": source_id,
+        "verification_sync_job_id": str(verification_job.get("id") or ""),
+        "verification_biz_date": verification_biz_date,
+        "source": _build_data_source_view(source_row, datasets=[verification_dataset]),
+        "message": "浏览器任务已重新下发到采集机，请等待任务状态更新",
+    }
+
+
+async def _handle_data_source_finalize_browser_playbook_registration(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Activate playbook + binding atomically after a successful verification sync_job."""
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    sync_job_id = str(arguments.get("verification_sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "verification_sync_job_id 不能为空"}
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    if not job or str(job.get("company_id") or "") != company_id:
+        return {"success": False, "error": "verification sync_job 不存在"}
+    if not bool(job.get("is_verification")):
+        return {"success": False, "error": "该 sync_job 不是 verification 任务"}
+    job_status = str(job.get("job_status") or "")
+    if job_status != "success":
+        return {
+            "success": False,
+            "error": "verification 未通过,无法激活",
+            "job_status": job_status,
+            "browser_fail_reason": str(job.get("browser_fail_reason") or ""),
+            "error_message": str(job.get("error_message") or ""),
+        }
+
+    request_payload = job.get("request_payload") or {}
+    payload = request_payload if isinstance(request_payload, dict) else {}
+    playbook_id = str(payload.get("playbook_id") or "").strip()
+    version = str(payload.get("playbook_version") or "").strip()
+    if not playbook_id or not version:
+        return {"success": False, "error": "verification sync_job 缺少 playbook 标识"}
+
+    result = auth_db.activate_browser_playbook_and_binding(
+        company_id=company_id,
+        playbook_id=playbook_id,
+        version=version,
+        data_source_id=str(job.get("data_source_id") or ""),
+    )
+    if not result.get("playbook") or not result.get("binding"):
+        return {
+            "success": False,
+            "error": "激活失败:playbook 或 binding 不在 draft/verifying 状态",
+            **result,
+        }
+    return {
+        "success": True,
+        "message": "playbook 与 binding 已激活,采集已进入 cron 调度",
+        **result,
+    }
+
+
 async def _handle_data_source_authorize(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -7555,6 +8724,7 @@ async def _handle_data_source_trigger_sync(
     resource_key = _resource_key_from_args(arguments)
     window_start, window_end = _window_from_args(arguments)
     params = dict(arguments.get("params") or {})
+    collection_driver = _safe_text(params.get("collection_driver"))
     idempotency_key = _safe_text(arguments.get("idempotency_key"))
     if idempotency_key:
         existing_job = auth_db.find_unified_sync_job_by_idempotency_key(
@@ -7579,6 +8749,44 @@ async def _handle_data_source_trigger_sync(
     dataset_id = _safe_text(params.get("dataset_id"))
     biz_date = _safe_text(params.get("biz_date"))
     if dataset_id and biz_date:
+        if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+            existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=dataset_id,
+                resource_key=resource_key,
+                biz_date=biz_date,
+            )
+            if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+                return {
+                    "success": True,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(existing_job),
+                    "reused": True,
+                    "queued": True,
+                    "reuse_reason": "inflight",
+                    "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                    "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                }
+            if not _skip_browser_success_reuse(params, arguments):
+                reusable_browser_job = _find_reusable_browser_success_job(
+                    company_id=company_id,
+                    data_source_id=source_id,
+                    dataset_id=dataset_id,
+                    resource_key=resource_key,
+                    biz_date=biz_date,
+                )
+                if reusable_browser_job:
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(reusable_browser_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "browser_biz_date_success",
+                        "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                        "message": "同一浏览器数据集该账期已有成功采集结果，已复用",
+                    }
         job_result = auth_db.create_or_reuse_dataset_collection_sync_job(
             company_id=company_id,
             data_source_id=source_id,
@@ -7586,7 +8794,11 @@ async def _handle_data_source_trigger_sync(
             resource_key=resource_key,
             dataset_id=dataset_id,
             biz_date=biz_date,
-            ttl_seconds=_dataset_collection_reuse_ttl_seconds(params),
+            ttl_seconds=(
+                0
+                if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK
+                else _dataset_collection_reuse_ttl_seconds(params)
+            ),
             idempotency_key=idempotency_key,
             window_start=window_start,
             window_end=window_end,
@@ -7597,6 +8809,21 @@ async def _handle_data_source_trigger_sync(
         if bool((job_result or {}).get("reused")) and job:
             reuse_reason = _safe_text(job_result.get("reuse_reason"))
             if reuse_reason == "inflight":
+                reused_status = _safe_text((job or {}).get("job_status")).lower()
+                if (
+                    collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK
+                    and reused_status in BROWSER_COLLECTION_ASYNC_JOB_STATUSES
+                ):
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(job),
+                        "reused": True,
+                        "queued": True,
+                        "reuse_reason": "inflight",
+                        "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                        "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                    }
                 completed_job = await _wait_for_collection_job_completion(_safe_text(job.get("id")))
                 completed_status = _safe_text((completed_job or {}).get("job_status")).lower()
                 if completed_job and completed_status == "success":
@@ -7675,6 +8902,17 @@ async def _handle_data_source_trigger_sync(
     )
     if not attempt:
         return {"success": False, "error": "创建同步任务尝试失败"}
+
+    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+        return {
+            "success": True,
+            "source_id": source_id,
+            "job": _attach_aliases_to_job(auth_db.get_unified_sync_job_by_id(str(job["id"])) or job),
+            "reused": False,
+            "queued": True,
+            "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+            "message": "浏览器采集任务已创建，等待 Production Push Dispatcher 执行",
+        }
 
     execute_kwargs = {
         "company_id": company_id,
@@ -7783,9 +9021,16 @@ async def _trigger_dataset_collection_resolved(
     uses_driver_managed_storage = collection_driver in {
         COLLECTION_DRIVER_TAOBAO_ORDER_API,
         COLLECTION_DRIVER_ALIPAY_BILL_DOWNLOAD_IMPORT,
+        COLLECTION_DRIVER_BROWSER_PLAYBOOK,
     }
     if not key_fields and not uses_driver_managed_storage:
         return {"success": False, "error": "数据集缺少 key_fields，无法生成采集记录唯一标识"}
+
+    # Trigger-time health gate for browser collection. Symmetric with the claim-side check:
+    # if the binding is paused (auth expired / risk blocked / playbook stale), refuse to
+    # create a pending sync_job here. Otherwise recon would enter waiting_data on a job
+    # that no agent will ever claim (claim SQL filters profile_status=active AND
+    # playbook_status=ok), and surface a generic "采集未就绪" only after wait_deadline_at.
     query = dict(params.get("query") or {})
     date_field = _collection_date_field(config)
     date_format = _collection_date_format(config)
@@ -7840,6 +9085,65 @@ async def _trigger_dataset_collection_resolved(
         "window_end": window_end,
         "params": params,
     }
+    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+        binding = auth_db.get_shop_runtime_binding_for_source(
+            company_id=company_id, data_source_id=source_id
+        ) or {}
+        unavailable = _browser_binding_unavailable_result(binding)
+        if unavailable:
+            existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=_safe_text(dataset_row.get("id")),
+                resource_key=resource_key,
+                biz_date=biz_date,
+            )
+            if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+                return {
+                    "success": True,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(existing_job),
+                    "reused": True,
+                    "queued": True,
+                    "reuse_reason": "inflight",
+                    "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                    "dataset_id": _safe_text(dataset_row.get("id")),
+                    "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                    "resource_key": resource_key,
+                    "biz_date": biz_date,
+                    "collection_driver": collection_driver,
+                }
+            if not _skip_browser_success_reuse(params, arguments):
+                success_job = _find_reusable_browser_success_job(
+                    company_id=company_id,
+                    data_source_id=source_id,
+                    dataset_id=_safe_text(dataset_row.get("id")),
+                    resource_key=resource_key,
+                    biz_date=biz_date,
+                )
+                if success_job:
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(success_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "browser_biz_date_success",
+                        "message": "同一浏览器数据集该账期已有成功采集结果，已复用",
+                        "dataset_id": _safe_text(dataset_row.get("id")),
+                        "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                        "resource_key": resource_key,
+                        "biz_date": biz_date,
+                        "collection_driver": collection_driver,
+                    }
+            return {
+                **unavailable,
+                "dataset_id": _safe_text(dataset_row.get("id")),
+                "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                "resource_key": resource_key,
+                "biz_date": biz_date,
+                "collection_driver": collection_driver,
+            }
     result = await _handle_data_source_trigger_sync(payload, trusted_company_id=company_id)
     if isinstance(result.get("job"), dict):
         result["job"]["collection_scope"] = "dataset"
@@ -7944,6 +9248,23 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=sample_limit,
+            offset=0,
+        )
+    elif _dataset_uses_browser_collection_records(dataset_row):
+        stats = auth_db.get_browser_collection_record_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+        )
+        collection_records = auth_db.list_browser_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
             resource_key=resource_key,
             limit=sample_limit,
             offset=0,
@@ -8224,3 +9545,447 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
         "rows": rows[: max(1, min(limit, 100))],
         "message": str(result.get("message") or ""),
     }
+
+
+# ---------- browser-agent worker tools ----------
+#
+# The browser-agent service runs on a separate collection machine and reaches finance-mcp via
+# MCP only. These three tools are the entire surface area:
+#
+#   browser_sync_job_claim     -- pull next runnable browser sync_job, enriched with binding +
+#                                 active playbook body so the agent can build a RUN_PLAYBOOK
+#                                 message without any further DB calls.
+#   browser_sync_job_complete  -- agent finished successfully: upsert records, persist capture
+#                                 file metadata, then mark sync_job success.
+#   browser_sync_job_fail      -- agent failed: let auth.db.mark_browser_sync_job_failed decide
+#                                 retry vs terminal, normalize error prefix, and on terminal
+#                                 failure flip the shop binding state.
+
+
+async def _handle_browser_sync_job_claim(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    max_concurrency = max(1, int(arguments.get("max_concurrency") or 2))
+    job = auth_db.claim_next_browser_sync_job(
+        agent_id=agent_id,
+        agent_max_concurrency=max_concurrency,
+    )
+    return {"success": True, "job": job}
+
+
+async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    company_id = str(arguments.get("company_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not company_id:
+        return {"success": False, "error": "missing company_id"}
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    row = auth_db.upsert_browser_agent_heartbeat(
+        company_id=company_id,
+        agent_id=agent_id,
+        hostname=str(arguments.get("hostname") or "").strip(),
+        version=str(arguments.get("version") or "").strip(),
+        capabilities=dict(arguments.get("capabilities") or {}),
+    )
+    return {"success": bool(row), "agent": row}
+
+
+async def _handle_browser_sync_job_startup_cleanup(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    result = auth_db.fail_running_browser_sync_jobs_for_agent(agent_id=agent_id)
+    if result.get("error"):
+        return {"success": False, **result}
+    return {"success": True, **result}
+
+
+async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    sync_job_id = str(arguments.get("sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "missing sync_job_id"}
+
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    company_id = str(job.get("company_id") or "")
+    data_source_id = str(job.get("data_source_id") or "")
+    resource_key = str(job.get("resource_key") or "")
+    request_payload = job.get("request_payload") or {}
+    payload_params = request_payload if isinstance(request_payload, dict) else {}
+    nested_params = payload_params.get("params") if isinstance(payload_params.get("params"), dict) else {}
+    biz_date = str(nested_params.get("biz_date") or payload_params.get("biz_date") or "")
+    dataset_id = str(nested_params.get("dataset_id") or payload_params.get("dataset_id") or "")
+    dataset_code = str(nested_params.get("dataset_code") or payload_params.get("dataset_code") or "")
+
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id, data_source_id=data_source_id
+    ) or {}
+    shop_id = str(binding.get("shop_id") or "")
+    playbook_id = str(binding.get("playbook_id") or "")
+
+    records = list(arguments.get("records") or [])
+    capture_files = list(arguments.get("capture_files") or [])
+    summary_in = dict(arguments.get("summary") or {})
+
+    record_summary: dict[str, Any] = {}
+    if records and dataset_id and biz_date:
+        record_summary = auth_db.upsert_browser_collection_records(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+            shop_id=shop_id,
+            playbook_id=playbook_id,
+            biz_date=biz_date,
+            sync_job_id=sync_job_id,
+            records=records,
+        ) or {}
+        # Materialize the dataset's field schema so the recon wizard can offer
+        # date/match fields (browser datasets publish directly and otherwise
+        # carry no columns). Best-effort: never let this break ingestion.
+        try:
+            columns = _build_browser_collection_columns(records)
+            if columns:
+                auth_db.update_unified_data_source_dataset_schema_columns(
+                    dataset_id=dataset_id, columns=columns
+                )
+        except Exception:
+            logger.warning("物化浏览器采集数据集 schema_summary.columns 失败", exc_info=True)
+
+    file_summary: dict[str, Any] = {}
+    if capture_files:
+        file_summary = auth_db.insert_browser_capture_files(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            sync_job_id=sync_job_id,
+            resource_key=resource_key,
+            shop_id=shop_id,
+            playbook_id=playbook_id,
+            biz_date=biz_date,
+            capture_files=capture_files,
+        ) or {}
+
+    final_summary = {
+        **summary_in,
+        "records": record_summary,
+        "capture_file_count": int(file_summary.get("inserted_count") or 0),
+    }
+    row = auth_db.mark_browser_sync_job_success(
+        sync_job_id=sync_job_id, summary=final_summary
+    )
+    if dataset_id:
+        auth_db.update_unified_data_source_dataset_health(
+            dataset_id=dataset_id,
+            health_status="healthy",
+            last_sync_at=(row or {}).get("completed_at") or _now_iso(),
+            last_error_message="",
+        )
+    return {"success": True, "job": row, "summary": final_summary}
+
+
+async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    sync_job_id = str(arguments.get("sync_job_id") or "").strip()
+    if not sync_job_id:
+        return {"success": False, "error": "missing sync_job_id"}
+    fail_reason = str(arguments.get("fail_reason") or "OTHER").strip()
+    error_message = str(arguments.get("error_message") or "")
+    retryable = bool(arguments.get("retryable", False))
+    max_attempts = int(arguments.get("max_attempts") or 3)
+    retry_delay_seconds = int(arguments.get("retry_delay_seconds") or 1800)
+    row = auth_db.mark_browser_sync_job_failed(
+        sync_job_id=sync_job_id,
+        error_message=error_message,
+        fail_reason=fail_reason,
+        retryable=retryable,
+        max_attempts=max_attempts,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+    return {"success": True, "job": row}
+
+
+async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    from auth.handoff_token import build_handoff_token
+
+    company_id = str(arguments.get("company_id") or "").strip()
+    sync_job_id = str(arguments.get("sync_job_id") or "").strip()
+    if not company_id or not sync_job_id:
+        return {"success": False, "error": "missing company_id or sync_job_id"}
+    expires_in = int(arguments.get("expires_in_seconds") or 900)
+    job_row = auth_db.get_sync_job(sync_job_id=sync_job_id) or {}
+    rp = job_row.get("request_payload") or {}
+    if isinstance(rp, str):
+        import json as _json
+        rp = _json.loads(rp or "{}")
+    payload_params = rp.get("params") or {}
+    channel_config_id = arguments.get("channel_config_id") or payload_params.get("handoff_channel_config_id") or None
+    owner = payload_params.get("handoff_owner") or {}
+    row = auth_db.insert_handoff_session(
+        company_id=company_id,
+        sync_job_id=sync_job_id,
+        data_source_id=(arguments.get("data_source_id") or None),
+        agent_id=str(arguments.get("agent_id") or ""),
+        profile_key=str(arguments.get("profile_key") or ""),
+        reason=str(arguments.get("reason") or "RISK_VERIFICATION"),
+        channel_config_id=channel_config_id,
+        expires_in_seconds=expires_in,
+    )
+    if not row:
+        return {"success": False, "error": "insert handoff session failed"}
+    auth_db.set_browser_sync_job_status(sync_job_id=sync_job_id, status="waiting_human_verification")
+    token = build_handoff_token(
+        handoff_session_id=str(row["id"]), company_id=company_id, ttl_seconds=expires_in
+    )
+    return {
+        "success": True,
+        "handoff_session_id": str(row["id"]),
+        "handoff_token": token,
+        "status": row["status"],
+        "channel_config_id": channel_config_id,
+        "owner": owner,
+    }
+
+
+def _handoff_row_for_token(token: str, *, allow_expired: bool = False) -> tuple[dict[str, Any] | None, str]:
+    from auth.handoff_token import decode_handoff_token_unverified, verify_handoff_token
+
+    payload = (
+        decode_handoff_token_unverified(token)
+        if allow_expired
+        else verify_handoff_token(token)
+    )
+    if payload is None:
+        return None, "链接无效或已过期"
+    row = auth_db.get_handoff_session(handoff_session_id=str(payload["handoff_session_id"]))
+    if not row:
+        return None, "handoff session 不存在"
+    if str(row.get("company_id") or "") != str(payload.get("company_id") or ""):
+        return None, "handoff token 与 session 不匹配"
+    return row, ""
+
+
+def _public_handoff_session_view(row: dict[str, Any]) -> dict[str, Any]:
+    """落地页可见字段:不含凭证 / profile 路径 / CDP / playbook。
+
+    profile_key 是店铺/运行 profile 的展示标识,不是本机 profile 路径。
+    """
+    return {
+        "handoff_session_id": str(row.get("id") or ""),
+        "status": str(row.get("status") or ""),
+        "reason": str(row.get("reason") or ""),
+        "agent_id": str(row.get("agent_id") or ""),
+        "profile_key": str(row.get("profile_key") or ""),
+        "expires_at": str(row.get("expires_at") or ""),
+    }
+
+
+def _handoff_public_session(row: dict[str, Any], *, controller_id: str = "") -> dict[str, Any]:
+    view = _public_handoff_session_view(row)
+    view.update(
+        {
+            "sync_job_id": str(row.get("sync_job_id") or ""),
+            "data_source_id": str(row.get("data_source_id") or ""),
+            "controller_id": controller_id,
+        }
+    )
+    return view
+
+
+_HANDOFF_PUBLIC_EVENT_STATUS_BY_TYPE = {
+    "agent_offline": "waiting_agent",
+    "controller_connected": "active",
+    "controller_disconnected": "waiting_agent",
+    "controller_waiting_agent": "waiting_agent",
+    "resume_requested": "resuming",
+    "resuming": "resuming",
+    "stream_started": "active",
+    "stream_stopped": "active",
+}
+_HANDOFF_WORKER_EVENT_STATUS_BY_TYPE = {
+    "agent_connected": "active",
+    "agent_offline": "waiting_agent",
+    "agent_disconnected": "waiting_agent",
+    "completed": "completed",
+    "failed": "failed",
+    "still_blocked": "active",
+    "risk_cleared": "completed",
+    "handoff_completed": "completed",
+    "handoff_failed": "failed",
+    "stream_started": "active",
+    "stream_stopped": "active",
+}
+_HANDOFF_CANONICAL_EVENT_TYPES = {
+    "agent_disconnected": "agent_offline",
+    "controller_waiting_agent": "agent_offline",
+    "handoff_completed": "completed",
+    "handoff_failed": "failed",
+    "risk_cleared": "completed",
+}
+
+
+def _handoff_status_for_event(
+    *,
+    event_type: str,
+    requested_status: str,
+    worker_authenticated: bool,
+) -> str | None:
+    if worker_authenticated:
+        allowed = _HANDOFF_WORKER_EVENT_STATUS_BY_TYPE
+    else:
+        allowed = _HANDOFF_PUBLIC_EVENT_STATUS_BY_TYPE
+    if event_type not in allowed:
+        return None
+    expected = allowed[event_type]
+    if requested_status and requested_status != expected:
+        return None
+    return expected
+
+
+def _canonical_handoff_event_type(event_type: str) -> str:
+    return _HANDOFF_CANONICAL_EVENT_TYPES.get(event_type, event_type)
+
+
+async def _handle_browser_handoff_session_describe(arguments: dict[str, Any]) -> dict[str, Any]:
+    row, error = _handoff_row_for_token(str(arguments.get("token") or ""))
+    if not row:
+        return {"success": False, "error": error}
+    return {"success": True, "session": _public_handoff_session_view(row)}
+
+
+async def _handle_browser_handoff_session_control_open(arguments: dict[str, Any]) -> dict[str, Any]:
+    token = str(arguments.get("token") or "")
+    controller_id = str(arguments.get("controller_id") or "").strip()
+    if not controller_id:
+        return {"success": False, "error": "missing controller_id"}
+    row, error = _handoff_row_for_token(token)
+    if not row:
+        return {"success": False, "error": error}
+    if auth_db.is_handoff_final_status(row.get("status")):
+        return {
+            "success": False,
+            "error": "handoff session 已结束",
+            "session": _handoff_public_session(row, controller_id=controller_id),
+        }
+    status = "active" if bool(arguments.get("agent_online", False)) else "waiting_agent"
+    updated = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status=status,
+        event_type="page_opened",
+        controller_id=controller_id,
+        agent_id=str(row.get("agent_id") or ""),
+    )
+    auth_db.append_handoff_audit_event(
+        handoff_session_id=str(row["id"]),
+        event_type="controller_changed",
+        controller_id=controller_id,
+        agent_id=str(row.get("agent_id") or ""),
+    )
+    updated = auth_db.get_handoff_session(handoff_session_id=str(row["id"])) or updated or row
+    return {
+        "success": True,
+        "session": _handoff_public_session(updated, controller_id=controller_id),
+    }
+
+
+async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> dict[str, Any]:
+    token = str(arguments.get("token") or "")
+    handoff_session_id = str(arguments.get("handoff_session_id") or "").strip()
+    worker_token = str(arguments.get("worker_token") or "")
+    row: dict[str, Any] | None = None
+    worker_authenticated = False
+    if token:
+        row, error = _handoff_row_for_token(token)
+        if not row:
+            return {"success": False, "error": error}
+    elif handoff_session_id and worker_token:
+        try:
+            _require_scheduler_user(worker_token)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        worker_authenticated = True
+        row = auth_db.get_handoff_session(handoff_session_id=handoff_session_id)
+    if not row:
+        return {"success": False, "error": "handoff session 不存在"}
+    if auth_db.is_handoff_final_status(row.get("status")):
+        return {"success": False, "error": "handoff session 已结束"}
+
+    event_type = str(arguments.get("event_type") or "").strip()
+    if not event_type:
+        return {"success": False, "error": "missing event_type"}
+    canonical_event_type = _canonical_handoff_event_type(event_type)
+    status = _handoff_status_for_event(
+        event_type=event_type,
+        requested_status=str(arguments.get("status") or "").strip(),
+        worker_authenticated=worker_authenticated,
+    )
+    if status is None:
+        return {"success": False, "error": "handoff event/status 不允许"}
+    controller_id = str(arguments.get("controller_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or row.get("agent_id") or "").strip()
+    updated = auth_db.transition_handoff_session_status(
+        handoff_session_id=str(row["id"]),
+        status=status,
+        event_type=canonical_event_type,
+        controller_id=controller_id,
+        agent_id=agent_id,
+        reason=str(arguments.get("reason") or ""),
+        metadata=dict(arguments.get("metadata") or {}),
+    )
+    if canonical_event_type in {"resume_requested", "resuming"} or status == "resuming":
+        auth_db.set_browser_sync_job_status(
+            sync_job_id=str(row["sync_job_id"]),
+            status="resuming",
+        )
+    return {
+        "success": True,
+        "session": _handoff_public_session(updated or row, controller_id=controller_id),
+    }
+
+
+async def _handle_browser_handoff_session_expire(arguments: dict[str, Any]) -> dict[str, Any]:
+    row: dict[str, Any] | None = None
+    token = str(arguments.get("token") or "")
+    if token:
+        row, error = _handoff_row_for_token(token, allow_expired=True)
+        if not row:
+            return {"success": False, "error": error}
+    elif arguments.get("worker_token") and arguments.get("handoff_session_id"):
+        try:
+            _require_scheduler_user(str(arguments.get("worker_token") or ""))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        row = auth_db.get_handoff_session(
+            handoff_session_id=str(arguments.get("handoff_session_id"))
+        )
+    if not row:
+        return {"success": False, "error": "handoff session 不存在"}
+    expired = auth_db.expire_handoff_session(
+        handoff_session_id=str(row["id"]),
+        reason=str(arguments.get("reason") or "expired"),
+    )
+    return {"success": True, "session": _handoff_public_session(expired or row)}

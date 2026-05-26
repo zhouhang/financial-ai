@@ -32,8 +32,10 @@ import {
   saveCollaborationChannelDrafts,
 } from '../collaborationChannelDrafts';
 import { SOURCE_TYPE_CARDS, sourceKindLabel } from '../dataSourceConfig';
+import { BrowserPlaybookPanel } from './BrowserPlaybookPanel';
 import type {
   AuthCallbackPayload,
+  BrowserVerificationSummary,
   CollaborationChannelListItem,
   CollaborationProvider,
   DataConnectionView,
@@ -1462,7 +1464,7 @@ function stabilizeDatasetRowOrder(
 }
 
 function isSourceKind(value: string): value is DataSourceKind {
-  return ['platform_oauth', 'database', 'api', 'file', 'browser', 'desktop_cli'].includes(value);
+  return ['platform_oauth', 'database', 'api', 'file', 'browser_playbook', 'browser', 'desktop_cli'].includes(value);
 }
 
 function inferDatabaseType(providerCode: string, dbType?: string): string {
@@ -1963,6 +1965,20 @@ function normalizeEvent(raw: unknown): DataSourceEventSummary | null {
   };
 }
 
+function normalizeBrowserVerification(raw: unknown): BrowserVerificationSummary | undefined {
+  const value = asRecord(raw);
+  if (!value) return undefined;
+  return {
+    sync_job_id: asString(value.sync_job_id),
+    job_status: asString(value.job_status),
+    browser_fail_reason: asString(value.browser_fail_reason),
+    error_message: asString(value.error_message),
+    updated_at: asStringOrNull(value.updated_at),
+    completed_at: asStringOrNull(value.completed_at),
+    is_verification: asBoolean(value.is_verification),
+  };
+}
+
 function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
   const value = asRecord(raw);
   if (!value) return null;
@@ -2109,6 +2125,7 @@ function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
     metadata,
     source_summary: asRecord(value.source_summary) ?? undefined,
     dataset_summary: asRecord(value.dataset_summary) ?? undefined,
+    browser_verification: normalizeBrowserVerification(value.browser_verification),
   };
 }
 
@@ -2229,16 +2246,12 @@ function mergePlatformSummaries(platforms: PlatformConnectionSummary[]): Platfor
   return order.map((platformCode) => merged.get(platformCode)).filter(Boolean) as PlatformConnectionSummary[];
 }
 
-function executionModeLabel(mode: DataSourceExecutionMode): string {
-  return mode === 'agent_assisted' ? 'Agent Assisted' : 'Deterministic';
-}
-
 function sourceKindIcon(kind: DataSourceKind) {
   if (kind === 'platform_oauth') return <Store className="h-4 w-4" />;
   if (kind === 'database') return <Database className="h-4 w-4" />;
   if (kind === 'api') return <Globe className="h-4 w-4" />;
   if (kind === 'file') return <FileSpreadsheet className="h-4 w-4" />;
-  if (kind === 'browser') return <MonitorSmartphone className="h-4 w-4" />;
+  if (kind === 'browser_playbook' || kind === 'browser') return <MonitorSmartphone className="h-4 w-4" />;
   return <Cpu className="h-4 w-4" />;
 }
 
@@ -2497,6 +2510,7 @@ export default function DataConnectionsPanel({
   >({});
   const [currentUserRole, setCurrentUserRole] = useState<string>('');
   const [editingPlatformAppCode, setEditingPlatformAppCode] = useState<PlatformCode | null>(null);
+  const [browserCreateSignal, setBrowserCreateSignal] = useState(0);
 
   const openAlipayAuthDialog = useCallback((merchantDisplayName = '') => {
     setAlipayAuthDialog({
@@ -4206,6 +4220,11 @@ export default function DataConnectionsPanel({
   const selectedProviderChannels = useMemo(
     () => mergedChannels.filter((item) => item.provider === selectedCollaborationProvider),
     [mergedChannels, selectedCollaborationProvider],
+  );
+  // 电商平台授权的“连接数”应为各平台已授权店铺数之和(而非固定的支持平台目录条数)。
+  const totalAuthorizedShops = useMemo(
+    () => platforms.reduce((sum, item) => sum + (item.authorized_shop_count ?? 0), 0),
+    [platforms],
   );
   const selectedSource = useMemo(
     () => selectedKindSources.find((item) => item.id === selectedSourceId) ?? null,
@@ -6077,9 +6096,12 @@ export default function DataConnectionsPanel({
       selectedSource && selectedSource.source_kind === kind
         ? selectedSource
         : rows.find((item) => item.id === selectedSourceId) ?? rows[0] ?? null;
+    // database 与 api 都用「列表总览 → 进入详情」的导航式布局(由 databaseDetailSourceId 驱动);
+    // file 仍用左列表右详情的并排网格。
+    const usesListDetailLayout = kind === 'database' || kind === 'api';
     const activeSource =
-      kind === 'database' ? rows.find((item) => item.id === databaseDetailSourceId) ?? null : defaultActiveSource;
-    const showDatabaseOverview = kind === 'database' && !databaseDetailSourceId;
+      usesListDetailLayout ? rows.find((item) => item.id === databaseDetailSourceId) ?? null : defaultActiveSource;
+    const showListOverview = usesListDetailLayout && !databaseDetailSourceId;
     const detailState = activeSource ? sourceDetails[activeSource.id] ?? createDefaultSourceDetail() : createDefaultSourceDetail();
     const fallbackDatasets = detailState.datasets.length > 0 ? detailState.datasets : activeSource?.datasets ?? [];
     const isDraftSource = activeSource ? draftSourceIdSet.has(activeSource.id) : false;
@@ -6164,7 +6186,7 @@ export default function DataConnectionsPanel({
 
     return (
       <>
-        {showDatabaseOverview ? (
+        {showListOverview ? (
           <div className="space-y-4">
             {sourcesError && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
@@ -6184,9 +6206,11 @@ export default function DataConnectionsPanel({
             <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
               <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h3 className="text-base font-semibold text-text-primary">数据库连接列表</h3>
+                  <h3 className="text-base font-semibold text-text-primary">{kind === 'api' ? 'API 连接列表' : '数据库连接列表'}</h3>
                   <p className="mt-1 text-sm text-text-secondary">
-                    展示已配置数据库连接，点击可查看配置、数据集和目录。
+                    {kind === 'api'
+                      ? '展示已配置 API 连接，点击可进入查看配置与数据集。'
+                      : '展示已配置数据库连接，点击可查看配置、数据集和目录。'}
                   </p>
                 </div>
                 <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-xs text-text-secondary">
@@ -6197,7 +6221,7 @@ export default function DataConnectionsPanel({
               {loadingSources && rows.length === 0 ? (
                 <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在加载数据库连接列表
+                  正在加载连接列表
                 </div>
               ) : rows.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-secondary">
@@ -6254,15 +6278,26 @@ export default function DataConnectionsPanel({
                                     )}
                                   </div>
                                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                                    <span className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary">
-                                      {databaseType}
-                                    </span>
-                                    <span
-                                      className="inline-flex max-w-full items-center rounded-full border border-border px-2.5 py-1 text-xs text-text-primary"
-                                      title={accountLabel}
-                                    >
-                                      <span className="truncate">{accountLabel}</span>
-                                    </span>
+                                    {kind === 'api' ? (
+                                      <span
+                                        className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary"
+                                        title={dataSourceSubtitle(source)}
+                                      >
+                                        <span className="truncate">{dataSourceSubtitle(source)}</span>
+                                      </span>
+                                    ) : (
+                                      <>
+                                        <span className="inline-flex max-w-full items-center rounded-full bg-surface-secondary px-2.5 py-1 text-xs text-text-secondary">
+                                          {databaseType}
+                                        </span>
+                                        <span
+                                          className="inline-flex max-w-full items-center rounded-full border border-border px-2.5 py-1 text-xs text-text-primary"
+                                          title={accountLabel}
+                                        >
+                                          <span className="truncate">{accountLabel}</span>
+                                        </span>
+                                      </>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -6293,8 +6328,8 @@ export default function DataConnectionsPanel({
             </div>
           </div>
         ) : (
-          <div className={kind === 'database' ? 'space-y-4' : 'grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]'}>
-            {kind === 'database' ? (
+          <div className={usesListDetailLayout ? 'space-y-4' : 'grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]'}>
+            {usesListDetailLayout ? (
               <div className="flex items-center">
                 <button
                   type="button"
@@ -6302,7 +6337,7 @@ export default function DataConnectionsPanel({
                   className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:bg-surface-tertiary"
                 >
                   <ArrowLeft className="h-4 w-4" />
-                  返回数据库列表
+                  {kind === 'api' ? '返回 API 列表' : '返回数据库列表'}
                 </button>
               </div>
             ) : (
@@ -6367,8 +6402,7 @@ export default function DataConnectionsPanel({
                               </span>
                             )}
                           </div>
-                          <div className="mt-3 flex items-center justify-between gap-3 text-xs text-text-secondary">
-                            <span>{executionModeLabel(source.execution_mode)}</span>
+                          <div className="mt-3 flex items-center justify-end gap-3 text-xs text-text-secondary">
                             <span>{formatTime(source.health_summary?.last_sync_at || source.updated_at)}</span>
                           </div>
                         </button>
@@ -6382,7 +6416,7 @@ export default function DataConnectionsPanel({
             <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
               {!activeSource ? (
                 <div className="rounded-xl border border-dashed border-border px-4 py-12 text-center text-sm text-text-secondary">
-                  {kind === 'database' ? '未找到对应数据库连接，请返回列表重新选择。' : '选择左侧连接后，在这里查看连接详情和数据集目录。'}
+                  {usesListDetailLayout ? '未找到对应连接，请返回列表重新选择。' : '选择左侧连接后，在这里查看连接详情和数据集目录。'}
                 </div>
               ) : (
             <div className="space-y-5">
@@ -6408,9 +6442,6 @@ export default function DataConnectionsPanel({
                         数据集{getStatusLabel(datasetStatus)}
                       </span>
                     )}
-                    <span className="inline-flex rounded-full bg-surface-accent px-2.5 py-1 text-xs text-text-secondary">
-                      {executionModeLabel(activeSource.execution_mode)}
-                    </span>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -8507,7 +8538,7 @@ export default function DataConnectionsPanel({
     );
   };
 
-  const renderReservedPanel = (kind: Extract<DataSourceKind, 'browser' | 'desktop_cli'>) => {
+  const renderReservedPanel = (kind: Extract<DataSourceKind, 'browser_playbook' | 'browser' | 'desktop_cli'>) => {
     const currentCard = SOURCE_TYPE_CARDS.find((item) => item.source_kind === kind);
     return (
       <div className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -9893,6 +9924,17 @@ export default function DataConnectionsPanel({
     if (selectedSourceKind === 'database' || selectedSourceKind === 'api' || selectedSourceKind === 'file') {
       return renderSourceList(selectedSourceKind);
     }
+    if (selectedSourceKind === 'browser_playbook') {
+      return (
+        <BrowserPlaybookPanel
+          authToken={authToken ?? null}
+          sources={selectedKindSources}
+          loadingSources={loadingSources}
+          openCreateSignal={browserCreateSignal}
+          onRegistered={refreshCurrentConnectionView}
+        />
+      );
+    }
     return renderReservedPanel(selectedSourceKind);
   };
 
@@ -10121,6 +10163,16 @@ export default function DataConnectionsPanel({
                       新增
                     </button>
                   )}
+                {selectedConnectionView === 'data_sources' && selectedSourceKind === 'browser_playbook' && (
+                  <button
+                    type="button"
+                    onClick={() => setBrowserCreateSignal((current) => current + 1)}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary transition-colors hover:bg-surface-tertiary"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    新增
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => void refreshCurrentConnectionView()}
@@ -10130,12 +10182,11 @@ export default function DataConnectionsPanel({
                   刷新
                 </button>
                 <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">
-                  {selectedConnectionView === 'collaboration_channels'
-                    ? 'Company Scoped'
-                    : executionModeLabel(selectedSourceCard.execution_mode)}
-                </span>
-                <span className="rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">
-                  当前 {selectedConnectionView === 'collaboration_channels' ? `${selectedProviderChannels.length} 个通道` : `${selectedKindSources.length} 个连接`}
+                  当前 {selectedConnectionView === 'collaboration_channels'
+                    ? `${selectedProviderChannels.length} 个通道`
+                    : selectedSourceKind === 'platform_oauth'
+                    ? `${totalAuthorizedShops} 个连接`
+                    : `${selectedKindSources.length} 个连接`}
                 </span>
                 {selectedConnectionView === 'collaboration_channels' && loadingChannels && (
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-3 py-1.5 text-text-secondary">

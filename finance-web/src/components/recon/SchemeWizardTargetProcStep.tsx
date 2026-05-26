@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, Sparkles } from 'lucide-react';
 import type { DataSourceKind } from '../../types';
+import {
+  filterBrowserCollectionFieldItems,
+  isBrowserCollectionTechnicalSchemaSummary,
+} from './browserCollectionSchema';
 import { extractCollectionDetailSampleRows } from './datasetPreview';
 import SchemeWizardOutputFieldEditor from './SchemeWizardOutputFieldEditor';
 import type { OutputFieldDraft } from './schemeWizardState';
@@ -43,7 +47,7 @@ export interface AiProcQuestion {
 }
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 export interface SchemeDraftLite {
@@ -382,12 +386,13 @@ function isSupportedSourceKind(value: string): value is SupportedSourceKind {
     value === 'database' ||
     value === 'api' ||
     value === 'file' ||
+    value === 'browser_playbook' ||
     value === 'browser' ||
     value === 'desktop_cli'
   );
 }
 
-function normalizeCandidateDataset(
+export function normalizeCandidateDataset(
   raw: unknown,
   sourceFallback?: Record<string, string>,
 ): SchemeSourceOption | null {
@@ -438,11 +443,15 @@ function normalizeCandidateDataset(
   const schemaSummary = asRecord(value.schema_summary);
   const extractConfig = asRecord(value.extract_config);
   const semanticFields = asList(value.semantic_fields);
-  const normalizedSchemaSummary = Object.keys(schemaSummary).length > 0
-    ? schemaSummary
-    : semanticFields.length > 0
-    ? { fields: semanticFields }
-    : schemaSummary;
+  const normalizedSchemaSummary = isBrowserCollectionTechnicalSchemaSummary(
+    { schemaSummary, extractConfig, sourceKind },
+  )
+    ? {}
+    : Object.keys(schemaSummary).length > 0
+      ? schemaSummary
+      : semanticFields.length > 0
+        ? { fields: semanticFields }
+        : schemaSummary;
   const explicitKeyFields = normalizeStringList(value.key_fields);
   const keyFields =
     explicitKeyFields.length > 0
@@ -495,7 +504,12 @@ function buildDatasetFieldItems(source: SchemeSourceOption, rows: Record<string,
     raw_name: raw,
     display_name: display || raw,
   }));
-  if (fromLabels.length > 0) return fromLabels;
+  const visibleFromLabels = filterBrowserCollectionFieldItems(fromLabels, {
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  });
+  if (visibleFromLabels.length > 0) return visibleFromLabels;
 
   const fromRows = buildSampleColumns(rows).map((column) => ({
     raw_name: column,
@@ -577,7 +591,14 @@ function useFieldPreview(authToken?: string | null) {
           }),
         });
         const data = await response.json().catch(() => ({}));
-        const remoteFields = response.ok && Array.isArray(data.fields) ? (data.fields as FieldItem[]) : [];
+        const remoteFields = filterBrowserCollectionFieldItems(
+          response.ok && Array.isArray(data.fields) ? (data.fields as FieldItem[]) : [],
+          {
+            schemaSummary: dataset.schemaSummary,
+            extractConfig: dataset.extractConfig,
+            sourceKind: dataset.sourceKind,
+          },
+        );
         setFieldCache((prev) => ({
           ...prev,
           [dataset.id]: mergeFieldItems(remoteFields, localFields),
@@ -866,7 +887,7 @@ function DatasetStructureCard({
               }),
             });
             const data = await response.json().catch(() => ({}));
-            return response.ok && Array.isArray(data.fields)
+            const remoteFields = response.ok && Array.isArray(data.fields)
               ? (data.fields as FieldItem[])
                   .map((field) => ({
                     raw_name: toText(field.raw_name).trim(),
@@ -874,6 +895,11 @@ function DatasetStructureCard({
                   }))
                   .filter((field) => field.raw_name)
               : [];
+            return filterBrowserCollectionFieldItems(remoteFields, {
+              schemaSummary: source.schemaSummary,
+              extractConfig: source.extractConfig,
+              sourceKind: source.sourceKind,
+            });
           })();
           DATASET_FIELD_ITEMS_CACHE.set(cacheKey, fieldsRequest);
         }

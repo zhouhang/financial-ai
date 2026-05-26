@@ -393,8 +393,17 @@ async def auth_handler(state: AgentState) -> dict | None:
         # 用户要登录，统一提示点击右上角登录按钮
         return {"messages": [AIMessage(content="💡 请点击右上角登录按钮进行登录。")]}
     if intent == "show_register_form":
-        # 用户要注册，统一提示点击右上角登录按钮切换至注册
-        return {"messages": [AIMessage(content="💡 请点击右上角登录按钮，切换至注册进行注册。")]}
+        # 用户要注册，显示聊天内注册表单（先选择公司，再填写账号信息）。
+        companies_result = await list_company()
+        return {
+            "messages": [
+                AIMessage(
+                    content=generate_register_form(
+                        companies=companies_result.get("companies", [])
+                    )
+                )
+            ]
+        }
 
     # LLM 正常回复（引导用户）
     cleaned_content = content.strip()

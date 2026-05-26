@@ -1,0 +1,426 @@
+{
+  "source": "/Users/kevin/Desktop/游戏生态电商店铺信息表0520.xls",
+  "output": "/Users/kevin/workspace/financial-ai/游戏生态电商店铺信息表0520_支付宝专属授权链接.xlsx",
+  "sheet": "店铺清单",
+  "total_data_rows": 46,
+  "selected_count": 20,
+  "skipped_count": 26,
+  "persisted_hyperlink_count": 20,
+  "unique_jti_count": 20,
+  "base_url": "https://dev.tallyai.cn/api",
+  "selected": [
+    {
+      "excel_row": 2,
+      "shop_name": "搜卡手游专营店",
+      "company_name": "武汉搜卡科技有限公司",
+      "merchant_display_name": "搜卡手游专营店武汉搜卡科技有限公司",
+      "fuyou_merchant_no": "6954103",
+      "alipay_account": "s4k4net@163.com",
+      "status": "正常经营",
+      "jti": "19be6903-00f9-49db-b250-75b3c550027d",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTY0MWNcdTUzNjFcdTYyNGJcdTZlMzhcdTRlMTNcdTg0MjVcdTVlOTdcdTZiNjZcdTZjNDlcdTY0MWNcdTUzNjFcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InM0azRuZXRAMTYzLmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiMTliZTY5MDMtMDBmOS00OWRiLWIyNTAtNzViM2M1NTAwMjdkIn0.wlQTXoLNurkLY3p80HeYjPuYrakpACAS5qmrZdT6gnk"
+    },
+    {
+      "excel_row": 3,
+      "shop_name": "博宽服务专营店",
+      "company_name": "深圳市博宽网络科技有限公司",
+      "merchant_display_name": "博宽服务专营店深圳市博宽网络科技有限公司",
+      "fuyou_merchant_no": "6965404",
+      "alipay_account": "szbkwy@bknic.com",
+      "status": "正常经营",
+      "jti": "328f7c88-c7a3-43c6-9b6d-e624a8203b3f",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTUzNWFcdTViYmRcdTY3MGRcdTUyYTFcdTRlMTNcdTg0MjVcdTVlOTdcdTZkZjFcdTU3MzNcdTVlMDJcdTUzNWFcdTViYmRcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InN6Ymt3eUBia25pYy5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjMyOGY3Yzg4LWM3YTMtNDNjNi05YjZkLWU2MjRhODIwM2IzZiJ9.uD9SxGYzPpAqO4ul4rxPjYpFickcABWAOyLFB5axOc4"
+    },
+    {
+      "excel_row": 4,
+      "shop_name": "一起游电玩专营店",
+      "company_name": "武汉一起游网络科技有限公司",
+      "merchant_display_name": "一起游电玩专营店武汉一起游网络科技有限公司",
+      "fuyou_merchant_no": "6179618",
+      "alipay_account": "yiqiyougo@163.com",
+      "status": "正常经营",
+      "jti": "14e37e8f-8329-42c0-b3db-6944384fde12",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTRlMDBcdThkNzdcdTZlMzhcdTc1MzVcdTczYTlcdTRlMTNcdTg0MjVcdTVlOTdcdTZiNjZcdTZjNDlcdTRlMDBcdThkNzdcdTZlMzhcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InlpcWl5b3Vnb0AxNjMuY29tIiwiZXh0ZXJuYWxfc2hvcF9pZCI6IiIsImlhdCI6MTc3OTM0MjU1NCwiZXhwIjoxNzgxOTM0NTU0LCJqdGkiOiIxNGUzN2U4Zi04MzI5LTQyYzAtYjNkYi02OTQ0Mzg0ZmRlMTIifQ.y9GgS6wj2-1a12y_yF-F3LoQbx0P95_x57EXxd2vt_M"
+    },
+    {
+      "excel_row": 5,
+      "shop_name": "一起游网游专营店",
+      "company_name": "武汉一起游网络科技有限公司",
+      "merchant_display_name": "一起游网游专营店武汉一起游网络科技有限公司",
+      "fuyou_merchant_no": "6592689",
+      "alipay_account": "506262628@qq.com",
+      "status": "正常经营",
+      "jti": "77a55aa4-7e05-43be-8be0-1c9c9bc29771",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTRlMDBcdThkNzdcdTZlMzhcdTdmNTFcdTZlMzhcdTRlMTNcdTg0MjVcdTVlOTdcdTZiNjZcdTZjNDlcdTRlMDBcdThkNzdcdTZlMzhcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6IjUwNjI2MjYyOEBxcS5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6Ijc3YTU1YWE0LTdlMDUtNDNiZS04YmUwLTFjOWM5YmMyOTc3MSJ9.5gmvgydKQg02nFE6tHfuIP8sKU7YCSjLTmtj8m05tNA"
+    },
+    {
+      "excel_row": 8,
+      "shop_name": "WeGame旗舰店",
+      "company_name": "新疆福佑网络科技有限公司",
+      "merchant_display_name": "WeGame旗舰店新疆福佑网络科技有限公司",
+      "fuyou_merchant_no": "6988215",
+      "alipay_account": "fulufuyou2024@163.com",
+      "status": "正常经营",
+      "jti": "3f8c1da7-6289-4d87-a90e-040c250fc26c",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJXZUdhbWVcdTY1ZDdcdTgyMzBcdTVlOTdcdTY1YjBcdTc1ODZcdTc5OGZcdTRmNTFcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6ImZ1bHVmdXlvdTIwMjRAMTYzLmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiM2Y4YzFkYTctNjI4OS00ZDg3LWE5MGUtMDQwYzI1MGZjMjZjIn0.Ct3kw67Q21BHdycNq6qHQ2l5rGGnvP7O3DylcQAgUDo"
+    },
+    {
+      "excel_row": 9,
+      "shop_name": "腾讯游戏旗舰",
+      "company_name": "新疆福佑网络科技有限公司",
+      "merchant_display_name": "腾讯游戏旗舰新疆福佑网络科技有限公司",
+      "fuyou_merchant_no": "6703617",
+      "alipay_account": "fulutengxuntm@163.com",
+      "status": "正常经营",
+      "jti": "f575e315-0420-4779-b29b-21e10e6cff96",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTgxN2VcdThiYWZcdTZlMzhcdTYyMGZcdTY1ZDdcdTgyMzBcdTY1YjBcdTc1ODZcdTc5OGZcdTRmNTFcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6ImZ1bHV0ZW5neHVudG1AMTYzLmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiZjU3NWUzMTUtMDQyMC00Nzc5LWIyOWItMjFlMTBlNmNmZjk2In0.0du7wqTD4oAeej6NVx1Orq3e9E3syJaXEOQREaiclcQ"
+    },
+    {
+      "excel_row": 11,
+      "shop_name": "履冰旗舰店",
+      "company_name": "武汉搜卡科技有限公司",
+      "merchant_display_name": "履冰旗舰店武汉搜卡科技有限公司",
+      "fuyou_merchant_no": "6988215",
+      "alipay_account": "s5k5net@163.com",
+      "status": "正常经营",
+      "jti": "8de4a8a0-1e67-4783-925a-45a8d06807d1",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTVjNjVcdTUxYjBcdTY1ZDdcdTgyMzBcdTVlOTdcdTZiNjZcdTZjNDlcdTY0MWNcdTUzNjFcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InM1azVuZXRAMTYzLmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiOGRlNGE4YTAtMWU2Ny00NzgzLTkyNWEtNDVhOGQwNjgwN2QxIn0.CAWIlFeaaB9oF2yHONXNy48_slxYNehlpsTmKgsTD0M"
+    },
+    {
+      "excel_row": 12,
+      "shop_name": "巴别时代旗舰店",
+      "company_name": "武汉搜卡科技有限公司",
+      "merchant_display_name": "巴别时代旗舰店武汉搜卡科技有限公司",
+      "fuyou_merchant_no": "6703617",
+      "alipay_account": "skkj20260415@163.com",
+      "status": "正常经营",
+      "jti": "0d8690f9-1be2-48f4-92d8-aec8a2c7978f",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTVkZjRcdTUyMmJcdTY1ZjZcdTRlZTNcdTY1ZDdcdTgyMzBcdTVlOTdcdTZiNjZcdTZjNDlcdTY0MWNcdTUzNjFcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InNra2oyMDI2MDQxNUAxNjMuY29tIiwiZXh0ZXJuYWxfc2hvcF9pZCI6IiIsImlhdCI6MTc3OTM0MjU1NCwiZXhwIjoxNzgxOTM0NTU0LCJqdGkiOiIwZDg2OTBmOS0xYmUyLTQ4ZjQtOTJkOC1hZWM4YTJjNzk3OGYifQ.kb0rlJRY3BI0RNpZkum15_s4VdTc3HLlq6SBtk5uLLM"
+    },
+    {
+      "excel_row": 14,
+      "shop_name": "创想服务专营店",
+      "company_name": "温州创想网络科技有限公司",
+      "merchant_display_name": "创想服务专营店温州创想网络科技有限公司",
+      "fuyou_merchant_no": "6399714",
+      "alipay_account": "wzcx16168@sina.com",
+      "status": "正常经营",
+      "jti": "b5654236-dd66-466c-80ff-13df5cc73a28",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTUyMWJcdTYwZjNcdTY3MGRcdTUyYTFcdTRlMTNcdTg0MjVcdTVlOTdcdTZlMjlcdTVkZGVcdTUyMWJcdTYwZjNcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6Ind6Y3gxNjE2OEBzaW5hLmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiYjU2NTQyMzYtZGQ2Ni00NjZjLTgwZmYtMTNkZjVjYzczYTI4In0.O-7dM6YxCbFZHJs3rxs-fachBdhOFV6bc2k3CKu3T24"
+    },
+    {
+      "excel_row": 15,
+      "shop_name": "ABGAME旗舰店",
+      "company_name": "温州创想网络科技有限公司",
+      "merchant_display_name": "ABGAME旗舰店温州创想网络科技有限公司",
+      "fuyou_merchant_no": "6121200",
+      "alipay_account": "chuangxiang@loke123.com",
+      "status": "正常经营",
+      "jti": "85a5b093-05ad-4bc5-93a4-8c9b00d25e45",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJBQkdBTUVcdTY1ZDdcdTgyMzBcdTVlOTdcdTZlMjlcdTVkZGVcdTUyMWJcdTYwZjNcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6ImNodWFuZ3hpYW5nQGxva2UxMjMuY29tIiwiZXh0ZXJuYWxfc2hvcF9pZCI6IiIsImlhdCI6MTc3OTM0MjU1NCwiZXhwIjoxNzgxOTM0NTU0LCJqdGkiOiI4NWE1YjA5My0wNWFkLTRiYzUtOTNhNC04YzliMDBkMjVlNDUifQ.Wnm-K3Cr7vfwSE5g4zp5ZZ0S5uZwv5RfHrVPLyHw2cQ"
+    },
+    {
+      "excel_row": 16,
+      "shop_name": "DADADA旗舰店",
+      "company_name": "深圳市维缇网络科技有限公司",
+      "merchant_display_name": "DADADA旗舰店深圳市维缇网络科技有限公司",
+      "fuyou_merchant_no": "6939446",
+      "alipay_account": "liuyuan@huyosy.com",
+      "status": "正常经营",
+      "jti": "8c144a2f-0348-47d8-a629-63f80393338c",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJEQURBREFcdTY1ZDdcdTgyMzBcdTVlOTdcdTZkZjFcdTU3MzNcdTVlMDJcdTdlZjRcdTdmMDdcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6ImxpdXl1YW5AaHV5b3N5LmNvbSIsImV4dGVybmFsX3Nob3BfaWQiOiIiLCJpYXQiOjE3NzkzNDI1NTQsImV4cCI6MTc4MTkzNDU1NCwianRpIjoiOGMxNDRhMmYtMDM0OC00N2Q4LWE2MjktNjNmODAzOTMzMzhjIn0.NKzRaq-AcJwTzqCCpNXEjNUeLCxCRDRmBzu0tMWWYBM"
+    },
+    {
+      "excel_row": 18,
+      "shop_name": "婉美de承诺",
+      "company_name": "武汉泰斯网络科技有限公司",
+      "merchant_display_name": "婉美de承诺武汉泰斯网络科技有限公司",
+      "fuyou_merchant_no": "6504690",
+      "alipay_account": "taisi0003@163.com",
+      "status": "正常经营",
+      "jti": "72e2b7d2-5c50-4500-a445-2cb0fc2b4fc0",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTVhNDlcdTdmOGVkZVx1NjI3Zlx1OGJmYVx1NmI2Nlx1NmM0OVx1NmNmMFx1NjVhZlx1N2Y1MVx1N2VkY1x1NzlkMVx1NjI4MFx1NjcwOVx1OTY1MFx1NTE2Y1x1NTNmOCIsImV4cGVjdGVkX2FsaXBheV9hY2NvdW50IjoidGFpc2kwMDAzQDE2My5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjcyZTJiN2QyLTVjNTAtNDUwMC1hNDQ1LTJjYjBmYzJiNGZjMCJ9.ZB1aQDxHyxF3_fONy97DbGtHxKvbshv5pteP0m3b_FA"
+    },
+    {
+      "excel_row": 20,
+      "shop_name": "tb397638823969",
+      "company_name": "武汉泰斯网络科技有限公司",
+      "merchant_display_name": "tb397638823969武汉泰斯网络科技有限公司",
+      "fuyou_merchant_no": "6357533",
+      "alipay_account": "taisi0002@163.com",
+      "status": "正常经营",
+      "jti": "e8668bc5-e9d5-4832-b5a6-67c960c10856",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJ0YjM5NzYzODgyMzk2OVx1NmI2Nlx1NmM0OVx1NmNmMFx1NjVhZlx1N2Y1MVx1N2VkY1x1NzlkMVx1NjI4MFx1NjcwOVx1OTY1MFx1NTE2Y1x1NTNmOCIsImV4cGVjdGVkX2FsaXBheV9hY2NvdW50IjoidGFpc2kwMDAyQDE2My5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6ImU4NjY4YmM1LWU5ZDUtNDgzMi1iNWE2LTY3Yzk2MGMxMDg1NiJ9.kAOueXqOqlL9dCQKVjv1GIpkQblVlh0v_af3g6TFjfY"
+    },
+    {
+      "excel_row": 21,
+      "shop_name": "亨创数娱充值店",
+      "company_name": "武汉蓝迪网络科技有限公司",
+      "merchant_display_name": "亨创数娱充值店武汉蓝迪网络科技有限公司",
+      "fuyou_merchant_no": "6187279",
+      "alipay_account": "whld1114@163.com",
+      "status": "正常经营",
+      "jti": "2acd392b-83ca-4e1f-997a-e411c76b3067",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTRlYThcdTUyMWJcdTY1NzBcdTVhMzFcdTUxNDVcdTUwM2NcdTVlOTdcdTZiNjZcdTZjNDlcdTg0ZGRcdThmZWFcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6IndobGQxMTE0QDE2My5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjJhY2QzOTJiLTgzY2EtNGUxZi05OTdhLWU0MTFjNzZiMzA2NyJ9.YfYWJrbD6WoiPJgdwCXwSnPSCkZ1_kGenkPtVsstvR8"
+    },
+    {
+      "excel_row": 22,
+      "shop_name": "tb0131100248",
+      "company_name": "武汉蓝迪网络科技有限公司",
+      "merchant_display_name": "tb0131100248武汉蓝迪网络科技有限公司",
+      "fuyou_merchant_no": "6677099",
+      "alipay_account": "whld1113@163.com",
+      "status": "正常经营",
+      "jti": "77fdaea0-ba89-4337-8900-fb5fcad57d42",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJ0YjAxMzExMDAyNDhcdTZiNjZcdTZjNDlcdTg0ZGRcdThmZWFcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6IndobGQxMTEzQDE2My5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6Ijc3ZmRhZWEwLWJhODktNDMzNy04OTAwLWZiNWZjYWQ1N2Q0MiJ9.HoqbXoi9GFrUuwEg3GUnHXuxmxhKAE7SDHs_I4rCLzg"
+    },
+    {
+      "excel_row": 23,
+      "shop_name": "瀚宇数卡速充",
+      "company_name": "武汉拾游网络科技有限公司",
+      "merchant_display_name": "瀚宇数卡速充武汉拾游网络科技有限公司",
+      "fuyou_merchant_no": "6295582",
+      "alipay_account": "shiyou1005@sina.com",
+      "status": "正常经营",
+      "jti": "03c9a038-2abc-4055-a8e6-676c2583e3de",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTcwMWFcdTViODdcdTY1NzBcdTUzNjFcdTkwMWZcdTUxNDVcdTZiNjZcdTZjNDlcdTYyZmVcdTZlMzhcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InNoaXlvdTEwMDVAc2luYS5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjAzYzlhMDM4LTJhYmMtNDA1NS1hOGU2LTY3NmMyNTgzZTNkZSJ9.lDrsN9ygwvUzMICzOC9pQhDVCaexL34wxtDr98XwL0Q"
+    },
+    {
+      "excel_row": 24,
+      "shop_name": "万游引力数娱",
+      "company_name": "武汉拾游网络科技有限公司",
+      "merchant_display_name": "万游引力数娱武汉拾游网络科技有限公司",
+      "fuyou_merchant_no": "6322564",
+      "alipay_account": "shiyou1004@sina.com",
+      "status": "新开",
+      "jti": "030da673-9870-4a73-b566-b65933103f5f",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTRlMDdcdTZlMzhcdTVmMTVcdTUyOWJcdTY1NzBcdTVhMzFcdTZiNjZcdTZjNDlcdTYyZmVcdTZlMzhcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InNoaXlvdTEwMDRAc2luYS5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjAzMGRhNjczLTk4NzAtNGE3My1iNTY2LWI2NTkzMzEwM2Y1ZiJ9.kOkuJYjNbyomMwgFtIzSrQEcw6JbIwsrB5HWhsRjIbU"
+    },
+    {
+      "excel_row": 25,
+      "shop_name": "App Store 充值卡",
+      "company_name": "武汉昊景网络科技有限公司",
+      "merchant_display_name": "App Store 充值卡武汉昊景网络科技有限公司",
+      "fuyou_merchant_no": "6555148",
+      "alipay_account": "haojing00033@sina.com",
+      "status": "新开",
+      "jti": "62ad5566-59fa-41fd-a81a-abf6b99ba750",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJBcHAgU3RvcmUgXHU1MTQ1XHU1MDNjXHU1MzYxXHU2YjY2XHU2YzQ5XHU2NjBhXHU2NjZmXHU3ZjUxXHU3ZWRjXHU3OWQxXHU2MjgwXHU2NzA5XHU5NjUwXHU1MTZjXHU1M2Y4IiwiZXhwZWN0ZWRfYWxpcGF5X2FjY291bnQiOiJoYW9qaW5nMDAwMzNAc2luYS5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6IjYyYWQ1NTY2LTU5ZmEtNDFmZC1hODFhLWFiZjZiOTliYTc1MCJ9.JOA5i_p9Iil5sbmd7SN5hO9ISnVw1Ly8FbiWVh5VuvE"
+    },
+    {
+      "excel_row": 43,
+      "shop_name": "24小时自动充值折扣店",
+      "company_name": "深圳市博宽网络科技有限公司",
+      "merchant_display_name": "24小时自动充值折扣店深圳市博宽网络科技有限公司",
+      "fuyou_merchant_no": "6327726",
+      "alipay_account": "bkwl1111@qq.com",
+      "status": "正常运营",
+      "jti": "d3f8446d-a7cd-431f-bf3a-8f6f2a795efb",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiIyNFx1NWMwZlx1NjVmNlx1ODFlYVx1NTJhOFx1NTE0NVx1NTAzY1x1NjI5OFx1NjI2M1x1NWU5N1x1NmRmMVx1NTczM1x1NWUwMlx1NTM1YVx1NWJiZFx1N2Y1MVx1N2VkY1x1NzlkMVx1NjI4MFx1NjcwOVx1OTY1MFx1NTE2Y1x1NTNmOCIsImV4cGVjdGVkX2FsaXBheV9hY2NvdW50IjoiYmt3bDExMTFAcXEuY29tIiwiZXh0ZXJuYWxfc2hvcF9pZCI6IiIsImlhdCI6MTc3OTM0MjU1NCwiZXhwIjoxNzgxOTM0NTU0LCJqdGkiOiJkM2Y4NDQ2ZC1hN2NkLTQzMWYtYmYzYS04ZjZmMmE3OTVlZmIifQ.UuZnkFf7YZPh-VAGI3APkkWBb5nCTQLS9KbjSU6lOlU"
+    },
+    {
+      "excel_row": 47,
+      "shop_name": "博宽充值小程序",
+      "company_name": "深圳市博宽网络科技有限公司",
+      "merchant_display_name": "博宽充值小程序深圳市博宽网络科技有限公司",
+      "fuyou_merchant_no": "6825500",
+      "alipay_account": "szbkwl@bknic.com",
+      "status": "正常经营",
+      "jti": "e03923b7-2f27-4b2e-83d1-9466f5c5e825",
+      "url": "https://dev.tallyai.cn/api/p/alipay-auth?t=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjoiYWxpcGF5X2F1dGhfaW52aXRlIiwiY29tcGFueV9pZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsIm9wZXJhdG9yX3VzZXJfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJtZXJjaGFudF9kaXNwbGF5X25hbWUiOiJcdTUzNWFcdTViYmRcdTUxNDVcdTUwM2NcdTVjMGZcdTdhMGJcdTVlOGZcdTZkZjFcdTU3MzNcdTVlMDJcdTUzNWFcdTViYmRcdTdmNTFcdTdlZGNcdTc5ZDFcdTYyODBcdTY3MDlcdTk2NTBcdTUxNmNcdTUzZjgiLCJleHBlY3RlZF9hbGlwYXlfYWNjb3VudCI6InN6Ymt3bEBia25pYy5jb20iLCJleHRlcm5hbF9zaG9wX2lkIjoiIiwiaWF0IjoxNzc5MzQyNTU0LCJleHAiOjE3ODE5MzQ1NTQsImp0aSI6ImUwMzkyM2I3LTJmMjctNGIyZS04M2QxLTk0NjZmNWM1ZTgyNSJ9.UCRMPFENtMYQ3AyddgrvRH03k-y9PbObn8qqNcfHdss"
+    }
+  ],
+  "skipped": [
+    {
+      "excel_row": 6,
+      "shop_name": "雷神战斧旗舰店",
+      "reasons": [
+        "福游云进货商户号为空"
+      ]
+    },
+    {
+      "excel_row": 7,
+      "shop_name": "雷系旗舰店",
+      "reasons": [
+        "福游云进货商户号为空"
+      ]
+    },
+    {
+      "excel_row": 10,
+      "shop_name": "AK加速器旗舰店",
+      "reasons": [
+        "福游云进货商户号为空"
+      ]
+    },
+    {
+      "excel_row": 13,
+      "shop_name": "雪悦游戏海外专营店",
+      "reasons": [
+        "福游云进货商户号为空"
+      ]
+    },
+    {
+      "excel_row": 17,
+      "shop_name": "App Store充值卡专卖店",
+      "reasons": [
+        "福游云进货商户号为空"
+      ]
+    },
+    {
+      "excel_row": 19,
+      "shop_name": "乡巴佬购物网",
+      "reasons": [
+        "退店流程中"
+      ]
+    },
+    {
+      "excel_row": 26,
+      "shop_name": "搜卡数娱专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 27,
+      "shop_name": "信鸿服务专营店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 28,
+      "shop_name": "颜良湾数娱专营店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 29,
+      "shop_name": "搜卡游戏专营店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 30,
+      "shop_name": "博宽网游专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 31,
+      "shop_name": "AK征云专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 32,
+      "shop_name": "博宽数卡充值",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 33,
+      "shop_name": "单枪官方旗舰店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 34,
+      "shop_name": "雷神福游专卖店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 35,
+      "shop_name": "博宽网络游戏专营店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 36,
+      "shop_name": "博宽充值专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 37,
+      "shop_name": "博宽游戏专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 38,
+      "shop_name": "奥拉夫电玩专营店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 39,
+      "shop_name": "搜卡游戏专营店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 40,
+      "shop_name": "腾讯游戏旗舰店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 41,
+      "shop_name": "和平精英旗舰店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 42,
+      "shop_name": "雷系旗舰店",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 44,
+      "shop_name": "App Store 充值卡专卖店",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 45,
+      "shop_name": "创想娱乐",
+      "reasons": [
+        "福游云进货商户号为空",
+        "支付宝账号为空"
+      ]
+    },
+    {
+      "excel_row": 46,
+      "shop_name": "充值",
+      "reasons": [
+        "支付宝账号为空"
+      ]
+    }
+  ]
+}

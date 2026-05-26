@@ -16,6 +16,7 @@ import psycopg2.extras
 
 from config import DATABASE_URL
 from graphs.recon.binding_date_fields import normalize_binding_query_date_field
+from graphs.recon.handoff_collection import build_handoff_collection_params
 from models import AgentState
 from services.notifications import get_notification_adapter
 from services.notifications.repository import load_company_channel_config_by_id
@@ -54,9 +55,8 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
 
 _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID = "alipay-fund-source-only-non-alipay-payment"
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL = "非支付宝支付订单"
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN = "微信/其他支付资金账单接入后，重新纳入资金对账"
+_BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
+_COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
 
 
 def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
@@ -476,54 +476,6 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
-def _is_alipay_fund_bill_binding(binding: dict[str, Any]) -> bool:
-    haystack = " ".join(
-        str(binding.get(key) or "")
-        for key in (
-            "dataset_name",
-            "business_name",
-            "display_name",
-            "name",
-            "dataset_code",
-            "resource_key",
-            "table_name",
-        )
-    ).lower()
-    return "支付宝资金账单" in haystack or "alipay_bill:signcustomer" in haystack
-
-
-def _collection_side(collection: dict[str, Any]) -> str:
-    binding = _safe_dict(collection.get("binding"))
-    text = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-    target = str(binding.get("input_plan_target_table") or binding.get("target_table") or "").strip().lower()
-    if text == "left" or text.startswith("left_") or target == "left_recon_ready":
-        return "left"
-    if text == "right" or text.startswith("right_") or target == "right_recon_ready":
-        return "right"
-    return ""
-
-
-def _alipay_fund_side(ctx: dict[str, Any]) -> str:
-    source_collection_json = _safe_dict(ctx.get("source_collection_json"))
-    collections = [
-        item for item in _safe_list(source_collection_json.get("collections"))
-        if isinstance(item, dict)
-    ]
-    if not collections:
-        collections = [
-            {"binding": item}
-            for item in _safe_list(ctx.get("plan_input_bindings"))
-            if isinstance(item, dict)
-        ]
-    for collection in collections:
-        binding = _safe_dict(collection.get("binding"))
-        if _is_alipay_fund_bill_binding(binding):
-            side = _collection_side(collection)
-            if side:
-                return side
-    return ""
-
-
 def _resolve_failed_reason(ctx: dict[str, Any]) -> str:
     """Produce a finance-team-friendly failure reason from ctx.
 
@@ -602,6 +554,186 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _parse_runtime_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _runtime_duration_seconds(started_at: Any, finished_at: Any) -> float | None:
+    start = _parse_runtime_datetime(started_at)
+    finish = _parse_runtime_datetime(finished_at)
+    if not start or not finish:
+        return None
+    return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
+def _runtime_metric_name(binding: dict[str, Any], fallback: str) -> str:
+    for key in ("business_name", "dataset_name", "display_name", "name", "dataset_code"):
+        text = str(binding.get(key) or "").strip()
+        if text and not _looks_like_physical_table_name(text):
+            return text
+    return fallback
+
+
+def _runtime_metric_side(binding: dict[str, Any]) -> str:
+    text = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
+    target = str(binding.get("input_plan_target_table") or binding.get("target_table") or "").strip().lower()
+    if text == "left" or text.startswith("left_") or target == "left_recon_ready":
+        return "left"
+    if text == "right" or text.startswith("right_") or target == "right_recon_ready":
+        return "right"
+    return ""
+
+
+def _collection_duration(collection: dict[str, Any]) -> float | None:
+    job = _safe_dict(collection.get("job"))
+    metrics = _safe_dict(job.get("metrics"))
+    timing = _safe_dict(metrics.get("collection_timing"))
+    return _safe_float(timing.get("total_seconds"))
+
+
+def _collection_row_count(collection: dict[str, Any]) -> int:
+    job = _safe_dict(collection.get("job"))
+    metrics = _safe_dict(job.get("metrics"))
+    for key in ("row_count", "collection_input", "collection_upserted"):
+        value = _safe_int(metrics.get(key), -1)
+        if value >= 0:
+            return value
+    collection_records = _safe_dict(collection.get("collection_records"))
+    return _safe_int(collection_records.get("record_count"), 0)
+
+
+def _collection_attempts_by_side(source_snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    attempts: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(_safe_list(source_snapshot.get("collection_attempts"))):
+        if not isinstance(item, dict):
+            continue
+        binding = _safe_dict(item.get("binding"))
+        side = _runtime_metric_side(binding) or ("right" if index == 1 else "left")
+        if side:
+            attempts[side] = item
+    return attempts
+
+
+def _summary_count(summary: dict[str, Any], side: str) -> int | None:
+    matched_exact = _safe_float(summary.get("matched_exact"))
+    matched_with_diff = _safe_float(summary.get("matched_with_diff"))
+    source_only = _safe_float(summary.get("source_only"))
+    target_only = _safe_float(summary.get("target_only"))
+    if None in {matched_exact, matched_with_diff, source_only, target_only}:
+        return None
+    if side == "right":
+        return int(matched_exact + matched_with_diff + target_only)
+    return int(matched_exact + matched_with_diff + source_only)
+
+
+def _runtime_business_name_by_side(collections: list[dict[str, Any]], side: str) -> str:
+    for item in collections:
+        if str(item.get("side") or "") == side:
+            return str(item.get("business_name") or "")
+    return "右侧数据源" if side == "right" else "左侧数据源"
+
+
+def _build_runtime_summary(ctx: dict[str, Any]) -> dict[str, Any]:
+    source_snapshot = _safe_dict(ctx.get("source_collection_json"))
+    recon_observation = _safe_dict(ctx.get("recon_observation"))
+    recon_summary = _safe_dict(recon_observation.get("summary"))
+    runtime_metrics = _safe_dict(ctx.get("runtime_metrics"))
+    run_context = _safe_dict(ctx.get("run_context"))
+    collections: list[dict[str, Any]] = []
+    collection_attempts_by_side = _collection_attempts_by_side(source_snapshot)
+
+    for index, item in enumerate(_safe_list(source_snapshot.get("collections"))):
+        if not isinstance(item, dict):
+            continue
+        binding = _safe_dict(item.get("binding"))
+        side = _runtime_metric_side(binding) or ("right" if index == 1 else "left")
+        runtime_collection = {**item, **_safe_dict(collection_attempts_by_side.get(side))}
+        collections.append(
+            {
+                "side": side,
+                "business_name": _runtime_metric_name(
+                    binding,
+                    "右侧数据源" if side == "right" else "左侧数据源",
+                ),
+                "row_count": _collection_row_count(runtime_collection),
+                "duration_seconds": _collection_duration(runtime_collection),
+            }
+        )
+
+    preparation: list[dict[str, Any]] = []
+    for item in _safe_list(runtime_metrics.get("preparation")):
+        if not isinstance(item, dict):
+            continue
+        side = str(item.get("side") or "").strip()
+        preparation.append(
+            {
+                "side": side,
+                "business_name": str(item.get("business_name") or _runtime_business_name_by_side(collections, side)),
+                "row_count": _safe_int(item.get("row_count"), 0),
+                "duration_seconds": _safe_float(item.get("duration_seconds")),
+            }
+        )
+    if not preparation:
+        for collection in collections:
+            side = str(collection.get("side") or "")
+            preparation.append(
+                {
+                    "side": side,
+                    "business_name": str(collection.get("business_name") or ("右侧数据源" if side == "right" else "左侧数据源")),
+                    "row_count": _summary_count(recon_summary, side),
+                    "duration_seconds": None,
+                }
+            )
+
+    queue_started_at = str(run_context.get("queue_started_at") or "")
+    queue_finished_at = str(run_context.get("queue_finished_at") or "")
+    return {
+        "biz_date": str(ctx.get("biz_date") or run_context.get("biz_date") or "").strip(),
+        "queue": {
+            "job_id": str(run_context.get("queue_job_id") or ""),
+            "started_at": queue_started_at,
+            "finished_at": queue_finished_at,
+            "duration_seconds": _runtime_duration_seconds(queue_started_at, queue_finished_at),
+        },
+        "collections": collections,
+        "preparation": preparation,
+        "reconciliation": _safe_dict(runtime_metrics.get("reconciliation")),
+        "summary_notification": _safe_dict(_safe_dict(runtime_metrics.get("summary_notification"))),
+    }
+
+
+def _merge_runtime_summary_notification(
+    artifacts: dict[str, Any],
+    summary_result: dict[str, Any],
+) -> dict[str, Any]:
+    patched = dict(artifacts or {})
+    runtime_summary = _safe_dict(patched.get("runtime_summary"))
+    recipient = _safe_dict(summary_result.get("summary_recipient"))
+    runtime_summary["summary_notification"] = {
+        "status": str(summary_result.get("status") or ""),
+        "recipient_name": str(recipient.get("name") or recipient.get("display_name") or ""),
+        "recipient_identifier": str(recipient.get("identifier") or recipient.get("user_id") or ""),
+        "message_id": str(summary_result.get("message_id") or ""),
+        "error": str(summary_result.get("error") or ""),
+    }
+    patched["runtime_summary"] = runtime_summary
+    return patched
 
 
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
@@ -861,6 +993,23 @@ def _collection_count_from_result(result: dict[str, Any]) -> int:
     return 0
 
 
+def _is_browser_collection_waiting_result(result: dict[str, Any], binding: dict[str, Any]) -> bool:
+    driver = str(result.get("collection_driver") or binding.get("collection_driver") or "").strip()
+    if driver != _BROWSER_COLLECTION_DRIVER or not bool(result.get("success")):
+        return False
+    job = _safe_dict(result.get("job"))
+    return bool(result.get("queued")) or _sync_job_status(job) in _COLLECTION_WAITING_STATUSES
+
+
+def _waiting_dataset_from_binding(binding: dict[str, Any], *, biz_date: str) -> dict[str, Any]:
+    return {
+        "data_source_id": _get_binding_source_id(binding),
+        "dataset_id": str(binding.get("dataset_id") or "").strip(),
+        "resource_key": _get_binding_resource_key(binding),
+        "biz_date": biz_date,
+    }
+
+
 def _flatten_input_plan_entries(scheme_meta: dict[str, Any]) -> list[dict[str, Any]]:
     input_plan = _safe_dict(scheme_meta.get("input_plan_json"))
     if not input_plan:
@@ -1072,7 +1221,7 @@ async def _wait_dataset_collection_job(
         await asyncio.sleep(poll_interval_seconds)
 
 
-async def _trigger_and_wait_collection(
+async def _trigger_collection(
     *,
     auth_token: str,
     source_id: str,
@@ -1080,8 +1229,15 @@ async def _trigger_and_wait_collection(
     resource_key: str,
     biz_date: str,
     trigger_mode: str,
+    handoff_channel_config_id: str = "",
+    handoff_owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    collect_result = await data_source_trigger_dataset_collection(
+    params: dict[str, Any] = {}
+    if handoff_channel_config_id:
+        params["handoff_channel_config_id"] = handoff_channel_config_id
+    if handoff_owner:
+        params["handoff_owner"] = handoff_owner
+    return await data_source_trigger_dataset_collection(
         auth_token,
         source_id,
         dataset_id=dataset_id,
@@ -1090,14 +1246,62 @@ async def _trigger_and_wait_collection(
         trigger_mode=trigger_mode,
         background=True,
         mode="real",
+        params=params,
+    )
+
+
+async def _enrich_completed_collection_job(
+    *,
+    auth_token: str,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    sync_job_id = _sync_job_id(job)
+    if not sync_job_id:
+        return job
+    result = await data_source_get_sync_job(auth_token, sync_job_id, mode="real")
+    if not bool(result.get("success")):
+        return job
+    enriched_job = _safe_dict(result.get("job"))
+    return enriched_job or job
+
+
+async def _trigger_and_wait_collection(
+    *,
+    auth_token: str,
+    source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+    trigger_mode: str,
+    collection_driver: str = "",
+    handoff_channel_config_id: str = "",
+    handoff_owner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    collect_result = await _trigger_collection(
+        auth_token=auth_token,
+        source_id=source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        trigger_mode=trigger_mode,
+        handoff_channel_config_id=handoff_channel_config_id,
+        handoff_owner=handoff_owner,
     )
     if not bool(collect_result.get("success")):
         return collect_result
 
     job = _safe_dict(collect_result.get("job"))
     status = _sync_job_status(job)
+    driver = str(collect_result.get("collection_driver") or collection_driver or "").strip()
+    if driver == _BROWSER_COLLECTION_DRIVER and (
+        bool(collect_result.get("queued")) or status in _COLLECTION_WAITING_STATUSES
+    ):
+        return {**collect_result, "collection_driver": driver}
     if not bool(collect_result.get("queued")) and status not in {"queued", "pending", "running"}:
-        return collect_result
+        return {
+            **collect_result,
+            "job": await _enrich_completed_collection_job(auth_token=auth_token, job=job),
+        }
 
     wait_result = await _wait_dataset_collection_job(
         auth_token=auth_token,
@@ -1295,6 +1499,7 @@ async def _persist_execution_run(
     recon_observation = _safe_dict(ctx.get("recon_observation"))
     summary = _safe_dict(recon_observation.get("summary"))
     artifacts = _safe_dict(recon_observation.get("artifacts"))
+    artifacts["runtime_summary"] = _build_runtime_summary(ctx)
     anomaly_items = _safe_list(recon_observation.get("anomaly_items"))
 
     if run_record.get("id"):
@@ -1687,6 +1892,7 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
     run_context = _safe_dict(ctx.get("run_context"))
     collection_trigger_mode = _normalize_collection_trigger_mode(run_context.get("trigger_type"))
     should_collect_first = _should_collect_before_recon(run_context.get("trigger_type"))
+    handoff_params = build_handoff_collection_params(_safe_dict(ctx.get("run_plan")))
 
     for binding in bindings:
         source_id = _get_binding_source_id(binding)
@@ -1695,41 +1901,61 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
             missing_bindings.append({**binding, "error": "缺少 data_source_id/source_id 或 table_name"})
             continue
         if should_collect_first and _should_trigger_collection_for_binding(binding):
+            collect_kwargs = {
+                "auth_token": auth_token,
+                "source_id": source_id,
+                "dataset_id": str(binding.get("dataset_id") or "").strip(),
+                "resource_key": _get_binding_resource_key(binding),
+                "biz_date": biz_date,
+                "trigger_mode": collection_trigger_mode,
+            }
             collect_result = await _trigger_and_wait_collection(
-                auth_token=auth_token,
-                source_id=source_id,
-                dataset_id=str(binding.get("dataset_id") or "").strip(),
-                resource_key=_get_binding_resource_key(binding),
-                biz_date=biz_date,
-                trigger_mode=collection_trigger_mode,
+                **collect_kwargs,
+                collection_driver=str(binding.get("collection_driver") or ""),
+                handoff_channel_config_id=str(handoff_params.get("handoff_channel_config_id") or ""),
+                handoff_owner=_safe_dict(handoff_params.get("handoff_owner")) or None,
             )
             collection_success = bool(collect_result.get("success"))
             collection_error = "" if collection_success else str(
                 collect_result.get("error") or collect_result.get("detail") or "采集失败"
+            )
+            collection_driver = str(
+                collect_result.get("collection_driver")
+                or binding.get("collection_driver")
+                or ""
             )
             collection_attempts.append(
                 {
                     "binding": binding,
                     "success": collection_success,
                     "job": _safe_dict(collect_result.get("job")),
+                    "job_id": _sync_job_id(collect_result.get("job")),
                     "error": collection_error,
-                    "collection_driver": str(
-                        collect_result.get("collection_driver")
-                        or binding.get("collection_driver")
-                        or ""
-                    ),
+                    "collection_driver": collection_driver,
                     "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                    "queued": bool(collect_result.get("queued")),
                 }
             )
+            if (
+                collection_success
+                and _is_browser_collection_waiting_result(collect_result, binding)
+            ):
+                missing_bindings.append(
+                    {
+                        **binding,
+                        "collection_driver": collection_driver,
+                        "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                        "error": "浏览器采集任务已创建，等待采集完成后继续对账",
+                        "waiting_data": True,
+                        "collection_job_id": _sync_job_id(collect_result.get("job")),
+                    }
+                )
+                continue
             if not collection_success:
                 missing_bindings.append(
                     {
                         **binding,
-                        "collection_driver": str(
-                            collect_result.get("collection_driver")
-                            or binding.get("collection_driver")
-                            or ""
-                        ),
+                        "collection_driver": collection_driver,
                         "dataset_source_type": str(binding.get("dataset_source_type") or ""),
                         "error": f"先同步失败：{collection_error}",
                     }
@@ -1818,6 +2044,29 @@ def validate_dataset_completeness_node(state: AgentState) -> dict[str, Any]:
 
     required_missing = [b for b in missing_bindings if _get_binding_required(b)]
     if required_missing:
+        # 只有真正在浏览器采集 pending/running 中的 binding 才算 waiting_data。
+        # 非 browser_playbook_remote 的 binding 哪怕带了 waiting_data 字段也不能拖
+        # 整个对账任务进 waiting_data —— 否则数据库类数据源缺数据时也会被错误地
+        # 推入 waiting_data 队列,等不到事件唤醒。
+        waiting_bindings = [
+            b for b in required_missing
+            if bool(b.get("waiting_data"))
+            and str(b.get("collection_driver") or "") == _BROWSER_COLLECTION_DRIVER
+        ]
+        if waiting_bindings and len(waiting_bindings) == len(required_missing):
+            ctx["waiting_data"] = True
+            ctx["failed_stage"] = "data_waiting"
+            ctx["failed_reason"] = "浏览器采集任务已创建，等待采集完成后继续对账"
+            ctx["waiting_datasets"] = [
+                _waiting_dataset_from_binding(b, biz_date=str(ctx.get("biz_date") or "").strip())
+                for b in waiting_bindings
+            ]
+            ctx["collection_job_ids"] = [
+                str(b.get("collection_job_id") or "").strip()
+                for b in waiting_bindings
+                if str(b.get("collection_job_id") or "").strip()
+            ]
+            return {"recon_ctx": ctx}
         names = [
             f"{_binding_display_name(b)}（{str(b.get('error') or '数据未就绪')}）"
             for b in required_missing
@@ -1866,77 +2115,6 @@ async def persist_failed_run_node(state: AgentState) -> dict[str, Any]:
     )
     if run:
         ctx["execution_run_record"] = run
-    return {"recon_ctx": ctx}
-
-
-def apply_alipay_fund_source_only_suppression_node(state: AgentState) -> dict[str, Any]:
-    ctx = _get_recon_ctx(state)
-    exec_status = str(ctx.get("exec_status") or "success").strip().lower()
-    if exec_status not in {"", "success", "partial_success", "skipped"}:
-        return {"recon_ctx": ctx}
-
-    alipay_side = _alipay_fund_side(ctx)
-    if alipay_side not in {"left", "right"}:
-        return {"recon_ctx": ctx}
-
-    recon_observation = _safe_dict(ctx.get("recon_observation"))
-    summary = _safe_dict(recon_observation.get("summary"))
-    anomaly_items = [
-        item for item in _safe_list(recon_observation.get("anomaly_items"))
-        if isinstance(item, dict)
-    ]
-    source_only = _safe_int(summary.get("source_only"), 0)
-    target_only = _safe_int(summary.get("target_only"), 0)
-    matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
-
-    # source_only means the left/source side exists and the right/target side is missing.
-    # Suppress it only when the Alipay fund bill is the right/target side.
-    if alipay_side != "right" or source_only <= 0:
-        pending_total = source_only + target_only + matched_with_diff
-        summary.update(
-            {
-                "pending_source_only": source_only,
-                "pending_target_only": target_only,
-                "pending_matched_with_diff": matched_with_diff,
-                "pending_total": pending_total,
-                "has_anomaly": pending_total > 0,
-            }
-        )
-        recon_observation["summary"] = summary
-        recon_observation["anomaly_items"] = anomaly_items
-        recon_observation["anomaly_item_count"] = len(anomaly_items)
-        ctx["recon_observation"] = recon_observation
-        ctx["recon_result_summary_json"] = summary
-        ctx["anomaly_items"] = anomaly_items
-        return {"recon_ctx": ctx}
-
-    pending_anomalies = [
-        item for item in anomaly_items
-        if str(item.get("anomaly_type") or "") != "source_only"
-    ]
-    pending_total = target_only + matched_with_diff
-    summary.update(
-        {
-            "pending_source_only": 0,
-            "pending_target_only": target_only,
-            "pending_matched_with_diff": matched_with_diff,
-            "pending_total": pending_total,
-            "has_anomaly": pending_total > 0,
-            "temporary_suppression": {
-                "id": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID,
-                "enabled": True,
-                "suppressed_source_only": source_only,
-                "label": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL,
-                "remove_when": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN,
-            },
-        }
-    )
-    recon_observation["summary"] = summary
-    recon_observation["anomaly_items"] = pending_anomalies
-    recon_observation["anomaly_item_count"] = len(pending_anomalies)
-    ctx["recon_observation"] = recon_observation
-    ctx["recon_result_summary_json"] = summary
-    ctx["anomaly_items"] = pending_anomalies
     return {"recon_ctx": ctx}
 
 
@@ -2280,6 +2458,33 @@ def _format_recon_result_summary_lines(summary: dict[str, Any], *, left_name: st
     ]
 
 
+def _summary_has_difference_counts(summary: dict[str, Any]) -> bool:
+    return any(
+        key in summary
+        for key in (
+            "pending_source_only",
+            "pending_target_only",
+            "pending_matched_with_diff",
+            "source_only",
+            "target_only",
+            "matched_with_diff",
+            "matched_exact",
+        )
+    )
+
+
+def _summary_pending_total(summary: dict[str, Any], fallback: int) -> int:
+    if "pending_total" in summary:
+        return _safe_int(summary.get("pending_total"), fallback)
+    if _summary_has_difference_counts(summary):
+        return (
+            _safe_int(summary.get("pending_source_only", summary.get("source_only")), 0)
+            + _safe_int(summary.get("pending_target_only", summary.get("target_only")), 0)
+            + _safe_int(summary.get("pending_matched_with_diff", summary.get("matched_with_diff")), 0)
+        )
+    return fallback
+
+
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
     policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
@@ -2479,11 +2684,7 @@ def _compose_run_summary_notification_text(
     left_name, right_name = _resolve_side_names(ctx)
 
     summary = _safe_dict(ctx.get("recon_result_summary_json"))
-    total = (
-        _safe_int(summary.get("pending_total"), len(anomalies))
-        if "pending_total" in summary
-        else len(anomalies)
-    )
+    total = _summary_pending_total(summary, len(anomalies))
     owner_names = _notified_owner_names_from_context(ctx)
     status = (
         f"执行完成，待处理异常已催办责任人「{'、'.join(owner_names)}」"
@@ -2500,15 +2701,7 @@ def _compose_run_summary_notification_text(
         f"待处理差异：\n{total} 条",
     ]
     count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
-    if not any(
-        _safe_int(summary.get(key), 0)
-        for key in (
-            "pending_source_only",
-            "pending_target_only",
-            "pending_matched_with_diff",
-            "matched_exact",
-        )
-    ):
+    if not _summary_has_difference_counts(summary):
         count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
@@ -3001,7 +3194,10 @@ async def _send_run_summary_notification(
         "reason": "",
         "error": "",
         "summary_recipient": {
-            "name": str(resolved.display_name or name),
+            # Prefer the human-configured name: resolve-by-userId echoes the
+            # userId back as display_name (contact.user:get needs interactive
+            # PAT permission), which would otherwise shadow the real name.
+            "name": str(name or resolved.display_name),
             "identifier": str(resolved.user_id or identifier),
             "mobile": str(resolved.mobile or mobile),
             "source": "plan_meta" if summary_recipient else str(initiator.get("source") or ""),
@@ -3038,6 +3234,31 @@ async def _mark_created_exceptions_skipped(
             }
         )
     return updated_refs
+
+
+async def _persist_runtime_summary_notification(
+    *,
+    auth_token: str,
+    ctx: dict[str, Any],
+    summary_result: dict[str, Any],
+) -> None:
+    run = _safe_dict(ctx.get("execution_run_record"))
+    run_id = str(run.get("id") or "").strip()
+    if not auth_token or not run_id or not summary_result:
+        return
+    artifacts = _merge_runtime_summary_notification(
+        _safe_dict(run.get("artifacts_json")),
+        summary_result,
+    )
+    update_result = await call_mcp_tool(
+        "execution_run_update",
+        {"auth_token": auth_token, "run_id": run_id, "artifacts_json": artifacts},
+    )
+    if bool(update_result.get("success")):
+        ctx["execution_run_record"] = _safe_dict(update_result.get("run")) or {
+            **run,
+            "artifacts_json": artifacts,
+        }
 
 
 async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
@@ -3147,6 +3368,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "items": [],
             "summary_notification": summary_result,
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     if not channel_config_id:
@@ -3175,6 +3401,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 for item in updated_refs
             ],
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     if channel_config is None:
@@ -3203,6 +3434,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 for item in updated_refs
             ],
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     scheme = _safe_dict(ctx.get("scheme"))
@@ -3270,6 +3506,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
             "summary_notification": summary_result,
             "items": results,
         }
+        await _persist_runtime_summary_notification(
+            auth_token=auth_token,
+            ctx=ctx,
+            summary_result=summary_result,
+        )
         return {"recon_ctx": ctx}
 
     total = len(created_exceptions)
@@ -3295,6 +3536,11 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
         "summary_notification": summary_result,
         "items": results,
     }
+    await _persist_runtime_summary_notification(
+        auth_token=auth_token,
+        ctx=ctx,
+        summary_result=summary_result,
+    )
     return {"recon_ctx": ctx}
 
 

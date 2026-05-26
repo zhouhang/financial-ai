@@ -17,10 +17,14 @@ import jwt
 
 from graphs.recon.auto_run_service import execute_run_plan_run
 from tools.mcp_client import (
+    execution_run_update,
     recon_queue_complete,
     recon_queue_dequeue,
     recon_queue_fail,
+    recon_queue_fail_expired_waiting,
     recon_queue_reclaim_stale,
+    recon_queue_requeue_ready_waiting,
+    recon_queue_waiting_data,
 )
 
 logging.basicConfig(
@@ -80,6 +84,15 @@ def _create_system_token() -> str:
     )
 
 
+def _queue_duration_seconds(started_at: object, finished_at: object) -> float | None:
+    try:
+        start = datetime.fromisoformat(str(started_at or "").replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(finished_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
 async def _process_job(job: dict, system_token: str) -> None:
     job_id = str(job["id"])
     company_id = str(job["company_id"])
@@ -87,14 +100,44 @@ async def _process_job(job: dict, system_token: str) -> None:
     logger.info("[recon-worker] 开始处理 job_id=%s run_plan_code=%s", job_id, run_plan_code)
     try:
         auth_token = _create_worker_token(company_id)
-        await execute_run_plan_run(
+        result = await execute_run_plan_run(
             auth_token=auth_token,
             run_plan_code=run_plan_code,
             biz_date=str(job.get("biz_date") or ""),
             trigger_mode=str(job.get("trigger_mode") or "schedule"),
-            run_context=dict(job.get("run_context") or {}),
+            run_context={
+                **dict(job.get("run_context") or {}),
+                "queue_job_id": job_id,
+                "queue_started_at": str(job.get("started_at") or ""),
+                "queue_created_at": str(job.get("created_at") or ""),
+            },
         )
-        await recon_queue_complete(system_token, job_id)
+        if result.get("status") == "data_waiting":
+            await recon_queue_waiting_data(
+                system_token,
+                job_id,
+                {
+                    "waiting_reason": str(result.get("error") or "browser_collection_pending"),
+                    "waiting_datasets": list(result.get("waiting_datasets") or []),
+                    "collection_job_ids": [str(v) for v in result.get("collection_job_ids") or [] if str(v)],
+                    "wait_minutes": int(os.getenv("RECON_WAITING_DATA_TIMEOUT_MINUTES", "90")),
+                },
+            )
+            logger.info("[recon-worker] job_id=%s 进入 waiting_data", job_id)
+            return
+        complete_result = await recon_queue_complete(system_token, job_id)
+        completed_job = dict(complete_result.get("job") or {})
+        run = dict(result.get("run") or {})
+        run_id = str(run.get("id") or "")
+        artifacts = dict(run.get("artifacts_json") or {})
+        runtime_summary = dict(artifacts.get("runtime_summary") or {})
+        queue = dict(runtime_summary.get("queue") or {})
+        queue["finished_at"] = str(completed_job.get("finished_at") or queue.get("finished_at") or "")
+        queue["duration_seconds"] = _queue_duration_seconds(queue.get("started_at"), queue.get("finished_at"))
+        runtime_summary["queue"] = queue
+        artifacts["runtime_summary"] = runtime_summary
+        if run_id:
+            await execution_run_update(auth_token, run_id, {"artifacts_json": artifacts})
         logger.info("[recon-worker] job_id=%s 完成", job_id)
     except Exception as exc:
         logger.error("[recon-worker] job_id=%s 失败: %s", job_id, exc, exc_info=True)
@@ -122,6 +165,9 @@ async def main() -> None:
         # 每 2 小时刷新一次系统令牌，避免过期
         system_token = _create_system_token()
 
+        # Waiting-data 调和(requeue ready / fail expired / fail failed)从 v2 起由
+        # browser-agent 的 _waiting_reconciler 单点拥有,这里不再 per-worker 重复轮询。
+        # recon-worker 只负责 dequeue 自己的 queued job、跑、必要时 park 到 waiting_data。
         try:
             result = await recon_queue_dequeue(system_token)
             job = (result or {}).get("job")

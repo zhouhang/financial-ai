@@ -249,54 +249,17 @@ async def test_create_alipay_auth_session_requires_merchant_display_name(auth_to
 
 
 @pytest.mark.anyio
-async def test_create_alipay_auth_session_stores_merchant_display_name_extra(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
+async def test_create_alipay_auth_session_returns_longlived_landing_url(monkeypatch) -> None:
+    """alipay 分支直接短路返回长效落地链接，不再创建 30-min auth_session。"""
+    import os
 
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    monkeypatch.setenv("TALLY_PUBLIC_BASE_URL", "https://tally.example.com")
     monkeypatch.setattr(
         platform_connections,
         "_require_user",
         lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "member"},
     )
-
-    monkeypatch.setattr(
-        platform_connections,
-        "_load_app_config",
-        lambda company_id, platform_code, *, mode, redirect_uri="": PlatformAppConfig(
-            id="alipay-app-1",
-            company_id=platform_connections.SERVICE_PROVIDER_COMPANY_ID,
-            platform_code="alipay",
-            app_name="支付宝服务商应用",
-            app_key="2021006152656574",
-            app_secret="PRIVATE-KEY",
-            app_type="isv",
-            auth_base_url="https://openauth.alipay.com/oauth2/appToAppAuth.htm",
-            token_url="https://openapi.alipay.com/gateway.do",
-            refresh_url="https://openapi.alipay.com/gateway.do",
-            redirect_uri="https://tally.example.com/api/platform-auth/callback/alipay",
-            scopes=[],
-            extra={},
-            status="active",
-            auth_mode="real",
-        ),
-    )
-
-    def fake_create_auth_session(**kwargs: Any) -> dict[str, Any]:
-        captured.update(kwargs)
-        return {
-            "id": "auth-session-1",
-            "company_id": kwargs["company_id"],
-            "platform_code": kwargs["platform_code"],
-            "operator_user_id": kwargs["operator_user_id"],
-            "shop_connection_id": kwargs["shop_connection_id"],
-            "state_token": kwargs["state_token"],
-            "return_path": kwargs["return_path"],
-            "redirect_uri": kwargs["redirect_uri"],
-            "status": "pending",
-            "expires_at": kwargs["expires_at"],
-            "extra": kwargs["extra"],
-        }
-
-    monkeypatch.setattr(platform_connections.auth_db, "create_auth_session", fake_create_auth_session)
 
     result = await platform_connections._handle_create_auth_session(
         {
@@ -309,13 +272,10 @@ async def test_create_alipay_auth_session_stores_merchant_display_name_extra(mon
     )
 
     assert result["success"] is True
-    assert captured["extra"] == {
-        "merchant_display_name": "福游网络",
-        "connection_label": "福游网络",
-        "subject_type": "alipay_merchant",
-    }
-    assert result["auth_url"].startswith("https://openauth.alipay.com/oauth2/appToAppAuth.htm?")
-    assert "2021006152656574" in result["auth_url"]
+    assert result["auth_mode"] == "longlived_invite"
+    url = result["auth_url"]
+    assert url.startswith("https://tally.example.com/p/alipay-auth?t=")
+    # session_extra no longer stored — auth_db.create_auth_session never called
 
 
 @pytest.mark.anyio
