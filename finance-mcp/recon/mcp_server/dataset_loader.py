@@ -51,6 +51,7 @@ _BROWSER_COLLECTION_RECORDS_QUERY_ALLOWED_KEYS = {
     "dataset_id",
     "resource_key",
     "biz_date",
+    "date_field",
     "filters",
     "order_by",
     "limit",

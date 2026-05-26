@@ -119,6 +119,64 @@ def test_browser_collection_records_loader_rejects_unknown_query_keys(monkeypatc
     assert "unknown_option" in str(exc_info.value)
 
 
+def test_browser_collection_records_loader_accepts_date_field_metadata(monkeypatch):
+    monkeypatch.setattr(
+        dataset_loader,
+        "_table_columns",
+        lambda table_name: {
+            "data_source_id",
+            "dataset_id",
+            "resource_key",
+            "biz_date",
+            "payload",
+            "captured_at",
+        },
+    )
+
+    def fake_query(*, source_key: str, query: dict):
+        assert source_key == "source-001"
+        assert query["dataset_id"] == "dataset-001"
+        assert query["resource_key"] == "browser-collection-001@1"
+        assert query["biz_date"] == "2026-05-25"
+        assert query["date_field"] == "确认收货时间"
+        return [
+            {
+                "payload": {
+                    "订单号": "order-001",
+                    "确认收货时间": "2026-05-25 15:52:39",
+                    "订单实际金额（元）": "103",
+                }
+            },
+            {
+                "payload": {
+                    "订单号": "order-002",
+                    "确认收货时间": "2026-05-24 23:59:59",
+                    "订单实际金额（元）": "88",
+                }
+            },
+        ]
+
+    monkeypatch.setattr(dataset_loader, "_load_browser_collection_record_rows", fake_query)
+
+    df = dataset_loader.load_dataset_as_df(
+        {
+            "source_type": "browser_collection_records",
+            "source_key": "source-001",
+            "query": {
+                "dataset_id": "dataset-001",
+                "resource_key": "browser-collection-001@1",
+                "biz_date": "2026-05-25",
+                "date_field": "确认收货时间",
+                "filters": {"确认收货时间": "2026-05-25"},
+            },
+        },
+        "收支账单",
+    )
+
+    assert list(df["订单号"]) == ["order-001"]
+    assert list(df["订单实际金额（元）"]) == ["103"]
+
+
 def test_load_browser_collection_records_applies_payload_filters(monkeypatch):
     monkeypatch.setattr(
         dataset_loader,
