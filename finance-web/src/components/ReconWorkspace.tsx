@@ -75,6 +75,7 @@ import {
   formatCount,
   formatDuration,
 } from './recon/runRuntimeSummary';
+import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
 import {
   cn,
   type ReconCenterRunItem,
@@ -6012,16 +6013,37 @@ export default function ReconWorkspace({
         Object.keys(selectedExceptionSideRecords.left).length > 0
           ? {
               title: selectedExceptionLeftDatasetLabel || '原始记录',
-              record: selectedExceptionSideRecords.left,
+              entries: orderExceptionRecordEntries(
+                Object.entries(selectedExceptionSideRecords.left)
+                  .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
+                  .map(([field, value]) => ({
+                    field,
+                    label: humanizeExceptionFieldName(field),
+                    value: formatDetailValue(value),
+                  })),
+                selectedExceptionLeftDatasetLabel || '原始记录',
+              ),
             }
           : null,
         Object.keys(selectedExceptionSideRecords.right).length > 0
           ? {
               title: selectedExceptionRightDatasetLabel || '原始记录',
-              record: selectedExceptionSideRecords.right,
+              entries: orderExceptionRecordEntries(
+                Object.entries(selectedExceptionSideRecords.right)
+                  .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
+                  .map(([field, value]) => ({
+                    field,
+                    label: humanizeExceptionFieldName(field),
+                    value: formatDetailValue(value),
+                  })),
+                selectedExceptionRightDatasetLabel || '原始记录',
+              ),
             }
           : null,
-      ].filter((item): item is { title: string; record: Record<string, unknown> } => Boolean(item))
+      ].filter((item): item is {
+        title: string;
+        entries: Array<{ field: string; label: string; value: string }>;
+      } => Boolean(item))
     : [];
 
   const renderSchemeRows = () =>
@@ -7435,13 +7457,12 @@ export default function ReconWorkspace({
                     <div key={`${selectedExceptionDetail.id}-${section.title}`} className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
                       <p className="text-sm font-semibold text-text-primary">{section.title}</p>
                       <div className="mt-3 grid gap-3">
-                        {Object.entries(section.record)
-                          .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
-                          .map(([key, value]) => (
-                            <div key={`${selectedExceptionDetail.id}-${section.title}-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                              <p className="text-xs text-text-secondary">{humanizeExceptionFieldName(key)}</p>
+                        {section.entries
+                          .map((entry) => (
+                            <div key={`${selectedExceptionDetail.id}-${section.title}-${entry.field}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                              <p className="text-xs text-text-secondary">{entry.label}</p>
                               <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
-                                {formatDetailValue(value)}
+                                {entry.value}
                               </p>
                             </div>
                           ))}

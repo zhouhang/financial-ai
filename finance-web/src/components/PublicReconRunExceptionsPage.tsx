@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Eye, Filter, RefreshCw, X } from 'lucide-react';
 import { fetchReconAutoApi } from './recon/autoApi';
 import { cn } from './recon/types';
+import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
 import { parsePublicReconRunExceptionsRunId } from './publicReconRunExceptionsRoute';
 import {
   buildRuntimeSummaryView,
@@ -842,11 +843,12 @@ function PublicRecordSection({
   entries: Array<{ field: string; label: string; value: string }>;
 }) {
   if (entries.length === 0) return null;
+  const orderedEntries = orderExceptionRecordEntries(entries, title);
   return (
     <section className="rounded-2xl border border-border bg-surface-secondary p-4">
       <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
       <dl className="mt-3 grid gap-2 sm:grid-cols-2">
-        {entries.map((entry) => (
+        {orderedEntries.map((entry) => (
           <div key={`${entry.field}-${entry.label}`} className="min-w-0 rounded-xl border border-border-subtle bg-surface px-3 py-2">
             <dt className="text-xs text-text-muted">{entry.label}</dt>
             <dd className="mt-1 whitespace-pre-wrap break-words text-sm text-text-primary">{entry.value}</dd>

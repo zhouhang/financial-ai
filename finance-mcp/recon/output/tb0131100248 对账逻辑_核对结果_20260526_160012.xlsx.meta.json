@@ -1,0 +1,8 @@
+{
+  "owner_user_id": "recon-worker:00000000-0000-0000-0000-000000000001",
+  "module": "recon",
+  "rule_code": "dataset_recon_tb0131100248_76a12c75",
+  "rule_id": "wizard_recon_544417",
+  "file_name": "tb0131100248 对账逻辑_核对结果_20260526_160012.xlsx",
+  "created_at": "2026-05-26T08:00:12.824540+00:00"
+}
