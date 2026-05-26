@@ -84,3 +84,32 @@ def test_runner_attaches_over_cdp_and_terminates_chrome(monkeypatch, tmp_path):
     assert fake_pw.chromium.cdp_url == fake_chrome.cdp_url
     assert fake_chrome.terminated is True
     assert isinstance(result, dict)
+
+
+def test_runner_rejects_invalid_playbook_before_launching_chrome(monkeypatch, tmp_path):
+    launched = {"called": False}
+
+    def fake_launch_chrome(**kwargs):
+        launched["called"] = True
+        return FakeChrome()
+
+    monkeypatch.setattr(runner, "launch_chrome", fake_launch_chrome)
+
+    config = runner.PlaywrightRunConfig(
+        profile_root=str(tmp_path / "p"), download_root=str(tmp_path / "d"),
+        headless=False, timezone_id="Asia/Shanghai", browser_channel="chrome",
+    )
+    message = {
+        "job_id": "j1",
+        "shop_id": "s1",
+        "runtime_profile_ref": "s1",
+        "playbook_body": {"steps": [{"id": "request_detail_file", "action": "c lick"}]},
+        "params": {},
+    }
+
+    result = runner.run_playbook_with_playwright(message, config=config)
+
+    assert result["status"] == "failed"
+    assert result["fail_reason"] == "OTHER"
+    assert result["error_info"]["message"] == "unsupported action: c lick"
+    assert launched["called"] is False

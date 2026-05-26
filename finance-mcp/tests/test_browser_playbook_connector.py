@@ -178,6 +178,188 @@ def test_browser_playbook_dataset_collection_queues_sync_job_without_inline_exec
     assert created_request_payloads[0]["collection_driver"] == data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK
 
 
+def test_browser_playbook_collection_reuses_waiting_handoff_job(monkeypatch) -> None:
+    source = {
+        "id": "source-001",
+        "company_id": "company-001",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "status": "active",
+        "is_enabled": True,
+        "auth_config": {},
+        "connection_config": {},
+        "extract_config": {},
+        "mapping_config": {},
+        "runtime_config": {},
+    }
+    dataset = {
+        "id": "dataset-001",
+        "dataset_code": "qianniu_daily_bill",
+        "resource_key": "daily_bill",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "sync_strategy": {},
+    }
+    waiting_job = {
+        "id": "job-waiting",
+        "company_id": "company-001",
+        "data_source_id": "source-001",
+        "resource_key": "daily_bill",
+        "job_status": "waiting_human_verification",
+        "current_attempt": 1,
+        "request_payload": {
+            "dataset_id": "dataset-001",
+            "biz_date": "2026-05-19",
+            "collection_driver": data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+        },
+    }
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: source,
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_resolve_dataset_row",
+        lambda *, company_id, arguments: dataset,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-001",
+            "profile_status": "risk_blocked",
+            "playbook_status": "ok",
+            "cron_pause_reason": "RISK_VERIFICATION",
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "get_latest_source_dataset_checkpoint", lambda **kwargs: {})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "find_inflight_dataset_collection_sync_job",
+        lambda **kwargs: waiting_job,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_or_reuse_dataset_collection_sync_job",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unavailable binding must only reuse existing jobs")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_sync_job_attempt",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("reused browser job must not create attempt")),
+    )
+
+    result = asyncio.run(
+        data_sources.trigger_dataset_collection_for_company(
+            company_id="company-001",
+            source_id="source-001",
+            dataset_id="dataset-001",
+            trigger_mode="auto",
+            params={"biz_date": "2026-05-19"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["reused"] is True
+    assert result["queued"] is True
+    assert result["reuse_reason"] == "inflight"
+    assert result["collection_driver"] == data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK
+    assert result["job"]["id"] == "job-waiting"
+    assert result["job"]["job_status"] == "waiting_human_verification"
+
+
+def test_browser_playbook_collection_reuses_success_same_biz_date_when_binding_unavailable(
+    monkeypatch,
+) -> None:
+    source = {
+        "id": "source-001",
+        "company_id": "company-001",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "status": "active",
+        "is_enabled": True,
+        "auth_config": {},
+        "connection_config": {},
+        "extract_config": {},
+        "mapping_config": {},
+        "runtime_config": {},
+    }
+    dataset = {
+        "id": "dataset-001",
+        "dataset_code": "qianniu_daily_bill",
+        "resource_key": "daily_bill",
+        "source_kind": "browser_playbook",
+        "provider_code": "qianniu",
+        "sync_strategy": {},
+    }
+    success_job = {
+        "id": "job-recent-success",
+        "company_id": "company-001",
+        "data_source_id": "source-001",
+        "resource_key": "daily_bill",
+        "job_status": "success",
+        "request_payload": {"dataset_id": "dataset-001", "biz_date": "2026-05-19"},
+    }
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: source,
+    )
+    monkeypatch.setattr(data_sources, "_resolve_dataset_row", lambda *, company_id, arguments: dataset)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-001",
+            "profile_status": "risk_blocked",
+            "playbook_status": "ok",
+            "cron_pause_reason": "RISK_VERIFICATION",
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "get_latest_source_dataset_checkpoint", lambda **kwargs: {})
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "find_success_dataset_collection_sync_job",
+        lambda **kwargs: success_job,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        lambda **kwargs: [{"id": "record-001"}],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_or_reuse_dataset_collection_sync_job",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("same biz-date success reuse must not create job")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_sync_job_attempt",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("same biz-date success reuse must not create attempt")),
+    )
+
+    result = asyncio.run(
+        data_sources.trigger_dataset_collection_for_company(
+            company_id="company-001",
+            source_id="source-001",
+            dataset_id="dataset-001",
+            trigger_mode="auto",
+            params={"biz_date": "2026-05-19"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["reused"] is True
+    assert result["queued"] is False
+    assert result["reuse_reason"] == "browser_biz_date_success"
+    assert result["message"] == "同一浏览器数据集该账期已有成功采集结果，已复用"
+    assert result["job"]["id"] == "job-recent-success"
+
+
 def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -268,6 +450,28 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     assert "p@ss" not in str(binding_kwargs)
     assert inserted_verification["request_payload"]["verification"] is True
     assert inserted_verification["request_payload"]["playbook_id"] == "qianniu-daily-bill-export"
+
+
+def test_normalize_qianniu_browser_playbook_expands_refund_safe_item_key_fields() -> None:
+    playbook_body = {
+        "schema_version": "1.0",
+        "target": {"platform": "qianniu"},
+        "steps": [{"id": "parse_detail_file", "action": "parse_table"}],
+        "output": {
+            "columns": [
+                {"name": "业务流水号", "type": "string", "required": True},
+                {"name": "退款单号", "type": "string", "required": False},
+                {"name": "订单实际金额（元）", "type": "decimal", "required": True},
+                {"name": "退款金额（元）", "type": "decimal", "required": False},
+            ],
+            "item_key_fields": ["业务流水号"],
+        },
+    }
+
+    normalized, error = data_sources._normalize_browser_playbook_body(playbook_body)
+
+    assert error == ""
+    assert normalized["output"]["item_key_fields"] == ["业务流水号", "退款单号"]
 
 
 def test_register_browser_playbook_respects_env_default_agent_id(monkeypatch) -> None:

@@ -20,12 +20,14 @@ from tools.mcp_client import (
     data_source_finalize_browser_playbook_registration,
     data_source_register_browser_collection,
     data_source_register_browser_playbook,
+    data_source_retry_browser_playbook_verification,
     data_source_create,
     data_source_delete,
     data_source_disable_dataset,
     data_source_disable,
     data_source_discover_datasets,
     data_source_get,
+    data_source_get_browser_playbook_detail,
     data_source_get_dataset,
     data_source_get_dataset_collection_detail,
     data_source_list_collection_records,
@@ -480,6 +482,24 @@ class BrowserCollectionRegistrationResponse(BaseModel):
     dataset: dict[str, Any] | None = None
     playbook: dict[str, Any] | None = None
     binding: dict[str, Any] | None = None
+    message: str = ""
+
+
+class BrowserPlaybookRetryRequest(BaseModel):
+    verification_biz_date: str = ""
+    dataset_id: str = ""
+    force_collection: bool = True
+
+
+class BrowserPlaybookDetailResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    source: dict[str, Any] | None = None
+    browser_verification: dict[str, Any] = Field(default_factory=dict)
+    record_count: int = 0
+    latest_records: list[dict[str, Any]] = Field(default_factory=list)
+    playbook: dict[str, Any] = Field(default_factory=dict)
+    credential: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
 
 
@@ -1016,6 +1036,41 @@ async def register_browser_collection(
     )
 
 
+@router.get(
+    "/data-sources/{source_id}/browser-playbook/detail",
+    response_model=BrowserPlaybookDetailResponse,
+)
+async def get_browser_playbook_detail(
+    source_id: str,
+    record_limit: int = Query(100, ge=1, le=100),
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_get_browser_playbook_detail(
+        auth_token,
+        source_id,
+        record_limit=record_limit,
+        mode=mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "获取浏览器任务详情失败"))
+    return BrowserPlaybookDetailResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "mock"),
+        source=result.get("source"),
+        browser_verification=dict(result.get("browser_verification") or {}),
+        record_count=int(result.get("record_count") or 0),
+        latest_records=list(result.get("latest_records") or []),
+        playbook=dict(result.get("playbook") or {}),
+        credential=dict(result.get("credential") or {}),
+        message=str(result.get("message") or ""),
+    )
+
+
 @router.post(
     "/data-sources/{source_id}/browser-playbook/register",
     response_model=BrowserPlaybookRegisterResponse,
@@ -1058,6 +1113,42 @@ async def register_browser_playbook(
         source_id=source_id,
         verification_sync_job_id=str(result.get("verification_sync_job_id") or ""),
         verification_biz_date=str(result.get("verification_biz_date") or body.verification_biz_date),
+        playbook=result.get("playbook"),
+        binding=result.get("binding"),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.post(
+    "/data-sources/{source_id}/browser-playbook/retry",
+    response_model=BrowserCollectionRegistrationResponse,
+)
+async def retry_browser_playbook(
+    source_id: str,
+    body: BrowserPlaybookRetryRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_retry_browser_playbook_verification(
+        auth_token,
+        source_id,
+        verification_biz_date=body.verification_biz_date,
+        dataset_id=body.dataset_id,
+        force_collection=body.force_collection,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "浏览器任务重试失败"))
+    return BrowserCollectionRegistrationResponse(
+        success=True,
+        status=str(result.get("status") or "verification_pending"),
+        source_id=str(result.get("source_id") or source_id),
+        verification_sync_job_id=str(result.get("verification_sync_job_id") or ""),
+        verification_biz_date=str(result.get("verification_biz_date") or ""),
+        source=result.get("source"),
+        dataset=result.get("dataset"),
         playbook=result.get("playbook"),
         binding=result.get("binding"),
         message=str(result.get("message") or ""),

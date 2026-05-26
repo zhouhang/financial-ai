@@ -1038,7 +1038,6 @@ export default function PublicReconRunExceptionsPage() {
                   <p className="text-xs text-text-secondary">汇总消息推送状态</p>
                   <p className="mt-1 text-sm font-medium text-text-primary">
                     {runtimeSummary.notification.label}
-                    {runtimeSummary.notification.messageId ? ` · ${runtimeSummary.notification.messageId}` : ''}
                     {runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}
                   </p>
                 </div>

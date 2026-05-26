@@ -3,7 +3,7 @@ import type { DataSourceKind } from '../../types';
 
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 export interface RunPlanSourceDraft {

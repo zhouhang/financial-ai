@@ -54,6 +54,29 @@ async def test_claim_maps_to_tool_with_injected_args(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_startup_cleanup_maps_to_tool_with_injected_agent(monkeypatch):
+    calls = []
+
+    async def fake_call(tool, args):
+        calls.append((tool, args))
+        return {"success": True, "failed_count": 2}
+
+    monkeypatch.setattr(gw, "call_mcp_tool", fake_call)
+
+    reply = await gw.handle_domain_message(_conn(), {"type": "startup_cleanup", "id": "cleanup-1"})
+
+    assert reply == {
+        "type": "result",
+        "id": "cleanup-1",
+        "ok": True,
+        "data": {"success": True, "failed_count": 2},
+    }
+    tool, args = calls[0]
+    assert tool == "browser_sync_job_startup_cleanup"
+    assert args == {"worker_token": "tok-1", "agent_id": "agent-A"}
+
+
+@pytest.mark.asyncio
 async def test_job_complete_passes_payload_and_injects_token(monkeypatch):
     calls = []
     async def fake_call(tool, args):

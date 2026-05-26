@@ -327,6 +327,41 @@ export interface BrowserVerificationSummary {
   is_verification?: boolean;
 }
 
+export interface BrowserPlaybookLatestRecord {
+  id?: string;
+  dataset_id?: string;
+  dataset_code?: string;
+  biz_date?: string;
+  item_key?: string;
+  payload?: Record<string, unknown>;
+  captured_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface BrowserPlaybookCredentialSummary {
+  username?: string;
+  password_saved?: boolean;
+}
+
+export interface BrowserPlaybookDefinitionSummary {
+  playbook_id?: string;
+  version?: string;
+  title?: string;
+  status?: string;
+  playbook_body?: Record<string, unknown>;
+  updated_at?: string | null;
+}
+
+export interface BrowserPlaybookTaskDetail {
+  source?: DataSourceListItem | Record<string, unknown> | null;
+  browser_verification?: BrowserVerificationSummary;
+  record_count?: number;
+  latest_records?: BrowserPlaybookLatestRecord[];
+  playbook?: BrowserPlaybookDefinitionSummary;
+  credential?: BrowserPlaybookCredentialSummary;
+  message?: string;
+}
+
 export interface DataSourceListItem {
   id: string;
   source_kind: DataSourceKind;

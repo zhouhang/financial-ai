@@ -3310,6 +3310,31 @@ async def data_source_get(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_get_browser_playbook_detail(
+    auth_token: str,
+    source_id: str,
+    *,
+    record_limit: int = 100,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    result = await call_mcp_tool(
+        "data_source_get_browser_playbook_detail",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "record_limit": record_limit,
+            "mode": normalized_mode,
+        },
+    )
+    return _attach_mode(result, normalized_mode)
+
+
 async def data_source_create(
     auth_token: str,
     payload: dict[str, Any],
@@ -3518,6 +3543,32 @@ async def data_source_register_browser_collection(
             "credential_username": credential_username,
             "credential_password": credential_password,
             "playbook_body": playbook_body,
+        },
+    )
+
+
+async def data_source_retry_browser_playbook_verification(
+    auth_token: str,
+    source_id: str,
+    *,
+    verification_biz_date: str = "",
+    dataset_id: str = "",
+    force_collection: bool = True,
+) -> dict[str, Any]:
+    """Create a new verification sync job for an existing browser task."""
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_retry_browser_playbook_verification",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "verification_biz_date": verification_biz_date,
+            "dataset_id": dataset_id,
+            "force_collection": bool(force_collection),
         },
     )
 

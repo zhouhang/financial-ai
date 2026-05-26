@@ -35,6 +35,7 @@ import { SOURCE_TYPE_CARDS, sourceKindLabel } from '../dataSourceConfig';
 import { BrowserPlaybookPanel } from './BrowserPlaybookPanel';
 import type {
   AuthCallbackPayload,
+  BrowserVerificationSummary,
   CollaborationChannelListItem,
   CollaborationProvider,
   DataConnectionView,
@@ -1964,6 +1965,20 @@ function normalizeEvent(raw: unknown): DataSourceEventSummary | null {
   };
 }
 
+function normalizeBrowserVerification(raw: unknown): BrowserVerificationSummary | undefined {
+  const value = asRecord(raw);
+  if (!value) return undefined;
+  return {
+    sync_job_id: asString(value.sync_job_id),
+    job_status: asString(value.job_status),
+    browser_fail_reason: asString(value.browser_fail_reason),
+    error_message: asString(value.error_message),
+    updated_at: asStringOrNull(value.updated_at),
+    completed_at: asStringOrNull(value.completed_at),
+    is_verification: asBoolean(value.is_verification),
+  };
+}
+
 function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
   const value = asRecord(raw);
   if (!value) return null;
@@ -2110,6 +2125,7 @@ function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
     metadata,
     source_summary: asRecord(value.source_summary) ?? undefined,
     dataset_summary: asRecord(value.dataset_summary) ?? undefined,
+    browser_verification: normalizeBrowserVerification(value.browser_verification),
   };
 }
 
@@ -9913,6 +9929,7 @@ export default function DataConnectionsPanel({
         <BrowserPlaybookPanel
           authToken={authToken ?? null}
           sources={selectedKindSources}
+          loadingSources={loadingSources}
           openCreateSignal={browserCreateSignal}
           onRegistered={refreshCurrentConnectionView}
         />

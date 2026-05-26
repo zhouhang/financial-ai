@@ -1123,14 +1123,16 @@ class FakeHistoryButton:
     def __init__(self, row: "FakeHistoryRow") -> None:
         self.row = row
 
-    def click(self, *, timeout: int) -> None:
+    def click(self, *, timeout: int, force: bool = False) -> None:
         self.row.clicked_timeout = timeout
+        self.row.clicked_force = force
 
 
 class FakeHistoryRow:
     def __init__(self, text: str) -> None:
         self.text = text
         self.clicked_timeout: int | None = None
+        self.clicked_force: bool | None = None
 
     def inner_text(self, *, timeout: int) -> str:
         return self.text
@@ -1156,6 +1158,7 @@ class FakeHistoryPage(FakePage):
         super().__init__()
         self.rows = rows
         self.download = FakeDownload()
+        self.dialog_history_clicked: list[tuple[int, bool]] = []
 
     def locator(self, selector: str) -> FakeHistoryLocator:
         assert selector == ".history tr"
@@ -1166,6 +1169,12 @@ class FakeHistoryPage(FakePage):
 
     def expect_download(self, *, timeout: int) -> FakeDownloadInfo:
         return FakeDownloadInfo(self.download)
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            self.dialog_history_clicked.append((timeout, force))
+            return
+        super().click(selector, timeout=timeout)
 
 
 def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
@@ -1194,6 +1203,87 @@ def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
     assert old_row.clicked_timeout is None
     assert target_row.clicked_timeout == 900000
     assert capture_files[0]["storage_path"] == result["last_download"]
+
+
+def test_download_history_file_can_open_history_from_dialog_with_forced_click(tmp_path) -> None:
+    target_row = FakeHistoryRow("2026-05-21 ~ 2026-05-21 交易货款 已完成 下载")
+    page = FakeHistoryPage([target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "history_open_timeout_ms": 30000,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 900000,
+        },
+        params={"biz_date": "2026-05-21"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.dialog_history_clicked == [(30000, True)]
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_ignores_history_created_time_when_matching_biz_date(
+    tmp_path,
+) -> None:
+    old_completed_row = FakeHistoryRow(
+        "交易货款_20260524_20260524.csv 生成时间 2026-05-25 10:52 已完成 下载"
+    )
+    target_generating_row = FakeHistoryRow("交易货款_20260525_20260525.csv 生成中")
+    page = FakeHistoryPage([old_completed_row, target_generating_row])
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "id": "download_completed_file",
+                "action": "download_history_file",
+                "selector": ".history tr",
+                "value_from": "params.biz_date",
+                "timeout_ms": 1,
+            },
+            params={"biz_date": "2026-05-25"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "PAGE_CHANGED"
+    assert old_completed_row.clicked_timeout is None
+    assert target_generating_row.clicked_timeout is None
+
+
+def test_download_history_file_rejects_cross_day_file_name_for_single_biz_date(tmp_path) -> None:
+    cross_day_row = FakeHistoryRow("交易货款_20260524_20260525.csv 已完成 下载")
+    page = FakeHistoryPage([cross_day_row])
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "id": "download_completed_file",
+                "action": "download_history_file",
+                "selector": ".history tr",
+                "value_from": "params.biz_date",
+                "timeout_ms": 1,
+            },
+            params={"biz_date": "2026-05-25"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "PAGE_CHANGED"
+    assert cross_day_row.clicked_timeout is None
 
 
 def test_download_history_file_times_out_without_matching_completed_row(tmp_path) -> None:

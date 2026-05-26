@@ -26,12 +26,14 @@ import contextvars
 import logging
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from finance_browser_agent.chrome_launcher import launch_chrome
+from finance_browser_agent.playbook_interpreter import validate_step_actions
 from finance_browser_agent.quality_gate import validate_rows
 from finance_browser_agent.remote_control import PlaywrightControlBackend, RemoteControlCoordinator
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -91,6 +93,107 @@ _DEFAULT_PASSWORD_LOGIN_SELECTORS = (
     ".login-switch",
 )
 _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS = 1000
+
+_KNOWN_OVERLAY_MARKERS = (
+    "text=预警通知",
+    ".normal_headTitle__iJ44s:has-text('预警通知')",
+)
+_KNOWN_OVERLAY_PANEL_TITLE_SELECTORS = (
+    "text=重要消息",
+)
+_KNOWN_OVERLAY_CONTAINER_SELECTORS = (
+    ".normal_container__13Xbj",
+    ".container--SMNuCb74",
+)
+_KNOWN_OVERLAY_CLOSE_SELECTORS = (
+    ".notify_headRight__XdjnE .next-icon-close_blod",
+    "[class*='notify_headRight'] .next-icon-close_blod",
+    "[class*='notify_headRight'] [class*='next-icon-close']",
+    ".normal_container__13Xbj button:has-text('知道了')",
+    ".normal_container__13Xbj button:has-text('确定')",
+    ".normal_container__13Xbj button:has-text('关闭')",
+    ".normal_container__13Xbj button:has-text('我知道了')",
+    ".normal_container__13Xbj [role='button']:has-text('知道了')",
+    ".normal_container__13Xbj [role='button']:has-text('确定')",
+    ".normal_container__13Xbj .next-dialog-close",
+    ".normal_container__13Xbj .next-icon-close",
+    ".container--SMNuCb74 button:has-text('知道了')",
+    ".container--SMNuCb74 button:has-text('确定')",
+    ".container--SMNuCb74 button:has-text('关闭')",
+    ".container--SMNuCb74 [role='button']:has-text('知道了')",
+    ".container--SMNuCb74 [role='button']:has-text('确定')",
+    ".container--SMNuCb74 .next-dialog-close",
+    ".container--SMNuCb74 .next-icon-close",
+)
+
+_KNOWN_OVERLAY_CLOSE_POINT_SCRIPT = r"""
+() => {
+  const visible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const style = window.getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+  };
+  const textOf = (el) => (el && el.innerText ? el.innerText : '').trim();
+  const all = Array.from(document.querySelectorAll('body *')).filter(visible);
+  const warningCandidates = all
+    .filter((el) => textOf(el).includes('预警通知'))
+    .sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (ar.width * ar.height) - (br.width * br.height);
+    });
+  const warning = warningCandidates[0];
+  if (!warning) return { present: false };
+
+  const importantCandidates = all
+    .filter((el) => textOf(el).includes('重要消息'))
+    .sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (ar.width * ar.height) - (br.width * br.height);
+    });
+  const important = importantCandidates[0];
+  const warningRect = warning.getBoundingClientRect();
+  const importantRect = important ? important.getBoundingClientRect() : warningRect;
+  const panelLeft = Math.min(importantRect.left, warningRect.left) - 24;
+  const panelTop = Math.min(importantRect.top, warningRect.top) - 24;
+  const panelRight = Math.max(importantRect.right, warningRect.right) + 260;
+  const panelBottom = Math.max(importantRect.bottom, warningRect.bottom) + 160;
+  const candidates = all
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      const text = textOf(el);
+      const label = [
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('title') || '',
+        el.getAttribute('class') || '',
+        text,
+      ].join(' ');
+      return { el, rect, text, label };
+    })
+    .filter(({ rect, label }) => {
+      if (rect.left < panelLeft || rect.right > panelRight) return false;
+      if (rect.top < panelTop || rect.bottom > panelBottom) return false;
+      if (rect.top > warningRect.top + 45) return false;
+      if (rect.width > 48 || rect.height > 48) return false;
+      return /关闭|close|icon|×|✕|\bx\b/i.test(label);
+    })
+    .sort((a, b) => (b.rect.left - a.rect.left) || (a.rect.top - b.rect.top));
+  const target = candidates[0];
+  if (!target) return null;
+  return {
+    x: target.rect.left + target.rect.width / 2,
+    y: target.rect.top + target.rect.height / 2,
+    panel_left: panelLeft,
+    panel_top: panelTop,
+    panel_right: panelRight,
+    panel_bottom: panelBottom,
+    source: target.label.slice(0, 120),
+  };
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -211,6 +314,13 @@ def _profile_is_authenticated(page: Any, playbook: dict[str, Any]) -> bool:
         except Exception:
             return False
     return False
+
+
+def _profile_auth_check_diagnostics(page: Any, *, user_data_dir: str) -> dict[str, str]:
+    return {
+        "url": _page_url(page),
+        "user_data_dir": str(user_data_dir or ""),
+    }
 
 
 def _resolve_value(action: dict[str, Any], params: dict[str, Any], extracted: dict[str, Any]) -> str:
@@ -708,6 +818,234 @@ def _pause_before_click(context: Any, *, run_config: PlaywrightRunConfig | None)
     _wait_for_timeout(context, delay_ms)
 
 
+def _safe_first_locator(context: Any, selector: str) -> Any | None:
+    locator_factory = getattr(context, "locator", None)
+    if not callable(locator_factory):
+        return None
+    try:
+        locator = locator_factory(selector)
+    except Exception:
+        return None
+    first = getattr(locator, "first", None)
+    return first if first is not None else locator
+
+
+def _locator_visible(locator: Any, *, timeout_ms: int = 300) -> bool:
+    try:
+        return bool(locator.is_visible(timeout=timeout_ms))
+    except Exception:
+        return False
+
+
+def _locator_bounding_box(locator: Any, *, timeout_ms: int = 300) -> dict[str, float] | None:
+    try:
+        box = locator.bounding_box(timeout=timeout_ms)
+    except TypeError:
+        try:
+            box = locator.bounding_box()
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if not isinstance(box, dict):
+        return None
+    try:
+        x = float(box.get("x") or 0)
+        y = float(box.get("y") or 0)
+        width = float(box.get("width") or 0)
+        height = float(box.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _box_is_reasonable_overlay_card(box: dict[str, float]) -> bool:
+    width = box["width"]
+    height = box["height"]
+    # QianNiu's outer .container--SMNuCb74 can be a page-wide top bar such as 1280x65.
+    # Clicking its top-right hits the page chrome area, not the notice card close button.
+    if width >= 900 and height <= 120:
+        return False
+    if height < 80:
+        return False
+    return True
+
+
+def _click_dom_detected_overlay_close(context: Any) -> bool:
+    evaluate = getattr(context, "evaluate", None)
+    mouse = getattr(context, "mouse", None)
+    mouse_click = getattr(mouse, "click", None)
+    if not callable(evaluate) or not callable(mouse_click):
+        return False
+    try:
+        point = evaluate(_KNOWN_OVERLAY_CLOSE_POINT_SCRIPT)
+    except Exception:
+        return False
+    if not isinstance(point, dict):
+        return False
+    try:
+        x = float(point.get("x"))
+        y = float(point.get("y"))
+    except (TypeError, ValueError):
+        return False
+    if x <= 0 or y <= 0:
+        return False
+    try:
+        panel_left = float(point.get("panel_left"))
+        panel_top = float(point.get("panel_top"))
+        panel_right = float(point.get("panel_right"))
+        panel_bottom = float(point.get("panel_bottom"))
+    except (TypeError, ValueError):
+        panel_left = panel_top = panel_right = panel_bottom = None
+    if panel_left is not None and not (
+        panel_left <= x <= panel_right and panel_top <= y <= panel_bottom
+    ):
+        logger.info("browser known overlay dom close rejected outside panel: point=%s", point)
+        return False
+    try:
+        mouse_click(x, y)
+        _wait_for_timeout(context, 300)
+        logger.info(
+            "browser known overlay dom close clicked: point=%s x=%s y=%s",
+            point,
+            x,
+            y,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _click_overlay_panel_header_close(context: Any) -> bool:
+    mouse = getattr(context, "mouse", None)
+    mouse_click = getattr(mouse, "click", None)
+    if not callable(mouse_click):
+        return False
+    title_box = None
+    title_selector = ""
+    for selector in _KNOWN_OVERLAY_PANEL_TITLE_SELECTORS:
+        locator = _safe_first_locator(context, selector)
+        if locator is None or not _locator_visible(locator, timeout_ms=300):
+            continue
+        title_box = _locator_bounding_box(locator, timeout_ms=300)
+        if title_box:
+            title_selector = selector
+            break
+    if not title_box:
+        return False
+
+    for container_selector in _KNOWN_OVERLAY_CONTAINER_SELECTORS:
+        container_locator = _safe_first_locator(context, container_selector)
+        if container_locator is None:
+            continue
+        container_box = _locator_bounding_box(container_locator, timeout_ms=300)
+        if not container_box or not _box_is_reasonable_overlay_card(container_box):
+            continue
+        if container_box["y"] < title_box["y"] - 10:
+            continue
+        x = container_box["x"] + container_box["width"] - 12
+        y = title_box["y"] + min(12, max(6, title_box["height"] / 2))
+        try:
+            mouse_click(x, y)
+            _wait_for_timeout(context, 300)
+            logger.info(
+                "browser known overlay panel header close clicked: "
+                "title_selector=%s title_box=%s container_selector=%s container_box=%s x=%s y=%s",
+                title_selector,
+                title_box,
+                container_selector,
+                container_box,
+                x,
+                y,
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _click_overlay_top_right_close(context: Any) -> bool:
+    mouse = getattr(context, "mouse", None)
+    mouse_click = getattr(mouse, "click", None)
+    if not callable(mouse_click):
+        return False
+    for selector in _KNOWN_OVERLAY_CONTAINER_SELECTORS:
+        locator = _safe_first_locator(context, selector)
+        if locator is None:
+            continue
+        box = _locator_bounding_box(locator, timeout_ms=300)
+        if not box:
+            continue
+        if not _box_is_reasonable_overlay_card(box):
+            logger.info(
+                "browser known overlay top-right close skipped unsuitable container: "
+                "selector=%s box=%s",
+                selector,
+                box,
+            )
+            continue
+        x = box["x"] + max(8, box["width"] - 16)
+        y = box["y"] + 16
+        try:
+            mouse_click(x, y)
+            _wait_for_timeout(context, 300)
+            logger.info(
+                "browser known overlay top-right close clicked: selector=%s box=%s x=%s y=%s",
+                selector,
+                box,
+                x,
+                y,
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _dismiss_known_overlays(context: Any) -> bool:
+    """Close known QianNiu non-risk overlays that can intercept ordinary clicks."""
+    has_overlay = False
+    for marker in _KNOWN_OVERLAY_MARKERS:
+        locator = _safe_first_locator(context, marker)
+        if locator is not None and _locator_visible(locator, timeout_ms=300):
+            has_overlay = True
+            break
+    if not has_overlay:
+        return False
+
+    keyboard = getattr(context, "keyboard", None)
+    press = getattr(keyboard, "press", None)
+    if callable(press):
+        try:
+            press("Escape")
+        except Exception:
+            pass
+        _wait_for_timeout(context, 200)
+
+    dismissed = False
+    for selector in _KNOWN_OVERLAY_CLOSE_SELECTORS:
+        locator = _safe_first_locator(context, selector)
+        if locator is None:
+            continue
+        try:
+            locator.click(timeout=1000)
+            dismissed = True
+            _wait_for_timeout(context, 300)
+            break
+        except Exception:
+            continue
+    if not dismissed:
+        dismissed = _click_dom_detected_overlay_close(context)
+    if not dismissed:
+        dismissed = _click_overlay_panel_header_close(context)
+    if not dismissed:
+        dismissed = _click_overlay_top_right_close(context)
+    logger.info("browser known overlay dismissed: overlay=qianniu_warning_notice clicked=%s", dismissed)
+    return True
+
+
 def _click_like_human(
     context: Any,
     selector: str,
@@ -715,8 +1053,16 @@ def _click_like_human(
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None,
 ) -> None:
+    _dismiss_known_overlays(context)
     _pause_before_click(context, run_config=run_config)
-    context.click(selector, timeout=timeout_ms)
+    try:
+        context.click(selector, timeout=timeout_ms)
+    except Exception as exc:
+        if _dismiss_known_overlays(context):
+            _pause_before_click(context, run_config=run_config)
+            context.click(selector, timeout=timeout_ms)
+            return
+        raise exc
 
 
 def _type_like_human(
@@ -812,6 +1158,49 @@ def _date_tokens(value: str) -> set[str]:
     return {token for token in tokens if token}
 
 
+def _canonical_date_token(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return text.replace("-", "")
+    if len(text) == 8 and text.isdigit():
+        return text
+    return ""
+
+
+def _history_row_matches_target_date(row_text: str, target_date: str) -> bool:
+    target_token = _canonical_date_token(target_date)
+    if not target_token:
+        return False
+
+    compact_text = " ".join(str(row_text or "").split())
+    file_names = re.findall(r"\S+\.(?:csv|xlsx|xls)\b", compact_text, flags=re.IGNORECASE)
+    for file_name in file_names:
+        file_date_tokens = [
+            match.replace("-", "")
+            for match in re.findall(r"(?<!\d)(?:20\d{6}|20\d{2}-\d{2}-\d{2})(?!\d)", file_name)
+        ]
+        if file_date_tokens and all(token == target_token for token in file_date_tokens):
+            return True
+    if file_names:
+        return False
+
+    business_text = re.split(
+        r"(?:生成时间|创建时间|更新时间|申请时间|提交时间|完成时间|下载时间)",
+        compact_text,
+        maxsplit=1,
+    )[0]
+    date_range_matches = re.findall(
+        r"(?<!\d)(20\d{2}-\d{2}-\d{2}|20\d{6})(?!\d)\s*"
+        r"(?:~|至|到|_|—|–|\s-\s)\s*"
+        r"(?<!\d)(20\d{2}-\d{2}-\d{2}|20\d{6})(?!\d)",
+        business_text,
+    )
+    for start, end in date_range_matches:
+        if _canonical_date_token(start) == target_token and _canonical_date_token(end) == target_token:
+            return True
+    return False
+
+
 def _download_history_file(
     page: Any,
     action: dict[str, Any],
@@ -823,10 +1212,15 @@ def _download_history_file(
     timeout_ms: int,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
+    history_open_selector = str(action.get("history_open_selector") or "").strip()
+    history_open_timeout_ms = int(action.get("history_open_timeout_ms") or 30000)
     target_date = _resolve_value(action, params, extracted)
     tokens = _date_tokens(target_date)
     if not selector or not tokens:
         raise BrowserActionError("PAGE_CHANGED", "download_history_file requires selector and target date")
+
+    if history_open_selector:
+        page.click(history_open_selector, timeout=history_open_timeout_ms, force=True)
 
     deadline = time.monotonic() + (timeout_ms / 1000)
     row = None
@@ -837,7 +1231,7 @@ def _download_history_file(
             text = candidate.inner_text(timeout=min(timeout_ms, 5000))
             compact_text = " ".join(str(text or "").split())
             if (
-                any(token in compact_text for token in tokens)
+                _history_row_matches_target_date(compact_text, str(target_date))
                 and "已完成" in compact_text
                 and "下载" in compact_text
             ):
@@ -946,6 +1340,20 @@ def _run_playbook_with_playwright_inner(
     capture_files: list[dict[str, Any]] = []
     extracted: dict[str, Any] = {}
     steps = [dict(step) for step in playbook.get("steps") or []]
+    try:
+        validate_step_actions(steps)
+    except ValueError as exc:
+        logger.warning(
+            "playwright browser run rejected invalid playbook: job_id=%s error=%s",
+            job_id,
+            str(exc),
+        )
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "fail_reason": "OTHER",
+            "error_info": {"message": str(exc)},
+        }
     logger.info(
         "playwright browser run starting: job_id=%s shop_id=%s playbook_id=%s "
         "user_data_dir=%s download_dir=%s headless=%s browser_channel=%s",
@@ -985,9 +1393,10 @@ def _run_playbook_with_playwright_inner(
                                 )
                                 continue
                             logger.info(
-                                "browser login required for profile: job_id=%s step_id=%s",
+                                "browser login required for profile: job_id=%s step_id=%s diagnostics=%s",
                                 job_id,
                                 step_id,
+                                _profile_auth_check_diagnostics(page, user_data_dir=user_data_dir),
                             )
                         _pause_before_step(
                             page,

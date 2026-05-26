@@ -227,6 +227,7 @@ _PLATFORM_TOOL_NAMES = {
 _DATA_SOURCE_TOOL_NAMES = {
     "data_source_list",
     "data_source_get",
+    "data_source_get_browser_playbook_detail",
     "data_source_discover_datasets",
     "data_source_list_datasets",
     "data_source_get_dataset",
@@ -248,6 +249,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_register_browser_collection",
     "data_source_register_browser_playbook",
     "data_source_finalize_browser_playbook_registration",
+    "data_source_retry_browser_playbook_verification",
     "data_source_authorize",
     "data_source_handle_callback",
     "data_source_trigger_sync",
@@ -260,6 +262,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_preview",
     "browser_agent_heartbeat",
     "browser_sync_job_claim",
+    "browser_sync_job_startup_cleanup",
     "browser_sync_job_complete",
     "browser_sync_job_fail",
     "browser_handoff_session_create",

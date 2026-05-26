@@ -481,3 +481,225 @@ def test_register_browser_collection_rejects_unknown_action(
 
     assert result["success"] is False
     assert "action 不支持" in result["error"]
+
+
+
+def test_retry_browser_collection_creates_verification_job_from_active_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **kwargs: {
+            "id": "source-1",
+            "company_id": "company-1",
+            "code": "browser-collection-qn",
+            "name": "千牛每日资金账单",
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [
+            {
+                "id": "dataset-1",
+                "dataset_code": "browser-collection-qn",
+                "dataset_name": "千牛每日资金账单",
+                "source_type": "browser_collection_records",
+                "resource_key": "browser-collection-qn@1",
+                "publish_status": "published",
+                "meta": {"source_type": "browser_collection_records"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda **kwargs: {
+            "shop_id": "browser-collection-qn",
+            "playbook_id": "browser-collection-qn",
+            "agent_id": "browser-agent-local",
+            "profile_status": "active",
+            "playbook_status": "ok",
+            "credential_ref": "sealed-secret",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_default_browser_verification_biz_date",
+        lambda: "2026-05-20",
+    )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "insert_browser_verification_sync_job",
+        lambda **kwargs: calls.append(("sync_job", kwargs)) or {"id": "sync-retry-1"},
+    )
+
+    result = asyncio.run(
+        data_sources._handle_data_source_retry_browser_playbook_verification(
+            {"auth_token": "token", "source_id": "source-1"}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "verification_pending"
+    assert result["verification_sync_job_id"] == "sync-retry-1"
+    assert result["verification_biz_date"] == "2026-05-20"
+    sync_call = calls[0][1]
+    assert sync_call["company_id"] == "company-1"
+    assert sync_call["data_source_id"] == "source-1"
+    assert sync_call["resource_key"] == "browser-collection-qn@1"
+    assert sync_call["request_payload"] == {
+        "dataset_id": "dataset-1",
+        "dataset_code": "browser-collection-qn",
+        "biz_date": "2026-05-20",
+        "verification": True,
+        "retry_verification": True,
+        "force_collection": True,
+        "skip_recent_success_reuse": True,
+        "playbook_id": "browser-collection-qn",
+        "playbook_version": "1",
+        "collection_driver": "browser_playbook_remote",
+        "params": {
+            "biz_date": "2026-05-20",
+            "playbook_id": "browser-collection-qn",
+            "playbook_version": "1",
+            "force_collection": True,
+            "skip_recent_success_reuse": True,
+        },
+    }
+
+
+def test_retry_browser_collection_reuses_inflight_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **kwargs: {
+            "id": "source-1",
+            "company_id": "company-1",
+            "code": "browser-collection-qn",
+            "name": "千牛每日资金账单",
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [
+            {
+                "id": "dataset-1",
+                "dataset_code": "browser-collection-qn",
+                "dataset_name": "千牛每日资金账单",
+                "source_type": "browser_collection_records",
+                "resource_key": "browser-collection-qn@1",
+                "publish_status": "published",
+                "meta": {"source_type": "browser_collection_records"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda **kwargs: {
+            "shop_id": "browser-collection-qn",
+            "playbook_id": "browser-collection-qn",
+            "agent_id": "browser-agent-local",
+            "profile_status": "active",
+            "playbook_status": "ok",
+            "credential_ref": "sealed-secret",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_default_browser_verification_biz_date",
+        lambda: "2026-05-20",
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "find_inflight_dataset_collection_sync_job",
+        lambda **kwargs: {
+            "id": "sync-running-1",
+            "job_status": "running",
+            "request_payload": {"dataset_id": "dataset-1", "biz_date": "2026-05-20"},
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "insert_browser_verification_sync_job",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("inflight retry must not insert a new job")),
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_build_data_source_view",
+        lambda source_row, datasets=None, include_dataset_details=False: {
+            "id": source_row["id"],
+            "datasets": datasets or [],
+        },
+    )
+
+    result = asyncio.run(
+        data_sources._handle_data_source_retry_browser_playbook_verification(
+            {"auth_token": "token", "source_id": "source-1", "force_collection": True}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "verification_pending"
+    assert result["verification_sync_job_id"] == "sync-running-1"
+    assert result["verification_biz_date"] == "2026-05-20"
+    assert result["reused"] is True
+    assert result["queued"] is True
+    assert result["reuse_reason"] == "inflight"
+    assert result["message"] == "同一浏览器任务正在执行或等待人工验证，已复用"
+
+
+def test_retry_browser_collection_rejects_missing_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-1", "id": "user-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **kwargs: {
+            "id": "source-1",
+            "company_id": "company-1",
+            "code": "browser-collection-qn",
+            "name": "千牛每日资金账单",
+            "source_kind": "browser_playbook",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "get_shop_runtime_binding_for_source", lambda **kwargs: {})
+
+    result = asyncio.run(
+        data_sources._handle_data_source_retry_browser_playbook_verification(
+            {"auth_token": "token", "source_id": "source-1"}
+        )
+    )
+
+    assert result == {"success": False, "error": "浏览器任务缺少运行时绑定，无法重试"}

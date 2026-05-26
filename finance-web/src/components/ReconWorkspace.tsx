@@ -22,6 +22,10 @@ import type {
   UserTaskRule,
 } from '../types';
 import { fetchReconAutoApi } from './recon/autoApi';
+import {
+  filterBrowserCollectionFieldItems,
+  isBrowserCollectionTechnicalSchemaSummary,
+} from './recon/browserCollectionSchema';
 import SchemeWizardIntentStep from './recon/SchemeWizardIntentStep';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
@@ -107,7 +111,7 @@ type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 interface SchemeSourceOption {
@@ -1355,7 +1359,19 @@ function resolveSourceFieldLabelMap(
   source: SchemeSourceOption | SchemeSourceDraft | null | undefined,
 ): Record<string, string> | undefined {
   if (!source) return undefined;
-  return normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap);
+  const fieldLabelMap = normalizeFieldLabelMap((source as { fieldLabelMap?: unknown }).fieldLabelMap);
+  if (!fieldLabelMap) return undefined;
+  const filtered = filterBrowserCollectionFieldItems(
+    Object.entries(fieldLabelMap).map(([raw_name, display_name]) => ({ raw_name, display_name })),
+    {
+      schemaSummary: source.schemaSummary,
+      extractConfig: source.extractConfig,
+      sourceKind: source.sourceKind,
+    },
+  );
+  return filtered.length > 0
+    ? Object.fromEntries(filtered.map((field) => [field.raw_name, field.display_name]))
+    : undefined;
 }
 
 function resolveSampleOriginMeta(
@@ -1541,7 +1557,14 @@ function buildRawSourceRows(
   seedText: string,
 ): PreviewTableRow[] {
   const seed = hashText(`${source.id}-${side}-${seedText}`);
-  const schemaSummaryEntries = Object.entries(asRecord(source.schemaSummary));
+  const schemaSummary = isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })
+    ? {}
+    : asRecord(source.schemaSummary);
+  const schemaSummaryEntries = Object.entries(schemaSummary);
   if (schemaSummaryEntries.length > 0) {
     return Array.from({ length: 3 }, (_, index) => {
       const seq = index + 1;
@@ -1551,6 +1574,9 @@ function buildRawSourceRows(
       ]);
       return Object.fromEntries(rowEntries) as PreviewTableRow;
     });
+  }
+  if (source.sourceKind === 'browser_playbook' || source.sourceKind === 'browser') {
+    return [];
   }
 
   return Array.from({ length: 3 }, (_, index) => {
@@ -1586,6 +1612,15 @@ function buildRawSourceRows(
   });
 }
 
+export function buildDatasetSamplePayloadForTest(
+  source: SchemeSourceOption,
+  side: 'left' | 'right',
+  description = '',
+  seedText = '',
+): Record<string, unknown> {
+  return buildDatasetSamplePayload(source, side, description, seedText);
+}
+
 function buildDatasetSamplePayload(
   source: SchemeSourceOption,
   side: 'left' | 'right',
@@ -1600,6 +1635,7 @@ function buildDatasetSamplePayload(
 ): Record<string, unknown> {
   const tableName = options?.tableName || resolveDatasetTableName(source);
   const sampleRows = options?.sampleRows || buildRawSourceRows(source, side, seedText);
+  const fieldLabelMap = resolveSourceFieldLabelMap(source);
   return {
     side,
     dataset_name: source.name,
@@ -1613,7 +1649,7 @@ function buildDatasetSamplePayload(
     source_kind: source.sourceKind,
     provider_code: source.providerCode,
     description,
-    field_label_map: source.fieldLabelMap || undefined,
+    field_label_map: fieldLabelMap,
     prepared_output_fields: options?.preparedOutputFields,
     sample_rows: sampleRows,
   };
@@ -2659,9 +2695,16 @@ interface SourceFieldCandidate {
 function collectSourceFieldCandidates(source: SchemeSourceOption): SourceFieldCandidate[] {
   const fieldLabelMap = resolveSourceFieldLabelMap(source) || {};
   const keyFieldSet = new Set(normalizeStringList(source.keyFields).map((item) => item.trim()));
+  const schemaFieldNames = isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })
+    ? []
+    : extractSchemaFieldNames(source.schemaSummary);
   const rawNames = Array.from(
     new Set<string>([
-      ...extractSchemaFieldNames(source.schemaSummary),
+      ...schemaFieldNames,
       ...Object.keys(fieldLabelMap),
     ]),
   ).map((item) => item.trim()).filter(Boolean);
@@ -2738,8 +2781,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sourceHasRecommendationMetadata(source: SchemeSourceOption): boolean {
-  if (source.fieldLabelMap && Object.keys(source.fieldLabelMap).length > 0) {
+  if (resolveSourceFieldLabelMap(source) && Object.keys(resolveSourceFieldLabelMap(source) || {}).length > 0) {
     return true;
+  }
+  if (isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })) {
+    return false;
   }
   return extractSchemaFieldNames(source.schemaSummary).length > 0;
 }
@@ -4221,12 +4271,19 @@ export default function ReconWorkspace({
               return source;
             }
 
-            const fieldEntries = (data.fields as Array<Record<string, string>>)
+            const fieldEntries = filterBrowserCollectionFieldItems(
+              (data.fields as Array<Record<string, string>>)
               .map((item) => ({
-                rawName: toText(item.raw_name).trim(),
-                displayName: toText(item.display_name, toText(item.raw_name)).trim(),
+                raw_name: toText(item.raw_name).trim(),
+                display_name: toText(item.display_name, toText(item.raw_name)).trim(),
               }))
-              .filter((item) => item.rawName);
+              .filter((item) => item.raw_name),
+              {
+                schemaSummary: source.schemaSummary,
+                extractConfig: source.extractConfig,
+                sourceKind: source.sourceKind,
+              },
+            );
             if (fieldEntries.length === 0) {
               return source;
             }
@@ -4234,12 +4291,12 @@ export default function ReconWorkspace({
             return {
               ...source,
               fieldLabelMap: Object.fromEntries(
-                fieldEntries.map((item) => [item.rawName, item.displayName || item.rawName]),
+                fieldEntries.map((item) => [item.raw_name, item.display_name || item.raw_name]),
               ),
               schemaSummary: {
                 ...(source.schemaSummary || {}),
                 columns: fieldEntries.map((item) => ({
-                  name: item.rawName,
+                  name: item.raw_name,
                 })),
               },
             } satisfies SchemeSourceOption;
@@ -7169,7 +7226,7 @@ export default function ReconWorkspace({
                 <DetailRow label="汇总接收人" value={runtimeSummary.notification.recipientName || runtimeSummary.notification.recipientIdentifier || '--'} />
                 <DetailRow
                   label="汇总消息推送状态"
-                  value={`${runtimeSummary.notification.label}${runtimeSummary.notification.messageId ? ` · ${runtimeSummary.notification.messageId}` : ''}${runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}`}
+                  value={`${runtimeSummary.notification.label}${runtimeSummary.notification.error ? ` · ${runtimeSummary.notification.error}` : ''}`}
                 />
                 {shouldShowRunFailureInfo ? <DetailRow label="失败阶段" value={run.failedStage || '--'} /> : null}
               </div>

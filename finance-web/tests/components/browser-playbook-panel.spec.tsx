@@ -52,27 +52,163 @@ afterEach(() => {
 });
 
 describe('BrowserPlaybookPanel', () => {
-  it('展示浏览器采集列表，点击列表元素用浮窗查看注册信息', () => {
-    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} />);
+  it('加载浏览器任务时显示加载态而不是空态', () => {
+    render(<BrowserPlaybookPanel authToken="token-1" sources={[]} loadingSources />);
 
-    expect(screen.queryByText('浏览器抓取')).not.toBeInTheDocument();
-    expect(screen.getByText('千牛每日资金账单')).toBeInTheDocument();
-    expect(screen.getByText('启用')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /千牛每日资金账单/ }));
-
-    const dialog = screen.getByRole('dialog', { name: '浏览器采集详情' });
-    expect(within(dialog).getByText('标题')).toBeInTheDocument();
-    expect(within(dialog).getAllByText('千牛每日资金账单').length).toBeGreaterThan(0);
-    expect(within(dialog).queryByText('source_id')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('playbook_id')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('version')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('egress_group')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('语义数据集')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('落地数据集')).not.toBeInTheDocument();
+    expect(screen.getByText('正在加载浏览器任务')).toBeInTheDocument();
+    expect(screen.queryByText('暂无浏览器任务')).not.toBeInTheDocument();
   });
 
-  it('列表和详情展示历史浏览器验证失败原因', () => {
+  it('展示浏览器任务列表和详情入口', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            browser_verification: {
+              sync_job_id: 'sync-success-1',
+              job_status: 'success',
+              completed_at: '2026-05-25T15:31:51+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText('浏览器抓取')).not.toBeInTheDocument();
+    expect(screen.getByText('浏览器任务列表')).toBeInTheDocument();
+    expect(screen.queryByText('浏览器采集列表')).not.toBeInTheDocument();
+    expect(screen.getByText('任务状态')).toBeInTheDocument();
+    expect(screen.queryByText('验证状态')).not.toBeInTheDocument();
+    expect(screen.getByText('千牛每日资金账单')).toBeInTheDocument();
+    expect(screen.getByText('已激活')).toBeInTheDocument();
+    expect(screen.getByText('成功')).toBeInTheDocument();
+    expect(screen.queryByText('未记录')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /详情 千牛每日资金账单/ })).toBeInTheDocument();
+    const retryButton = screen.getByRole('button', { name: /重试 千牛每日资金账单/ });
+    const deleteButton = screen.getByRole('button', { name: /删除 千牛每日资金账单/ });
+    expect(retryButton).toBeInTheDocument();
+    expect(deleteButton).toBeInTheDocument();
+    expect(retryButton).toHaveClass('whitespace-nowrap');
+    expect(deleteButton).toHaveClass('whitespace-nowrap');
+  });
+
+  it('点击详情加载最新采集数据、playbook 和凭证摘要，并支持复制 playbook', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText,
+      },
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/detail?record_limit=100') {
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        return jsonResponse({
+          success: true,
+          source: { id: 'source-1', name: '千牛每日资金账单' },
+          browser_verification: { sync_job_id: 'sync-1', job_status: 'success' },
+          record_count: 23,
+          latest_records: [
+            {
+              id: 'record-1',
+              biz_date: '2026-05-21',
+              item_key: 'bill-1',
+              payload: { custom_b: 'bill-1', custom_a: '12.30', custom_c: '2026-05-21 13:00:00' },
+              captured_at: '2026-05-22T13:30:00+08:00',
+            },
+          ],
+          playbook: {
+            playbook_id: 'browser-collection-qn',
+            version: '1',
+            title: '千牛每日资金账单',
+            status: 'active',
+            playbook_body: {
+              schema_version: '1.0',
+              output: {
+                columns: [
+                  { name: 'custom_a' },
+                  { name: 'custom_b' },
+                  { name: 'missing_from_payload' },
+                ],
+              },
+              steps: [{ action: 'click' }],
+            },
+          },
+          credential: {
+            username: 'finance_ops@example.com',
+            password_saved: true,
+          },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /详情 千牛每日资金账单/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: '浏览器任务详情' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(await within(dialog).findByText('最新采集数据')).toBeInTheDocument();
+    expect(within(dialog).getByText('已加载 1 / 共 23 条')).toBeInTheDocument();
+    const recordsTable = within(dialog).getByRole('table', { name: '最新采集数据表' });
+    const headerTexts = within(recordsTable)
+      .getAllByRole('columnheader')
+      .map((header) => header.textContent);
+    expect(headerTexts.slice(0, 3)).toEqual(['custom_a', 'custom_b', 'custom_c']);
+    expect(within(recordsTable).queryByText('missing_from_payload')).not.toBeInTheDocument();
+    expect(within(dialog).getAllByText(/bill-1/).length).toBeGreaterThan(0);
+    expect(within(recordsTable).getByText('12.30')).toBeInTheDocument();
+    expect(within(recordsTable).queryByText(/"custom_a"/)).not.toBeInTheDocument();
+    expect(within(dialog).getByText('Playbook')).toBeInTheDocument();
+    expect(within(dialog).getByText(/"action": "click"/)).toBeInTheDocument();
+    expect(within(dialog).getByText('凭证')).toBeInTheDocument();
+    expect(within(dialog).getByText('finance_ops@example.com')).toBeInTheDocument();
+    expect(within(dialog).getByText('密码已保存')).toBeInTheDocument();
+    expect(within(dialog).queryByText('secret')).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '复制 Playbook' }));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        JSON.stringify(
+          {
+            schema_version: '1.0',
+            output: {
+              columns: [
+                { name: 'custom_a' },
+                { name: 'custom_b' },
+                { name: 'missing_from_payload' },
+              ],
+            },
+            steps: [{ action: 'click' }],
+          },
+          null,
+          2,
+        ),
+      ),
+    );
+    expect(await within(dialog).findByText('Playbook 已复制')).toBeInTheDocument();
+  });
+
+  it('列表和详情展示历史浏览器验证失败原因', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/detail?record_limit=100') {
+        return jsonResponse({
+          success: true,
+          source: { id: 'source-1', name: '千牛每日资金账单' },
+          latest_records: [],
+          playbook: {},
+          credential: {},
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
     render(
       <BrowserPlaybookPanel
         authToken="token-1"
@@ -92,15 +228,139 @@ describe('BrowserPlaybookPanel', () => {
       />,
     );
 
-    expect(screen.getByText('验证失败')).toBeInTheDocument();
+    expect(screen.getByText('失败')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /千牛每日资金账单/ }));
+    fireEvent.click(screen.getByRole('button', { name: /详情 千牛每日资金账单/ }));
 
-    const dialog = screen.getByRole('dialog', { name: '浏览器采集详情' });
-    expect(within(dialog).getByText('验证任务')).toBeInTheDocument();
+    const dialog = await screen.findByRole('dialog', { name: '浏览器任务详情' });
+    expect(within(dialog).getByText('任务ID')).toBeInTheDocument();
     expect(within(dialog).getByText('sync-failed-1')).toBeInTheDocument();
     expect(within(dialog).getByText('失败原因')).toBeInTheDocument();
     expect(within(dialog).getByText('PAGE_CHANGED: login selector missing')).toBeInTheDocument();
+  });
+
+  it('重试浏览器任务会重新下发任务并刷新列表', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/retry') {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        expect(JSON.parse(String(init?.body))).toEqual({ force_collection: true });
+        return jsonResponse({
+          success: true,
+          verification_sync_job_id: 'sync-retry-1',
+          verification_biz_date: '2026-05-20',
+          message: '浏览器任务已重新下发到采集机，请等待任务状态更新',
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} onRegistered={onRegistered} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /重试 千牛每日资金账单/ }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const notice = await screen.findByText(/sync-retry-1/);
+    const table = screen.getByRole('table');
+    expect(notice.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+  });
+
+  it('重试浏览器任务后轮询任务状态并更新提示', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/retry') {
+        return jsonResponse({
+          success: true,
+          verification_sync_job_id: 'sync-retry-success-1',
+          verification_biz_date: '2026-05-20',
+          message: '浏览器任务已重新下发到采集机，请等待任务状态更新',
+        });
+      }
+      if (url === '/api/sync-jobs/sync-retry-success-1') {
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        return jsonResponse({
+          success: true,
+          job: {
+            id: 'sync-retry-success-1',
+            job_status: 'success',
+            error_message: '',
+          },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} onRegistered={onRegistered} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /重试 千牛每日资金账单/ }));
+
+    expect(await screen.findByText(/sync-retry-success-1/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/浏览器任务已完成/)).toBeInTheDocument());
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('/api/sync-jobs/sync-retry-success-1', expect.any(Object)));
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(2));
+  });
+
+  it('重试浏览器任务轮询到失败状态时展示 browser-agent 失败原因', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/retry') {
+        return jsonResponse({
+          success: true,
+          verification_sync_job_id: 'sync-retry-failed-1',
+          message: '浏览器任务已重新下发到采集机，请等待任务状态更新',
+        });
+      }
+      if (url === '/api/sync-jobs/sync-retry-failed-1') {
+        return jsonResponse({
+          success: true,
+          job: {
+            id: 'sync-retry-failed-1',
+            job_status: 'failed',
+            browser_fail_reason: 'DATA_MISMATCH',
+            error_message: 'DATA_MISMATCH: 行数与日汇总不一致: 明细 23 行，日汇总 24 行',
+          },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /重试 千牛每日资金账单/ }));
+
+    expect(await screen.findByText(/sync-retry-failed-1/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/DATA_MISMATCH: 行数与日汇总不一致: 明细 23 行，日汇总 24 行/)).toBeInTheDocument(),
+    );
+  });
+
+  it('删除浏览器任务会调用数据源删除接口并刷新列表', async () => {
+    const onRegistered = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1') {
+        expect(init?.method).toBe('DELETE');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        return jsonResponse({
+          success: true,
+          message: '数据源已删除',
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} onRegistered={onRegistered} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /删除 千牛每日资金账单/ }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('数据源已删除')).toBeInTheDocument();
   });
 
   it('通过外部新增信号打开新增浮窗并提交 source-less 注册', async () => {

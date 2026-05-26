@@ -57,9 +57,6 @@ _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
 _BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
 _COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID = "alipay-fund-source-only-non-alipay-payment"
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL = "非支付宝支付订单"
-ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN = "微信/其他支付资金账单接入后，重新纳入资金对账"
 
 
 def _label_anomaly_type(anomaly_type: str, *, left_name: str = "", right_name: str = "") -> str:
@@ -477,54 +474,6 @@ def _resolve_side_names(ctx: dict[str, Any]) -> tuple[str, str]:
             return left, right
 
     return "", ""
-
-
-def _is_alipay_fund_bill_binding(binding: dict[str, Any]) -> bool:
-    haystack = " ".join(
-        str(binding.get(key) or "")
-        for key in (
-            "dataset_name",
-            "business_name",
-            "display_name",
-            "name",
-            "dataset_code",
-            "resource_key",
-            "table_name",
-        )
-    ).lower()
-    return "支付宝资金账单" in haystack or "alipay_bill:signcustomer" in haystack
-
-
-def _collection_side(collection: dict[str, Any]) -> str:
-    binding = _safe_dict(collection.get("binding"))
-    text = str(binding.get("side") or binding.get("role_code") or "").strip().lower()
-    target = str(binding.get("input_plan_target_table") or binding.get("target_table") or "").strip().lower()
-    if text == "left" or text.startswith("left_") or target == "left_recon_ready":
-        return "left"
-    if text == "right" or text.startswith("right_") or target == "right_recon_ready":
-        return "right"
-    return ""
-
-
-def _alipay_fund_side(ctx: dict[str, Any]) -> str:
-    source_collection_json = _safe_dict(ctx.get("source_collection_json"))
-    collections = [
-        item for item in _safe_list(source_collection_json.get("collections"))
-        if isinstance(item, dict)
-    ]
-    if not collections:
-        collections = [
-            {"binding": item}
-            for item in _safe_list(ctx.get("plan_input_bindings"))
-            if isinstance(item, dict)
-        ]
-    for collection in collections:
-        binding = _safe_dict(collection.get("binding"))
-        if _is_alipay_fund_bill_binding(binding):
-            side = _collection_side(collection)
-            if side:
-                return side
-    return ""
 
 
 def _resolve_failed_reason(ctx: dict[str, Any]) -> str:
@@ -2169,77 +2118,6 @@ async def persist_failed_run_node(state: AgentState) -> dict[str, Any]:
     return {"recon_ctx": ctx}
 
 
-def apply_alipay_fund_source_only_suppression_node(state: AgentState) -> dict[str, Any]:
-    ctx = _get_recon_ctx(state)
-    exec_status = str(ctx.get("exec_status") or "success").strip().lower()
-    if exec_status not in {"", "success", "partial_success", "skipped"}:
-        return {"recon_ctx": ctx}
-
-    alipay_side = _alipay_fund_side(ctx)
-    if alipay_side not in {"left", "right"}:
-        return {"recon_ctx": ctx}
-
-    recon_observation = _safe_dict(ctx.get("recon_observation"))
-    summary = _safe_dict(recon_observation.get("summary"))
-    anomaly_items = [
-        item for item in _safe_list(recon_observation.get("anomaly_items"))
-        if isinstance(item, dict)
-    ]
-    source_only = _safe_int(summary.get("source_only"), 0)
-    target_only = _safe_int(summary.get("target_only"), 0)
-    matched_with_diff = _safe_int(summary.get("matched_with_diff"), 0)
-
-    # source_only means the left/source side exists and the right/target side is missing.
-    # Suppress it only when the Alipay fund bill is the right/target side.
-    if alipay_side != "right" or source_only <= 0:
-        pending_total = source_only + target_only + matched_with_diff
-        summary.update(
-            {
-                "pending_source_only": source_only,
-                "pending_target_only": target_only,
-                "pending_matched_with_diff": matched_with_diff,
-                "pending_total": pending_total,
-                "has_anomaly": pending_total > 0,
-            }
-        )
-        recon_observation["summary"] = summary
-        recon_observation["anomaly_items"] = anomaly_items
-        recon_observation["anomaly_item_count"] = len(anomaly_items)
-        ctx["recon_observation"] = recon_observation
-        ctx["recon_result_summary_json"] = summary
-        ctx["anomaly_items"] = anomaly_items
-        return {"recon_ctx": ctx}
-
-    pending_anomalies = [
-        item for item in anomaly_items
-        if str(item.get("anomaly_type") or "") != "source_only"
-    ]
-    pending_total = target_only + matched_with_diff
-    summary.update(
-        {
-            "pending_source_only": 0,
-            "pending_target_only": target_only,
-            "pending_matched_with_diff": matched_with_diff,
-            "pending_total": pending_total,
-            "has_anomaly": pending_total > 0,
-            "temporary_suppression": {
-                "id": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_ID,
-                "enabled": True,
-                "suppressed_source_only": source_only,
-                "label": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_LABEL,
-                "remove_when": ALIPAY_FUND_SOURCE_ONLY_SUPPRESSION_REMOVE_WHEN,
-            },
-        }
-    )
-    recon_observation["summary"] = summary
-    recon_observation["anomaly_items"] = pending_anomalies
-    recon_observation["anomaly_item_count"] = len(pending_anomalies)
-    ctx["recon_observation"] = recon_observation
-    ctx["recon_result_summary_json"] = summary
-    ctx["anomaly_items"] = pending_anomalies
-    return {"recon_ctx": ctx}
-
-
 async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     auth_token = str(state.get("auth_token") or "")
@@ -3316,7 +3194,10 @@ async def _send_run_summary_notification(
         "reason": "",
         "error": "",
         "summary_recipient": {
-            "name": str(resolved.display_name or name),
+            # Prefer the human-configured name: resolve-by-userId echoes the
+            # userId back as display_name (contact.user:get needs interactive
+            # PAT permission), which would otherwise shadow the real name.
+            "name": str(name or resolved.display_name),
             "identifier": str(resolved.user_id or identifier),
             "mobile": str(resolved.mobile or mobile),
             "source": "plan_meta" if summary_recipient else str(initiator.get("source") or ""),

@@ -1280,6 +1280,17 @@ def _load_from_collection_records(dataset_ref: dict[str, Any], table_name: str) 
     return df.reset_index(drop=True)
 
 
+def _strip_browser_payload_values(payload: dict[str, Any]) -> dict[str, Any]:
+    """Trim surrounding whitespace (incl. tabs/newlines) from collected keys and
+    string values. 千牛/淘宝 exports embed trailing tabs that otherwise break
+    match-key / amount / date comparison against the other reconciliation side."""
+    cleaned: dict[str, Any] = {}
+    for key, value in payload.items():
+        clean_key = key.strip() if isinstance(key, str) else key
+        cleaned[clean_key] = value.strip() if isinstance(value, str) else value
+    return cleaned
+
+
 def _load_from_browser_collection_records(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
     """Load dataset from published browser_collection_records rows."""
     _, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
@@ -1299,7 +1310,7 @@ def _load_from_browser_collection_records(dataset_ref: dict[str, Any], table_nam
     for row in rows:
         payload = row.get("payload")
         if isinstance(payload, dict):
-            payload_rows.append(dict(payload))
+            payload_rows.append(_strip_browser_payload_values(payload))
 
     if not payload_rows:
         raise DatasetLoadError(f"source_key={source_key} 暂无浏览器采集记录。请先采集数据后再执行对账。")

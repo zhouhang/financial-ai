@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
@@ -9,6 +10,18 @@ def _money(value: Any) -> Decimal:
     if text == "":
         text = "0"
     return Decimal(text).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+    return int(match.group(0))
 
 
 def validate_rows(
@@ -50,9 +63,25 @@ def validate_rows(
 
     total = sum((_money(row.get(amount_field)) for row in rows), Decimal("0.00"))
     total_text = str(total.quantize(Decimal("0.01")))
-    if expected_row_count is not None and len(rows) != expected_row_count:
-        return {"success": False, "fail_reason": "DATA_MISMATCH", "error": "行数与日汇总不一致"}
+    normalized_expected_row_count = _int_or_none(expected_row_count)
+    if normalized_expected_row_count is not None and len(rows) != normalized_expected_row_count:
+        return {
+            "success": False,
+            "fail_reason": "DATA_MISMATCH",
+            "error": f"行数与日汇总不一致: 明细 {len(rows)} 行，日汇总 {normalized_expected_row_count} 行",
+            "details": {
+                "actual_row_count": len(rows),
+                "expected_row_count": normalized_expected_row_count,
+            },
+        }
     if expected_amount_total is not None and total_text != str(_money(expected_amount_total)):
-        return {"success": False, "fail_reason": "DATA_MISMATCH", "error": "金额合计与日汇总不一致"}
+        return {
+            "success": False,
+            "fail_reason": "DATA_MISMATCH",
+            "error": f"金额合计与日汇总不一致: 明细 {total_text}，日汇总 {str(_money(expected_amount_total))}",
+            "details": {
+                "actual_amount_total": total_text,
+                "expected_amount_total": str(_money(expected_amount_total)),
+            },
+        }
     return {"success": True, "summary": {"row_count": len(rows), "amount_total": total_text}}
-

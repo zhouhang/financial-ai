@@ -62,6 +62,42 @@ def test_load_browser_collection_records_from_dataset_ref(monkeypatch):
     assert list(df["amount"]) == ["12.30"]
 
 
+def test_browser_collection_records_loader_trims_whitespace_from_values(monkeypatch):
+    """千牛/淘宝导出在每个值后面带尾部制表符（\\t）。加载时必须 trim，否则匹配键、
+    金额、时间都对不上另一侧（实测不 trim 时 订单号匹配 0 条）。"""
+    monkeypatch.setattr(
+        dataset_loader,
+        "_table_columns",
+        lambda table_name: {"data_source_id", "dataset_id", "biz_date", "payload"},
+    )
+    monkeypatch.setattr(
+        dataset_loader,
+        "_load_browser_collection_record_rows",
+        lambda *, source_key, query: [
+            {
+                "payload": {
+                    "订单号": "3303691179052000067\t",
+                    "订单实际金额（元）": "103\t",
+                    "确认收货时间": "2026-05-25 15:52:39\t",
+                }
+            }
+        ],
+    )
+
+    df = dataset_loader.load_dataset_as_df(
+        {
+            "source_type": "browser_collection_records",
+            "source_key": "source-001",
+            "query": {"dataset_id": "dataset-001", "biz_date": "2026-05-25"},
+        },
+        "收支账单",
+    )
+
+    assert list(df["订单号"]) == ["3303691179052000067"]
+    assert list(df["订单实际金额（元）"]) == ["103"]
+    assert list(df["确认收货时间"]) == ["2026-05-25 15:52:39"]
+
+
 def test_browser_collection_records_loader_rejects_unknown_query_keys(monkeypatch):
     monkeypatch.setattr(
         dataset_loader,

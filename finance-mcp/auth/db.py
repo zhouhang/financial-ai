@@ -4738,6 +4738,37 @@ def update_unified_data_source_dataset_catalog(
         return None
 
 
+def update_unified_data_source_dataset_schema_columns(
+    *,
+    dataset_id: str,
+    columns: list[dict[str, Any]],
+) -> dict | None:
+    """写入数据集 schema_summary.columns（浏览器采集数据集发布后物化字段 schema，
+    供对账向导选择日期/匹配字段；浏览器数据集"直接发布"不走语义档，否则没有列结构）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE data_source_datasets
+                    SET schema_summary = jsonb_set(
+                            COALESCE(schema_summary, '{}'::jsonb), '{columns}', %s::jsonb, true
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id, schema_summary
+                    """,
+                    (json.dumps(columns or [], ensure_ascii=False), dataset_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"更新 data_source_datasets schema_summary.columns 失败 (id={dataset_id}): {e}")
+        return None
+
+
 def touch_unified_data_source_dataset_usage(
     *,
     company_id: str,
@@ -5546,7 +5577,7 @@ def find_inflight_dataset_collection_sync_job(
                     WHERE company_id = %s
                       AND data_source_id = %s
                       AND resource_key = %s
-                      AND job_status IN ('pending', 'running')
+                      AND job_status IN ('pending', 'running', 'waiting_human_verification', 'resuming')
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                       AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
@@ -5616,6 +5647,48 @@ def find_recent_success_dataset_collection_sync_job(
         return None
 
 
+def find_success_dataset_collection_sync_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> dict | None:
+    """查找同一数据集业务日期最近一次成功采集任务，不按 completed_at 做 TTL 限制。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, data_source_id, trigger_mode, resource_key,
+                           window_start, window_end, idempotency_key, job_status,
+                           request_payload, checkpoint_before, checkpoint_after,
+                           active_snapshot_id, published_snapshot_id, current_attempt,
+                           error_message, started_at, completed_at, created_at, updated_at
+                    FROM sync_jobs
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND resource_key = %s
+                      AND job_status = 'success'
+                      AND request_payload ->> 'dataset_id' = %s
+                      AND request_payload ->> 'biz_date' = %s
+                    ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id, resource_key, dataset_id, biz_date),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(
+            "查询成功采集任务失败 "
+            f"(company_id={company_id}, data_source_id={data_source_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return None
+
+
 def create_or_reuse_dataset_collection_sync_job(
     *,
     company_id: str,
@@ -5651,7 +5724,7 @@ def create_or_reuse_dataset_collection_sync_job(
                     WHERE company_id = %s
                       AND data_source_id = %s
                       AND resource_key = %s
-                      AND job_status IN ('pending', 'running')
+                      AND job_status IN ('pending', 'running', 'waiting_human_verification', 'resuming')
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                       AND updated_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
@@ -6026,6 +6099,35 @@ def get_active_playbook(*, company_id: str, playbook_id: str) -> dict:
         return {}
 
 
+def get_playbook(*, company_id: str, playbook_id: str, version: str | None = None) -> dict:
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                params: list[Any] = [company_id, playbook_id]
+                sql = """
+                    SELECT *
+                    FROM playbooks
+                    WHERE company_id = %s
+                      AND playbook_id = %s
+                """
+                if version:
+                    sql += " AND version = %s"
+                    params.append(version)
+                sql += """
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"查询 playbooks 失败 (company_id={company_id}, playbook_id={playbook_id}, version={version or ''}): {e}"
+        )
+        return {}
+
+
 def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
     row = update_unified_sync_job_status(
         sync_job_id=sync_job_id,
@@ -6049,6 +6151,9 @@ def mark_browser_binding_collection_seen(*, sync_job_id: str) -> int:
                     """
                     UPDATE shop_runtime_bindings b
                     SET last_collection_at = CURRENT_TIMESTAMP,
+                        profile_status = 'active',
+                        playbook_status = 'ok',
+                        cron_pause_reason = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     FROM sync_jobs s
                     WHERE s.id = %s
@@ -6111,6 +6216,48 @@ def upsert_browser_agent_heartbeat(
     except Exception as e:
         logger.error(f"upsert_browser_agent_heartbeat 失败 (company_id={company_id}, agent_id={agent_id}): {e}")
         return None
+
+
+def fail_running_browser_sync_jobs_for_agent(*, agent_id: str) -> dict[str, Any]:
+    """Mark browser jobs left running by a previous process for this agent as interrupted."""
+    resolved_agent_id = str(agent_id or "").strip()
+    if not resolved_agent_id:
+        return {"failed_count": 0, "sync_job_ids": []}
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'failed',
+                        browser_fail_reason = 'AGENT_INTERRUPTED',
+                        error_message = 'AGENT_INTERRUPTED: browser-agent restarted while this job was running',
+                        next_retry_at = NULL,
+                        completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE sync_jobs.job_status = 'running'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM data_sources ds
+                          JOIN shop_runtime_bindings srb
+                            ON srb.company_id = sync_jobs.company_id
+                           AND srb.data_source_id = sync_jobs.data_source_id
+                          WHERE ds.id = sync_jobs.data_source_id
+                            AND ds.source_kind = 'browser_playbook'
+                            AND srb.agent_id = %s
+                      )
+                    RETURNING sync_jobs.id
+                    """,
+                    (resolved_agent_id,),
+                )
+                rows = cur.fetchall()
+                conn.commit()
+    except Exception as e:
+        logger.error(f"fail_running_browser_sync_jobs_for_agent 失败 (agent_id={resolved_agent_id}): {e}")
+        return {"failed_count": 0, "sync_job_ids": [], "error": str(e)}
+    sync_job_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
 
 
 def mark_browser_sync_job_failed(
@@ -7436,6 +7583,22 @@ def list_dataset_collection_records(
         return []
 
 
+def _clean_collection_payload(payload: Any) -> Any:
+    """Strip surrounding whitespace (incl. tabs/newlines) from collected string
+    keys/values. 千牛/淘宝 exports embed trailing tabs that otherwise break
+    match-key / amount / date comparison at reconciliation time."""
+    if isinstance(payload, dict):
+        return {
+            (key.strip() if isinstance(key, str) else key): _clean_collection_payload(value)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_clean_collection_payload(item) for item in payload]
+    if isinstance(payload, str):
+        return payload.strip()
+    return payload
+
+
 def _browser_record_hash(payload: dict[str, Any]) -> str:
     raw = json.dumps(
         _json_safe_payload(payload or {}),
@@ -7475,8 +7638,8 @@ def upsert_browser_collection_records(
     input_count = len(items)
     values: list[tuple[Any, ...]] = []
     for item in items:
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-        key_values = item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {}
+        payload = _clean_collection_payload(item.get("payload") if isinstance(item.get("payload"), dict) else {})
+        key_values = _clean_collection_payload(item.get("item_key_values") if isinstance(item.get("item_key_values"), dict) else {})
         item_key = str(item.get("item_key") or "").strip()
         if not item_key:
             raise ValueError("browser_collection_records item_key 不能为空")
@@ -7793,6 +7956,58 @@ def get_dataset_collection_record_stats(
     except Exception as e:
         logger.error(
             f"统计 dataset_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
+        )
+        return {}
+
+
+def get_browser_collection_record_stats(
+    *,
+    company_id: str,
+    data_source_id: str | None = None,
+    dataset_id: str | None = None,
+    dataset_code: str | None = None,
+    resource_key: str | None = None,
+    biz_date: str | None = None,
+) -> dict:
+    """统计浏览器采集明细记录。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(*) FILTER (WHERE record_status = 'active')::bigint AS active_count,
+                           COUNT(*) FILTER (WHERE record_status = 'updated')::bigint AS updated_count,
+                           COUNT(*) FILTER (WHERE record_status = 'unchanged')::bigint AS unchanged_count,
+                           COUNT(DISTINCT biz_date)::bigint AS biz_date_count,
+                           MIN(first_seen_at) AS first_seen_at,
+                           MAX(latest_seen_at) AS latest_seen_at
+                    FROM browser_collection_records
+                    WHERE company_id = %s
+                      AND record_status <> 'deleted'
+                """
+                params: list[Any] = [company_id]
+                if data_source_id:
+                    sql += " AND data_source_id = %s"
+                    params.append(data_source_id)
+                if dataset_id:
+                    sql += " AND dataset_id = %s"
+                    params.append(dataset_id)
+                if dataset_code:
+                    sql += " AND dataset_code = %s"
+                    params.append(dataset_code)
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                if biz_date:
+                    sql += " AND biz_date = %s"
+                    params.append(biz_date)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else {}
+    except Exception as e:
+        logger.error(
+            f"统计 browser_collection_records 失败 (company_id={company_id}, dataset_id={dataset_id}, biz_date={biz_date}): {e}"
         )
         return {}
 

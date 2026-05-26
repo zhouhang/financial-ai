@@ -200,11 +200,6 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
           source_only: 69,
           target_only: 0,
           matched_with_diff: 0,
-          pending_total: 0,
-          temporary_suppression: {
-            suppressed_source_only: 69,
-            label: '非支付宝支付订单',
-          },
         },
         source_snapshot_json: {
           collections: [

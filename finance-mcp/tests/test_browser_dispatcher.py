@@ -556,6 +556,9 @@ def test_mark_browser_sync_job_success_updates_binding_last_collection(monkeypat
 
     assert row["job_status"] == "success"
     assert "last_collection_at = CURRENT_TIMESTAMP" in captured["binding_sql"]
+    assert "profile_status = 'active'" in captured["binding_sql"]
+    assert "playbook_status = 'ok'" in captured["binding_sql"]
+    assert "cron_pause_reason = NULL" in captured["binding_sql"]
     assert captured["binding_params"] == ("sync-001",)
 
 
@@ -735,6 +738,95 @@ def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
     assert captured["capabilities"] == {"browser": "chrome"}
 
 
+def test_browser_sync_job_startup_cleanup_tool_calls_helper(monkeypatch) -> None:
+    import asyncio
+
+    from tools import data_sources
+
+    captured: dict[str, object] = {}
+
+    def fake_cleanup(**kwargs):
+        captured.update(kwargs)
+        return {"failed_count": 2, "sync_job_ids": ["sync-001", "sync-002"]}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system", "company_id": "company-001"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "fail_running_browser_sync_jobs_for_agent", fake_cleanup)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_startup_cleanup",
+            {"worker_token": "tok", "agent_id": "browser-agent-local"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["failed_count"] == 2
+    assert result["sync_job_ids"] == ["sync-001", "sync-002"]
+    assert captured["agent_id"] == "browser-agent-local"
+
+
+def test_fail_running_browser_sync_jobs_for_agent_updates_only_agent_browser_jobs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    rows = [{"id": "sync-001"}, {"id": "sync-002"}]
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return rows
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            captured["committed"] = True
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    result = auth_db.fail_running_browser_sync_jobs_for_agent(agent_id="browser-agent-local")
+
+    sql = str(captured["sql"])
+    assert result == {"failed_count": 2, "sync_job_ids": ["sync-001", "sync-002"]}
+    assert "UPDATE sync_jobs" in sql
+    assert "WHERE ds.id = sync_jobs.data_source_id" in sql
+    assert "EXISTS (" in sql
+    assert "JOIN shop_runtime_bindings srb" in sql
+    assert "sync_jobs.job_status = 'running'" in sql
+    assert "ds.source_kind = 'browser_playbook'" in sql
+    assert "srb.agent_id = %s" in sql
+    assert "AGENT_INTERRUPTED" in sql
+    assert captured["params"] == ("browser-agent-local",)
+    assert captured["committed"] is True
+
+
 def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
     import asyncio
 
@@ -783,6 +875,7 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
     upserted: dict[str, object] = {}
     files: dict[str, object] = {}
     success: dict[str, object] = {}
+    health_updates: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         data_sources,
@@ -823,11 +916,20 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
 
     def fake_success(**kw):
         success.update(kw)
-        return {"id": kw["sync_job_id"], "job_status": "success"}
+        return {
+            "id": kw["sync_job_id"],
+            "job_status": "success",
+            "completed_at": "2026-05-25T15:31:51+08:00",
+        }
 
     monkeypatch.setattr(data_sources.auth_db, "upsert_browser_collection_records", fake_upsert)
     monkeypatch.setattr(data_sources.auth_db, "insert_browser_capture_files", fake_files)
     monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_success", fake_success)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_data_source_dataset_health",
+        lambda **kw: health_updates.append(kw) or {"id": kw["dataset_id"]},
+    )
 
     result = asyncio.run(
         data_sources.handle_tool_call(
@@ -848,6 +950,14 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
     assert files["sync_job_id"] == "sync-001"
     assert success["sync_job_id"] == "sync-001"
     assert success["summary"]["capture_file_count"] == 1
+    assert health_updates == [
+        {
+            "dataset_id": "d1",
+            "health_status": "healthy",
+            "last_sync_at": "2026-05-25T15:31:51+08:00",
+            "last_error_message": "",
+        }
+    ]
 
 
 def test_dispatcher_persists_capture_files() -> None:

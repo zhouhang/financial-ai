@@ -4,7 +4,7 @@ export type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 export type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
   DataSourceKind,
-  'platform_oauth' | 'database' | 'api' | 'file' | 'browser' | 'desktop_cli'
+  'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
 >;
 
 export interface CompatibilityCheckResult {
@@ -29,6 +29,7 @@ export interface SchemeSourceSelection {
   resourceKey?: string;
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
+  extractConfig?: Record<string, unknown>;
 }
 
 export type OutputFieldValueMode = 'source_field' | 'fixed_value' | 'formula' | 'concat';

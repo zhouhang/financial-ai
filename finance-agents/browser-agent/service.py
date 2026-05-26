@@ -64,6 +64,24 @@ async def _heartbeat(client: BrowserAgentTallyClient, config: BrowserAgentConfig
         await asyncio.sleep(config.heartbeat_interval_seconds)
 
 
+async def _cleanup_interrupted_jobs(client: BrowserAgentTallyClient) -> None:
+    try:
+        result = await client.startup_cleanup()
+    except Exception:
+        logger.exception("browser-agent 启动清理旧任务异常")
+        return
+    if not bool(result.get("success", False)):
+        logger.warning("browser-agent 启动清理旧任务失败: %s", result.get("error") or result)
+        return
+    failed_count = int(result.get("failed_count") or 0)
+    if failed_count:
+        logger.warning(
+            "browser-agent 启动清理旧 running 任务: failed_count=%s sync_job_ids=%s",
+            failed_count,
+            result.get("sync_job_ids") or [],
+        )
+
+
 async def _dispatcher(client: BrowserAgentTallyClient, config: BrowserAgentConfig) -> None:
     loop = BrowserDispatcherLoop(
         client=client,
@@ -92,6 +110,7 @@ async def main() -> None:
         config.max_concurrency,
         config.data_agent_ws_url,
     )
+    await _cleanup_interrupted_jobs(client)
     await asyncio.gather(
         _heartbeat(client, config),
         _dispatcher(client, config),

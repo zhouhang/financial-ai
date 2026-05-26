@@ -124,6 +124,9 @@ class BrowserAgentTallyClient:
     async def claim_browser_job(self) -> dict[str, Any]:
         return await self._client.request("claim", {})
 
+    async def startup_cleanup(self) -> dict[str, Any]:
+        return await self._client.request("startup_cleanup", {})
+
     async def heartbeat(self, *, company_id: str | None = None) -> dict[str, Any]:
         resolved_company_id = (company_id or self.config.company_id or "").strip()
         return await self._client.request("heartbeat", {

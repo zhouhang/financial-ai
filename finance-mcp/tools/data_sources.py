@@ -48,6 +48,18 @@ DATASET_COLLECTION_INFLIGHT_WAIT_SECONDS = int(
 DATASET_COLLECTION_INFLIGHT_POLL_SECONDS = float(
     os.getenv("DATASET_COLLECTION_INFLIGHT_POLL_SECONDS", "2")
 )
+DATASET_COLLECTION_INFLIGHT_JOB_STATUSES = {
+    "pending",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_COLLECTION_ASYNC_JOB_STATUSES = {
+    "pending",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -130,6 +142,83 @@ def _dataset_collection_reuse_ttl_seconds(params: dict[str, Any]) -> int:
         return max(0, min(int(raw_value), 3600))
     except (TypeError, ValueError):
         return DATASET_COLLECTION_REUSE_TTL_SECONDS
+
+
+def _skip_browser_success_reuse(
+    params: dict[str, Any], arguments: dict[str, Any] | None = None
+) -> bool:
+    arguments = arguments or {}
+    nested_params = params.get("params") if isinstance(params.get("params"), dict) else {}
+    return any(
+        _normalize_bool(value, default=False)
+        for value in (
+            params.get("force_collection"),
+            params.get("skip_recent_success_reuse"),
+            params.get("retry_verification"),
+            nested_params.get("force_collection"),
+            nested_params.get("skip_recent_success_reuse"),
+            nested_params.get("retry_verification"),
+            arguments.get("force_collection"),
+            arguments.get("skip_recent_success_reuse"),
+        )
+    )
+
+
+def _browser_collection_records_exist(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> bool:
+    records = auth_db.list_browser_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+        limit=1,
+    )
+    return bool(records)
+
+
+def _find_reusable_browser_success_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str,
+    biz_date: str,
+) -> dict[str, Any] | None:
+    job = auth_db.find_success_dataset_collection_sync_job(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+    )
+    if not job:
+        return None
+    if not _browser_collection_records_exist(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=biz_date,
+    ):
+        logger.warning(
+            "跳过浏览器同账期成功任务复用: success job has no records "
+            "company_id=%s data_source_id=%s dataset_id=%s resource_key=%s biz_date=%s job_id=%s",
+            company_id,
+            data_source_id,
+            dataset_id,
+            resource_key,
+            biz_date,
+            job.get("id"),
+        )
+        return None
+    return job
 
 
 def _is_hologres_source(source_row: dict[str, Any] | None) -> bool:
@@ -863,6 +952,63 @@ def _extract_dataset_columns(dataset_row: dict[str, Any], sample_rows: list[dict
                 }
             )
     return ordered
+
+
+_BROWSER_DATE_VALUE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")
+_BROWSER_COMPACT_DATE_RE = re.compile(r"^\d{8}$")
+_BROWSER_TEMPORAL_NAME_RE = re.compile(r"(时间|日期|账期)")
+
+
+def _infer_browser_column_type(name: str, sample_values: list[Any]) -> str:
+    """Conservative type inference for browser-collected columns.
+
+    Only temporal types are inferred (datetime/date); everything else stays
+    "string". We deliberately do NOT infer "number": collected identifiers like
+    19-digit 订单号 are numeric-looking but must never become numbers (precision
+    loss / corruption), and amounts are safe as strings. Values may carry export
+    artifacts (trailing tabs), so we strip before matching.
+    """
+    samples = [str(value).strip() for value in sample_values if value is not None and str(value).strip()]
+    samples = samples[:50]
+    if samples and all(_BROWSER_DATE_VALUE_RE.match(value) for value in samples):
+        return "datetime" if any((" " in value or "T" in value) for value in samples) else "date"
+    if (
+        samples
+        and _BROWSER_TEMPORAL_NAME_RE.search(str(name or ""))
+        and all(_BROWSER_COMPACT_DATE_RE.match(value) for value in samples)
+    ):
+        return "date"
+    return "string"
+
+
+def _build_browser_collection_columns(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Build a schema_summary.columns list (name + conservative data_type) from
+    collected browser records' payloads, preserving first-seen field order. This
+    materializes the dataset schema so the recon wizard can offer date/match
+    fields (browser datasets publish directly and otherwise have no columns)."""
+    order: list[str] = []
+    samples: dict[str, list[Any]] = {}
+    for record in records or []:
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        for raw_key, value in payload.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if key not in samples:
+                samples[key] = []
+                order.append(key)
+            if value is not None and len(samples[key]) < 50:
+                samples[key].append(value)
+    return [
+        {
+            "name": name,
+            "data_type": _infer_browser_column_type(name, samples.get(name) or []),
+            "nullable": True,
+        }
+        for name in order
+    ]
 
 
 def _guess_business_name(dataset_row: dict[str, Any], source_row: dict[str, Any] | None = None) -> str:
@@ -1931,6 +2077,10 @@ def _dataset_uses_platform_alipay_bill_lines(dataset_row: dict[str, Any] | None)
     return _dataset_storage_value(dataset_row) in {"platform_alipay_bill_lines", "alipay_bill_lines"}
 
 
+def _dataset_uses_browser_collection_records(dataset_row: dict[str, Any] | None) -> bool:
+    return _dataset_storage_value(dataset_row) == "browser_collection_records"
+
+
 def _dataset_uses_alipay_bill_records(dataset_row: dict[str, Any] | None) -> bool:
     config = _dataset_collection_config(dataset_row)
     resource_key = _safe_text((dataset_row or {}).get("resource_key"))
@@ -2238,6 +2388,29 @@ def _browser_registration_code(*, title: str) -> str:
 
 def _normalize_browser_playbook_body(playbook_body: dict[str, Any]) -> tuple[dict[str, Any], str]:
     normalized = dict(playbook_body)
+    target = normalized.get("target") if isinstance(normalized.get("target"), dict) else {}
+    output = normalized.get("output") if isinstance(normalized.get("output"), dict) else {}
+    if str(target.get("platform") or "").strip().lower() == "qianniu" and output:
+        columns = output.get("columns") if isinstance(output.get("columns"), list) else []
+        column_names = {
+            _safe_text(column.get("name"))
+            for column in columns
+            if isinstance(column, dict) and _safe_text(column.get("name"))
+        }
+        item_key_fields = [
+            _safe_text(field)
+            for field in output.get("item_key_fields") or []
+            if _safe_text(field)
+        ]
+        if (
+            item_key_fields == ["业务流水号"]
+            and "业务流水号" in column_names
+            and "退款单号" in column_names
+        ):
+            normalized_output = dict(output)
+            normalized_output["item_key_fields"] = ["业务流水号", "退款单号"]
+            normalized["output"] = normalized_output
+
     steps = normalized.get("steps")
     if steps is None:
         return normalized, ""
@@ -2352,6 +2525,27 @@ def _load_dataset_sample_rows_from_collection_records(
     return _extract_collection_payload_rows(records, limit=limit)
 
 
+def _load_dataset_sample_rows_from_browser_collection_records(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str = "",
+    dataset_code: str = "",
+    resource_key: str = "",
+    limit: int = SEMANTIC_SAMPLE_ROW_LIMIT,
+) -> list[dict[str, Any]]:
+    records = auth_db.list_browser_collection_records(
+        company_id=company_id,
+        data_source_id=data_source_id,
+        dataset_id=_safe_text(dataset_id) or None,
+        dataset_code=_safe_text(dataset_code) or None,
+        resource_key=_safe_text(resource_key) or None,
+        limit=max(1, min(limit, 100)),
+        offset=0,
+    )
+    return _extract_collection_payload_rows(records, limit=limit)
+
+
 def _flatten_platform_sample_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     raw = payload.get("raw")
@@ -2418,6 +2612,17 @@ def _load_dataset_semantic_sample_rows(
             if isinstance(item, dict) and isinstance(item.get("payload"), dict)
         ]
         return rows, "platform_alipay_bill_lines" if rows else "none"
+
+    if _dataset_uses_browser_collection_records(dataset_row):
+        rows = _load_dataset_sample_rows_from_browser_collection_records(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id or "",
+            dataset_code=dataset_code or "",
+            resource_key=resource_key,
+            limit=normalized_limit,
+        )
+        return rows, "browser_collection_records" if rows else "none"
 
     rows = _load_dataset_sample_rows_from_collection_records(
         company_id=company_id,
@@ -3849,7 +4054,7 @@ def _build_data_source_view(
     latest_jobs = auth_db.list_unified_sync_jobs(
         company_id=company_id,
         data_source_id=source_id,
-        limit=1,
+        limit=10 if str(source_row.get("source_kind") or "") == "browser_playbook" else 1,
     )
     latest_job = latest_jobs[0] if latest_jobs else None
     browser_verification = _build_browser_verification_summary(
@@ -4878,7 +5083,7 @@ async def _wait_for_collection_job_completion(
     while True:
         job = auth_db.get_unified_sync_job_by_id(sync_job_id)
         status = _safe_text((job or {}).get("job_status")).lower()
-        if status not in {"pending", "running"}:
+        if status not in DATASET_COLLECTION_INFLIGHT_JOB_STATUSES:
             return job
         if monotonic_time.monotonic() >= deadline:
             return job
@@ -5109,6 +5314,19 @@ def create_tools() -> list[Tool]:
                 "properties": {
                     "auth_token": {"type": "string"},
                     **source_id_schema,
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
+            name="data_source_get_browser_playbook_detail",
+            description="获取 browser_playbook 任务详情: 最新采集记录、playbook JSON 和安全凭证摘要。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "record_limit": {"type": "integer"},
                 },
                 "required": ["auth_token", "source_id"],
             },
@@ -5515,6 +5733,20 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_retry_browser_playbook_verification",
+            description="基于 browser_playbook 数据源现有运行时绑定重新创建 verification sync_job,用于重新下发凭证+playbook 到采集机验证采集链路。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "verification_biz_date": {"type": "string"},
+                    "dataset_id": {"type": "string"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_authorize",
             description="发起授权（主要用于 platform_oauth）。",
             inputSchema={
@@ -5702,6 +5934,18 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="browser_sync_job_startup_cleanup",
+            description="Worker 专用：browser-agent 启动后清理本 agent 上次进程遗留的 running browser_playbook sync_job。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+                "required": ["worker_token", "agent_id"],
+            },
+        ),
+        Tool(
             name="browser_sync_job_complete",
             description="Worker 专用：browser-agent 完成 sync_job 后回写 records / capture_files 并将 sync_job 标记 success。",
             inputSchema={
@@ -5815,6 +6059,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_list(arguments)
         if name == "data_source_get":
             return await _handle_data_source_get(arguments)
+        if name == "data_source_get_browser_playbook_detail":
+            return await _handle_data_source_get_browser_playbook_detail(arguments)
         if name == "data_source_discover_datasets":
             return await _handle_data_source_discover_datasets(arguments)
         if name == "data_source_list_datasets":
@@ -5857,6 +6103,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_register_browser_playbook(arguments)
         if name == "data_source_finalize_browser_playbook_registration":
             return await _handle_data_source_finalize_browser_playbook_registration(arguments)
+        if name == "data_source_retry_browser_playbook_verification":
+            return await _handle_data_source_retry_browser_playbook_verification(arguments)
         if name == "data_source_authorize":
             return await _handle_data_source_authorize(arguments)
         if name == "data_source_handle_callback":
@@ -5881,6 +6129,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_browser_sync_job_claim(arguments)
         if name == "browser_agent_heartbeat":
             return await _handle_browser_agent_heartbeat(arguments)
+        if name == "browser_sync_job_startup_cleanup":
+            return await _handle_browser_sync_job_startup_cleanup(arguments)
         if name == "browser_sync_job_complete":
             return await _handle_browser_sync_job_complete(arguments)
         if name == "browser_sync_job_fail":
@@ -5977,6 +6227,106 @@ async def _handle_data_source_get(arguments: dict[str, Any]) -> dict[str, Any]:
         "source_summary": dict(source_view.get("source_summary") or {}),
         "dataset_summary": dict(source_view.get("dataset_summary") or {}),
         "health_summary": dict(source_view.get("health_summary") or {}),
+    }
+
+
+def _browser_collection_dataset(row: dict[str, Any]) -> bool:
+    return _browser_collection_dataset_source_type(row) == "browser_collection_records"
+
+
+def _browser_detail_record_view(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "dataset_id": str(row.get("dataset_id") or ""),
+        "dataset_code": str(row.get("dataset_code") or ""),
+        "biz_date": str(row.get("biz_date") or ""),
+        "item_key": str(row.get("item_key") or ""),
+        "payload": dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {},
+        "captured_at": row.get("captured_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _browser_playbook_detail_credential(binding: dict[str, Any]) -> dict[str, Any]:
+    credential_ref = str(binding.get("credential_ref") or "")
+    credential_payload = auth_db._open_json_payload(credential_ref) if credential_ref else {}  # noqa: SLF001
+    return {
+        "username": str(credential_payload.get("username") or ""),
+        "password_saved": bool(credential_payload.get("password")),
+    }
+
+
+def _browser_playbook_detail_playbook(
+    *,
+    company_id: str,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    playbook_id = str(binding.get("playbook_id") or "").strip()
+    if not playbook_id:
+        return {}
+    playbook = auth_db.get_active_playbook(company_id=company_id, playbook_id=playbook_id) or {}
+    if not playbook:
+        playbook = auth_db.get_playbook(company_id=company_id, playbook_id=playbook_id) or {}
+    if not playbook:
+        return {"playbook_id": playbook_id}
+    return {
+        "playbook_id": str(playbook.get("playbook_id") or playbook_id),
+        "version": str(playbook.get("version") or ""),
+        "title": str(playbook.get("title") or ""),
+        "status": str(playbook.get("status") or ""),
+        "playbook_body": dict(playbook.get("playbook_body") or {})
+        if isinstance(playbook.get("playbook_body"), dict)
+        else {},
+        "updated_at": playbook.get("updated_at"),
+    }
+
+
+async def _handle_data_source_get_browser_playbook_detail(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(
+        company_id=company_id,
+        data_source_id=source_id,
+    )
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持查看浏览器任务详情"}
+
+    dataset_rows = _load_source_datasets(company_id, source_id)
+    source_view = _build_data_source_view(
+        source_row,
+        datasets=dataset_rows,
+        include_dataset_details=True,
+    )
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id,
+        data_source_id=source_id,
+    ) or {}
+    browser_datasets = [row for row in dataset_rows if _browser_collection_dataset(row)]
+    record_limit = max(1, min(int(arguments.get("record_limit") or 100), 100))
+    latest_records: list[dict[str, Any]] = []
+    for dataset in browser_datasets[:1]:
+        latest_records = [
+            _browser_detail_record_view(row)
+            for row in auth_db.list_browser_collection_records(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=str(dataset.get("id") or ""),
+                limit=record_limit,
+            )
+        ]
+
+    return {
+        "success": True,
+        "source": source_view,
+        "browser_verification": dict(source_view.get("browser_verification") or {}),
+        "record_count": len(latest_records),
+        "latest_records": latest_records,
+        "playbook": _browser_playbook_detail_playbook(company_id=company_id, binding=binding),
+        "credential": _browser_playbook_detail_credential(binding),
+        "message": "",
     }
 
 
@@ -7515,6 +7865,150 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
     }
 
 
+def _browser_collection_dataset_source_type(row: dict[str, Any]) -> str:
+    for candidate in (
+        row.get("source_type"),
+        row.get("dataset_source_type"),
+        (row.get("meta") or {}).get("source_type"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _playbook_version_from_resource_key(resource_key: str, playbook_id: str) -> str:
+    resource_key = str(resource_key or "").strip()
+    playbook_id = str(playbook_id or "").strip()
+    if resource_key and "@" in resource_key:
+        prefix, version = resource_key.rsplit("@", 1)
+        if (not playbook_id or prefix == playbook_id) and version.strip():
+            return version.strip()
+    return ""
+
+
+async def _handle_data_source_retry_browser_playbook_verification(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a fresh verification sync job from an existing browser task binding."""
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(
+        company_id=company_id,
+        data_source_id=source_id,
+    )
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持重试"}
+
+    binding = auth_db.get_shop_runtime_binding_for_source(
+        company_id=company_id,
+        data_source_id=source_id,
+    ) or {}
+    playbook_id = str(binding.get("playbook_id") or "").strip()
+    if not binding or not playbook_id:
+        return {"success": False, "error": "浏览器任务缺少运行时绑定，无法重试"}
+
+    datasets = auth_db.list_unified_data_source_datasets(
+        company_id=company_id,
+        data_source_id=source_id,
+        only_published=True,
+    )
+    browser_datasets = [
+        row
+        for row in datasets
+        if _browser_collection_dataset_source_type(row) == "browser_collection_records"
+    ]
+    if not browser_datasets:
+        return {"success": False, "error": "请先发布 browser_collection_records 数据集后再重试"}
+
+    verification_dataset = browser_datasets[0]
+    explicit_dataset_id = str(arguments.get("dataset_id") or "").strip()
+    if explicit_dataset_id:
+        match = next(
+            (row for row in browser_datasets if str(row.get("id") or "") == explicit_dataset_id),
+            None,
+        )
+        if not match:
+            return {"success": False, "error": "指定的 dataset_id 不属于该数据源的已发布 browser dataset"}
+        verification_dataset = match
+
+    dataset_id = str(verification_dataset.get("id") or "")
+    dataset_code = str(verification_dataset.get("dataset_code") or "")
+    resource_key = str(verification_dataset.get("resource_key") or "").strip()
+    playbook_version = (
+        str(arguments.get("version") or "").strip()
+        or _playbook_version_from_resource_key(resource_key, playbook_id)
+        or "1"
+    )
+    if not resource_key:
+        resource_key = f"{playbook_id}@{playbook_version}"
+    verification_biz_date = (
+        str(arguments.get("verification_biz_date") or "").strip()
+        or _default_browser_verification_biz_date()
+    )
+
+    existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        biz_date=verification_biz_date,
+    )
+    if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+        return {
+            "success": True,
+            "status": "verification_pending",
+            "source_id": source_id,
+            "verification_sync_job_id": _safe_text((existing_job or {}).get("id")),
+            "verification_biz_date": verification_biz_date,
+            "source": _build_data_source_view(source_row, datasets=[verification_dataset]),
+            "reused": True,
+            "queued": True,
+            "reuse_reason": "inflight",
+            "message": "同一浏览器任务正在执行或等待人工验证，已复用",
+        }
+
+    verification_payload = {
+        "dataset_id": dataset_id,
+        "dataset_code": dataset_code,
+        "biz_date": verification_biz_date,
+        "verification": True,
+        "retry_verification": True,
+        "force_collection": True,
+        "skip_recent_success_reuse": True,
+        "playbook_id": playbook_id,
+        "playbook_version": playbook_version,
+        "collection_driver": "browser_playbook_remote",
+        "params": {
+            "biz_date": verification_biz_date,
+            "playbook_id": playbook_id,
+            "playbook_version": playbook_version,
+            "force_collection": True,
+            "skip_recent_success_reuse": True,
+        },
+    }
+    verification_job = auth_db.insert_browser_verification_sync_job(
+        company_id=company_id,
+        data_source_id=source_id,
+        resource_key=resource_key,
+        request_payload=verification_payload,
+    )
+    if not verification_job:
+        return {"success": False, "error": "创建 verification sync_job 失败"}
+    return {
+        "success": True,
+        "status": "verification_pending",
+        "source_id": source_id,
+        "verification_sync_job_id": str(verification_job.get("id") or ""),
+        "verification_biz_date": verification_biz_date,
+        "source": _build_data_source_view(source_row, datasets=[verification_dataset]),
+        "message": "浏览器任务已重新下发到采集机，请等待任务状态更新",
+    }
+
+
 async def _handle_data_source_finalize_browser_playbook_registration(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
@@ -8255,6 +8749,44 @@ async def _handle_data_source_trigger_sync(
     dataset_id = _safe_text(params.get("dataset_id"))
     biz_date = _safe_text(params.get("biz_date"))
     if dataset_id and biz_date:
+        if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+            existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=dataset_id,
+                resource_key=resource_key,
+                biz_date=biz_date,
+            )
+            if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+                return {
+                    "success": True,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(existing_job),
+                    "reused": True,
+                    "queued": True,
+                    "reuse_reason": "inflight",
+                    "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                    "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                }
+            if not _skip_browser_success_reuse(params, arguments):
+                reusable_browser_job = _find_reusable_browser_success_job(
+                    company_id=company_id,
+                    data_source_id=source_id,
+                    dataset_id=dataset_id,
+                    resource_key=resource_key,
+                    biz_date=biz_date,
+                )
+                if reusable_browser_job:
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(reusable_browser_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "browser_biz_date_success",
+                        "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                        "message": "同一浏览器数据集该账期已有成功采集结果，已复用",
+                    }
         job_result = auth_db.create_or_reuse_dataset_collection_sync_job(
             company_id=company_id,
             data_source_id=source_id,
@@ -8262,7 +8794,11 @@ async def _handle_data_source_trigger_sync(
             resource_key=resource_key,
             dataset_id=dataset_id,
             biz_date=biz_date,
-            ttl_seconds=_dataset_collection_reuse_ttl_seconds(params),
+            ttl_seconds=(
+                0
+                if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK
+                else _dataset_collection_reuse_ttl_seconds(params)
+            ),
             idempotency_key=idempotency_key,
             window_start=window_start,
             window_end=window_end,
@@ -8273,6 +8809,21 @@ async def _handle_data_source_trigger_sync(
         if bool((job_result or {}).get("reused")) and job:
             reuse_reason = _safe_text(job_result.get("reuse_reason"))
             if reuse_reason == "inflight":
+                reused_status = _safe_text((job or {}).get("job_status")).lower()
+                if (
+                    collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK
+                    and reused_status in BROWSER_COLLECTION_ASYNC_JOB_STATUSES
+                ):
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(job),
+                        "reused": True,
+                        "queued": True,
+                        "reuse_reason": "inflight",
+                        "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                        "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                    }
                 completed_job = await _wait_for_collection_job_completion(_safe_text(job.get("id")))
                 completed_status = _safe_text((completed_job or {}).get("job_status")).lower()
                 if completed_job and completed_status == "success":
@@ -8480,20 +9031,6 @@ async def _trigger_dataset_collection_resolved(
     # create a pending sync_job here. Otherwise recon would enter waiting_data on a job
     # that no agent will ever claim (claim SQL filters profile_status=active AND
     # playbook_status=ok), and surface a generic "采集未就绪" only after wait_deadline_at.
-    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
-        binding = auth_db.get_shop_runtime_binding_for_source(
-            company_id=company_id, data_source_id=source_id
-        ) or {}
-        unavailable = _browser_binding_unavailable_result(binding)
-        if unavailable:
-            return {
-                **unavailable,
-                "dataset_id": _safe_text(dataset_row.get("id")),
-                "dataset_code": _safe_text(dataset_row.get("dataset_code")),
-                "resource_key": resource_key,
-                "biz_date": biz_date,
-                "collection_driver": collection_driver,
-            }
     query = dict(params.get("query") or {})
     date_field = _collection_date_field(config)
     date_format = _collection_date_format(config)
@@ -8548,6 +9085,65 @@ async def _trigger_dataset_collection_resolved(
         "window_end": window_end,
         "params": params,
     }
+    if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
+        binding = auth_db.get_shop_runtime_binding_for_source(
+            company_id=company_id, data_source_id=source_id
+        ) or {}
+        unavailable = _browser_binding_unavailable_result(binding)
+        if unavailable:
+            existing_job = auth_db.find_inflight_dataset_collection_sync_job(
+                company_id=company_id,
+                data_source_id=source_id,
+                dataset_id=_safe_text(dataset_row.get("id")),
+                resource_key=resource_key,
+                biz_date=biz_date,
+            )
+            if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
+                return {
+                    "success": True,
+                    "source_id": source_id,
+                    "job": _attach_aliases_to_job(existing_job),
+                    "reused": True,
+                    "queued": True,
+                    "reuse_reason": "inflight",
+                    "message": "同一浏览器采集任务正在执行或等待人工验证，已复用",
+                    "dataset_id": _safe_text(dataset_row.get("id")),
+                    "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                    "resource_key": resource_key,
+                    "biz_date": biz_date,
+                    "collection_driver": collection_driver,
+                }
+            if not _skip_browser_success_reuse(params, arguments):
+                success_job = _find_reusable_browser_success_job(
+                    company_id=company_id,
+                    data_source_id=source_id,
+                    dataset_id=_safe_text(dataset_row.get("id")),
+                    resource_key=resource_key,
+                    biz_date=biz_date,
+                )
+                if success_job:
+                    return {
+                        "success": True,
+                        "source_id": source_id,
+                        "job": _attach_aliases_to_job(success_job),
+                        "reused": True,
+                        "queued": False,
+                        "reuse_reason": "browser_biz_date_success",
+                        "message": "同一浏览器数据集该账期已有成功采集结果，已复用",
+                        "dataset_id": _safe_text(dataset_row.get("id")),
+                        "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                        "resource_key": resource_key,
+                        "biz_date": biz_date,
+                        "collection_driver": collection_driver,
+                    }
+            return {
+                **unavailable,
+                "dataset_id": _safe_text(dataset_row.get("id")),
+                "dataset_code": _safe_text(dataset_row.get("dataset_code")),
+                "resource_key": resource_key,
+                "biz_date": biz_date,
+                "collection_driver": collection_driver,
+            }
     result = await _handle_data_source_trigger_sync(payload, trusted_company_id=company_id)
     if isinstance(result.get("job"), dict):
         result["job"]["collection_scope"] = "dataset"
@@ -8652,6 +9248,23 @@ async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str,
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=dataset_id,
+            resource_key=resource_key,
+            limit=sample_limit,
+            offset=0,
+        )
+    elif _dataset_uses_browser_collection_records(dataset_row):
+        stats = auth_db.get_browser_collection_record_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key,
+        )
+        collection_records = auth_db.list_browser_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
             resource_key=resource_key,
             limit=sample_limit,
             offset=0,
@@ -8986,6 +9599,20 @@ async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str
     return {"success": bool(row), "agent": row}
 
 
+async def _handle_browser_sync_job_startup_cleanup(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    result = auth_db.fail_running_browser_sync_jobs_for_agent(agent_id=agent_id)
+    if result.get("error"):
+        return {"success": False, **result}
+    return {"success": True, **result}
+
+
 async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         _require_scheduler_user(str(arguments.get("worker_token") or ""))
@@ -9030,6 +9657,17 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
             sync_job_id=sync_job_id,
             records=records,
         ) or {}
+        # Materialize the dataset's field schema so the recon wizard can offer
+        # date/match fields (browser datasets publish directly and otherwise
+        # carry no columns). Best-effort: never let this break ingestion.
+        try:
+            columns = _build_browser_collection_columns(records)
+            if columns:
+                auth_db.update_unified_data_source_dataset_schema_columns(
+                    dataset_id=dataset_id, columns=columns
+                )
+        except Exception:
+            logger.warning("物化浏览器采集数据集 schema_summary.columns 失败", exc_info=True)
 
     file_summary: dict[str, Any] = {}
     if capture_files:
@@ -9053,6 +9691,13 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
     row = auth_db.mark_browser_sync_job_success(
         sync_job_id=sync_job_id, summary=final_summary
     )
+    if dataset_id:
+        auth_db.update_unified_data_source_dataset_health(
+            dataset_id=dataset_id,
+            health_status="healthy",
+            last_sync_at=(row or {}).get("completed_at") or _now_iso(),
+            last_error_message="",
+        )
     return {"success": True, "job": row, "summary": final_summary}
 
 

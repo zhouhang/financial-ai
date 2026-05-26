@@ -9,6 +9,10 @@ import {
   type OutputFieldSemanticRole,
   type SchemeSourceSelection,
 } from './schemeWizardState';
+import {
+  filterBrowserCollectionFieldItems,
+  isBrowserCollectionTechnicalSchemaSummary,
+} from './browserCollectionSchema';
 
 interface FieldItem {
   rawName: string;
@@ -59,11 +63,23 @@ function extractFieldItemsFromSchemaSummary(schemaSummary: Record<string, unknow
 }
 
 function buildFieldItems(source: SchemeSourceSelection): FieldItem[] {
+  if (isBrowserCollectionTechnicalSchemaSummary({
+    schemaSummary: source.schemaSummary,
+    extractConfig: source.extractConfig,
+    sourceKind: source.sourceKind,
+  })) {
+    return [];
+  }
   if (source.fieldLabelMap && Object.keys(source.fieldLabelMap).length > 0) {
-    return Object.entries(source.fieldLabelMap).map(([rawName, displayName]) => ({
+    const items = Object.entries(source.fieldLabelMap).map(([rawName, displayName]) => ({
       rawName,
       displayName: displayName || rawName,
     }));
+    return filterBrowserCollectionFieldItems(items, {
+      schemaSummary: source.schemaSummary,
+      extractConfig: source.extractConfig,
+      sourceKind: source.sourceKind,
+    });
   }
   return extractFieldItemsFromSchemaSummary(source.schemaSummary);
 }
@@ -120,7 +136,7 @@ export default function SchemeWizardOutputFieldEditor({
           }),
         });
         const data = await response.json().catch(() => ({}));
-        const nextFields = response.ok && Array.isArray(data.fields)
+        const remoteFields = response.ok && Array.isArray(data.fields)
           ? (data.fields as Array<Record<string, string>>)
             .map((item) => ({
               rawName: String(item.raw_name || '').trim(),
@@ -128,6 +144,11 @@ export default function SchemeWizardOutputFieldEditor({
             }))
             .filter((item) => item.rawName)
           : [];
+        const nextFields = filterBrowserCollectionFieldItems(remoteFields, {
+          schemaSummary: source.schemaSummary,
+          extractConfig: source.extractConfig,
+          sourceKind: source.sourceKind,
+        });
         setFieldCache((prev) => ({ ...prev, [source.id]: nextFields }));
       } catch {
         setFieldCache((prev) => ({ ...prev, [source.id]: [] }));

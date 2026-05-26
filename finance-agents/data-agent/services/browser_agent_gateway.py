@@ -26,6 +26,7 @@ _NOTIFIED_RISK_JOBS: set[str] = set()
 _DOMAIN_TOOL_MAP: dict[str, str] = {
     "claim": "browser_sync_job_claim",
     "heartbeat": "browser_agent_heartbeat",
+    "startup_cleanup": "browser_sync_job_startup_cleanup",
     "job_complete": "browser_sync_job_complete",
     "job_fail": "browser_sync_job_fail",
     "queue_requeue_ready": "recon_queue_requeue_ready_waiting",
@@ -80,7 +81,7 @@ class BrowserAgentConnection:
         if msg_type == "claim":
             args["agent_id"] = self.agent_id
             args["max_concurrency"] = self.max_concurrency
-        elif msg_type == "heartbeat":
+        elif msg_type in {"heartbeat", "startup_cleanup"}:
             args["agent_id"] = self.agent_id
             args.update(payload)
         else:
