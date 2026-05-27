@@ -5487,8 +5487,8 @@ def update_unified_sync_job_status(
         sync_job_id,
     ]
     if allowed_current_statuses:
-        status_guard_sql = " AND job_status = ANY(%s)"
-        params.append(tuple(allowed_current_statuses))
+        status_guard_sql = " AND job_status = ANY(%s::text[])"
+        params.append(list(allowed_current_statuses))
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -6443,8 +6443,8 @@ def mark_browser_sync_job_failed(
         sync_job_id,
     ]
     if allowed_current_statuses:
-        status_guard_sql = " AND job_status = ANY(%s)"
-        params.append(tuple(allowed_current_statuses))
+        status_guard_sql = " AND job_status = ANY(%s::text[])"
+        params.append(list(allowed_current_statuses))
 
     conn_manager = get_conn()
     try:

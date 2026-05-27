@@ -341,9 +341,9 @@ def test_mark_browser_sync_job_success_uses_mutable_status_guard(monkeypatch) ->
     assert row is not None
     sql = "\n".join(cursor.sql)
     assert "UPDATE sync_jobs" in sql
-    assert "job_status = ANY" in sql
+    assert "job_status = ANY(%s::text[])" in sql
     flattened_params = [item for params in cursor.params for item in params]
-    assert ("running", "waiting_human_verification", "resuming") in flattened_params
+    assert ["running", "waiting_human_verification", "resuming"] in flattened_params
 
 
 def test_browser_worker_complete_ignores_when_guarded_success_write_loses_race(monkeypatch) -> None:
@@ -459,9 +459,9 @@ def test_mark_browser_sync_job_failed_uses_mutable_status_guard(monkeypatch) -> 
     assert row is not None
     sql = "\n".join(cursor.sql)
     assert "UPDATE sync_jobs" in sql
-    assert "job_status = ANY" in sql
+    assert "job_status = ANY(%s::text[])" in sql
     flattened_params = [item for params in cursor.params for item in params]
-    assert ("running", "waiting_human_verification", "resuming") in flattened_params
+    assert ["running", "waiting_human_verification", "resuming"] in flattened_params
 
 
 def test_browser_worker_fail_ignores_when_guarded_failed_write_loses_race(monkeypatch) -> None:
