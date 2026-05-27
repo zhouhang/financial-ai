@@ -5515,6 +5515,127 @@ def update_unified_sync_job_status(
         return None
 
 
+BROWSER_SYNC_MANUAL_CLEAR_REASON = "MANUAL_CLEARED"
+BROWSER_SYNC_MANUAL_CLEAR_MESSAGE = "MANUAL_CLEARED: operator cleared stuck browser task"
+BROWSER_SYNC_ACTIVE_CLEARABLE_STATUSES = (
+    "pending",
+    "queued",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+)
+BROWSER_SYNC_WORKER_MUTABLE_STATUSES = (
+    "running",
+    "waiting_human_verification",
+    "resuming",
+)
+
+
+def get_sync_job_with_data_source(*, sync_job_id: str, company_id: str) -> dict | None:
+    """Load a sync job with its data source metadata, scoped to one company."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT s.id, s.company_id, s.data_source_id, s.trigger_mode, s.resource_key,
+                           s.window_start, s.window_end, s.idempotency_key, s.job_status,
+                           s.request_payload, s.checkpoint_before, s.checkpoint_after,
+                           s.active_snapshot_id, s.published_snapshot_id, s.current_attempt,
+                           s.error_message, s.next_retry_at, s.browser_fail_reason, s.max_attempts,
+                           s.is_verification, s.started_at, s.completed_at, s.created_at, s.updated_at,
+                           ds.source_kind, ds.name AS data_source_name, ds.status AS data_source_status,
+                           ds.is_enabled AS data_source_enabled
+                    FROM sync_jobs s
+                    JOIN data_sources ds ON ds.id = s.data_source_id
+                    WHERE s.id = %s
+                      AND s.company_id = %s
+                    LIMIT 1
+                    """,
+                    (sync_job_id, company_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"查询 sync_jobs+data_sources 失败 (id={sync_job_id}, company_id={company_id}): {e}")
+        return None
+
+
+def clear_browser_sync_job_manually(
+    *,
+    sync_job_id: str,
+    company_id: str,
+    reason: str = "",
+) -> dict | None:
+    """Mark a stuck browser sync job as manually cleared without deleting its data source."""
+    message = BROWSER_SYNC_MANUAL_CLEAR_MESSAGE
+    if str(reason or "").strip():
+        message = f"MANUAL_CLEARED: {str(reason).strip()[:500]}"
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'cancelled',
+                        browser_fail_reason = 'MANUAL_CLEARED',
+                        error_message = %s,
+                        next_retry_at = NULL,
+                        completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND company_id = %s
+                      AND job_status IN ('pending', 'queued', 'running', 'waiting_human_verification', 'resuming')
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, next_retry_at, browser_fail_reason, max_attempts,
+                              is_verification, started_at, completed_at, created_at, updated_at
+                    """,
+                    (message, sync_job_id, company_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"人工清除 browser sync_job 失败 (id={sync_job_id}, company_id={company_id}): {e}")
+        return None
+
+
+def cancel_open_handoff_sessions_for_sync_job(*, sync_job_id: str, reason: str = "") -> int:
+    """Cancel non-final handoff sessions for a manually cleared sync job."""
+    event = _handoff_audit_event(
+        event_type="manual_clear",
+        reason=str(reason or "operator cleared stuck browser task"),
+        metadata={"status": "cancelled"},
+    )
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE browser_handoff_sessions
+                    SET status = 'cancelled',
+                        audit_events = audit_events || %s::jsonb, -- manual_clear
+                        completed_at = COALESCE(completed_at, now()),
+                        updated_at = now()
+                    WHERE sync_job_id = %s
+                      AND status <> ALL(%s)
+                    """,
+                    (json.dumps([event], ensure_ascii=False), sync_job_id, list(_HANDOFF_FINAL_STATUSES)),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"取消 handoff session 失败 (sync_job_id={sync_job_id}): {e}")
+        return 0
+
+
 def get_latest_source_dataset_checkpoint(
     *,
     company_id: str,
