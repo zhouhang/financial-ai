@@ -104,6 +104,10 @@ def test_clear_browser_sync_job_marks_active_job_cancelled(monkeypatch) -> None:
     assert "completed_at = CURRENT_TIMESTAMP" in sql
     assert "next_retry_at = NULL" in sql
     assert "job_status IN ('pending', 'queued', 'running', 'waiting_human_verification', 'resuming')" in sql
+    assert "EXISTS" in sql
+    assert "FROM data_sources ds" in sql
+    assert "ds.id = sync_jobs.data_source_id" in sql
+    assert "ds.source_kind = 'browser_playbook'" in sql
     assert cursor.params[-1][-2:] == ("sync-001", "company-001")
     assert manager.conn.committed is True
 

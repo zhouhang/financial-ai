@@ -5588,6 +5588,12 @@ def clear_browser_sync_job_manually(
                     WHERE id = %s
                       AND company_id = %s
                       AND job_status IN ('pending', 'queued', 'running', 'waiting_human_verification', 'resuming')
+                      AND EXISTS (
+                          SELECT 1
+                          FROM data_sources ds
+                          WHERE ds.id = sync_jobs.data_source_id
+                            AND ds.source_kind = 'browser_playbook'
+                      )
                     RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
                               window_start, window_end, idempotency_key, job_status,
                               request_payload, checkpoint_before, checkpoint_after,
