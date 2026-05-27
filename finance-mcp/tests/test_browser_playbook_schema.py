@@ -204,6 +204,20 @@ def test_playbook_accepts_download_history_file_action() -> None:
         "selector": ".HistoryDataLists--drawer-conent--3FJMg52 tr.next-table-row",
         "value_from": "params.biz_date",
         "download_timeout_ms": 600000,
+        "history_open_selectors": [
+            ".next-dialog button:has-text('历史下载记录')",
+            "button:has-text('历史下载记录')",
+        ],
+        "history_row_selectors": [
+            ".HistoryDataLists--drawer-conent--3FJMg52 tr.next-table-row",
+            "tr.next-table-row",
+        ],
+        "history_close_selectors": [
+            ".drawer-close",
+            "[aria-label='关闭']",
+        ],
+        "history_completed_status_text": "已完成",
+        "history_download_selector": "button:has-text('下载')",
         "timeout_ms": 900000,
     }
 
@@ -220,6 +234,171 @@ def test_playbook_accepts_download_history_file_action() -> None:
     )
 
     assert msg.playbook_body.steps[6].action == "download_history_file"
+    assert msg.playbook_body.steps[6].history_open_selectors == [
+        ".next-dialog button:has-text('历史下载记录')",
+        "button:has-text('历史下载记录')",
+    ]
+    assert msg.playbook_body.steps[6].history_row_selectors == [
+        ".HistoryDataLists--drawer-conent--3FJMg52 tr.next-table-row",
+        "tr.next-table-row",
+    ]
+    assert msg.playbook_body.steps[6].history_close_selectors == [
+        ".drawer-close",
+        "[aria-label='关闭']",
+    ]
+    assert msg.playbook_body.steps[6].history_completed_status_text == "已完成"
+    assert msg.playbook_body.steps[6].history_download_selector == "button:has-text('下载')"
+
+
+def test_playbook_accepts_select_checkboxes_and_wait_ms_actions() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        6,
+        {
+            "id": "select_export_fields",
+            "action": "select_checkboxes",
+            "selector": ".next-dialog:has-text('批量导出订单')",
+            "checked_labels": ["订单编号", "订单状态"],
+            "timeout_ms": 30000,
+        },
+    )
+    steps.insert(
+        7,
+        {
+            "id": "wait_report_generation",
+            "action": "wait_ms",
+            "duration_ms": 1000,
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[6].action == "select_checkboxes"
+    assert msg.playbook_body.steps[7].action == "wait_ms"
+
+
+def test_playbook_accepts_set_date_with_biz_date_template() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[1] = {
+        "id": "set_pay_start_time",
+        "action": "set_date",
+        "selector": "input[placeholder='起始日期']",
+        "value": "{{params.biz_date}} 00:00:00",
+        "timeout_ms": 30000,
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[1].action == "set_date"
+    assert msg.playbook_body.steps[1].value == "{{params.biz_date}} 00:00:00"
+
+
+def test_playbook_accepts_qianniu_export_report_download_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[6] = {
+        "id": "download_latest_order_report",
+        "action": "download_qianniu_export_report",
+        "selector": "[class*='order-export_order-block']",
+        "requested_after_from": "extracted.report_requested_at",
+        "report_type": "订单报表",
+        "download_button_text": "下载订单报表",
+        "refresh_interval_ms": 10000,
+        "download_timeout_ms": 600000,
+        "timeout_ms": 900000,
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[6].action == "download_qianniu_export_report"
+    assert msg.playbook_body.steps[6].requested_after_from == "extracted.report_requested_at"
+
+
+def test_playbook_rejects_qianniu_export_report_download_without_requested_after() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[6] = {
+        "id": "download_latest_order_report",
+        "action": "download_qianniu_export_report",
+        "selector": "[class*='order-export_order-block']",
+        "download_button_text": "下载订单报表",
+    }
+
+    with pytest.raises(ValidationError):
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
+
+
+def test_playbook_rejects_select_checkboxes_without_labels() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        6,
+        {
+            "id": "select_export_fields",
+            "action": "select_checkboxes",
+            "selector": ".next-dialog",
+        },
+    )
+
+    with pytest.raises(ValidationError):
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
 
 
 def test_playbook_preserves_auth_check_for_login_state_detection() -> None:
@@ -457,3 +636,123 @@ def test_upsert_playbook_and_binding_helpers_are_available(monkeypatch: pytest.M
     assert binding["id"] == "row-001"
     assert calls.count("execute") == 2
     assert calls.count("commit") == 2
+
+
+def test_activate_browser_playbook_allows_already_active_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalize remains valid after verification success has already marked the binding active."""
+
+    executed_sql: list[str] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._fetch_index = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, *args, **kwargs) -> None:
+            executed_sql.append(sql)
+
+        def fetchone(self):
+            self._fetch_index += 1
+            if self._fetch_index == 1:
+                return {"id": "playbook-001", "status": "active"}
+            binding_sql = executed_sql[-1]
+            if "profile_status = 'verifying'" in binding_sql:
+                return None
+            return {
+                "id": "binding-001",
+                "profile_status": "active",
+                "playbook_status": "ok",
+            }
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self, *args, **kwargs):
+            return self.cursor_obj
+
+        def commit(self) -> None:
+            pass
+
+    class FakeConnManager:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager())
+
+    result = auth_db.activate_browser_playbook_and_binding(
+        company_id="company-001",
+        playbook_id="qianniu-daily-bill-export",
+        version="1.0.0",
+        data_source_id="source-001",
+    )
+
+    assert result["playbook"]["status"] == "active"
+    assert result["binding"]["profile_status"] == "active"
+
+
+def test_clear_page_changed_bindings_matches_canonical_pause_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PAGE_CHANGED failures store an uppercase canonical pause reason."""
+
+    executed: dict[str, object] = {}
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, params: tuple[object, ...]) -> None:
+            executed["sql"] = sql
+            executed["params"] = params
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self) -> None:
+            pass
+
+    class FakeConnManager:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager())
+
+    count = auth_db.clear_page_changed_bindings_for_playbook(
+        company_id="company-001",
+        playbook_id="qianniu-daily-bill-export",
+    )
+
+    assert count == 1
+    assert "cron_pause_reason = 'PAGE_CHANGED'" in str(executed["sql"])

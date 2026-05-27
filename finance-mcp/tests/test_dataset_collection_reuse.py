@@ -469,3 +469,84 @@ async def test_browser_trigger_creates_job_when_success_has_no_records(
     assert result["queued"] is True
     assert result["reused"] is False
     assert create_kwargs["ttl_seconds"] == 0
+
+
+@pytest.mark.anyio
+async def test_browser_trigger_leaves_new_job_pending_for_agent_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(data_sources, "_require_user", lambda _token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **_kwargs: {
+            "id": "source-browser-1",
+            "company_id": "company-1",
+            "status": "active",
+            "is_enabled": True,
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "config": {},
+            "credential_ref": {},
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_runtime_source",
+        lambda _row, include_secret=False: {"source_kind": "browser_playbook"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "find_success_dataset_collection_sync_job", lambda **_kwargs: None)
+
+    def fake_create_or_reuse_dataset_collection_sync_job(**kwargs):
+        return {
+            "job": {
+                "id": "new-browser-job",
+                "job_status": "pending",
+                "request_payload": kwargs.get("request_payload") or {},
+            },
+            "reused": False,
+        }
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_or_reuse_dataset_collection_sync_job",
+        fake_create_or_reuse_dataset_collection_sync_job,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_unified_sync_job_attempt",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("browser jobs must stay pending until browser-agent claims them")
+        ),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda _job_id: {
+            "id": "new-browser-job",
+            "job_status": "pending",
+            "request_payload": {
+                "collection_driver": data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                "dataset_id": "dataset-browser-1",
+                "biz_date": "2026-05-25",
+            },
+        },
+    )
+
+    result = await data_sources._handle_data_source_trigger_sync(
+        {
+            "auth_token": "token-1",
+            "source_id": "source-browser-1",
+            "resource_key": "playbook-1@1",
+            "params": {
+                "collection_driver": data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                "dataset_id": "dataset-browser-1",
+                "biz_date": "2026-05-25",
+                "force_browser_collection": True,
+            },
+        }
+    )
+
+    assert result["success"] is True
+    assert result["queued"] is True
+    assert result["job"]["job_status"] == "pending"

@@ -3811,6 +3811,45 @@ async def data_source_get_sync_job(
     return _attach_mode(result, normalized_mode)
 
 
+async def data_source_clear_browser_sync_job(
+    auth_token: str,
+    sync_job_id: str,
+    *,
+    reason: str = "",
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not sync_job_id:
+        return {"success": False, "error": "sync_job_id 不能为空"}
+
+    normalized_mode = _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    if normalized_mode == "mock":
+        return {
+            "success": True,
+            "mode": "mock",
+            "job": {
+                "id": sync_job_id,
+                "sync_job_id": sync_job_id,
+                "job_status": "cancelled",
+                "status": "cancelled",
+                "browser_fail_reason": "MANUAL_CLEARED",
+                "error_message": "MANUAL_CLEARED: operator cleared stuck browser task",
+            },
+            "message": "当前浏览器任务已清除，可重新下发或等待后续任务执行",
+        }
+
+    payload: dict[str, Any] = {
+        "auth_token": auth_token,
+        "sync_job_id": sync_job_id,
+        "mode": normalized_mode,
+    }
+    if str(reason or "").strip():
+        payload["reason"] = str(reason).strip()
+    result = await call_mcp_tool("data_source_clear_browser_sync_job", payload)
+    return _attach_mode(result, normalized_mode)
+
+
 async def data_source_list_sync_jobs(
     auth_token: str,
     *,

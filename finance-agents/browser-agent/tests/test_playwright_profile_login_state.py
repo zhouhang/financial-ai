@@ -14,9 +14,12 @@ from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.playwright_runner import (
     BrowserActionError,
     PlaywrightRunConfig,
+    _detect_auth_or_risk,
     _execute_action,
+    _history_row_matches_target_date,
     _parse_downloaded_table,
     _profile_is_authenticated,
+    _render_template,
     build_user_data_dir,
     sanitize_profile_key,
     should_skip_login_action,
@@ -85,6 +88,173 @@ class FakePage:
 
     def wait_for_timeout(self, timeout: int) -> None:
         self.timeouts.append(timeout)
+
+
+class TransientAuthRedirectPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="about:blank")
+        self.content_text = "登录后继续"
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.gotos.append((url, wait_until, timeout))
+        self.url = "https://loginmyseller.taobao.com/?redirect_url=https%3A%2F%2Fmyseller.taobao.com%2Fhome.htm%2Ftrade-platform%2Ftp%2Fexport-list"
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        super().wait_for_timeout(timeout)
+        self.url = "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list"
+        self.content_text = "报表申请时间 下载订单报表"
+
+
+class FakeRootLocator:
+    def __init__(self, page: "FakeCheckboxPage") -> None:
+        self.page = page
+
+    @property
+    def last(self) -> "FakeRootLocator":
+        return self
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        self.page.waited_for.append((state, timeout))
+
+    def locator(self, selector: str) -> "FakeCheckboxLabelLocator":
+        self.page.label_selectors.append(selector)
+        return FakeCheckboxLabelLocator(self.page)
+
+    def evaluate(self, script: str, arg: dict[str, str]) -> bool:
+        label = arg["label"]
+        for item in self.page.labels:
+            if item["text"] == label:
+                if item.get("disabled"):
+                    return False
+                item["checked"] = not bool(item.get("checked"))
+                self.page.clicked_labels.append(label)
+                return True
+        return False
+
+
+class FakeCheckboxLabelLocator:
+    def __init__(self, page: "FakeCheckboxPage") -> None:
+        self.page = page
+
+    def evaluate_all(self, script: str) -> list[dict[str, object]]:
+        return [dict(item) for item in self.page.labels]
+
+
+class FakeCheckboxPage(FakePage):
+    def __init__(self, labels: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.labels = labels
+        self.waited_for: list[tuple[str, int]] = []
+        self.label_selectors: list[str] = []
+        self.clicked_labels: list[str] = []
+
+    def locator(self, selector: str) -> FakeRootLocator:
+        assert selector == ".dialog"
+        return FakeRootLocator(self)
+
+
+class FakeDateInputLocator:
+    def __init__(self, page: "FakeDateInputPage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self) -> "FakeDateInputLocator":
+        return self
+
+    def input_value(self, *, timeout: int) -> str:
+        return self.page.values.get(self.selector, "")
+
+    def click(self, *, timeout: int) -> None:
+        self.page.locator_clicks.append((self.selector, timeout))
+
+    def fill(self, value: str, *, timeout: int) -> None:
+        self.page.locator_fills.append((self.selector, value, timeout))
+        self.page.values[self.selector] = value
+
+    def evaluate(self, script: str, arg: object | None = None) -> None:
+        self.page.locator_evaluations.append((self.selector, script, arg))
+
+
+class FakeDateKeyboard:
+    def __init__(self, page: "FakeDateInputPage") -> None:
+        self.page = page
+
+    def press(self, key: str) -> None:
+        self.page.key_presses.append(key)
+
+
+class FakeDateInputPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: dict[str, str] = {}
+        self.locator_clicks: list[tuple[str, int]] = []
+        self.locator_fills: list[tuple[str, str, int]] = []
+        self.locator_evaluations: list[tuple[str, str, object | None]] = []
+        self.key_presses: list[str] = []
+        self.keyboard = FakeDateKeyboard(self)
+
+    def fill(self, selector: str, value: str, *, timeout: int) -> None:
+        super().fill(selector, value, timeout=timeout)
+        self.values[selector] = value
+
+    def locator(self, selector: str) -> FakeDateInputLocator:
+        return FakeDateInputLocator(self, selector)
+
+
+class FakeControlledDateInputLocator:
+    def __init__(self, page: "FakeControlledDateInputPage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self) -> "FakeControlledDateInputLocator":
+        return self
+
+    def click(self, *, timeout: int) -> None:
+        self.page.active_selector = self.selector
+        self.page.events.append(("click", self.selector))
+
+    def fill(self, value: str, *, timeout: int) -> None:
+        self.page.display_values[self.selector] = value
+        self.page.events.append(("locator_fill", self.selector, value))
+
+    def input_value(self, *, timeout: int) -> str:
+        return self.page.display_values.get(self.selector, "")
+
+    def evaluate(self, script: str, arg: object | None = None) -> None:
+        self.page.events.append(("evaluate", self.selector, "blur" in script, arg))
+        if "blur" in script:
+            self.page.blurred = True
+
+
+class FakeControlledDateKeyboard:
+    def __init__(self, page: "FakeControlledDateInputPage") -> None:
+        self.page = page
+
+    def press(self, key: str) -> None:
+        self.page.events.append(("press", key))
+        if key == "Enter" and self.page.active_selector and not self.page.blurred:
+            selector = self.page.active_selector
+            self.page.committed_values[selector] = self.page.display_values.get(selector, "")
+
+
+class FakeControlledDateInputPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.display_values: dict[str, str] = {}
+        self.committed_values: dict[str, str] = {}
+        self.active_selector = ""
+        self.blurred = False
+        self.events: list[tuple] = []
+        self.keyboard = FakeControlledDateKeyboard(self)
+
+    def fill(self, selector: str, value: str, *, timeout: int) -> None:
+        self.display_values[selector] = value
+        self.events.append(("page_fill", selector, value))
+
+    def locator(self, selector: str) -> FakeControlledDateInputLocator:
+        return FakeControlledDateInputLocator(self, selector)
 
 
 class FailingFillPage(FakePage):
@@ -888,6 +1058,16 @@ def test_login_risk_detection_ignores_hidden_slider_text_when_visible_body_is_no
     ]
 
 
+def test_auth_detection_ignores_login_sdk_strings_in_business_page_html() -> None:
+    page = LocatorBackedPage(
+        visible_text="报表申请时间 下载订单报表 生成中",
+        content_text="<script>var passport='login.taobao.com';</script>",
+    )
+    page.url = "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list"
+
+    assert _detect_auth_or_risk(page) is None
+
+
 def test_login_action_rejects_missing_resolved_credentials(tmp_path) -> None:
     page = FakePage(url="https://login.example", selectors={".dashboard"})
 
@@ -959,6 +1139,144 @@ def test_parse_table_records_detected_csv_encoding_in_capture_file(tmp_path) -> 
     assert capture_files[0]["row_count"] == 1
 
 
+def test_resolve_value_renders_params_template() -> None:
+    assert _render_template(
+        "{{params.biz_date}} 23:59:59",
+        params={"biz_date": "2026-05-26"},
+        extracted={},
+    ) == "2026-05-26 23:59:59"
+
+
+def test_history_row_matches_short_month_day_range_for_target_year() -> None:
+    assert _history_row_matches_target_date("5-26 ~ 5-26 交易货款 已完成 下载", "2026-05-26")
+    assert _history_row_matches_target_date("05/26 至 05/26 交易货款 已完成 下载", "2026-05-26")
+    assert not _history_row_matches_target_date("5-25 ~ 5-25 交易货款 已完成 下载", "2026-05-26")
+
+
+def test_wait_ms_action_uses_duration_ms(tmp_path) -> None:
+    page = FakePage()
+
+    _execute_action(
+        page,
+        {"id": "wait", "action": "wait_ms", "duration_ms": 1234},
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.timeouts == [1234]
+
+
+def test_set_date_action_commits_datepicker_value_with_events_and_blur(tmp_path) -> None:
+    page = FakeDateInputPage()
+
+    _execute_action(
+        page,
+        {
+            "id": "set_start_date",
+            "action": "set_date",
+            "selector": "input[placeholder='起始日期']",
+            "value_from": "params.biz_date",
+            "timeout_ms": 30000,
+        },
+        params={"biz_date": "2026-03-01"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.values["input[placeholder='起始日期']"] == "2026-03-01"
+    assert page.locator_clicks == [("input[placeholder='起始日期']", 30000)]
+    assert page.locator_fills == [("input[placeholder='起始日期']", "2026-03-01", 30000)]
+    scripts = [item[1] for item in page.locator_evaluations]
+    assert any("change" in script for script in scripts)
+    assert "blur" in scripts[-1]
+    assert page.key_presses == ["Enter", "Tab"]
+
+
+def test_set_date_action_presses_enter_before_blur_for_controlled_datepicker(tmp_path) -> None:
+    page = FakeControlledDateInputPage()
+
+    _execute_action(
+        page,
+        {
+            "id": "set_start_date",
+            "action": "set_date",
+            "selector": "input[placeholder='起始日期']",
+            "value_from": "params.biz_date",
+            "timeout_ms": 30000,
+        },
+        params={"biz_date": "2026-03-01"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert ("page_fill", "input[placeholder='起始日期']", "2026-03-01") not in page.events
+    assert page.committed_values["input[placeholder='起始日期']"] == "2026-03-01"
+    assert page.events.index(("press", "Enter")) < next(
+        index for index, event in enumerate(page.events) if event[0] == "evaluate" and event[2]
+    )
+
+
+def test_select_checkboxes_uses_exact_label_text_and_rejects_extras(tmp_path) -> None:
+    page = FakeCheckboxPage(
+        [
+            {"text": "订单编号", "checked": False},
+            {"text": "安心鉴订单", "checked": True},
+            {"text": "安心鉴订单二阶段物流", "checked": False},
+            {"text": "订单状态", "checked": True},
+        ]
+    )
+
+    result = _execute_action(
+        page,
+        {
+            "id": "select_export_fields",
+            "action": "select_checkboxes",
+            "selector": ".dialog",
+            "checked_labels": ["订单编号", "订单状态"],
+            "timeout_ms": 30000,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert result == {"selected_labels": ["订单状态", "订单编号"]}
+    assert page.clicked_labels == ["安心鉴订单", "订单编号"]
+    assert page.labels == [
+        {"text": "订单编号", "checked": True},
+        {"text": "安心鉴订单", "checked": False},
+        {"text": "安心鉴订单二阶段物流", "checked": False},
+        {"text": "订单状态", "checked": True},
+    ]
+
+
+def test_select_checkboxes_fails_when_required_label_missing(tmp_path) -> None:
+    page = FakeCheckboxPage([{"text": "订单编号", "checked": False}])
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "id": "select_export_fields",
+                "action": "select_checkboxes",
+                "selector": ".dialog",
+                "checked_labels": ["订单编号", "订单状态"],
+            },
+            params={},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc.value.fail_reason == "PAGE_CHANGED"
+    assert "订单状态" in str(exc.value)
+
+
 def test_navigate_allows_auth_redirect_when_login_step_follows(tmp_path) -> None:
     page = FakePage(url="about:blank")
 
@@ -998,6 +1316,28 @@ def test_navigate_still_fails_auth_redirect_without_login_step(tmp_path) -> None
         )
 
     assert exc.value.fail_reason == "AUTH_EXPIRED"
+
+
+def test_navigate_waits_for_transient_auth_redirect_to_clear(tmp_path) -> None:
+    page = TransientAuthRedirectPage()
+
+    result = _execute_action(
+        page,
+        {
+            "action": "navigate",
+            "url": "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list",
+            "timeout_ms": 1234,
+            "auth_redirect_grace_ms": 2000,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert result == {}
+    assert page.timeouts == [500]
+    assert page.url.endswith("/trade-platform/tp/export-list")
 
 
 def test_sanitize_profile_key_matches_runner_profile_dir() -> None:
@@ -1142,6 +1482,11 @@ class FakeHistoryRow:
         return FakeHistoryButton(self)
 
 
+class FakeBatchOnlyHistoryRow(FakeHistoryRow):
+    def inner_text(self, *, timeout: int) -> str:
+        raise AssertionError("history rows should be read in batch")
+
+
 class FakeHistoryLocator:
     def __init__(self, rows: list[FakeHistoryRow]) -> None:
         self.rows = rows
@@ -1151,6 +1496,9 @@ class FakeHistoryLocator:
 
     def nth(self, index: int) -> FakeHistoryRow:
         return self.rows[index]
+
+    def evaluate_all(self, script: str) -> list[str]:
+        return [row.text for row in self.rows]
 
 
 class FakeHistoryPage(FakePage):
@@ -1175,6 +1523,158 @@ class FakeHistoryPage(FakePage):
             self.dialog_history_clicked.append((timeout, force))
             return
         super().click(selector, timeout=timeout)
+
+
+class ClosedHistoryPage(FakeHistoryPage):
+    def __init__(self, rows_after_open: list[FakeHistoryRow]) -> None:
+        super().__init__([])
+        self.rows_after_open = rows_after_open
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            self.dialog_history_clicked.append((timeout, force))
+            self.rows = self.rows_after_open
+            return
+        super().click(selector, timeout=timeout, force=force)
+
+
+class RefreshingHistoryPage(FakeHistoryPage):
+    def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.row_sets = row_sets
+        self.close_clicks: list[tuple[str, int, bool]] = []
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            self.dialog_history_clicked.append((timeout, force))
+            index = min(len(self.dialog_history_clicked) - 1, len(self.row_sets) - 1)
+            self.rows = self.row_sets[index]
+            return
+        if selector == ".next-drawer-close":
+            self.close_clicks.append((selector, timeout, force))
+            self.rows = []
+            return
+        super().click(selector, timeout=timeout, force=force)
+
+
+class HistoryAlreadyOpenPage(FakeHistoryPage):
+    def __init__(self, rows: list[FakeHistoryRow]) -> None:
+        super().__init__(rows)
+        self.open_attempts = 0
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            self.open_attempts += 1
+            raise TimeoutError(selector)
+        super().click(selector, timeout=timeout, force=force)
+
+
+class RefreshOpenDisappearsHistoryPage(FakeHistoryPage):
+    def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.row_sets = row_sets
+        self.open_attempts = 0
+        self.close_attempts: list[str] = []
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        if self.open_attempts >= 1 and len(self.row_sets) > 1:
+            self.rows = self.row_sets[1]
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            self.open_attempts += 1
+            if self.open_attempts == 1:
+                self.rows = self.row_sets[0]
+                return
+            raise TimeoutError(selector)
+        if "close" in selector.lower() or "Close" in selector:
+            self.close_attempts.append(selector)
+            raise TimeoutError(selector)
+        super().click(selector, timeout=timeout, force=force)
+
+
+class ConfiguredHistoryRefreshPage(FakeHistoryPage):
+    def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.row_sets = row_sets
+        self.open_attempts: list[str] = []
+        self.close_attempts: list[str] = []
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".configured-open":
+            self.open_attempts.append(selector)
+            index = min(len(self.open_attempts) - 1, len(self.row_sets) - 1)
+            self.rows = self.row_sets[index]
+            return
+        if selector == ".configured-close":
+            self.close_attempts.append(selector)
+            self.rows = []
+            return
+        raise TimeoutError(selector)
+
+
+class FastSelectorRefreshPage(FakeHistoryPage):
+    def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.row_sets = row_sets
+        self.open_attempts: list[str] = []
+        self.close_attempts: list[str] = []
+        self.click_attempts: list[str] = []
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        if selector == ".history tr":
+            return FakeHistoryLocator(self.rows)
+        if selector in {".configured-open", ".configured-close"}:
+            return FakeHistoryLocator([FakeHistoryRow("clickable")])
+        if selector in {".missing-open", ".missing-close"}:
+            return FakeHistoryLocator([])
+        return FakeHistoryLocator([])
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        self.click_attempts.append(selector)
+        if selector == ".configured-open":
+            self.open_attempts.append(selector)
+            index = min(len(self.open_attempts) - 1, len(self.row_sets) - 1)
+            self.rows = self.row_sets[index]
+            return
+        if selector == ".configured-close":
+            self.close_attempts.append(selector)
+            self.rows = []
+            return
+        raise TimeoutError(selector)
+
+
+class MultiSelectorHistoryPage(FakeHistoryPage):
+    def __init__(self, rows_by_selector: dict[str, list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.rows_by_selector = rows_by_selector
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        return FakeHistoryLocator(self.rows_by_selector.get(selector, []))
+
+
+class OpeningMultiSelectorHistoryPage(MultiSelectorHistoryPage):
+    def __init__(
+        self,
+        *,
+        initial_rows_by_selector: dict[str, list[FakeHistoryRow]],
+        rows_after_open_by_selector: dict[str, list[FakeHistoryRow]],
+    ) -> None:
+        super().__init__(initial_rows_by_selector)
+        self.rows_after_open_by_selector = rows_after_open_by_selector
+        self.open_clicks: list[tuple[str, int, bool]] = []
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".open-history":
+            self.open_clicks.append((selector, timeout, force))
+            self.rows_by_selector = self.rows_after_open_by_selector
+            return
+        super().click(selector, timeout=timeout, force=force)
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        if selector == ".open-history":
+            return FakeHistoryLocator([FakeHistoryRow("open")])
+        return super().locator(selector)
 
 
 def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
@@ -1205,9 +1705,63 @@ def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
     assert capture_files[0]["storage_path"] == result["last_download"]
 
 
+def test_download_history_file_clicks_completed_target_range_without_download_text(
+    tmp_path,
+) -> None:
+    target_row = FakeHistoryRow("时间范围 2026-03-01 ~ 2026-03-01 状态 已完成")
+    page = FakeHistoryPage([target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-01"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert target_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_reads_history_rows_in_batch(tmp_path) -> None:
+    old_row = FakeBatchOnlyHistoryRow("2026-05-20 ~ 2026-05-20 交易货款 已完成 下载")
+    target_row = FakeBatchOnlyHistoryRow("2026-05-21 ~ 2026-05-21 交易货款 已完成 下载")
+    page = FakeHistoryPage([old_row, target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-05-21"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert old_row.clicked_timeout is None
+    assert target_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
 def test_download_history_file_can_open_history_from_dialog_with_forced_click(tmp_path) -> None:
     target_row = FakeHistoryRow("2026-05-21 ~ 2026-05-21 交易货款 已完成 下载")
-    page = FakeHistoryPage([target_row])
+    page = ClosedHistoryPage([target_row])
     capture_files: list[dict[str, object]] = []
 
     result = _execute_action(
@@ -1229,6 +1783,243 @@ def test_download_history_file_can_open_history_from_dialog_with_forced_click(tm
     )
 
     assert page.dialog_history_clicked == [(30000, True)]
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_refreshes_history_drawer_until_completed(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-05-26 ~ 2026-05-26 交易货款 生成中")
+    completed_row = FakeHistoryRow("2026-05-26 ~ 2026-05-26 交易货款 已完成 下载")
+    page = RefreshingHistoryPage([[generating_row], [completed_row]])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "history_close_selector": ".next-drawer-close",
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-05-26"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.dialog_history_clicked == [(30000, True), (30000, True)]
+    assert page.close_clicks == [(".next-drawer-close", 3000, True)]
+    assert completed_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_skips_missing_refresh_controls_before_clicking(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-03-03 ~ 2026-03-03 交易货款 生成中")
+    completed_row = FakeHistoryRow("2026-03-03 ~ 2026-03-03 交易货款 已完成 下载")
+    page = FastSelectorRefreshPage([[generating_row], [completed_row]])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selectors": [".missing-open", ".configured-open"],
+            "history_close_selectors": [".missing-close", ".configured-close"],
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-03"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.click_attempts == [".configured-open", ".configured-close", ".configured-open"]
+    assert completed_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_refresh_selectors_are_configured_by_playbook(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-03-01 ~ 2026-03-01 交易货款 生成中")
+    completed_row = FakeHistoryRow("2026-03-01 ~ 2026-03-01 交易货款 已完成 下载")
+    page = ConfiguredHistoryRefreshPage([[generating_row], [completed_row]])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selectors": [".missing-open", ".configured-open"],
+            "history_close_selectors": [".missing-close", ".configured-close"],
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-01"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_attempts == [".configured-open", ".configured-open"]
+    assert page.close_attempts == [".configured-close"]
+    assert completed_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_uses_configured_history_row_selectors_when_primary_stale(
+    tmp_path,
+) -> None:
+    summary_row = FakeHistoryRow("交易货款 2026-03-02 CNY 下载明细")
+    target_row = FakeHistoryRow(
+        "2026-05-27 16:34:20\n"
+        "2026-05-27 16:34:35\n"
+        "2026-03-02 ~\n"
+        "2026-03-02\n"
+        "交易货款\n"
+        "已完成\n"
+        "下载"
+    )
+    page = MultiSelectorHistoryPage(
+        {
+            ".stale-history-class tr": [],
+            "tr.next-table-row": [summary_row, target_row],
+        }
+    )
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".stale-history-class tr",
+            "history_row_selectors": ["tr.next-table-row"],
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-02"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert summary_row.clicked_timeout is None
+    assert target_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_does_not_treat_fallback_rows_as_open_history(
+    tmp_path,
+) -> None:
+    summary_row = FakeHistoryRow("交易货款 2026-03-02 CNY 下载明细")
+    target_row = FakeHistoryRow("2026-03-02 ~ 2026-03-02 交易货款 已完成 下载")
+    page = OpeningMultiSelectorHistoryPage(
+        initial_rows_by_selector={
+            ".stale-history-class tr": [],
+            "tr.next-table-row": [summary_row],
+        },
+        rows_after_open_by_selector={
+            ".stale-history-class tr": [],
+            "tr.next-table-row": [summary_row, target_row],
+        },
+    )
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".stale-history-class tr",
+            "history_row_selectors": ["tr.next-table-row"],
+            "history_open_selector": ".open-history",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-02"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_clicks == [(".open-history", 30000, True)]
+    assert summary_row.clicked_timeout is None
+    assert target_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_uses_already_open_history_when_dialog_entry_disappears(
+    tmp_path,
+) -> None:
+    target_row = FakeHistoryRow("2026-05-26 ~ 2026-05-26 交易货款 已完成 下载")
+    page = HistoryAlreadyOpenPage([target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "history_open_timeout_ms": 30000,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-05-26"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_attempts == 0
+    assert target_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_keeps_polling_when_refresh_entry_disappears(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-03-01 ~ 2026-03-01 交易货款 生成中")
+    completed_row = FakeHistoryRow("2026-03-01 ~ 2026-03-01 交易货款 已完成 下载")
+    page = RefreshOpenDisappearsHistoryPage([[generating_row], [completed_row]])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "history_close_selector": ".next-drawer-close",
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-03-01"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_attempts == 1
+    assert page.close_attempts
+    assert completed_row.clicked_timeout == 1000
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
 

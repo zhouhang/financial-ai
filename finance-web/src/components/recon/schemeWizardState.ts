@@ -782,12 +782,23 @@ export function updateIntentDraft(
   state: SchemeWizardDraftState,
   patch: Partial<SchemeWizardIntentDraft>,
 ): SchemeWizardDraftState {
-  return {
+  const next: SchemeWizardDraftState = {
     ...state,
     intent: {
       ...state.intent,
       ...patch,
     },
+  };
+  // The scheme name is a pure label — it has no effect on generated rules or
+  // trials. Only re-derive when the business goal actually changes, so late
+  // name edits (e.g. appending "资金对账") don't wipe already-generated work.
+  const goalChanged =
+    patch.businessGoal !== undefined && patch.businessGoal !== state.intent.businessGoal;
+  if (!goalChanged) {
+    return next;
+  }
+  return {
+    ...next,
     derived: createEmptySchemeWizardDerivedState(),
   };
 }

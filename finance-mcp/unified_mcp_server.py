@@ -255,6 +255,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_trigger_sync",
     "data_source_scheduler_list_collection_plans",
     "data_source_trigger_dataset_collection",
+    "data_source_clear_browser_sync_job",
     "data_source_get_sync_job",
     "data_source_list_sync_jobs",
     "data_source_get_dataset_collection_detail",
@@ -295,6 +296,10 @@ _RECON_AUTO_TOOL_NAMES = {
     "recon_queue_complete",
     "recon_queue_fail",
     "recon_queue_reclaim_stale",
+    "recon_queue_waiting_data",
+    "recon_queue_requeue_ready_waiting",
+    "recon_queue_fail_expired_waiting",
+    "recon_queue_fail_failed_collection_waiting",
 }
 
 _EXECUTION_TOOL_NAMES = {

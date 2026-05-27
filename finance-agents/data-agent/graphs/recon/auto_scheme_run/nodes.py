@@ -1495,6 +1495,9 @@ async def _persist_execution_run(
     run_record = _safe_dict(ctx.get("execution_run_record"))
     subtasks_json = [item for item in _safe_list(ctx.get("subtasks_json")) if isinstance(item, dict)]
     run_context = _safe_dict(ctx.get("run_context"))
+    existing_run_id = str(run_context.get("execution_run_id") or "").strip()
+    if existing_run_id and not str(run_record.get("id") or "").strip():
+        run_record = {"id": existing_run_id}
     source_collection_json = _safe_dict(ctx.get("source_collection_json"))
     recon_observation = _safe_dict(ctx.get("recon_observation"))
     summary = _safe_dict(recon_observation.get("summary"))
@@ -2111,6 +2114,21 @@ async def persist_failed_run_node(state: AgentState) -> dict[str, Any]:
         ctx=ctx,
         execution_status="failed",
         failed_stage=str(ctx.get("failed_stage") or ""),
+        failed_reason=_resolve_failed_reason(ctx),
+    )
+    if run:
+        ctx["execution_run_record"] = run
+    return {"recon_ctx": ctx}
+
+
+async def persist_data_waiting_run_node(state: AgentState) -> dict[str, Any]:
+    ctx = _get_recon_ctx(state)
+    auth_token = str(state.get("auth_token") or "")
+    run = await _persist_execution_run(
+        auth_token=auth_token,
+        ctx=ctx,
+        execution_status="running",
+        failed_stage="data_waiting",
         failed_reason=_resolve_failed_reason(ctx),
     )
     if run:

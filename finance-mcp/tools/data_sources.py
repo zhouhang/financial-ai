@@ -60,6 +60,20 @@ BROWSER_COLLECTION_ASYNC_JOB_STATUSES = {
     "waiting_human_verification",
     "resuming",
 }
+BROWSER_SYNC_CLEARABLE_STATUSES = {
+    "pending",
+    "queued",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_SYNC_WORKER_MUTABLE_STATUSES = {
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_SYNC_MANUAL_CLEAR_DEFAULT_REASON = "operator cleared stuck browser task"
+BROWSER_SYNC_MANUAL_CLEAR_MESSAGE = "当前浏览器任务已清除，可重新下发或等待后续任务执行"
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -98,10 +112,13 @@ VALID_BROWSER_PLAYBOOK_ACTIONS = {
     "fill",
     "set_date",
     "wait_for",
+    "wait_ms",
     "extract_text",
     "extract_summary",
+    "select_checkboxes",
     "download",
     "download_history_file",
+    "download_qianniu_export_report",
     "parse_table",
     "assert",
 }
@@ -5831,6 +5848,19 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_clear_browser_sync_job",
+            description="人工清除卡住的 browser_playbook 同步任务；只取消当前 sync_job，不删除数据源配置。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["auth_token", "sync_job_id"],
+            },
+        ),
+        Tool(
             name="data_source_get_sync_job",
             description="查询单个同步任务。",
             inputSchema={
@@ -6115,6 +6145,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_scheduler_list_collection_plans(arguments)
         if name == "data_source_trigger_dataset_collection":
             return await _handle_data_source_trigger_dataset_collection(arguments)
+        if name == "data_source_clear_browser_sync_job":
+            return await _handle_data_source_clear_browser_sync_job(arguments)
         if name == "data_source_get_sync_job":
             return await _handle_data_source_get_sync_job(arguments)
         if name == "data_source_list_sync_jobs":
@@ -8894,15 +8926,6 @@ async def _handle_data_source_trigger_sync(
                 }
         return {"success": False, "error": "创建同步任务失败"}
 
-    attempt = auth_db.create_unified_sync_job_attempt(
-        company_id=company_id,
-        sync_job_id=str(job["id"]),
-        attempt_no=int(job.get("current_attempt") or 0) + 1,
-        checkpoint_before=checkpoint_before,
-    )
-    if not attempt:
-        return {"success": False, "error": "创建同步任务尝试失败"}
-
     if collection_driver == COLLECTION_DRIVER_BROWSER_PLAYBOOK:
         return {
             "success": True,
@@ -8911,8 +8934,17 @@ async def _handle_data_source_trigger_sync(
             "reused": False,
             "queued": True,
             "collection_driver": COLLECTION_DRIVER_BROWSER_PLAYBOOK,
-            "message": "浏览器采集任务已创建，等待 Production Push Dispatcher 执行",
+            "message": "浏览器采集任务已创建，等待 browser-agent 领取执行",
         }
+
+    attempt = auth_db.create_unified_sync_job_attempt(
+        company_id=company_id,
+        sync_job_id=str(job["id"]),
+        attempt_no=int(job.get("current_attempt") or 0) + 1,
+        checkpoint_before=checkpoint_before,
+    )
+    if not attempt:
+        return {"success": False, "error": "创建同步任务尝试失败"}
 
     execute_kwargs = {
         "company_id": company_id,
@@ -9154,6 +9186,64 @@ async def _trigger_dataset_collection_resolved(
         "resource_key": resource_key,
         "biz_date": biz_date,
         "collection_driver": collection_driver,
+    }
+
+
+async def _handle_data_source_clear_browser_sync_job(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    sync_job_id = _safe_text(arguments.get("sync_job_id"))
+    if not sync_job_id:
+        return {"success": False, "error": "sync_job_id 不能为空"}
+
+    job = auth_db.get_sync_job_with_data_source(
+        sync_job_id=sync_job_id,
+        company_id=company_id,
+    )
+    if not job:
+        return {"success": False, "error": "同步任务不存在"}
+    if _safe_text(job.get("source_kind")) != "browser_playbook":
+        return {"success": False, "error": "只能清除浏览器采集任务"}
+
+    current_status = _safe_text(job.get("job_status")).lower()
+    if (
+        current_status == "cancelled"
+        and _safe_text(job.get("browser_fail_reason")) == "MANUAL_CLEARED"
+    ):
+        return {
+            "success": True,
+            "already_cancelled": True,
+            "job": _attach_aliases_to_job(job),
+            "message": BROWSER_SYNC_MANUAL_CLEAR_MESSAGE,
+        }
+    if current_status not in BROWSER_SYNC_CLEARABLE_STATUSES:
+        return {
+            "success": False,
+            "error": f"当前任务状态不允许清除: {current_status or 'unknown'}",
+        }
+
+    reason = _safe_text(arguments.get("reason")) or BROWSER_SYNC_MANUAL_CLEAR_DEFAULT_REASON
+    cleared_job = auth_db.clear_browser_sync_job_manually(
+        sync_job_id=sync_job_id,
+        company_id=company_id,
+        reason=reason,
+    )
+    if not cleared_job:
+        latest_job = auth_db.get_sync_job_with_data_source(
+            sync_job_id=sync_job_id,
+            company_id=company_id,
+        )
+        latest_status = _safe_text((latest_job or {}).get("job_status")).lower()
+        return {
+            "success": False,
+            "error": f"当前任务状态不允许清除: {latest_status or 'unknown'}",
+        }
+
+    auth_db.cancel_open_handoff_sessions_for_sync_job(sync_job_id=sync_job_id, reason=reason)
+    return {
+        "success": True,
+        "job": _attach_aliases_to_job(cleared_job),
+        "message": BROWSER_SYNC_MANUAL_CLEAR_MESSAGE,
     }
 
 
@@ -9622,83 +9712,119 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
     if not sync_job_id:
         return {"success": False, "error": "missing sync_job_id"}
 
-    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
-    company_id = str(job.get("company_id") or "")
-    data_source_id = str(job.get("data_source_id") or "")
-    resource_key = str(job.get("resource_key") or "")
-    request_payload = job.get("request_payload") or {}
-    payload_params = request_payload if isinstance(request_payload, dict) else {}
-    nested_params = payload_params.get("params") if isinstance(payload_params.get("params"), dict) else {}
-    biz_date = str(nested_params.get("biz_date") or payload_params.get("biz_date") or "")
-    dataset_id = str(nested_params.get("dataset_id") or payload_params.get("dataset_id") or "")
-    dataset_code = str(nested_params.get("dataset_code") or payload_params.get("dataset_code") or "")
+    with auth_db.browser_sync_job_transition_lock(sync_job_id):
+        job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+        current_status = _safe_text(job.get("job_status")).lower()
+        if current_status not in BROWSER_SYNC_WORKER_MUTABLE_STATUSES:
+            return {
+                "success": True,
+                "ignored": True,
+                "job": _attach_aliases_to_job(job),
+                "message": f"browser sync_job already left active state: {current_status or 'unknown'}",
+            }
 
-    binding = auth_db.get_shop_runtime_binding_for_source(
-        company_id=company_id, data_source_id=data_source_id
-    ) or {}
-    shop_id = str(binding.get("shop_id") or "")
-    playbook_id = str(binding.get("playbook_id") or "")
-
-    records = list(arguments.get("records") or [])
-    capture_files = list(arguments.get("capture_files") or [])
-    summary_in = dict(arguments.get("summary") or {})
-
-    record_summary: dict[str, Any] = {}
-    if records and dataset_id and biz_date:
-        record_summary = auth_db.upsert_browser_collection_records(
-            company_id=company_id,
-            data_source_id=data_source_id,
-            dataset_id=dataset_id,
-            dataset_code=dataset_code,
-            resource_key=resource_key,
-            shop_id=shop_id,
-            playbook_id=playbook_id,
-            biz_date=biz_date,
+        guarded_job = auth_db.guard_browser_sync_job_worker_active(
             sync_job_id=sync_job_id,
-            records=records,
-        ) or {}
-        # Materialize the dataset's field schema so the recon wizard can offer
-        # date/match fields (browser datasets publish directly and otherwise
-        # carry no columns). Best-effort: never let this break ingestion.
-        try:
-            columns = _build_browser_collection_columns(records)
-            if columns:
-                auth_db.update_unified_data_source_dataset_schema_columns(
-                    dataset_id=dataset_id, columns=columns
-                )
-        except Exception:
-            logger.warning("物化浏览器采集数据集 schema_summary.columns 失败", exc_info=True)
-
-    file_summary: dict[str, Any] = {}
-    if capture_files:
-        file_summary = auth_db.insert_browser_capture_files(
-            company_id=company_id,
-            data_source_id=data_source_id,
-            dataset_id=dataset_id,
-            sync_job_id=sync_job_id,
-            resource_key=resource_key,
-            shop_id=shop_id,
-            playbook_id=playbook_id,
-            biz_date=biz_date,
-            capture_files=capture_files,
-        ) or {}
-
-    final_summary = {
-        **summary_in,
-        "records": record_summary,
-        "capture_file_count": int(file_summary.get("inserted_count") or 0),
-    }
-    row = auth_db.mark_browser_sync_job_success(
-        sync_job_id=sync_job_id, summary=final_summary
-    )
-    if dataset_id:
-        auth_db.update_unified_data_source_dataset_health(
-            dataset_id=dataset_id,
-            health_status="healthy",
-            last_sync_at=(row or {}).get("completed_at") or _now_iso(),
-            last_error_message="",
+            allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
         )
-    return {"success": True, "job": row, "summary": final_summary}
+        if not guarded_job:
+            latest_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+            latest_status = _safe_text(latest_job.get("job_status")).lower()
+            return {
+                "success": True,
+                "ignored": True,
+                "job": _attach_aliases_to_job(latest_job),
+                "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
+            }
+        job = {**job, **guarded_job}
+
+        company_id = str(job.get("company_id") or "")
+        data_source_id = str(job.get("data_source_id") or "")
+        resource_key = str(job.get("resource_key") or "")
+        request_payload = job.get("request_payload") or {}
+        payload_params = request_payload if isinstance(request_payload, dict) else {}
+        nested_params = payload_params.get("params") if isinstance(payload_params.get("params"), dict) else {}
+        biz_date = str(nested_params.get("biz_date") or payload_params.get("biz_date") or "")
+        dataset_id = str(nested_params.get("dataset_id") or payload_params.get("dataset_id") or "")
+        dataset_code = str(nested_params.get("dataset_code") or payload_params.get("dataset_code") or "")
+
+        binding = auth_db.get_shop_runtime_binding_for_source(
+            company_id=company_id, data_source_id=data_source_id
+        ) or {}
+        shop_id = str(binding.get("shop_id") or "")
+        playbook_id = str(binding.get("playbook_id") or "")
+
+        records = list(arguments.get("records") or [])
+        capture_files = list(arguments.get("capture_files") or [])
+        summary_in = dict(arguments.get("summary") or {})
+
+        record_summary: dict[str, Any] = {}
+        if records and dataset_id and biz_date:
+            record_summary = auth_db.upsert_browser_collection_records(
+                company_id=company_id,
+                data_source_id=data_source_id,
+                dataset_id=dataset_id,
+                dataset_code=dataset_code,
+                resource_key=resource_key,
+                shop_id=shop_id,
+                playbook_id=playbook_id,
+                biz_date=biz_date,
+                sync_job_id=sync_job_id,
+                records=records,
+            ) or {}
+            # Materialize the dataset's field schema so the recon wizard can offer
+            # date/match fields (browser datasets publish directly and otherwise
+            # carry no columns). Best-effort: never let this break ingestion.
+            try:
+                columns = _build_browser_collection_columns(records)
+                if columns:
+                    auth_db.update_unified_data_source_dataset_schema_columns(
+                        dataset_id=dataset_id, columns=columns
+                    )
+            except Exception:
+                logger.warning("物化浏览器采集数据集 schema_summary.columns 失败", exc_info=True)
+
+        file_summary: dict[str, Any] = {}
+        if capture_files:
+            file_summary = auth_db.insert_browser_capture_files(
+                company_id=company_id,
+                data_source_id=data_source_id,
+                dataset_id=dataset_id,
+                sync_job_id=sync_job_id,
+                resource_key=resource_key,
+                shop_id=shop_id,
+                playbook_id=playbook_id,
+                biz_date=biz_date,
+                capture_files=capture_files,
+            ) or {}
+
+        final_summary = {
+            **summary_in,
+            "records": record_summary,
+            "capture_file_count": int(file_summary.get("inserted_count") or 0),
+        }
+        row = auth_db.mark_browser_sync_job_success(
+            sync_job_id=sync_job_id,
+            summary=final_summary,
+            allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
+        )
+        if not row:
+            latest_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+            latest_status = _safe_text(latest_job.get("job_status")).lower()
+            return {
+                "success": True,
+                "ignored": True,
+                "job": _attach_aliases_to_job(latest_job),
+                "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
+            }
+        if dataset_id:
+            auth_db.update_unified_data_source_dataset_health(
+                dataset_id=dataset_id,
+                health_status="healthy",
+                last_sync_at=(row or {}).get("completed_at") or _now_iso(),
+                last_error_message="",
+            )
+        return {"success": True, "job": row, "summary": final_summary}
 
 
 async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -9709,6 +9835,16 @@ async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, 
     sync_job_id = str(arguments.get("sync_job_id") or "").strip()
     if not sync_job_id:
         return {"success": False, "error": "missing sync_job_id"}
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    current_status = _safe_text(job.get("job_status")).lower()
+    if current_status not in BROWSER_SYNC_WORKER_MUTABLE_STATUSES:
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(job),
+            "message": f"browser sync_job already left active state: {current_status or 'unknown'}",
+        }
+
     fail_reason = str(arguments.get("fail_reason") or "OTHER").strip()
     error_message = str(arguments.get("error_message") or "")
     retryable = bool(arguments.get("retryable", False))
@@ -9721,7 +9857,17 @@ async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, 
         retryable=retryable,
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay_seconds,
+        allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
     )
+    if not row:
+        latest_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+        latest_status = _safe_text(latest_job.get("job_status")).lower()
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(latest_job),
+            "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
+        }
     return {"success": True, "job": row}
 
 
@@ -9737,38 +9883,60 @@ async def _handle_browser_handoff_session_create(arguments: dict[str, Any]) -> d
     if not company_id or not sync_job_id:
         return {"success": False, "error": "missing company_id or sync_job_id"}
     expires_in = int(arguments.get("expires_in_seconds") or 900)
-    job_row = auth_db.get_sync_job(sync_job_id=sync_job_id) or {}
-    rp = job_row.get("request_payload") or {}
-    if isinstance(rp, str):
-        import json as _json
-        rp = _json.loads(rp or "{}")
-    payload_params = rp.get("params") or {}
-    channel_config_id = arguments.get("channel_config_id") or payload_params.get("handoff_channel_config_id") or None
-    owner = payload_params.get("handoff_owner") or {}
-    row = auth_db.insert_handoff_session(
-        company_id=company_id,
-        sync_job_id=sync_job_id,
-        data_source_id=(arguments.get("data_source_id") or None),
-        agent_id=str(arguments.get("agent_id") or ""),
-        profile_key=str(arguments.get("profile_key") or ""),
-        reason=str(arguments.get("reason") or "RISK_VERIFICATION"),
-        channel_config_id=channel_config_id,
-        expires_in_seconds=expires_in,
-    )
-    if not row:
-        return {"success": False, "error": "insert handoff session failed"}
-    auth_db.set_browser_sync_job_status(sync_job_id=sync_job_id, status="waiting_human_verification")
-    token = build_handoff_token(
-        handoff_session_id=str(row["id"]), company_id=company_id, ttl_seconds=expires_in
-    )
-    return {
-        "success": True,
-        "handoff_session_id": str(row["id"]),
-        "handoff_token": token,
-        "status": row["status"],
-        "channel_config_id": channel_config_id,
-        "owner": owner,
-    }
+    with auth_db.browser_sync_job_transition_lock(sync_job_id):
+        job_row = auth_db.get_sync_job(sync_job_id=sync_job_id) or {}
+        current_status = _safe_text(job_row.get("job_status")).lower()
+        if current_status and current_status not in {"running", "resuming"}:
+            return {
+                "success": True,
+                "ignored": True,
+                "job": _attach_aliases_to_job(job_row),
+                "message": f"browser sync_job already left handoff state: {current_status}",
+            }
+        rp = job_row.get("request_payload") or {}
+        if isinstance(rp, str):
+            import json as _json
+            rp = _json.loads(rp or "{}")
+        payload_params = rp.get("params") or {}
+        channel_config_id = arguments.get("channel_config_id") or payload_params.get("handoff_channel_config_id") or None
+        owner = payload_params.get("handoff_owner") or {}
+        row = auth_db.insert_handoff_session(
+            company_id=company_id,
+            sync_job_id=sync_job_id,
+            data_source_id=(arguments.get("data_source_id") or None),
+            agent_id=str(arguments.get("agent_id") or ""),
+            profile_key=str(arguments.get("profile_key") or ""),
+            reason=str(arguments.get("reason") or "RISK_VERIFICATION"),
+            channel_config_id=channel_config_id,
+            expires_in_seconds=expires_in,
+        )
+        if not row:
+            return {"success": False, "error": "insert handoff session failed"}
+        affected = auth_db.set_browser_sync_job_status(
+            sync_job_id=sync_job_id,
+            status="waiting_human_verification",
+            allowed_current_statuses=("running", "resuming"),
+        )
+        if affected <= 0 and current_status:
+            latest_job = auth_db.get_sync_job(sync_job_id=sync_job_id) or job_row
+            latest_status = _safe_text(latest_job.get("job_status")).lower()
+            return {
+                "success": True,
+                "ignored": True,
+                "job": _attach_aliases_to_job(latest_job),
+                "message": f"browser sync_job already left handoff state: {latest_status or 'unknown'}",
+            }
+        token = build_handoff_token(
+            handoff_session_id=str(row["id"]), company_id=company_id, ttl_seconds=expires_in
+        )
+        return {
+            "success": True,
+            "handoff_session_id": str(row["id"]),
+            "handoff_token": token,
+            "status": row["status"],
+            "channel_config_id": channel_config_id,
+            "owner": owner,
+        }
 
 
 def _handoff_row_for_token(token: str, *, allow_expired: bool = False) -> tuple[dict[str, Any] | None, str]:
@@ -9957,10 +10125,22 @@ async def _handle_browser_handoff_session_event(arguments: dict[str, Any]) -> di
         metadata=dict(arguments.get("metadata") or {}),
     )
     if canonical_event_type in {"resume_requested", "resuming"} or status == "resuming":
-        auth_db.set_browser_sync_job_status(
+        affected = auth_db.set_browser_sync_job_status(
             sync_job_id=str(row["sync_job_id"]),
             status="resuming",
+            allowed_current_statuses=("waiting_human_verification", "resuming"),
         )
+        if affected <= 0:
+            latest_job = auth_db.get_sync_job(sync_job_id=str(row["sync_job_id"])) or {}
+            latest_status = _safe_text(latest_job.get("job_status")).lower()
+            if latest_status:
+                return {
+                    "success": True,
+                    "ignored": True,
+                    "job": _attach_aliases_to_job(latest_job),
+                    "session": _handoff_public_session(updated or row, controller_id=controller_id),
+                    "message": f"browser sync_job already left handoff state: {latest_status}",
+                }
     return {
         "success": True,
         "session": _handoff_public_session(updated or row, controller_id=controller_id),

@@ -82,6 +82,21 @@ describe('HandoffPage', () => {
     });
 
     const viewport = await screen.findByTestId('handoff-viewport');
+    const image = viewport.querySelector('img');
+    if (!image) {
+      throw new Error('handoff frame image not rendered');
+    }
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({
+      left: 47.5,
+      top: 20,
+      width: 125,
+      height: 100,
+      right: 172.5,
+      bottom: 120,
+      x: 47.5,
+      y: 20,
+      toJSON: () => ({}),
+    } as DOMRect);
     vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue({
       left: 10,
       top: 20,
@@ -110,6 +125,8 @@ describe('HandoffPage', () => {
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
     const ws = FakeWebSocket.instances[0];
 
+    expect(screen.queryByPlaceholderText('短信验证码或文本')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开键盘输入' }));
     fireEvent.change(screen.getByPlaceholderText('短信验证码或文本'), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     fireEvent.click(screen.getByRole('button', { name: '我已完成验证' }));

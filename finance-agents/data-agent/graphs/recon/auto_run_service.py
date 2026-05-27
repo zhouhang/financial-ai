@@ -737,6 +737,7 @@ async def execute_run_plan_run(
     )
     ctx = _safe_dict(output.get("recon_ctx"))
     if bool(ctx.get("waiting_data")) or str(ctx.get("failed_stage") or "") == "data_waiting":
+        run_record = _safe_dict(ctx.get("execution_run_record"))
         return {
             "success": False,
             "status": "data_waiting",
@@ -753,6 +754,7 @@ async def execute_run_plan_run(
             "collection_job_ids": [
                 str(v) for v in _safe_list(ctx.get("collection_job_ids")) if str(v)
             ],
+            "run": run_record,
             "recon_ctx": ctx,
         }
 

@@ -212,6 +212,9 @@ class _WaitingCursor:
     def execute(self, sql: str, params=None):
         self.executed.append(sql)
 
+    def fetchall(self):
+        return [("queue-001", "company-001", "AGENT_INTERRUPTED: browser-agent restarted")]
+
 
 class _WaitingConn:
     def __init__(self, cursor: _WaitingCursor) -> None:
@@ -269,6 +272,7 @@ def test_e2e_waiting_data_failed_browser_job_fast_fails(monkeypatch) -> None:
     assert "status = 'failed'" in sql
     assert "s.job_status = 'failed'" in sql
     assert "s.error_message" in sql
+    assert "UPDATE execution_runs" in sql
 
 
 def test_e2e_waiting_data_success_triggers_requeue_with_resume_metadata(monkeypatch) -> None:

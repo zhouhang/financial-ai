@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +33,7 @@ _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
 _PLATFORM_PENDING_AUTHORIZATIONS_SCHEMA_READY = False
 _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
+_SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = False
 _RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
 _BROWSER_HANDOFF_SCHEMA_READY = False
@@ -133,6 +135,9 @@ _RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS = (
     "waiting_reason",
     "waiting_datasets",
     "collection_job_ids",
+    "data_wait_resume_count",
+    "last_data_wait_resumed_at",
+    "updated_at",
 )
 
 _RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS = (
@@ -608,6 +613,7 @@ def _browser_playbook_collection_schema_ready() -> bool:
             "collection_job_ids",
             "data_wait_resume_count",
             "last_data_wait_resumed_at",
+            "updated_at",
         ),
         "sync_jobs": (
             "next_retry_at",
@@ -796,6 +802,7 @@ def ensure_unified_data_source_schema() -> list[str]:
         applied.append("029_clean_alipay_semantic_profiles.sql")
     applied.extend(ensure_data_sources_browser_playbook_kind_schema())
     applied.extend(ensure_sync_jobs_trigger_modes_schema())
+    applied.extend(ensure_sync_jobs_handoff_status_schema())
 
     remaining_missing_tables = sorted(
         table_name for table_name in _UNIFIED_DATA_SOURCE_BASE_TABLES if not _table_exists(table_name)
@@ -853,6 +860,31 @@ def ensure_sync_jobs_trigger_modes_schema() -> list[str]:
 
     _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = True
     logger.info("sync_jobs.trigger_mode 约束已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
+def ensure_sync_jobs_handoff_status_schema() -> list[str]:
+    """确保 sync_jobs.job_status 允许浏览器 handoff 生命周期状态。"""
+    global _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY
+    if _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY:
+        return []
+    if not _table_exists("sync_jobs"):
+        return []
+
+    required_statuses = {"waiting_human_verification", "resuming"}
+    constraint_def = _constraint_definition("sync_jobs", "sync_jobs_status_check")
+    if all(status in constraint_def for status in required_statuses):
+        _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = True
+        return []
+
+    migration_name = "035_sync_jobs_handoff_statuses.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    applied_constraint_def = _constraint_definition("sync_jobs", "sync_jobs_status_check")
+    if not all(status in applied_constraint_def for status in required_statuses):
+        raise RuntimeError("sync_jobs.job_status 约束升级失败，handoff 状态仍不可用")
+
+    _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = True
+    logger.info("sync_jobs.job_status handoff 状态已自动补齐: %s", migration_name)
     return [migration_name]
 
 
@@ -950,6 +982,8 @@ def ensure_recon_execution_queue_schema() -> list[str]:
 
     migration_name = "019_recon_execution_queue.sql"
     _execute_sql_script(_migration_path(migration_name))
+    if not _recon_execution_queue_schema_ready():
+        _execute_sql_script(_migration_path("031_browser_playbook_collection.sql"))
     if not _recon_execution_queue_schema_ready():
         raise RuntimeError("recon_execution_queue schema 升级失败，waiting_data 结构仍不完整")
 
@@ -5474,8 +5508,178 @@ def update_unified_sync_job_status(
     error_message: str = "",
     checkpoint_after: dict | None = None,
     finish_job: bool = False,
+    allowed_current_statuses: tuple[str, ...] | None = None,
 ) -> dict | None:
     """更新同步任务状态。"""
+    status_guard_sql = ""
+    params: list[Any] = [
+        job_status,
+        error_message,
+        psycopg2.extras.Json(checkpoint_after or {}),
+        psycopg2.extras.Json(checkpoint_after or {}),
+        finish_job,
+        sync_job_id,
+    ]
+    if allowed_current_statuses:
+        placeholders = ", ".join(["%s"] * len(allowed_current_statuses))
+        status_guard_sql = f" AND job_status IN ({placeholders})"
+        params.extend(str(status) for status in allowed_current_statuses)
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sql = """
+                    UPDATE sync_jobs
+                    SET job_status = %s,
+                        error_message = %s,
+                        checkpoint_after = CASE
+                            WHEN %s::jsonb = '{{}}'::jsonb THEN checkpoint_after
+                            ELSE %s::jsonb
+                        END,
+                        completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE completed_at END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    {status_guard}
+                    RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                              window_start, window_end, idempotency_key, job_status,
+                              request_payload, checkpoint_before, checkpoint_after,
+                              active_snapshot_id, published_snapshot_id, current_attempt,
+                              error_message, started_at, completed_at, created_at, updated_at
+                    """.format(status_guard=status_guard_sql)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                conn.commit()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"更新 sync_jobs 状态失败 (sync_job_id={sync_job_id}, status={job_status}): {e}")
+        return None
+
+
+BROWSER_SYNC_MANUAL_CLEAR_REASON = "MANUAL_CLEARED"
+BROWSER_SYNC_MANUAL_CLEAR_MESSAGE = "MANUAL_CLEARED: operator cleared stuck browser task"
+BROWSER_SYNC_ACTIVE_CLEARABLE_STATUSES = (
+    "pending",
+    "queued",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+)
+BROWSER_SYNC_WORKER_MUTABLE_STATUSES = (
+    "running",
+    "waiting_human_verification",
+    "resuming",
+)
+
+
+@contextmanager
+def browser_sync_job_transition_lock(sync_job_id: str):
+    """Serialize terminal browser sync job transitions with manual clear."""
+    lock_key = f"browser_sync_job_transition:{str(sync_job_id or '').strip()}"
+    conn_manager = get_conn()
+    with conn_manager as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+            yield
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+
+def get_sync_job_with_data_source(*, sync_job_id: str, company_id: str) -> dict | None:
+    """Load a sync job with its data source metadata, scoped to one company."""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT s.id, s.company_id, s.data_source_id, s.trigger_mode, s.resource_key,
+                           s.window_start, s.window_end, s.idempotency_key, s.job_status,
+                           s.request_payload, s.checkpoint_before, s.checkpoint_after,
+                           s.active_snapshot_id, s.published_snapshot_id, s.current_attempt,
+                           s.error_message, s.next_retry_at, s.browser_fail_reason, s.max_attempts,
+                           s.is_verification, s.started_at, s.completed_at, s.created_at, s.updated_at,
+                           ds.source_kind, ds.name AS data_source_name, ds.status AS data_source_status,
+                           ds.is_enabled AS data_source_enabled
+                    FROM sync_jobs s
+                    JOIN data_sources ds ON ds.id = s.data_source_id
+                    WHERE s.id = %s
+                      AND s.company_id = %s
+                    LIMIT 1
+                    """,
+                    (sync_job_id, company_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"查询 sync_jobs+data_sources 失败 (id={sync_job_id}, company_id={company_id}): {e}")
+        return None
+
+
+def clear_browser_sync_job_manually(
+    *,
+    sync_job_id: str,
+    company_id: str,
+    reason: str = "",
+) -> dict | None:
+    """Mark a stuck browser sync job as manually cleared without deleting its data source."""
+    message = BROWSER_SYNC_MANUAL_CLEAR_MESSAGE
+    if str(reason or "").strip():
+        message = f"MANUAL_CLEARED: {str(reason).strip()[:500]}"
+    try:
+        with browser_sync_job_transition_lock(sync_job_id):
+            conn_manager = get_conn()
+            with conn_manager as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        UPDATE sync_jobs
+                        SET job_status = 'cancelled',
+                            browser_fail_reason = 'MANUAL_CLEARED',
+                            error_message = %s,
+                            next_retry_at = NULL,
+                            completed_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                          AND company_id = %s
+                          AND job_status IN ('pending', 'queued', 'running', 'waiting_human_verification', 'resuming')
+                          AND EXISTS (
+                              SELECT 1
+                              FROM data_sources ds
+                              WHERE ds.id = sync_jobs.data_source_id
+                                AND ds.source_kind = 'browser_playbook'
+                          )
+                        RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
+                                  window_start, window_end, idempotency_key, job_status,
+                                  request_payload, checkpoint_before, checkpoint_after,
+                                  active_snapshot_id, published_snapshot_id, current_attempt,
+                                  error_message, next_retry_at, browser_fail_reason, max_attempts,
+                                  is_verification, started_at, completed_at, created_at, updated_at
+                        """,
+                        (message, sync_job_id, company_id),
+                    )
+                    row = cur.fetchone()
+                    conn.commit()
+                    return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"人工清除 browser sync_job 失败 (id={sync_job_id}, company_id={company_id}): {e}")
+        return None
+
+
+def guard_browser_sync_job_worker_active(
+    *,
+    sync_job_id: str,
+    allowed_current_statuses: tuple[str, ...] | None = None,
+) -> dict | None:
+    """Atomically confirm a browser worker may still write side effects for this job."""
+    statuses = tuple(allowed_current_statuses or BROWSER_SYNC_WORKER_MUTABLE_STATUSES)
+    if not statuses:
+        return None
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -5483,36 +5687,55 @@ def update_unified_sync_job_status(
                 cur.execute(
                     """
                     UPDATE sync_jobs
-                    SET job_status = %s,
-                        error_message = %s,
-                        checkpoint_after = CASE
-                            WHEN %s::jsonb = '{}'::jsonb THEN checkpoint_after
-                            ELSE %s::jsonb
-                        END,
-                        completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE completed_at END,
-                        updated_at = CURRENT_TIMESTAMP
+                    SET updated_at = updated_at
                     WHERE id = %s
+                      AND job_status = ANY(%s::text[])
                     RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
                               window_start, window_end, idempotency_key, job_status,
                               request_payload, checkpoint_before, checkpoint_after,
                               active_snapshot_id, published_snapshot_id, current_attempt,
-                              error_message, started_at, completed_at, created_at, updated_at
+                              error_message, next_retry_at, browser_fail_reason, max_attempts,
+                              is_verification, started_at, completed_at, created_at, updated_at
                     """,
-                    (
-                        job_status,
-                        error_message,
-                        psycopg2.extras.Json(checkpoint_after or {}),
-                        psycopg2.extras.Json(checkpoint_after or {}),
-                        finish_job,
-                        sync_job_id,
-                    ),
+                    (sync_job_id, list(statuses)),
                 )
                 row = cur.fetchone()
                 conn.commit()
                 return _normalize_record(dict(row)) if row else None
     except Exception as e:
-        logger.error(f"更新 sync_jobs 状态失败 (sync_job_id={sync_job_id}, status={job_status}): {e}")
+        logger.error(f"校验 browser sync_job 可写状态失败 (id={sync_job_id}): {e}")
         return None
+
+
+def cancel_open_handoff_sessions_for_sync_job(*, sync_job_id: str, reason: str = "") -> int:
+    """Cancel non-final handoff sessions for a manually cleared sync job."""
+    event = _handoff_audit_event(
+        event_type="manual_clear",
+        reason=str(reason or "operator cleared stuck browser task"),
+        metadata={"status": "cancelled"},
+    )
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE browser_handoff_sessions
+                    SET status = 'cancelled',
+                        audit_events = audit_events || %s::jsonb, -- manual_clear
+                        completed_at = COALESCE(completed_at, now()),
+                        updated_at = now()
+                    WHERE sync_job_id = %s
+                      AND status <> ALL(%s)
+                    """,
+                    (json.dumps([event], ensure_ascii=False), sync_job_id, list(_HANDOFF_FINAL_STATUSES)),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+    except Exception as e:
+        logger.error(f"取消 handoff session 失败 (sync_job_id={sync_job_id}): {e}")
+        return 0
 
 
 def get_latest_source_dataset_checkpoint(
@@ -6035,7 +6258,7 @@ def activate_browser_playbook_and_binding(
                         updated_at = CURRENT_TIMESTAMP
                     WHERE company_id = %s
                       AND data_source_id = %s
-                      AND profile_status = 'verifying'
+                      AND profile_status IN ('verifying', 'active')
                     RETURNING id, company_id, data_source_id, shop_id, profile_status, playbook_status
                     """,
                     (company_id, data_source_id),
@@ -6128,13 +6351,19 @@ def get_playbook(*, company_id: str, playbook_id: str, version: str | None = Non
         return {}
 
 
-def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
+def mark_browser_sync_job_success(
+    *,
+    sync_job_id: str,
+    summary: dict,
+    allowed_current_statuses: tuple[str, ...] | None = None,
+) -> dict | None:
     row = update_unified_sync_job_status(
         sync_job_id=sync_job_id,
         job_status="success",
         error_message="",
         checkpoint_after={"browser_collection_summary": summary or {}},
         finish_job=True,
+        allowed_current_statuses=allowed_current_statuses,
     )
     if row:
         mark_browser_binding_collection_seen(sync_job_id=sync_job_id)
@@ -6268,6 +6497,7 @@ def mark_browser_sync_job_failed(
     retryable: bool = False,
     max_attempts: int = 3,
     retry_delay_seconds: int = 1800,
+    allowed_current_statuses: tuple[str, ...] | None = None,
 ) -> dict | None:
     """Terminal or transient browser sync_job failure handler.
 
@@ -6293,12 +6523,27 @@ def mark_browser_sync_job_failed(
     else:
         prefixed_error = canonical
 
+    status_guard_sql = ""
+    params: list[Any] = [
+        bool(retryable), int(max_attempts),
+        canonical,
+        prefixed_error,
+        int(max_attempts),
+        bool(retryable), int(max_attempts), int(retry_delay_seconds),
+        bool(retryable), int(max_attempts),
+        sync_job_id,
+    ]
+    if allowed_current_statuses:
+        placeholders = ", ".join(["%s"] * len(allowed_current_statuses))
+        status_guard_sql = f" AND job_status IN ({placeholders})"
+        params.extend(str(status) for status in allowed_current_statuses)
+
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE sync_jobs
                     SET job_status = CASE
                             WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN 'pending'
@@ -6317,17 +6562,10 @@ def mark_browser_sync_job_failed(
                         END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
+                    {status_guard_sql}
                     RETURNING *
                     """,
-                    (
-                        bool(retryable), int(max_attempts),
-                        canonical,
-                        prefixed_error,
-                        int(max_attempts),
-                        bool(retryable), int(max_attempts), int(retry_delay_seconds),
-                        bool(retryable), int(max_attempts),
-                        sync_job_id,
-                    ),
+                    tuple(params),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -6560,7 +6798,7 @@ def clear_page_changed_bindings_for_playbook(*, company_id: str, playbook_id: st
                     WHERE company_id = %s
                       AND playbook_id = %s
                       AND playbook_status = 'stale'
-                      AND cron_pause_reason = 'page_changed'
+                      AND cron_pause_reason = 'PAGE_CHANGED'
                     """,
                     (company_id, playbook_id),
                 )
@@ -6578,8 +6816,10 @@ def mark_recon_run_waiting_data(
     waiting_reason: str,
     waiting_datasets: list[dict],
     collection_job_ids: list[str],
+    execution_run_id: str = "",
     wait_minutes: int = 90,
 ) -> dict | None:
+    run_id = str(execution_run_id or "").strip()
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
@@ -6589,6 +6829,10 @@ def mark_recon_run_waiting_data(
                     UPDATE recon_execution_queue
                     SET status = 'waiting_data',
                         started_at = NULL,
+                        run_context = CASE
+                            WHEN %s = '' THEN run_context
+                            ELSE jsonb_set(run_context, '{execution_run_id}', to_jsonb(%s::text), TRUE)
+                        END,
                         next_retry_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
                         wait_deadline_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
                         waiting_reason = %s,
@@ -6599,6 +6843,8 @@ def mark_recon_run_waiting_data(
                     RETURNING *
                     """,
                     (
+                        run_id,
+                        run_id,
                         max(1, int(wait_minutes or 1)),
                         waiting_reason,
                         json.dumps(waiting_datasets or [], ensure_ascii=False),
@@ -6655,7 +6901,7 @@ def requeue_ready_waiting_recon_runs() -> int:
 
 
 def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
-    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs already failed.
+    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs failed or were cancelled.
 
     Without this, a deterministic browser failure (AUTH_EXPIRED / PAGE_CHANGED etc.) would leave
     the recon job in waiting_data until wait_deadline_at (~90min) before surfacing a generic
@@ -6680,14 +6926,37 @@ def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
                         JOIN LATERAL jsonb_array_elements_text(collection_job_ids) job_id ON TRUE
                         JOIN sync_jobs s ON s.id::text = job_id
                         WHERE q0.status = 'waiting_data'
-                          AND s.job_status = 'failed'
+                          AND s.job_status IN ('failed', 'cancelled')
                         GROUP BY q0.id
                     ) f
                     WHERE q.id = f.queue_id
                       AND q.status = 'waiting_data'
+                    RETURNING q.id, q.company_id, COALESCE(NULLIF(f.failed_error, ''), q.waiting_reason, '浏览器采集失败')
                     """
                 )
-                count = cur.rowcount
+                rows = cur.fetchall() or []
+                for queue_id, company_id, failed_error in rows:
+                    cur.execute(
+                        """
+                        UPDATE execution_runs
+                        SET execution_status = 'failed',
+                            failed_stage = 'data_waiting',
+                            failed_reason = %s,
+                            finished_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE company_id = %s
+                          AND (
+                              run_context_json->>'queue_job_id' = %s
+                              OR id::text = (
+                                  SELECT run_context->>'execution_run_id'
+                                  FROM recon_execution_queue
+                                  WHERE id = %s
+                              )
+                          )
+                        """,
+                        (str(failed_error or "")[:4000], company_id, str(queue_id), queue_id),
+                    )
+                count = len(rows)
                 conn.commit()
                 return count
     except Exception as e:
@@ -6709,9 +6978,32 @@ def fail_expired_waiting_recon_runs() -> int:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND wait_deadline_at <= CURRENT_TIMESTAMP
+                    RETURNING id, company_id, COALESCE(NULLIF(waiting_reason, ''), '采集未就绪')
                     """
                 )
-                count = cur.rowcount
+                rows = cur.fetchall() or []
+                for queue_id, company_id, failed_error in rows:
+                    cur.execute(
+                        """
+                        UPDATE execution_runs
+                        SET execution_status = 'failed',
+                            failed_stage = 'data_waiting',
+                            failed_reason = %s,
+                            finished_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE company_id = %s
+                          AND (
+                              run_context_json->>'queue_job_id' = %s
+                              OR id::text = (
+                                  SELECT run_context->>'execution_run_id'
+                                  FROM recon_execution_queue
+                                  WHERE id = %s
+                              )
+                          )
+                        """,
+                        (str(failed_error or "")[:4000], company_id, str(queue_id), queue_id),
+                    )
+                count = len(rows)
                 conn.commit()
                 return count
     except Exception as e:
@@ -7863,7 +8155,10 @@ def list_browser_collection_records(
                     else:
                         sql += " AND payload ->> %s = %s"
                         params.extend([field_name, str(filter_value)])
-                sql += " ORDER BY biz_date DESC, captured_at DESC, id DESC OFFSET %s"
+                sql += (
+                    " ORDER BY latest_seen_at DESC NULLS LAST, updated_at DESC, "
+                    "captured_at DESC NULLS LAST, id DESC OFFSET %s"
+                )
                 params.append(max(0, offset))
                 if limit is not None:
                     sql += " LIMIT %s"
@@ -10857,12 +11152,17 @@ def mark_handoff_session_status(*, handoff_session_id, status, claimed_by_user_i
             return dict(row) if row else None
 
 
-def set_browser_sync_job_status(*, sync_job_id, status):
+def set_browser_sync_job_status(*, sync_job_id, status, allowed_current_statuses=None):
+    status_guard_sql = ""
+    params = [status, sync_job_id]
+    if allowed_current_statuses:
+        status_guard_sql = " AND job_status = ANY(%s::text[])"
+        params.append(list(allowed_current_statuses))
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE sync_jobs SET job_status=%s, updated_at=now() WHERE id=%s",
-                (status, sync_job_id),
+                f"UPDATE sync_jobs SET job_status=%s, updated_at=now() WHERE id=%s{status_guard_sql}",
+                tuple(params),
             )
             affected = cur.rowcount
             conn.commit()

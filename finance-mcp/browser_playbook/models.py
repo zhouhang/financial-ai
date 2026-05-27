@@ -13,10 +13,13 @@ ActionType = Literal[
     "fill",
     "set_date",
     "wait_for",
+    "wait_ms",
     "extract_text",
     "extract_summary",
+    "select_checkboxes",
     "download",
     "download_history_file",
+    "download_qianniu_export_report",
     "parse_table",
     "assert",
 ]
@@ -63,6 +66,29 @@ class PlaybookStep(BaseModel):
     source: str | None = None
     format: Literal["csv", "xlsx"] | None = None
     download_timeout_ms: int | None = None
+    history_row_selector: str | None = None
+    history_row_selectors: list[str] | None = None
+    history_open_selector: str | None = None
+    history_open_selectors: list[str] | None = None
+    history_close_selector: str | None = None
+    history_close_selectors: list[str] | None = None
+    history_open_timeout_ms: int | None = None
+    history_refresh_close_timeout_ms: int | None = None
+    history_refresh_interval_ms: int | None = None
+    history_completed_status_text: str | None = None
+    history_download_selector: str | None = None
+    duration_ms: int | None = None
+    refresh_interval_ms: int | None = None
+    allowed_labels: list[str] | None = None
+    checked_labels: list[str] | None = None
+    label_selector: str | None = None
+    exact: bool | None = None
+    record_time_as: str | None = None
+    requested_after_from: str | None = None
+    report_type: str | None = None
+    download_button_text: str | None = None
+    refresh_selector: str | None = None
+    request_time_tolerance_seconds: int | None = None
     username_selector: str | None = None
     password_selector: str | None = None
     submit_selector: str | None = None
@@ -103,13 +129,29 @@ class PlaybookStep(BaseModel):
             "extract_text",
             "download",
             "download_history_file",
+            "download_qianniu_export_report",
         }:
             if not str(self.selector or "").strip():
                 raise ValueError(f"{self.action} requires selector")
-        if self.action == "set_date" and self.value_from != "params.biz_date":
-            raise ValueError("set_date must use value_from=params.biz_date")
+        if self.action == "wait_ms" and (self.duration_ms is None or self.duration_ms <= 0):
+            raise ValueError("wait_ms requires positive duration_ms")
+        if self.action == "select_checkboxes":
+            labels = self.checked_labels if self.checked_labels is not None else self.allowed_labels
+            if not str(self.selector or "").strip():
+                raise ValueError("select_checkboxes requires selector")
+            if not labels:
+                raise ValueError("select_checkboxes requires checked_labels or allowed_labels")
+        if self.action == "set_date":
+            has_biz_date_value = "{{params.biz_date}}" in str(self.value or "")
+            if self.value_from != "params.biz_date" and not has_biz_date_value:
+                raise ValueError("set_date must use value_from=params.biz_date or value with {{params.biz_date}}")
         if self.action == "download_history_file" and self.value_from != "params.biz_date":
             raise ValueError("download_history_file must use value_from=params.biz_date")
+        if self.action == "download_qianniu_export_report":
+            if not str(self.requested_after_from or "").strip():
+                raise ValueError("download_qianniu_export_report requires requested_after_from")
+            if not str(self.download_button_text or "").strip():
+                raise ValueError("download_qianniu_export_report requires download_button_text")
         if self.action == "extract_summary" and not self.mapping:
             raise ValueError("extract_summary requires mapping")
         if self.action == "parse_table":

@@ -113,16 +113,28 @@ async def _process_job(job: dict, system_token: str) -> None:
             },
         )
         if result.get("status") == "data_waiting":
-            await recon_queue_waiting_data(
+            run = dict(result.get("run") or {})
+            execution_run_id = str(run.get("id") or "")
+            waiting_result = await recon_queue_waiting_data(
                 system_token,
                 job_id,
                 {
                     "waiting_reason": str(result.get("error") or "browser_collection_pending"),
                     "waiting_datasets": list(result.get("waiting_datasets") or []),
                     "collection_job_ids": [str(v) for v in result.get("collection_job_ids") or [] if str(v)],
+                    "execution_run_id": execution_run_id,
                     "wait_minutes": int(os.getenv("RECON_WAITING_DATA_TIMEOUT_MINUTES", "90")),
                 },
             )
+            if not bool(waiting_result.get("success")):
+                error = str(
+                    waiting_result.get("error")
+                    or waiting_result.get("message")
+                    or "recon_queue_waiting_data 返回失败"
+                )
+                await recon_queue_fail(system_token, job_id, f"waiting_data 更新失败: {error}"[:2000])
+                logger.error("[recon-worker] job_id=%s waiting_data 更新失败: %s", job_id, error)
+                return
             logger.info("[recon-worker] job_id=%s 进入 waiting_data", job_id)
             return
         complete_result = await recon_queue_complete(system_token, job_id)

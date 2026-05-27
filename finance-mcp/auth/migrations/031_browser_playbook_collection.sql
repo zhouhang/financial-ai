@@ -321,7 +321,8 @@ ALTER TABLE public.recon_execution_queue
     -- request finally getting its data. Bumping current_attempt here would conflate the
     -- two and starve retries.
     ADD COLUMN IF NOT EXISTS data_wait_resume_count integer NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS last_data_wait_resumed_at timestamptz;
+    ADD COLUMN IF NOT EXISTS last_data_wait_resumed_at timestamptz,
+    ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT CURRENT_TIMESTAMP;
 
 CREATE INDEX IF NOT EXISTS idx_recon_execution_queue_waiting_data
     ON public.recon_execution_queue (next_retry_at ASC)

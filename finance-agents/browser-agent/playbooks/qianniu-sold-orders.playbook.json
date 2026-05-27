@@ -1,0 +1,269 @@
+{
+  "schema_version": "1.0",
+  "playbook_id": "qianniu-sold-orders",
+  "title": "千牛交易已卖出的宝贝订单导出",
+  "target": {
+    "platform": "qianniu",
+    "business_object": "sold_orders",
+    "timezone": "Asia/Shanghai"
+  },
+  "params_schema": {
+    "required": ["biz_date"],
+    "properties": {
+      "biz_date": {
+        "type": "date",
+        "format": "YYYY-MM-DD"
+      },
+      "login_username": {
+        "type": "string"
+      },
+      "login_password": {
+        "type": "string"
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "open_sold_orders",
+      "action": "navigate",
+      "url": "https://myseller.taobao.com/home.htm/trade-platform/tp/sold",
+      "timeout_ms": 120000
+    },
+    {
+      "id": "login_if_needed",
+      "action": "login_if_needed",
+      "timeout_ms": 120000,
+      "username_selector": "#fm-login-id, input[name='fm-login-id'], input[name='TPL_username'], input[type='text']",
+      "password_selector": "#fm-login-password, input[name='fm-login-password'], input[name='TPL_password'], input[type='password']",
+      "submit_selector": "button[type='submit'], #login-form button, .fm-button, .password-login",
+      "username_value_from": "params.login_username",
+      "password_value_from": "params.login_password",
+      "post_login_wait_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')"
+    },
+    {
+      "id": "set_pay_start_time",
+      "action": "set_date",
+      "selector": "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
+      "value": "{{params.biz_date}} 00:00:00",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "set_pay_end_time",
+      "action": "set_date",
+      "selector": "div.next-form-item:has-text('付款时间') input[placeholder='结束日期']",
+      "value": "{{params.biz_date}} 23:59:59",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "search_orders",
+      "action": "click",
+      "selector": "button.next-btn.next-btn-primary:has-text('搜索订单')",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "wait_order_count",
+      "action": "wait_for",
+      "selector": ".sold_number-order__I8dbF:has-text('共查询到')",
+      "timeout_ms": 60000
+    },
+    {
+      "id": "read_order_count",
+      "action": "extract_summary",
+      "mapping": {
+        "row_count": ".sold_number-order__I8dbF"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "id": "open_export_dialog",
+      "action": "click",
+      "selector": "button.next-btn:has-text('批量导出')",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "wait_export_dialog",
+      "action": "wait_for",
+      "selector": ".next-dialog:has-text('批量导出订单')",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "select_compliant_export_fields",
+      "action": "select_checkboxes",
+      "selector": ".next-dialog:has-text('批量导出订单')",
+      "checked_labels": [
+        "订单编号",
+        "订单状态",
+        "订单创建时间",
+        "店铺ID",
+        "支付单号",
+        "订单付款时间",
+        "总金额",
+        "买家实付金额",
+        "退款金额",
+        "商品标题",
+        "商家编码",
+        "商家备注",
+        "订单关闭原因"
+      ],
+      "timeout_ms": 30000
+    },
+    {
+      "id": "request_report",
+      "action": "click",
+      "selector": ".next-dialog:has-text('批量导出订单') button.next-btn-primary:has-text('生成报表')",
+      "record_time_as": "report_requested_at",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "confirm_sensitive_export_notice",
+      "action": "click",
+      "selector": ".next-dialog:has-text('请您注意') button.next-btn-primary:has-text('确认')",
+      "timeout_ms": 30000
+    },
+    {
+      "id": "wait_report_generation",
+      "action": "wait_ms",
+      "duration_ms": 5000
+    },
+    {
+      "id": "open_export_list",
+      "action": "navigate",
+      "url": "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list",
+      "timeout_ms": 120000
+    },
+    {
+      "id": "wait_export_list_today",
+      "action": "wait_for",
+      "selector": "body:has-text('报表申请时间')",
+      "timeout_ms": 60000
+    },
+    {
+      "id": "download_latest_order_report",
+      "action": "download_qianniu_export_report",
+      "selector": "[class*='order-export_order-block']",
+      "requested_after_from": "extracted.report_requested_at",
+      "report_type": "订单报表",
+      "download_button_text": "下载订单报表",
+      "refresh_interval_ms": 10000,
+      "request_time_tolerance_seconds": 5,
+      "download_timeout_ms": 600000,
+      "timeout_ms": 900000
+    },
+    {
+      "id": "parse_order_report",
+      "action": "parse_table",
+      "source": "last_download",
+      "format": "xlsx"
+    }
+  ],
+  "output": {
+    "record_type": "browser_collection_records",
+    "item_key_fields": ["订单编号"],
+    "columns": [
+      {
+        "name": "订单编号",
+        "type": "string",
+        "required": true,
+        "semantic_name": "订单编号"
+      },
+      {
+        "name": "订单状态",
+        "type": "string",
+        "required": true,
+        "semantic_name": "订单状态"
+      },
+      {
+        "name": "订单创建时间",
+        "type": "date",
+        "required": true,
+        "semantic_name": "订单创建时间"
+      },
+      {
+        "name": "店铺ID",
+        "type": "string",
+        "required": true,
+        "semantic_name": "店铺ID"
+      },
+      {
+        "name": "支付单号",
+        "type": "string",
+        "required": true,
+        "semantic_name": "支付单号"
+      },
+      {
+        "name": "订单付款时间",
+        "type": "date",
+        "required": true,
+        "semantic_name": "订单付款时间"
+      },
+      {
+        "name": "总金额",
+        "type": "decimal",
+        "required": true,
+        "semantic_name": "总金额"
+      },
+      {
+        "name": "买家实付金额",
+        "type": "decimal",
+        "required": true,
+        "semantic_name": "买家实付金额"
+      },
+      {
+        "name": "退款金额",
+        "type": "decimal",
+        "required": true,
+        "semantic_name": "退款金额"
+      },
+      {
+        "name": "商品标题",
+        "type": "string",
+        "required": false,
+        "semantic_name": "商品标题"
+      },
+      {
+        "name": "商家编码",
+        "type": "string",
+        "required": false,
+        "semantic_name": "商家编码"
+      },
+      {
+        "name": "商家备注",
+        "type": "string",
+        "required": false,
+        "semantic_name": "商家备注"
+      },
+      {
+        "name": "订单关闭原因",
+        "type": "string",
+        "required": false,
+        "semantic_name": "订单关闭原因"
+      }
+    ]
+  },
+  "quality_gate": {
+    "date_field": "订单付款时间",
+    "amount_field": "买家实付金额",
+    "summary_step_id": "read_order_count",
+    "row_count_field": "row_count",
+    "amount_total_field": "amount_total",
+    "row_count_equals_summary": true,
+    "amount_sum_equals_summary": false,
+    "amount_precision": 2,
+    "zero_tolerance": true
+  },
+  "accounting_policy": {
+    "date_basis": "千牛已卖出的宝贝付款时间",
+    "amount_sign": "source_signed",
+    "included_business_types": ["已卖出的宝贝订单报表"]
+  },
+  "failure_mapping": {
+    "selector_missing": "PAGE_CHANGED",
+    "auth_redirect": "AUTH_EXPIRED",
+    "risk_verification": "RISK_VERIFICATION",
+    "quality_mismatch": "DATA_MISMATCH"
+  },
+  "auth_check": {
+    "logged_in_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+    "timeout_ms": 8000
+  }
+}
