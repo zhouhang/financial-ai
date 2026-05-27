@@ -3,6 +3,7 @@ import {
   AlertCircle,
   CheckCircle2,
   ClipboardCopy,
+  Eraser,
   Eye,
   Loader2,
   MonitorSmartphone,
@@ -40,6 +41,10 @@ interface BrowserSyncJobResponse {
   detail?: string;
   error?: string;
   message?: string;
+}
+
+interface BrowserSyncJobClearResponse extends BrowserSyncJobResponse {
+  already_cancelled?: boolean;
 }
 
 interface BrowserPlaybookFinalizeResponse {
@@ -121,9 +126,28 @@ function statusLabel(status: string): string {
   return status || '未知';
 }
 
+function browserVerificationJobStatus(source: DataSourceListItem): string {
+  return text(source.browser_verification?.job_status).toLowerCase();
+}
+
+function isManuallyClearedJob(source: DataSourceListItem): boolean {
+  const status = browserVerificationJobStatus(source);
+  return (
+    ['cancelled', 'canceled'].includes(status) &&
+    text(source.browser_verification?.browser_fail_reason) === 'MANUAL_CLEARED'
+  );
+}
+
+function canClearBrowserTask(source: DataSourceListItem): boolean {
+  if (!text(source.browser_verification?.sync_job_id)) return false;
+  return ['pending', 'queued', 'running', 'waiting_human_verification', 'resuming'].includes(
+    browserVerificationJobStatus(source),
+  );
+}
+
 function taskStatusLabel(source: DataSourceListItem): string {
-  const verification = source.browser_verification || {};
-  const jobStatus = text(verification.job_status).toLowerCase();
+  const jobStatus = browserVerificationJobStatus(source);
+  if (isManuallyClearedJob(source)) return '已清除';
   if (jobStatus === 'success' || jobStatus === 'completed') return '成功';
   if (['failed', 'error'].includes(jobStatus)) return '失败';
   if (['cancelled', 'canceled'].includes(jobStatus)) return '已取消';
@@ -138,6 +162,7 @@ function taskStatusClass(label: string): string {
   if (label === '失败' || label === '已取消') return 'bg-red-50 text-red-700';
   if (label === '成功') return 'bg-emerald-50 text-emerald-700';
   if (['运行中', '等待中', '待人工验证', '恢复中'].includes(label)) return 'bg-blue-50 text-blue-700';
+  if (label === '已清除') return 'bg-surface-secondary text-text-secondary';
   return 'bg-surface-secondary text-text-secondary';
 }
 
@@ -516,6 +541,43 @@ export function BrowserPlaybookPanel({
     [authHeaders, authToken, onRegistered, pollRetryJob],
   );
 
+  const clearBrowserTask = useCallback(
+    async (row: BrowserCollectionRow) => {
+      if (!authToken) {
+        setActionError('未登录');
+        return;
+      }
+      const syncJobId = text(row.source.browser_verification?.sync_job_id);
+      if (!syncJobId) {
+        setActionError('缺少浏览器任务ID');
+        return;
+      }
+
+      const actionId = `clear:${syncJobId}`;
+      setActionBusy(actionId);
+      setActionError('');
+      setActionNotice('');
+      try {
+        const response = await fetch(`/api/sync-jobs/${encodeURIComponent(syncJobId)}/clear`, {
+          method: 'POST',
+          headers: authHeaders,
+          body: JSON.stringify({ reason: 'operator cleared stuck browser task' }),
+        });
+        const body = (await response.json().catch(() => ({}))) as BrowserSyncJobClearResponse;
+        if (!response.ok || !body.success) {
+          throw new Error(String(body.detail || body.error || body.message || '浏览器任务清除失败'));
+        }
+        setActionNotice(String(body.message || '当前浏览器任务已清除，可重新下发或等待后续任务执行'));
+        await onRegistered?.();
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : '浏览器任务清除失败');
+      } finally {
+        setActionBusy('');
+      }
+    },
+    [authHeaders, authToken, onRegistered],
+  );
+
   const openTaskDetail = useCallback(
     async (row: BrowserCollectionRow) => {
       setSelectedRow(row);
@@ -648,13 +710,13 @@ export function BrowserPlaybookPanel({
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-border">
-            <table className="min-w-[960px] w-full table-fixed text-sm">
+            <table className="min-w-[1060px] w-full table-fixed text-sm">
               <colgroup>
-                <col className="w-[30%]" />
-                <col className="w-[16%]" />
+                <col className="w-[25%]" />
                 <col className="w-[14%]" />
-                <col className="w-[18%]" />
-                <col className="w-[22%]" />
+                <col className="w-[12%]" />
+                <col className="w-[17%]" />
+                <col className="w-[32%]" />
               </colgroup>
               <thead className="bg-surface-secondary text-left text-text-secondary">
                 <tr>
@@ -684,7 +746,7 @@ export function BrowserPlaybookPanel({
                     <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
                     <td className="px-4 py-3 text-text-secondary">{formatDateTime(row.updatedAt)}</td>
                     <td className="px-4 py-3">
-                      <div className="flex min-w-[204px] items-center gap-2 whitespace-nowrap">
+                      <div className="flex min-w-[272px] items-center gap-2 whitespace-nowrap">
                         <button
                           type="button"
                           onClick={() => void openTaskDetail(row)}
@@ -709,6 +771,22 @@ export function BrowserPlaybookPanel({
                           )}
                           重试
                         </button>
+                        {canClearBrowserTask(row.source) && (
+                          <button
+                            type="button"
+                            onClick={() => void clearBrowserTask(row)}
+                            disabled={Boolean(actionBusy)}
+                            aria-label={`清除任务 ${row.title}`}
+                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-60"
+                          >
+                            {actionBusy === `clear:${text(row.source.browser_verification?.sync_job_id)}` ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Eraser className="h-3.5 w-3.5" />
+                            )}
+                            清除任务
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => void deleteBrowserTask(row)}

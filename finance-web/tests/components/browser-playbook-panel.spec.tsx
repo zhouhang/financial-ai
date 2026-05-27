@@ -95,6 +95,58 @@ describe('BrowserPlaybookPanel', () => {
     expect(deleteButton).toHaveClass('whitespace-nowrap');
   });
 
+  it('手动清除只展示在卡住任务上并将 MANUAL_CLEARED 显示为已清除', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            browser_verification: {
+              sync_job_id: 'sync-waiting-1',
+              job_status: 'waiting_human_verification',
+              updated_at: '2026-05-25T15:31:51+08:00',
+              is_verification: true,
+            },
+          },
+          {
+            ...sources[0],
+            id: 'source-cleared',
+            name: '已清除任务',
+            metadata: { registration_title: '已清除任务' },
+            browser_verification: {
+              sync_job_id: 'sync-cleared-1',
+              job_status: 'cancelled',
+              browser_fail_reason: 'MANUAL_CLEARED',
+              error_message: 'MANUAL_CLEARED: operator cleared stuck browser task',
+              updated_at: '2026-05-25T15:32:51+08:00',
+              is_verification: true,
+            },
+          },
+          {
+            ...sources[0],
+            id: 'source-success',
+            name: '成功任务',
+            metadata: { registration_title: '成功任务' },
+            browser_verification: {
+              sync_job_id: 'sync-success-2',
+              job_status: 'success',
+              completed_at: '2026-05-25T15:33:51+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('待人工验证')).toBeInTheDocument();
+    expect(screen.getByText('已清除')).toBeInTheDocument();
+    expect(screen.getByText('成功')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /清除任务 千牛每日资金账单/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /清除任务 已清除任务/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /清除任务 成功任务/ })).not.toBeInTheDocument();
+  });
+
   it('点击详情加载最新采集数据、playbook 和凭证摘要，并支持复制 playbook', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
@@ -336,6 +388,52 @@ describe('BrowserPlaybookPanel', () => {
     await waitFor(() =>
       expect(screen.getByText(/DATA_MISMATCH: 行数与日汇总不一致: 明细 23 行，日汇总 24 行/)).toBeInTheDocument(),
     );
+  });
+
+  it('手动清除浏览器任务会调用清除接口并刷新列表', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/sync-jobs/sync-waiting-1/clear') {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        expect(JSON.parse(String(init?.body))).toEqual({ reason: 'operator cleared stuck browser task' });
+        return jsonResponse({
+          success: true,
+          job: {
+            id: 'sync-waiting-1',
+            job_status: 'cancelled',
+            browser_fail_reason: 'MANUAL_CLEARED',
+          },
+          message: '当前浏览器任务已清除，可重新下发或等待后续任务执行',
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            browser_verification: {
+              sync_job_id: 'sync-waiting-1',
+              job_status: 'waiting_human_verification',
+              updated_at: '2026-05-25T15:31:51+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+        onRegistered={onRegistered}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /清除任务 千牛每日资金账单/ }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('当前浏览器任务已清除，可重新下发或等待后续任务执行')).toBeInTheDocument();
   });
 
   it('删除浏览器任务会调用数据源删除接口并刷新列表', async () => {
