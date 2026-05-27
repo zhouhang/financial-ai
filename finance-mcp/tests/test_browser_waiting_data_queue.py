@@ -78,5 +78,5 @@ def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_id
     sql = "\n".join(cursor.sql)
     assert "status = 'waiting_data'" in sql
     assert "jsonb_array_elements_text(collection_job_ids)" in sql
-    assert "s.job_status = 'failed'" in sql
+    assert "s.job_status IN ('failed', 'cancelled')" in sql
     assert "s.error_message" in sql

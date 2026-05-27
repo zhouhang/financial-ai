@@ -6801,7 +6801,7 @@ def requeue_ready_waiting_recon_runs() -> int:
 
 
 def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
-    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs already failed.
+    """Fast-fail waiting_data recon jobs whose referenced browser sync_jobs failed or were cancelled.
 
     Without this, a deterministic browser failure (AUTH_EXPIRED / PAGE_CHANGED etc.) would leave
     the recon job in waiting_data until wait_deadline_at (~90min) before surfacing a generic
@@ -6826,7 +6826,7 @@ def fail_waiting_recon_runs_with_failed_collection_jobs() -> int:
                         JOIN LATERAL jsonb_array_elements_text(collection_job_ids) job_id ON TRUE
                         JOIN sync_jobs s ON s.id::text = job_id
                         WHERE q0.status = 'waiting_data'
-                          AND s.job_status = 'failed'
+                          AND s.job_status IN ('failed', 'cancelled')
                         GROUP BY q0.id
                     ) f
                     WHERE q.id = f.queue_id
