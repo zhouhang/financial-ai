@@ -5474,39 +5474,44 @@ def update_unified_sync_job_status(
     error_message: str = "",
     checkpoint_after: dict | None = None,
     finish_job: bool = False,
+    allowed_current_statuses: tuple[str, ...] | None = None,
 ) -> dict | None:
     """更新同步任务状态。"""
+    status_guard_sql = ""
+    params: list[Any] = [
+        job_status,
+        error_message,
+        psycopg2.extras.Json(checkpoint_after or {}),
+        psycopg2.extras.Json(checkpoint_after or {}),
+        finish_job,
+        sync_job_id,
+    ]
+    if allowed_current_statuses:
+        status_guard_sql = " AND job_status = ANY(%s)"
+        params.append(tuple(allowed_current_statuses))
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
+                sql = """
                     UPDATE sync_jobs
                     SET job_status = %s,
                         error_message = %s,
                         checkpoint_after = CASE
-                            WHEN %s::jsonb = '{}'::jsonb THEN checkpoint_after
+                            WHEN %s::jsonb = '{{}}'::jsonb THEN checkpoint_after
                             ELSE %s::jsonb
                         END,
                         completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE completed_at END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
+                    {status_guard}
                     RETURNING id, company_id, data_source_id, trigger_mode, resource_key,
                               window_start, window_end, idempotency_key, job_status,
                               request_payload, checkpoint_before, checkpoint_after,
                               active_snapshot_id, published_snapshot_id, current_attempt,
                               error_message, started_at, completed_at, created_at, updated_at
-                    """,
-                    (
-                        job_status,
-                        error_message,
-                        psycopg2.extras.Json(checkpoint_after or {}),
-                        psycopg2.extras.Json(checkpoint_after or {}),
-                        finish_job,
-                        sync_job_id,
-                    ),
-                )
+                    """.format(status_guard=status_guard_sql)
+                cur.execute(sql, tuple(params))
                 row = cur.fetchone()
                 conn.commit()
                 return _normalize_record(dict(row)) if row else None
@@ -6255,13 +6260,19 @@ def get_playbook(*, company_id: str, playbook_id: str, version: str | None = Non
         return {}
 
 
-def mark_browser_sync_job_success(*, sync_job_id: str, summary: dict) -> dict | None:
+def mark_browser_sync_job_success(
+    *,
+    sync_job_id: str,
+    summary: dict,
+    allowed_current_statuses: tuple[str, ...] | None = None,
+) -> dict | None:
     row = update_unified_sync_job_status(
         sync_job_id=sync_job_id,
         job_status="success",
         error_message="",
         checkpoint_after={"browser_collection_summary": summary or {}},
         finish_job=True,
+        allowed_current_statuses=allowed_current_statuses,
     )
     if row:
         mark_browser_binding_collection_seen(sync_job_id=sync_job_id)
@@ -6395,6 +6406,7 @@ def mark_browser_sync_job_failed(
     retryable: bool = False,
     max_attempts: int = 3,
     retry_delay_seconds: int = 1800,
+    allowed_current_statuses: tuple[str, ...] | None = None,
 ) -> dict | None:
     """Terminal or transient browser sync_job failure handler.
 
@@ -6420,12 +6432,26 @@ def mark_browser_sync_job_failed(
     else:
         prefixed_error = canonical
 
+    status_guard_sql = ""
+    params: list[Any] = [
+        bool(retryable), int(max_attempts),
+        canonical,
+        prefixed_error,
+        int(max_attempts),
+        bool(retryable), int(max_attempts), int(retry_delay_seconds),
+        bool(retryable), int(max_attempts),
+        sync_job_id,
+    ]
+    if allowed_current_statuses:
+        status_guard_sql = " AND job_status = ANY(%s)"
+        params.append(tuple(allowed_current_statuses))
+
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE sync_jobs
                     SET job_status = CASE
                             WHEN %s = TRUE AND COALESCE(current_attempt, 0) < %s THEN 'pending'
@@ -6444,17 +6470,10 @@ def mark_browser_sync_job_failed(
                         END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
+                    {status_guard_sql}
                     RETURNING *
                     """,
-                    (
-                        bool(retryable), int(max_attempts),
-                        canonical,
-                        prefixed_error,
-                        int(max_attempts),
-                        bool(retryable), int(max_attempts), int(retry_delay_seconds),
-                        bool(retryable), int(max_attempts),
-                        sync_job_id,
-                    ),
+                    tuple(params),
                 )
                 row = cur.fetchone()
                 conn.commit()

@@ -9785,8 +9785,19 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
         "capture_file_count": int(file_summary.get("inserted_count") or 0),
     }
     row = auth_db.mark_browser_sync_job_success(
-        sync_job_id=sync_job_id, summary=final_summary
+        sync_job_id=sync_job_id,
+        summary=final_summary,
+        allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
     )
+    if not row:
+        latest_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+        latest_status = _safe_text(latest_job.get("job_status")).lower()
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(latest_job),
+            "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
+        }
     if dataset_id:
         auth_db.update_unified_data_source_dataset_health(
             dataset_id=dataset_id,
@@ -9827,7 +9838,17 @@ async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, 
         retryable=retryable,
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay_seconds,
+        allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
     )
+    if not row:
+        latest_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+        latest_status = _safe_text(latest_job.get("job_status")).lower()
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(latest_job),
+            "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
+        }
     return {"success": True, "job": row}
 
 
