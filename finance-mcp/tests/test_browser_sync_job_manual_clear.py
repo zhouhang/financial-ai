@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(FINANCE_MCP_ROOT))
 
 from auth import db as auth_db
+from tools import data_sources
 
 
 class FakeCursor:
@@ -156,3 +158,195 @@ def test_get_browser_sync_job_with_source_filters_company_and_source_kind(monkey
     assert "JOIN data_sources ds" in sql
     assert "s.id = %s" in sql
     assert "s.company_id = %s" in sql
+
+
+def test_data_source_clear_browser_sync_job_clears_valid_browser_job(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-001", "id": "user-001"},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job_with_data_source",
+        lambda **kwargs: {
+            "id": "sync-001",
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "waiting_human_verification",
+            "source_kind": "browser_playbook",
+        },
+    )
+
+    def fake_clear(**kwargs):
+        calls.append({"clear": kwargs})
+        return {
+            "id": kwargs["sync_job_id"],
+            "company_id": kwargs["company_id"],
+            "data_source_id": "source-001",
+            "job_status": "cancelled",
+            "browser_fail_reason": "MANUAL_CLEARED",
+            "error_message": "MANUAL_CLEARED: operator cleared stuck browser task",
+        }
+
+    monkeypatch.setattr(auth_db, "clear_browser_sync_job_manually", fake_clear)
+    monkeypatch.setattr(
+        auth_db,
+        "cancel_open_handoff_sessions_for_sync_job",
+        lambda **kwargs: calls.append({"handoff": kwargs}) or 1,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "data_source_clear_browser_sync_job",
+            {"auth_token": "token-1", "sync_job_id": "sync-001"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["job"]["job_status"] == "cancelled"
+    assert result["job"]["browser_fail_reason"] == "MANUAL_CLEARED"
+    assert result["message"] == "当前浏览器任务已清除，可重新下发或等待后续任务执行"
+    assert calls == [
+        {
+            "clear": {
+                "sync_job_id": "sync-001",
+                "company_id": "company-001",
+                "reason": "operator cleared stuck browser task",
+            }
+        },
+        {
+            "handoff": {
+                "sync_job_id": "sync-001",
+                "reason": "operator cleared stuck browser task",
+            }
+        },
+    ]
+
+
+def test_data_source_clear_browser_sync_job_rejects_non_browser_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-001", "id": "user-001"},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job_with_data_source",
+        lambda **kwargs: {
+            "id": "sync-001",
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "pending",
+            "source_kind": "database",
+        },
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "data_source_clear_browser_sync_job",
+            {"auth_token": "token-1", "sync_job_id": "sync-001"},
+        )
+    )
+
+    assert result == {"success": False, "error": "只能清除浏览器采集任务"}
+
+
+def test_data_source_clear_browser_sync_job_rejects_terminal_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-001", "id": "user-001"},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job_with_data_source",
+        lambda **kwargs: {
+            "id": "sync-001",
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "success",
+            "source_kind": "browser_playbook",
+        },
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "data_source_clear_browser_sync_job",
+            {"auth_token": "token-1", "sync_job_id": "sync-001"},
+        )
+    )
+
+    assert result == {"success": False, "error": "当前任务状态不允许清除: success"}
+
+
+def test_browser_worker_complete_does_not_overwrite_cancelled_job(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "resource_key": "browser@1",
+            "job_status": "cancelled",
+            "browser_fail_reason": "MANUAL_CLEARED",
+            "error_message": "MANUAL_CLEARED: operator cleared stuck browser task",
+            "request_payload": {"dataset_id": "dataset-001", "biz_date": "2026-05-20"},
+        },
+    )
+    success_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "mark_browser_sync_job_success",
+        lambda **kwargs: success_calls.append(kwargs) or {"id": kwargs["sync_job_id"]},
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {"worker_token": "worker", "sync_job_id": "sync-001", "records": []},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["ignored"] is True
+    assert result["job"]["job_status"] == "cancelled"
+    assert success_calls == []
+
+
+def test_browser_worker_fail_does_not_overwrite_cancelled_job(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "cancelled",
+            "browser_fail_reason": "MANUAL_CLEARED",
+            "error_message": "MANUAL_CLEARED: operator cleared stuck browser task",
+        },
+    )
+    fail_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "mark_browser_sync_job_failed",
+        lambda **kwargs: fail_calls.append(kwargs) or {"id": kwargs["sync_job_id"]},
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_fail",
+            {"worker_token": "worker", "sync_job_id": "sync-001", "fail_reason": "PAGE_CHANGED"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["ignored"] is True
+    assert result["job"]["job_status"] == "cancelled"
+    assert fail_calls == []

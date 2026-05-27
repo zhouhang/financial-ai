@@ -60,6 +60,20 @@ BROWSER_COLLECTION_ASYNC_JOB_STATUSES = {
     "waiting_human_verification",
     "resuming",
 }
+BROWSER_SYNC_CLEARABLE_STATUSES = {
+    "pending",
+    "queued",
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_SYNC_WORKER_MUTABLE_STATUSES = {
+    "running",
+    "waiting_human_verification",
+    "resuming",
+}
+BROWSER_SYNC_MANUAL_CLEAR_DEFAULT_REASON = "operator cleared stuck browser task"
+BROWSER_SYNC_MANUAL_CLEAR_MESSAGE = "当前浏览器任务已清除，可重新下发或等待后续任务执行"
 
 SOURCE_KINDS = {
     "platform_oauth",
@@ -5831,6 +5845,19 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_clear_browser_sync_job",
+            description="人工清除卡住的 browser_playbook 同步任务；只取消当前 sync_job，不删除数据源配置。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "sync_job_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["auth_token", "sync_job_id"],
+            },
+        ),
+        Tool(
             name="data_source_get_sync_job",
             description="查询单个同步任务。",
             inputSchema={
@@ -6115,6 +6142,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_scheduler_list_collection_plans(arguments)
         if name == "data_source_trigger_dataset_collection":
             return await _handle_data_source_trigger_dataset_collection(arguments)
+        if name == "data_source_clear_browser_sync_job":
+            return await _handle_data_source_clear_browser_sync_job(arguments)
         if name == "data_source_get_sync_job":
             return await _handle_data_source_get_sync_job(arguments)
         if name == "data_source_list_sync_jobs":
@@ -9157,6 +9186,64 @@ async def _trigger_dataset_collection_resolved(
     }
 
 
+async def _handle_data_source_clear_browser_sync_job(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    sync_job_id = _safe_text(arguments.get("sync_job_id"))
+    if not sync_job_id:
+        return {"success": False, "error": "sync_job_id 不能为空"}
+
+    job = auth_db.get_sync_job_with_data_source(
+        sync_job_id=sync_job_id,
+        company_id=company_id,
+    )
+    if not job:
+        return {"success": False, "error": "同步任务不存在"}
+    if _safe_text(job.get("source_kind")) != "browser_playbook":
+        return {"success": False, "error": "只能清除浏览器采集任务"}
+
+    current_status = _safe_text(job.get("job_status")).lower()
+    if (
+        current_status == "cancelled"
+        and _safe_text(job.get("browser_fail_reason")) == "MANUAL_CLEARED"
+    ):
+        return {
+            "success": True,
+            "already_cancelled": True,
+            "job": _attach_aliases_to_job(job),
+            "message": BROWSER_SYNC_MANUAL_CLEAR_MESSAGE,
+        }
+    if current_status not in BROWSER_SYNC_CLEARABLE_STATUSES:
+        return {
+            "success": False,
+            "error": f"当前任务状态不允许清除: {current_status or 'unknown'}",
+        }
+
+    reason = _safe_text(arguments.get("reason")) or BROWSER_SYNC_MANUAL_CLEAR_DEFAULT_REASON
+    cleared_job = auth_db.clear_browser_sync_job_manually(
+        sync_job_id=sync_job_id,
+        company_id=company_id,
+        reason=reason,
+    )
+    if not cleared_job:
+        latest_job = auth_db.get_sync_job_with_data_source(
+            sync_job_id=sync_job_id,
+            company_id=company_id,
+        )
+        latest_status = _safe_text((latest_job or {}).get("job_status")).lower()
+        return {
+            "success": False,
+            "error": f"当前任务状态不允许清除: {latest_status or 'unknown'}",
+        }
+
+    auth_db.cancel_open_handoff_sessions_for_sync_job(sync_job_id=sync_job_id, reason=reason)
+    return {
+        "success": True,
+        "job": _attach_aliases_to_job(cleared_job),
+        "message": BROWSER_SYNC_MANUAL_CLEAR_MESSAGE,
+    }
+
+
 async def _handle_data_source_get_sync_job(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -9623,6 +9710,15 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
         return {"success": False, "error": "missing sync_job_id"}
 
     job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    current_status = _safe_text(job.get("job_status")).lower()
+    if current_status not in BROWSER_SYNC_WORKER_MUTABLE_STATUSES:
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(job),
+            "message": f"browser sync_job already left active state: {current_status or 'unknown'}",
+        }
+
     company_id = str(job.get("company_id") or "")
     data_source_id = str(job.get("data_source_id") or "")
     resource_key = str(job.get("resource_key") or "")
@@ -9709,6 +9805,16 @@ async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, 
     sync_job_id = str(arguments.get("sync_job_id") or "").strip()
     if not sync_job_id:
         return {"success": False, "error": "missing sync_job_id"}
+    job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+    current_status = _safe_text(job.get("job_status")).lower()
+    if current_status not in BROWSER_SYNC_WORKER_MUTABLE_STATUSES:
+        return {
+            "success": True,
+            "ignored": True,
+            "job": _attach_aliases_to_job(job),
+            "message": f"browser sync_job already left active state: {current_status or 'unknown'}",
+        }
+
     fail_reason = str(arguments.get("fail_reason") or "OTHER").strip()
     error_message = str(arguments.get("error_message") or "")
     retryable = bool(arguments.get("retryable", False))
