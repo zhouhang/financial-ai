@@ -336,3 +336,86 @@ def test_browser_playbook_detail_route_returns_safe_task_detail(monkeypatch) -> 
         "password_saved": True,
     }
     assert "secret" not in str(body)
+
+
+def test_clear_browser_sync_job_route_dispatches_mcp_wrapper(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_clear(
+        auth_token: str,
+        sync_job_id: str,
+        *,
+        reason: str = "",
+        mode: str = "",
+    ):
+        calls.append(
+            {
+                "auth_token": auth_token,
+                "sync_job_id": sync_job_id,
+                "reason": reason,
+                "mode": mode,
+            }
+        )
+        return {
+            "success": True,
+            "mode": "real",
+            "job": {
+                "id": sync_job_id,
+                "job_status": "cancelled",
+                "browser_fail_reason": "MANUAL_CLEARED",
+            },
+            "message": "当前浏览器任务已清除，可重新下发或等待后续任务执行",
+        }
+
+    monkeypatch.setattr(api, "data_source_clear_browser_sync_job", fake_clear)
+
+    response = _client().post(
+        "/sync-jobs/sync-001/clear",
+        headers={"Authorization": "Bearer token-1"},
+        json={"reason": "dev cleanup"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "auth_token": "token-1",
+            "sync_job_id": "sync-001",
+            "reason": "dev cleanup",
+            "mode": "",
+        }
+    ]
+    assert response.json()["success"] is True
+    assert response.json()["job"]["job_status"] == "cancelled"
+    assert response.json()["message"] == "当前浏览器任务已清除，可重新下发或等待后续任务执行"
+
+
+def test_clear_browser_sync_job_route_requires_authorization(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_clear(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(api, "data_source_clear_browser_sync_job", fake_clear)
+
+    response = _client().post("/sync-jobs/sync-001/clear", json={})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "未提供认证 token，请先登录"}
+    assert calls == []
+
+
+def test_clear_browser_sync_job_route_returns_400_when_wrapper_fails(monkeypatch) -> None:
+    async def fake_clear(*args, **kwargs):
+        return {"success": False, "error": "当前任务状态不允许清除: success"}
+
+    monkeypatch.setattr(api, "data_source_clear_browser_sync_job", fake_clear)
+
+    response = _client().post(
+        "/sync-jobs/sync-001/clear",
+        headers={"Authorization": "Bearer token-1"},
+        json={},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "当前任务状态不允许清除: success"}

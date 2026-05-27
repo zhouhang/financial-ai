@@ -17,6 +17,7 @@ from starlette.responses import RedirectResponse
 
 from tools.mcp_client import (
     data_source_authorize,
+    data_source_clear_browser_sync_job,
     data_source_finalize_browser_playbook_registration,
     data_source_register_browser_collection,
     data_source_register_browser_playbook,
@@ -514,6 +515,11 @@ class BrowserPlaybookFinalizeResponse(BaseModel):
     browser_fail_reason: str = ""
     error_message: str = ""
     message: str = ""
+
+
+class DataSourceSyncJobClearRequest(BaseModel):
+    reason: str = ""
+    mode: str = ""
 
 
 class DataSourceSyncJobResponse(BaseModel):
@@ -1315,6 +1321,36 @@ async def get_sync_job(
         job=result.get("job"),
         reused=result.get("reused"),
         message=str(result.get("message") or ""),
+    )
+
+
+@router.post("/sync-jobs/{sync_job_id}/clear", response_model=DataSourceSyncJobResponse)
+async def clear_sync_job(
+    sync_job_id: str,
+    body: DataSourceSyncJobClearRequest | None = None,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    payload = body or DataSourceSyncJobClearRequest()
+    result = await data_source_clear_browser_sync_job(
+        auth_token,
+        sync_job_id,
+        reason=payload.reason,
+        mode=payload.mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "清除浏览器任务失败"))
+    job = result.get("job") or {}
+    return DataSourceSyncJobResponse(
+        success=True,
+        mode=str(result.get("mode") or payload.mode or "mock"),
+        source_id=str(job.get("source_id") or job.get("data_source_id") or ""),
+        job=result.get("job"),
+        reused=result.get("reused"),
+        message=str(result.get("message") or "当前浏览器任务已清除，可重新下发或等待后续任务执行"),
     )
 
 
