@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,7 @@ def test_clear_browser_sync_job_marks_active_job_cancelled(monkeypatch) -> None:
     assert row["job_status"] == "cancelled"
     assert row["browser_fail_reason"] == "MANUAL_CLEARED"
     sql = "\n".join(cursor.sql)
+    assert "pg_advisory_xact_lock(hashtext(%s))" in sql
     assert "UPDATE sync_jobs" in sql
     assert "job_status = 'cancelled'" in sql
     assert "browser_fail_reason = 'MANUAL_CLEARED'" in sql
@@ -112,6 +114,35 @@ def test_clear_browser_sync_job_marks_active_job_cancelled(monkeypatch) -> None:
     assert "ds.source_kind = 'browser_playbook'" in sql
     assert cursor.params[-1][-2:] == ("sync-001", "company-001")
     assert manager.conn.committed is True
+
+
+def test_guard_browser_sync_job_worker_active_uses_status_guard(monkeypatch) -> None:
+    cursor = FakeCursor(
+        rows=[
+            {
+                "id": "sync-001",
+                "company_id": "company-001",
+                "data_source_id": "source-001",
+                "job_status": "running",
+            }
+        ]
+    )
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    row = auth_db.guard_browser_sync_job_worker_active(
+        sync_job_id="sync-001",
+        allowed_current_statuses=("running", "waiting_human_verification", "resuming"),
+    )
+
+    assert row is not None
+    assert row["job_status"] == "running"
+    sql = "\n".join(cursor.sql)
+    assert "UPDATE sync_jobs" in sql
+    assert "job_status = ANY(%s::text[])" in sql
+    assert cursor.params[-1][-2:] == (
+        "sync-001",
+        ["running", "waiting_human_verification", "resuming"],
+    )
 
 
 def test_clear_related_handoff_sessions_marks_non_final_sessions_cancelled(monkeypatch) -> None:
@@ -341,13 +372,19 @@ def test_mark_browser_sync_job_success_uses_mutable_status_guard(monkeypatch) ->
     assert row is not None
     sql = "\n".join(cursor.sql)
     assert "UPDATE sync_jobs" in sql
-    assert "job_status = ANY(%s::text[])" in sql
+    assert "job_status IN (%s, %s, %s)" in sql
     flattened_params = [item for params in cursor.params for item in params]
-    assert ["running", "waiting_human_verification", "resuming"] in flattened_params
+    assert flattened_params[-3:] == ["running", "waiting_human_verification", "resuming"]
 
 
 def test_browser_worker_complete_ignores_when_guarded_success_write_loses_race(monkeypatch) -> None:
     monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "browser_sync_job_transition_lock",
+        lambda sync_job_id: nullcontext(),
+        raising=False,
+    )
     jobs = [
         {
             "id": "sync-001",
@@ -376,8 +413,32 @@ def test_browser_worker_complete_ignores_when_guarded_success_write_loses_race(m
     monkeypatch.setattr(auth_db, "get_unified_sync_job_by_id", fake_get_job)
     monkeypatch.setattr(
         auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        auth_db,
         "get_shop_runtime_binding_for_source",
         lambda **kwargs: {"shop_id": "shop-001", "playbook_id": "playbook-001"},
+    )
+    record_calls: list[dict[str, Any]] = []
+    file_calls: list[dict[str, Any]] = []
+    schema_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "upsert_browser_collection_records",
+        lambda **kwargs: record_calls.append(kwargs) or {"inserted_count": 1},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "insert_browser_capture_files",
+        lambda **kwargs: file_calls.append(kwargs) or {"inserted_count": 1},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "update_unified_data_source_dataset_schema_columns",
+        lambda **kwargs: schema_calls.append(kwargs) or {"id": kwargs["dataset_id"]},
     )
     monkeypatch.setattr(
         auth_db,
@@ -388,7 +449,12 @@ def test_browser_worker_complete_ignores_when_guarded_success_write_loses_race(m
     result = asyncio.run(
         data_sources.handle_tool_call(
             "browser_sync_job_complete",
-            {"worker_token": "worker", "sync_job_id": "sync-001", "records": []},
+            {
+                "worker_token": "worker",
+                "sync_job_id": "sync-001",
+                "records": [{"item_key": "B1", "payload": {"bill_no": "B1"}}],
+                "capture_files": [{"storage_path": "/tmp/capture.csv"}],
+            },
         )
     )
 
@@ -396,9 +462,88 @@ def test_browser_worker_complete_ignores_when_guarded_success_write_loses_race(m
     assert result["ignored"] is True
     assert result["job"]["job_status"] == "cancelled"
     assert result["message"] == "browser sync_job already left active state: cancelled"
-    assert success_calls[0]["allowed_current_statuses"] == tuple(
-        data_sources.BROWSER_SYNC_WORKER_MUTABLE_STATUSES
+    assert record_calls == []
+    assert file_calls == []
+    assert schema_calls == []
+    assert success_calls == []
+
+
+def test_browser_worker_complete_holds_transition_lock_around_side_effects(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    in_lock = {"value": False}
+    observed: list[str] = []
+
+    class FakeLock:
+        def __enter__(self):
+            in_lock["value"] = True
+            observed.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            observed.append("exit")
+            in_lock["value"] = False
+            return False
+
+    monkeypatch.setattr(
+        auth_db,
+        "browser_sync_job_transition_lock",
+        lambda sync_job_id: FakeLock(),
+        raising=False,
     )
+    monkeypatch.setattr(
+        auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "resource_key": "browser@1",
+            "job_status": "running",
+            "request_payload": {"dataset_id": "dataset-001", "biz_date": "2026-05-20"},
+        },
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kwargs: {
+            "id": kwargs["sync_job_id"],
+            "job_status": "running",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda **kwargs: {"shop_id": "shop-001", "playbook_id": "playbook-001"},
+    )
+
+    def fake_upsert(**kwargs):
+        assert in_lock["value"] is True
+        observed.append("upsert")
+        return {"inserted_count": 1}
+
+    def fake_success(**kwargs):
+        assert in_lock["value"] is True
+        observed.append("success")
+        return {"id": kwargs["sync_job_id"], "job_status": "success", "completed_at": "2026-05-20"}
+
+    monkeypatch.setattr(auth_db, "upsert_browser_collection_records", fake_upsert)
+    monkeypatch.setattr(auth_db, "mark_browser_sync_job_success", fake_success)
+    monkeypatch.setattr(auth_db, "update_unified_data_source_dataset_health", lambda **kwargs: None)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {
+                "worker_token": "worker",
+                "sync_job_id": "sync-001",
+                "records": [{"item_key": "B1", "payload": {"bill_no": "B1"}}],
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert observed == ["enter", "upsert", "success", "exit"]
 
 
 def test_browser_worker_fail_does_not_overwrite_cancelled_job(monkeypatch) -> None:
@@ -435,6 +580,217 @@ def test_browser_worker_fail_does_not_overwrite_cancelled_job(monkeypatch) -> No
     assert fail_calls == []
 
 
+def test_browser_handoff_create_does_not_overwrite_cancelled_job(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job",
+        lambda **kwargs: {
+            "id": kwargs["sync_job_id"],
+            "job_status": "cancelled",
+            "browser_fail_reason": "MANUAL_CLEARED",
+            "request_payload": {"params": {}},
+        },
+    )
+    insert_calls: list[dict[str, Any]] = []
+    status_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "insert_handoff_session",
+        lambda **kwargs: insert_calls.append(kwargs) or {"id": "handoff-001", "status": "pending"},
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "set_browser_sync_job_status",
+        lambda **kwargs: status_calls.append(kwargs) or 1,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_handoff_session_create",
+            {
+                "worker_token": "worker",
+                "company_id": "company-001",
+                "sync_job_id": "sync-001",
+                "agent_id": "agent-001",
+                "profile_key": "shop-001",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["ignored"] is True
+    assert result["job"]["job_status"] == "cancelled"
+    assert insert_calls == []
+    assert status_calls == []
+
+
+def test_browser_handoff_create_uses_guarded_sync_status_transition(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job",
+        lambda **kwargs: {
+            "id": kwargs["sync_job_id"],
+            "job_status": "running",
+            "request_payload": {"params": {}},
+        },
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "insert_handoff_session",
+        lambda **kwargs: {"id": "handoff-001", "status": "pending"},
+    )
+    status_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "set_browser_sync_job_status",
+        lambda **kwargs: status_calls.append(kwargs) or 1,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_handoff_session_create",
+            {
+                "worker_token": "worker",
+                "company_id": "company-001",
+                "sync_job_id": "sync-001",
+                "agent_id": "agent-001",
+                "profile_key": "shop-001",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["handoff_session_id"] == "handoff-001"
+    assert status_calls == [
+        {
+            "sync_job_id": "sync-001",
+            "status": "waiting_human_verification",
+            "allowed_current_statuses": ("running", "resuming"),
+        }
+    ]
+
+
+def test_browser_handoff_resume_uses_guarded_sync_status_transition(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_handoff_row_for_token",
+        lambda token: (
+            {
+                "id": "handoff-001",
+                "sync_job_id": "sync-001",
+                "data_source_id": "source-001",
+                "status": "active",
+                "agent_id": "agent-001",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "transition_handoff_session_status",
+        lambda **kwargs: {
+            "id": "handoff-001",
+            "sync_job_id": "sync-001",
+            "data_source_id": "source-001",
+            "status": kwargs["status"],
+            "agent_id": "agent-001",
+        },
+    )
+    status_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "set_browser_sync_job_status",
+        lambda **kwargs: status_calls.append(kwargs) or 0,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_handoff_session_event",
+            {
+                "token": "handoff-token",
+                "event_type": "resume_requested",
+                "status": "resuming",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert status_calls == [
+        {
+            "sync_job_id": "sync-001",
+            "status": "resuming",
+            "allowed_current_statuses": ("waiting_human_verification", "resuming"),
+        }
+    ]
+
+
+def test_browser_handoff_resume_does_not_overwrite_cancelled_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_handoff_row_for_token",
+        lambda token: (
+            {
+                "id": "handoff-001",
+                "sync_job_id": "sync-001",
+                "data_source_id": "source-001",
+                "status": "active",
+                "agent_id": "agent-001",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "transition_handoff_session_status",
+        lambda **kwargs: {
+            "id": "handoff-001",
+            "sync_job_id": "sync-001",
+            "data_source_id": "source-001",
+            "status": kwargs["status"],
+            "agent_id": "agent-001",
+        },
+    )
+    status_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "set_browser_sync_job_status",
+        lambda **kwargs: status_calls.append(kwargs) or 0,
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job",
+        lambda **kwargs: {
+            "id": kwargs["sync_job_id"],
+            "job_status": "cancelled",
+            "browser_fail_reason": "MANUAL_CLEARED",
+        },
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_handoff_session_event",
+            {
+                "token": "handoff-token",
+                "event_type": "resume_requested",
+                "status": "resuming",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["ignored"] is True
+    assert result["job"]["job_status"] == "cancelled"
+    assert status_calls == [
+        {
+            "sync_job_id": "sync-001",
+            "status": "resuming",
+            "allowed_current_statuses": ("waiting_human_verification", "resuming"),
+        }
+    ]
+
+
 def test_mark_browser_sync_job_failed_uses_mutable_status_guard(monkeypatch) -> None:
     cursor = FakeCursor(
         rows=[
@@ -459,9 +815,9 @@ def test_mark_browser_sync_job_failed_uses_mutable_status_guard(monkeypatch) -> 
     assert row is not None
     sql = "\n".join(cursor.sql)
     assert "UPDATE sync_jobs" in sql
-    assert "job_status = ANY(%s::text[])" in sql
+    assert "job_status IN (%s, %s, %s)" in sql
     flattened_params = [item for params in cursor.params for item in params]
-    assert ["running", "waiting_human_verification", "resuming"] in flattened_params
+    assert flattened_params[-3:] == ["running", "waiting_human_verification", "resuming"]
 
 
 def test_browser_worker_fail_ignores_when_guarded_failed_write_loses_race(monkeypatch) -> None:

@@ -26,6 +26,9 @@ class FakeCursor:
         self.sql.append(sql)
         self.params.append(params or ())
 
+    def fetchall(self) -> list[tuple[str, str, str]]:
+        return [("queue-001", "company-001", "AGENT_INTERRUPTED: browser-agent restarted")]
+
 
 class FakeConn:
     def __init__(self, cursor: FakeCursor) -> None:
@@ -67,6 +70,26 @@ def test_requeue_ready_waiting_requires_non_empty_collection_jobs(monkeypatch) -
     # Resume metadata must be bumped independently of business retry budget.
     assert "data_wait_resume_count" in sql
     assert "last_data_wait_resumed_at" in sql
+    assert "updated_at = CURRENT_TIMESTAMP" in sql
+
+
+def test_mark_waiting_data_persists_collection_job_ids_and_timestamp(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.mark_recon_run_waiting_data(
+        job_id="queue-001",
+        waiting_reason="browser_collection_pending",
+        waiting_datasets=[{"dataset_id": "dataset-001"}],
+        collection_job_ids=["sync-001"],
+        wait_minutes=90,
+    )
+
+    sql = "\n".join(cursor.sql)
+    assert "status = 'waiting_data'" in sql
+    assert "jsonb_set(run_context, '{execution_run_id}'" in sql
+    assert "collection_job_ids = %s::jsonb" in sql
+    assert "updated_at = CURRENT_TIMESTAMP" in sql
 
 
 def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_ids(monkeypatch) -> None:
@@ -80,3 +103,5 @@ def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_id
     assert "jsonb_array_elements_text(collection_job_ids)" in sql
     assert "s.job_status IN ('failed', 'cancelled')" in sql
     assert "s.error_message" in sql
+    assert "UPDATE execution_runs" in sql
+    assert "failed_stage = 'data_waiting'" in sql

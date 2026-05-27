@@ -296,6 +296,10 @@ _RECON_AUTO_TOOL_NAMES = {
     "recon_queue_complete",
     "recon_queue_fail",
     "recon_queue_reclaim_stale",
+    "recon_queue_waiting_data",
+    "recon_queue_requeue_ready_waiting",
+    "recon_queue_fail_expired_waiting",
+    "recon_queue_fail_failed_collection_waiting",
 }
 
 _EXECUTION_TOOL_NAMES = {

@@ -17,6 +17,7 @@ from .nodes import (
     load_scheme_node,
     maybe_auto_notify_node,
     persist_auto_run_node,
+    persist_data_waiting_run_node,
     persist_failed_run_node,
     resolve_biz_date_node,
     resolve_plan_inputs_node,
@@ -80,7 +81,7 @@ def route_after_ensure_dataset_ready(state: AgentState) -> str:
 def route_after_validate_dataset_completeness(state: AgentState) -> str:
     ctx = _get_ctx(state)
     if bool(ctx.get("waiting_data")) or str(ctx.get("failed_stage") or "") == "data_waiting":
-        return END
+        return "persist_data_waiting_run_node"
     if _has_failed_reason(state):
         return "persist_failed_run_node"
     return "build_auto_run_context_node"
@@ -101,6 +102,7 @@ def build_auto_scheme_run_graph() -> StateGraph:
     graph.add_node("validate_dataset_completeness_node", validate_dataset_completeness_node)
     graph.add_node("build_auto_run_context_node", build_auto_run_context_node)
     graph.add_node("scheme_execution_graph", scheme_execution)
+    graph.add_node("persist_data_waiting_run_node", persist_data_waiting_run_node)
     graph.add_node("persist_failed_run_node", persist_failed_run_node)
     graph.add_node("persist_auto_run_node", persist_auto_run_node)
     graph.add_node("create_exception_tasks_node", create_exception_tasks_node)
@@ -157,7 +159,7 @@ def build_auto_scheme_run_graph() -> StateGraph:
         {
             "build_auto_run_context_node": "build_auto_run_context_node",
             "persist_failed_run_node": "persist_failed_run_node",
-            END: END,
+            "persist_data_waiting_run_node": "persist_data_waiting_run_node",
         },
     )
     graph.add_edge("build_auto_run_context_node", "scheme_execution_graph")
@@ -166,6 +168,7 @@ def build_auto_scheme_run_graph() -> StateGraph:
     graph.add_edge("create_exception_tasks_node", "maybe_auto_notify_node")
     graph.add_edge("maybe_auto_notify_node", "update_rerun_exception_verification_node")
     graph.add_edge("update_rerun_exception_verification_node", END)
+    graph.add_edge("persist_data_waiting_run_node", END)
     graph.add_edge("persist_failed_run_node", END)
     return graph
 

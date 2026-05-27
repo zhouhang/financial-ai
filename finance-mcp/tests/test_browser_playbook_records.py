@@ -466,3 +466,45 @@ def test_upsert_browser_collection_records_updates_seen_and_captured_timestamps(
         "record_status = CASE WHEN browser_collection_records.item_hash = "
         "EXCLUDED.item_hash THEN 'unchanged' ELSE 'updated' END"
     ) in sql
+
+
+def test_list_browser_collection_records_orders_by_latest_collection_time(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Cursor:
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple[object, ...]) -> None:
+            captured["sql"] = " ".join(sql.split())
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+    class Connection:
+        def __enter__(self) -> "Connection":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def cursor(self, *args: object, **kwargs: object) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: Connection())
+
+    auth_db.list_browser_collection_records(
+        company_id="company-1",
+        data_source_id="source-1",
+        dataset_id="dataset-1",
+        limit=100,
+    )
+
+    sql = str(captured["sql"])
+    assert "ORDER BY latest_seen_at DESC NULLS LAST, updated_at DESC, captured_at DESC NULLS LAST, id DESC" in sql
+    assert "ORDER BY biz_date DESC" not in sql
+    assert captured["params"][-2:] == (0, 100)

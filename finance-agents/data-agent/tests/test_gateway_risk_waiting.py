@@ -43,7 +43,7 @@ def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
             return FakeResolved()
 
         def send_bot_message(self, *, content, to_user_id="", **kwargs):
-            calls["notify"].append({"content": content, "to_user_id": to_user_id})
+            calls["notify"].append({"content": content, "to_user_id": to_user_id, **kwargs})
             return type("R", (), {"success": True, "message": "ok"})()
 
     monkeypatch.setattr(gw, "get_notification_adapter", lambda **kwargs: FakeAdapter())
@@ -74,7 +74,10 @@ def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
     assert calls["resolve"] == [{"user_id": "u1", "mobile": "", "keyword": "周行"}]
     assert len(calls["notify"]) == 1
     assert calls["notify"][0]["to_user_id"] == "ding-u1"
-    assert "/handoff?t=TKN" in calls["notify"][0]["content"]
+    assert calls["notify"][0]["content_type"] == "markdown"
+    assert calls["notify"][0]["title"] == "Tally 浏览器人工验证"
+    assert "[打开验证链接](https://dev.tallyai.cn/handoff?t=TKN)" in calls["notify"][0]["content"]
+    assert "https://dev.tallyai.cn/api/handoff" not in calls["notify"][0]["content"]
     assert "/p/handoff" not in calls["notify"][0]["content"]
 
     deduped = asyncio.run(

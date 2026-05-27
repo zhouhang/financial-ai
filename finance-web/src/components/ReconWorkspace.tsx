@@ -1410,32 +1410,6 @@ function runPlanInputSideLabel(side: 'left' | 'right'): string {
   return side === 'left' ? '左侧' : '右侧';
 }
 
-function buildRunPlanDateFieldOptions(input: RunPlanInputDatasetDraft): ReconFieldOption[] {
-  const source = input.source;
-  const fieldLabelMap = normalizeFieldLabelMap(source?.fieldLabelMap) || {};
-  const rawNames = Array.from(
-    new Set<string>([
-      ...extractSchemaFieldNames(source?.schemaSummary),
-      ...Object.keys(fieldLabelMap),
-    ]),
-  ).map((item) => item.trim()).filter(Boolean);
-
-  return rawNames
-    .map((rawName) => {
-      const label = toText(fieldLabelMap[rawName], rawName);
-      const schemaType = normalizeSchemaType(asRecord(source?.schemaSummary)[rawName]);
-      const typeScore = schemaType === 'datetime' || schemaType === 'date' ? 20 : 0;
-      const score = scoreDateFieldCandidate(rawName, label) + typeScore;
-      return {
-        value: rawName,
-        label: label && label !== rawName ? `${label}（${rawName}）` : rawName,
-        score,
-      };
-    })
-    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
-    .map(({ value, label }) => ({ value, label }));
-}
-
 function pickDefaultRunPlanDateField(input: RunPlanInputDatasetDraft): string {
   const options = buildRunPlanDateFieldOptions(input);
   return options[0]?.value || '';
@@ -3075,19 +3049,73 @@ function extractSchemaFieldNames(schemaSummary: Record<string, unknown> | undefi
   return Object.keys(summary).filter((key) => key !== 'columns');
 }
 
+function extractSchemaFieldTypeMap(schemaSummary: Record<string, unknown> | undefined): Map<string, string> {
+  const summary = asRecord(schemaSummary);
+  const typeMap = new Map<string, string>();
+  const columns = asList(summary.columns);
+  if (columns.length > 0) {
+    columns.forEach((item) => {
+      const column = asRecord(item);
+      const name = toText(column.name, toText(column.column_name)).trim();
+      if (!name) return;
+      typeMap.set(name, normalizeSchemaType(column.data_type || column.type || column.schema_type));
+    });
+  }
+  Object.entries(summary).forEach(([key, value]) => {
+    if (key !== 'columns' && !typeMap.has(key)) {
+      typeMap.set(key, normalizeSchemaType(value));
+    }
+  });
+  return typeMap;
+}
+
+function buildRunPlanDateFieldOptions(input: RunPlanInputDatasetDraft): ReconFieldOption[] {
+  const source = input.source;
+  const fieldLabelMap = normalizeFieldLabelMap(source?.fieldLabelMap) || {};
+  const schemaTypeByField = extractSchemaFieldTypeMap(source?.schemaSummary);
+  const rawNames = Array.from(
+    new Set<string>([
+      ...extractSchemaFieldNames(source?.schemaSummary),
+      ...Object.keys(fieldLabelMap),
+    ]),
+  ).map((item) => item.trim()).filter(Boolean);
+
+  return rawNames
+    .map((rawName) => {
+      const label = toText(fieldLabelMap[rawName], rawName);
+      const schemaType = schemaTypeByField.get(rawName) || 'string';
+      const typeScore = schemaType === 'datetime' || schemaType === 'date' ? 20 : 0;
+      const score = scoreDateFieldCandidate(rawName, label) + typeScore;
+      return {
+        value: rawName,
+        label: label && label !== rawName ? `${label}（${rawName}）` : rawName,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label, 'zh-CN'))
+    .map(({ value, label }) => ({ value, label }));
+}
+
 function scoreDateFieldCandidate(rawName: string, label: string): number {
   const raw = rawName.trim().toLowerCase();
+  const display = label || rawName;
   if (!raw) return Number.NEGATIVE_INFINITY;
 
   let score = 0;
-  if (/(biz_date|business_date|accounting_date|trade_time|trade_date|payment_time|pay_time|gmt_payment|gmt_create|created_at|updated_at|occurred_at|happened_at|booked_at|settle_date|settle_time|posting_date|entry_date)/.test(raw)) {
+  if (/(biz_date|business_date|accounting_date|trade_time|trade_date|payment_time|pay_time|paid_at|gmt_payment|occurred_at|happened_at|booked_at|settle_date|settle_time|posting_date|entry_date|completed_at|finished_at)/.test(raw)) {
     score += 12;
   }
-  if (/(date|time|day|dt|gmt|created|updated|trade|payment|pay|settle|account|book|occur|happen|posting|entry)/.test(raw)) {
+  if (/(date|time|day|dt|gmt|trade|payment|pay|paid|settle|account|book|occur|happen|posting|entry|complete|finish)/.test(raw)) {
     score += 6;
   }
-  if (/(日期|时间|时刻|账期|交易|支付|付款|入账|到账|创建|更新|结算|记账|发生|下单|业务)/.test(label || rawName)) {
+  if (/(账期|交易|支付|付款|入账|到账|结算|记账|发生|完成|业务)/.test(display)) {
+    score += 10;
+  }
+  if (/(日期|时间|时刻|下单)/.test(display)) {
     score += 8;
+  }
+  if (/(创建|更新|created|updated|gmt_create)/.test(display) || /(created|updated|gmt_create)/.test(raw)) {
+    score -= 5;
   }
   if (/(id|code|amount|amt|fee|price|status|name|type|order|key|remark|desc|flag)/.test(raw)) {
     score -= 6;
@@ -3841,6 +3869,13 @@ export default function ReconWorkspace({
           businessGoal: patch.businessGoal ?? prev.intent.businessGoal,
         }),
       );
+      // A name-only edit must NOT wipe the design session / generated trials:
+      // the scheme name is a pure label with no effect on rules. Re-deriving
+      // only on a real goal change keeps late name edits (e.g. appending
+      // "资金对账") from being lost in regeneration churn.
+      if (patch.businessGoal === undefined) {
+        return;
+      }
       setDesignSessionId('');
       setWizardJsonPanel(null);
       setWizardProcJsonView('proc');

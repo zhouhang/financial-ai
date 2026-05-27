@@ -140,6 +140,25 @@ def test_browser_alert_service_default_adapter_uses_env_dingtalk_credentials(mon
     assert built == ["dingtalk-env-adapter"]
 
 
+def test_browser_alert_content_explains_agent_interrupted_in_plain_language() -> None:
+    content = browser_alerts._compose_alert_content(
+        BrowserAlertEvent(
+            event_type="browser_sync_failed",
+            company_id="merchant-company-001",
+            shop_id="browser-collection-04576bddc3",
+            data_source_name="tb0131100248-收支账单",
+            biz_date="2026-05-26",
+            sync_job_id="sync-agent-interrupted",
+            severity="critical",
+            reason="AGENT_INTERRUPTED",
+            message="AGENT_INTERRUPTED: browser-agent restarted while this job was running",
+        )
+    )
+
+    assert "直观原因: 采集任务运行中，浏览器采集机或本地服务被重启/中断，任务未正常跑完。" in content
+    assert "处理建议: 确认是否刚执行过服务重启/发版；确认采集机在线后，重新采集或重新触发本次对账。" in content
+
+
 def test_browser_alert_service_dedupes_existing_alert() -> None:
     adapter = FakeAdapter()
     service = BrowserAlertService(

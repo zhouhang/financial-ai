@@ -321,6 +321,34 @@ def _compose_alert_title(event: BrowserAlertEvent) -> str:
     return f"Tally {label}: {shop}"
 
 
+def _reason_explanation(event: BrowserAlertEvent) -> str:
+    reason = str(event.reason or "").strip().upper()
+    if reason == "AGENT_INTERRUPTED":
+        return "采集任务运行中，浏览器采集机或本地服务被重启/中断，任务未正常跑完。"
+    if reason == "AUTH_EXPIRED":
+        return "店铺登录态已失效，需要重新登录后再采集。"
+    if reason == "RISK_VERIFICATION":
+        return "平台触发安全验证，需要人工完成页面验证后再采集。"
+    if reason == "PAGE_CHANGED":
+        return "采集页面结构变化，当前 playbook 可能需要更新。"
+    if reason:
+        return f"浏览器采集失败，原因码: {reason}。"
+    return "浏览器采集失败，系统未返回明确原因码。"
+
+
+def _next_action(event: BrowserAlertEvent) -> str:
+    reason = str(event.reason or "").strip().upper()
+    if reason == "AGENT_INTERRUPTED":
+        return "确认是否刚执行过服务重启/发版；确认采集机在线后，重新采集或重新触发本次对账。"
+    if reason == "AUTH_EXPIRED":
+        return "打开对应店铺浏览器登录态，完成登录后重新采集/重新对账。"
+    if reason == "RISK_VERIFICATION":
+        return "进入采集机浏览器完成平台验证，再重新采集/重新对账。"
+    if reason == "PAGE_CHANGED":
+        return "检查页面是否改版，更新或重放 playbook 后再重新采集。"
+    return "检查采集机在线状态、店铺登录态、页面验证和 playbook 状态后重新采集/重新对账。"
+
+
 def _compose_alert_content(event: BrowserAlertEvent) -> str:
     lines = [
         f"告警类型: {event.event_type}",
@@ -335,7 +363,8 @@ def _compose_alert_content(event: BrowserAlertEvent) -> str:
         lines.append(f"agent_id: {event.agent_id}")
     if event.reason:
         lines.append(f"原因码: {event.reason}")
+        lines.append(f"直观原因: {_reason_explanation(event)}")
     if event.message:
         lines.append(f"错误摘要: {event.message}")
-    lines.append("处理建议: 请检查浏览器采集机、店铺登录态、页面验证或 playbook 状态后重新采集/重新对账。")
+    lines.append(f"处理建议: {_next_action(event)}")
     return "\n".join(lines)

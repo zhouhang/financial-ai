@@ -52,6 +52,24 @@ def _resolve_handoff_recipient(adapter: Any, owner: dict[str, Any]) -> str:
     return recipient
 
 
+def _handoff_web_base_url() -> str:
+    """Resolve the public web base URL for mobile handoff links."""
+    for key in ("TALLY_PUBLIC_WEB_BASE_URL", "TALLY_WEB_BASE_URL", "PUBLIC_WEB_BASE_URL"):
+        value = os.getenv(key, "").strip().rstrip("/")
+        if value:
+            return value
+
+    value = os.getenv("TALLY_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if value.endswith("/api"):
+        return value[:-4].rstrip("/")
+    return value
+
+
+def _build_handoff_link(token: str) -> str:
+    base = _handoff_web_base_url()
+    return f"{base}/handoff?t={token}" if base else f"/handoff?t={token}"
+
+
 def verify_system_token(token: str) -> dict[str, Any] | None:
     """校验 JWT 且必须 role=system,否则返回 None。"""
     try:
@@ -123,8 +141,7 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
     if not created.get("success"):
         return {"type": "result", "id": req_id, "ok": False, "error": str(created.get("error") or "create session failed")}
     token = created.get("handoff_token") or ""
-    base = os.getenv("TALLY_PUBLIC_BASE_URL", "").rstrip("/")
-    link = f"{base}/handoff?t={token}" if base else f"/handoff?t={token}"
+    link = _build_handoff_link(str(token))
     owner = created.get("owner") or {}
     if not isinstance(owner, dict):
         owner = {}
@@ -140,11 +157,16 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
                 adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
                 target = _resolve_handoff_recipient(adapter, owner)
                 if target:
+                    reason = str(msg.get("reason") or "RISK_VERIFICATION")
                     adapter.send_bot_message(
                         content=(
-                            f"采集店铺需要人工验证({msg.get('reason') or 'RISK_VERIFICATION'})。"
-                            f"请打开链接远程完成验证:{link}"
+                            "采集店铺需要人工验证。\n\n"
+                            f"原因：{reason}\n\n"
+                            f"[打开验证链接]({link})\n\n"
+                            "完成验证后请点击页面底部“我已完成验证”。"
                         ),
+                        content_type="markdown",
+                        title="Tally 浏览器人工验证",
                         to_user_id=target,
                     )
                     notified = True

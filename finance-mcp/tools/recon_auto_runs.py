@@ -390,6 +390,7 @@ def create_tools() -> list[Tool]:
                     "waiting_reason": {"type": "string"},
                     "waiting_datasets": {"type": "array"},
                     "collection_job_ids": {"type": "array"},
+                    "execution_run_id": {"type": "string"},
                     "wait_minutes": {"type": "integer"},
                 },
                 "required": ["worker_token", "job_id"],
@@ -1006,6 +1007,7 @@ def _queue_waiting_data(arguments: dict[str, Any]) -> dict[str, Any]:
         waiting_reason=str(arguments.get("waiting_reason") or "browser_collection_pending"),
         waiting_datasets=list(arguments.get("waiting_datasets") or []),
         collection_job_ids=[str(v) for v in arguments.get("collection_job_ids") or [] if str(v)],
+        execution_run_id=str(arguments.get("execution_run_id") or ""),
         wait_minutes=int(arguments.get("wait_minutes") or 90),
     )
     return {"success": bool(job), "job": job}

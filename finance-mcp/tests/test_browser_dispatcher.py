@@ -869,6 +869,7 @@ def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
 
 def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None:
     import asyncio
+    from contextlib import nullcontext
 
     from tools import data_sources
 
@@ -890,6 +891,28 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
             "company_id": "c1",
             "data_source_id": "s1",
             "resource_key": "qianniu-daily-bill-export@1.0.0",
+            "job_status": "running",
+            "request_payload": {
+                "dataset_id": "d1",
+                "dataset_code": "qianniu_fund_bill",
+                "biz_date": "2026-05-18",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "browser_sync_job_transition_lock",
+        lambda sync_job_id: nullcontext(),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kw: {
+            "id": kw["sync_job_id"],
+            "company_id": "c1",
+            "data_source_id": "s1",
+            "resource_key": "qianniu-daily-bill-export@1.0.0",
+            "job_status": "running",
             "request_payload": {
                 "dataset_id": "d1",
                 "dataset_code": "qianniu_fund_bill",

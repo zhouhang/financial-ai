@@ -953,6 +953,191 @@ def _build_dataset_field_label_map(item: dict[str, Any]) -> dict[str, str]:
     return field_label_map
 
 
+def _schema_summary_has_fields(schema_summary: Any) -> bool:
+    summary = _safe_dict(schema_summary)
+    for key in ("columns", "fields", "semantic_fields"):
+        for item in _safe_list(summary.get(key)):
+            item_dict = _safe_dict(item)
+            if _as_text(
+                item_dict.get("name")
+                or item_dict.get("column_name")
+                or item_dict.get("raw_name")
+                or item_dict.get("field_name")
+                or item_dict.get("key")
+            ):
+                return True
+    technical_keys = {"storage", "source_type", "dataset_source_type", "loader", "source"}
+    return any(key not in technical_keys for key in summary.keys())
+
+
+def _normalized_text_list(value: Any) -> list[str]:
+    return [text for text in (_as_text(item) for item in _safe_list(value)) if text]
+
+
+def _dataset_key_fields(dataset_row: dict[str, Any]) -> list[str]:
+    profile = _extract_dataset_semantic_profile(dataset_row)
+    for container in (
+        profile,
+        _safe_dict(dataset_row.get("meta")),
+        _safe_dict(dataset_row.get("schema_summary")),
+        _safe_dict(dataset_row.get("extract_config")),
+    ):
+        fields = _normalized_text_list(container.get("key_fields"))
+        if fields:
+            return fields
+    return []
+
+
+def _infer_source_kind_from_dataset(dataset_row: dict[str, Any]) -> str:
+    for container_key in ("extract_config", "meta", "schema_summary"):
+        container = _safe_dict(dataset_row.get(container_key))
+        registration_kind = _as_text(container.get("registration_kind")).lower()
+        source_type = _as_text(container.get("source_type") or container.get("dataset_source_type")).lower()
+        storage = _as_text(container.get("storage")).lower()
+        if registration_kind == "browser_playbook" or source_type == "browser_collection_records":
+            return "browser_playbook"
+        if storage == "platform_order_lines" or storage == "platform_alipay_bill_lines":
+            return "platform_oauth"
+    return ""
+
+
+def _resolve_dataset_for_scheme_binding(
+    *,
+    company_id: str,
+    binding: dict[str, Any],
+    cache_by_id: dict[str, dict[str, Any] | None],
+    cache_by_source_resource: dict[tuple[str, str], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    dataset_id = _as_text(binding.get("dataset_id") or binding.get("id"))
+    if dataset_id:
+        if dataset_id not in cache_by_id:
+            cache_by_id[dataset_id] = auth_db.get_unified_data_source_dataset_by_id(
+                company_id=company_id,
+                dataset_id=dataset_id,
+            )
+        dataset = cache_by_id.get(dataset_id)
+        if dataset:
+            return dataset
+
+    data_source_id = _as_text(binding.get("data_source_id") or binding.get("source_id"))
+    if not data_source_id:
+        return None
+    resource_candidates: list[str] = []
+    for value in (binding.get("resource_key"), binding.get("table_name"), binding.get("dataset_code")):
+        resource_key = _as_text(value)
+        if resource_key and resource_key not in resource_candidates:
+            resource_candidates.append(resource_key)
+
+    for resource_key in resource_candidates:
+        cache_key = (data_source_id, resource_key)
+        if cache_key not in cache_by_source_resource:
+            cache_by_source_resource[cache_key] = auth_db.get_unified_data_source_dataset_by_source_resource(
+                company_id=company_id,
+                data_source_id=data_source_id,
+                resource_key=resource_key,
+            )
+        dataset = cache_by_source_resource.get(cache_key)
+        if dataset:
+            return dataset
+    return None
+
+
+def _hydrate_scheme_binding_with_current_dataset(
+    *,
+    company_id: str,
+    raw_binding: Any,
+    cache_by_id: dict[str, dict[str, Any] | None],
+    cache_by_source_resource: dict[tuple[str, str], dict[str, Any] | None],
+) -> Any:
+    if not isinstance(raw_binding, dict):
+        return raw_binding
+    binding = copy.deepcopy(raw_binding)
+    dataset = _resolve_dataset_for_scheme_binding(
+        company_id=company_id,
+        binding=binding,
+        cache_by_id=cache_by_id,
+        cache_by_source_resource=cache_by_source_resource,
+    )
+    if not dataset:
+        return binding
+
+    current_schema = _safe_dict(dataset.get("schema_summary"))
+    existing_schema = _safe_dict(binding.get("schema_summary") or binding.get("schemaSummary"))
+    if current_schema and (_schema_summary_has_fields(current_schema) or not _schema_summary_has_fields(existing_schema)):
+        binding["schema_summary"] = current_schema
+
+    current_extract_config = _safe_dict(dataset.get("extract_config"))
+    if current_extract_config:
+        binding["extract_config"] = {
+            **current_extract_config,
+            **_safe_dict(binding.get("extract_config") or binding.get("extractConfig")),
+        }
+
+    current_label_map = _build_dataset_field_label_map(dataset)
+    existing_label_map = _normalize_label_map(binding.get("field_label_map"))
+    if current_label_map or existing_label_map:
+        binding["field_label_map"] = {**current_label_map, **existing_label_map}
+
+    if not _normalized_text_list(binding.get("key_fields")):
+        key_fields = _dataset_key_fields(dataset)
+        if key_fields:
+            binding["key_fields"] = key_fields
+
+    semantic_profile = _extract_dataset_semantic_profile(dataset)
+    fill_if_missing = {
+        "dataset_id": dataset.get("id"),
+        "dataset_name": dataset.get("dataset_name"),
+        "business_name": semantic_profile.get("business_name") or dataset.get("dataset_name"),
+        "data_source_id": dataset.get("data_source_id"),
+        "dataset_code": dataset.get("dataset_code"),
+        "resource_key": dataset.get("resource_key"),
+        "dataset_kind": dataset.get("dataset_kind"),
+        "source_kind": _infer_source_kind_from_dataset(dataset),
+    }
+    for key, value in fill_if_missing.items():
+        if _as_text(value) and not _as_text(binding.get(key)):
+            binding[key] = value
+
+    return binding
+
+
+def _hydrate_execution_scheme_dataset_snapshots(company_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Refresh scheme dataset snapshots from the current dataset catalog."""
+    hydrated = copy.deepcopy(item)
+    scheme_meta = _safe_dict(hydrated.get("scheme_meta_json"))
+    if not scheme_meta:
+        return hydrated
+
+    cache_by_id: dict[str, dict[str, Any] | None] = {}
+    cache_by_source_resource: dict[tuple[str, str], dict[str, Any] | None] = {}
+
+    def hydrate_rows(rows: Any) -> list[Any]:
+        return [
+            _hydrate_scheme_binding_with_current_dataset(
+                company_id=company_id,
+                raw_binding=row,
+                cache_by_id=cache_by_id,
+                cache_by_source_resource=cache_by_source_resource,
+            )
+            for row in _safe_list(rows)
+        ]
+
+    dataset_bindings = _safe_dict(scheme_meta.get("dataset_bindings"))
+    if dataset_bindings:
+        hydrated_bindings = copy.deepcopy(dataset_bindings)
+        for side in ("left", "right"):
+            if isinstance(dataset_bindings.get(side), list):
+                hydrated_bindings[side] = hydrate_rows(dataset_bindings.get(side))
+        scheme_meta["dataset_bindings"] = hydrated_bindings
+
+    for key in ("left_sources", "right_sources"):
+        if isinstance(scheme_meta.get(key), list):
+            scheme_meta[key] = hydrate_rows(scheme_meta.get(key))
+
+    hydrated["scheme_meta_json"] = scheme_meta
+    return hydrated
+
+
 def _build_proc_trial_inputs(
     *,
     uploaded_files: list[dict[str, Any]],
@@ -1792,28 +1977,35 @@ def _ensure_allowed(value: str, allowed: set[str], field_name: str) -> str:
 
 def _scheme_list(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
     items = auth_db.list_execution_schemes(
-        company_id=str(user.get("company_id") or ""),
+        company_id=company_id,
         include_disabled=_as_bool(arguments.get("include_disabled"), True),
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
+    items = [
+        _hydrate_execution_scheme_dataset_snapshots(company_id, item)
+        for item in items
+    ]
     return {"success": True, "count": len(items), "schemes": items}
 
 
 def _scheme_get(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
     scheme_id = str(arguments.get("scheme_id") or "").strip() or None
     scheme_code = str(arguments.get("scheme_code") or "").strip() or None
     if not scheme_id and not scheme_code:
         return {"success": False, "error": "scheme_id 或 scheme_code 至少提供一个"}
     item = auth_db.get_execution_scheme(
-        company_id=str(user.get("company_id") or ""),
+        company_id=company_id,
         scheme_id=scheme_id,
         scheme_code=scheme_code,
     )
     if not item:
         return {"success": False, "error": "方案不存在"}
+    item = _hydrate_execution_scheme_dataset_snapshots(company_id, item)
     return {"success": True, "scheme": item}
 
 

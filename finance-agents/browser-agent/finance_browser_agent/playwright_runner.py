@@ -29,6 +29,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +55,6 @@ def _notify_risk_waiting() -> None:
 
 
 _AUTH_REDIRECT_MARKERS = (
-    "login.taobao.com",
-    "passport",
     "请先登录",
     "登录后继续",
 )
@@ -290,7 +289,7 @@ def _detect_auth_or_risk(page: Any) -> str | None:
         url = ""
     if any(marker in url for marker in ("login.taobao.com", "passport")):
         return "AUTH_EXPIRED"
-    if any(marker in body or marker in lowered for marker in _AUTH_REDIRECT_MARKERS):
+    if any(marker in risk_text or marker in lowered_risk_text for marker in _AUTH_REDIRECT_MARKERS):
         return "AUTH_EXPIRED"
     return None
 
@@ -300,6 +299,32 @@ def _page_url(page: Any) -> str:
         return str(page.url or "")
     except Exception:
         return ""
+
+
+def _wait_for_transient_auth_redirect_to_clear(
+    page: Any,
+    *,
+    timeout_ms: int,
+    poll_interval_ms: int = 500,
+) -> str | None:
+    """QianNiu may briefly route through login/havana URLs even with a valid session."""
+    deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
+    last_url = _page_url(page)
+    while time.monotonic() <= deadline:
+        detected = _detect_auth_or_risk(page)
+        if detected != "AUTH_EXPIRED":
+            if last_url:
+                logger.info(
+                    "browser transient auth redirect cleared: final_url=%s detected=%s",
+                    _page_url(page),
+                    detected or "none",
+                )
+            return detected
+        last_url = _page_url(page)
+        remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
+        _wait_for_timeout(page, min(max(1, poll_interval_ms), remaining_ms))
+    logger.info("browser transient auth redirect did not clear: final_url=%s", last_url)
+    return "AUTH_EXPIRED"
 
 
 def _profile_is_authenticated(page: Any, playbook: dict[str, Any]) -> bool:
@@ -340,7 +365,26 @@ def _resolve_value(action: dict[str, Any], params: dict[str, Any], extracted: di
         if scope == "extracted":
             return str(extracted.get(key.strip()) or "")
         return ""
-    return str(action.get("value") or "")
+    return _render_template(str(action.get("value") or ""), params=params, extracted=extracted)
+
+
+def _render_template(value: str, *, params: dict[str, Any], extracted: dict[str, Any]) -> str:
+    text = str(value or "")
+    if "{{" not in text:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        raw_key = match.group(1).strip()
+        if "." not in raw_key:
+            return ""
+        scope, key = raw_key.split(".", 1)
+        if scope == "params":
+            return str(params.get(key.strip()) or "")
+        if scope == "extracted":
+            return str(extracted.get(key.strip()) or "")
+        return ""
+
+    return re.sub(r"\{\{\s*([^{}]+?)\s*\}\}", repl, text)
 
 
 def _execute_action(
@@ -372,6 +416,12 @@ def _execute_action(
         detected = _detect_auth_or_risk(page)
         if detected == "AUTH_EXPIRED" and allow_auth_redirect:
             return {"auth_required": True}
+        if detected == "AUTH_EXPIRED":
+            auth_redirect_grace_ms = int(action.get("auth_redirect_grace_ms") or 15000)
+            detected = _wait_for_transient_auth_redirect_to_clear(
+                page,
+                timeout_ms=auth_redirect_grace_ms,
+            )
         if detected == "RISK_VERIFICATION":
             detected = _await_navigate_risk_clearance(
                 page,
@@ -380,19 +430,28 @@ def _execute_action(
                 handoff_coordinator=handoff_coordinator,
             )
         if detected:
-            raise BrowserActionError(detected, f"navigate detected {detected}")
+            raise BrowserActionError(detected, f"navigate detected {detected}: url={_page_url(page)}")
         return {}
     if name == "click":
+        record_time_as = str(action.get("record_time_as") or "").strip()
+        if record_time_as:
+            extracted[record_time_as] = _now_local_iso()
         _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
         return {}
     if name == "fill":
         page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
         return {}
     if name == "set_date":
-        page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
+        _set_date_value(page, selector, _resolve_value(action, params, extracted), timeout_ms=timeout_ms)
         return {}
     if name == "wait_for":
         page.wait_for_selector(selector, timeout=timeout_ms)
+        return {}
+    if name == "wait_ms":
+        duration_ms = int(action.get("duration_ms") or action.get("value") or 0)
+        if duration_ms <= 0:
+            raise BrowserActionError("PAGE_CHANGED", "wait_ms requires positive duration_ms")
+        page.wait_for_timeout(duration_ms)
         return {}
     if name in {"login", "login_if_needed"}:
         _execute_login_action(
@@ -416,6 +475,14 @@ def _execute_action(
             text = page.locator(str(css)).first.inner_text(timeout=timeout_ms)
             extracted[str(key)] = text.strip()
         return {}
+    if name == "select_checkboxes":
+        return _select_checkboxes(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            timeout_ms=timeout_ms,
+        )
     if name == "download":
         with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
             _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
@@ -433,6 +500,16 @@ def _execute_action(
         return {"last_download": str(target)}
     if name == "download_history_file":
         return _download_history_file(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            capture_files=capture_files,
+            download_dir=download_dir,
+            timeout_ms=timeout_ms,
+        )
+    if name == "download_qianniu_export_report":
+        return _download_qianniu_export_report(
             page,
             action,
             params=params,
@@ -1089,6 +1166,192 @@ def _type_like_human(
     locator.type(value, delay=type_delay_ms, timeout=timeout_ms)
 
 
+def _set_date_value(page: Any, selector: str, value: str, *, timeout_ms: int) -> None:
+    if not selector or not value:
+        raise BrowserActionError("PAGE_CHANGED", "set_date requires selector and value")
+    locator = page.locator(selector).first
+    locator.click(timeout=timeout_ms)
+    try:
+        readonly = bool(
+            locator.evaluate(
+                """
+                el => Boolean(
+                  el.readOnly ||
+                  el.hasAttribute('readonly') ||
+                  el.getAttribute('aria-readonly') === 'true'
+                )
+                """
+            )
+        )
+    except Exception:
+        readonly = False
+    if not readonly:
+        try:
+            locator.fill(value, timeout=timeout_ms)
+        except Exception as exc:
+            logger.info("browser date input fill failed; falling back to DOM value setter: %s", exc)
+    locator.evaluate(
+        """
+        (el, value) => {
+          const proto = el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) {
+            setter.call(el, value);
+          } else {
+            el.value = value;
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        """,
+        value,
+    )
+    keyboard = getattr(page, "keyboard", None)
+    press = getattr(keyboard, "press", None)
+    if callable(press):
+        try:
+            press("Enter")
+            press("Tab")
+        except Exception:
+            pass
+    locator.evaluate(
+        """
+        el => {
+          el.blur();
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+        """
+    )
+    page.wait_for_timeout(300)
+    try:
+        actual_value = locator.input_value(timeout=min(timeout_ms, 2000))
+    except Exception:
+        actual_value = value
+    if str(actual_value or "").strip() != str(value or "").strip():
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            f"set_date value not committed: selector={selector} expected={value} actual={actual_value}",
+        )
+    logger.info("browser date input committed: selector=%s value=%s", selector, value)
+
+
+def _select_checkboxes(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    timeout_ms: int,
+) -> dict[str, Any]:
+    selector = str(action.get("selector") or "").strip()
+    if not selector:
+        raise BrowserActionError("PAGE_CHANGED", "select_checkboxes requires selector")
+    root = page.locator(selector).last
+    root.wait_for(state="visible", timeout=timeout_ms)
+    label_selector = str(action.get("label_selector") or "label.next-checkbox-wrapper").strip()
+    raw_labels = action.get("checked_labels")
+    if raw_labels is None:
+        raw_labels = action.get("allowed_labels")
+    checked_labels = {
+        _render_template(str(item), params=params, extracted=extracted).strip()
+        for item in list(raw_labels or [])
+        if str(item or "").strip()
+    }
+    if not checked_labels:
+        raise BrowserActionError("PAGE_CHANGED", "select_checkboxes requires checked labels")
+    if len(checked_labels) != len(list(raw_labels or [])):
+        raise BrowserActionError("PAGE_CHANGED", "select_checkboxes contains empty labels")
+
+    max_passes = max(1, int(action.get("max_passes") or 5))
+    for _ in range(max_passes):
+        state = _read_checkbox_state(root, label_selector=label_selector)
+        known_labels = {str(item.get("text") or "") for item in state if item.get("text")}
+        missing = sorted(checked_labels - known_labels)
+        if missing:
+            raise BrowserActionError("PAGE_CHANGED", f"select_checkboxes missing labels: {missing}")
+        extra = [
+            str(item.get("text") or "")
+            for item in state
+            if item.get("text")
+            and item.get("text") != "全选"
+            and bool(item.get("checked"))
+            and str(item.get("text") or "") not in checked_labels
+        ]
+        missing_checked = [
+            label
+            for label in sorted(checked_labels)
+            if not any(str(item.get("text") or "") == label and bool(item.get("checked")) for item in state)
+        ]
+        if not extra and not missing_checked:
+            selected = sorted(
+                str(item.get("text") or "")
+                for item in state
+                if item.get("text") and item.get("text") != "全选" and bool(item.get("checked"))
+            )
+            return {"selected_labels": selected}
+        for label in [*extra, *missing_checked]:
+            clicked = _click_exact_checkbox_label(root, label_selector=label_selector, label=label)
+            if not clicked:
+                raise BrowserActionError("PAGE_CHANGED", f"select_checkboxes label not clickable: {label}")
+            page.wait_for_timeout(120)
+
+    final_state = _read_checkbox_state(root, label_selector=label_selector)
+    selected = sorted(
+        str(item.get("text") or "")
+        for item in final_state
+        if item.get("text") and item.get("text") != "全选" and bool(item.get("checked"))
+    )
+    extra = sorted(set(selected) - checked_labels)
+    missing_checked = sorted(checked_labels - set(selected))
+    if extra or missing_checked:
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            f"select_checkboxes failed: extra={extra} missing={missing_checked}",
+        )
+    return {"selected_labels": selected}
+
+
+def _read_checkbox_state(root: Any, *, label_selector: str) -> list[dict[str, Any]]:
+    return list(
+        root.locator(label_selector).evaluate_all(
+            """
+            els => els.map((label) => {
+              const input = label.querySelector('input[type="checkbox"]');
+              return {
+                text: (label.innerText || label.textContent || '').trim(),
+                checked: !!input?.checked,
+                disabled: !!input?.disabled,
+              };
+            })
+            """
+        )
+        or []
+    )
+
+
+def _click_exact_checkbox_label(root: Any, *, label_selector: str, label: str) -> bool:
+    return bool(
+        root.evaluate(
+            """
+            (root, arg) => {
+              const labels = Array.from(root.querySelectorAll(arg.selector));
+              const label = labels.find((item) => (
+                (item.innerText || item.textContent || '').trim() === arg.label
+              ));
+              if (!label) return false;
+              const input = label.querySelector('input[type="checkbox"]');
+              if (input && input.disabled) return false;
+              label.click();
+              return true;
+            }
+            """,
+            {"selector": label_selector, "label": label},
+        )
+    )
+
+
 def _wait_for_post_login_selector(
     page: Any,
     *,
@@ -1167,17 +1430,35 @@ def _canonical_date_token(value: str) -> str:
     return ""
 
 
+def _canonical_history_date_token(value: str, *, target_year: str) -> str:
+    text = str(value or "").strip()
+    token = _canonical_date_token(text)
+    if token:
+        return token
+    match = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", text)
+    if match and target_year:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{target_year}{month:02d}{day:02d}"
+    return ""
+
+
 def _history_row_matches_target_date(row_text: str, target_date: str) -> bool:
     target_token = _canonical_date_token(target_date)
     if not target_token:
         return False
+    target_year = target_token[:4]
 
     compact_text = " ".join(str(row_text or "").split())
     file_names = re.findall(r"\S+\.(?:csv|xlsx|xls)\b", compact_text, flags=re.IGNORECASE)
     for file_name in file_names:
         file_date_tokens = [
-            match.replace("-", "")
-            for match in re.findall(r"(?<!\d)(?:20\d{6}|20\d{2}-\d{2}-\d{2})(?!\d)", file_name)
+            _canonical_history_date_token(match, target_year=target_year)
+            for match in re.findall(
+                r"(?<!\d)(?:20\d{6}|20\d{2}[-/.]\d{2}[-/.]\d{2}|\d{1,2}[-/.]\d{1,2})(?!\d)",
+                file_name,
+            )
         ]
         if file_date_tokens and all(token == target_token for token in file_date_tokens):
             return True
@@ -1190,15 +1471,384 @@ def _history_row_matches_target_date(row_text: str, target_date: str) -> bool:
         maxsplit=1,
     )[0]
     date_range_matches = re.findall(
-        r"(?<!\d)(20\d{2}-\d{2}-\d{2}|20\d{6})(?!\d)\s*"
+        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)\s*"
         r"(?:~|至|到|_|—|–|\s-\s)\s*"
-        r"(?<!\d)(20\d{2}-\d{2}-\d{2}|20\d{6})(?!\d)",
+        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)",
         business_text,
     )
     for start, end in date_range_matches:
-        if _canonical_date_token(start) == target_token and _canonical_date_token(end) == target_token:
+        if (
+            _canonical_history_date_token(start, target_year=target_year) == target_token
+            and _canonical_history_date_token(end, target_year=target_year) == target_token
+        ):
             return True
     return False
+
+
+def _now_local_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _parse_local_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-").replace(".", "-")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+        pass
+    match = re.search(
+        r"(20\d{2})[-年](\d{1,2})[-月](\d{1,2})日?\s+"
+        r"(\d{1,2}):(\d{2})(?::(\d{2}))?",
+        normalized,
+    )
+    if not match:
+        return None
+    year, month, day, hour, minute, second = match.groups()
+    try:
+        return datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour),
+            int(minute),
+            int(second or "0"),
+        )
+    except ValueError:
+        return None
+
+
+def _extract_export_row_requested_time(row_text: str, requested_after: datetime | None) -> datetime | None:
+    compact_text = " ".join(str(row_text or "").split())
+    matches = re.findall(
+        r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?",
+        compact_text,
+    )
+    parsed = [item for item in (_parse_local_datetime(match) for match in matches) if item is not None]
+    if not parsed:
+        return None
+    if requested_after is None:
+        return parsed[0]
+    return min(parsed, key=lambda item: abs((item - requested_after).total_seconds()))
+
+
+def _playwright_text_arg(value: str) -> str:
+    text = str(value or "")
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    return f"/{re.escape(text)}/"
+
+
+def _save_download(
+    download: Any,
+    *,
+    download_dir: Path,
+    capture_files: list[dict[str, Any]],
+) -> dict[str, str]:
+    target = download_dir / (download.suggested_filename or "download.bin")
+    if target.exists():
+        stem = target.stem
+        suffix = target.suffix
+        index = 1
+        while target.exists():
+            target = download_dir / f"{stem}-{index}{suffix}"
+            index += 1
+    download.save_as(str(target))
+    capture_files.append({"storage_path": str(target), "encoding": "", "checksum": "", "row_count": 0})
+    return {"last_download": str(target)}
+
+
+def _configured_selectors(action: dict[str, Any], list_key: str, single_key: str = "") -> list[str]:
+    raw_items = action.get(list_key)
+    selectors: list[str] = []
+    if isinstance(raw_items, list):
+        selectors.extend(str(item or "").strip() for item in raw_items)
+    elif isinstance(raw_items, str):
+        selectors.append(raw_items.strip())
+    if single_key:
+        single = str(action.get(single_key) or "").strip()
+        if single:
+            selectors.insert(0, single)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        if selector and selector not in seen:
+            deduped.append(selector)
+            seen.add(selector)
+    return deduped
+
+
+def _configured_selectors_with_primary(
+    primary_selector: str,
+    action: dict[str, Any],
+    list_key: str,
+    single_key: str = "",
+) -> list[str]:
+    selectors = [primary_selector.strip()] if primary_selector.strip() else []
+    selectors.extend(_configured_selectors(action, list_key, single_key))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        if selector and selector not in seen:
+            deduped.append(selector)
+            seen.add(selector)
+    return deduped
+
+
+def _selector_has_matches(page: Any, selector: str) -> bool | None:
+    try:
+        return page.locator(selector).count() > 0
+    except Exception:
+        return None
+
+
+def _click_first_available_selector(
+    page: Any,
+    selectors: list[str],
+    *,
+    timeout_ms: int,
+    force: bool = True,
+) -> bool:
+    last_error: Exception | None = None
+    for selector in selectors:
+        has_matches = _selector_has_matches(page, selector)
+        if has_matches is False:
+            continue
+        try:
+            page.click(selector, timeout=timeout_ms, force=force)
+            return True
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return False
+
+
+def _locator_text_rows(locator: Any, *, timeout_ms: int) -> list[tuple[int, str]]:
+    try:
+        rows = locator.evaluate_all(
+            """
+            els => els
+              .map((el, index) => {
+                const style = window.getComputedStyle(el);
+                const visible = style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && el.getClientRects().length > 0;
+                return {
+                  index,
+                  visible,
+                  text: (el.innerText || el.textContent || '').trim(),
+                };
+              })
+              .filter(item => item.visible && item.text)
+            """
+        )
+    except Exception as exc:
+        logger.info("browser history batch row text read failed; falling back to row reads: %s", exc)
+        rows = []
+        try:
+            row_count = locator.count()
+        except Exception:
+            return []
+        for index in range(row_count):
+            try:
+                text = locator.nth(index).inner_text(timeout=min(timeout_ms, 1000))
+            except Exception:
+                continue
+            rows.append({"index": index, "text": text})
+
+    normalized: list[tuple[int, str]] = []
+    for index, item in enumerate(list(rows or [])):
+        if isinstance(item, dict):
+            raw_index = item.get("index", index)
+            raw_text = item.get("text", "")
+        else:
+            raw_index = index
+            raw_text = item
+        try:
+            row_index = int(raw_index)
+        except (TypeError, ValueError):
+            row_index = index
+        text = " ".join(str(raw_text or "").split())
+        if text:
+            normalized.append((row_index, text))
+    return normalized
+
+
+def _download_qianniu_export_report(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    capture_files: list[dict[str, Any]],
+    download_dir: Path,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    row_selector = str(action.get("selector") or "").strip()
+    requested_after_value = _resolve_value(
+        {"value_from": action.get("requested_after_from")},
+        params,
+        extracted,
+    )
+    requested_after = _parse_local_datetime(requested_after_value)
+    report_type = str(action.get("report_type") or "").strip()
+    download_button_text = str(action.get("download_button_text") or "").strip()
+    refresh_selector = str(action.get("refresh_selector") or "").strip()
+    refresh_interval_ms = max(1000, int(action.get("refresh_interval_ms") or 15000))
+    request_time_tolerance_seconds = int(action.get("request_time_tolerance_seconds") or 5)
+    if not row_selector or not requested_after or not download_button_text:
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "download_qianniu_export_report requires selector, requested_after_from, and download_button_text",
+        )
+
+    button_selector = (
+        f"button:has-text({_playwright_text_arg(download_button_text)}), "
+        f"[role='button']:has-text({_playwright_text_arg(download_button_text)})"
+    )
+    fallback_row_selector = (
+        "[class*='order-export_order-block'], "
+        "tr.next-table-row, "
+        ".next-table-row, "
+        "[role='row']"
+    )
+    earliest_allowed = requested_after - timedelta(seconds=max(0, request_time_tolerance_seconds))
+
+    def _find_download_button() -> tuple[Any | None, str]:
+        row_sources: list[tuple[str, Any]] = []
+        for selector in [row_selector, fallback_row_selector]:
+            if not selector:
+                continue
+            try:
+                row_sources.append((selector, page.locator(selector)))
+            except Exception as exc:
+                logger.info("qianniu export row selector failed: selector=%s error=%s", selector, exc)
+        nearest_skipped_time = ""
+        checked_any_row = False
+        for source_selector, rows in row_sources:
+            try:
+                row_count = rows.count()
+            except Exception as exc:
+                logger.info(
+                    "qianniu export row count failed: selector=%s error=%s",
+                    source_selector,
+                    exc,
+                )
+                continue
+            for index in range(row_count):
+                row = rows.nth(index)
+                try:
+                    if not row.is_visible(timeout=300):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    text = row.inner_text(timeout=min(timeout_ms, 5000))
+                except Exception:
+                    continue
+                compact_text = " ".join(str(text or "").split())
+                if "报表申请时间" not in compact_text and download_button_text not in compact_text:
+                    continue
+                checked_any_row = True
+                if report_type and report_type not in compact_text:
+                    continue
+                row_requested_at = _extract_export_row_requested_time(compact_text, requested_after)
+                if row_requested_at is None:
+                    logger.info(
+                        "qianniu export row skipped because request time was not found: "
+                        "selector=%s row=%s text=%s",
+                        source_selector,
+                        index,
+                        compact_text[:300],
+                    )
+                    continue
+                if row_requested_at < earliest_allowed:
+                    nearest_skipped_time = row_requested_at.isoformat(sep=" ", timespec="seconds")
+                    continue
+                button = row.locator(button_selector).first
+                try:
+                    if button.count() <= 0:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    if not button.is_visible(timeout=500):
+                        continue
+                except Exception:
+                    continue
+                try:
+                    if button.is_disabled(timeout=500):
+                        continue
+                except Exception:
+                    pass
+                logger.info(
+                    "qianniu export report matched for download: requested_after=%s row_requested_at=%s "
+                    "report_type=%s selector=%s row=%s text=%s",
+                    requested_after.isoformat(sep=" ", timespec="seconds"),
+                    row_requested_at.isoformat(sep=" ", timespec="seconds"),
+                    report_type,
+                    source_selector,
+                    index,
+                    compact_text[:500],
+                )
+                return button, ""
+        if not checked_any_row:
+            return None, "no_export_rows"
+        return None, nearest_skipped_time
+
+    def _refresh_export_list() -> None:
+        if refresh_selector:
+            try:
+                page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True)
+                return
+            except Exception as exc:
+                logger.info("qianniu export list refresh click failed, reloading page: %s", exc)
+        page.reload(wait_until="domcontentloaded", timeout=min(30000, timeout_ms))
+
+    try:
+        page.wait_for_selector(row_selector, timeout=min(timeout_ms, 5000))
+    except Exception:
+        logger.info("qianniu export rows not visible yet; will continue polling")
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last_skipped_time = ""
+    while time.monotonic() <= deadline:
+        detected = _detect_auth_or_risk(page)
+        if detected:
+            raise BrowserActionError(detected, f"download_qianniu_export_report detected {detected}")
+        button, skipped_time = _find_download_button()
+        if skipped_time:
+            last_skipped_time = skipped_time
+        if button is not None:
+            with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
+                button.click(timeout=min(30000, timeout_ms))
+            return _save_download(info.value, download_dir=download_dir, capture_files=capture_files)
+        remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
+        if remaining_ms <= 0:
+            break
+        wait_ms = min(refresh_interval_ms, remaining_ms)
+        logger.info(
+            "qianniu export report not ready; waiting before refresh: requested_after=%s "
+            "report_type=%s wait_ms=%s last_skipped_time=%s",
+            requested_after.isoformat(sep=" ", timespec="seconds"),
+            report_type,
+            wait_ms,
+            last_skipped_time,
+        )
+        page.wait_for_timeout(wait_ms)
+        if time.monotonic() <= deadline:
+            _refresh_export_list()
+
+    raise BrowserActionError(
+        "PAGE_CHANGED",
+        "download_qianniu_export_report timed out waiting for a newly generated report "
+        f"after {requested_after.isoformat(sep=' ', timespec='seconds')}",
+    )
 
 
 def _download_history_file(
@@ -1212,40 +1862,120 @@ def _download_history_file(
     timeout_ms: int,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
-    history_open_selector = str(action.get("history_open_selector") or "").strip()
+    history_row_selectors = _configured_selectors_with_primary(
+        selector,
+        action,
+        "history_row_selectors",
+        "history_row_selector",
+    )
+    status_text = str(action.get("history_completed_status_text") or "已完成").strip()
+    download_selector = str(action.get("history_download_selector") or "button:has-text('下载')").strip()
+    history_open_selectors = _configured_selectors(
+        action,
+        "history_open_selectors",
+        "history_open_selector",
+    )
+    history_close_selectors = _configured_selectors(
+        action,
+        "history_close_selectors",
+        "history_close_selector",
+    )
     history_open_timeout_ms = int(action.get("history_open_timeout_ms") or 30000)
+    history_refresh_close_timeout_ms = int(
+        action.get("history_refresh_close_timeout_ms")
+        or min(max(1000, history_open_timeout_ms), 3000)
+    )
+    history_refresh_interval_ms = max(0, int(action.get("history_refresh_interval_ms") or 5000))
     target_date = _resolve_value(action, params, extracted)
     tokens = _date_tokens(target_date)
-    if not selector or not tokens:
+    if not history_row_selectors or not tokens:
         raise BrowserActionError("PAGE_CHANGED", "download_history_file requires selector and target date")
+    if not status_text or not download_selector:
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "download_history_file requires history_completed_status_text and history_download_selector",
+        )
 
-    if history_open_selector:
-        page.click(history_open_selector, timeout=history_open_timeout_ms, force=True)
+    def _history_has_rows() -> bool:
+        if not selector:
+            return False
+        try:
+            return page.locator(selector).count() > 0
+        except Exception:
+            return False
 
+    def _open_history() -> None:
+        if _history_has_rows():
+            return
+        if not history_open_selectors:
+            return
+        _click_first_available_selector(
+            page,
+            history_open_selectors,
+            timeout_ms=history_open_timeout_ms,
+            force=True,
+        )
+
+    def _find_completed_row() -> Any | None:
+        for row_selector in history_row_selectors:
+            rows = page.locator(row_selector)
+            for index, compact_text in _locator_text_rows(rows, timeout_ms=timeout_ms):
+                matches_date = _history_row_matches_target_date(compact_text, str(target_date))
+                matches_status = status_text in compact_text
+                if matches_date and matches_status:
+                    logger.info(
+                        "browser history row matched for download: target_date=%s selector=%s row=%s "
+                        "status_text=%s text=%s",
+                        target_date,
+                        row_selector,
+                        index,
+                        status_text,
+                        compact_text[:500],
+                    )
+                    return rows.nth(index)
+        return None
+
+    def _refresh_history() -> None:
+        if not history_open_selectors:
+            return
+        try:
+            closed = _click_first_available_selector(
+                page,
+                history_close_selectors,
+                timeout_ms=history_refresh_close_timeout_ms,
+                force=True,
+            )
+        except Exception as exc:
+            closed = False
+            logger.info("browser history drawer close skipped before refresh: %s", exc)
+        if closed:
+            page.wait_for_timeout(min(1000, max(0, history_refresh_interval_ms)))
+        try:
+            _open_history()
+        except Exception as exc:
+            logger.info("browser history reopen skipped; keeping current history list: %s", exc)
+
+    try:
+        _open_history()
+    except Exception as exc:
+        logger.info("browser history open skipped; checking current history list: %s", exc)
     deadline = time.monotonic() + (timeout_ms / 1000)
     row = None
     while time.monotonic() <= deadline:
-        rows = page.locator(selector)
-        for index in range(rows.count()):
-            candidate = rows.nth(index)
-            text = candidate.inner_text(timeout=min(timeout_ms, 5000))
-            compact_text = " ".join(str(text or "").split())
-            if (
-                _history_row_matches_target_date(compact_text, str(target_date))
-                and "已完成" in compact_text
-                and "下载" in compact_text
-            ):
-                row = candidate
-                break
+        row = _find_completed_row()
         if row is not None:
             break
-        page.wait_for_timeout(2000)
+        wait_ms = min(2000, max(0, int((deadline - time.monotonic()) * 1000)))
+        if wait_ms > 0:
+            page.wait_for_timeout(wait_ms)
+        if time.monotonic() <= deadline:
+            _refresh_history()
 
     if row is None:
         raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
 
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-        row.locator("button:has-text('下载')").click(timeout=timeout_ms)
+        row.locator(download_selector).click(timeout=timeout_ms)
     download = info.value
     target = download_dir / (download.suggested_filename or "download.bin")
     download.save_as(str(target))

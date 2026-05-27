@@ -11,10 +11,13 @@ VALID_ACTIONS = {
     "fill",
     "set_date",
     "wait_for",
+    "wait_ms",
     "extract_text",
     "extract_summary",
+    "select_checkboxes",
     "download",
     "download_history_file",
+    "download_qianniu_export_report",
     "parse_table",
     "assert",
 }

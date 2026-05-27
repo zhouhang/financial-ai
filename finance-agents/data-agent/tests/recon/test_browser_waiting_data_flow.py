@@ -98,6 +98,14 @@ async def test_browser_queued_collection_returns_data_waiting_without_stale_look
     async def stale_sync_job_poll(*args: object, **kwargs: object) -> dict[str, object]:
         raise AssertionError("browser queued collection should not wait for sync job completion")
 
+    async def fake_persist_execution_run(**kwargs: object) -> dict[str, object]:
+        return {
+            "id": "run-visible-001",
+            "execution_status": kwargs["execution_status"],
+            "failed_stage": kwargs.get("failed_stage", ""),
+            "failed_reason": kwargs.get("failed_reason", ""),
+        }
+
     monkeypatch.setattr(routers, "load_run_plan_node", fake_load_run_plan_node)
     monkeypatch.setattr(routers, "validate_run_plan_node", fake_validate_noop)
     monkeypatch.setattr(routers, "load_scheme_node", fake_load_scheme_node)
@@ -107,7 +115,7 @@ async def test_browser_queued_collection_returns_data_waiting_without_stale_look
     monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_trigger_collection)
     monkeypatch.setattr(nodes, "data_source_list_collection_records", stale_collection_lookup)
     monkeypatch.setattr(nodes, "data_source_get_sync_job", stale_sync_job_poll)
-    monkeypatch.setattr(nodes, "_persist_execution_run", stale_collection_lookup)
+    monkeypatch.setattr(nodes, "_persist_execution_run", fake_persist_execution_run)
 
     result = await auto_run_service.execute_run_plan_run(
         auth_token="token",
@@ -128,3 +136,87 @@ async def test_browser_queued_collection_returns_data_waiting_without_stale_look
         }
     ]
     assert result["collection_job_ids"] == ["sync-job-browser"]
+
+
+@pytest.mark.anyio
+async def test_browser_queued_collection_persists_visible_running_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, object]] = []
+
+    async def fake_load_run_plan_node(state: dict[str, object]) -> dict[str, object]:
+        ctx = dict(state["recon_ctx"])  # type: ignore[index]
+        ctx["run_plan"] = {
+            "plan_code": "plan-browser",
+            "scheme_code": "scheme-browser",
+            "is_active": True,
+        }
+        ctx["scheme_code"] = "scheme-browser"
+        return {"recon_ctx": ctx}
+
+    async def fake_load_scheme_node(state: dict[str, object]) -> dict[str, object]:
+        ctx = dict(state["recon_ctx"])  # type: ignore[index]
+        ctx["scheme"] = {"scheme_code": "scheme-browser", "scheme_type": "recon"}
+        ctx["scheme_code"] = "scheme-browser"
+        ctx["scheme_type"] = "recon"
+        return {"recon_ctx": ctx}
+
+    def fake_validate_noop(state: dict[str, object]) -> dict[str, object]:
+        return {"recon_ctx": dict(state["recon_ctx"])}  # type: ignore[index]
+
+    def fake_resolve_inputs_node(state: dict[str, object]) -> dict[str, object]:
+        ctx = dict(state["recon_ctx"])  # type: ignore[index]
+        ctx["plan_input_bindings"] = [
+            {
+                "data_source_id": "source-browser",
+                "dataset_id": "dataset-browser",
+                "table_name": "browser_orders",
+                "resource_key": "browser_orders",
+                "required": True,
+                "collection_driver": "browser_playbook_remote",
+                "dataset_source_type": "collection_records",
+                "dataset_name": "浏览器订单",
+            }
+        ]
+        ctx["plan_input_source"] = "dataset_bindings:execution_run_plan"
+        return {"recon_ctx": ctx}
+
+    async def fake_trigger_collection(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "success": True,
+            "queued": True,
+            "collection_driver": "browser_playbook_remote",
+            "job": {"id": "sync-job-browser", "status": "queued"},
+        }
+
+    async def fake_persist_execution_run(**kwargs: object) -> dict[str, object]:
+        persisted.append(dict(kwargs))
+        return {
+            "id": "run-visible-001",
+            "execution_status": kwargs["execution_status"],
+            "failed_stage": kwargs.get("failed_stage", ""),
+            "failed_reason": kwargs.get("failed_reason", ""),
+        }
+
+    monkeypatch.setattr(routers, "load_run_plan_node", fake_load_run_plan_node)
+    monkeypatch.setattr(routers, "validate_run_plan_node", fake_validate_noop)
+    monkeypatch.setattr(routers, "load_scheme_node", fake_load_scheme_node)
+    monkeypatch.setattr(routers, "validate_scheme_rules_node", fake_validate_noop)
+    monkeypatch.setattr(routers, "resolve_plan_inputs_node", fake_resolve_inputs_node)
+    monkeypatch.setattr(auto_run_service, "run_auto_scheme_run_graph", routers.run_auto_scheme_run_graph)
+    monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_trigger_collection)
+    monkeypatch.setattr(nodes, "_persist_execution_run", fake_persist_execution_run)
+
+    result = await auto_run_service.execute_run_plan_run(
+        auth_token="token",
+        run_plan_code="plan-browser",
+        biz_date="2026-05-20",
+        trigger_mode="schedule",
+        run_context={},
+    )
+
+    assert result["status"] == "data_waiting"
+    assert result["run"]["id"] == "run-visible-001"
+    assert persisted
+    assert persisted[0]["execution_status"] == "running"
+    assert persisted[0]["failed_stage"] == "data_waiting"
