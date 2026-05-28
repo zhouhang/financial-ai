@@ -520,6 +520,79 @@ def test_runtime_summary_prefers_collection_job_metrics_over_sample_counts() -> 
     assert summary["collections"][1]["duration_seconds"] == 1.249467
 
 
+def test_runtime_summary_uses_browser_checkpoint_when_job_metrics_absent() -> None:
+    ctx = {
+        "biz_date": "2026-05-27",
+        "source_collection_json": {
+            "collections": [
+                {
+                    "binding": {"role_code": "left_1", "dataset_name": "tb0131100248-店铺订单"},
+                    "collection_records": {"record_count": 0},
+                },
+                {
+                    "binding": {"role_code": "right_1", "dataset_name": "tb0131100248-收支账单"},
+                    "collection_records": {"record_count": 0},
+                },
+            ],
+            "collection_attempts": [
+                {
+                    "binding": {"role_code": "left_1", "dataset_name": "tb0131100248-店铺订单"},
+                    "job": {
+                        "started_at": "2026-05-28T09:40:02.832897+08:00",
+                        "completed_at": "2026-05-28T09:41:19.024757+08:00",
+                        "checkpoint_after": {
+                            "browser_collection_summary": {
+                                "record_count": 461,
+                                "quality_summary": {"row_count": 461},
+                                "records": {"input_count": 461, "upserted_count": 461},
+                            }
+                        },
+                    },
+                },
+                {
+                    "binding": {"role_code": "right_1", "dataset_name": "tb0131100248-收支账单"},
+                    "job": {
+                        "started_at": "2026-05-28T09:41:19.054214+08:00",
+                        "completed_at": "2026-05-28T09:49:30.307656+08:00",
+                        "checkpoint_after": {
+                            "browser_collection_summary": {
+                                "record_count": 456,
+                                "quality_summary": {"row_count": 456},
+                                "records": {"input_count": 456, "upserted_count": 456},
+                            }
+                        },
+                    },
+                },
+            ],
+        },
+        "runtime_metrics": {},
+    }
+
+    summary = nodes._build_runtime_summary(ctx)  # noqa: SLF001
+
+    assert summary["collections"][0]["row_count"] == 461
+    assert summary["collections"][0]["duration_seconds"] == 76.19186
+    assert summary["collections"][1]["row_count"] == 456
+    assert summary["collections"][1]["duration_seconds"] == 491.253442
+
+
+def test_collection_count_from_result_reads_browser_checkpoint_after_summary() -> None:
+    result = {
+        "success": True,
+        "job": {
+            "checkpoint_after": {
+                "browser_collection_summary": {
+                    "record_count": 456,
+                    "quality_summary": {"row_count": 456},
+                    "records": {"input_count": 456, "upserted_count": 456},
+                }
+            }
+        },
+    }
+
+    assert nodes._collection_count_from_result(result) == 456  # noqa: SLF001
+
+
 def test_trigger_and_wait_collection_enriches_completed_job_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

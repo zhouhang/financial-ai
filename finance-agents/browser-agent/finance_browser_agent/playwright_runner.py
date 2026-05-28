@@ -1896,16 +1896,16 @@ def _download_history_file(
             "download_history_file requires history_completed_status_text and history_download_selector",
         )
 
-    def _history_has_rows() -> bool:
+    def _history_has_visible_rows() -> bool:
         if not selector:
             return False
         try:
-            return page.locator(selector).count() > 0
+            return bool(_locator_text_rows(page.locator(selector), timeout_ms=history_open_timeout_ms))
         except Exception:
             return False
 
     def _open_history() -> None:
-        if _history_has_rows():
+        if _history_has_visible_rows():
             return
         if not history_open_selectors:
             return
@@ -1968,6 +1968,9 @@ def _download_history_file(
         wait_ms = min(2000, max(0, int((deadline - time.monotonic()) * 1000)))
         if wait_ms > 0:
             page.wait_for_timeout(wait_ms)
+        row = _find_completed_row()
+        if row is not None:
+            break
         if time.monotonic() <= deadline:
             _refresh_history()
 

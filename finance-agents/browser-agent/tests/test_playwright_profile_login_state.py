@@ -1557,6 +1557,79 @@ class RefreshingHistoryPage(FakeHistoryPage):
         super().click(selector, timeout=timeout, force=force)
 
 
+class VisibleHistoryLocator(FakeHistoryLocator):
+    def __init__(self, rows: list[FakeHistoryRow], *, visible: bool = True) -> None:
+        super().__init__(rows)
+        self.visible = visible
+
+    def evaluate_all(self, script: str) -> list[str]:
+        if not self.visible:
+            return []
+        return super().evaluate_all(script)
+
+
+class HiddenDomAfterCloseHistoryPage(FakeHistoryPage):
+    def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
+        super().__init__([])
+        self.row_sets = row_sets
+        self.history_visible = False
+        self.open_clicks: list[tuple[str, int, bool]] = []
+        self.close_clicks: list[tuple[str, int, bool]] = []
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        if selector == ".history tr":
+            return VisibleHistoryLocator(self.rows, visible=self.history_visible)
+        if selector in {".open-history", ".close-history"}:
+            return FakeHistoryLocator([FakeHistoryRow("clickable")])
+        return FakeHistoryLocator([])
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".open-history":
+            self.open_clicks.append((selector, timeout, force))
+            index = min(len(self.open_clicks) - 1, len(self.row_sets) - 1)
+            self.rows = self.row_sets[index]
+            self.history_visible = True
+            return
+        if selector == ".close-history":
+            self.close_clicks.append((selector, timeout, force))
+            self.history_visible = False
+            return
+        super().click(selector, timeout=timeout, force=force)
+
+
+class CompletingWhileOpenHistoryPage(FakeHistoryPage):
+    def __init__(self, generating_row: FakeHistoryRow, completed_row: FakeHistoryRow) -> None:
+        super().__init__([])
+        self.generating_row = generating_row
+        self.completed_row = completed_row
+        self.history_visible = False
+        self.open_clicks: list[tuple[str, int, bool]] = []
+        self.close_clicks: list[tuple[str, int, bool]] = []
+
+    def locator(self, selector: str) -> FakeHistoryLocator:
+        if selector == ".history tr":
+            return VisibleHistoryLocator(self.rows, visible=self.history_visible)
+        if selector in {".open-history", ".close-history"}:
+            return FakeHistoryLocator([FakeHistoryRow("clickable")])
+        return FakeHistoryLocator([])
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        if self.history_visible and self.rows == [self.generating_row]:
+            self.rows = [self.completed_row]
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".open-history":
+            self.open_clicks.append((selector, timeout, force))
+            self.rows = [self.generating_row]
+            self.history_visible = True
+            return
+        if selector == ".close-history":
+            self.close_clicks.append((selector, timeout, force))
+            self.history_visible = False
+            return
+        super().click(selector, timeout=timeout, force=force)
+
+
 class HistoryAlreadyOpenPage(FakeHistoryPage):
     def __init__(self, rows: list[FakeHistoryRow]) -> None:
         super().__init__(rows)
@@ -1817,6 +1890,77 @@ def test_download_history_file_refreshes_history_drawer_until_completed(tmp_path
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
 
+def test_download_history_file_reopens_when_closed_history_dom_remains_hidden(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-05-27 ~ 2026-05-27 交易货款 生成中")
+    completed_row = FakeHistoryRow(
+        "2026-05-28 09:42:01 2026-05-28 09:42:05 "
+        "2026-05-27 ~ 2026-05-27 交易货款 已完成 下载"
+    )
+    page = HiddenDomAfterCloseHistoryPage([[generating_row], [completed_row]])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".open-history",
+            "history_close_selector": ".close-history",
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-05-27"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_clicks == [
+        (".open-history", 30000, True),
+        (".open-history", 30000, True),
+    ]
+    assert page.close_clicks == [(".close-history", 3000, True)]
+    assert completed_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_rechecks_rows_before_refreshing_open_history(tmp_path) -> None:
+    generating_row = FakeHistoryRow("2026-05-27 ~ 2026-05-27 交易货款 生成中")
+    completed_row = FakeHistoryRow(
+        "2026-05-28 09:42:01 2026-05-28 09:42:05 "
+        "2026-05-27 ~ 2026-05-27 交易货款 已完成 下载"
+    )
+    page = CompletingWhileOpenHistoryPage(generating_row, completed_row)
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".open-history",
+            "history_close_selector": ".close-history",
+            "history_refresh_interval_ms": 0,
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-05-27"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.open_clicks == [(".open-history", 30000, True)]
+    assert page.close_clicks == []
+    assert completed_row.clicked_timeout == 1000
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
 def test_download_history_file_skips_missing_refresh_controls_before_clicking(tmp_path) -> None:
     generating_row = FakeHistoryRow("2026-03-03 ~ 2026-03-03 交易货款 生成中")
     completed_row = FakeHistoryRow("2026-03-03 ~ 2026-03-03 交易货款 已完成 下载")
@@ -2018,7 +2162,7 @@ def test_download_history_file_keeps_polling_when_refresh_entry_disappears(tmp_p
     )
 
     assert page.open_attempts == 1
-    assert page.close_attempts
+    assert page.close_attempts == []
     assert completed_row.clicked_timeout == 1000
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
