@@ -32,7 +32,7 @@ describe('对账任务列表布局', () => {
   it('在任务名称下方展示创建时间和协作责任信息，并隐藏独立方案和创建时间列', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === '/api/recon/schemes') {
+      if (url.split('?')[0] === '/api/recon/schemes') {
         return jsonResponse({
           schemes: [
             {
@@ -46,7 +46,7 @@ describe('对账任务列表布局', () => {
           ],
         });
       }
-      if (url === '/api/recon/tasks') {
+      if (url.split('?')[0] === '/api/recon/tasks') {
         return jsonResponse({
           tasks: [
             {
@@ -77,7 +77,7 @@ describe('对账任务列表布局', () => {
           ],
         });
       }
-      if (url === '/api/recon/runs') {
+      if (url.split('?')[0] === '/api/recon/runs') {
         return jsonResponse({ runs: [] });
       }
       if (url === '/api/collaboration-channels') {
@@ -123,7 +123,7 @@ describe('对账任务列表布局', () => {
   it('异常看板展示运行真实摘要和差异列表异常数', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === '/api/recon/schemes') {
+      if (url.split('?')[0] === '/api/recon/schemes') {
         return jsonResponse({
           schemes: [
             {
@@ -137,7 +137,7 @@ describe('对账任务列表布局', () => {
           ],
         });
       }
-      if (url === '/api/recon/tasks') {
+      if (url.split('?')[0] === '/api/recon/tasks') {
         return jsonResponse({
           tasks: [
             {
@@ -152,7 +152,7 @@ describe('对账任务列表布局', () => {
           ],
         });
       }
-      if (url === '/api/recon/runs') {
+      if (url.split('?')[0] === '/api/recon/runs') {
         return jsonResponse({
           runs: [
             {

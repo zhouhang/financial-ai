@@ -55,7 +55,7 @@ def test_playwright_config_defaults_to_persistent_profile(monkeypatch) -> None:
     assert config.click_delay_min_ms == 800
     assert config.click_delay_max_ms == 1800
     assert config.type_delay_ms == 160
-    assert config.risk_manual_timeout_ms == 300000
+    assert config.risk_manual_timeout_ms == 900000
 
 
 def test_playwright_config_env_overrides(monkeypatch, tmp_path) -> None:

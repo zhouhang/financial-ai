@@ -9725,6 +9725,28 @@ def list_execution_schemes(
         return []
 
 
+def count_execution_schemes(
+    *,
+    company_id: str,
+    include_disabled: bool = True,
+) -> int:
+    """统计执行方案总数（与 list_execution_schemes 同筛选条件，供分页显示总数）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = "SELECT count(*) FROM execution_schemes WHERE company_id = %s"
+                params: list[Any] = [company_id]
+                if not include_disabled:
+                    sql += " AND is_enabled = true"
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(f"统计 execution_schemes 总数失败 (company_id={company_id}): {e}")
+        return 0
+
+
 def create_execution_run_plan(
     *,
     company_id: str,
@@ -9982,6 +10004,34 @@ def list_execution_run_plans(
     except Exception as e:
         logger.error(f"查询 execution_run_plans 列表失败 (company_id={company_id}, scheme_code={scheme_code}): {e}")
         return []
+
+
+def count_execution_run_plans(
+    *,
+    company_id: str,
+    scheme_code: str | None = None,
+    include_disabled: bool = True,
+) -> int:
+    """统计执行运行计划总数（与 list_execution_run_plans 同筛选条件，供分页显示总数）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = "SELECT count(*) FROM execution_run_plans WHERE company_id = %s"
+                params: list[Any] = [company_id]
+                if scheme_code:
+                    sql += " AND scheme_code = %s"
+                    params.append(scheme_code)
+                if not include_disabled:
+                    sql += " AND is_enabled = true"
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(
+            f"统计 execution_run_plans 总数失败 (company_id={company_id}, scheme_code={scheme_code}): {e}"
+        )
+        return 0
 
 
 def list_enabled_execution_run_plans_for_scheduler(
@@ -10319,6 +10369,35 @@ def list_execution_runs(
             f"查询 execution_runs 列表失败 (company_id={company_id}, scheme_code={scheme_code}, plan_code={plan_code}): {e}"
         )
         return []
+
+
+def count_execution_runs(
+    *,
+    company_id: str,
+    scheme_code: str | None = None,
+    plan_code: str | None = None,
+) -> int:
+    """统计执行记录总数（与 list_execution_runs 同筛选条件，供分页显示总数）。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = "SELECT count(*) FROM execution_runs WHERE company_id = %s"
+                params: list[Any] = [company_id]
+                if scheme_code:
+                    sql += " AND scheme_code = %s"
+                    params.append(scheme_code)
+                if plan_code:
+                    sql += " AND plan_code = %s"
+                    params.append(plan_code)
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(
+            f"统计 execution_runs 总数失败 (company_id={company_id}, scheme_code={scheme_code}, plan_code={plan_code}): {e}"
+        )
+        return 0
 
 
 def delete_execution_run(*, company_id: str, run_id: str) -> dict | None:

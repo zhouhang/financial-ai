@@ -1978,9 +1978,10 @@ def _ensure_allowed(value: str, allowed: set[str], field_name: str) -> str:
 def _scheme_list(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user.get("company_id") or "")
+    include_disabled = _as_bool(arguments.get("include_disabled"), True)
     items = auth_db.list_execution_schemes(
         company_id=company_id,
-        include_disabled=_as_bool(arguments.get("include_disabled"), True),
+        include_disabled=include_disabled,
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
@@ -1988,7 +1989,11 @@ def _scheme_list(arguments: dict[str, Any]) -> dict[str, Any]:
         _hydrate_execution_scheme_dataset_snapshots(company_id, item)
         for item in items
     ]
-    return {"success": True, "count": len(items), "schemes": items}
+    total = auth_db.count_execution_schemes(
+        company_id=company_id,
+        include_disabled=include_disabled,
+    )
+    return {"success": True, "count": len(items), "total": total, "schemes": items}
 
 
 def _scheme_get(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2213,14 +2218,20 @@ def _plan_list(arguments: dict[str, Any]) -> dict[str, Any]:
     scheme_code, error = _resolve_scheme_code(company_id, arguments)
     if error:
         return {"success": False, "error": error}
+    include_disabled = _as_bool(arguments.get("include_disabled"), True)
     items = auth_db.list_execution_run_plans(
         company_id=company_id,
         scheme_code=scheme_code,
-        include_disabled=_as_bool(arguments.get("include_disabled"), True),
+        include_disabled=include_disabled,
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
-    return {"success": True, "count": len(items), "run_plans": items}
+    total = auth_db.count_execution_run_plans(
+        company_id=company_id,
+        scheme_code=scheme_code,
+        include_disabled=include_disabled,
+    )
+    return {"success": True, "count": len(items), "total": total, "run_plans": items}
 
 
 def _plan_get(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2433,7 +2444,12 @@ def _run_list(arguments: dict[str, Any]) -> dict[str, Any]:
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
-    return {"success": True, "count": len(items), "runs": items}
+    total = auth_db.count_execution_runs(
+        company_id=company_id,
+        scheme_code=scheme_code,
+        plan_code=plan_code,
+    )
+    return {"success": True, "count": len(items), "total": total, "runs": items}
 
 
 def _run_get(arguments: dict[str, Any]) -> dict[str, Any]:

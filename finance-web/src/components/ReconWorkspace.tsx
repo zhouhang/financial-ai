@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type
 import {
   AlertCircle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Eye,
   Pause,
@@ -3252,6 +3254,10 @@ function WizardStepBadge({
   );
 }
 
+const RUNS_PAGE_SIZE = 20;
+const SCHEMES_PAGE_SIZE = 20;
+const TASKS_PAGE_SIZE = 20;
+
 export default function ReconWorkspace({
   mode = 'center',
   authToken,
@@ -3261,8 +3267,20 @@ export default function ReconWorkspace({
 }: ReconWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<ReconCenterTab>('schemes');
   const [schemes, setSchemes] = useState<ReconSchemeListItem[]>([]);
+  const [schemesPage, setSchemesPage] = useState(0);
+  const [schemesTotal, setSchemesTotal] = useState(0);
+  const [schemesHasMore, setSchemesHasMore] = useState(false);
+  const [schemesPageLoading, setSchemesPageLoading] = useState(false);
   const [tasks, setTasks] = useState<ReconTaskListItem[]>([]);
+  const [tasksPage, setTasksPage] = useState(0);
+  const [tasksTotal, setTasksTotal] = useState(0);
+  const [tasksHasMore, setTasksHasMore] = useState(false);
+  const [tasksPageLoading, setTasksPageLoading] = useState(false);
   const [runs, setRuns] = useState<ReconCenterRunItem[]>([]);
+  const [runsPage, setRunsPage] = useState(0);
+  const [runsHasMore, setRunsHasMore] = useState(false);
+  const [runsPageLoading, setRunsPageLoading] = useState(false);
+  const [runsTotal, setRunsTotal] = useState(0);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
   const [loadingCenter, setLoadingCenter] = useState(false);
@@ -3574,9 +3592,9 @@ export default function ReconWorkspace({
     try {
       const headers = { Authorization: `Bearer ${authToken}` };
       const [schemeResponse, taskResponse, runResponse] = await Promise.all([
-        fetchReconAutoApi('/schemes', { headers }),
-        fetchReconAutoApi('/tasks', { headers }),
-        fetchReconAutoApi('/runs', { headers }),
+        fetchReconAutoApi(`/schemes?include_disabled=false&limit=${SCHEMES_PAGE_SIZE}&offset=0`, { headers }),
+        fetchReconAutoApi(`/tasks?limit=${TASKS_PAGE_SIZE}&offset=0`, { headers }),
+        fetchReconAutoApi(`/runs?limit=${RUNS_PAGE_SIZE}&offset=0`, { headers }),
       ]);
 
       const [schemeData, taskData, runData] = await Promise.all([
@@ -3616,6 +3634,15 @@ export default function ReconWorkspace({
       setFocusedRunId((current) => (
         current && !nextRuns.some((item) => item.id === current) ? null : current
       ));
+      setRunsPage(0);
+      setRunsHasMore(nextRuns.length === RUNS_PAGE_SIZE);
+      setRunsTotal(Number(runData.total) || nextRuns.length);
+      setSchemesPage(0);
+      setSchemesHasMore(asList(schemeData.schemes).length === SCHEMES_PAGE_SIZE);
+      setSchemesTotal(Number(schemeData.total) || nextSchemes.length);
+      setTasksPage(0);
+      setTasksHasMore(asList(taskData.tasks || taskData.run_plans).length === TASKS_PAGE_SIZE);
+      setTasksTotal(Number(taskData.total) || nextTasks.length);
       applyCenterPayload(nextSchemes, nextTasks, nextRuns, {
         notice: null,
         exceptionsByRunId: {},
@@ -3625,6 +3652,15 @@ export default function ReconWorkspace({
       setSchemes([]);
       setTasks([]);
       setRuns([]);
+      setRunsPage(0);
+      setRunsHasMore(false);
+      setRunsTotal(0);
+      setSchemesPage(0);
+      setSchemesHasMore(false);
+      setSchemesTotal(0);
+      setTasksPage(0);
+      setTasksHasMore(false);
+      setTasksTotal(0);
       setExceptionsByRunId({});
       setCenterNotice(null);
       setCenterError(error instanceof Error ? error.message : '对账中心加载失败');
@@ -3636,6 +3672,105 @@ export default function ReconWorkspace({
       setLoadingCenter(false);
     }
   }, [applyCenterPayload, authToken]);
+
+  const loadRunsPage = useCallback(async (nextPage: number): Promise<void> => {
+    if (!authToken) return;
+    const targetPage = Math.max(0, nextPage);
+    setRunsPageLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${authToken}` };
+      const offset = targetPage * RUNS_PAGE_SIZE;
+      const response = await fetchReconAutoApi(
+        `/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}`,
+        { headers },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.detail || data.message || '运行记录加载失败'));
+      }
+      // Reuse the current schemes/tasks state to label runs — prev/next only
+      // re-fetches the runs page, never the schemes/tasks lists.
+      const schemeNameByCode = new Map(schemes.map((item) => [item.schemeCode, item.name]));
+      const taskNameByCode = new Map(tasks.map((item) => [item.planCode, item.name]));
+      const nextRuns = asList(data.runs).map((item) =>
+        mapRun(item, schemeNameByCode, taskNameByCode),
+      );
+      setRuns(nextRuns);
+      setRunsPage(targetPage);
+      setRunsHasMore(nextRuns.length === RUNS_PAGE_SIZE);
+      setRunsTotal(Number(data.total) || nextRuns.length + targetPage * RUNS_PAGE_SIZE);
+      setFocusedRunId((current) => (
+        current && !nextRuns.some((item) => item.id === current) ? null : current
+      ));
+    } catch (error) {
+      setCenterError(error instanceof Error ? error.message : '运行记录加载失败');
+    } finally {
+      setRunsPageLoading(false);
+    }
+  }, [authToken, schemes, tasks]);
+
+  const loadSchemesPage = useCallback(async (nextPage: number): Promise<void> => {
+    if (!authToken) return;
+    const targetPage = Math.max(0, nextPage);
+    setSchemesPageLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${authToken}` };
+      const offset = targetPage * SCHEMES_PAGE_SIZE;
+      const response = await fetchReconAutoApi(
+        `/schemes?include_disabled=false&limit=${SCHEMES_PAGE_SIZE}&offset=${offset}`,
+        { headers },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.detail || data.message || '对账方案加载失败'));
+      }
+      const rawList = asList(data.schemes);
+      const nextSchemes = rawList.map(mapScheme).filter((item) => item.status === 'enabled');
+      setSchemes(nextSchemes);
+      setSchemesPage(targetPage);
+      setSchemesHasMore(rawList.length === SCHEMES_PAGE_SIZE);
+      setSchemesTotal(Number(data.total) || nextSchemes.length + targetPage * SCHEMES_PAGE_SIZE);
+    } catch (error) {
+      setCenterError(error instanceof Error ? error.message : '对账方案加载失败');
+    } finally {
+      setSchemesPageLoading(false);
+    }
+  }, [authToken]);
+
+  const loadTasksPage = useCallback(async (nextPage: number): Promise<void> => {
+    if (!authToken) return;
+    const targetPage = Math.max(0, nextPage);
+    setTasksPageLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${authToken}` };
+      const offset = targetPage * TASKS_PAGE_SIZE;
+      const response = await fetchReconAutoApi(
+        `/tasks?limit=${TASKS_PAGE_SIZE}&offset=${offset}`,
+        { headers },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.detail || data.message || '对账任务加载失败'));
+      }
+      const rawList = asList(data.tasks || data.run_plans);
+      const schemeNameByCode = new Map(schemes.map((item) => [item.schemeCode, item.name]));
+      const schemeMetaByCode = new Map(schemes.map((item) => [item.schemeCode, extractSchemeMeta(item)]));
+      const nextTasks = rawList
+        .map((item) => mapTask(item, schemeNameByCode, schemeMetaByCode))
+        .filter((item) => !isTaskMarkedDeleted(item));
+      setTasks(nextTasks);
+      setTasksPage(targetPage);
+      setTasksHasMore(rawList.length === TASKS_PAGE_SIZE);
+      setTasksTotal(Number(data.total) || nextTasks.length + targetPage * TASKS_PAGE_SIZE);
+      setFocusedTaskId((current) => (
+        current && !nextTasks.some((item) => item.id === current) ? null : current
+      ));
+    } catch (error) {
+      setCenterError(error instanceof Error ? error.message : '对账任务加载失败');
+    } finally {
+      setTasksPageLoading(false);
+    }
+  }, [authToken, schemes]);
 
   useEffect(() => {
     if (activeTab !== 'schemes') {
@@ -5568,6 +5703,7 @@ export default function ReconWorkspace({
           throw new Error(String(data.detail || data.message || '删除对账方案失败'));
         }
         setSchemes((prev) => prev.filter((item) => item.id !== scheme.id));
+        setSchemesTotal((prev) => Math.max(0, prev - 1));
         if (modalState?.kind === 'scheme-detail' && modalState.scheme.id === scheme.id) {
           closeModal();
         }
@@ -5624,6 +5760,7 @@ export default function ReconWorkspace({
         }).catch(() => null);
 
         setTasks((prev) => prev.filter((item) => item.id !== task.id));
+        setTasksTotal((prev) => Math.max(0, prev - 1));
         await loadCenterData();
       } catch (error) {
         setModalError(error instanceof Error ? error.message : '删除任务失败');
@@ -5655,6 +5792,7 @@ export default function ReconWorkspace({
           throw new Error(String(data.detail || data.message || '删除运行记录失败'));
         }
         setRuns((prev) => prev.filter((item) => item.id !== run.id));
+        setRunsTotal((prev) => Math.max(0, prev - 1));
         setExceptionsByRunId((prev) => {
           const next = { ...prev };
           delete next[run.id];
@@ -6003,9 +6141,9 @@ export default function ReconWorkspace({
 
   const headerRightSlot = (
     <div className="hidden items-center gap-2 lg:flex">
-      <SummaryBadge label="方案" value={schemes.length} />
-      <SummaryBadge label="任务" value={tasks.length} />
-      <SummaryBadge label="运行" value={runs.length} />
+      <SummaryBadge label="方案" value={schemesTotal} />
+      <SummaryBadge label="任务" value={tasksTotal} />
+      <SummaryBadge label="运行" value={runsTotal} />
     </div>
   );
 
@@ -6192,6 +6330,31 @@ export default function ReconWorkspace({
           );
         })}
       </div>
+      <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
+        <p className="text-xs text-text-secondary">
+          第 {schemesPage + 1} 页 · 每页 {SCHEMES_PAGE_SIZE} 条
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void loadSchemesPage(schemesPage - 1)}
+            disabled={schemesPage === 0 || schemesPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            上一页
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadSchemesPage(schemesPage + 1)}
+            disabled={!schemesHasMore || schemesPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            下一页
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 
@@ -6288,6 +6451,31 @@ export default function ReconWorkspace({
           );
         })}
       </div>
+      <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
+        <p className="text-xs text-text-secondary">
+          第 {tasksPage + 1} 页 · 每页 {TASKS_PAGE_SIZE} 条
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void loadTasksPage(tasksPage - 1)}
+            disabled={tasksPage === 0 || tasksPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            上一页
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadTasksPage(tasksPage + 1)}
+            disabled={!tasksHasMore || tasksPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            下一页
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 
@@ -6340,15 +6528,6 @@ export default function ReconWorkspace({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => void handleRerunValidation(item.id)}
-                    disabled={Boolean(rerunningRunId)}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <RefreshCw className={cn('h-4 w-4', rerunningRunId === item.id && 'animate-spin')} />
-                    {rerunningRunId === item.id ? '验证中...' : '重新对账验证'}
-                  </button>
-                  <button
-                    type="button"
                     data-testid={`execution-run-exceptions-${item.id}`}
                     onClick={() => setModalState({ kind: 'run-exceptions', run: item })}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-primary transition hover:border-sky-200 hover:text-sky-700"
@@ -6369,6 +6548,31 @@ export default function ReconWorkspace({
             </div>
           );
         })}
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
+        <p className="text-xs text-text-secondary">
+          第 {runsPage + 1} 页 · 每页 {RUNS_PAGE_SIZE} 条
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void loadRunsPage(runsPage - 1)}
+            disabled={runsPage === 0 || runsPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            上一页
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadRunsPage(runsPage + 1)}
+            disabled={!runsHasMore || runsPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 text-xs text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            下一页
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
       </div>
     </div>
   );

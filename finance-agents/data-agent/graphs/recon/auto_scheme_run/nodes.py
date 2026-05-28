@@ -604,7 +604,35 @@ def _collection_duration(collection: dict[str, Any]) -> float | None:
     job = _safe_dict(collection.get("job"))
     metrics = _safe_dict(job.get("metrics"))
     timing = _safe_dict(metrics.get("collection_timing"))
-    return _safe_float(timing.get("total_seconds"))
+    duration = _safe_float(timing.get("total_seconds"))
+    if duration is not None:
+        return duration
+    return _runtime_duration_seconds(
+        job.get("started_at"),
+        job.get("completed_at") or job.get("finished_at"),
+    )
+
+
+def _browser_collection_summary_from_job(job: dict[str, Any]) -> dict[str, Any]:
+    for checkpoint_key in ("checkpoint_after", "checkpoint_before"):
+        checkpoint = _safe_dict(job.get(checkpoint_key))
+        summary = _safe_dict(checkpoint.get("browser_collection_summary"))
+        if summary:
+            return summary
+    return {}
+
+
+def _browser_collection_summary_row_count(summary: dict[str, Any]) -> int:
+    for container in (
+        summary,
+        _safe_dict(summary.get("quality_summary")),
+        _safe_dict(summary.get("records")),
+    ):
+        for key in ("record_count", "row_count", "input_count", "upserted_count", "inserted_count"):
+            value = _safe_int(container.get(key), -1)
+            if value >= 0:
+                return value
+    return -1
 
 
 def _collection_row_count(collection: dict[str, Any]) -> int:
@@ -614,6 +642,9 @@ def _collection_row_count(collection: dict[str, Any]) -> int:
         value = _safe_int(metrics.get(key), -1)
         if value >= 0:
             return value
+    browser_count = _browser_collection_summary_row_count(_browser_collection_summary_from_job(job))
+    if browser_count >= 0:
+        return browser_count
     collection_records = _safe_dict(collection.get("collection_records"))
     return _safe_int(collection_records.get("record_count"), 0)
 
@@ -982,7 +1013,14 @@ def _uses_driver_managed_dataset_loader(binding: dict[str, Any]) -> bool:
 
 def _collection_count_from_result(result: dict[str, Any]) -> int:
     summary = _safe_dict(result.get("collection_summary"))
-    for container in (summary, result):
+    browser_summary = _browser_collection_summary_from_job(_safe_dict(result.get("job")))
+    for container in (
+        summary,
+        result,
+        browser_summary,
+        _safe_dict(browser_summary.get("quality_summary")),
+        _safe_dict(browser_summary.get("records")),
+    ):
         for key in ("record_count", "row_count", "upserted_count", "inserted_count"):
             try:
                 value = int(container.get(key) or 0)
