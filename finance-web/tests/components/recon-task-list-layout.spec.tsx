@@ -23,18 +23,10 @@ function jsonResponse(data: unknown, status = 200) {
   );
 }
 
-function expectStructuredSummary(container: HTMLElement) {
-  const diffTypeRow = within(container).getByTestId('exception-summary-row-差异类型');
-  expect(within(diffTypeRow).getByText('差异类型')).toBeInTheDocument();
-  expect(within(diffTypeRow).getByText('金额差异')).toBeInTheDocument();
-
-  const matchFieldRow = within(container).getByTestId('exception-summary-row-匹配字段');
-  expect(within(matchFieldRow).getByText('匹配字段')).toBeInTheDocument();
-  expect(within(matchFieldRow).getByText('订单号=TB001')).toBeInTheDocument();
-
-  const compareFieldRow = within(container).getByTestId('exception-summary-row-对比字段');
-  expect(within(compareFieldRow).getByText('对比字段')).toBeInTheDocument();
-  expect(within(compareFieldRow).getByText('实收金额 100 / 98')).toBeInTheDocument();
+function expectNoStructuredSummaryLabels(container: HTMLElement) {
+  expect(within(container).queryByText('差异类型')).not.toBeInTheDocument();
+  expect(within(container).queryByText('匹配字段')).not.toBeInTheDocument();
+  expect(within(container).queryByText('对比字段')).not.toBeInTheDocument();
 }
 
 afterEach(() => {
@@ -242,7 +234,7 @@ describe('对账任务列表布局', () => {
     expect(within(dialog).queryByText('结束时间')).not.toBeInTheDocument();
   });
 
-  it('异常看板按段换行展示异常摘要', async () => {
+  it('异常看板展示业务化短摘要', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.split('?')[0] === '/api/recon/schemes') {
@@ -253,6 +245,26 @@ describe('对账任务列表布局', () => {
               scheme_code: 'scheme_code_1',
               scheme_name: '订单对账方案',
               is_enabled: true,
+              scheme_meta_json: {
+                dataset_bindings: {
+                  left: [
+                    {
+                      dataset_id: 'left-dataset',
+                      dataset_name: 'tb0131100248-店铺订单',
+                      business_name: 'tb0131100248-店铺订单',
+                      field_label_map: { biz_key: '订单编号', amount: '含税销售金额' },
+                    },
+                  ],
+                  right: [
+                    {
+                      dataset_id: 'right-dataset',
+                      dataset_name: '交易订单明细表',
+                      business_name: '交易订单明细表',
+                      field_label_map: { biz_key: '订单编号', paid_amount: '买家实付金额' },
+                    },
+                  ],
+                },
+              },
             },
           ],
         });
@@ -294,11 +306,34 @@ describe('对账任务列表布局', () => {
           exceptions: [
             {
               id: 'exception-1',
-              anomaly_type: 'matched_with_diff',
-              summary: '差异类型：金额差异 匹配字段：订单号=TB001 对比字段：实收金额 100 / 98',
+              anomaly_type: 'source_only',
+              summary: '仅 tb0131100248-店铺订单 存在（交易订单明细表 缺失）：订单编号=5118002676174023242 含税销售金额 ↔ 买家实付金额：tb0131100248-店铺订单 0.00',
               owner_name: '周行',
               processing_status: 'pending',
-              detail_json: {},
+              detail_json: {
+                source_ref: 'left_recon_ready',
+                target_ref: 'right_recon_ready',
+                join_key: [
+                  {
+                    source_field: 'biz_key',
+                    target_field: 'biz_key',
+                    source_value: '5118002676174023242',
+                    target_value: null,
+                  },
+                ],
+                compare_values: [
+                  {
+                    source_field: 'amount',
+                    target_field: 'paid_amount',
+                    source_value: '0.00',
+                    target_value: null,
+                  },
+                ],
+                left_record: {
+                  biz_key: '5118002676174023242',
+                  amount: '0.00',
+                },
+              },
             },
           ],
         });
@@ -317,12 +352,16 @@ describe('对账任务列表布局', () => {
     fireEvent.click(within(runRow).getByRole('button', { name: '异常看板' }));
 
     const dialog = await screen.findByRole('dialog');
-    await within(dialog).findByTestId('exception-summary-row-差异类型');
-    expectStructuredSummary(dialog);
+    expect(within(dialog).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
+    expectNoStructuredSummaryLabels(dialog);
 
     fireEvent.click(within(dialog).getByRole('button', { name: '查看详情' }));
 
     const detailDialog = await screen.findByRole('dialog', { name: '异常详情' });
-    expectStructuredSummary(detailDialog);
+    expect(within(detailDialog).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('交易订单明细表')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('未匹配到原始记录')).toBeInTheDocument();
+    expectNoStructuredSummaryLabels(detailDialog);
   });
 });

@@ -77,8 +77,12 @@ import {
   formatCount,
   formatDuration,
 } from './recon/runRuntimeSummary';
-import ExceptionSummary from './recon/ExceptionSummary';
-import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
+import {
+  buildExceptionBusinessDisplay,
+  normalizeExceptionValue,
+  stripExceptionFieldPrefix,
+  type ExceptionBusinessDisplay,
+} from './recon/exceptionBusinessSummary';
 import {
   cn,
   type ReconCenterRunItem,
@@ -900,27 +904,11 @@ function formatProcessingStatusLabel(value: string): string {
 }
 
 function formatDetailValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '--';
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
+  return normalizeExceptionValue(value);
 }
 
 function stripRunExceptionFieldPrefix(field: string): string {
-  const normalized = field.trim();
-  if (!normalized) return '';
-  const prefixes = ['left_recon_ready.', 'right_recon_ready.', 'source.', 'target.', 'left.', 'right.'];
-  for (const prefix of prefixes) {
-    if (normalized.startsWith(prefix)) {
-      return normalized.slice(prefix.length);
-    }
-  }
-  return normalized;
+  return stripExceptionFieldPrefix(field.trim());
 }
 
 function humanizeExceptionFieldName(field: string, fallback = ''): string {
@@ -929,49 +917,41 @@ function humanizeExceptionFieldName(field: string, fallback = ''): string {
   return PREPARED_OUTPUT_FIELD_LABEL_MAP[normalized] || humanizeProcDescription(normalized).trim() || normalized;
 }
 
-function getRunExceptionRawRecord(item: ReconRunExceptionDetail): Record<string, unknown> {
-  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-  return firstNonEmptyRecord(detail.raw_record, detail.record, detail.source_record, detail.left_record);
-}
-
-function getRunExceptionRecordsBySide(
+function buildRunExceptionDisplay(
   item: ReconRunExceptionDetail,
-): { left: Record<string, unknown>; right: Record<string, unknown>; extra: Record<string, unknown> } {
-  const detail = firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-  const explicitLeft = firstNonEmptyRecord(detail.left_record, detail.source_record, detail.left_row);
-  const explicitRight = firstNonEmptyRecord(detail.right_record, detail.target_record, detail.right_row);
-  const rawRecord = firstNonEmptyRecord(detail.raw_record, detail.record);
+  schemeMeta: SchemeMetaSummary | null,
+): ExceptionBusinessDisplay {
+  const leftLabel = schemeMeta
+    ? resolveResultDatasetLabel('left', schemeMeta.matchFieldPairs, schemeMeta.leftOutputFields, schemeMeta.leftSources)
+    : '数据集 A';
+  const rightLabel = schemeMeta
+    ? resolveResultDatasetLabel('right', schemeMeta.matchFieldPairs, schemeMeta.rightOutputFields, schemeMeta.rightSources)
+    : '数据集 B';
 
-  const normalizeRecordKeys = (record: Record<string, unknown>): Record<string, unknown> =>
-    Object.fromEntries(
-      Object.entries(record).map(([key, value]) => [stripRunExceptionFieldPrefix(key), value]),
-    );
+  const labelMaps = schemeMeta
+    ? {
+        left: schemeMeta.leftOutputFieldLabelMap,
+        right: schemeMeta.rightOutputFieldLabelMap,
+      }
+    : { left: {}, right: {} };
 
-  if (Object.keys(explicitLeft).length > 0 || Object.keys(explicitRight).length > 0) {
-    return {
-      left: normalizeRecordKeys(explicitLeft),
-      right: normalizeRecordKeys(explicitRight),
-      extra: {},
-    };
-  }
-
-  const left: Record<string, unknown> = {};
-  const right: Record<string, unknown> = {};
-  const extra: Record<string, unknown> = {};
-
-  Object.entries(rawRecord).forEach(([key, value]) => {
-    if (key.startsWith('left_recon_ready.') || key.startsWith('source.') || key.startsWith('left.')) {
-      left[stripRunExceptionFieldPrefix(key)] = value;
-      return;
-    }
-    if (key.startsWith('right_recon_ready.') || key.startsWith('target.') || key.startsWith('right.')) {
-      right[stripRunExceptionFieldPrefix(key)] = value;
-      return;
-    }
-    extra[stripRunExceptionFieldPrefix(key)] = value;
-  });
-
-  return { left, right, extra };
+  return buildExceptionBusinessDisplay(
+    {
+      anomalyType: item.anomalyType,
+      summary: item.summary,
+      raw: item.raw,
+    },
+    {
+      datasetLabels: {
+        left: leftLabel || '数据集 A',
+        right: rightLabel || '数据集 B',
+      },
+      fieldLabelForSide: (side, field) => {
+        const label = labelMaps[side][stripRunExceptionFieldPrefix(field)];
+        return label || humanizeExceptionFieldName(field);
+      },
+    },
+  );
 }
 
 function enabledStatusMeta(enabled: boolean): { label: string; className: string } {
@@ -2295,7 +2275,7 @@ function buildOutputFieldLabelMap(
   fields: OutputFieldDraft[],
   sources: SchemeSourceDraft[] = [],
 ): Record<string, string> {
-  const labels: Record<string, string> = {};
+  const labels = Object.assign({}, ...sources.map((source) => source.fieldLabelMap || {}));
   const sourceLabelMaps = new Map(
     sources.map((source) => [source.id, source.fieldLabelMap || {}] as const),
   );
@@ -6148,12 +6128,6 @@ export default function ReconWorkspace({
     </div>
   );
 
-  const selectedExceptionRawRecord = selectedExceptionDetail
-    ? getRunExceptionRawRecord(selectedExceptionDetail)
-    : {};
-  const selectedExceptionSideRecords = selectedExceptionDetail
-    ? getRunExceptionRecordsBySide(selectedExceptionDetail)
-    : { left: {}, right: {}, extra: {} };
   const selectedExceptionRun =
     selectedExceptionDetail && modalState?.kind === 'run-exceptions' ? modalState.run : null;
   const selectedExceptionScheme = selectedExceptionRun
@@ -6162,63 +6136,10 @@ export default function ReconWorkspace({
   const selectedExceptionSchemeMeta = selectedExceptionScheme
     ? extractSchemeMeta(selectedExceptionScheme)
     : null;
-  const selectedExceptionLeftDatasetLabel = (
-    selectedExceptionSchemeMeta
-      ? resolveResultDatasetLabel(
-          'left',
-          selectedExceptionSchemeMeta.matchFieldPairs,
-          selectedExceptionSchemeMeta.leftOutputFields,
-          selectedExceptionSchemeMeta.leftSources,
-        )
-      : ''
-  ) || toText(selectedExceptionSideRecords.left.source_name, toText(selectedExceptionRawRecord.source_name, '原始记录'));
-  const selectedExceptionRightDatasetLabel = (
-    selectedExceptionSchemeMeta
-      ? resolveResultDatasetLabel(
-          'right',
-          selectedExceptionSchemeMeta.matchFieldPairs,
-          selectedExceptionSchemeMeta.rightOutputFields,
-          selectedExceptionSchemeMeta.rightSources,
-        )
-      : ''
-  ) || toText(selectedExceptionSideRecords.right.source_name, toText(selectedExceptionRawRecord.source_name, '原始记录'));
-  const selectedExceptionRecordSections = selectedExceptionDetail
-    ? [
-        Object.keys(selectedExceptionSideRecords.left).length > 0
-          ? {
-              title: selectedExceptionLeftDatasetLabel || '原始记录',
-              entries: orderExceptionRecordEntries(
-                Object.entries(selectedExceptionSideRecords.left)
-                  .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
-                  .map(([field, value]) => ({
-                    field,
-                    label: humanizeExceptionFieldName(field),
-                    value: formatDetailValue(value),
-                  })),
-                selectedExceptionLeftDatasetLabel || '原始记录',
-              ),
-            }
-          : null,
-        Object.keys(selectedExceptionSideRecords.right).length > 0
-          ? {
-              title: selectedExceptionRightDatasetLabel || '原始记录',
-              entries: orderExceptionRecordEntries(
-                Object.entries(selectedExceptionSideRecords.right)
-                  .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
-                  .map(([field, value]) => ({
-                    field,
-                    label: humanizeExceptionFieldName(field),
-                    value: formatDetailValue(value),
-                  })),
-                selectedExceptionRightDatasetLabel || '原始记录',
-              ),
-            }
-          : null,
-      ].filter((item): item is {
-        title: string;
-        entries: Array<{ field: string; label: string; value: string }>;
-      } => Boolean(item))
-    : [];
+  const selectedExceptionBusinessDisplay = selectedExceptionDetail
+    ? buildRunExceptionDisplay(selectedExceptionDetail, selectedExceptionSchemeMeta)
+    : null;
+  const selectedExceptionRecordSections = selectedExceptionBusinessDisplay?.recordSections || [];
 
   const renderSchemeRows = () =>
     schemes.length === 0
@@ -7418,6 +7339,8 @@ export default function ReconWorkspace({
     const { run } = modalState;
     const modalExceptions = exceptionsByRunId[run.id] || [];
     const statusMeta = executionStatusMeta(run.executionStatus);
+    const exceptionScheme = schemes.find((item) => item.schemeCode === run.schemeCode) || null;
+    const exceptionSchemeMeta = exceptionScheme ? extractSchemeMeta(exceptionScheme) : null;
     const normalizedRunStatus = run.executionStatus.trim().toLowerCase();
     const shouldShowRunFailureInfo = !['success', 'succeeded', 'completed'].includes(normalizedRunStatus);
     const runtimeSummary = buildRuntimeSummaryView(run);
@@ -7525,31 +7448,33 @@ export default function ReconWorkspace({
                   <span>处理进展</span>
                   <span className="justify-self-end">操作</span>
                 </div>
-                {modalExceptions.map((item) => (
-                  <div
-                    key={item.id}
-                    className="grid grid-cols-[minmax(0,3.4fr)_140px_140px_120px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
-                  >
-                    <div className="min-w-0">
-                      <ExceptionSummary
-                        text={item.summary}
-                        valueClassName="text-sm font-medium text-text-primary"
-                      />
+                {modalExceptions.map((item) => {
+                  const display = buildRunExceptionDisplay(item, exceptionSchemeMeta);
+                  return (
+                    <div
+                      key={item.id}
+                      className="grid grid-cols-[minmax(0,3.4fr)_140px_140px_120px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="break-words text-sm font-medium leading-6 text-text-primary">
+                          {display.shortSummary}
+                        </p>
+                      </div>
+                      <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
+                      <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
+                      <div className="justify-self-end">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedExceptionDetail(item)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          查看详情
+                        </button>
+                      </div>
                     </div>
-                    <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
-                    <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
-                    <div className="justify-self-end">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedExceptionDetail(item)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        查看详情
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : (
@@ -7680,11 +7605,9 @@ export default function ReconWorkspace({
             <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
               <div>
                 <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常详情</p>
-                <ExceptionSummary
-                  text={selectedExceptionDetail.summary}
-                  className="mt-1"
-                  valueClassName="text-base font-semibold text-text-primary"
-                />
+                <p className="mt-1 break-words text-base font-semibold leading-7 text-text-primary">
+                  {selectedExceptionBusinessDisplay?.conclusion || selectedExceptionDetail.summary || '--'}
+                </p>
               </div>
               <button
                 type="button"
@@ -7707,34 +7630,23 @@ export default function ReconWorkspace({
                     <div key={`${selectedExceptionDetail.id}-${section.title}`} className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
                       <p className="text-sm font-semibold text-text-primary">{section.title}</p>
                       <div className="mt-3 grid gap-3">
-                        {section.entries
-                          .map((entry) => (
+                        {section.entries.length > 0 ? (
+                          section.entries.map((entry) => (
                             <div key={`${selectedExceptionDetail.id}-${section.title}-${entry.field}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
                               <p className="text-xs text-text-secondary">{entry.label}</p>
                               <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
                                 {entry.value}
                               </p>
                             </div>
-                          ))}
+                          ))
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-border bg-surface px-4 py-4 text-sm text-text-secondary">
+                            {section.emptyMessage || '未匹配到原始记录'}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
-                </div>
-              ) : Object.keys(selectedExceptionRawRecord).length > 0 ? (
-                <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-4">
-                  <p className="text-sm font-semibold text-text-primary">原始记录</p>
-                  <div className="mt-3 grid gap-3">
-                    {Object.entries(selectedExceptionRawRecord)
-                      .filter(([key]) => stripRunExceptionFieldPrefix(key) !== 'source_name')
-                      .map(([key, value]) => (
-                        <div key={`${selectedExceptionDetail.id}-field-${key}`} className="rounded-2xl border border-border bg-surface px-4 py-3">
-                          <p className="text-xs text-text-secondary">{humanizeExceptionFieldName(key)}</p>
-                          <p className="mt-1 whitespace-pre-wrap break-all text-sm text-text-primary">
-                            {formatDetailValue(value)}
-                          </p>
-                        </div>
-                      ))}
-                  </div>
                 </div>
               ) : (
                 <div className="rounded-3xl border border-border bg-surface-secondary px-5 py-5 text-sm text-text-secondary">
