@@ -245,4 +245,52 @@ describe('exception business summary display', () => {
       },
     ]);
   });
+
+  it('recovers key and compare values from record payloads when detail values are omitted', () => {
+    const item = buildItem({
+      anomalyType: 'matched_with_diff',
+      raw: {
+        detail_json: {
+          join_key: [
+            {
+              source_field: 'biz_key',
+              target_field: 'biz_key',
+            },
+          ],
+          compare_values: [
+            {
+              source_field: 'amount',
+              target_field: 'paid_amount',
+            },
+          ],
+          left_record: {
+            biz_key: '5118002676174023242',
+            amount: '10.00',
+          },
+          right_record: {
+            biz_key: '5118002676174023242',
+            paid_amount: '9.00',
+          },
+        },
+      },
+    });
+
+    const display = buildExceptionBusinessDisplay(item, context);
+
+    expect(display.shortSummary).toBe('订单编号 5118002676174023242 金额不一致');
+    expect(display.keyLines.map((line) => line.value)).toEqual([
+      '5118002676174023242',
+      '5118002676174023242',
+    ]);
+    expect(display.compareLines).toEqual([
+      {
+        fieldLabel: '含税销售金额 / 买家实付金额',
+        sourceDatasetLabel: 'tb0131100248-店铺订单',
+        targetDatasetLabel: '交易订单明细表',
+        sourceValue: '10.00',
+        targetValue: '9.00',
+        diffValue: '--',
+      },
+    ]);
+  });
 });

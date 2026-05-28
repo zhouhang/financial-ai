@@ -229,14 +229,87 @@ function recordForSide(
   return {};
 }
 
+function hasDisplayValue(value: unknown): boolean {
+  return normalizeExceptionValue(value) !== EMPTY_VALUE;
+}
+
+function valueFromRecord(record: DetailRecord, field: string): unknown {
+  const strippedField = stripExceptionFieldPrefix(field);
+  const candidates = [field, strippedField];
+
+  for (const candidate of candidates) {
+    if (Object.prototype.hasOwnProperty.call(record, candidate) && hasDisplayValue(record[candidate])) {
+      return record[candidate];
+    }
+  }
+
+  return undefined;
+}
+
+function recordValueForSide(
+  side: ReconExceptionSide,
+  field: string,
+  detailJson: DetailRecord,
+  raw: DetailRecord,
+): unknown {
+  if (!field) return undefined;
+
+  const sideRecordValue = valueFromRecord(recordForSide(side, detailJson, raw), field);
+  if (hasDisplayValue(sideRecordValue)) return sideRecordValue;
+
+  const strippedField = stripExceptionFieldPrefix(field);
+  const prefixes = side === 'left' ? LEFT_PREFIXES : RIGHT_PREFIXES;
+  for (const source of [detailJson, raw]) {
+    for (const recordKey of ['raw_record', 'record']) {
+      const record = asRecord(source[recordKey]);
+      if (Object.keys(record).length === 0) continue;
+
+      for (const prefix of prefixes) {
+        const prefixedValue = record[`${prefix}${strippedField}`];
+        if (hasDisplayValue(prefixedValue)) return prefixedValue;
+      }
+
+      const unprefixedValue = valueFromRecord(record, strippedField);
+      if (hasDisplayValue(unprefixedValue)) return unprefixedValue;
+    }
+  }
+
+  return undefined;
+}
+
+function firstDisplayValue(primary: unknown, fallback: unknown): unknown {
+  return hasDisplayValue(primary) ? primary : fallback;
+}
+
+function hydratedJoinDetailsFor(
+  detailJson: DetailRecord,
+  raw: DetailRecord,
+): JoinKeyDetail[] {
+  const sourceSide = sideFromRef(detailJson.source_ref, 'left');
+  const targetSide = sideFromRef(detailJson.target_ref, 'right');
+
+  return joinDetailsFor(detailJson).map((entry) => ({
+    ...entry,
+    sourceValue: firstDisplayValue(
+      entry.sourceValue,
+      recordValueForSide(sourceSide, entry.sourceField || entry.targetField, detailJson, raw),
+    ),
+    targetValue: firstDisplayValue(
+      entry.targetValue,
+      recordValueForSide(targetSide, entry.targetField || entry.sourceField, detailJson, raw),
+    ),
+  }));
+}
+
 function buildKeyLines(
+  joinDetails: JoinKeyDetail[],
   detailJson: DetailRecord,
   context: ExceptionBusinessDisplayContext,
 ): ExceptionFieldValueLine[] {
   const sourceSide = sideFromRef(detailJson.source_ref, 'left');
   const targetSide = sideFromRef(detailJson.target_ref, 'right');
 
-  return joinDetailsFor(detailJson).flatMap((entry) => [
+  return joinDetails.flatMap((entry) => [
     {
       side: sourceSide,
       datasetLabel: context.datasetLabels[sourceSide],
@@ -254,6 +327,7 @@ function buildKeyLines(
 
 function buildCompareLines(
   detailJson: DetailRecord,
+  raw: DetailRecord,
   context: ExceptionBusinessDisplayContext,
 ): ExceptionCompareValueLine[] {
   const sourceSide = sideFromRef(detailJson.source_ref, 'left');
@@ -267,8 +341,18 @@ function buildCompareLines(
       fieldLabel: compareFieldLabel(context, sourceField, targetField),
       sourceDatasetLabel: context.datasetLabels[sourceSide],
       targetDatasetLabel: context.datasetLabels[targetSide],
-      sourceValue: normalizeExceptionValue(entry.source_value),
-      targetValue: normalizeExceptionValue(entry.target_value),
+      sourceValue: normalizeExceptionValue(
+        firstDisplayValue(
+          entry.source_value,
+          recordValueForSide(sourceSide, sourceField || targetField, detailJson, raw),
+        ),
+      ),
+      targetValue: normalizeExceptionValue(
+        firstDisplayValue(
+          entry.target_value,
+          recordValueForSide(targetSide, targetField || sourceField, detailJson, raw),
+        ),
+      ),
       diffValue: normalizeExceptionValue(entry.diff_value),
     };
   });
@@ -295,12 +379,12 @@ function buildRecordSections(
 function buildShortSummary(
   item: ExceptionBusinessItem,
   context: ExceptionBusinessDisplayContext,
-  detailJson: DetailRecord,
+  joinDetails: JoinKeyDetail[],
   compareLines: ExceptionCompareValueLine[],
 ): string {
   const preferredSide =
     item.anomalyType === 'target_only' ? 'right' : 'left';
-  const matchDetail = matchDetailFor(joinDetailsFor(detailJson), preferredSide);
+  const matchDetail = matchDetailFor(joinDetails, preferredSide);
   if (!matchDetail) return formatExceptionSummaryLines(item.summary || '');
 
   const matchLabel = fieldLabel(context, matchDetail.side, matchDetail.field);
@@ -341,9 +425,11 @@ export function buildExceptionBusinessDisplay(
   context: ExceptionBusinessDisplayContext,
 ): ExceptionBusinessDisplay {
   const detailJson = detailJsonFor(item);
-  const keyLines = buildKeyLines(detailJson, context);
-  const compareLines = buildCompareLines(detailJson, context);
-  const shortSummary = buildShortSummary(item, context, detailJson, compareLines);
+  const raw = asRecord(item.raw);
+  const joinDetails = hydratedJoinDetailsFor(detailJson, raw);
+  const keyLines = buildKeyLines(joinDetails, detailJson, context);
+  const compareLines = buildCompareLines(detailJson, raw, context);
+  const shortSummary = buildShortSummary(item, context, joinDetails, compareLines);
 
   return {
     shortSummary,
