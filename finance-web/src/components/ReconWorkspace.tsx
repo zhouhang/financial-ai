@@ -77,6 +77,7 @@ import {
   formatCount,
   formatDuration,
 } from './recon/runRuntimeSummary';
+import ExceptionSummary from './recon/ExceptionSummary';
 import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
 import {
   cn,
@@ -7530,9 +7531,10 @@ export default function ReconWorkspace({
                     className="grid grid-cols-[minmax(0,3.4fr)_140px_140px_120px] items-start gap-6 border-b border-border-subtle px-5 py-4 last:border-b-0"
                   >
                     <div className="min-w-0">
-                      <p className="line-clamp-4 text-sm font-medium leading-6 text-text-primary">
-                        {item.summary || '异常详情待补充。'}
-                      </p>
+                      <ExceptionSummary
+                        text={item.summary}
+                        valueClassName="text-sm font-medium text-text-primary"
+                      />
                     </div>
                     <span className="text-sm text-text-secondary">{item.ownerName || '--'}</span>
                     <span className="text-sm text-text-secondary">{formatProcessingStatusLabel(item.processingStatus)}</span>
@@ -7669,11 +7671,20 @@ export default function ReconWorkspace({
 
       {selectedExceptionDetail ? (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-8">
-          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+          <div
+            role="dialog"
+            aria-label="异常详情"
+            aria-modal="true"
+            className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-[0_24px_80px_rgba(15,23,42,0.22)]"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
               <div>
                 <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常详情</p>
-                <h3 className="mt-1 text-lg font-semibold text-text-primary">{selectedExceptionDetail.summary}</h3>
+                <ExceptionSummary
+                  text={selectedExceptionDetail.summary}
+                  className="mt-1"
+                  valueClassName="text-base font-semibold text-text-primary"
+                />
               </div>
               <button
                 type="button"

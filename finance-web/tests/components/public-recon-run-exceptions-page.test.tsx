@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import PublicReconRunExceptionsPage from '../../src/components/PublicReconRunExceptionsPage';
@@ -10,6 +10,20 @@ function buildJsonResponse(body: unknown, status = 200): Response {
       'Content-Type': 'application/json',
     },
   });
+}
+
+function expectStructuredSummary(container: HTMLElement) {
+  const diffTypeRow = within(container).getByTestId('exception-summary-row-差异类型');
+  expect(within(diffTypeRow).getByText('差异类型')).toBeInTheDocument();
+  expect(within(diffTypeRow).getByText('金额差异')).toBeInTheDocument();
+
+  const matchFieldRow = within(container).getByTestId('exception-summary-row-匹配字段');
+  expect(within(matchFieldRow).getByText('匹配字段')).toBeInTheDocument();
+  expect(within(matchFieldRow).getByText('订单号=TB001')).toBeInTheDocument();
+
+  const compareFieldRow = within(container).getByTestId('exception-summary-row-对比字段');
+  expect(within(compareFieldRow).getByText('对比字段')).toBeInTheDocument();
+  expect(within(compareFieldRow).getByText('实收金额 100 / 98')).toBeInTheDocument();
 }
 
 describe('PublicReconRunExceptionsPage run metrics', () => {
@@ -254,5 +268,59 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     expect(headerView.queryByText('待处理差异')).not.toBeInTheDocument();
     expect(screen.getByText((_, element) => element?.textContent === '待处理差异 0 条')).toBeInTheDocument();
     expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
+  });
+
+  it('formats exception summaries consistently in the public difference list', async () => {
+    fetchMock.mockResolvedValueOnce(buildJsonResponse({
+      run: {
+        id: 'run-003',
+        run_code: 'run_code_003',
+        scheme_code: 'scheme-003',
+        plan_code: 'plan-003',
+        scheme_name: '泰斯支付宝对账方案',
+        plan_name: '泰斯支付宝对账',
+        execution_status: 'success',
+        run_context_json: { biz_date: '2026-05-12' },
+        artifacts_json: {
+          runtime_summary: {
+            biz_date: '2026-05-12',
+          },
+        },
+      },
+      scheme: {
+        id: 'scheme-003',
+        scheme_code: 'scheme-003',
+        scheme_name: '泰斯支付宝对账方案',
+        scheme_meta_json: {},
+      },
+      run_plan: {
+        id: 'plan-003',
+        plan_code: 'plan-003',
+        plan_name: '泰斯支付宝对账',
+      },
+      exceptions: [
+        {
+          id: 'exception-003',
+          anomaly_type: 'matched_with_diff',
+          summary: '差异类型：金额差异 匹配字段：订单号=TB001 对比字段：实收金额 100 / 98',
+          owner_name: '周行',
+          processing_status: 'pending',
+          detail_json: {},
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    }));
+
+    render(<PublicReconRunExceptionsPage />);
+
+    await screen.findByTestId('exception-summary-row-差异类型');
+    expectStructuredSummary(document.body);
+
+    fireEvent.click(screen.getByRole('button', { name: '详情' }));
+
+    const detailDialog = await screen.findByRole('dialog', { name: '差异详情' });
+    expectStructuredSummary(detailDialog);
   });
 });

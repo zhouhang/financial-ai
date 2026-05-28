@@ -3,6 +3,8 @@ import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Eye, Filter, Refre
 import { fetchReconAutoApi } from './recon/autoApi';
 import { cn } from './recon/types';
 import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
+import { formatExceptionSummaryLines } from './recon/exceptionSummaryDisplay';
+import ExceptionSummary from './recon/ExceptionSummary';
 import { parsePublicReconRunExceptionsRunId } from './publicReconRunExceptionsRoute';
 import {
   buildRuntimeSummaryView,
@@ -615,18 +617,8 @@ function replaceSourceNameLabels(text: string, ctx: ExceptionDisplayContext): st
   return value;
 }
 
-function formatSummaryLines(text: string): string {
-  return text
-    .replace(/[；;]\s*/g, '\n')
-    .replace(/\s{2,}/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n');
-}
-
 function readableExceptionSummary(item: ReconRunExceptionDetail, ctx: ExceptionDisplayContext): string {
-  return formatSummaryLines(replaceSourceNameLabels(replaceOutputFieldLabels(item.summary || '异常详情待补充。', ctx), ctx)
+  return formatExceptionSummaryLines(replaceSourceNameLabels(replaceOutputFieldLabels(item.summary || '异常详情待补充。', ctx), ctx)
     .replaceAll('左侧基础表', ctx.datasetLabels.left)
     .replaceAll('右侧基础表', ctx.datasetLabels.right)
     .replaceAll('左侧数据', ctx.datasetLabels.left)
@@ -1111,12 +1103,10 @@ export default function PublicReconRunExceptionsPage() {
                     key={item.id}
                     className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] items-start gap-4 px-5 py-4"
                   >
-                    <p
-                      className="whitespace-pre-line break-words text-sm leading-6 text-text-primary"
-                      style={ANYWHERE_WRAP_STYLE}
-                    >
-                      {readableExceptionSummary(item, displayContext)}
-                    </p>
+                    <ExceptionSummary
+                      text={readableExceptionSummary(item, displayContext)}
+                      valueClassName="text-sm text-text-primary"
+                    />
                     <p
                       className="whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
                       style={ANYWHERE_WRAP_STYLE}
@@ -1174,7 +1164,12 @@ export default function PublicReconRunExceptionsPage() {
 
       {selectedException ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 py-6">
-          <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-2xl">
+          <div
+            role="dialog"
+            aria-label="差异详情"
+            aria-modal="true"
+            className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-2xl"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
               <div>
                 <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">差异详情</p>
@@ -1192,9 +1187,11 @@ export default function PublicReconRunExceptionsPage() {
               <div className="space-y-4">
                 <section className="rounded-2xl border border-border bg-surface-secondary p-4">
                   <p className="text-sm font-semibold text-text-primary">摘要</p>
-                  <p className="mt-2 whitespace-pre-line text-sm leading-6 text-text-secondary">
-                    {readableExceptionSummary(selectedException, displayContext)}
-                  </p>
+                  <ExceptionSummary
+                    text={readableExceptionSummary(selectedException, displayContext)}
+                    className="mt-2"
+                    valueClassName="text-sm text-text-secondary"
+                  />
                   <div className="mt-4 grid gap-3 sm:grid-cols-3">
                     <div>
                       <p className="text-xs text-text-muted">责任人</p>

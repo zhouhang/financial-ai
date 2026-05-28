@@ -23,6 +23,20 @@ function jsonResponse(data: unknown, status = 200) {
   );
 }
 
+function expectStructuredSummary(container: HTMLElement) {
+  const diffTypeRow = within(container).getByTestId('exception-summary-row-差异类型');
+  expect(within(diffTypeRow).getByText('差异类型')).toBeInTheDocument();
+  expect(within(diffTypeRow).getByText('金额差异')).toBeInTheDocument();
+
+  const matchFieldRow = within(container).getByTestId('exception-summary-row-匹配字段');
+  expect(within(matchFieldRow).getByText('匹配字段')).toBeInTheDocument();
+  expect(within(matchFieldRow).getByText('订单号=TB001')).toBeInTheDocument();
+
+  const compareFieldRow = within(container).getByTestId('exception-summary-row-对比字段');
+  expect(within(compareFieldRow).getByText('对比字段')).toBeInTheDocument();
+  expect(within(compareFieldRow).getByText('实收金额 100 / 98')).toBeInTheDocument();
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -226,5 +240,89 @@ describe('对账任务列表布局', () => {
     expect(within(dialog).queryByText('所属方案')).not.toBeInTheDocument();
     expect(within(dialog).queryByText('开始时间')).not.toBeInTheDocument();
     expect(within(dialog).queryByText('结束时间')).not.toBeInTheDocument();
+  });
+
+  it('异常看板按段换行展示异常摘要', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.split('?')[0] === '/api/recon/schemes') {
+        return jsonResponse({
+          schemes: [
+            {
+              id: 'scheme-1',
+              scheme_code: 'scheme_code_1',
+              scheme_name: '订单对账方案',
+              is_enabled: true,
+            },
+          ],
+        });
+      }
+      if (url.split('?')[0] === '/api/recon/tasks') {
+        return jsonResponse({
+          tasks: [
+            {
+              id: 'task-1',
+              plan_code: 'plan-1',
+              plan_name: '每日订单对账',
+              scheme_code: 'scheme_code_1',
+              is_enabled: true,
+            },
+          ],
+        });
+      }
+      if (url.split('?')[0] === '/api/recon/runs') {
+        return jsonResponse({
+          runs: [
+            {
+              id: 'run-1',
+              run_code: 'run-code-1',
+              scheme_code: 'scheme_code_1',
+              plan_code: 'plan-1',
+              execution_status: 'warning',
+              anomaly_count: 1,
+              artifacts_json: {
+                runtime_summary: {
+                  biz_date: '2026-05-11',
+                },
+              },
+            },
+          ],
+        });
+      }
+      if (url === '/api/recon/runs/run-1/exceptions') {
+        return jsonResponse({
+          exceptions: [
+            {
+              id: 'exception-1',
+              anomaly_type: 'matched_with_diff',
+              summary: '差异类型：金额差异 匹配字段：订单号=TB001 对比字段：实收金额 100 / 98',
+              owner_name: '周行',
+              processing_status: 'pending',
+              detail_json: {},
+            },
+          ],
+        });
+      }
+      if (url === '/api/collaboration-channels') {
+        return jsonResponse({ channels: [] });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<ReconWorkspace selectedTask={selectedTask} authToken="test-token" />);
+
+    fireEvent.click(screen.getByRole('button', { name: '运行记录' }));
+
+    const runRow = await screen.findByTestId('execution-run-row-run-1');
+    fireEvent.click(within(runRow).getByRole('button', { name: '异常看板' }));
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByTestId('exception-summary-row-差异类型');
+    expectStructuredSummary(dialog);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '查看详情' }));
+
+    const detailDialog = await screen.findByRole('dialog', { name: '异常详情' });
+    expectStructuredSummary(detailDialog);
   });
 });
