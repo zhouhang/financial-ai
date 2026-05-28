@@ -214,6 +214,18 @@ describe('exception business summary display', () => {
       anomalyType: 'matched_with_diff',
       raw: {
         detail_json: {
+          join_key: [
+            {
+              source_field: 'biz_key',
+              target_field: 'biz_key',
+            },
+          ],
+          compare_values: [
+            {
+              source_field: 'amount',
+              target_field: 'paid_amount',
+            },
+          ],
           raw_record: {
             'source.biz_key': '5118002676174023242',
             'source.amount': '10.00',
@@ -226,6 +238,14 @@ describe('exception business summary display', () => {
 
     const display = buildExceptionBusinessDisplay(item, context);
 
+    expect(display.shortSummary).toBe('订单编号 5118002676174023242 金额不一致');
+    expect(display.keyLines.map((line) => line.value)).toEqual([
+      '5118002676174023242',
+      '5118002676174023242',
+    ]);
+    expect(display.compareLines.map((line) => [line.sourceValue, line.targetValue])).toEqual([
+      ['10.00', '9.00'],
+    ]);
     expect(display.recordSections).toEqual([
       {
         side: 'left',
