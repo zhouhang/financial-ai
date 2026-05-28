@@ -180,6 +180,35 @@ describe('exception business summary display', () => {
     expect(display.conclusion).toBe('差异类型：金额差异\n匹配字段：订单号=TB001\n对比字段：实收金额 100 / 98');
   });
 
+  it('uses detail fallback when detail_json is present but empty', () => {
+    const item = buildItem({
+      anomalyType: 'matched_with_diff',
+      raw: {
+        detail_json: {},
+        detail: {
+          join_key: [
+            {
+              field: 'biz_key',
+              value: '5118002676174023242',
+            },
+          ],
+          compare_values: [
+            {
+              source_field: 'order_status',
+              target_field: 'pay_status',
+              source_value: '已发货',
+              target_value: '未支付',
+            },
+          ],
+        },
+      },
+    });
+
+    const display = buildExceptionBusinessDisplay(item, context);
+
+    expect(display.shortSummary).toBe('订单编号 5118002676174023242 状态不一致');
+  });
+
   it('splits prefixed raw_record entries into left and right record sections', () => {
     const item = buildItem({
       anomalyType: 'matched_with_diff',
