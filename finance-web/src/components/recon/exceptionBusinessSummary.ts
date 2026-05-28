@@ -99,7 +99,7 @@ function fieldLabel(
 
 function detailJsonFor(item: ExceptionBusinessItem): DetailRecord {
   const raw = asRecord(item.raw);
-  return asRecord(raw.detail_json);
+  return asRecord(raw.detail_json || raw.detail || raw);
 }
 
 function joinDetailsFor(detailJson: DetailRecord): JoinKeyDetail[] {
