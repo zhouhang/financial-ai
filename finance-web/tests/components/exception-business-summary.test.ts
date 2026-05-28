@@ -313,4 +313,46 @@ describe('exception business summary display', () => {
       },
     ]);
   });
+
+  it('shows unprefixed raw_record fields on the side that has a recovered match value', () => {
+    const item = buildItem({
+      anomalyType: 'source_only',
+      raw: {
+        detail_json: {
+          source_ref: 'left_recon_ready',
+          target_ref: 'right_recon_ready',
+          join_key: [
+            {
+              source_field: 'biz_key',
+              target_field: 'biz_key',
+            },
+          ],
+          raw_record: {
+            biz_key: '5118002676174023242',
+            amount: '10.00',
+          },
+        },
+      },
+    });
+
+    const display = buildExceptionBusinessDisplay(item, context);
+
+    expect(display.shortSummary).toBe('交易订单明细表缺失订单编号 5118002676174023242');
+    expect(display.recordSections).toEqual([
+      {
+        side: 'left',
+        title: 'tb0131100248-店铺订单',
+        entries: [
+          { field: 'biz_key', label: '订单编号', value: '5118002676174023242' },
+          { field: 'amount', label: '含税销售金额', value: '10.00' },
+        ],
+      },
+      {
+        side: 'right',
+        title: '交易订单明细表',
+        entries: [],
+        emptyMessage: '未匹配到原始记录',
+      },
+    ]);
+  });
 });

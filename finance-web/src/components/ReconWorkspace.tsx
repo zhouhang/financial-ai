@@ -903,10 +903,6 @@ function formatProcessingStatusLabel(value: string): string {
   return value || '--';
 }
 
-function formatDetailValue(value: unknown): string {
-  return normalizeExceptionValue(value);
-}
-
 function stripRunExceptionFieldPrefix(field: string): string {
   return stripExceptionFieldPrefix(field.trim());
 }

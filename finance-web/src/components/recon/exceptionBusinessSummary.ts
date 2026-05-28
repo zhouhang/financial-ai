@@ -184,6 +184,28 @@ function prefixedRecordSection(record: DetailRecord, side: ReconExceptionSide): 
   return section;
 }
 
+function hasPrefixedFields(record: DetailRecord): boolean {
+  return Object.keys(record).some((field) => prefixedSideFor(field));
+}
+
+function unprefixedRecordForSide(
+  side: ReconExceptionSide,
+  detailJson: DetailRecord,
+  raw: DetailRecord,
+  fallbackSide: ReconExceptionSide,
+): DetailRecord {
+  if (side !== fallbackSide) return {};
+
+  for (const source of [detailJson, raw]) {
+    for (const key of ['raw_record', 'record']) {
+      const record = asRecord(source[key]);
+      if (Object.keys(record).length > 0 && !hasPrefixedFields(record)) return record;
+    }
+  }
+
+  return {};
+}
+
 function entriesForRecord(
   record: DetailRecord,
   side: ReconExceptionSide,
@@ -205,6 +227,7 @@ function recordForSide(
   side: ReconExceptionSide,
   detailJson: DetailRecord,
   raw: DetailRecord,
+  fallbackSide: ReconExceptionSide,
 ): DetailRecord {
   const directKeys =
     side === 'left'
@@ -220,11 +243,22 @@ function recordForSide(
 
   for (const source of [detailJson, raw]) {
     const rawRecord = asRecord(source.raw_record);
-    if (Object.keys(rawRecord).length > 0) return prefixedRecordSection(rawRecord, side);
+    if (Object.keys(rawRecord).length > 0) {
+      const section = prefixedRecordSection(rawRecord, side);
+      if (Object.keys(section).length > 0) return section;
+      if (hasPrefixedFields(rawRecord)) return {};
+    }
 
     const record = asRecord(source.record);
-    if (Object.keys(record).length > 0) return prefixedRecordSection(record, side);
+    if (Object.keys(record).length > 0) {
+      const section = prefixedRecordSection(record, side);
+      if (Object.keys(section).length > 0) return section;
+      if (hasPrefixedFields(record)) return {};
+    }
   }
+
+  const fallbackRecord = unprefixedRecordForSide(side, detailJson, raw, fallbackSide);
+  if (Object.keys(fallbackRecord).length > 0) return fallbackRecord;
 
   return {};
 }
@@ -254,7 +288,7 @@ function recordValueForSide(
 ): unknown {
   if (!field) return undefined;
 
-  const sideRecordValue = valueFromRecord(recordForSide(side, detailJson, raw), field);
+  const sideRecordValue = valueFromRecord(recordForSide(side, detailJson, raw, side), field);
   if (hasDisplayValue(sideRecordValue)) return sideRecordValue;
 
   const strippedField = stripExceptionFieldPrefix(field);
@@ -361,12 +395,17 @@ function buildCompareLines(
 function buildRecordSections(
   item: ExceptionBusinessItem,
   detailJson: DetailRecord,
+  joinDetails: JoinKeyDetail[],
   context: ExceptionBusinessDisplayContext,
 ): ExceptionRecordSection[] {
   const raw = asRecord(item.raw);
+  const fallbackSide = (
+    matchDetailFor(joinDetails, item.anomalyType === 'target_only' ? 'right' : 'left')?.side
+    || (item.anomalyType === 'target_only' ? 'right' : 'left')
+  );
 
   return (['left', 'right'] as const).map((side) => {
-    const entries = entriesForRecord(recordForSide(side, detailJson, raw), side, context);
+    const entries = entriesForRecord(recordForSide(side, detailJson, raw, fallbackSide), side, context);
     return {
       side,
       title: context.datasetLabels[side],
@@ -436,6 +475,6 @@ export function buildExceptionBusinessDisplay(
     conclusion: shortSummary,
     keyLines,
     compareLines,
-    recordSections: buildRecordSections(item, detailJson, context),
+    recordSections: buildRecordSections(item, detailJson, joinDetails, context),
   };
 }
