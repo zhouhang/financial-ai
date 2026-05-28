@@ -79,7 +79,6 @@ import {
 } from './recon/runRuntimeSummary';
 import {
   buildExceptionBusinessDisplay,
-  normalizeExceptionValue,
   stripExceptionFieldPrefix,
   type ExceptionBusinessDisplay,
 } from './recon/exceptionBusinessSummary';
