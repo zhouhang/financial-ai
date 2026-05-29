@@ -26,7 +26,33 @@ function pair(id: string, leftField: string, rightField: string): ReconFieldPair
   return { id, leftField, rightField };
 }
 
-const validRule = { schema_version: '1.6', rules: [] };
+const validRule = {
+  schema_version: '1.6',
+  rules: [
+    {
+      id: 'rule-1',
+      enabled: true,
+      recon: {
+        key_columns: {
+          mappings: [
+            {
+              source_field: 'biz_key',
+              target_field: 'biz_key',
+            },
+          ],
+        },
+        compare_columns: {
+          columns: [
+            {
+              source_column: 'amount',
+              target_column: 'amount',
+            },
+          ],
+        },
+      },
+    },
+  ],
+};
 const leftFields = [outputField('biz_key'), outputField('amount')];
 const rightFields = [outputField('biz_key'), outputField('amount')];
 
@@ -58,7 +84,58 @@ describe('validateReconStructureForSave', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
     expect(result.message).toBe('请先完成对账字段配置，生成可保存的对账规则 JSON。');
+    expect(result.details).toEqual([]);
+  });
+
+  it('fails when recon JSON shape is incomplete', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: { schema_version: '1.6', rules: [] },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+      details: [],
+    });
+  });
+
+  it('fails when every recon JSON rule is disabled', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            enabled: false,
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'biz_key', target_field: 'biz_key' }],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'amount', target_column: 'amount' }],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+      details: [],
+    });
   });
 
   it('fails when no complete match pair exists', () => {
@@ -71,7 +148,9 @@ describe('validateReconStructureForSave', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
     expect(result.message).toBe('请至少配置一组完整的匹配字段。');
+    expect(result.details).toEqual([]);
   });
 
   it('fails when no complete compare pair exists', () => {
@@ -84,7 +163,9 @@ describe('validateReconStructureForSave', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
     expect(result.message).toBe('请至少配置一组完整的对比字段。');
+    expect(result.details).toEqual([]);
   });
 
   it('fails when a left field is not in the prepared left output fields', () => {
@@ -98,6 +179,7 @@ describe('validateReconStructureForSave', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
     expect(result.message).toBe('对账规则字段不存在: 左侧字段「缺失业务单号」不在第二步输出字段中。');
     expect(result.details).toEqual(['左侧字段「缺失业务单号」不在第二步输出字段中。']);
   });
@@ -113,7 +195,50 @@ describe('validateReconStructureForSave', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
     expect(result.message).toBe('对账规则字段不存在: 右侧字段「缺失平台单号」不在第二步输出字段中。');
     expect(result.details).toEqual(['右侧字段「缺失平台单号」不在第二步输出字段中。']);
+  });
+
+  it('fails when recon JSON omits configured field pairs', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'legacy_key', target_field: 'legacy_key' }],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'legacy_amount', target_column: 'legacy_amount' }],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+      leftFieldLabelMap: {
+        biz_key: '客户订单号',
+        amount: '含税销售金额',
+      },
+      rightFieldLabelMap: {
+        biz_key: '商户订单号',
+        amount: '订单金额',
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 与当前字段配置不一致，请重新生成或查看 JSON。',
+      details: [
+        'JSON 缺少匹配字段「客户订单号 ↔ 商户订单号」。',
+        'JSON 缺少对比字段「含税销售金额 ↔ 订单金额」。',
+      ],
+    });
   });
 });
