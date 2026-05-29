@@ -12,10 +12,6 @@ describe('对账方案 warning 展示', () => {
   it('第3步数据对账在 warning 时展示提示文案', () => {
     render(
       <SchemeWizardReconStep
-        schemeDraft={{
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }}
         reconRuleName="资金对账逻辑"
         matchFieldPairs={[{ id: 'match-1', leftField: '业务单号', rightField: '业务单号' }]}
         compareFieldPairs={[{ id: 'compare-1', leftField: '金额', rightField: '金额' }]}
@@ -41,10 +37,6 @@ describe('对账方案 warning 展示', () => {
   it('第3步对账字段优先展示中文名称，底层字段仍保留英文 value', () => {
     render(
       <SchemeWizardReconStep
-        schemeDraft={{
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }}
         reconRuleName="订单对账逻辑"
         matchFieldPairs={[{ id: 'match-1', leftField: 'biz_key', rightField: 'biz_key' }]}
         compareFieldPairs={[{ id: 'compare-1', leftField: 'amount', rightField: 'amount' }]}
@@ -68,10 +60,6 @@ describe('对账方案 warning 展示', () => {
     const onStructuredConfigChange = vi.fn();
     render(
       <SchemeWizardReconStep
-        schemeDraft={{
-          reconTrialStatus: 'idle',
-          reconTrialSummary: '',
-        }}
         reconRuleName="订单对账逻辑"
         matchFieldPairs={[{ id: 'match-1', leftField: 'biz_key', rightField: 'biz_key' }]}
         compareFieldPairs={[{ id: 'compare-1', leftField: 'amount', rightField: 'amount' }]}
@@ -107,10 +95,6 @@ describe('对账方案 warning 展示', () => {
   it('第3步不再展示手动试跑入口和样例结果区', () => {
     render(
       <SchemeWizardReconStep
-        schemeDraft={{
-          reconTrialStatus: 'passed',
-          reconTrialSummary: '历史试跑已通过',
-        }}
         reconRuleName="订单对账逻辑"
         matchFieldPairs={[{ id: 'match-1', leftField: 'biz_key', rightField: 'biz_key' }]}
         compareFieldPairs={[{ id: 'compare-1', leftField: 'amount', rightField: 'amount' }]}
@@ -130,7 +114,6 @@ describe('对账方案 warning 展示', () => {
     expect(screen.queryByText('正在试跑对账规则，请稍候…')).not.toBeInTheDocument();
     expect(screen.queryByText('对账结果摘要')).not.toBeInTheDocument();
     expect(screen.queryByText('对账差异')).not.toBeInTheDocument();
-    expect(screen.queryByText('历史试跑已通过')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '查看 JSON' })).toBeEnabled();
   });
 });

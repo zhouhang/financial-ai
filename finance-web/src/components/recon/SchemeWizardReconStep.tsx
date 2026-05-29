@@ -2,13 +2,6 @@ import { ChevronDown, Plus, Trash2 } from 'lucide-react';
 
 import type { ReconFieldPairDraft } from './schemeWizardState';
 
-type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
-
-export interface ReconDraftShape {
-  reconTrialStatus: TrialStatus;
-  reconTrialSummary: string;
-}
-
 export interface ReconFieldOption {
   value: string;
   label: string;
@@ -21,7 +14,6 @@ export interface CompatibilityCheckResult {
 }
 
 interface SchemeWizardReconStepProps {
-  schemeDraft: ReconDraftShape;
   reconRuleName: string;
   matchFieldPairs: ReconFieldPairDraft[];
   compareFieldPairs: ReconFieldPairDraft[];
