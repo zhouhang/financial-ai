@@ -15,7 +15,6 @@ describe('对账方案 warning 展示', () => {
         reconRuleName="资金对账逻辑"
         matchFieldPairs={[{ id: 'match-1', leftField: '业务单号', rightField: '业务单号' }]}
         compareFieldPairs={[{ id: 'compare-1', leftField: '金额', rightField: '金额' }]}
-        tolerance="0.00"
         leftMatchFieldOptions={[{ value: '业务单号', label: '业务单号' }]}
         rightMatchFieldOptions={[{ value: '业务单号', label: '业务单号' }]}
         leftCompareFieldOptions={[{ value: '金额', label: '金额' }]}
