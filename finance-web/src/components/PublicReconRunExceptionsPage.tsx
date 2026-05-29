@@ -107,6 +107,7 @@ interface ExceptionDisplayContext {
 const PAGE_SIZE = 100;
 const ANYWHERE_WRAP_STYLE = { overflowWrap: 'anywhere' } as const;
 const EMPTY_EXCEPTION_VALUE = normalizeExceptionValue(null);
+const EMPTY_EXCEPTIONS: ReconRunExceptionDetail[] = [];
 
 const COMMON_FIELD_LABELS: Record<string, string> = {
   biz_key: '业务单号',
@@ -767,17 +768,18 @@ export default function PublicReconRunExceptionsPage() {
     void loadBundle(0);
   }, [loadBundle]);
 
+  const bundleExceptions = bundle?.exceptions || EMPTY_EXCEPTIONS;
   const displayContext = useMemo(() => buildDisplayContext(bundle?.scheme || null), [bundle?.scheme]);
   const exceptionBusinessDisplays = useMemo(() => {
     const displays = new Map<string, ExceptionBusinessDisplay>();
-    (bundle?.exceptions || []).forEach((item) => {
+    bundleExceptions.forEach((item) => {
       displays.set(item.id, businessDisplayForException(item, displayContext));
     });
     return displays;
-  }, [bundle?.exceptions, displayContext]);
+  }, [bundleExceptions, displayContext]);
   const filteredExceptions = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
-    return (bundle?.exceptions || []).filter((item) => {
+    return bundleExceptions.filter((item) => {
       if (statusFilter && item.processingStatus !== statusFilter) return false;
       if (!normalizedKeyword) return true;
       const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
@@ -792,17 +794,17 @@ export default function PublicReconRunExceptionsPage() {
       ].join('\n').toLowerCase();
       return haystack.includes(normalizedKeyword);
     });
-  }, [bundle, bundle?.exceptions, displayContext, exceptionBusinessDisplays, keyword, statusFilter]);
+  }, [bundle, bundleExceptions, displayContext, exceptionBusinessDisplays, keyword, statusFilter]);
 
   const selectedBusinessDisplay = selectedException
     ? exceptionBusinessDisplays.get(selectedException.id) || businessDisplayForException(selectedException, displayContext)
     : null;
   const statusMeta = formatExecutionStatus(bundle?.run?.executionStatus || '');
   const runtimeSummary = useMemo(() => buildRuntimeSummaryView(bundle?.run), [bundle?.run]);
-  const pendingDifferenceTotal = bundle?.total ?? (bundle?.exceptions || []).length;
+  const pendingDifferenceTotal = bundle?.total ?? bundleExceptions.length;
   const hasPrevious = offset > 0;
   const hasNext = bundle ? offset + bundle.limit < bundle.total : false;
-  const uniqueStatuses = statusOptions(bundle?.exceptions || []);
+  const uniqueStatuses = statusOptions(bundleExceptions);
 
   const renderRuntimeMetric = (label: string, value: string, key?: string) => (
     <div key={key} className="min-w-[180px] rounded-xl border border-border bg-surface-secondary px-3 py-2">
