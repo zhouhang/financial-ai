@@ -120,6 +120,7 @@ type CenterModalState =
 
 type SchemeWizardStep = 1 | 2 | 3;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
+type ReconValidationStatus = TrialStatus | typeof RECON_STRUCTURE_CHECK_STATUS;
 type ConfigMode = 'ai' | 'existing';
 type SupportedSourceKind = Extract<
   DataSourceKind,
@@ -188,7 +189,7 @@ interface SchemeDraft {
   rightTimeSemantic: string;
   reconDraft: string;
   reconRuleJson: Record<string, unknown> | null;
-  reconTrialStatus: TrialStatus;
+  reconTrialStatus: ReconValidationStatus;
   reconTrialSummary: string;
 }
 
@@ -293,7 +294,7 @@ interface SchemeMetaSummary {
   procRuleName: string;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
-  reconTrialStatus: TrialStatus;
+  reconTrialStatus: ReconValidationStatus;
   reconTrialSummary: string;
   procDraftText: string;
   reconDraftText: string;
@@ -1144,6 +1145,10 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
   return {};
 }
 
+function toEditableReconTrialStatus(status: ReconValidationStatus): TrialStatus {
+  return status === RECON_STRUCTURE_CHECK_STATUS ? 'idle' : status;
+}
+
 function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
   const procRuleJson = asRecord(schemeMeta.proc_rule_json);
@@ -1256,7 +1261,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     procRuleName: toText(schemeMeta.proc_rule_name),
     procTrialStatus: (toText(schemeMeta.proc_trial_status) as TrialStatus) || 'idle',
     procTrialSummary: toText(schemeMeta.proc_trial_summary),
-    reconTrialStatus: (toText(schemeMeta.recon_trial_status) as TrialStatus) || 'idle',
+    reconTrialStatus: (toText(schemeMeta.recon_trial_status) as ReconValidationStatus) || 'idle',
     reconTrialSummary: toText(schemeMeta.recon_trial_summary),
     procDraftText: toText(schemeMeta.proc_draft_text),
     reconDraftText: toText(schemeMeta.recon_draft_text),
@@ -3178,7 +3183,10 @@ export default function ReconWorkspace({
       const nextDraft = typeof updater === 'function'
         ? (updater as (value: SchemeDraft) => SchemeDraft)(prevDraft)
         : updater;
-      return applyLegacySchemeDraftSnapshot(prev, nextDraft);
+      return applyLegacySchemeDraftSnapshot(prev, {
+        ...nextDraft,
+        reconTrialStatus: toEditableReconTrialStatus(nextDraft.reconTrialStatus),
+      });
     });
   }, []);
   const setProcCompatibility = useCallback((next: SetStateAction<CompatibilityCheckResult>) => {
