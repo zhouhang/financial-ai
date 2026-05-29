@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react';
-import { ChevronDown, FlaskConical, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, Plus, Trash2 } from 'lucide-react';
 
 import type { ReconFieldPairDraft } from './schemeWizardState';
 
@@ -21,30 +20,6 @@ export interface CompatibilityCheckResult {
   details: string[];
 }
 
-export interface ReconSampleRow {
-  [key: string]: string | number | null | undefined;
-}
-
-export interface ReconResultSummary {
-  matched?: number;
-  unmatchedLeft?: number;
-  unmatchedRight?: number;
-  amountDiff?: number;
-  diffCount?: number;
-}
-
-export interface ReconTrialPreview {
-  status: TrialStatus;
-  summary: string;
-  leftSamples?: ReconSampleRow[];
-  rightSamples?: ReconSampleRow[];
-  resultSamples?: ReconSampleRow[];
-  leftFieldLabelMap?: Record<string, string>;
-  rightFieldLabelMap?: Record<string, string>;
-  resultFieldLabelMap?: Record<string, string>;
-  resultSummary?: ReconResultSummary;
-}
-
 interface SchemeWizardReconStepProps {
   schemeDraft: ReconDraftShape;
   reconRuleName: string;
@@ -62,75 +37,12 @@ interface SchemeWizardReconStepProps {
     matchFieldPairs: ReconFieldPairDraft[];
     compareFieldPairs: ReconFieldPairDraft[];
   }>) => void;
-  onTrialRecon: () => void;
   onViewReconJson: () => void;
   reconJsonPreview?: string;
-  reconTrialPreview?: ReconTrialPreview;
-  trialDisabled?: boolean;
-  isTrialingRecon?: boolean;
 }
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
-}
-
-function renderSampleTable(
-  rows: ReconSampleRow[] | undefined,
-  title: string,
-  fieldLabelMap?: Record<string, string>,
-  options: { showCount?: boolean } = {},
-) {
-  if (!rows || rows.length === 0) {
-    return (
-      <div className="rounded-2xl border border-border bg-surface px-4 py-3 text-sm text-text-secondary">
-        {title}暂无数据
-      </div>
-    );
-  }
-
-  const columns = Array.from(
-    rows.reduce<Set<string>>((acc, row) => {
-      Object.keys(row).forEach((key) => acc.add(key));
-      return acc;
-    }, new Set<string>()),
-  );
-
-  return (
-    <div className="max-h-[280px] overflow-auto rounded-2xl border border-border bg-surface">
-      <div className="min-w-[680px]">
-        <div className="sticky top-0 z-20 border-b border-border-subtle bg-surface px-4 py-2 text-xs font-semibold tracking-[0.16em] text-text-muted">
-          {options.showCount === false ? title : `${title}（${rows.length} 条）`}
-        </div>
-        <table className="w-full text-left text-sm text-text-secondary">
-          <thead className="sticky top-[33px] z-10 bg-surface-secondary text-[11px] uppercase tracking-[0.14em] text-text-muted">
-            <tr>
-              {columns.map((col) => (
-                <th key={col} className="px-4 py-2 font-semibold">
-                  <span className="block max-w-[220px] truncate">{fieldLabelMap?.[col] || col}</span>
-                  {fieldLabelMap?.[col] && fieldLabelMap[col] !== col ? (
-                    <span className="mt-0.5 block max-w-[220px] truncate text-[10px] font-normal normal-case tracking-normal text-text-muted">
-                      {col}
-                    </span>
-                  ) : null}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, index) => (
-              <tr key={`${title}-${index}`} className="border-t border-border-subtle">
-                {columns.map((col) => (
-                  <td key={`${title}-${index}-${col}`} className="px-4 py-2">
-                    {row[col] ?? '--'}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
 }
 
 function SelectField({
@@ -269,7 +181,6 @@ function FieldPairEditorSection({
 }
 
 export default function SchemeWizardReconStep({
-  schemeDraft,
   reconRuleName,
   matchFieldPairs = [],
   compareFieldPairs = [],
@@ -281,35 +192,14 @@ export default function SchemeWizardReconStep({
   rightFieldLabelMap,
   reconCompatibility,
   onStructuredConfigChange,
-  onTrialRecon,
   onViewReconJson,
   reconJsonPreview,
-  reconTrialPreview,
-  trialDisabled,
-  isTrialingRecon = false,
 }: SchemeWizardReconStepProps) {
-  const previewAnchorRef = useRef<HTMLDivElement | null>(null);
-  const scrollToPreviewPendingRef = useRef(false);
-  const preview = reconTrialPreview;
-  const showTrialResult = schemeDraft.reconTrialStatus !== 'idle' || Boolean(preview?.summary);
   const compatibility = reconCompatibility;
   const showCompatibility =
     (compatibility?.status || 'idle') !== 'idle'
     || (compatibility?.details.length || 0) > 0
     || (compatibility?.message || '等待校验') !== '等待校验';
-
-  useEffect(() => {
-    if (!scrollToPreviewPendingRef.current || !showTrialResult) {
-      return;
-    }
-    previewAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    scrollToPreviewPendingRef.current = false;
-  }, [showTrialResult]);
-
-  const handleTrialRecon = () => {
-    scrollToPreviewPendingRef.current = true;
-    onTrialRecon();
-  };
 
   return (
     <div className="space-y-5">
@@ -320,21 +210,6 @@ export default function SchemeWizardReconStep({
           <span className="mx-1 font-medium text-text-primary">{reconRuleName}</span>
           。
         </p>
-
-        {showTrialResult ? (
-          <div
-            className={cn(
-              'mt-4 rounded-2xl border px-4 py-3 text-sm',
-              (preview?.status || schemeDraft.reconTrialStatus) === 'passed'
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                : (preview?.status || schemeDraft.reconTrialStatus) === 'needs_adjustment'
-                ? 'border-amber-200 bg-amber-50 text-amber-700'
-                : 'border-border bg-surface text-text-secondary',
-            )}
-          >
-            <p>{preview?.summary || schemeDraft.reconTrialSummary}</p>
-          </div>
-        ) : null}
 
         {showCompatibility ? (
           <div
@@ -388,27 +263,11 @@ export default function SchemeWizardReconStep({
         onChange={(pairs) => onStructuredConfigChange?.({ compareFieldPairs: pairs })}
       />
 
-      {isTrialingRecon ? (
-        <div className="flex items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50/60 px-5 py-4">
-          <span className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-          <span className="text-sm font-medium text-sky-700">正在试跑对账规则，请稍候…</span>
-        </div>
-      ) : null}
-
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={handleTrialRecon}
-          disabled={trialDisabled || isTrialingRecon}
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <FlaskConical className="h-4 w-4" />
-          试跑验证
-        </button>
-        <button
-          type="button"
           onClick={onViewReconJson}
-          disabled={!reconJsonPreview || isTrialingRecon}
+          disabled={!reconJsonPreview}
           className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
           查看 JSON
@@ -417,51 +276,6 @@ export default function SchemeWizardReconStep({
           <span className="text-xs text-text-muted">当前字段配置已可编译为 JSON</span>
         ) : null}
       </div>
-
-      {showTrialResult ? (
-        <div ref={previewAnchorRef} className="space-y-4">
-          {renderSampleTable(preview?.leftSamples, '左侧整理结果', preview?.leftFieldLabelMap)}
-          {renderSampleTable(preview?.rightSamples, '右侧整理结果', preview?.rightFieldLabelMap)}
-
-          <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-            <p className="text-sm font-semibold text-text-primary">对账结果摘要</p>
-            {preview?.resultSummary ? (
-              <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-                  <p className="text-xs text-text-secondary">匹配成功</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {preview.resultSummary.matched ?? '--'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-                  <p className="text-xs text-text-secondary">左侧缺失</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {preview.resultSummary.unmatchedLeft ?? '--'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-                  <p className="text-xs text-text-secondary">右侧缺失</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {preview.resultSummary.unmatchedRight ?? '--'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border bg-surface px-4 py-3">
-                  <p className="text-xs text-text-secondary">差异记录</p>
-                  <p className="mt-1 text-sm font-medium text-text-primary">
-                    {preview.resultSummary.amountDiff ?? preview.resultSummary.diffCount ?? '--'}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <p className="mt-3 text-sm leading-6 text-text-secondary">
-                试跑结果摘要会在这里展示匹配成功、差异和缺失情况。
-              </p>
-            )}
-          </div>
-
-          {renderSampleTable(preview?.resultSamples, '对账差异', preview?.resultFieldLabelMap, { showCount: false })}
-        </div>
-      ) : null}
     </div>
   );
 }
