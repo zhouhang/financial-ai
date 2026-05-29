@@ -97,7 +97,7 @@ Run:
 
 ```bash
 cd /Users/kevin/workspace/financial-ai/finance-web
-npm run test:components -- public-recon-run-exceptions-page.test.tsx
+npx vitest run tests/components/public-recon-run-exceptions-page.test.tsx
 ```
 
 Expected result:
@@ -433,7 +433,7 @@ Run:
 
 ```bash
 cd /Users/kevin/workspace/financial-ai/finance-web
-npm run test:components -- public-recon-run-exceptions-page.test.tsx
+npx vitest run tests/components/public-recon-run-exceptions-page.test.tsx
 ```
 
 Expected result:
@@ -463,7 +463,7 @@ Run:
 
 ```bash
 cd /Users/kevin/workspace/financial-ai/finance-web
-npm run test:components -- public-recon-run-exceptions-page.test.tsx
+npx vitest run tests/components/public-recon-run-exceptions-page.test.tsx
 ```
 
 Expected result:
