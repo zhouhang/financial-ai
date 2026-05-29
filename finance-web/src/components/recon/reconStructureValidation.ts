@@ -101,16 +101,18 @@ function findFirstActiveRule(reconRuleJson: Record<string, unknown>): ActiveReco
 function hasMalformedMatchMapping(activeRule: ActiveReconRule): boolean {
   return activeRule.recon.key_columns.mappings.some(
     (mapping) =>
-      isRecord(mapping)
-      && (typeof mapping.source_field !== 'string' || typeof mapping.target_field !== 'string'),
+      !isRecord(mapping)
+      || typeof mapping.source_field !== 'string'
+      || typeof mapping.target_field !== 'string',
   );
 }
 
 function hasMalformedCompareColumn(activeRule: ActiveReconRule): boolean {
   return activeRule.recon.compare_columns.columns.some(
     (column) =>
-      isRecord(column)
-      && (typeof column.source_column !== 'string' || typeof column.target_column !== 'string'),
+      !isRecord(column)
+      || typeof column.source_column !== 'string'
+      || typeof column.target_column !== 'string',
   );
 }
 
