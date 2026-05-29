@@ -138,6 +138,116 @@ describe('validateReconStructureForSave', () => {
     });
   });
 
+  it('fails when recon JSON contains more than one active rule', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            enabled: true,
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'biz_key', target_field: 'biz_key' }],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'amount', target_column: 'amount' }],
+              },
+            },
+          },
+          {
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'legacy_key', target_field: 'legacy_key' }],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'legacy_amount', target_column: 'legacy_amount' }],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+      details: [],
+    });
+  });
+
+  it('fails when recon JSON contains a malformed match mapping', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            recon: {
+              key_columns: {
+                mappings: [
+                  { source_field: 'biz_key', target_field: 'biz_key' },
+                  { source_field: 'legacy_key' },
+                ],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'amount', target_column: 'amount' }],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+      details: [],
+    });
+  });
+
+  it('fails when recon JSON contains a malformed compare column', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'biz_key', target_field: 'biz_key' }],
+              },
+              compare_columns: {
+                columns: [
+                  { source_column: 'amount', target_column: 'amount' },
+                  { source_column: 'legacy_amount' },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: leftFields,
+      rightOutputFields: rightFields,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+      details: [],
+    });
+  });
+
   it('fails when no complete match pair exists', () => {
     const result = validateReconStructureForSave({
       reconRuleJson: validRule,

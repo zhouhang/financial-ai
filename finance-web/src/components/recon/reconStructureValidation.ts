@@ -53,6 +53,15 @@ function missingFieldMessage(sideLabel: string, fieldName: string): string {
   return `${sideLabel}字段「${fieldName}」不在第二步输出字段中。`;
 }
 
+function structureError(): ReconStructureValidationResult {
+  return {
+    ok: false,
+    status: 'failed',
+    message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
+    details: [],
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -61,7 +70,10 @@ function findFirstActiveRule(reconRuleJson: Record<string, unknown>): ActiveReco
   const rules = reconRuleJson.rules;
   if (!Array.isArray(rules)) return null;
 
-  const activeRule = rules.find((rule) => isRecord(rule) && rule.enabled !== false);
+  const activeRules = rules.filter((rule) => isRecord(rule) && rule.enabled !== false);
+  if (activeRules.length !== 1) return null;
+
+  const [activeRule] = activeRules;
   if (!isRecord(activeRule)) return null;
 
   const recon = activeRule.recon;
@@ -84,6 +96,22 @@ function findFirstActiveRule(reconRuleJson: Record<string, unknown>): ActiveReco
       },
     },
   };
+}
+
+function hasMalformedMatchMapping(activeRule: ActiveReconRule): boolean {
+  return activeRule.recon.key_columns.mappings.some(
+    (mapping) =>
+      isRecord(mapping)
+      && (typeof mapping.source_field !== 'string' || typeof mapping.target_field !== 'string'),
+  );
+}
+
+function hasMalformedCompareColumn(activeRule: ActiveReconRule): boolean {
+  return activeRule.recon.compare_columns.columns.some(
+    (column) =>
+      isRecord(column)
+      && (typeof column.source_column !== 'string' || typeof column.target_column !== 'string'),
+  );
 }
 
 function normalizeCurrentPairs(pairs: ReconFieldPairDraft[]): NormalizedReconPair[] {
@@ -153,12 +181,11 @@ export function validateReconStructureForSave(
 
   const activeRule = findFirstActiveRule(input.reconRuleJson);
   if (!activeRule) {
-    return {
-      ok: false,
-      status: 'failed',
-      message: '对账规则 JSON 结构不完整，请重新生成对账字段配置。',
-      details: [],
-    };
+    return structureError();
+  }
+
+  if (hasMalformedMatchMapping(activeRule) || hasMalformedCompareColumn(activeRule)) {
+    return structureError();
   }
 
   const completeMatchPairs = completePairs(input.matchFieldPairs);
