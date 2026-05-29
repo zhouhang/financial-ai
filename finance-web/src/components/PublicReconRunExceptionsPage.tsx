@@ -11,6 +11,8 @@ import {
   type ExceptionRecordEntry,
 } from './recon/exceptionBusinessSummary';
 import { parsePublicReconRunExceptionsRunId } from './publicReconRunExceptionsRoute';
+import PublicReconExceptionCompareValues from './recon/PublicReconExceptionCompareValues';
+import PublicReconRunExceptionMobileCard from './recon/PublicReconRunExceptionMobileCard';
 import {
   buildRuntimeSummaryView,
   formatCount,
@@ -963,49 +965,67 @@ export default function PublicReconRunExceptionsPage() {
               正在加载全量差异...
             </div>
           ) : filteredExceptions.length > 0 ? (
-            <div className="overflow-x-auto">
-              <div className="min-w-[1320px] divide-y divide-border-subtle">
-                <div className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] gap-4 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
-                  <span>摘要</span>
-                  <span>关键字段和值</span>
-                  <span>责任人</span>
-                  <span>处理状态</span>
-                  <span className="text-right">操作</span>
-                </div>
+            <>
+              <div className="md:hidden">
                 {filteredExceptions.map((item) => {
                   const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
                   return (
-                    <article
+                    <PublicReconRunExceptionMobileCard
                       key={item.id}
-                      className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] items-start gap-4 px-5 py-4"
-                    >
-                      <p
-                        className="whitespace-pre-line break-words text-sm leading-6 text-text-primary"
-                        style={ANYWHERE_WRAP_STYLE}
-                      >
-                        {businessDisplay.shortSummary}
-                      </p>
-                      <p
-                        className="whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
-                        style={ANYWHERE_WRAP_STYLE}
-                      >
-                        {fieldValueSummary(businessDisplay)}
-                      </p>
-                      <span className="break-words text-sm leading-6 text-text-secondary">{ownerDisplayName(item, bundle)}</span>
-                      <span className="break-words text-sm leading-6 text-text-secondary">{formatProcessingStatus(item.processingStatus)}</span>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedException(item)}
-                        className="justify-self-end inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        详情
-                      </button>
-                    </article>
+                      id={item.id}
+                      display={businessDisplay}
+                      fieldSummary={fieldValueSummary(businessDisplay)}
+                      ownerName={ownerDisplayName(item, bundle)}
+                      processingStatusLabel={formatProcessingStatus(item.processingStatus)}
+                      onOpen={() => setSelectedException(item)}
+                    />
                   );
                 })}
               </div>
-            </div>
+              <div className="hidden overflow-x-auto md:block">
+                <div className="min-w-[1320px] divide-y divide-border-subtle">
+                  <div className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] gap-4 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
+                    <span>摘要</span>
+                    <span>关键字段和值</span>
+                    <span>责任人</span>
+                    <span>处理状态</span>
+                    <span className="text-right">操作</span>
+                  </div>
+                  {filteredExceptions.map((item) => {
+                    const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
+                    return (
+                      <article
+                        key={item.id}
+                        className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] items-start gap-4 px-5 py-4"
+                      >
+                        <p
+                          className="whitespace-pre-line break-words text-sm leading-6 text-text-primary"
+                          style={ANYWHERE_WRAP_STYLE}
+                        >
+                          {businessDisplay.shortSummary}
+                        </p>
+                        <p
+                          className="whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
+                          style={ANYWHERE_WRAP_STYLE}
+                        >
+                          {fieldValueSummary(businessDisplay)}
+                        </p>
+                        <span className="break-words text-sm leading-6 text-text-secondary">{ownerDisplayName(item, bundle)}</span>
+                        <span className="break-words text-sm leading-6 text-text-secondary">{formatProcessingStatus(item.processingStatus)}</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedException(item)}
+                          className="justify-self-end inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          详情
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
           ) : (
             <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center">
               <AlertCircle className="h-8 w-8 text-text-muted" />
@@ -1042,12 +1062,12 @@ export default function PublicReconRunExceptionsPage() {
       </div>
 
       {selectedException && selectedBusinessDisplay ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 py-6">
+        <div className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-black/30 p-0 md:items-center md:justify-center md:px-4 md:py-6">
           <div
             role="dialog"
             aria-label="差异详情"
             aria-modal="true"
-            className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-2xl"
+            className="flex h-full max-h-none w-full max-w-none flex-col overflow-hidden rounded-none border-0 bg-surface shadow-2xl md:h-auto md:max-h-[90vh] md:max-w-5xl md:rounded-[28px] md:border md:border-border"
           >
             <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
               <div>
@@ -1105,28 +1125,11 @@ export default function PublicReconRunExceptionsPage() {
                 {selectedBusinessDisplay.compareLines.length > 0 ? (
                   <section className="rounded-2xl border border-border bg-surface-secondary p-4">
                     <h3 className="text-sm font-semibold text-text-primary">差异字段和值</h3>
-                    <div className="mt-3 overflow-x-auto rounded-xl border border-border-subtle bg-surface">
-                      <table className="min-w-[720px] w-full text-left text-sm">
-                        <thead className="border-b border-border-subtle text-xs text-text-muted">
-                          <tr>
-                            <th className="px-3 py-2 font-medium">字段</th>
-                            <th className="px-3 py-2 font-medium">{selectedBusinessDisplay.compareLines[0]?.sourceDatasetLabel || displayContext.datasetLabels.left}</th>
-                            <th className="px-3 py-2 font-medium">{selectedBusinessDisplay.compareLines[0]?.targetDatasetLabel || displayContext.datasetLabels.right}</th>
-                            <th className="px-3 py-2 font-medium">差异值</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedBusinessDisplay.compareLines.map((line, index) => (
-                            <tr key={`${line.fieldLabel}-${index}`} className="border-b border-border-subtle last:border-b-0">
-                              <td className="px-3 py-2 text-text-primary">{line.fieldLabel}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.sourceValue}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.targetValue}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.diffValue}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <PublicReconExceptionCompareValues
+                      compareLines={selectedBusinessDisplay.compareLines}
+                      leftDatasetLabel={displayContext.datasetLabels.left}
+                      rightDatasetLabel={displayContext.datasetLabels.right}
+                    />
                   </section>
                 ) : null}
 

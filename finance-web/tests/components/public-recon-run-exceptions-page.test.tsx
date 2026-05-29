@@ -380,8 +380,8 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     expect(within(mobileCompareValues).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
     expect(within(mobileCompareValues).getByText('0.00')).toBeInTheDocument();
     expect(within(detailDialog).getByText('mobile-buyer-001')).toBeInTheDocument();
-    expect(within(detailDialog).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
-    expect(within(detailDialog).getByText('交易订单明细表')).toBeInTheDocument();
+    expect(within(detailDialog).getAllByText('tb0131100248-店铺订单').length).toBeGreaterThan(0);
+    expect(within(detailDialog).getAllByText('交易订单明细表').length).toBeGreaterThan(0);
     expect(within(detailDialog).getByText('未匹配到原始记录')).toBeInTheDocument();
     expectNoStructuredSummaryLabels(detailDialog);
   });
