@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import PublicReconRunExceptionsPage from '../../src/components/PublicReconRunExceptionsPage';
@@ -10,6 +10,13 @@ function buildJsonResponse(body: unknown, status = 200): Response {
       'Content-Type': 'application/json',
     },
   });
+}
+
+function expectNoStructuredSummaryLabels(container: HTMLElement) {
+  expect(within(container).queryByText('差异类型')).not.toBeInTheDocument();
+  expect(within(container).queryByText('匹配字段')).not.toBeInTheDocument();
+  expect(within(container).queryByText('对比字段')).not.toBeInTheDocument();
+  expect(within(container).queryByText('含税销售金额 ↔ 买家实付金额')).not.toBeInTheDocument();
 }
 
 describe('PublicReconRunExceptionsPage run metrics', () => {
@@ -254,5 +261,128 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     expect(headerView.queryByText('待处理差异')).not.toBeInTheDocument();
     expect(screen.getByText((_, element) => element?.textContent === '待处理差异 0 条')).toBeInTheDocument();
     expect(headerView.queryByText('差异总数')).not.toBeInTheDocument();
+  });
+
+  it('formats exception summaries consistently in the public difference list', async () => {
+    fetchMock.mockResolvedValueOnce(buildJsonResponse({
+      run: {
+        id: 'run-003',
+        run_code: 'run_code_003',
+        scheme_code: 'scheme-003',
+        plan_code: 'plan-003',
+        scheme_name: '泰斯支付宝对账方案',
+        plan_name: '泰斯支付宝对账',
+        execution_status: 'success',
+        run_context_json: { biz_date: '2026-05-12' },
+        artifacts_json: {
+          runtime_summary: {
+            biz_date: '2026-05-12',
+          },
+        },
+      },
+      scheme: {
+        id: 'scheme-003',
+        scheme_code: 'scheme-003',
+        scheme_name: '泰斯支付宝对账方案',
+        scheme_meta_json: {
+          dataset_bindings: {
+            left: [
+              {
+                dataset_id: 'dataset-left',
+                dataset_name: 'tb0131100248-店铺订单',
+                business_name: 'tb0131100248-店铺订单',
+                field_label_map: {
+                  biz_key: '订单编号',
+                  amount: '含税销售金额',
+                },
+              },
+            ],
+            right: [
+              {
+                dataset_id: 'dataset-right',
+                dataset_name: '交易订单明细表',
+                business_name: '交易订单明细表',
+                field_label_map: {
+                  biz_key: '订单编号',
+                  paid_amount: '买家实付金额',
+                },
+              },
+            ],
+          },
+        },
+      },
+      run_plan: {
+        id: 'plan-003',
+        plan_code: 'plan-003',
+        plan_name: '泰斯支付宝对账',
+      },
+      exceptions: [
+        {
+          id: 'exception-003',
+          anomaly_type: 'source_only',
+          summary: '仅 tb0131100248-店铺订单 存在（交易订单明细表 缺失）：订单编号=5118002676174023242 含税销售金额 ↔ 买家实付金额：tb0131100248-店铺订单 0.00',
+          owner_name: '周行',
+          processing_status: 'pending',
+          detail_json: {
+            source_ref: 'left_recon_ready',
+            target_ref: 'right_recon_ready',
+            join_key: [
+              {
+                source_field: 'biz_key',
+                target_field: 'biz_key',
+                source_value: '5118002676174023242',
+                target_value: null,
+              },
+            ],
+            compare_values: [
+              {
+                source_field: 'amount',
+                target_field: 'paid_amount',
+                source_value: '0.00',
+                target_value: null,
+              },
+            ],
+            left_record: {
+              biz_key: '5118002676174023242',
+              amount: '0.00',
+              buyer_nick: 'mobile-buyer-001',
+            },
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    }));
+
+    render(<PublicReconRunExceptionsPage />);
+
+    const summaryMatches = await screen.findAllByText('交易订单明细表缺失订单编号 5118002676174023242');
+    expect(summaryMatches.length).toBeGreaterThanOrEqual(1);
+    expectNoStructuredSummaryLabels(document.body);
+
+    const mobileCard = screen.getByTestId('mobile-exception-card-exception-003');
+    expect(within(mobileCard).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('tb0131100248-店铺订单：订单编号 = 5118002676174023242')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('含税销售金额')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('周行')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('待处理')).toBeInTheDocument();
+    expect(within(mobileCard).getByRole('button', { name: '查看详情' })).toBeInTheDocument();
+
+    fireEvent.click(within(mobileCard).getByRole('button', { name: '查看详情' }));
+
+    const detailDialog = await screen.findByRole('dialog', { name: '差异详情' });
+    expect(within(detailDialog).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('对账关键字段')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('差异字段和值')).toBeInTheDocument();
+    const mobileCompareValues = within(detailDialog).getByTestId('mobile-compare-values');
+    expect(within(mobileCompareValues).getByText('含税销售金额')).toBeInTheDocument();
+    expect(within(mobileCompareValues).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
+    expect(within(mobileCompareValues).getByText('0.00')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('mobile-buyer-001')).toBeInTheDocument();
+    expect(within(detailDialog).getAllByText('tb0131100248-店铺订单').length).toBeGreaterThan(0);
+    expect(within(detailDialog).getAllByText('交易订单明细表').length).toBeGreaterThan(0);
+    expect(within(detailDialog).getByText('未匹配到原始记录')).toBeInTheDocument();
+    expectNoStructuredSummaryLabels(detailDialog);
   });
 });

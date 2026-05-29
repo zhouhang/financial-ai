@@ -49,6 +49,7 @@ _DEFAULT_OUTPUT_SHEETS = {
     "target_only": "目标文件独有",
     "matched_with_diff": "差异记录",
 }
+SOURCE_RECORD_METADATA_COLUMN = "__tally_source_record"
 
 
 def _normalize_output_sheets_config(sheets_config: Any) -> dict[str, dict[str, Any]]:
@@ -797,6 +798,11 @@ def execute_single_recon(
         f"源独有 {len(diff_result.get('source_only', []))} 条，"
         f"目标独有 {len(diff_result.get('target_only', []))} 条"
     )
+    anomaly_rows = _build_anomaly_rows(
+        diff_result,
+        key_mappings=key_mappings,
+        compare_columns_config=compare_columns_config,
+    )
     
     result = {
         "success": True,
@@ -811,6 +817,7 @@ def execute_single_recon(
         "source_only": len(diff_result.get("source_only", [])),
         "target_only": len(diff_result.get("target_only", [])),
         "matched_exact": len(diff_result.get("matched_exact", [])),
+        "anomaly_rows": anomaly_rows,
         "output_file": output_path,
         "download_url": download_url,
         "message": "；".join(message_parts)
@@ -921,6 +928,172 @@ def _apply_column_mapping(df: pd.DataFrame, column_mapping: dict) -> pd.DataFram
     return df
 
 
+def _extract_source_record_series(df: pd.DataFrame) -> pd.Series | None:
+    """Return original source-record metadata from proc output, if present."""
+    if SOURCE_RECORD_METADATA_COLUMN not in df.columns:
+        return None
+    return df[SOURCE_RECORD_METADATA_COLUMN].copy()
+
+
+def _clean_record_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for key, item in value.items():
+        field_name = str(key)
+        if not field_name or field_name == SOURCE_RECORD_METADATA_COLUMN:
+            continue
+        cleaned[field_name] = _normalize_json_value(item)
+    return cleaned
+
+
+def _normalize_json_value(value: Any) -> Any:
+    """Normalize pandas/numpy values for JSON serialization."""
+    try:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+    except Exception:
+        pass
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        if hasattr(value, "item"):
+            return value.item()
+    except Exception:
+        pass
+    return value
+
+
+def _build_side_record(row: dict[str, Any], prefix: str) -> dict[str, Any]:
+    metadata = _clean_record_metadata(row.get(f"{prefix}_{SOURCE_RECORD_METADATA_COLUMN}"))
+    if metadata:
+        return metadata
+    side_prefix = f"{prefix}_"
+    record: dict[str, Any] = {}
+    for key, value in row.items():
+        field_name = str(key)
+        if not field_name.startswith(side_prefix):
+            continue
+        stripped = field_name[len(side_prefix):]
+        if stripped == SOURCE_RECORD_METADATA_COLUMN:
+            continue
+        record[stripped] = _normalize_json_value(value)
+    return record
+
+
+def _resolve_row_value(row: dict[str, Any], candidates: list[str]) -> Any:
+    """Resolve row value by candidate column names."""
+    for name in candidates:
+        key = str(name or "").strip()
+        if key and key in row:
+            return row[key]
+    return None
+
+
+def _candidate_columns_for_field(field: str, role: str) -> list[str]:
+    """Build candidate column names for source/target field lookup."""
+    field_name = str(field or "").strip()
+    if not field_name:
+        return []
+    if role == "source":
+        return [f"source_{field_name}", f"source.{field_name}", f"合单.{field_name}", field_name]
+    return [f"target_{field_name}", f"target.{field_name}", f"官网.{field_name}", field_name]
+
+
+def _candidate_diff_columns(compare_name: str, source_field: str, target_field: str) -> list[str]:
+    """Build candidate diff column names."""
+    name = str(compare_name or "").strip()
+    src = str(source_field or "").strip()
+    tgt = str(target_field or "").strip()
+    candidates = [
+        f"diff_{name}" if name else "",
+        f"{name}差异" if name and not name.endswith("差异") else name,
+        f"diff_{src}" if src else "",
+        f"diff_{tgt}" if tgt else "",
+        f"{src}差异" if src else "",
+        f"{tgt}差异" if tgt else "",
+    ]
+    return [candidate for candidate in candidates if candidate]
+
+
+def _normalize_dataframe_row(row: pd.Series) -> dict[str, Any]:
+    return {str(key): _normalize_json_value(value) for key, value in row.to_dict().items()}
+
+
+def _build_anomaly_rows(
+    diff_result: dict[str, pd.DataFrame],
+    *,
+    key_mappings: list[dict[str, str]],
+    compare_columns_config: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for anomaly_type in ("matched_with_diff", "source_only", "target_only"):
+        df = diff_result.get(anomaly_type)
+        if df is None or df.empty:
+            continue
+        for _, source_row in df.iterrows():
+            normalized_row = _normalize_dataframe_row(source_row)
+            join_key: list[dict[str, Any]] = []
+            for mapping in key_mappings:
+                source_field = str(mapping.get("source_field") or "").strip()
+                target_field = str(mapping.get("target_field") or "").strip()
+                join_key.append(
+                    {
+                        "source_field": source_field,
+                        "target_field": target_field,
+                        "source_value": _resolve_row_value(
+                            normalized_row,
+                            _candidate_columns_for_field(source_field, "source"),
+                        ),
+                        "target_value": _resolve_row_value(
+                            normalized_row,
+                            _candidate_columns_for_field(target_field, "target"),
+                        ),
+                    }
+                )
+
+            compare_values: list[dict[str, Any]] = []
+            for compare_cfg in compare_columns_config:
+                compare_name = _get_compare_name(compare_cfg)
+                source_field = str(compare_cfg.get("source_column") or "").strip()
+                target_field = str(compare_cfg.get("target_column") or "").strip()
+                compare_values.append(
+                    {
+                        "name": compare_name,
+                        "source_field": source_field,
+                        "target_field": target_field,
+                        "source_value": _resolve_row_value(
+                            normalized_row,
+                            _candidate_columns_for_field(source_field, "source"),
+                        ),
+                        "target_value": _resolve_row_value(
+                            normalized_row,
+                            _candidate_columns_for_field(target_field, "target"),
+                        ),
+                        "diff_value": _resolve_row_value(
+                            normalized_row,
+                            _candidate_diff_columns(compare_name, source_field, target_field),
+                        ),
+                    }
+                )
+
+            rows.append(
+                {
+                    "anomaly_type": anomaly_type,
+                    "join_key": join_key,
+                    "compare_values": compare_values,
+                    "detail_unavailable": False,
+                    "raw_record": normalized_row,
+                    "source_record": _build_side_record(normalized_row, "source"),
+                    "target_record": _build_side_record(normalized_row, "target"),
+                }
+            )
+    return rows
+
+
 def _get_key_mappings(key_columns_config: dict | None) -> list[dict[str, str]]:
     """解析关键列映射，兼容单字段与多字段配置。"""
     config = key_columns_config or {}
@@ -1016,6 +1189,11 @@ def _format_export_dataframe(
         return df
 
     formatted = df.copy()
+    metadata_columns = [
+        col for col in formatted.columns if str(col).endswith(SOURCE_RECORD_METADATA_COLUMN)
+    ]
+    if metadata_columns:
+        formatted = formatted.drop(columns=metadata_columns)
     source_name = ((rule.get("source_file") or {}).get("table_name") or "源").strip()
     target_name = ((rule.get("target_file") or {}).get("table_name") or "目标").strip()
     rename_map: dict[str, str] = {}
@@ -1262,9 +1440,20 @@ def _execute_comparison(
                         df_target, target_key_col, trans_chain, "target", rule_id
                     )
     
+    source_record_series = _extract_source_record_series(df_source)
+    target_record_series = _extract_source_record_series(df_target)
+    if source_record_series is not None:
+        df_source = df_source.drop(columns=[SOURCE_RECORD_METADATA_COLUMN])
+    if target_record_series is not None:
+        df_target = df_target.drop(columns=[SOURCE_RECORD_METADATA_COLUMN])
+
     # 添加前缀以区分来源
     df_source_prefixed = df_source.add_prefix("source_")
     df_target_prefixed = df_target.add_prefix("target_")
+    if source_record_series is not None:
+        df_source_prefixed[f"source_{SOURCE_RECORD_METADATA_COLUMN}"] = source_record_series
+    if target_record_series is not None:
+        df_target_prefixed[f"target_{SOURCE_RECORD_METADATA_COLUMN}"] = target_record_series
     
     source_key_cols = [f"source_{col}" for col in source_key_cols_raw]
     target_key_cols = [f"target_{col}" for col in target_key_cols_raw]

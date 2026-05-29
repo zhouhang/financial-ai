@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import { ArrowUpRight, RefreshCw } from 'lucide-react';
 
+import ExceptionSummary from './ExceptionSummary';
 import { cn } from './types';
 import type { ReconExceptionItem, ReconRunItem } from './types';
 
@@ -260,7 +261,11 @@ export default function ReconAutoRunsPanel({
                       {exception.handlingStatus}
                     </div>
                   </div>
-                  <p className="mt-2 text-sm text-text-secondary">{exception.summary}</p>
+                  <ExceptionSummary
+                    text={exception.summary}
+                    className="mt-2"
+                    valueClassName="text-sm text-text-secondary"
+                  />
                   <div className="mt-3 grid gap-2 text-xs text-text-secondary md:grid-cols-3">
                     <div>责任人：{exception.owner}</div>
                     <div>催办状态：{exception.reminderStatus}</div>

@@ -3,7 +3,16 @@ import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Eye, Filter, Refre
 import { fetchReconAutoApi } from './recon/autoApi';
 import { cn } from './recon/types';
 import { orderExceptionRecordEntries } from './recon/exceptionRecordDisplay';
+import { formatExceptionSummaryLines } from './recon/exceptionSummaryDisplay';
+import {
+  buildExceptionBusinessDisplay,
+  normalizeExceptionValue,
+  type ExceptionBusinessDisplay,
+  type ExceptionRecordEntry,
+} from './recon/exceptionBusinessSummary';
 import { parsePublicReconRunExceptionsRunId } from './publicReconRunExceptionsRoute';
+import PublicReconExceptionCompareValues from './recon/PublicReconExceptionCompareValues';
+import PublicReconRunExceptionMobileCard from './recon/PublicReconRunExceptionMobileCard';
 import {
   buildRuntimeSummaryView,
   formatCount,
@@ -95,22 +104,10 @@ interface ExceptionDisplayContext {
   sourceFieldLabels: Record<ReconSide, Record<string, string>>;
 }
 
-interface FieldValueLine {
-  side: ReconSide;
-  datasetLabel: string;
-  fieldLabel: string;
-  value: string;
-}
-
-interface CompareValueLine {
-  fieldLabel: string;
-  sourceValue: string;
-  targetValue: string;
-  diffValue: string;
-}
-
 const PAGE_SIZE = 100;
 const ANYWHERE_WRAP_STYLE = { overflowWrap: 'anywhere' } as const;
+const EMPTY_EXCEPTION_VALUE = normalizeExceptionValue(null);
+const EMPTY_EXCEPTIONS: ReconRunExceptionDetail[] = [];
 
 const COMMON_FIELD_LABELS: Record<string, string> = {
   biz_key: '业务单号',
@@ -166,18 +163,6 @@ function normalizeFieldLabelMap(value: unknown): Record<string, string> {
       .map(([key, raw]) => [key.trim(), toText(raw).trim()] as const)
       .filter(([key, label]) => Boolean(key && label)),
   );
-}
-
-function normalizeValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '--';
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 function firstText(...values: unknown[]): string {
@@ -539,6 +524,7 @@ function fieldLabelForSide(ctx: ExceptionDisplayContext, side: ReconSide, field:
   return (
     ctx.fieldInfo[side][normalized]?.label
     || ctx.outputFieldLabels[side][normalized]
+    || ctx.sourceFieldLabels[side][normalized]
     || COMMON_FIELD_LABELS[normalized]
     || normalized
     || '--'
@@ -615,18 +601,8 @@ function replaceSourceNameLabels(text: string, ctx: ExceptionDisplayContext): st
   return value;
 }
 
-function formatSummaryLines(text: string): string {
-  return text
-    .replace(/[；;]\s*/g, '\n')
-    .replace(/\s{2,}/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n');
-}
-
 function readableExceptionSummary(item: ReconRunExceptionDetail, ctx: ExceptionDisplayContext): string {
-  return formatSummaryLines(replaceSourceNameLabels(replaceOutputFieldLabels(item.summary || '异常详情待补充。', ctx), ctx)
+  return formatExceptionSummaryLines(replaceSourceNameLabels(replaceOutputFieldLabels(item.summary || '异常详情待补充。', ctx), ctx)
     .replaceAll('左侧基础表', ctx.datasetLabels.left)
     .replaceAll('右侧基础表', ctx.datasetLabels.right)
     .replaceAll('左侧数据', ctx.datasetLabels.left)
@@ -635,165 +611,44 @@ function readableExceptionSummary(item: ReconRunExceptionDetail, ctx: ExceptionD
     .replaceAll('右侧', ctx.datasetLabels.right));
 }
 
-function getExceptionDetail(item: ReconRunExceptionDetail): Record<string, unknown> {
-  return firstNonEmptyRecord(item.raw.detail_json, item.raw.detail, item.raw);
-}
-
-function getRawRecord(item: ReconRunExceptionDetail): Record<string, unknown> {
-  const detail = getExceptionDetail(item);
-  return firstNonEmptyRecord(detail.raw_record, detail.record, detail.source_record, detail.left_record);
-}
-
-function getRecordsBySide(item: ReconRunExceptionDetail): Record<ReconSide, Record<string, unknown>> {
-  const detail = getExceptionDetail(item);
-  const explicitLeft = firstNonEmptyRecord(detail.left_record, detail.source_record, detail.left_row);
-  const explicitRight = firstNonEmptyRecord(detail.right_record, detail.target_record, detail.right_row);
-  const rawRecord = firstNonEmptyRecord(detail.raw_record, detail.record);
-
-  const normalizeRecord = (record: Record<string, unknown>) =>
-    Object.fromEntries(Object.entries(record).map(([key, value]) => [stripFieldPrefix(key), value]));
-
-  if (Object.keys(explicitLeft).length > 0 || Object.keys(explicitRight).length > 0) {
-    return {
-      left: normalizeRecord(explicitLeft),
-      right: normalizeRecord(explicitRight),
-    };
-  }
-
-  const left: Record<string, unknown> = {};
-  const right: Record<string, unknown> = {};
-  Object.entries(rawRecord).forEach(([key, value]) => {
-    if (key.startsWith('left_recon_ready.') || key.startsWith('source.') || key.startsWith('left.')) {
-      left[stripFieldPrefix(key)] = value;
-      return;
-    }
-    if (key.startsWith('right_recon_ready.') || key.startsWith('target.') || key.startsWith('right.')) {
-      right[stripFieldPrefix(key)] = value;
-    }
-  });
-  return { left, right };
-}
-
-function sideFromRef(value: unknown): ReconSide | '' {
-  const normalized = toText(value).trim().toLowerCase();
-  if (normalized.includes('left') || normalized.includes('source')) return 'left';
-  if (normalized.includes('right') || normalized.includes('target')) return 'right';
-  return '';
-}
-
-function findRawValue(item: ReconRunExceptionDetail, side: ReconSide, field: string): unknown {
-  const rawRecord = getRawRecord(item);
-  const normalized = stripFieldPrefix(field);
-  const prefixes = side === 'left'
-    ? ['left_recon_ready.', 'source.', 'left.']
-    : ['right_recon_ready.', 'target.', 'right.'];
-  for (const prefix of prefixes) {
-    const value = rawRecord[`${prefix}${normalized}`];
-    if (value !== null && value !== undefined && value !== '') return value;
-  }
-  const records = getRecordsBySide(item);
-  const sideRecordValue = records[side][normalized];
-  if (sideRecordValue !== null && sideRecordValue !== undefined && sideRecordValue !== '') {
-    return sideRecordValue;
-  }
-  return rawRecord[normalized];
-}
-
-function getJoinKeyLines(item: ReconRunExceptionDetail, ctx: ExceptionDisplayContext): FieldValueLine[] {
-  const detail = getExceptionDetail(item);
-  return asList(detail.join_key)
-    .filter((entry) => typeof entry === 'object' && entry !== null)
-    .flatMap((entry) => {
-      const row = asRecord(entry);
-      const sourceField = toText(row.source_field || row.field).trim();
-      const targetField = toText(row.target_field || row.field).trim();
-      const detail = getExceptionDetail(item);
-      const sourceSide = sideFromRef(detail.source_ref) || 'left';
-      const targetSide = sideFromRef(detail.target_ref) || 'right';
-      const lines: FieldValueLine[] = [];
-      if (sourceField) {
-        lines.push({
-          side: sourceSide,
-          datasetLabel: ctx.datasetLabels[sourceSide],
-          fieldLabel: displayFieldLabelForSide(ctx, sourceSide, sourceField),
-          value: normalizeValue(row.source_value ?? row.value ?? findRawValue(item, sourceSide, sourceField)),
-        });
-      }
-      if (targetField) {
-        lines.push({
-          side: targetSide,
-          datasetLabel: ctx.datasetLabels[targetSide],
-          fieldLabel: displayFieldLabelForSide(ctx, targetSide, targetField),
-          value: normalizeValue(row.target_value ?? row.value ?? findRawValue(item, targetSide, targetField)),
-        });
-      }
-      return lines;
-    });
-}
-
-function getCompareValueLines(item: ReconRunExceptionDetail, ctx: ExceptionDisplayContext): CompareValueLine[] {
-  const detail = getExceptionDetail(item);
-  const sourceSide = sideFromRef(detail.source_ref) || 'left';
-  const targetSide = sideFromRef(detail.target_ref) || 'right';
-  return asList(detail.compare_values)
-    .filter((entry) => typeof entry === 'object' && entry !== null)
-    .map((entry) => {
-      const row = asRecord(entry);
-      const sourceField = toText(row.source_field).trim();
-      const targetField = toText(row.target_field).trim();
-      const leftLabel = sourceField ? displayFieldLabelForSide(ctx, sourceSide, sourceField) : '';
-      const rightLabel = targetField ? displayFieldLabelForSide(ctx, targetSide, targetField) : '';
-      return {
-        fieldLabel: leftLabel && rightLabel && leftLabel !== rightLabel
-          ? `${leftLabel} / ${rightLabel}`
-          : leftLabel || rightLabel || toText(row.name, '对比值'),
-        sourceValue: normalizeValue(row.source_value ?? findRawValue(item, sourceSide, sourceField)),
-        targetValue: normalizeValue(row.target_value ?? findRawValue(item, targetSide, targetField)),
-        diffValue: normalizeValue(row.diff_value),
-      };
-    });
-}
-
-function fieldValueSummary(item: ReconRunExceptionDetail, ctx: ExceptionDisplayContext): string {
-  const joinLines = getJoinKeyLines(item, ctx)
-    .filter((line) => line.value !== '--')
-    .slice(0, 3)
-    .map((line) => `${line.datasetLabel}：${line.fieldLabel} = ${line.value}`);
-  if (joinLines.length > 0) return joinLines.join('；');
-  const compareLines = getCompareValueLines(item, ctx).slice(0, 2);
-  return compareLines
-    .map((line) => `${line.fieldLabel}：${line.sourceValue} / ${line.targetValue}`)
-    .join('；') || '--';
-}
-
-function recordSectionEntriesForSide(
-  item: ReconRunExceptionDetail | null,
-  side: ReconSide,
+function businessDisplayForException(
+  item: ReconRunExceptionDetail,
   ctx: ExceptionDisplayContext,
-): Array<{ field: string; label: string; value: string }> {
-  if (!item) return [];
-  const records = getRecordsBySide(item);
-  const fromRecord = recordEntriesForDisplay(records[side], side, ctx);
-  if (fromRecord.length > 0) return fromRecord;
-
-  const detail = getExceptionDetail(item);
-  const refSide = sideFromRef(detail.source_ref) || 'left';
-  if (refSide !== side) return [];
-  return recordEntriesForDisplay(getRawRecord(item), side, ctx);
+): ExceptionBusinessDisplay {
+  return buildExceptionBusinessDisplay(
+    {
+      anomalyType: item.anomalyType,
+      summary: readableExceptionSummary(item, ctx),
+      raw: item.raw,
+    },
+    {
+      datasetLabels: ctx.datasetLabels,
+      fieldLabelForSide: (side, field) => displayFieldLabelForSide(ctx, side, field),
+    },
+  );
 }
 
-function recordEntriesForDisplay(
-  record: Record<string, unknown>,
-  side: ReconSide,
-  ctx: ExceptionDisplayContext,
-): Array<{ field: string; label: string; value: string }> {
-  return Object.entries(record)
-    .filter(([field]) => !['source_name', 'source_side', 'source_count'].includes(field))
-    .map(([field, value]) => ({
-      field,
-      label: displayFieldLabelForSide(ctx, side, field),
-      value: normalizeValue(value),
-    }));
+function fieldValueSummary(display: ExceptionBusinessDisplay): string {
+  const firstKeyLine = display.keyLines
+    .filter((line) => line.value !== EMPTY_EXCEPTION_VALUE)
+    .at(0);
+  return firstKeyLine ? `${firstKeyLine.datasetLabel}：${firstKeyLine.fieldLabel} = ${firstKeyLine.value}` : '--';
+}
+
+function businessDisplaySearchText(display: ExceptionBusinessDisplay): string {
+  return [
+    display.shortSummary,
+    display.conclusion,
+    ...display.keyLines.map((line) => `${line.datasetLabel} ${line.fieldLabel} ${line.value}`),
+    ...display.compareLines.map((line) => [
+      line.fieldLabel,
+      line.sourceDatasetLabel,
+      line.targetDatasetLabel,
+      line.sourceValue,
+      line.targetValue,
+      line.diffValue,
+    ].join(' ')),
+  ].join('\n');
 }
 
 function businessDateFromBundle(bundle: PublicExceptionBundle | null): string {
@@ -838,23 +693,30 @@ function statusOptions(exceptions: ReconRunExceptionDetail[]): string[] {
 function PublicRecordSection({
   title,
   entries,
+  emptyMessage,
 }: {
   title: string;
-  entries: Array<{ field: string; label: string; value: string }>;
+  entries: ExceptionRecordEntry[];
+  emptyMessage?: string;
 }) {
-  if (entries.length === 0) return null;
   const orderedEntries = orderExceptionRecordEntries(entries, title);
   return (
     <section className="rounded-2xl border border-border bg-surface-secondary p-4">
-      <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
-      <dl className="mt-3 grid gap-2 sm:grid-cols-2">
-        {orderedEntries.map((entry) => (
-          <div key={`${entry.field}-${entry.label}`} className="min-w-0 rounded-xl border border-border-subtle bg-surface px-3 py-2">
-            <dt className="text-xs text-text-muted">{entry.label}</dt>
-            <dd className="mt-1 whitespace-pre-wrap break-words text-sm text-text-primary">{entry.value}</dd>
-          </div>
-        ))}
-      </dl>
+      <h3 className="text-sm font-semibold text-text-primary">{title} 原始记录</h3>
+      {orderedEntries.length > 0 ? (
+        <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+          {orderedEntries.map((entry) => (
+            <div key={`${entry.field}-${entry.label}`} className="min-w-0 rounded-xl border border-border-subtle bg-surface px-3 py-2">
+              <dt className="text-xs text-text-muted">{entry.label}</dt>
+              <dd className="mt-1 whitespace-pre-wrap break-words text-sm text-text-primary">{entry.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-3 rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-secondary">
+          {emptyMessage || '暂无原始记录'}
+        </p>
+      )}
     </section>
   );
 }
@@ -906,35 +768,43 @@ export default function PublicReconRunExceptionsPage() {
     void loadBundle(0);
   }, [loadBundle]);
 
+  const bundleExceptions = bundle?.exceptions || EMPTY_EXCEPTIONS;
   const displayContext = useMemo(() => buildDisplayContext(bundle?.scheme || null), [bundle?.scheme]);
+  const exceptionBusinessDisplays = useMemo(() => {
+    const displays = new Map<string, ExceptionBusinessDisplay>();
+    bundleExceptions.forEach((item) => {
+      displays.set(item.id, businessDisplayForException(item, displayContext));
+    });
+    return displays;
+  }, [bundleExceptions, displayContext]);
   const filteredExceptions = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
-    return (bundle?.exceptions || []).filter((item) => {
+    return bundleExceptions.filter((item) => {
       if (statusFilter && item.processingStatus !== statusFilter) return false;
       if (!normalizedKeyword) return true;
+      const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
       const haystack = [
+        businessDisplaySearchText(businessDisplay),
         readableExceptionSummary(item, displayContext),
         ownerDisplayName(item, bundle),
         item.ownerName,
         item.ownerIdentifier,
         anomalyTypeLabel(item, displayContext),
-        fieldValueSummary(item, displayContext),
         item.latestFeedback,
       ].join('\n').toLowerCase();
       return haystack.includes(normalizedKeyword);
     });
-  }, [bundle, bundle?.exceptions, displayContext, keyword, statusFilter]);
+  }, [bundle, bundleExceptions, displayContext, exceptionBusinessDisplays, keyword, statusFilter]);
 
-  const selectedLeftRecordEntries = recordSectionEntriesForSide(selectedException, 'left', displayContext);
-  const selectedRightRecordEntries = recordSectionEntriesForSide(selectedException, 'right', displayContext);
-  const selectedJoinLines = selectedException ? getJoinKeyLines(selectedException, displayContext) : [];
-  const selectedCompareLines = selectedException ? getCompareValueLines(selectedException, displayContext) : [];
+  const selectedBusinessDisplay = selectedException
+    ? exceptionBusinessDisplays.get(selectedException.id) || businessDisplayForException(selectedException, displayContext)
+    : null;
   const statusMeta = formatExecutionStatus(bundle?.run?.executionStatus || '');
   const runtimeSummary = useMemo(() => buildRuntimeSummaryView(bundle?.run), [bundle?.run]);
-  const pendingDifferenceTotal = bundle?.total ?? (bundle?.exceptions || []).length;
+  const pendingDifferenceTotal = bundle?.total ?? bundleExceptions.length;
   const hasPrevious = offset > 0;
   const hasNext = bundle ? offset + bundle.limit < bundle.total : false;
-  const uniqueStatuses = statusOptions(bundle?.exceptions || []);
+  const uniqueStatuses = statusOptions(bundleExceptions);
 
   const renderRuntimeMetric = (label: string, value: string, key?: string) => (
     <div key={key} className="min-w-[180px] rounded-xl border border-border bg-surface-secondary px-3 py-2">
@@ -1097,46 +967,67 @@ export default function PublicReconRunExceptionsPage() {
               正在加载全量差异...
             </div>
           ) : filteredExceptions.length > 0 ? (
-            <div className="overflow-x-auto">
-              <div className="min-w-[1320px] divide-y divide-border-subtle">
-                <div className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] gap-4 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
-                  <span>摘要</span>
-                  <span>关键字段和值</span>
-                  <span>责任人</span>
-                  <span>处理状态</span>
-                  <span className="text-right">操作</span>
-                </div>
-                {filteredExceptions.map((item) => (
-                  <article
-                    key={item.id}
-                    className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] items-start gap-4 px-5 py-4"
-                  >
-                    <p
-                      className="whitespace-pre-line break-words text-sm leading-6 text-text-primary"
-                      style={ANYWHERE_WRAP_STYLE}
-                    >
-                      {readableExceptionSummary(item, displayContext)}
-                    </p>
-                    <p
-                      className="whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
-                      style={ANYWHERE_WRAP_STYLE}
-                    >
-                      {fieldValueSummary(item, displayContext)}
-                    </p>
-                    <span className="break-words text-sm leading-6 text-text-secondary">{ownerDisplayName(item, bundle)}</span>
-                    <span className="break-words text-sm leading-6 text-text-secondary">{formatProcessingStatus(item.processingStatus)}</span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedException(item)}
-                      className="justify-self-end inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                      详情
-                    </button>
-                  </article>
-                ))}
+            <>
+              <div className="md:hidden">
+                {filteredExceptions.map((item) => {
+                  const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
+                  return (
+                    <PublicReconRunExceptionMobileCard
+                      key={item.id}
+                      id={item.id}
+                      display={businessDisplay}
+                      fieldSummary={fieldValueSummary(businessDisplay)}
+                      ownerName={ownerDisplayName(item, bundle)}
+                      processingStatusLabel={formatProcessingStatus(item.processingStatus)}
+                      onOpen={() => setSelectedException(item)}
+                    />
+                  );
+                })}
               </div>
-            </div>
+              <div className="hidden overflow-x-auto md:block">
+                <div className="min-w-[1320px] divide-y divide-border-subtle">
+                  <div className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] gap-4 border-b border-border-subtle px-5 py-3 text-[11px] font-semibold tracking-[0.14em] text-text-muted">
+                    <span>摘要</span>
+                    <span>关键字段和值</span>
+                    <span>责任人</span>
+                    <span>处理状态</span>
+                    <span className="text-right">操作</span>
+                  </div>
+                  {filteredExceptions.map((item) => {
+                    const businessDisplay = exceptionBusinessDisplays.get(item.id) || businessDisplayForException(item, displayContext);
+                    return (
+                      <article
+                        key={item.id}
+                        className="grid grid-cols-[minmax(440px,1.5fr)_minmax(360px,1fr)_140px_140px_100px] items-start gap-4 px-5 py-4"
+                      >
+                        <p
+                          className="whitespace-pre-line break-words text-sm leading-6 text-text-primary"
+                          style={ANYWHERE_WRAP_STYLE}
+                        >
+                          {businessDisplay.shortSummary}
+                        </p>
+                        <p
+                          className="whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
+                          style={ANYWHERE_WRAP_STYLE}
+                        >
+                          {fieldValueSummary(businessDisplay)}
+                        </p>
+                        <span className="break-words text-sm leading-6 text-text-secondary">{ownerDisplayName(item, bundle)}</span>
+                        <span className="break-words text-sm leading-6 text-text-secondary">{formatProcessingStatus(item.processingStatus)}</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedException(item)}
+                          className="justify-self-end inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          详情
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
           ) : (
             <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center">
               <AlertCircle className="h-8 w-8 text-text-muted" />
@@ -1172,9 +1063,14 @@ export default function PublicReconRunExceptionsPage() {
         </section>
       </div>
 
-      {selectedException ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 py-6">
-          <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-border bg-surface shadow-2xl">
+      {selectedException && selectedBusinessDisplay ? (
+        <div className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-black/30 p-0 md:items-center md:justify-center md:px-4 md:py-6">
+          <div
+            role="dialog"
+            aria-label="差异详情"
+            aria-modal="true"
+            className="flex h-full max-h-none w-full max-w-none flex-col overflow-hidden rounded-none border-0 bg-surface shadow-2xl md:h-auto md:max-h-[90vh] md:max-w-5xl md:rounded-[28px] md:border md:border-border"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
               <div>
                 <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">差异详情</p>
@@ -1192,8 +1088,11 @@ export default function PublicReconRunExceptionsPage() {
               <div className="space-y-4">
                 <section className="rounded-2xl border border-border bg-surface-secondary p-4">
                   <p className="text-sm font-semibold text-text-primary">摘要</p>
-                  <p className="mt-2 whitespace-pre-line text-sm leading-6 text-text-secondary">
-                    {readableExceptionSummary(selectedException, displayContext)}
+                  <p
+                    className="mt-2 whitespace-pre-line break-words text-sm leading-6 text-text-secondary"
+                    style={ANYWHERE_WRAP_STYLE}
+                  >
+                    {selectedBusinessDisplay.conclusion}
                   </p>
                   <div className="mt-4 grid gap-3 sm:grid-cols-3">
                     <div>
@@ -1211,11 +1110,11 @@ export default function PublicReconRunExceptionsPage() {
                   </div>
                 </section>
 
-                {selectedJoinLines.length > 0 ? (
+                {selectedBusinessDisplay.keyLines.length > 0 ? (
                   <section className="rounded-2xl border border-border bg-surface-secondary p-4">
                     <h3 className="text-sm font-semibold text-text-primary">对账关键字段</h3>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      {selectedJoinLines.map((line, index) => (
+                      {selectedBusinessDisplay.keyLines.map((line, index) => (
                         <div key={`${line.side}-${line.fieldLabel}-${index}`} className="rounded-xl border border-border-subtle bg-surface px-3 py-2">
                           <p className="text-xs text-text-muted">{line.datasetLabel}：{line.fieldLabel}</p>
                           <p className="mt-1 break-words text-sm text-text-primary">{line.value}</p>
@@ -1225,42 +1124,25 @@ export default function PublicReconRunExceptionsPage() {
                   </section>
                 ) : null}
 
-                {selectedCompareLines.length > 0 ? (
+                {selectedBusinessDisplay.compareLines.length > 0 ? (
                   <section className="rounded-2xl border border-border bg-surface-secondary p-4">
                     <h3 className="text-sm font-semibold text-text-primary">差异字段和值</h3>
-                    <div className="mt-3 overflow-x-auto rounded-xl border border-border-subtle bg-surface">
-                      <table className="min-w-[720px] w-full text-left text-sm">
-                        <thead className="border-b border-border-subtle text-xs text-text-muted">
-                          <tr>
-                            <th className="px-3 py-2 font-medium">字段</th>
-                            <th className="px-3 py-2 font-medium">{displayContext.datasetLabels.left}</th>
-                            <th className="px-3 py-2 font-medium">{displayContext.datasetLabels.right}</th>
-                            <th className="px-3 py-2 font-medium">差异值</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedCompareLines.map((line, index) => (
-                            <tr key={`${line.fieldLabel}-${index}`} className="border-b border-border-subtle last:border-b-0">
-                              <td className="px-3 py-2 text-text-primary">{line.fieldLabel}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.sourceValue}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.targetValue}</td>
-                              <td className="px-3 py-2 text-text-secondary">{line.diffValue}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <PublicReconExceptionCompareValues
+                      compareLines={selectedBusinessDisplay.compareLines}
+                      leftDatasetLabel={displayContext.datasetLabels.left}
+                      rightDatasetLabel={displayContext.datasetLabels.right}
+                    />
                   </section>
                 ) : null}
 
-                <PublicRecordSection
-                  title={`${displayContext.datasetLabels.left} 整理输出行`}
-                  entries={selectedLeftRecordEntries}
-                />
-                <PublicRecordSection
-                  title={`${displayContext.datasetLabels.right} 整理输出行`}
-                  entries={selectedRightRecordEntries}
-                />
+                {selectedBusinessDisplay.recordSections.map((section) => (
+                  <PublicRecordSection
+                    key={section.side}
+                    title={section.title}
+                    entries={section.entries}
+                    emptyMessage={section.emptyMessage}
+                  />
+                ))}
               </div>
             </div>
           </div>

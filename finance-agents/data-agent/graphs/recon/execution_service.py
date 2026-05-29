@@ -41,6 +41,10 @@ def _normalize_results(recon_result: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _extract_recon_meta(rule: dict[str, Any]) -> tuple[list[dict[str, str]], list[dict[str, Any]], set[str], set[str]]:
     """Extract key mappings / compare config from rule json."""
     key_mappings: list[dict[str, str]] = []
@@ -302,6 +306,42 @@ def _build_placeholder_anomaly_items(
     return items
 
 
+def _normalize_direct_anomaly_item(
+    *,
+    run_id: str,
+    rule_code: str,
+    rule_name: str,
+    result_index: int,
+    row_index: int,
+    result: dict[str, Any],
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    anomaly_type = str(row.get("anomaly_type") or row.get("type") or "matched_with_diff").strip()
+    if anomaly_type not in {"matched_with_diff", "source_only", "target_only", "value_mismatch"}:
+        anomaly_type = "matched_with_diff"
+    detail_unavailable = bool(row.get("detail_unavailable", False))
+    return {
+        "item_id": str(
+            row.get("item_id")
+            or row.get("anomaly_key")
+            or f"{run_id}:{result_index}:{anomaly_type}:{row_index}"
+        ),
+        "run_id": str(row.get("run_id") or run_id),
+        "rule_code": str(row.get("rule_code") or rule_code),
+        "rule_name": str(row.get("rule_name") or rule_name),
+        "result_index": result_index,
+        "anomaly_type": anomaly_type,
+        "source_ref": str(row.get("source_ref") or result.get("source_file") or ""),
+        "target_ref": str(row.get("target_ref") or result.get("target_file") or ""),
+        "join_key": [item for item in (row.get("join_key") or []) if isinstance(item, dict)],
+        "compare_values": [item for item in (row.get("compare_values") or []) if isinstance(item, dict)],
+        "detail_unavailable": detail_unavailable,
+        "raw_record": _normalize_row_dict(_safe_dict(row.get("raw_record"))),
+        "source_record": _normalize_row_dict(_safe_dict(row.get("source_record"))),
+        "target_record": _normalize_row_dict(_safe_dict(row.get("target_record"))),
+    }
+
+
 def _extract_anomaly_items_from_output(
     *,
     run_id: str,
@@ -315,6 +355,22 @@ def _extract_anomaly_items_from_output(
     """Extract row-level anomaly items from recon output workbooks."""
     items: list[dict[str, Any]] = []
     for result_idx, result in enumerate(results, 1):
+        direct_rows = [item for item in (result.get("anomaly_rows") or []) if isinstance(item, dict)]
+        if direct_rows:
+            for row_idx, row in enumerate(direct_rows, 1):
+                items.append(
+                    _normalize_direct_anomaly_item(
+                        run_id=run_id,
+                        rule_code=rule_code,
+                        rule_name=rule_name,
+                        result_index=result_idx,
+                        row_index=row_idx,
+                        result=result,
+                        row=row,
+                    )
+                )
+            continue
+
         output_file = str(result.get("output_file") or "").strip()
         type_counts = {
             "matched_with_diff": _to_int(result.get("matched_with_diff")),
