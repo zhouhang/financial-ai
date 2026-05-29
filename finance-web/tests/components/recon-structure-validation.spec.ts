@@ -208,10 +208,10 @@ describe('validateReconStructureForSave', () => {
           {
             recon: {
               key_columns: {
-                mappings: [{ source_field: 'legacy_key', target_field: 'legacy_key' }],
+                mappings: [],
               },
               compare_columns: {
-                columns: [{ source_column: 'legacy_amount', target_column: 'legacy_amount' }],
+                columns: [],
               },
             },
           },
@@ -239,6 +239,86 @@ describe('validateReconStructureForSave', () => {
         'JSON 缺少匹配字段「客户订单号 ↔ 商户订单号」。',
         'JSON 缺少对比字段「含税销售金额 ↔ 订单金额」。',
       ],
+    });
+  });
+
+  it('fails when recon JSON contains a stale unconfigured match pair', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            recon: {
+              key_columns: {
+                mappings: [
+                  { source_field: 'biz_key', target_field: 'biz_key' },
+                  { source_field: 'legacy_key', target_field: 'legacy_key' },
+                ],
+              },
+              compare_columns: {
+                columns: [{ source_column: 'amount', target_column: 'amount' }],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: [...leftFields, outputField('legacy_key')],
+      rightOutputFields: [...rightFields, outputField('legacy_key')],
+      leftFieldLabelMap: {
+        legacy_key: '客户订单号',
+      },
+      rightFieldLabelMap: {
+        legacy_key: '商户订单号',
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 与当前字段配置不一致，请重新生成或查看 JSON。',
+      details: ['JSON 包含未配置的匹配字段「客户订单号 ↔ 商户订单号」。'],
+    });
+  });
+
+  it('fails when recon JSON contains a stale unconfigured compare pair', () => {
+    const result = validateReconStructureForSave({
+      reconRuleJson: {
+        schema_version: '1.6',
+        rules: [
+          {
+            recon: {
+              key_columns: {
+                mappings: [{ source_field: 'biz_key', target_field: 'biz_key' }],
+              },
+              compare_columns: {
+                columns: [
+                  { source_column: 'amount', target_column: 'amount' },
+                  { source_column: 'legacy_amount', target_column: 'legacy_amount' },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      matchFieldPairs: [pair('match-1', 'biz_key', 'biz_key')],
+      compareFieldPairs: [pair('compare-1', 'amount', 'amount')],
+      leftOutputFields: [...leftFields, outputField('legacy_amount')],
+      rightOutputFields: [...rightFields, outputField('legacy_amount')],
+      leftFieldLabelMap: {
+        legacy_amount: '含税销售金额',
+      },
+      rightFieldLabelMap: {
+        legacy_amount: '订单金额',
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 'failed',
+      message: '对账规则 JSON 与当前字段配置不一致，请重新生成或查看 JSON。',
+      details: ['JSON 包含未配置的对比字段「含税销售金额 ↔ 订单金额」。'],
     });
   });
 });

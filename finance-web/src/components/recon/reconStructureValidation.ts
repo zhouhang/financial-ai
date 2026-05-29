@@ -31,6 +31,11 @@ interface ActiveReconRule {
   };
 }
 
+interface NormalizedReconPair {
+  leftField: string;
+  rightField: string;
+}
+
 function completePairs(pairs: ReconFieldPairDraft[]): ReconFieldPairDraft[] {
   return pairs.filter((pair) => pair.leftField.trim() && pair.rightField.trim());
 }
@@ -81,37 +86,57 @@ function findFirstActiveRule(reconRuleJson: Record<string, unknown>): ActiveReco
   };
 }
 
-function hasJsonMatchPair(pair: ReconFieldPairDraft, activeRule: ActiveReconRule): boolean {
-  const leftField = pair.leftField.trim();
-  const rightField = pair.rightField.trim();
-  return activeRule.recon.key_columns.mappings.some(
-    (mapping) =>
-      isRecord(mapping)
-      && mapping.source_field === leftField
-      && mapping.target_field === rightField,
-  );
+function normalizeCurrentPairs(pairs: ReconFieldPairDraft[]): NormalizedReconPair[] {
+  return pairs.map((pair) => ({
+    leftField: pair.leftField.trim(),
+    rightField: pair.rightField.trim(),
+  }));
 }
 
-function hasJsonComparePair(pair: ReconFieldPairDraft, activeRule: ActiveReconRule): boolean {
-  const leftField = pair.leftField.trim();
-  const rightField = pair.rightField.trim();
-  return activeRule.recon.compare_columns.columns.some(
-    (column) =>
-      isRecord(column)
-      && column.source_column === leftField
-      && column.target_column === rightField,
-  );
+function normalizeJsonMatchPairs(activeRule: ActiveReconRule): NormalizedReconPair[] {
+  return activeRule.recon.key_columns.mappings
+    .filter(isRecord)
+    .map((mapping) => ({
+      leftField: typeof mapping.source_field === 'string' ? mapping.source_field.trim() : '',
+      rightField: typeof mapping.target_field === 'string' ? mapping.target_field.trim() : '',
+    }))
+    .filter((pair) => pair.leftField && pair.rightField);
+}
+
+function normalizeJsonComparePairs(activeRule: ActiveReconRule): NormalizedReconPair[] {
+  return activeRule.recon.compare_columns.columns
+    .filter(isRecord)
+    .map((column) => ({
+      leftField: typeof column.source_column === 'string' ? column.source_column.trim() : '',
+      rightField: typeof column.target_column === 'string' ? column.target_column.trim() : '',
+    }))
+    .filter((pair) => pair.leftField && pair.rightField);
+}
+
+function pairKey(pair: NormalizedReconPair): string {
+  return `${pair.leftField}\u0000${pair.rightField}`;
 }
 
 function missingJsonPairMessage(
   pairType: '匹配' | '对比',
-  pair: ReconFieldPairDraft,
+  pair: NormalizedReconPair,
   leftFieldLabelMap: Record<string, string> | undefined,
   rightFieldLabelMap: Record<string, string> | undefined,
 ): string {
   const leftField = displayFieldName(pair.leftField, leftFieldLabelMap);
   const rightField = displayFieldName(pair.rightField, rightFieldLabelMap);
   return `JSON 缺少${pairType}字段「${leftField} ↔ ${rightField}」。`;
+}
+
+function extraJsonPairMessage(
+  pairType: '匹配' | '对比',
+  pair: NormalizedReconPair,
+  leftFieldLabelMap: Record<string, string> | undefined,
+  rightFieldLabelMap: Record<string, string> | undefined,
+): string {
+  const leftField = displayFieldName(pair.leftField, leftFieldLabelMap);
+  const rightField = displayFieldName(pair.rightField, rightFieldLabelMap);
+  return `JSON 包含未配置的${pairType}字段「${leftField} ↔ ${rightField}」。`;
 }
 
 export function validateReconStructureForSave(
@@ -182,16 +207,34 @@ export function validateReconStructureForSave(
     };
   }
 
+  const currentMatchPairs = normalizeCurrentPairs(completeMatchPairs);
+  const currentComparePairs = normalizeCurrentPairs(completeComparePairs);
+  const jsonMatchPairs = normalizeJsonMatchPairs(activeRule);
+  const jsonComparePairs = normalizeJsonComparePairs(activeRule);
+  const currentMatchPairKeys = new Set(currentMatchPairs.map(pairKey));
+  const currentComparePairKeys = new Set(currentComparePairs.map(pairKey));
+  const jsonMatchPairKeys = new Set(jsonMatchPairs.map(pairKey));
+  const jsonComparePairKeys = new Set(jsonComparePairs.map(pairKey));
   const jsonPairDetails = [
-    ...completeMatchPairs
-      .filter((pair) => !hasJsonMatchPair(pair, activeRule))
+    ...currentMatchPairs
+      .filter((pair) => !jsonMatchPairKeys.has(pairKey(pair)))
       .map((pair) =>
         missingJsonPairMessage('匹配', pair, input.leftFieldLabelMap, input.rightFieldLabelMap),
       ),
-    ...completeComparePairs
-      .filter((pair) => !hasJsonComparePair(pair, activeRule))
+    ...currentComparePairs
+      .filter((pair) => !jsonComparePairKeys.has(pairKey(pair)))
       .map((pair) =>
         missingJsonPairMessage('对比', pair, input.leftFieldLabelMap, input.rightFieldLabelMap),
+      ),
+    ...jsonMatchPairs
+      .filter((pair) => !currentMatchPairKeys.has(pairKey(pair)))
+      .map((pair) =>
+        extraJsonPairMessage('匹配', pair, input.leftFieldLabelMap, input.rightFieldLabelMap),
+      ),
+    ...jsonComparePairs
+      .filter((pair) => !currentComparePairKeys.has(pairKey(pair)))
+      .map((pair) =>
+        extraJsonPairMessage('对比', pair, input.leftFieldLabelMap, input.rightFieldLabelMap),
       ),
   ];
   const uniqueJsonPairDetails = Array.from(new Set(jsonPairDetails));
