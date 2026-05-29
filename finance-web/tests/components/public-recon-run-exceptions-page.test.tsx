@@ -345,6 +345,7 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
             left_record: {
               biz_key: '5118002676174023242',
               amount: '0.00',
+              buyer_nick: 'mobile-buyer-001',
             },
           },
         },
@@ -356,15 +357,29 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
 
     render(<PublicReconRunExceptionsPage />);
 
-    await screen.findByText('交易订单明细表缺失订单编号 5118002676174023242');
+    const summaryMatches = await screen.findAllByText('交易订单明细表缺失订单编号 5118002676174023242');
+    expect(summaryMatches.length).toBeGreaterThanOrEqual(1);
     expectNoStructuredSummaryLabels(document.body);
 
-    fireEvent.click(screen.getByRole('button', { name: '详情' }));
+    const mobileCard = screen.getByTestId('mobile-exception-card-exception-003');
+    expect(within(mobileCard).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('tb0131100248-店铺订单：订单编号 = 5118002676174023242')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('含税销售金额')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('周行')).toBeInTheDocument();
+    expect(within(mobileCard).getByText('待处理')).toBeInTheDocument();
+    expect(within(mobileCard).getByRole('button', { name: '查看详情' })).toBeInTheDocument();
+
+    fireEvent.click(within(mobileCard).getByRole('button', { name: '查看详情' }));
 
     const detailDialog = await screen.findByRole('dialog', { name: '差异详情' });
     expect(within(detailDialog).getByText('交易订单明细表缺失订单编号 5118002676174023242')).toBeInTheDocument();
     expect(within(detailDialog).getByText('对账关键字段')).toBeInTheDocument();
     expect(within(detailDialog).getByText('差异字段和值')).toBeInTheDocument();
+    const mobileCompareValues = within(detailDialog).getByTestId('mobile-compare-values');
+    expect(within(mobileCompareValues).getByText('含税销售金额')).toBeInTheDocument();
+    expect(within(mobileCompareValues).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
+    expect(within(mobileCompareValues).getByText('0.00')).toBeInTheDocument();
+    expect(within(detailDialog).getByText('mobile-buyer-001')).toBeInTheDocument();
     expect(within(detailDialog).getByText('tb0131100248-店铺订单')).toBeInTheDocument();
     expect(within(detailDialog).getByText('交易订单明细表')).toBeInTheDocument();
     expect(within(detailDialog).getByText('未匹配到原始记录')).toBeInTheDocument();
