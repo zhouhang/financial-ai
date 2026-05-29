@@ -66,11 +66,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function findFirstActiveRule(reconRuleJson: Record<string, unknown>): ActiveReconRule | null {
   const rules = reconRuleJson.rules;
   if (!Array.isArray(rules)) return null;
+  if (rules.some((rule) => !isRecord(rule))) return null;
 
-  const activeRules = rules.filter((rule) => isRecord(rule) && rule.enabled !== false);
+  const activeRules = rules.filter((rule) => rule.enabled !== false);
   if (activeRules.length !== 1) return null;
 
   const [activeRule] = activeRules;
@@ -102,8 +107,8 @@ function hasMalformedMatchMapping(activeRule: ActiveReconRule): boolean {
   return activeRule.recon.key_columns.mappings.some(
     (mapping) =>
       !isRecord(mapping)
-      || typeof mapping.source_field !== 'string'
-      || typeof mapping.target_field !== 'string',
+      || !isNonBlankString(mapping.source_field)
+      || !isNonBlankString(mapping.target_field),
   );
 }
 
@@ -111,8 +116,8 @@ function hasMalformedCompareColumn(activeRule: ActiveReconRule): boolean {
   return activeRule.recon.compare_columns.columns.some(
     (column) =>
       !isRecord(column)
-      || typeof column.source_column !== 'string'
-      || typeof column.target_column !== 'string',
+      || !isNonBlankString(column.source_column)
+      || !isNonBlankString(column.target_column),
   );
 }
 
