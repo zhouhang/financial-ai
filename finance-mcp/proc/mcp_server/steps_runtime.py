@@ -21,6 +21,7 @@ VALID_ROW_WRITE_MODES = {"upsert", "insert_if_missing", "update_only"}
 VALID_FIELD_WRITE_MODES = {"overwrite", "increment"}
 MEMORY_FRAME_TTL_SECONDS = 30 * 60
 MEMORY_FRAME_MAX_ENTRIES = 64
+SOURCE_RECORD_METADATA_COLUMN = "__tally_source_record"
 
 _MEMORY_FRAME_REGISTRY: dict[str, dict[str, Any]] = {}
 
@@ -229,6 +230,7 @@ class StepsProcRuntime:
         self._lookup_cache: dict[tuple[str, tuple[str, ...]], dict[tuple[Any, ...], dict[str, Any]]] = {}
         self._row_index_cache: dict[str, dict[tuple[Any, ...], int]] = {}
         self._column_lineage: dict[tuple[str, str], dict[str, Any]] = {}
+        self._target_source_records: dict[str, dict[int, dict[str, Any]]] = {}
         self._input_plan_frame_keys = {
             key for key in self.preloaded_frames.keys() if str(key).startswith("__input_plan__::")
         }
@@ -840,6 +842,7 @@ class StepsProcRuntime:
                     )
                     if row_index is None:
                         continue
+                    self._record_target_source_record(target_table, row_index, source_row.to_dict())
                     target_row = target_df.loc[row_index].to_dict()
                     row_contexts = {alias: source_row.to_dict()}
                     target_row = self._apply_mapping_group(
@@ -894,6 +897,7 @@ class StepsProcRuntime:
             )
             if row_index is None:
                 continue
+            self._record_target_source_record(target_table, row_index, source_row.to_dict())
             target_row = target_df.loc[row_index].to_dict()
             self._apply_row_values(
                 mappings,
@@ -905,6 +909,63 @@ class StepsProcRuntime:
                 alias_tables,
             )
         return target_df
+
+    def _normalize_source_record_snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in row.items():
+            field_name = str(key)
+            if field_name == SOURCE_RECORD_METADATA_COLUMN:
+                continue
+            normalized[field_name] = _json_safe_cell_value(value)
+        return normalized
+
+    def _record_target_source_record(
+        self,
+        target_table: str,
+        row_index: int,
+        source_row: dict[str, Any],
+    ) -> None:
+        if not target_table:
+            return
+        record = self._normalize_source_record_snapshot(source_row)
+        if record:
+            self._target_source_records.setdefault(target_table, {})[int(row_index)] = record
+
+    def _capture_fast_source_records(
+        self,
+        *,
+        target_table: str,
+        base_df: pd.DataFrame,
+        result_df: pd.DataFrame,
+        primary_key: list[str],
+    ) -> None:
+        if not target_table or base_df.empty or result_df.empty:
+            return
+        records_by_index: dict[int, dict[str, Any]] = {}
+        if primary_key and all(field in result_df.columns for field in primary_key):
+            source_lookup: dict[tuple[Any, ...], dict[str, Any]] = {}
+            for source_index, source_row in base_df.iterrows():
+                if source_index not in result_df.index:
+                    continue
+                result_row = result_df.loc[source_index]
+                key = tuple(result_row.get(field) for field in primary_key)
+                source_lookup[key] = self._normalize_source_record_snapshot(source_row.to_dict())
+            for result_index, result_row in result_df.reset_index(drop=True).iterrows():
+                key = tuple(result_row.get(field) for field in primary_key)
+                record = source_lookup.get(key)
+                if record:
+                    records_by_index[int(result_index)] = record
+        else:
+            source_rows = [
+                self._normalize_source_record_snapshot(row.to_dict())
+                for _, row in base_df.reset_index(drop=True).iterrows()
+            ]
+            for result_index in range(min(len(source_rows), len(result_df))):
+                record = source_rows[result_index]
+                if record:
+                    records_by_index[result_index] = record
+        if records_by_index:
+            self._target_source_records[target_table] = records_by_index
 
     def _try_build_filter_mask_fast(
         self,
@@ -978,6 +1039,12 @@ class StepsProcRuntime:
         primary_key = list(self.schemas.get(target_table, TableSchemaState(target_table)).primary_key)
         if primary_key and all(field in result_df.columns for field in primary_key):
             result_df = result_df.drop_duplicates(subset=primary_key, keep="last").reset_index(drop=True)
+        self._capture_fast_source_records(
+            target_table=target_table,
+            base_df=base_df,
+            result_df=result_df,
+            primary_key=primary_key,
+        )
         self._invalidate_row_index_cache(target_table)
         return result_df
 
@@ -2310,6 +2377,12 @@ class StepsProcRuntime:
             if schema and not schema.export_enabled:
                 continue
             export_df = _normalize_excel_text_dataframe(self._build_export_dataframe(table_name, df))
+            source_records = self._target_source_records.get(table_name, {})
+            if source_records:
+                export_df[SOURCE_RECORD_METADATA_COLUMN] = [
+                    source_records.get(int(index), {})
+                    for index in range(len(export_df))
+                ]
             outputs.append(
                 {
                     "rule_id": table_name,
@@ -2759,6 +2832,24 @@ def _normalize_decimal_cell(value: Any) -> Any:
         return _to_decimal(value)
     except ValueError:
         return value
+
+
+def _json_safe_cell_value(value: Any) -> Any:
+    if _is_nullish(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+    except Exception:
+        pass
+    try:
+        if hasattr(value, "item"):
+            return value.item()
+    except Exception:
+        pass
+    return str(value)
 
 
 def _strip_prefix(value: Any, prefix: Any) -> Optional[str]:

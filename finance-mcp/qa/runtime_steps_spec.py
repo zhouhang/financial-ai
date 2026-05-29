@@ -6,12 +6,80 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from proc.mcp_server.steps_runtime import ProcRuleConfigError, StepsProcRuntime
+from proc.mcp_server.steps_runtime import (
+    ProcRuleConfigError,
+    StepsProcRuntime,
+    execute_steps_rule_with_frames,
+)
 from tools.rule_schema import validate_rule_record
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def test_steps_runtime_memory_outputs_include_source_record_metadata(tmp_path: Path) -> None:
+    rule = {
+        "steps": [
+            {
+                "step_id": "create_left",
+                "action": "create_schema",
+                "target_table": "left_recon_ready",
+                "schema": {
+                    "primary_key": ["订单号"],
+                    "columns": [
+                        {"name": "订单号", "data_type": "string", "nullable": False},
+                        {"name": "金额", "data_type": "decimal", "precision": 18, "scale": 2},
+                    ],
+                },
+            },
+            {
+                "step_id": "write_left",
+                "depends_on": ["create_left"],
+                "action": "write_dataset",
+                "target_table": "left_recon_ready",
+                "sources": [{"table": "原始订单", "alias": "orders"}],
+                "mappings": [
+                    {
+                        "target_field": "订单号",
+                        "value": {"type": "source", "source": {"alias": "orders", "field": "订单编号"}},
+                    },
+                    {
+                        "target_field": "金额",
+                        "value": {"type": "source", "source": {"alias": "orders", "field": "实付金额"}},
+                    },
+                ],
+                "row_write_mode": "upsert",
+            },
+        ]
+    }
+    source_frame = pd.DataFrame(
+        [
+            {
+                "订单编号": "A001",
+                "实付金额": 100,
+                "买家昵称": "alice",
+                "原始状态": "已付款",
+            }
+        ]
+    )
+
+    _, frame_outputs = execute_steps_rule_with_frames(
+        "source_record_metadata",
+        rule,
+        [],
+        str(tmp_path),
+        preloaded_frames={"原始订单": source_frame},
+    )
+
+    output_frame = frame_outputs[0]["dataframe"]
+    assert "__tally_source_record" in output_frame.columns
+    assert output_frame.loc[0, "__tally_source_record"] == {
+        "订单编号": "A001",
+        "实付金额": 100,
+        "买家昵称": "alice",
+        "原始状态": "已付款",
+    }
 
 
 def test_example_overdue_rule_validates_as_proc_steps() -> None:

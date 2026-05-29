@@ -27,6 +27,7 @@ from mcp import Tool
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from security_utils import resolve_upload_file_path
+from tools.execution_exception_detail_hydration import hydrate_execution_exception_details
 from tools.rule_schema import validate_rule_record
 
 
@@ -2580,6 +2581,13 @@ def _run_delete(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "run": item, "message": "运行记录已删除"}
 
 
+def _get_run_scheme_for_hydration(company_id: str, run: dict[str, Any]) -> dict[str, Any]:
+    scheme_code = _as_text(run.get("scheme_code"))
+    if not company_id or not scheme_code:
+        return {}
+    return auth_db.get_execution_scheme(company_id=company_id, scheme_code=scheme_code) or {}
+
+
 def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user.get("company_id") or "")
@@ -2597,6 +2605,9 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
         limit=_as_int(arguments.get("limit"), 500, minimum=1, maximum=1000),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
+    run = auth_db.get_execution_run(company_id=company_id, run_id=run_id) or {}
+    scheme = _get_run_scheme_for_hydration(company_id, run)
+    items = hydrate_execution_exception_details(run=run, scheme=scheme, exceptions=items)
     return {"success": True, "count": len(items), "exceptions": items}
 
 
@@ -2612,6 +2623,15 @@ def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not bundle:
         return {"success": False, "error": "执行记录不存在"}
+    run = _safe_dict(bundle.get("run"))
+    scheme = _safe_dict(bundle.get("scheme"))
+    bundle = dict(bundle)
+    bundle["exceptions"] = hydrate_execution_exception_details(
+        run=run,
+        scheme=scheme,
+        exceptions=[item for item in _safe_list(bundle.get("exceptions")) if isinstance(item, dict)],
+    )
+    bundle["count"] = len(bundle["exceptions"])
     return {"success": True, **bundle}
 
 
@@ -2626,6 +2646,13 @@ def _exception_get(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     if not item:
         return {"success": False, "error": "执行异常不存在"}
+    run = auth_db.get_execution_run(
+        company_id=str(user.get("company_id") or ""),
+        run_id=_as_text(item.get("run_id")),
+    ) or {}
+    scheme = _get_run_scheme_for_hydration(str(user.get("company_id") or ""), run)
+    hydrated_items = hydrate_execution_exception_details(run=run, scheme=scheme, exceptions=[item])
+    item = hydrated_items[0] if hydrated_items else item
     return {"success": True, "exception": item}
 
 
