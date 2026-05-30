@@ -987,7 +987,7 @@ async def create_execution_scheme_api(
 
     if proc_rule_json and proc_trial_status != "passed":
         raise HTTPException(status_code=400, detail="请先完成数据整理试跑验证，再保存方案")
-    if recon_rule_json and recon_trial_status != "passed":
+    if recon_rule_json and recon_trial_status not in {"passed", "structure_checked"}:
         raise HTTPException(status_code=400, detail="请先完成数据对账试跑验证，再保存方案")
 
     if proc_rule_json and not proc_rule_code:

@@ -122,6 +122,7 @@ type SchemeWizardStep = 1 | 2 | 3;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
 type ReconValidationStatus = TrialStatus | typeof RECON_STRUCTURE_CHECK_STATUS;
 type ConfigMode = 'ai' | 'existing';
+const SOURCE_RECORD_METADATA_COLUMN = '__tally_source_record';
 type SupportedSourceKind = Extract<
   DataSourceKind,
   'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
@@ -1145,6 +1146,10 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
   return {};
 }
 
+function isUserVisibleOutputField(name: string): boolean {
+  return name.trim() !== SOURCE_RECORD_METADATA_COLUMN;
+}
+
 function toEditableReconTrialStatus(status: ReconValidationStatus): TrialStatus {
   return status === RECON_STRUCTURE_CHECK_STATUS ? 'idle' : status;
 }
@@ -1578,11 +1583,13 @@ function toPreviewTableRows(value: unknown): PreviewTableRow[] {
     .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
     .map((item) =>
       Object.fromEntries(
-        Object.entries(item).map(([key, rawValue]) => {
-          if (rawValue === null || rawValue === undefined) return [key, null];
-          if (typeof rawValue === 'number') return [key, rawValue];
-          return [key, String(rawValue)];
-        }),
+        Object.entries(item)
+          .filter(([key]) => isUserVisibleOutputField(key))
+          .map(([key, rawValue]) => {
+            if (rawValue === null || rawValue === undefined) return [key, null];
+            if (typeof rawValue === 'number') return [key, rawValue];
+            return [key, String(rawValue)];
+          }),
       ) as PreviewTableRow,
     );
 }
@@ -2301,7 +2308,7 @@ function createOutputFieldsFromRows(
   rows.forEach((row) => {
     Object.keys(row).forEach((key) => {
       const name = key.trim();
-      if (name && !orderedNames.includes(name)) {
+      if (name && isUserVisibleOutputField(name) && !orderedNames.includes(name)) {
         orderedNames.push(name);
       }
     });

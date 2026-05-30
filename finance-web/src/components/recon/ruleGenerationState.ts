@@ -80,6 +80,7 @@ const RULE_GENERATION_NODE_DEFS = [
 const RULE_GENERATION_NODE_LABELS = Object.fromEntries(RULE_GENERATION_NODE_DEFS) as Record<string, string>;
 
 const RULE_GENERATION_SAMPLE_ROW_LIMIT = 20;
+const SOURCE_RECORD_METADATA_COLUMN = '__tally_source_record';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -97,6 +98,10 @@ function toText(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number') return String(value);
   return fallback;
+}
+
+function isUserVisibleOutputField(name: string): boolean {
+  return name.trim() !== SOURCE_RECORD_METADATA_COLUMN;
 }
 
 function normalizeStringList(value: unknown): string[] {
@@ -525,7 +530,7 @@ export function normalizeAiOutputFields(value: unknown): OutputFieldDraft[] {
       }
       return draft;
     })
-    .filter((field) => field.outputName.trim());
+    .filter((field) => field.outputName.trim() && isUserVisibleOutputField(field.outputName));
 }
 
 function normalizeAiOutputFieldLabelMap(value: unknown): Record<string, string> {
@@ -538,7 +543,7 @@ function normalizeAiOutputFieldLabelMap(value: unknown): Record<string, string> 
         const label = String(item.label || item.display_name || name).trim();
         return [name, label] as const;
       })
-      .filter(([name]) => Boolean(name)),
+      .filter(([name]) => Boolean(name) && isUserVisibleOutputField(name)),
   );
 }
 
@@ -550,7 +555,7 @@ function inferAiOutputFieldsFromRows(
   rows.forEach((row) => {
     Object.keys(row).forEach((key) => {
       const name = key.trim();
-      if (name && !orderedNames.includes(name)) {
+      if (name && isUserVisibleOutputField(name) && !orderedNames.includes(name)) {
         orderedNames.push(name);
       }
     });
@@ -588,7 +593,7 @@ function normalizeAiOutputColumnHints(value: unknown): Record<string, {
           },
         ] as const;
       })
-      .filter(([name]) => Boolean(name)),
+      .filter(([name]) => Boolean(name) && isUserVisibleOutputField(name)),
   );
 }
 
@@ -599,6 +604,7 @@ export function normalizeAiOutputRows(value: unknown): PreviewTableRow[] {
     .map((row) => {
       const normalized: PreviewTableRow = {};
       Object.entries(row).forEach(([key, cell]) => {
+        if (!isUserVisibleOutputField(key)) return;
         normalized[key] = typeof cell === 'number' || typeof cell === 'string' || cell === null ? cell : String(cell ?? '');
       });
       return normalized;
