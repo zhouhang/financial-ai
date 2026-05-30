@@ -18,6 +18,7 @@ from graphs.recon.auto_run_service import (
     send_execution_run_exception_reminder,
     sync_execution_run_exception_reminder,
     sync_exception_reminder,
+    sync_pending_todo_exceptions,
 )
 from graphs.recon.binding_date_fields import (
     extract_source_items_from_scheme_meta,
@@ -296,6 +297,13 @@ class ExceptionBatchSyncRequest(BaseModel):
     channel_code: str = ""
     max_polls: int = 1
     poll_interval_seconds: float = 2.0
+
+
+class PendingTodoSyncRequest(BaseModel):
+    limit: int = 200
+    max_age_days: int = 30
+    max_polls: int = 1
+    poll_interval_seconds: float = 1.0
 
 
 class OwnerCandidateSearchRequest(BaseModel):
@@ -1481,6 +1489,31 @@ async def sync_execution_run_exception_batch_api(
         },
         "updated_count": int(update_result.get("updated_count") or 0),
     }
+
+
+@router.post("/exceptions/sync-pending-todos")
+async def sync_pending_todo_exceptions_api(
+    body: PendingTodoSyncRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """供 finance-cron 周期调用：批量同步仍待处理、已建钉钉待办的异常状态。
+
+    钉钉待办完成不会回调本系统，由调度器周期触发本接口拉取并回写 owner_done。
+    鉴权交由下游 MCP 调度器工具（_require_scheduler_user）执行。
+    """
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token")
+    result = await sync_pending_todo_exceptions(
+        auth_token=auth_token,
+        limit=body.limit,
+        max_age_days=body.max_age_days,
+        max_polls=body.max_polls,
+        poll_interval_seconds=body.poll_interval_seconds,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "同步待办状态失败"))
+    return result
 
 
 @router.post("/run-exceptions/{exception_id}/remind")

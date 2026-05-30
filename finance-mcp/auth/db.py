@@ -10065,6 +10065,53 @@ def list_enabled_execution_run_plans_for_scheduler(
         return []
 
 
+def list_pending_todo_exception_batches(
+    *,
+    limit: int = 200,
+    max_age_days: int = 30,
+) -> list[dict]:
+    """供调度器查询仍待处理且已建钉钉待办的异常批次。
+
+    钉钉待办完成不会主动回调本系统，需由 finance-cron 周期拉取。本查询按
+    run_id + owner_identifier + todo_id 去重，只返回 processing_status='pending'、
+    未关闭、已建待办、且在 max_age_days 时间窗内的批次。
+
+    依赖部分索引 idx_execution_run_exceptions_pending_open，扫描代价随在途待处理
+    条数变化，与表总量无关。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT
+                        company_id::text AS company_id,
+                        run_id::text AS run_id,
+                        owner_identifier,
+                        feedback_json ->> 'todo_id' AS todo_id,
+                        feedback_json ->> 'channel_config_id' AS channel_config_id
+                    FROM execution_run_exceptions
+                    WHERE processing_status = 'pending'
+                      AND is_closed = false
+                      AND owner_identifier <> ''
+                      AND COALESCE(feedback_json ->> 'todo_id', '') <> ''
+                      AND created_at > (CURRENT_TIMESTAMP - make_interval(days => %s))
+                    ORDER BY run_id
+                    LIMIT %s
+                    """,
+                    (int(max_age_days), int(limit)),
+                )
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(
+            "查询待同步待办异常批次失败 "
+            f"(limit={limit}, max_age_days={max_age_days}): {e}"
+        )
+        return []
+
+
 def get_execution_run_by_schedule_slot(
     *,
     company_id: str,

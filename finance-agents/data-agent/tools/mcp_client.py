@@ -1072,6 +1072,19 @@ async def execution_run_exception_bulk_update_by_owner(
     )
 
 
+async def execution_run_exception_list_pending_todo_batches(
+    auth_token: str,
+    *,
+    limit: int = 200,
+    max_age_days: int = 30,
+) -> dict[str, Any]:
+    """列出仍待处理且已建钉钉待办的异常批次（按 run_id + owner + todo 去重）。"""
+    return await call_mcp_tool(
+        "execution_run_exception_list_pending_todo_batches",
+        {"auth_token": auth_token, "limit": limit, "max_age_days": max_age_days},
+    )
+
+
 async def execution_proc_draft_trial(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_proc_draft_trial",
