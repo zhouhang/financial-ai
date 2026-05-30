@@ -31,27 +31,20 @@ def _get_local_request_retry_delay_seconds() -> float:
         return 1.0
 
 
-async def trigger_run_plan(
+async def _post_data_agent_json(
+    path: str,
     auth_token: str,
-    *,
-    run_plan_code: str,
-    biz_date: str = "",
-    trigger_mode: str = "schedule",
-    run_context: dict[str, Any] | None = None,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
+    """向本地 data-agent POST JSON，带连接错误/5xx 重试与统一响应解析。"""
     headers = {
         "Authorization": f"Bearer {auth_token}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "biz_date": biz_date,
-        "trigger_mode": trigger_mode,
-        "run_context": dict(run_context or {}),
-    }
     response: httpx.Response | None = None
     retry_count = _get_local_request_retry_count()
     retry_delay_seconds = _get_local_request_retry_delay_seconds()
-    request_url = f"{_data_agent_base_url()}/recon/run-plans/{run_plan_code}/run"
+    request_url = f"{_data_agent_base_url()}{path}"
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as client:
         for attempt in range(1, retry_count + 1):
@@ -89,3 +82,43 @@ async def trigger_run_plan(
             return {**body, "success": True}
         return body
     return {"success": True, "result": body}
+
+
+async def trigger_run_plan(
+    auth_token: str,
+    *,
+    run_plan_code: str,
+    biz_date: str = "",
+    trigger_mode: str = "schedule",
+    run_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return await _post_data_agent_json(
+        f"/recon/run-plans/{run_plan_code}/run",
+        auth_token,
+        {
+            "biz_date": biz_date,
+            "trigger_mode": trigger_mode,
+            "run_context": dict(run_context or {}),
+        },
+    )
+
+
+async def sync_pending_todo_exceptions(
+    auth_token: str,
+    *,
+    limit: int = 200,
+    max_age_days: int = 30,
+    max_polls: int = 1,
+    poll_interval_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """触发 data-agent 批量同步仍待处理、已建钉钉待办的异常状态。"""
+    return await _post_data_agent_json(
+        "/recon/exceptions/sync-pending-todos",
+        auth_token,
+        {
+            "limit": limit,
+            "max_age_days": max_age_days,
+            "max_polls": max_polls,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+    )

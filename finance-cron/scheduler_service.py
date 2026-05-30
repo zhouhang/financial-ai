@@ -15,7 +15,7 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from data_agent_client import trigger_run_plan
+from data_agent_client import sync_pending_todo_exceptions, trigger_run_plan
 from mcp_client import (
     aclose_mcp_session,
     data_source_scheduler_list_collection_plans,
@@ -43,6 +43,7 @@ class FinanceCronConfig:
     refresh_interval_seconds: int = 30
     plan_page_size: int = 200
     misfire_grace_seconds: int = 60
+    todo_sync_interval_seconds: int = 300
 
 
 def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
@@ -81,6 +82,14 @@ def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
                 or 60
             ),
             1,
+        ),
+        todo_sync_interval_seconds=max(
+            int(
+                os.getenv("FINANCE_CRON_TODO_SYNC_INTERVAL_SECONDS")
+                or scheduler.get("todo_sync_interval_seconds")
+                or 300
+            ),
+            30,
         ),
     )
 
@@ -246,6 +255,16 @@ class FinanceCronSchedulerService:
             max_instances=1,
             misfire_grace_time=self.config.misfire_grace_seconds,
         )
+        self.scheduler.add_job(
+            self.sync_pending_todo_exceptions_job,
+            trigger="interval",
+            seconds=self.config.todo_sync_interval_seconds,
+            id="sync-pending-todo-exceptions",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=self.config.misfire_grace_seconds,
+        )
         self.scheduler.start()
         await self._safe_initial_refresh("运行计划", self.refresh_run_plans)
         await self._safe_initial_refresh("采集计划", self.refresh_collection_plans)
@@ -281,6 +300,36 @@ class FinanceCronSchedulerService:
             "[finance-cron] 初始刷新%s仍失败，调度器保持运行并等待后续周期自动恢复",
             name,
         )
+
+    async def sync_pending_todo_exceptions_job(self) -> None:
+        """周期性同步钉钉待办完成状态，回写异常处理状态。
+
+        钉钉待办完成不会主动回调本系统，需调度器周期拉取。用 system 级 token
+        触发 data-agent，跨公司处理；data-agent 侧按批次的 company_id 限定写范围。
+        """
+        scheduler_token = create_scheduler_auth_token()
+        try:
+            result = await sync_pending_todo_exceptions(
+                scheduler_token,
+                limit=self.config.plan_page_size,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[finance-cron] 同步待办状态异常: error=%s", exc)
+            return
+        if bool(result.get("success")):
+            completed = int(result.get("completed") or 0)
+            updated = int(result.get("updated_count") or 0)
+            if completed or updated:
+                logger.info(
+                    "[finance-cron] 待办状态同步完成: completed=%s updated=%s",
+                    completed,
+                    updated,
+                )
+        else:
+            logger.warning(
+                "[finance-cron] 待办状态同步失败: error=%s",
+                result.get("error"),
+            )
 
     async def refresh_run_plans(self) -> None:
         scheduler_token = create_scheduler_auth_token()

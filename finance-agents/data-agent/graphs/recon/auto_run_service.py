@@ -25,6 +25,7 @@ from tools.mcp_client import (
     data_source_trigger_dataset_collection,
     execution_run_exception_bulk_update_by_owner,
     execution_run_exception_get,
+    execution_run_exception_list_pending_todo_batches,
     execution_run_exception_update,
     execution_run_get,
     execution_run_plan_get,
@@ -1458,6 +1459,116 @@ async def sync_execution_run_exception_reminder(
             "is_terminal": bool(sync_result.is_terminal),
             "polls": int(sync_result.polls),
         },
+    }
+
+
+async def sync_pending_todo_exceptions(
+    *,
+    auth_token: str,
+    limit: int = 200,
+    max_age_days: int = 30,
+    max_polls: int = 1,
+    poll_interval_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """批量同步仍待处理、已建钉钉待办的异常批次。
+
+    钉钉待办完成不会主动回调本系统，因此需要由 finance-cron 周期性触发本函数：
+    1. 查询 processing_status='pending' 且已建待办的异常，按 run_id + owner + todo 去重成批次
+    2. 逐批向钉钉拉取待办状态
+    3. 钉钉返回 completed 的批次，按责任人批量回写 processing_status='owner_done'
+
+    返回汇总信息，便于调度端记录。
+    """
+    batches_result = await execution_run_exception_list_pending_todo_batches(
+        auth_token, limit=limit, max_age_days=max_age_days
+    )
+    if not batches_result.get("success"):
+        return {
+            "success": False,
+            "error": batches_result.get("error", "查询待同步待办批次失败"),
+        }
+
+    batches = [item for item in (batches_result.get("batches") or []) if isinstance(item, dict)]
+    synced = 0
+    completed = 0
+    updated_count = 0
+    errors: list[dict[str, str]] = []
+
+    for batch in batches:
+        run_id = str(batch.get("run_id") or "").strip()
+        owner_identifier = str(batch.get("owner_identifier") or "").strip()
+        todo_id = str(batch.get("todo_id") or "").strip()
+        company_id = str(batch.get("company_id") or "").strip()
+        channel_config_id = str(batch.get("channel_config_id") or "").strip()
+        if not (run_id and owner_identifier and todo_id):
+            continue
+
+        try:
+            adapter = None
+            if channel_config_id:
+                channel_config = load_company_channel_config_by_id(channel_id=channel_config_id)
+                if channel_config is not None:
+                    adapter = get_notification_adapter(
+                        provider=str(getattr(channel_config, "provider", "") or ""),
+                        channel_config=channel_config,
+                    )
+            if adapter is None:
+                adapter = get_notification_adapter(
+                    provider=str(batch.get("provider") or ""),
+                    company_id=company_id,
+                )
+
+            sync_result = adapter.sync_todo_status(
+                todo_id=todo_id,
+                max_polls=max(1, max_polls),
+                poll_interval_seconds=max(0.5, poll_interval_seconds),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[recon][sync_pending_todo] 同步待办失败: run_id=%s todo_id=%s error=%s",
+                run_id,
+                todo_id,
+                exc,
+            )
+            errors.append({"run_id": run_id, "todo_id": todo_id, "error": str(exc)})
+            continue
+
+        synced += 1
+        if not sync_result.success:
+            errors.append({"run_id": run_id, "todo_id": todo_id, "error": sync_result.message})
+            continue
+        if sync_result.status != UnifiedTodoStatus.COMPLETED:
+            continue
+
+        completed += 1
+        patch = {
+            "company_id": company_id,
+            "owner_identifier": owner_identifier,
+            "processing_status": "owner_done",
+            "fix_status": "ready_for_verify",
+            "verify_required": True,
+            "reminder_status": "completed",
+            "latest_feedback": "待办状态已同步为 completed",
+        }
+        update_result = await execution_run_exception_bulk_update_by_owner(auth_token, run_id, patch)
+        if update_result.get("success"):
+            updated_count += int(update_result.get("updated_count") or 0)
+        else:
+            errors.append(
+                {
+                    "run_id": run_id,
+                    "todo_id": todo_id,
+                    "error": str(update_result.get("error") or "批量回写异常状态失败"),
+                }
+            )
+
+    return {
+        "success": True,
+        "batch_count": len(batches),
+        "synced": synced,
+        "completed": completed,
+        "updated_count": updated_count,
+        "errors": errors,
     }
 
 

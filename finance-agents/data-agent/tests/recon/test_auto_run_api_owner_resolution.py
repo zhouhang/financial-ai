@@ -100,6 +100,48 @@ def test_delete_execution_run_api_calls_mcp_delete(monkeypatch: pytest.MonkeyPat
     assert captured["auth_token"]
 
 
+def test_create_execution_scheme_accepts_structure_checked_recon_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_save_rule(
+        auth_token: str,
+        *,
+        scheme_name: str,
+        rule_type: str,
+        rule_json: dict[str, object],
+        remark: str,
+        supported_entry_modes: list[str],
+    ) -> dict[str, object]:
+        return {"rule_code": f"{rule_type}_rule_001"}
+
+    async def fake_create(auth_token: str, payload: dict[str, object]) -> dict[str, object]:
+        captured.update(payload)
+        return {"success": True, "scheme": payload}
+
+    monkeypatch.setattr(auto_run_api, "ensure_scheme_rule_saved", fake_save_rule)
+    monkeypatch.setattr(auto_run_api, "execution_scheme_create", fake_create)
+
+    body = auto_run_api.ExecutionSchemeCreateRequest(
+        scheme_name="结构校验方案",
+        scheme_meta_json={
+            "proc_rule_json": {"steps": []},
+            "recon_rule_json": {"rules": []},
+            "proc_trial_status": "passed",
+            "recon_trial_status": "structure_checked",
+        },
+    )
+
+    result = asyncio.run(
+        auto_run_api.create_execution_scheme_api(body, authorization=_auth_header())
+    )
+
+    assert result["success"] is True
+    assert captured["recon_rule_code"] == "recon_rule_001"
+    assert captured["scheme_meta_json"]["recon_trial_status"] == "structure_checked"
+
+
 def test_create_execution_task_resolves_owner_identifier_before_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

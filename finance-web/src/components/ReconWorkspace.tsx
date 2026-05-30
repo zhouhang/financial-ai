@@ -78,6 +78,11 @@ import {
   formatDuration,
 } from './recon/runRuntimeSummary';
 import {
+  RECON_STRUCTURE_CHECK_STATUS,
+  RECON_STRUCTURE_CHECK_SUMMARY,
+  validateReconStructureForSave,
+} from './recon/reconStructureValidation';
+import {
   buildExceptionBusinessDisplay,
   stripExceptionFieldPrefix,
   type ExceptionBusinessDisplay,
@@ -115,7 +120,9 @@ type CenterModalState =
 
 type SchemeWizardStep = 1 | 2 | 3;
 type TrialStatus = 'idle' | 'passed' | 'needs_adjustment';
+type ReconValidationStatus = TrialStatus | typeof RECON_STRUCTURE_CHECK_STATUS;
 type ConfigMode = 'ai' | 'existing';
+const SOURCE_RECORD_METADATA_COLUMN = '__tally_source_record';
 type SupportedSourceKind = Extract<
   DataSourceKind,
   'platform_oauth' | 'database' | 'api' | 'file' | 'browser_playbook' | 'browser' | 'desktop_cli'
@@ -183,7 +190,7 @@ interface SchemeDraft {
   rightTimeSemantic: string;
   reconDraft: string;
   reconRuleJson: Record<string, unknown> | null;
-  reconTrialStatus: TrialStatus;
+  reconTrialStatus: ReconValidationStatus;
   reconTrialSummary: string;
 }
 
@@ -224,31 +231,6 @@ interface ProcTrialPreview {
   rawSources: SourcePreviewBlock[];
   preparedOutputs: PreparedPreviewBlock[];
   validations: string[];
-}
-
-interface ReconResultRow {
-  matchFields: string;
-  leftCompareFields: string;
-  rightCompareFields: string;
-  result: string;
-}
-
-interface ReconTrialPreview {
-  status: TrialStatus;
-  summary: string;
-  leftRows: PreviewTableRow[];
-  rightRows: PreviewTableRow[];
-  leftFieldLabelMap?: Record<string, string>;
-  rightFieldLabelMap?: Record<string, string>;
-  resultFieldLabelMap?: Record<string, string>;
-  results: ReconResultRow[];
-  resultSummary?: {
-    matched?: number;
-    unmatchedLeft?: number;
-    unmatchedRight?: number;
-    amountDiff?: number;
-    diffCount?: number;
-  };
 }
 
 interface ParsedReconDraftConfig {
@@ -313,7 +295,7 @@ interface SchemeMetaSummary {
   procRuleName: string;
   procTrialStatus: TrialStatus;
   procTrialSummary: string;
-  reconTrialStatus: TrialStatus;
+  reconTrialStatus: ReconValidationStatus;
   reconTrialSummary: string;
   procDraftText: string;
   reconDraftText: string;
@@ -344,13 +326,6 @@ const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   source_count: '来源数量',
   source_side: '输出侧',
   source_hint: '来源提示',
-};
-
-const RECON_RESULT_FIELD_LABEL_MAP: Record<string, string> = {
-  match_fields: '匹配字段',
-  left_compare_fields: '左侧对比字段',
-  right_compare_fields: '右侧对比字段',
-  result: '对账结果',
 };
 
 const SCHEME_WIZARD_STEPS: Array<{ id: SchemeWizardStep; title: string; description: string }> = [
@@ -972,8 +947,6 @@ function emptyCompatibilityResult(): CompatibilityCheckResult {
 const PROC_REFERENCE_VALIDATION = '以下展示的是上一次试跑的数据样例，仅供参考。';
 const PREPARATION_REFERENCE_EDIT_SUMMARY =
   '已保留上一次试跑结果的数据样例供参考。当前数据整理已修改，请重新试跑。';
-const RECON_REFERENCE_EDIT_SUMMARY =
-  '已保留上一次对账试跑结果供参考。当前对账设置已修改，请重新试跑。';
 
 function markProcTrialPreviewAsReference(
   preview: ProcTrialPreview | null,
@@ -988,18 +961,6 @@ function markProcTrialPreviewAsReference(
     status: 'needs_adjustment',
     summary,
     validations,
-  };
-}
-
-function markReconTrialPreviewAsReference(
-  preview: ReconTrialPreview | null,
-  summary: string,
-): ReconTrialPreview | null {
-  if (!preview) return preview;
-  return {
-    ...preview,
-    status: 'needs_adjustment',
-    summary,
   };
 }
 
@@ -1185,6 +1146,14 @@ function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
   return {};
 }
 
+function isUserVisibleOutputField(name: string): boolean {
+  return name.trim() !== SOURCE_RECORD_METADATA_COLUMN;
+}
+
+function toEditableReconTrialStatus(status: ReconValidationStatus): TrialStatus {
+  return status === RECON_STRUCTURE_CHECK_STATUS ? 'idle' : status;
+}
+
 function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
   const schemeMeta = firstNonEmptyRecord(item.raw.scheme_meta_json, item.raw.scheme_meta, item.raw.meta);
   const procRuleJson = asRecord(schemeMeta.proc_rule_json);
@@ -1297,7 +1266,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     procRuleName: toText(schemeMeta.proc_rule_name),
     procTrialStatus: (toText(schemeMeta.proc_trial_status) as TrialStatus) || 'idle',
     procTrialSummary: toText(schemeMeta.proc_trial_summary),
-    reconTrialStatus: (toText(schemeMeta.recon_trial_status) as TrialStatus) || 'idle',
+    reconTrialStatus: (toText(schemeMeta.recon_trial_status) as ReconValidationStatus) || 'idle',
     reconTrialSummary: toText(schemeMeta.recon_trial_summary),
     procDraftText: toText(schemeMeta.proc_draft_text),
     reconDraftText: toText(schemeMeta.recon_draft_text),
@@ -1614,11 +1583,13 @@ function toPreviewTableRows(value: unknown): PreviewTableRow[] {
     .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
     .map((item) =>
       Object.fromEntries(
-        Object.entries(item).map(([key, rawValue]) => {
-          if (rawValue === null || rawValue === undefined) return [key, null];
-          if (typeof rawValue === 'number') return [key, rawValue];
-          return [key, String(rawValue)];
-        }),
+        Object.entries(item)
+          .filter(([key]) => isUserVisibleOutputField(key))
+          .map(([key, rawValue]) => {
+            if (rawValue === null || rawValue === undefined) return [key, null];
+            if (typeof rawValue === 'number') return [key, rawValue];
+            return [key, String(rawValue)];
+          }),
       ) as PreviewTableRow,
     );
 }
@@ -2038,116 +2009,6 @@ function resolveResultDatasetLabel(
   return resolveFieldDrivenDatasetLabel(fieldName || '', fields, sources);
 }
 
-function hasExplicitRunPlanDatasets(inputPlanJson: unknown): boolean {
-  const planJson = asRecord(inputPlanJson);
-  if (asList(planJson.datasets).length > 0) return true;
-  return asList(planJson.plans).some((rawPlan) => asList(asRecord(rawPlan).datasets).length > 0);
-}
-
-function resolveRunPlanBaseDatasetLabel(
-  side: 'left' | 'right',
-  inputPlanJson: unknown,
-  leftSources: Array<SchemeSourceOption | SchemeSourceDraft>,
-  rightSources: Array<SchemeSourceOption | SchemeSourceDraft>,
-): string {
-  if (!hasExplicitRunPlanDatasets(inputPlanJson)) return '';
-  const inputs = extractRunPlanInputDatasets({
-    leftSources,
-    rightSources,
-    leftOutputFields: [],
-    rightOutputFields: [],
-    inputPlanJson: asRecord(inputPlanJson),
-  });
-  const sideInputs = inputs.filter((input) => input.side === side);
-  const baseInput =
-    sideInputs.find((input) => input.readMode === 'base')
-    || sideInputs.find((input) => input.requiresDateField);
-  return baseInput?.displayName.trim() || '';
-}
-
-function resolveReconOnlyResultDatasetLabel(
-  side: 'left' | 'right',
-  matchFieldPairs: ReconFieldPairDraft[],
-  fields: OutputFieldDraft[],
-  sources: Array<SchemeSourceOption | SchemeSourceDraft>,
-  inputPlanJson: unknown,
-  leftSources: Array<SchemeSourceOption | SchemeSourceDraft>,
-  rightSources: Array<SchemeSourceOption | SchemeSourceDraft>,
-): string {
-  if (sources.length <= 1) {
-    return resolveResultDatasetLabel(side, matchFieldPairs, fields, sources);
-  }
-  return (
-    resolveRunPlanBaseDatasetLabel(side, inputPlanJson, leftSources, rightSources)
-    || resolveResultDatasetLabel(side, matchFieldPairs, fields, sources)
-  );
-}
-
-function resolvePreviewFieldValue(row: PreviewTableRow, candidateKeys: string[]): string {
-  for (const key of candidateKeys) {
-    const rawValue = row[key];
-    if (rawValue === null || rawValue === undefined || rawValue === '') {
-      continue;
-    }
-    return String(rawValue);
-  }
-  return '--';
-}
-
-function formatPreviewFieldValueSummary(
-  row: PreviewTableRow,
-  pairs: ReconFieldPairDraft[],
-  side: 'match' | 'left_compare' | 'right_compare',
-): string {
-  const normalizedPairs = filterCompleteReconFieldPairs(pairs);
-  if (normalizedPairs.length === 0) return '--';
-  return normalizedPairs
-    .map((pair) => {
-      if (side === 'match') {
-        const value = resolvePreviewFieldValue(row, [
-          `source_${pair.leftField}`,
-          pair.leftField,
-          `target_${pair.rightField}`,
-          pair.rightField,
-          'match_key',
-          'biz_key',
-        ]);
-        return normalizedPairs.length === 1 ? value : `${pair.leftField}: ${value}`;
-      }
-      if (side === 'left_compare') {
-        const value = resolvePreviewFieldValue(row, [`source_${pair.leftField}`, pair.leftField]);
-        return normalizedPairs.length === 1 ? value : `${pair.leftField}: ${value}`;
-      }
-      const value = resolvePreviewFieldValue(row, [`target_${pair.rightField}`, pair.rightField]);
-      return normalizedPairs.length === 1 ? value : `${pair.rightField}: ${value}`;
-    })
-    .join('；');
-}
-
-function buildReconResultFieldLabelMap(
-  matchFieldPairs: ReconFieldPairDraft[],
-  compareFieldPairs: ReconFieldPairDraft[],
-): Record<string, string> {
-  const matchLabel = filterCompleteReconFieldPairs(matchFieldPairs)
-    .map((pair) => pair.leftField.trim())
-    .filter(Boolean)
-    .join('、');
-  const leftCompareLabel = filterCompleteReconFieldPairs(compareFieldPairs)
-    .map((pair) => pair.leftField.trim())
-    .filter(Boolean)
-    .join('、');
-  const rightCompareLabel = filterCompleteReconFieldPairs(compareFieldPairs)
-    .map((pair) => pair.rightField.trim())
-    .filter(Boolean)
-    .join('、');
-  return {
-    match_fields: matchLabel ? `匹配字段（${matchLabel}）` : '匹配字段',
-    left_compare_fields: leftCompareLabel ? `左侧对比字段（${leftCompareLabel}）` : '左侧对比字段',
-    right_compare_fields: rightCompareLabel ? `右侧对比字段（${rightCompareLabel}）` : '右侧对比字段',
-    result: '对账结果',
-  };
-}
-
 function parseReconDraftConfig({
   matchFieldPairs,
   compareFieldPairs,
@@ -2447,7 +2308,7 @@ function createOutputFieldsFromRows(
   rows.forEach((row) => {
     Object.keys(row).forEach((key) => {
       const name = key.trim();
-      if (name && !orderedNames.includes(name)) {
+      if (name && isUserVisibleOutputField(name) && !orderedNames.includes(name)) {
         orderedNames.push(name);
       }
     });
@@ -3302,12 +3163,10 @@ export default function ReconWorkspace({
   const [ownerCandidates, setOwnerCandidates] = useState<OwnerCandidate[]>([]);
   const [ownerSearchMessage, setOwnerSearchMessage] = useState('');
   const [isTrialingProc, setIsTrialingProc] = useState(false);
-  const [isTrialingRecon, setIsTrialingRecon] = useState(false);
   const [wizardJsonPanel, setWizardJsonPanel] = useState<'proc' | 'recon' | null>(null);
   const [wizardProcJsonView, setWizardProcJsonView] = useState<'proc' | 'inputPlan'>('proc');
   const [wizardReconJsonView, setWizardReconJsonView] = useState<'proc' | 'recon'>('recon');
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
-  const [reconTrialPreview, setReconTrialPreview] = useState<ReconTrialPreview | null>(null);
   const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
@@ -3331,7 +3190,10 @@ export default function ReconWorkspace({
       const nextDraft = typeof updater === 'function'
         ? (updater as (value: SchemeDraft) => SchemeDraft)(prevDraft)
         : updater;
-      return applyLegacySchemeDraftSnapshot(prev, nextDraft);
+      return applyLegacySchemeDraftSnapshot(prev, {
+        ...nextDraft,
+        reconTrialStatus: toEditableReconTrialStatus(nextDraft.reconTrialStatus),
+      });
     });
   }, []);
   const setProcCompatibility = useCallback((next: SetStateAction<CompatibilityCheckResult>) => {
@@ -3884,7 +3746,6 @@ export default function ReconWorkspace({
     setWizardProcJsonView('proc');
     setWizardReconJsonView('recon');
     setProcTrialPreview(null);
-    setReconTrialPreview(null);
     setProcCompatibility(emptyCompatibilityResult());
     setReconCompatibility(emptyCompatibilityResult());
   }, [setProcCompatibility, setReconCompatibility]);
@@ -3992,7 +3853,6 @@ export default function ReconWorkspace({
       setWizardProcJsonView('proc');
       setWizardReconJsonView('recon');
       setProcTrialPreview(null);
-      setReconTrialPreview(null);
       setProcCompatibility(emptyCompatibilityResult());
       setReconCompatibility(emptyCompatibilityResult());
     },
@@ -4033,7 +3893,6 @@ export default function ReconWorkspace({
         setProcTrialPreview(null);
         setProcCompatibility(emptyCompatibilityResult());
       }
-      setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
     },
     [procTrialPreview, setProcCompatibility, setReconCompatibility],
@@ -4052,7 +3911,6 @@ export default function ReconWorkspace({
       setWizardJsonPanel(null);
       setWizardProcJsonView('proc');
       setProcTrialPreview(null);
-      setReconTrialPreview(null);
       setWizardDraftState((prev) =>
         updateDerivedDraft(prev, {
           procTrialStatus: 'idle',
@@ -4301,7 +4159,6 @@ export default function ReconWorkspace({
         setDesignSessionId('');
         setWizardJsonPanel(null);
         setWizardProcJsonView('proc');
-        setReconTrialPreview(null);
         setReconCompatibility(emptyCompatibilityResult());
         setWizardDraftState((prev) => {
           const withGeneratedFields = outputFields.length > 0
@@ -4349,7 +4206,6 @@ export default function ReconWorkspace({
             reconPreviewState: 'empty',
           });
         });
-        setReconTrialPreview(null);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
@@ -4489,35 +4345,20 @@ export default function ReconWorkspace({
   }, [handlePreparationDraftChange, procBuildMode, recommendPreparationOutputFields, selectedLeftSources, selectedRightSources]);
 
   const handleReconDraftMutation = useCallback(
-    (
-      updater: (prev: SchemeWizardDraftState) => SchemeWizardDraftState,
-      referenceSummary = RECON_REFERENCE_EDIT_SUMMARY,
-    ) => {
-      const hasExistingPreview = Boolean(reconTrialPreview);
-      setWizardDraftState((prev) => {
-        const next = updater(prev);
-        return updateDerivedDraft(next, {
-          reconTrialStatus: hasExistingPreview ? 'needs_adjustment' : 'idle',
-          reconTrialSummary: hasExistingPreview ? referenceSummary : '',
-          reconPreviewState: hasExistingPreview ? 'reference' : 'empty',
-        });
-      });
+    (updater: (prev: SchemeWizardDraftState) => SchemeWizardDraftState) => {
+      setWizardDraftState((prev) =>
+        updateDerivedDraft(updater(prev), {
+          reconTrialStatus: 'idle',
+          reconTrialSummary: '',
+          reconPreviewState: 'empty',
+        }),
+      );
       setWizardJsonPanel(null);
       setWizardProcJsonView('proc');
       setWizardReconJsonView('recon');
-      if (hasExistingPreview) {
-        setReconTrialPreview((prev) => markReconTrialPreviewAsReference(prev, referenceSummary));
-        setReconCompatibility({
-          status: 'warning',
-          message: '对账设置已修改，下面保留的是上一次试跑结果，仅供参考。请重新试跑。',
-          details: [],
-        });
-      } else {
-        setReconTrialPreview(null);
-        setReconCompatibility(emptyCompatibilityResult());
-      }
+      setReconCompatibility(emptyCompatibilityResult());
     },
-    [reconTrialPreview, setReconCompatibility],
+    [setReconCompatibility],
   );
 
   const applyStructuredReconConfig = useCallback(
@@ -4722,90 +4563,6 @@ export default function ReconWorkspace({
     };
   }, []);
 
-  const buildReconPreviewFromTrial = useCallback((trialResult: unknown): ReconTrialPreview | null => {
-    const raw = asRecord(trialResult);
-    if (Object.keys(raw).length === 0) return null;
-    const resultSamples = asRecord(raw.result_samples);
-    const matchedWithDiff = toPreviewTableRows(resultSamples.matched_with_diff);
-    const sourceOnly = toPreviewTableRows(resultSamples.source_only);
-    const targetOnly = toPreviewTableRows(resultSamples.target_only);
-    const leftDatasetLabel = resolveReconOnlyResultDatasetLabel(
-      'left',
-      activeMatchFieldPairs,
-      leftOutputFields,
-      selectedLeftSources,
-      schemeDraft.inputPlanJson,
-      selectedLeftSources,
-      selectedRightSources,
-    );
-    const rightDatasetLabel = resolveReconOnlyResultDatasetLabel(
-      'right',
-      activeMatchFieldPairs,
-      rightOutputFields,
-      selectedRightSources,
-      schemeDraft.inputPlanJson,
-      selectedLeftSources,
-      selectedRightSources,
-    );
-    const rows: ReconResultRow[] = [
-      ...matchedWithDiff.map((item) => ({
-        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
-        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
-        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
-        result: '存在差异',
-      })),
-      ...sourceOnly.map((item) => ({
-        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
-        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
-        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
-        result: `${leftDatasetLabel}独有`,
-      })),
-      ...targetOnly.map((item) => ({
-        matchFields: formatPreviewFieldValueSummary(item, activeMatchFieldPairs, 'match'),
-        leftCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'left_compare'),
-        rightCompareFields: formatPreviewFieldValueSummary(item, activeCompareFieldPairs, 'right_compare'),
-        result: `${rightDatasetLabel}独有`,
-      })),
-    ];
-    const resultSummary = asRecord(raw.result_summary);
-    const leftFieldLabelMap =
-      normalizeFieldLabelMap(raw.left_field_label_map)
-      || normalizeFieldLabelMap(resultSamples.left_field_label_map)
-      || PREPARED_OUTPUT_FIELD_LABEL_MAP;
-    const rightFieldLabelMap =
-      normalizeFieldLabelMap(raw.right_field_label_map)
-      || normalizeFieldLabelMap(resultSamples.right_field_label_map)
-      || PREPARED_OUTPUT_FIELD_LABEL_MAP;
-    const resultFieldLabelMap =
-      normalizeFieldLabelMap(raw.result_field_label_map)
-      || normalizeFieldLabelMap(resultSamples.result_field_label_map)
-      || buildReconResultFieldLabelMap(activeMatchFieldPairs, activeCompareFieldPairs);
-    return {
-      status: raw.ready_for_confirm === true && raw.success !== false ? 'passed' : 'needs_adjustment',
-      summary: toText(raw.summary, toText(raw.message, toText(raw.error, '数据对账试跑完成'))),
-      leftRows: toPreviewTableRows(raw.left_samples),
-      rightRows: toPreviewTableRows(raw.right_samples),
-      leftFieldLabelMap,
-      rightFieldLabelMap,
-      resultFieldLabelMap,
-      results: rows,
-      resultSummary: {
-        matched: toInt(resultSummary.matched_exact, 0),
-        unmatchedLeft: toInt(resultSummary.source_only, 0),
-        unmatchedRight: toInt(resultSummary.target_only, 0),
-        diffCount: toInt(resultSummary.matched_with_diff, 0),
-      },
-    };
-  }, [
-    activeCompareFieldPairs,
-    activeMatchFieldPairs,
-    leftOutputFields,
-    rightOutputFields,
-    schemeDraft.inputPlanJson,
-    selectedLeftSources,
-    selectedRightSources,
-  ]);
-
   const trialProcDraft = useCallback(async (): Promise<boolean> => {
     setModalError(null);
     if (!authToken) {
@@ -4950,7 +4707,6 @@ export default function ReconWorkspace({
       }
       const procPreview = buildProcPreviewFromTrialResult(trialResult);
       setProcTrialPreview(procPreview);
-      setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
       setWizardDraftState((prev) =>
         updateDerivedDraft(prev, {
@@ -4985,7 +4741,6 @@ export default function ReconWorkspace({
         reconTrialSummary: '',
       }));
       setProcTrialPreview(null);
-      setReconTrialPreview(null);
       setReconCompatibility(emptyCompatibilityResult());
       setWizardDraftState((prev) =>
         updateDerivedDraft(prev, {
@@ -5009,177 +4764,6 @@ export default function ReconWorkspace({
     setProcCompatibility,
     setReconCompatibility,
     setSchemeDraft,
-    syncDesignTarget,
-    toCompatibilityResult,
-  ]);
-
-  const trialReconDraft = useCallback(async (): Promise<boolean> => {
-    setModalError(null);
-    if (!authToken) {
-      setModalError('请先登录后再试跑验证。');
-      return false;
-    }
-    if (schemeDraft.procTrialStatus !== 'passed' || !schemeDraft.procRuleJson) {
-      setModalError('请先完成数据整理试跑，再进行对账试跑。');
-      return false;
-    }
-    if (!compiledReconRuleResult.json) {
-      setModalError(compiledReconRuleResult.error || '请先完成对账字段配置。');
-      return false;
-    }
-
-    setIsTrialingRecon(true);
-    try {
-      const sessionId = await ensureDesignSession();
-      await syncDesignTarget(sessionId);
-      const procPrepareResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/use-existing`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          rule_json: schemeDraft.procRuleJson,
-        }),
-      });
-      const procPrepareData = await procPrepareResponse.json().catch(() => ({}));
-      if (!procPrepareResponse.ok) {
-        throw new Error(String(procPrepareData.detail || procPrepareData.message || '同步数据整理规则失败'));
-      }
-      const procTrialSampleDatasets = procBuildMode === 'ai_complex_rule'
-        ? await buildAiProcTrialSampleDatasets(
-            aiProcSideDraftsRef.current,
-            selectedLeftSources,
-            selectedRightSources,
-            authToken,
-          )
-        : [];
-      const procTrialResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/proc/trial`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          input_plan_json: schemeDraft.inputPlanJson || undefined,
-          sample_datasets: procTrialSampleDatasets,
-        }),
-      });
-      const procTrialData = await procTrialResponse.json().catch(() => ({}));
-      if (!procTrialResponse.ok) {
-        throw new Error(String(procTrialData.detail || procTrialData.message || procTrialData.error || '数据整理结果同步试跑失败'));
-      }
-      const procTrialResult = asRecord(asRecord(asRecord(procTrialData.session).proc_step).trial_result);
-      if (procTrialResult.ready_for_confirm !== true || procTrialResult.success === false) {
-        throw new Error(String(procTrialResult.summary || procTrialResult.message || procTrialResult.error || '数据整理结果未生成可用于对账的左右样例数据'));
-      }
-      const prepareResponse = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/use-existing`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          rule_json: stripReconTimeSemantics(compiledReconRuleResult.json),
-        }),
-      });
-      const prepareData = await prepareResponse.json().catch(() => ({}));
-      if (!prepareResponse.ok) {
-        throw new Error(String(prepareData.detail || prepareData.message || '生成数据对账逻辑失败'));
-      }
-      const response = await fetchReconAutoApi(`/schemes/design/${encodeURIComponent(sessionId)}/recon/trial`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data.detail || data.message || data.error || '数据对账试跑失败'));
-      }
-      const session = asRecord(data.session);
-      const reconStep = asRecord(session.recon_step);
-      const trialResult = asRecord(reconStep.trial_result);
-      const normalizedRule = stripReconTimeSemantics(asRecord(reconStep.effective_rule_json));
-      const parsed = parseReconRuleJsonConfig(normalizedRule, parsedReconConfig);
-      const passed = trialResult.ready_for_confirm === true && trialResult.success !== false;
-      const summary = toText(
-        trialResult.summary,
-        toText(trialResult.message, toText(trialResult.error, passed ? '数据对账试跑通过' : '数据对账试跑未通过')),
-      );
-      setReconCompatibility(
-        toCompatibilityResult(
-          reconStep.compatibility_result,
-          passed ? '试跑验证通过，可进入保存方案。' : '试跑未通过，请调整数据对账逻辑后重试。',
-        ),
-      );
-      setSchemeDraft((prev) => ({
-        ...prev,
-        reconDraft: buildStructuredReconDraftText({
-          reconRuleName: toText(
-            normalizedRule.rule_name,
-            prev.reconRuleName || buildDefaultReconRuleName(prev.name),
-          ),
-          matchFieldPairs: parsed.matchFieldPairs,
-          compareFieldPairs: parsed.compareFieldPairs,
-        }),
-        reconRuleJson: Object.keys(normalizedRule).length > 0 ? normalizedRule : prev.reconRuleJson,
-        reconRuleName: toText(normalizedRule.rule_name, prev.reconRuleName || buildDefaultReconRuleName(prev.name)),
-        matchFieldPairs: parsed.matchFieldPairs,
-        compareFieldPairs: parsed.compareFieldPairs,
-        matchKey: parsed.matchKey,
-        leftAmountField: parsed.leftAmountField,
-        rightAmountField: parsed.rightAmountField,
-        leftTimeSemantic: '',
-        rightTimeSemantic: '',
-        tolerance: parsed.tolerance,
-        reconTrialStatus: passed ? 'passed' : 'needs_adjustment',
-        reconTrialSummary: summary,
-      }));
-      const reconPreview = buildReconPreviewFromTrial(trialResult);
-      setReconTrialPreview(reconPreview);
-      setWizardDraftState((prev) =>
-        updateDerivedDraft(prev, {
-          reconPreviewState: reconPreview ? 'current' : 'empty',
-        }),
-      );
-      return passed;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '数据对账试跑失败';
-      setModalError(message);
-      setReconCompatibility({
-        status: 'failed',
-        message: '试跑未通过，请检查对账逻辑或整理后的样本数据。',
-        details: [message],
-      });
-      setSchemeDraft((prev) => ({
-        ...prev,
-        reconTrialStatus: 'needs_adjustment',
-        reconTrialSummary: message,
-      }));
-      setReconTrialPreview(null);
-      setWizardDraftState((prev) =>
-        updateDerivedDraft(prev, {
-          reconPreviewState: 'empty',
-        }),
-      );
-      return false;
-    } finally {
-      setIsTrialingRecon(false);
-    }
-  }, [
-    authToken,
-    buildReconPreviewFromTrial,
-    compiledReconRuleResult.error,
-    compiledReconRuleResult.json,
-    ensureDesignSession,
-    parsedReconConfig,
-    procBuildMode,
-    schemeDraft.procRuleJson,
-    schemeDraft.procTrialStatus,
-    schemeDraft.inputPlanJson,
-    selectedLeftSources,
-    selectedRightSources,
     syncDesignTarget,
     toCompatibilityResult,
   ]);
@@ -5228,21 +4812,26 @@ export default function ReconWorkspace({
     }
     effectiveReconRuleJson = stripReconTimeSemantics(effectiveReconRuleJson);
 
-    if (schemeDraft.reconTrialStatus !== 'passed') {
-      const passed = await trialReconDraft();
-      if (!passed) {
-        setModalError('数据对账试跑未通过，请调整逻辑后重试。');
-        return;
-      }
-      effectiveReconRuleJson = schemeDraft.reconRuleJson || compiledReconRuleResult.json;
-      if (!effectiveReconRuleJson) {
-        setModalError('数据对账试跑完成后，仍未生成可保存的对账逻辑。');
-        return;
-      }
-      effectiveReconRuleJson = stripReconTimeSemantics(effectiveReconRuleJson);
+    const structureValidation = validateReconStructureForSave({
+      reconRuleJson: effectiveReconRuleJson,
+      matchFieldPairs: activeMatchFieldPairs,
+      compareFieldPairs: activeCompareFieldPairs,
+      leftOutputFields: activeLeftOutputFields,
+      rightOutputFields: activeRightOutputFields,
+      leftFieldLabelMap: leftOutputFieldLabelMap,
+      rightFieldLabelMap: rightOutputFieldLabelMap,
+    });
+    if (!structureValidation.ok) {
+      setModalError(structureValidation.message);
+      setReconCompatibility({
+        status: 'failed',
+        message: structureValidation.message,
+        details: structureValidation.details,
+      });
+      return;
     }
 
-    if (!window.confirm('确认当前规则、字段映射和试跑结果都已检查完毕，立即保存方案吗？')) {
+    if (!window.confirm('当前方案已完成规则结构校验。样例数据不作为对账结果依据，请在首次真实运行后查看异常结果并修正。确认保存方案吗？')) {
       return;
     }
 
@@ -5375,14 +4964,14 @@ export default function ReconWorkspace({
                 summary: schemePayloadDraft.scheme_meta_json.proc_trial_summary,
               },
               recon: {
-                status: schemePayloadDraft.scheme_meta_json.recon_trial_status,
-                summary: schemePayloadDraft.scheme_meta_json.recon_trial_summary,
+                status: RECON_STRUCTURE_CHECK_STATUS,
+                summary: RECON_STRUCTURE_CHECK_SUMMARY,
               },
             },
             proc_trial_status: schemePayloadDraft.scheme_meta_json.proc_trial_status,
             proc_trial_summary: schemePayloadDraft.scheme_meta_json.proc_trial_summary,
-            recon_trial_status: schemePayloadDraft.scheme_meta_json.recon_trial_status,
-            recon_trial_summary: schemePayloadDraft.scheme_meta_json.recon_trial_summary,
+            recon_trial_status: RECON_STRUCTURE_CHECK_STATUS,
+            recon_trial_summary: RECON_STRUCTURE_CHECK_SUMMARY,
             left_output_field_label_map: leftOutputFieldLabelMap,
             right_output_field_label_map: rightOutputFieldLabelMap,
             match_key: parsedReconRule.matchKey.trim() || parsedReconConfig.matchKey.trim(),
@@ -5418,6 +5007,10 @@ export default function ReconWorkspace({
   }, [
     authToken,
     closeModal,
+    activeCompareFieldPairs,
+    activeLeftOutputFields,
+    activeMatchFieldPairs,
+    activeRightOutputFields,
     compiledReconRuleResult.error,
     compiledReconRuleResult.json,
     leftOutputFieldLabelMap,
@@ -5427,7 +5020,6 @@ export default function ReconWorkspace({
     schemeDraft,
     selectedLeftSources,
     selectedRightSources,
-    trialReconDraft,
     wizardDraftState,
   ]);
 
@@ -5934,7 +5526,7 @@ export default function ReconWorkspace({
     && activeRightOutputFieldsReady,
   );
   const isSchemeWizardBusy =
-    isTrialingProc || isTrialingRecon || aiProcGenerationBusy;
+    isTrialingProc || aiProcGenerationBusy;
   const schemeStepTwoReady = Boolean(
     procBuildMode === 'ai_complex_rule'
       ? aiProcStepReady
@@ -6582,25 +6174,6 @@ export default function ReconWorkspace({
           validations: procTrialPreview.validations,
         }
       : undefined;
-    const mappedReconTrialPreview = reconTrialPreview
-      ? {
-          status: reconTrialPreview.status,
-          summary: reconTrialPreview.summary,
-          leftSamples: reconTrialPreview.leftRows,
-          rightSamples: reconTrialPreview.rightRows,
-          leftFieldLabelMap: reconTrialPreview.leftFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
-          rightFieldLabelMap: reconTrialPreview.rightFieldLabelMap || PREPARED_OUTPUT_FIELD_LABEL_MAP,
-          resultSamples: reconTrialPreview.results.map((item) => ({
-            match_fields: item.matchFields,
-            left_compare_fields: item.leftCompareFields,
-            right_compare_fields: item.rightCompareFields,
-            result: item.result,
-          })),
-          resultFieldLabelMap: reconTrialPreview.resultFieldLabelMap || RECON_RESULT_FIELD_LABEL_MAP,
-          resultSummary: reconTrialPreview.resultSummary,
-        }
-      : undefined;
-
     if (schemeWizardStep === 1) {
       return (
         <SchemeWizardIntentStep
@@ -6653,10 +6226,6 @@ export default function ReconWorkspace({
       return (
         <div className="space-y-5">
           <SchemeWizardReconStep
-            schemeDraft={{
-              reconTrialStatus: schemeDraft.reconTrialStatus,
-              reconTrialSummary: schemeDraft.reconTrialSummary,
-            }}
             reconRuleName={schemeDraft.reconRuleName || buildDefaultReconRuleName(schemeDraft.name)}
             matchFieldPairs={activeMatchFieldPairs}
             compareFieldPairs={activeCompareFieldPairs}
@@ -6668,17 +6237,8 @@ export default function ReconWorkspace({
             rightFieldLabelMap={rightOutputFieldLabelMap}
             reconCompatibility={reconCompatibilityState}
             onStructuredConfigChange={(patch) => applyStructuredReconConfig(patch)}
-            onTrialRecon={trialReconDraft}
             onViewReconJson={handleViewReconJson}
             reconJsonPreview={reconJsonPreview}
-            reconTrialPreview={mappedReconTrialPreview}
-            trialDisabled={
-              isTrialingRecon
-              || !schemeDraft.procRuleJson
-              || schemeDraft.procTrialStatus !== 'passed'
-              || !compiledReconRuleResult.json
-            }
-            isTrialingRecon={isTrialingRecon}
           />
 
         </div>

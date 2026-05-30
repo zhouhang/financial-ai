@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { buildDatasetSamplePayloadForTest } from '../../src/components/ReconWorkspace';
 import { filterBrowserCollectionFieldItems } from '../../src/components/recon/browserCollectionSchema';
 import { normalizeCandidateDataset } from '../../src/components/recon/SchemeWizardTargetProcStep';
-import { serializeSchemeSourceForRuleGeneration } from '../../src/components/recon/ruleGenerationState';
+import {
+  applyRuleGenerationEventToDraft,
+  createEmptyAiProcSideDraft,
+  serializeSchemeSourceForRuleGeneration,
+} from '../../src/components/recon/ruleGenerationState';
 
 describe('normalizeCandidateDataset', () => {
   it('保留 browser_playbook 候选数据集', () => {
@@ -128,5 +132,33 @@ describe('normalizeCandidateDataset', () => {
     });
 
     expect(payload.fields).toEqual([]);
+  });
+
+  it('AI 输出预览不把 __tally_source_record 当作用户字段', () => {
+    const draft = createEmptyAiProcSideDraft();
+
+    const result = applyRuleGenerationEventToDraft(draft, '左侧', {
+      event: 'graph_completed',
+      proc_rule_json: {
+        steps: [],
+      },
+      output_fields: [
+        { name: 'biz_key', label: '业务主键' },
+        { name: '__tally_source_record', label: '__tally_source_record' },
+      ],
+      output_preview_rows: [
+        {
+          biz_key: 'ORD-001',
+          __tally_source_record: { order_no: 'ORD-001', amount: 100 },
+        },
+      ],
+      assumptions: [],
+      validations: [],
+      warnings: [],
+    });
+
+    expect(result.draft.outputRows).toEqual([{ biz_key: 'ORD-001' }]);
+    expect(result.outputFields.map((field) => field.outputName)).toEqual(['biz_key']);
+    expect(result.draft.outputFieldLabelMap).toEqual({ biz_key: '业务主键' });
   });
 });

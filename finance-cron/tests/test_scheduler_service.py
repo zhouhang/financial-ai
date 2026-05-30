@@ -81,6 +81,29 @@ def test_refresh_run_plans_registers_jobs(monkeypatch):
     assert "run-plan:company_001:plan_manual" not in job_ids
 
 
+def test_sync_pending_todo_exceptions_job_calls_data_agent(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        scheduler_service, "create_scheduler_auth_token", lambda **kwargs: "scheduler-token"
+    )
+
+    async def fake_sync(auth_token, *, limit=200, max_age_days=30, **kwargs):
+        captured["auth_token"] = auth_token
+        captured["limit"] = limit
+        return {"success": True, "completed": 2, "updated_count": 5}
+
+    monkeypatch.setattr(scheduler_service, "sync_pending_todo_exceptions", fake_sync)
+
+    service = scheduler_service.FinanceCronSchedulerService(
+        scheduler_service.FinanceCronConfig(refresh_interval_seconds=30)
+    )
+    asyncio.run(service.sync_pending_todo_exceptions_job())
+
+    assert captured["auth_token"] == "scheduler-token"
+    assert captured["limit"] >= 1
+
+
 def test_execute_run_plan_job_avoids_duplicate_slot(monkeypatch):
     triggered: list[tuple[str, str]] = []
     existing_slots: set[str] = set()

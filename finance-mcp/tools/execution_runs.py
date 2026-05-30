@@ -218,6 +218,19 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="execution_run_exception_list_pending_todo_batches",
+            description="供内部调度器查询仍待处理且已建钉钉待办的异常批次（按 run+owner+todo 去重）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "max_age_days": {"type": "integer"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
             name="execution_scheduler_get_slot_run",
             description="供内部调度器按 company_id + plan_code + schedule_slot 查询是否已触发。",
             inputSchema={
@@ -482,6 +495,7 @@ def create_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
                     "run_id": {"type": "string"},
                     "owner_identifier": {"type": "string"},
                     "reminder_status": {"type": "string"},
@@ -605,6 +619,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _exception_update(arguments)
         if name == "execution_run_exception_bulk_update_by_owner":
             return _exception_bulk_update_by_owner(arguments)
+        if name == "execution_run_exception_list_pending_todo_batches":
+            return _scheduler_list_pending_todo_batches(arguments)
         if name == "execution_proc_draft_trial":
             return _proc_draft_trial(arguments)
         if name == "execution_recon_draft_trial":
@@ -643,6 +659,30 @@ def _require_scheduler_user(auth_token: str) -> dict[str, Any]:
     if role not in {"system", "scheduler"}:
         raise ValueError("当前 token 无权限执行调度器内部调用")
     return user
+
+
+def _resolve_write_company_id(auth_token: str, explicit_company_id: str = "") -> str:
+    """解析批量写操作的目标公司。
+
+    - 普通用户：强制使用 token 内的 company_id，忽略入参，杜绝跨租户写。
+    - 调度器/系统 token（无公司绑定）：使用入参 company_id（由调度端按批次提供）。
+    """
+    token = str(auth_token or "").strip()
+    if not token:
+        raise ValueError("未提供认证 token，请先登录")
+    user = get_user_from_token(token)
+    if not user:
+        raise ValueError("token 无效或已过期，请重新登录")
+    role = str(user.get("role") or "").strip().lower()
+    if role in {"system", "scheduler"}:
+        company_id = str(explicit_company_id or user.get("company_id") or "").strip()
+        if not company_id:
+            raise ValueError("调度器调用缺少 company_id")
+        return company_id
+    company_id = str(user.get("company_id") or "").strip()
+    if not company_id:
+        raise ValueError("当前用户未绑定公司")
+    return company_id
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -2721,15 +2761,17 @@ def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _exception_bulk_update_by_owner(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(arguments.get("auth_token", ""))
+    company_id = _resolve_write_company_id(
+        arguments.get("auth_token", ""), _as_text(arguments.get("company_id"))
+    )
     run_id = _as_text(arguments.get("run_id"))
     if not run_id:
         return {"success": False, "error": "run_id 不能为空"}
-    run = auth_db.get_execution_run(company_id=str(user.get("company_id") or ""), run_id=run_id)
+    run = auth_db.get_execution_run(company_id=company_id, run_id=run_id)
     if not run:
         return {"success": False, "error": "run_id 对应执行记录不存在"}
     items = auth_db.bulk_update_execution_run_exceptions_by_owner(
-        company_id=str(user.get("company_id") or ""),
+        company_id=company_id,
         run_id=run_id,
         owner_identifier=_as_text(arguments.get("owner_identifier")),
         reminder_status=arguments.get("reminder_status"),
@@ -2743,6 +2785,17 @@ def _exception_bulk_update_by_owner(arguments: dict[str, Any]) -> dict[str, Any]
         "updated_count": len(items),
         "exceptions": items,
     }
+
+
+def _scheduler_list_pending_todo_batches(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_scheduler_user(arguments.get("auth_token", ""))
+    limit = _as_int(arguments.get("limit"), 200)
+    max_age_days = _as_int(arguments.get("max_age_days"), 30)
+    batches = auth_db.list_pending_todo_exception_batches(
+        limit=max(1, min(limit, 1000)),
+        max_age_days=max(1, max_age_days),
+    )
+    return {"success": True, "count": len(batches), "batches": batches}
 
 
 def _validate_proc_source_tables(rule_json: dict[str, Any]) -> list[dict[str, Any]]:
