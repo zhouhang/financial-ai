@@ -21,8 +21,8 @@ def save_storage_object_metadata(
     """Insert or update storage object metadata by logical path."""
     storage_ref = parse_storage_ref(ref)
     params: dict[str, Any] = {
-        "owner_user_id": owner_user_id,
-        "company_id": company_id,
+        "owner_user_id": str(owner_user_id or "").strip() or None,
+        "company_id": str(company_id or "").strip() or None,
         "module": str(module or "").strip(),
         "logical_path": str(logical_path or "").strip(),
         "storage_provider": storage_ref.provider,

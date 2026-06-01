@@ -112,13 +112,15 @@ def test_save_storage_object_metadata_returns_params_fallback_when_no_row(monkey
     monkeypatch.setattr(repository.auth_db, "get_conn", lambda: _FakeConnManager(captured))
 
     result = repository.save_storage_object_metadata(
-        owner_user_id=None,
-        company_id=None,
+        owner_user_id=" ",
+        company_id="",
         module="exports",
         logical_path="local/export.csv",
         ref=StorageObjectRef(provider="local", local_path="/tmp/export.csv"),
     )
 
+    assert result["owner_user_id"] is None
+    assert result["company_id"] is None
     assert result["logical_path"] == "local/export.csv"
     assert result["storage_provider"] == "local"
     assert result["local_path"] == "/tmp/export.csv"

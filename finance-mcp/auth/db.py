@@ -16,6 +16,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 from psycopg2 import OperationalError, InterfaceError
+from storage.refs import parse_storage_ref
 
 try:
     from auth.crypto import open_secret, seal_secret
@@ -8060,9 +8061,11 @@ def insert_browser_capture_files(
         storage_path = str(entry.get("storage_path") or "").strip()
         if not storage_path:
             continue
+        storage_uri = str(entry.get("storage_uri") or "").strip()
+        parsed_ref = parse_storage_ref(storage_uri or storage_path)
         storage_provider = str(entry.get("storage_provider") or "").strip()
         if not storage_provider:
-            storage_provider = "oss" if storage_path.startswith("oss://") else "local"
+            storage_provider = parsed_ref.provider
         rows.append(
             (
                 company_id,
@@ -8078,9 +8081,9 @@ def insert_browser_capture_files(
                 str(entry.get("checksum") or ""),
                 int(entry.get("row_count") or 0),
                 storage_provider,
-                str(entry.get("storage_bucket") or ""),
-                str(entry.get("storage_key") or ""),
-                str(entry.get("storage_uri") or ""),
+                str(entry.get("storage_bucket") or parsed_ref.bucket or ""),
+                str(entry.get("storage_key") or parsed_ref.key or ""),
+                storage_uri or (parsed_ref.to_uri() if parsed_ref.provider == "oss" else ""),
                 str(entry.get("content_type") or ""),
                 int(entry.get("size_bytes") or 0),
             )
