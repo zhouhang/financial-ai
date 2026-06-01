@@ -13,3 +13,4 @@ requests>=2.31.0
 cryptography>=42.0.0
 bcrypt
 PyJWT
+oss2>=2.18.0
