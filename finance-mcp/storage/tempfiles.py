@@ -11,10 +11,6 @@ from storage.refs import StorageObjectRef
 
 @contextmanager
 def materialize_to_temp(client: StorageClient, ref: StorageObjectRef) -> Iterator[Path]:
-    if ref.provider == "local":
-        yield Path(ref.local_path)
-        return
-
     suffix = Path(ref.original_filename or ref.key).suffix
     handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     temp_path = Path(handle.name)
@@ -23,6 +19,8 @@ def materialize_to_temp(client: StorageClient, ref: StorageObjectRef) -> Iterato
         handle.close()
         yield temp_path
     finally:
+        if not handle.closed:
+            handle.close()
         try:
             temp_path.unlink(missing_ok=True)
         except Exception:

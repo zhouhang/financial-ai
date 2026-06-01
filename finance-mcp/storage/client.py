@@ -64,6 +64,16 @@ class LocalStorageClient:
         target.relative_to(self.root)
         return target
 
+    def _path_for_ref(self, ref: StorageObjectRef) -> Path:
+        if ref.provider != "local" or not ref.local_path:
+            raise ValueError("invalid local storage path")
+        target = Path(ref.local_path).resolve()
+        try:
+            target.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError("invalid local storage path") from exc
+        return target
+
     def put_file(
         self,
         source_path: str | Path,
@@ -107,10 +117,10 @@ class LocalStorageClient:
         )
 
     def read_bytes(self, ref: StorageObjectRef) -> bytes:
-        return Path(ref.local_path).read_bytes()
+        return self._path_for_ref(ref).read_bytes()
 
     def exists(self, ref: StorageObjectRef) -> bool:
-        return bool(ref.local_path) and Path(ref.local_path).is_file()
+        return self._path_for_ref(ref).is_file()
 
     def create_presigned_upload(self, *, key: str, content_type: str = "") -> dict[str, Any]:
         return {"provider": "local", "key": _safe_key(key), "url": "", "fields": {}, "headers": {}}
@@ -139,14 +149,15 @@ class OssStorageClient:
         checksum: str = "",
     ) -> StorageObjectRef:
         safe_key = _safe_key(key)
-        headers = {"Content-Type": _guess_content_type(original_filename, content_type)}
+        resolved_content_type = _guess_content_type(original_filename, content_type)
+        headers = {"Content-Type": resolved_content_type}
         self.bucket.put_object_from_file(safe_key, str(source_path), headers=headers)
         return StorageObjectRef(
             provider="oss",
             bucket=self.bucket_name,
             key=safe_key,
             original_filename=original_filename,
-            content_type=content_type,
+            content_type=resolved_content_type,
             size_bytes=Path(source_path).stat().st_size,
             checksum=checksum,
         )
@@ -161,14 +172,15 @@ class OssStorageClient:
         checksum: str = "",
     ) -> StorageObjectRef:
         safe_key = _safe_key(key)
-        headers = {"Content-Type": _guess_content_type(original_filename, content_type)}
+        resolved_content_type = _guess_content_type(original_filename, content_type)
+        headers = {"Content-Type": resolved_content_type}
         self.bucket.put_object(safe_key, data, headers=headers)
         return StorageObjectRef(
             provider="oss",
             bucket=self.bucket_name,
             key=safe_key,
             original_filename=original_filename,
-            content_type=content_type,
+            content_type=resolved_content_type,
             size_bytes=len(data),
             checksum=checksum,
         )
@@ -203,4 +215,6 @@ def storage_from_env(*, local_root: str | Path) -> StorageClient:
     settings = StorageSettings.from_env()
     if settings.backend == "oss":
         return OssStorageClient(settings)
-    return LocalStorageClient(root=local_root)
+    if settings.backend == "local":
+        return LocalStorageClient(root=local_root)
+    raise RuntimeError(f"Unsupported storage backend: {settings.backend}")
