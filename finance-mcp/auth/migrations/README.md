@@ -36,6 +36,13 @@
 28. **028_drop_alipay_derived_business_columns.sql** - 删除支付宝账单英文派生业务列，业务字段仅保留明细 payload
 29. **029_clean_alipay_semantic_profiles.sql** - 清理支付宝账单历史语义档案中的隐藏元数据和旧英文派生字段
 30. **030_messages_seq_ordering.sql** - 为 messages 表新增单调自增 seq 列,修复聊天记录加载顺序乱序
+31. **031_browser_playbook_collection.sql** - 浏览器采集 Playbook、采集记录、文件审计与等待数据队列字段
+32. **032_data_sources_browser_playbook_source_kind.sql** - 为数据源 source_kind 增加 browser_playbook
+33. **033_browser_handoff_sessions.sql** - 浏览器人工接管会话
+34. **034_browser_handoff_lifecycle.sql** - 浏览器人工接管生命周期字段
+35. **035_sync_jobs_handoff_statuses.sql** - 同步任务增加人工验证与恢复状态
+36. **036_execution_run_exceptions_pending_index.sql** - 待处理异常同步待办状态的部分索引
+37. **037_storage_objects_and_browser_capture_oss.sql** - 存储对象元数据表与浏览器采集 OSS 文件字段
 
 ## 使用方法
 

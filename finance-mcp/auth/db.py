@@ -8060,6 +8060,9 @@ def insert_browser_capture_files(
         storage_path = str(entry.get("storage_path") or "").strip()
         if not storage_path:
             continue
+        storage_provider = str(entry.get("storage_provider") or "").strip()
+        if not storage_provider:
+            storage_provider = "oss" if storage_path.startswith("oss://") else "local"
         rows.append(
             (
                 company_id,
@@ -8074,6 +8077,12 @@ def insert_browser_capture_files(
                 str(entry.get("encoding") or ""),
                 str(entry.get("checksum") or ""),
                 int(entry.get("row_count") or 0),
+                storage_provider,
+                str(entry.get("storage_bucket") or ""),
+                str(entry.get("storage_key") or ""),
+                str(entry.get("storage_uri") or ""),
+                str(entry.get("content_type") or ""),
+                int(entry.get("size_bytes") or 0),
             )
         )
     if not rows:
@@ -8088,11 +8097,15 @@ def insert_browser_capture_files(
                     """
                     INSERT INTO browser_capture_files (
                         company_id, data_source_id, dataset_id, sync_job_id, resource_key,
-                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count
+                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count,
+                        storage_provider, storage_bucket, storage_key, storage_uri, content_type, size_bytes
                     ) VALUES %s
                     """,
                     rows,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s)",
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, "
+                        "%s, %s, %s, %s, %s, %s)"
+                    ),
                 )
                 conn.commit()
         return {"inserted_count": len(rows)}

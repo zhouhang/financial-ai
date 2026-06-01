@@ -68,7 +68,12 @@ def test_insert_browser_capture_files_uses_execute_values(monkeypatch) -> None:
         biz_date="2026-05-18",
         capture_files=[
             {
-                "storage_path": "/tmp/export.csv",
+                "storage_path": "oss://finance-oss/browser-captures/shop-001/export.csv",
+                "storage_bucket": "finance-oss",
+                "storage_key": "browser-captures/shop-001/export.csv",
+                "storage_uri": "oss://finance-oss/browser-captures/shop-001/export.csv",
+                "content_type": "text/csv",
+                "size_bytes": 123,
                 "encoding": "utf-8",
                 "checksum": "sha256:abc",
                 "row_count": 10,
@@ -80,6 +85,14 @@ def test_insert_browser_capture_files_uses_execute_values(monkeypatch) -> None:
     assert "INSERT INTO browser_capture_files" in str(captured["sql"])
     assert captured["committed"] is True
     assert len(captured["values"]) == 1
+    row = captured["values"][0]
+    assert row[8] == "oss://finance-oss/browser-captures/shop-001/export.csv"
+    assert row[12] == "oss"
+    assert row[13] == "finance-oss"
+    assert row[14] == "browser-captures/shop-001/export.csv"
+    assert row[15] == "oss://finance-oss/browser-captures/shop-001/export.csv"
+    assert row[16] == "text/csv"
+    assert row[17] == 123
 
 
 def test_insert_browser_capture_files_empty_returns_zero(monkeypatch) -> None:
