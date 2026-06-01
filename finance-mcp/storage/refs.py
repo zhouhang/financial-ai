@@ -45,13 +45,21 @@ def parse_storage_ref(value: str | dict[str, Any] | StorageObjectRef) -> Storage
     if isinstance(value, dict):
         provider = str(value.get("storage_provider") or value.get("provider") or "").strip()
         storage_uri = str(value.get("storage_uri") or "").strip()
-        if not provider and storage_uri:
-            return parse_storage_ref(storage_uri)
+        parsed_uri_ref = parse_storage_ref(storage_uri) if storage_uri else None
+        if not provider and parsed_uri_ref:
+            provider = parsed_uri_ref.provider
+        bucket = str(value.get("storage_bucket") or value.get("bucket") or "").strip()
+        key = str(value.get("storage_key") or value.get("key") or "").strip().lstrip("/")
+        local_path = str(value.get("local_path") or value.get("storage_path") or "").strip()
+        if parsed_uri_ref:
+            bucket = bucket or parsed_uri_ref.bucket
+            key = key or parsed_uri_ref.key
+            local_path = local_path or parsed_uri_ref.local_path
         return StorageObjectRef(
             provider=provider or "local",
-            bucket=str(value.get("storage_bucket") or value.get("bucket") or "").strip(),
-            key=str(value.get("storage_key") or value.get("key") or "").strip().lstrip("/"),
-            local_path=str(value.get("local_path") or value.get("storage_path") or "").strip(),
+            bucket=bucket,
+            key=key,
+            local_path=local_path,
             original_filename=str(
                 value.get("original_filename") or value.get("file_name") or ""
             ).strip(),

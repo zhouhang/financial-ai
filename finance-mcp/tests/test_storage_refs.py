@@ -11,6 +11,24 @@ from storage.config import StorageSettings
 from storage.refs import StorageObjectRef, parse_storage_ref
 
 
+STORAGE_ENV_VARS = [
+    "STORAGE_BACKEND",
+    "OSS_BUCKET",
+    "OSS_ENDPOINT",
+    "OSS_REGION",
+    "OSS_ACCESS_KEY_ID",
+    "OSS_ACCESS_KEY_SECRET",
+    "OSS_PREFIX",
+    "OSS_PRESIGN_EXPIRE_SECONDS",
+    "OSS_UPLOAD_MAX_SIZE",
+]
+
+
+def clear_storage_env(monkeypatch) -> None:
+    for env_var in STORAGE_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+
+
 def test_parse_legacy_upload_path() -> None:
     ref = parse_storage_ref("/uploads/2026/6/1/a.xlsx")
 
@@ -49,8 +67,39 @@ def test_parse_metadata_dict() -> None:
     assert ref.checksum == "sha256:abc"
 
 
+def test_parse_metadata_dict_uses_storage_uri_for_missing_oss_fields() -> None:
+    ref = parse_storage_ref(
+        {
+            "storage_provider": "oss",
+            "storage_uri": "oss://bucket-from-uri/recon-output/c1/file.xlsx",
+            "original_filename": "file.xlsx",
+        }
+    )
+
+    assert ref.provider == "oss"
+    assert ref.bucket == "bucket-from-uri"
+    assert ref.key == "recon-output/c1/file.xlsx"
+    assert ref.local_path == ""
+    assert ref.original_filename == "file.xlsx"
+
+
+def test_parse_metadata_dict_preserves_explicit_fields_over_storage_uri() -> None:
+    ref = parse_storage_ref(
+        {
+            "storage_provider": "oss",
+            "storage_bucket": "explicit-bucket",
+            "storage_key": "explicit/key.xlsx",
+            "storage_uri": "oss://bucket-from-uri/recon-output/c1/file.xlsx",
+        }
+    )
+
+    assert ref.provider == "oss"
+    assert ref.bucket == "explicit-bucket"
+    assert ref.key == "explicit/key.xlsx"
+
+
 def test_storage_settings_default_local(monkeypatch) -> None:
-    monkeypatch.delenv("STORAGE_BACKEND", raising=False)
+    clear_storage_env(monkeypatch)
 
     settings = StorageSettings.from_env()
 
@@ -60,9 +109,14 @@ def test_storage_settings_default_local(monkeypatch) -> None:
 
 
 def test_storage_settings_oss_requires_bucket_and_endpoint(monkeypatch) -> None:
+    clear_storage_env(monkeypatch)
     monkeypatch.setenv("STORAGE_BACKEND", "oss")
     monkeypatch.setenv("OSS_BUCKET", "")
     monkeypatch.setenv("OSS_ENDPOINT", "")
+    monkeypatch.setenv("OSS_ACCESS_KEY_ID", "")
+    monkeypatch.setenv("OSS_ACCESS_KEY_SECRET", "")
+    monkeypatch.setenv("OSS_PRESIGN_EXPIRE_SECONDS", "900")
+    monkeypatch.setenv("OSS_UPLOAD_MAX_SIZE", str(100 * 1024 * 1024))
 
     settings = StorageSettings.from_env()
 
