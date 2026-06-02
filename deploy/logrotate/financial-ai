@@ -1,0 +1,9 @@
+/Users/kevin/workspace/financial-ai/logs/*.log {
+    size 50M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
