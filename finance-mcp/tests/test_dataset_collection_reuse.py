@@ -380,7 +380,7 @@ async def test_browser_trigger_reuses_success_same_biz_date_when_records_exist(
 
 
 @pytest.mark.anyio
-async def test_browser_trigger_creates_job_when_success_has_no_records(
+async def test_browser_trigger_reuses_success_same_biz_date_when_records_are_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(data_sources, "_require_user", lambda _token: {"company_id": "company-1"})
@@ -414,43 +414,18 @@ async def test_browser_trigger_creates_job_when_success_has_no_records(
     )
     monkeypatch.setattr(data_sources.auth_db, "list_browser_collection_records", lambda **_kwargs: [])
 
-    create_kwargs: dict[str, Any] = {}
+    created = False
 
-    def fake_create_or_reuse_dataset_collection_sync_job(**kwargs):
-        create_kwargs.update(kwargs)
-        return {
-            "job": {
-                "id": "new-job-1",
-                "job_status": "pending",
-                "request_payload": kwargs.get("request_payload") or {},
-            },
-            "reused": False,
-        }
+    def fake_create_or_reuse_dataset_collection_sync_job(**_kwargs):
+        nonlocal created
+        created = True
+        return {"job": {"id": "new-job-1"}, "reused": False}
 
     monkeypatch.setattr(
         data_sources.auth_db,
         "create_or_reuse_dataset_collection_sync_job",
         fake_create_or_reuse_dataset_collection_sync_job,
     )
-    monkeypatch.setattr(
-        data_sources.auth_db,
-        "create_unified_sync_job_attempt",
-        lambda **_kwargs: {"id": "attempt-1"},
-    )
-    monkeypatch.setattr(
-        data_sources.auth_db,
-        "get_unified_sync_job_by_id",
-        lambda _job_id: {
-            "id": "new-job-1",
-            "job_status": "pending",
-            "request_payload": {
-                "collection_driver": data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK,
-                "dataset_id": "dataset-browser-1",
-                "biz_date": "2026-05-25",
-            },
-        },
-    )
-
     result = await data_sources._handle_data_source_trigger_sync(
         {
             "auth_token": "token-1",
@@ -466,9 +441,11 @@ async def test_browser_trigger_creates_job_when_success_has_no_records(
     )
 
     assert result["success"] is True
-    assert result["queued"] is True
-    assert result["reused"] is False
-    assert create_kwargs["ttl_seconds"] == 0
+    assert result["queued"] is False
+    assert result["reused"] is True
+    assert result["reuse_reason"] == "browser_biz_date_success"
+    assert result["job"]["id"] == "success-job-without-records"
+    assert created is False
 
 
 @pytest.mark.anyio

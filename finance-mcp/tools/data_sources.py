@@ -219,24 +219,6 @@ def _find_reusable_browser_success_job(
     )
     if not job:
         return None
-    if not _browser_collection_records_exist(
-        company_id=company_id,
-        data_source_id=data_source_id,
-        dataset_id=dataset_id,
-        resource_key=resource_key,
-        biz_date=biz_date,
-    ):
-        logger.warning(
-            "跳过浏览器同账期成功任务复用: success job has no records "
-            "company_id=%s data_source_id=%s dataset_id=%s resource_key=%s biz_date=%s job_id=%s",
-            company_id,
-            data_source_id,
-            dataset_id,
-            resource_key,
-            biz_date,
-            job.get("id"),
-        )
-        return None
     return job
 
 
@@ -1876,6 +1858,43 @@ def _flatten_semantic_profile(dataset_row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _browser_collection_display_name(dataset_row: dict[str, Any]) -> str:
+    meta = dict(dataset_row.get("meta") or {})
+    return (
+        _safe_text(meta.get("registration_title"))
+        or _safe_text(dataset_row.get("dataset_name"))
+        or _safe_text(dataset_row.get("source_name"))
+        or _safe_text(dataset_row.get("data_source_name"))
+        or _safe_text(dataset_row.get("dataset_code"))
+    )
+
+
+def _dataset_source_type_value(dataset_row: dict[str, Any]) -> str:
+    for container_key in ("extract_config", "schema_summary", "meta"):
+        container = dataset_row.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        source_type = _safe_text(container.get("source_type")).lower()
+        if source_type:
+            return source_type
+    return ""
+
+
+def _resolve_dataset_business_name(
+    dataset_row: dict[str, Any],
+    *,
+    semantic_business_name: str,
+    dataset_code: str,
+) -> str:
+    source_type = _dataset_source_type_value(dataset_row)
+    storage = _dataset_storage_value(dataset_row)
+    if source_type == "browser_collection_records" or storage == "browser_collection_records":
+        browser_name = _browser_collection_display_name(dataset_row)
+        if browser_name:
+            return browser_name
+    return semantic_business_name or (_safe_text(dataset_row.get("dataset_name")) or dataset_code)
+
+
 def _default_execution_mode(source_kind: str) -> str:
     return "agent_assisted" if source_kind in AGENT_ASSISTED_KINDS else "deterministic"
 
@@ -3315,6 +3334,11 @@ def _build_dataset_base_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
     search_text = _safe_text(dataset_row.get("search_text")) or _safe_text(catalog_profile.get("search_text"))
     if not search_text:
         search_text = _build_dataset_search_text(dataset_row, semantic_flat=semantic_flat)
+    business_name = _resolve_dataset_business_name(
+        dataset_row,
+        semantic_business_name=semantic_flat["business_name"],
+        dataset_code=dataset_code,
+    )
     source_context = {
         "id": _safe_text(dataset_row.get("data_source_id") or dataset_row.get("source_id")),
         "name": _safe_text(dataset_row.get("source_name"))
@@ -3354,7 +3378,7 @@ def _build_dataset_base_view(dataset_row: dict[str, Any]) -> dict[str, Any]:
         "search_text": search_text,
         "semantic_status": semantic_flat["semantic_status"],
         "semantic_updated_at": semantic_flat["semantic_updated_at"],
-        "business_name": semantic_flat["business_name"] or (_safe_text(dataset_row.get("dataset_name")) or dataset_code),
+        "business_name": business_name,
         "business_description": semantic_flat["business_description"],
         "key_fields": semantic_flat["key_fields"],
         "semantic_pending_count": semantic_flat["semantic_pending_count"],
@@ -9546,6 +9570,27 @@ async def _handle_data_source_list_collection_records(arguments: dict[str, Any])
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=dataset_id,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+        )
+    elif _dataset_uses_browser_collection_records(dataset_row):
+        records = auth_db.list_browser_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key or None,
+            biz_date=_safe_text(arguments.get("biz_date")) or None,
+            item_key=_safe_text(arguments.get("item_key")) or None,
+            filters=payload_filters,
+            limit=limit,
+            offset=offset,
+        )
+        stats = auth_db.get_browser_collection_record_stats(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=dataset_id,
+            dataset_code=dataset_code,
+            resource_key=resource_key or None,
             biz_date=_safe_text(arguments.get("biz_date")) or None,
         )
     else:

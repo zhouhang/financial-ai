@@ -56,6 +56,26 @@ def test_validate_rows_accepts_expected_row_count_from_page_text() -> None:
     assert result["summary"]["row_count"] == 2
 
 
+def test_validate_rows_accepts_empty_placeholder_amount_total_for_zero_rows() -> None:
+    result = validate_rows(
+        rows=[],
+        columns=[
+            {"name": "业务流水号", "type": "string", "required": True},
+            {"name": "订单实际金额（元）", "type": "decimal", "required": True},
+            {"name": "打款时间", "type": "date", "required": True},
+        ],
+        item_key_fields=["业务流水号"],
+        amount_field="订单实际金额（元）",
+        date_field="打款时间",
+        biz_date="2026-06-01",
+        expected_row_count="--",
+        expected_amount_total="-",
+    )
+
+    assert result["success"] is True
+    assert result["summary"] == {"row_count": 0, "amount_total": "0.00"}
+
+
 def test_validate_rows_reports_expected_and_actual_row_count() -> None:
     result = validate_rows(
         rows=[
