@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from storage.input_resolver import materialize_input_file
+from storage.input_resolver import materialize_input_file, split_input_file_ref
 
 logger = logging.getLogger(__name__)
 
@@ -2509,6 +2509,7 @@ def _normalize_alias_key(name: Any) -> str:
 
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
+    _, sheet_name = split_input_file_ref(file_path)
     with materialize_input_file(file_path) as path:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
@@ -2523,7 +2524,7 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                     encoding = chardet.detect(file.read()).get("encoding", "gbk")
                 return pd.read_csv(path, encoding=encoding)
         if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-            return pd.read_excel(path, dtype=object)
+            return pd.read_excel(path, dtype=object, sheet_name=sheet_name or 0)
         raise ProcUserDataError(
             summary="数据整理遇到不支持的文件格式",
             cause=f"文件格式「{suffix}」不受支持。",

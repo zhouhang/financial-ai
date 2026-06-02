@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from security_utils import PROC_OUTPUT_ROOT, UPLOAD_ROOT, resolve_path_under_roots
-from storage.input_resolver import materialize_input_file
+from storage.input_resolver import materialize_input_file, split_input_file_ref
 from tools.rule_schema import load_and_validate_rule
 from proc.mcp_server.steps_runtime import ProcUserDataError
 
@@ -708,6 +708,7 @@ def _merge_append_rows(
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
+    _, sheet_name = split_input_file_ref(file_path)
     with materialize_input_file(file_path) as path:
         if not path.exists():
             raise ProcUserDataError(
@@ -725,7 +726,7 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                     enc = chardet.detect(f.read()).get("encoding", "gbk")
                 return pd.read_csv(path, encoding=enc)
         elif ext in (".xlsx", ".xls"):
-            return pd.read_excel(path)
+            return pd.read_excel(path, sheet_name=sheet_name or 0)
         else:
             raise ProcUserDataError(
                 summary="数据整理遇到不支持的文件格式",

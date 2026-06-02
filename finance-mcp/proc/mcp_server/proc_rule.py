@@ -31,7 +31,7 @@ import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import write_output_metadata
-from storage.input_resolver import materialize_input_file
+from storage.input_resolver import materialize_input_file, split_input_file_ref
 from tools.rule_schema import load_and_validate_rule
 from proc.mcp_server.steps_runtime import (
     ProcRuntimeError,
@@ -979,6 +979,7 @@ def _load_source_df(source_tables: Any, table_file_map: dict[str, str]) -> pd.Da
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
+    _, sheet_name = split_input_file_ref(file_path)
     with materialize_input_file(file_path) as path:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
@@ -992,7 +993,7 @@ def _read_file_as_df(file_path: str) -> pd.DataFrame:
                     enc = chardet.detect(f.read()).get("encoding", "gbk")
                 return pd.read_csv(path, encoding=enc)
         elif ext in (".xlsx", ".xls"):
-            return pd.read_excel(path, dtype=object)
+            return pd.read_excel(path, dtype=object, sheet_name=sheet_name or 0)
         else:
             raise ValueError(f"不支持的文件格式: {ext}")
 

@@ -152,6 +152,15 @@ def _materialize_oss_logical_file(file_ref: str) -> Iterator[Path]:
         yield path
 
 
+def _build_oss_sheet_input_ref(base_ref: str, sheet_name: str) -> str:
+    finance_mcp_root = _finance_mcp_root()
+    if str(finance_mcp_root) not in sys.path:
+        sys.path.insert(0, str(finance_mcp_root))
+    from storage.input_resolver import build_sheet_input_ref
+
+    return build_sheet_input_ref(base_ref, sheet_name)
+
+
 def _schema_candidate_names(
     *,
     file_name: str,
@@ -383,8 +392,13 @@ def _prepare_oss_excel_logical_entries(
                 if split_required
                 else display_name
             )
+            sheet_file_path = (
+                _build_oss_sheet_input_ref(upload_ref, sheet_name)
+                if split_required
+                else upload_ref
+            )
             logical_file = _build_logical_file_entry(
-                file_path=upload_ref,
+                file_path=sheet_file_path,
                 display_name=logical_display_name,
                 workbook_original_filename=entry["original_filename"],
                 workbook_display_name=display_name,

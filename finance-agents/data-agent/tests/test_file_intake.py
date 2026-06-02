@@ -174,10 +174,15 @@ def test_oss_logical_upload_multi_sheet_workbook_preserves_logical_refs(
     assert {item["sheet_name"] for item in logical_files} == {"订单", "退款"}
     assert {item["sheet_index"] for item in logical_files} == {1, 2}
     assert all(item["is_logical_split"] is True for item in logical_files)
-    assert all(item["file_path"].startswith("/uploads/oss/") for item in logical_files)
+    assert all(item["file_path"].startswith("/uploads/oss/company-1/workbook.xlsx#sheet=") for item in logical_files)
+    assert len({item["file_path"] for item in logical_files}) == 2
     assert all(item["workbook_file_path"] == "/uploads/oss/company-1/workbook.xlsx" for item in logical_files)
-    assert all(summary["file_path"].startswith("/uploads/oss/") for summary in summaries)
+    assert all(summary["file_path"].startswith("/uploads/oss/company-1/workbook.xlsx#sheet=") for summary in summaries)
     assert all(str(tmp_path) not in summary["file_path"] for summary in summaries)
+
+    display_name_to_ref, _ = build_upload_name_maps(logical_files)
+    for item in logical_files:
+        assert display_name_to_ref[item["display_name"]] == item["file_path"]
 
 
 def test_oss_logical_upload_ref_with_explicit_empty_columns_prefilters_empty_header(
