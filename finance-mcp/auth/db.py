@@ -38,6 +38,7 @@ _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = False
 _RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
 _STORAGE_OBJECTS_SCHEMA_READY = False
+_BROWSER_CAPTURE_FILES_INDEX_READY = False
 _BROWSER_HANDOFF_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
@@ -1077,6 +1078,28 @@ def ensure_storage_objects_schema() -> list[str]:
     return [migration_name]
 
 
+def _browser_capture_files_index_ready() -> bool:
+    return _index_exists("idx_browser_capture_files_sync_job_storage_path")
+
+
+def ensure_browser_capture_files_idempotent_index() -> None:
+    """确保 migration 038 的部分唯一索引已存在，索引不存在时自动补建。"""
+    global _BROWSER_CAPTURE_FILES_INDEX_READY
+    if _BROWSER_CAPTURE_FILES_INDEX_READY:
+        return
+    if _browser_capture_files_index_ready():
+        _BROWSER_CAPTURE_FILES_INDEX_READY = True
+        return
+
+    migration_name = "038_browser_capture_files_idempotent.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _browser_capture_files_index_ready():
+        raise RuntimeError("browser_capture_files idempotent index 补建失败")
+
+    _BROWSER_CAPTURE_FILES_INDEX_READY = True
+    logger.info("browser_capture_files idempotent index 已自动补齐: %s", migration_name)
+
+
 def _browser_handoff_schema_ready() -> bool:
     try:
         with get_conn() as conn:
@@ -1134,6 +1157,7 @@ def ensure_schema() -> list[str]:
     applied = ensure_unified_data_source_schema()
     applied.extend(ensure_browser_playbook_collection_schema())
     applied.extend(ensure_storage_objects_schema())
+    ensure_browser_capture_files_idempotent_index()
     applied.extend(ensure_browser_handoff_schema())
     return applied
 

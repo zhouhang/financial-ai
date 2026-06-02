@@ -534,11 +534,16 @@ async def download_output_file(request):
         from urllib.parse import quote
 
         storage_ref = parse_storage_ref(storage_row)
-        client = storage_from_env(local_root=output_dir)
         try:
+            client = storage_from_env(local_root=output_dir)
             if not client.exists(storage_ref):
                 logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
                 return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+            byte_iter = iter(client.iter_bytes(storage_ref))
+            try:
+                first_chunk = next(byte_iter)
+            except StopIteration:
+                first_chunk = b""
         except FileNotFoundError:
             logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
             return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
@@ -551,10 +556,25 @@ async def download_output_file(request):
                 exc_info=True,
             )
             return JSONResponse({"error": "读取存储文件失败，请稍后重试"}, status_code=502)
+
+        def stream_storage_object():
+            if first_chunk:
+                yield first_chunk
+            try:
+                yield from byte_iter
+            except Exception as exc:
+                logger.error(
+                    "[download] 流式读取存储对象中断: logical_path=%s ref=%s error=%s",
+                    logical_path,
+                    storage_ref,
+                    exc,
+                    exc_info=True,
+                )
+
         filename = storage_ref.original_filename or Path(file_path).name
         encoded_filename = quote(filename, safe="")
         return StreamingResponse(
-            client.iter_bytes(storage_ref),
+            stream_storage_object(),
             media_type=storage_ref.content_type or "application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"

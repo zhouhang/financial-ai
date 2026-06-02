@@ -81,6 +81,31 @@ Log in to GHCR once on ECS. For private packages, the token needs `read:packages
 echo "$GHCR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
 ```
 
+## OSS Storage
+
+Production should set `STORAGE_BACKEND=oss` in `/opt/tally/.env.prod` and use a private OSS
+bucket. Do not make the bucket public; the application serves downloads through authenticated
+backend routes.
+
+Required variables:
+
+```env
+STORAGE_BACKEND=oss
+OSS_BUCKET=<private-bucket-name>
+OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
+OSS_REGION=cn-hangzhou
+OSS_ACCESS_KEY_ID=<oss-access-key-id>
+OSS_ACCESS_KEY_SECRET=<oss-access-key-secret>
+OSS_PREFIX=financial-ai/prod
+OSS_PRESIGN_EXPIRE_SECONDS=900
+OSS_UPLOAD_MAX_SIZE=104857600
+```
+
+The Windows browser-agent is not part of the ECS compose file. Configure the same OSS variables
+on the collection machine so raw browser downloads are uploaded before
+`browser_sync_job_complete` reports success. The browser-agent imports `oss2` lazily; install the
+same Python dependency set that includes `oss2>=2.18.0`.
+
 ## GitHub Secrets
 
 Add these repository secrets:
@@ -125,6 +150,17 @@ cd /opt/tally
 cp deploy.env.prev deploy.env
 docker compose --env-file deploy.env -f docker-compose.prod.yml pull
 docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans
+```
+
+## Logs
+
+Docker JSON logs are capped at `50m x 5` per service in `docker-compose.prod.yml`.
+
+For script-based local deployments, install the provided logrotate config or adapt the path:
+
+```bash
+sudo cp deploy/logrotate/financial-ai /etc/logrotate.d/financial-ai
+sudo logrotate -d /etc/logrotate.d/financial-ai
 ```
 
 ## Nginx/SSL Front Door
@@ -211,5 +247,6 @@ server {
 - `DB_POOL_MAXCONN=16` matches the current application default and is appropriate for the first
   RDS 2c8g rollout.
 - Docker JSON logs are capped at `50m x 5` per container in `docker-compose.prod.yml`.
-- Uploaded files and generated outputs are persisted in Docker volumes for now. Move these paths
-  to OSS before relying on them as long-term audit storage.
+- Uploads, generated outputs, and browser capture files should use the private OSS bucket in
+  production. Docker volumes remain mounted for local fallback, temporary files, and legacy
+  compatibility.

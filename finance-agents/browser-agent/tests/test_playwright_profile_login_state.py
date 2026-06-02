@@ -242,6 +242,78 @@ def test_playwright_runner_stops_when_summary_text_is_placeholder_dash(
     assert page.waited_for_summary_row is False
 
 
+def test_playwright_runner_stops_when_bill_summary_fields_are_all_empty_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeBillSummaryPlaceholderRunnerPage(
+        {
+            ".bill-row-count": "--",
+            ".bill-amount-total": "-",
+            ".bill-refund-total": "—",
+        }
+    )
+    monkeypatch.setattr(playwright_runner, "launch_chrome", lambda **_kwargs: FakeChromeProcess())
+    monkeypatch.setattr(playwright_runner, "sync_playwright", lambda: FakeSyncPlaywright(page))
+
+    result = playwright_runner._run_playbook_with_playwright_inner(
+        {
+            "job_id": "job-empty-bill-summary",
+            "shop_id": "shop-empty-bill-summary",
+            "playbook_body": {
+                "steps": [
+                    {
+                        "id": "read_summary",
+                        "action": "extract_summary",
+                        "mapping": {
+                            "row_count": ".bill-row-count",
+                            "amount_total": ".bill-amount-total",
+                            "refund_total": ".bill-refund-total",
+                        },
+                    },
+                    {
+                        "id": "stop_when_zero_bill_details",
+                        "action": "stop_if_summary_zero",
+                        "summary_field": "row_count",
+                    },
+                    {
+                        "id": "wait_summary_row",
+                        "action": "wait_for",
+                        "selector": "tr.next-table-row:has-text('交易货款'):has-text('下载明细')",
+                    },
+                ],
+                "output": {
+                    "columns": [
+                        {"name": "业务流水号", "required": True},
+                        {"name": "订单实际金额（元）", "required": True},
+                        {"name": "打款时间", "required": True},
+                    ],
+                    "item_key_fields": ["业务流水号"],
+                },
+                "quality_gate": {
+                    "summary_step_id": "read_summary",
+                    "row_count_field": "row_count",
+                    "date_field": "打款时间",
+                    "amount_field": "订单实际金额（元）",
+                },
+            },
+            "params": {"biz_date": "2026-06-01"},
+        },
+        config=PlaywrightRunConfig(
+            profile_root=str(tmp_path / "profiles"),
+            download_root=str(tmp_path / "downloads"),
+            headless=True,
+            timezone_id="Asia/Shanghai",
+            browser_channel="chrome",
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["records"] == []
+    assert result["quality_summary"]["row_count"] == 0
+    assert page.waited_for_summary_row is False
+
+
 class FakePage:
     def __init__(
         self,
@@ -322,6 +394,24 @@ class FakeNoNumberSummaryRunnerPage(FakePage):
         if selector == ".SearchTable--messageBox--3uyzOoz":
             return FakeZeroCountLocator(self.summary_text)
         return FakeZeroCountLocator("")
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        if "下载明细" in selector:
+            self.waited_for_summary_row = True
+        super().wait_for_selector(selector, timeout=timeout)
+
+
+class FakeBillSummaryPlaceholderRunnerPage(FakePage):
+    def __init__(self, summary_text_by_selector: dict[str, str]) -> None:
+        super().__init__(
+            url="https://myseller.taobao.com/home.htm/whale-accountant/bill/summary",
+            selectors=set(summary_text_by_selector),
+        )
+        self.summary_text_by_selector = summary_text_by_selector
+        self.waited_for_summary_row = False
+
+    def locator(self, selector: str) -> FakeZeroCountLocator:
+        return FakeZeroCountLocator(self.summary_text_by_selector.get(selector, ""))
 
     def wait_for_selector(self, selector: str, *, timeout: int) -> None:
         if "下载明细" in selector:
@@ -1464,6 +1554,37 @@ def test_parse_table_records_detected_csv_encoding_in_capture_file(tmp_path) -> 
         },
         params={},
         extracted={"last_download": str(path)},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert result["rows"][0]["业务流水号"] == "2026052123001193261450560998"
+    assert capture_files[0]["encoding"] == "gb18030"
+    assert capture_files[0]["row_count"] == 1
+
+
+def test_parse_table_uses_capture_local_path_when_storage_path_is_oss(tmp_path) -> None:
+    path = tmp_path / "交易货款_20260521_20260521.csv"
+    path.write_bytes("账期,业务流水号\n20260521,2026052123001193261450560998\n".encode("gb18030"))
+    capture_files = [
+        {
+            "storage_path": "oss://bucket-a/browser-captures/company-001/shop-001/file.csv",
+            "local_path": str(path),
+            "encoding": "",
+            "checksum": "",
+            "row_count": 0,
+        }
+    ]
+
+    result = _execute_action(
+        FakePage(),
+        {
+            "id": "parse_detail_file",
+            "action": "parse_table",
+            "format": "csv",
+        },
+        params={},
+        extracted={},
         capture_files=capture_files,
         download_dir=tmp_path,
     )

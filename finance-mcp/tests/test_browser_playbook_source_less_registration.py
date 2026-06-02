@@ -32,6 +32,32 @@ def test_browser_registration_code_is_unique_and_bounded() -> None:
     assert len(second) <= 100
 
 
+def test_browser_dataset_base_view_prefers_dataset_name_over_seeded_business_name() -> None:
+    view = data_sources._build_dataset_base_view(
+        {
+            "id": "dataset-001",
+            "dataset_name": "瀚宇卡券速充-店铺订单",
+            "dataset_code": "browser-collection-hanyu-sold-orders",
+            "resource_key": "browser-collection-hanyu-sold-orders@1",
+            "source_kind": "browser_playbook",
+            "extract_config": {"source_type": "browser_collection_records"},
+            "schema_summary": {"source_type": "browser_collection_records"},
+            "meta": {
+                "source_type": "browser_collection_records",
+                "registration_title": "瀚宇卡券速充-店铺订单",
+                "seeded_from": "tb0131100248-店铺订单",
+                "semantic_profile": {
+                    "status": "manual_updated",
+                    "business_name": "tb0131100248-店铺订单",
+                    "key_fields": ["订单编号"],
+                },
+            },
+        }
+    )
+
+    assert view["business_name"] == "瀚宇卡券速充-店铺订单"
+
+
 def test_unified_schema_bootstrap_upgrades_browser_playbook_source_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -67,6 +93,7 @@ def test_unified_schema_bootstrap_upgrades_browser_playbook_source_kind(
     monkeypatch.setattr(auth_db, "_platform_alipay_bill_lines_schema_ready", lambda: True)
     monkeypatch.setattr(auth_db, "_alipay_semantic_profiles_need_hidden_field_cleanup", lambda: False)
     monkeypatch.setattr(auth_db, "ensure_sync_jobs_trigger_modes_schema", lambda: [])
+    monkeypatch.setattr(auth_db, "ensure_sync_jobs_handoff_status_schema", lambda: [])
 
     def fake_execute_sql_script(script_path: Path) -> None:
         calls.append(script_path.name)

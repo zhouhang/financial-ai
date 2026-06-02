@@ -9,8 +9,17 @@ if str(ROOT) not in sys.path:
 
 from finance_browser_agent.playwright_runner import (
     PlaywrightRunConfig,
+    _save_download,
     build_user_data_dir,
 )
+
+
+class FakeDownload:
+    def __init__(self, suggested_filename: str) -> None:
+        self.suggested_filename = suggested_filename
+
+    def save_as(self, path: str) -> None:
+        Path(path).write_bytes(b"a,b\n1,2\n")
 
 
 def test_build_user_data_dir_uses_shop_id_under_profile_root(tmp_path) -> None:
@@ -82,3 +91,64 @@ def test_playwright_config_env_overrides(monkeypatch, tmp_path) -> None:
     assert config.click_delay_max_ms == 800
     assert config.type_delay_ms == 120
     assert config.risk_manual_timeout_ms == 600000
+
+
+def test_save_download_appends_uploaded_capture_metadata(monkeypatch, tmp_path) -> None:
+    calls: list[dict[str, str]] = []
+
+    def fake_upload(path, **kwargs):
+        calls.append({"path": str(path), **kwargs})
+        return {
+            "storage_path": "oss://bucket-a/prefix/browser-captures/company-001/shop-001/file.csv",
+            "storage_provider": "oss",
+            "storage_bucket": "bucket-a",
+            "storage_key": "prefix/browser-captures/company-001/shop-001/file.csv",
+            "storage_uri": "oss://bucket-a/prefix/browser-captures/company-001/shop-001/file.csv",
+            "local_path": str(path),
+            "content_type": "text/csv",
+            "size_bytes": Path(path).stat().st_size,
+        }
+
+    monkeypatch.setattr(
+        "finance_browser_agent.playwright_runner.upload_capture_file_if_configured",
+        fake_upload,
+    )
+    capture_files: list[dict[str, object]] = []
+
+    result = _save_download(
+        FakeDownload("file.csv"),
+        download_dir=tmp_path,
+        capture_files=capture_files,
+        storage_context={
+            "company_id": "company-001",
+            "shop_id": "shop-001",
+            "biz_date": "2026-05-18",
+            "sync_job_id": "job-001",
+        },
+    )
+
+    assert Path(result["last_download"]).read_bytes() == b"a,b\n1,2\n"
+    assert calls == [
+        {
+            "path": result["last_download"],
+            "company_id": "company-001",
+            "shop_id": "shop-001",
+            "biz_date": "2026-05-18",
+            "sync_job_id": "job-001",
+        }
+    ]
+    assert capture_files == [
+        {
+            "storage_path": "oss://bucket-a/prefix/browser-captures/company-001/shop-001/file.csv",
+            "storage_provider": "oss",
+            "storage_bucket": "bucket-a",
+            "storage_key": "prefix/browser-captures/company-001/shop-001/file.csv",
+            "storage_uri": "oss://bucket-a/prefix/browser-captures/company-001/shop-001/file.csv",
+            "local_path": result["last_download"],
+            "content_type": "text/csv",
+            "size_bytes": 8,
+            "encoding": "",
+            "checksum": "",
+            "row_count": 0,
+        }
+    ]

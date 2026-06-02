@@ -5,9 +5,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 
+_EMPTY_PLACEHOLDERS = {"", "-", "--", "---", "—", "——", "–", "－"}
+
+
 def _money(value: Any) -> Decimal:
     text = str(value or "0").strip().replace(",", "").replace("￥", "").replace("¥", "")
-    if text == "":
+    if text in _EMPTY_PLACEHOLDERS:
         text = "0"
     return Decimal(text).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -18,6 +21,8 @@ def _int_or_none(value: Any) -> int | None:
     text = str(value).strip().replace(",", "")
     if not text:
         return None
+    if text in _EMPTY_PLACEHOLDERS:
+        return 0
     match = re.search(r"\d+", text)
     if not match:
         return None

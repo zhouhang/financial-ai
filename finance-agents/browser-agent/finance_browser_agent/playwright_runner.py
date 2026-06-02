@@ -37,6 +37,7 @@ from finance_browser_agent.chrome_launcher import launch_chrome
 from finance_browser_agent.playbook_interpreter import validate_step_actions
 from finance_browser_agent.quality_gate import validate_rows
 from finance_browser_agent.remote_control import PlaywrightControlBackend, RemoteControlCoordinator
+from finance_browser_agent.storage_client import upload_capture_file_if_configured
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -468,6 +469,7 @@ def _execute_action(
     allow_auth_redirect: bool = False,
     run_config: PlaywrightRunConfig | None = None,
     sync_job_id: str = "",
+    storage_context: dict[str, str] | None = None,
     handoff_coordinator: RemoteControlCoordinator | None = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
@@ -563,18 +565,12 @@ def _execute_action(
     if name == "download":
         with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
             _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
-        download = info.value
-        target = download_dir / (download.suggested_filename or "download.bin")
-        download.save_as(str(target))
-        capture_files.append(
-            {
-                "storage_path": str(target),
-                "encoding": "",
-                "checksum": "",
-                "row_count": 0,
-            }
+        return _save_download(
+            info.value,
+            download_dir=download_dir,
+            capture_files=capture_files,
+            storage_context=storage_context,
         )
-        return {"last_download": str(target)}
     if name == "download_history_file":
         return _download_history_file(
             page,
@@ -584,6 +580,7 @@ def _execute_action(
             capture_files=capture_files,
             download_dir=download_dir,
             timeout_ms=timeout_ms,
+            storage_context=storage_context,
         )
     if name == "download_qianniu_export_report":
         return _download_qianniu_export_report(
@@ -594,11 +591,12 @@ def _execute_action(
             capture_files=capture_files,
             download_dir=download_dir,
             timeout_ms=timeout_ms,
+            storage_context=storage_context,
         )
     if name == "parse_table":
         source = str(action.get("source") or "last_download")
         fmt = str(action.get("format") or "csv").lower()
-        path = extracted.get(source) or capture_files[-1]["storage_path"]
+        path = extracted.get(source) or capture_files[-1].get("local_path") or capture_files[-1]["storage_path"]
         rows, encoding = _parse_downloaded_table_with_metadata(Path(str(path)), fmt=fmt)
         if capture_files:
             capture_files[-1]["encoding"] = encoding
@@ -1658,6 +1656,7 @@ def _save_download(
     *,
     download_dir: Path,
     capture_files: list[dict[str, Any]],
+    storage_context: dict[str, str] | None = None,
 ) -> dict[str, str]:
     target = download_dir / (download.suggested_filename or "download.bin")
     if target.exists():
@@ -1668,8 +1667,25 @@ def _save_download(
             target = download_dir / f"{stem}-{index}{suffix}"
             index += 1
     download.save_as(str(target))
-    capture_files.append({"storage_path": str(target), "encoding": "", "checksum": "", "row_count": 0})
+    _append_capture_file(target, capture_files=capture_files, storage_context=storage_context)
     return {"last_download": str(target)}
+
+
+def _append_capture_file(
+    target: Path,
+    *,
+    capture_files: list[dict[str, Any]],
+    storage_context: dict[str, str] | None = None,
+) -> None:
+    context = dict(storage_context or {})
+    storage_meta = upload_capture_file_if_configured(
+        target,
+        company_id=str(context.get("company_id") or ""),
+        shop_id=str(context.get("shop_id") or ""),
+        biz_date=str(context.get("biz_date") or ""),
+        sync_job_id=str(context.get("sync_job_id") or ""),
+    )
+    capture_files.append({**storage_meta, "encoding": "", "checksum": "", "row_count": 0})
 
 
 def _configured_selectors(action: dict[str, Any], list_key: str, single_key: str = "") -> list[str]:
@@ -1798,6 +1814,7 @@ def _download_qianniu_export_report(
     capture_files: list[dict[str, Any]],
     download_dir: Path,
     timeout_ms: int,
+    storage_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     row_selector = str(action.get("selector") or "").strip()
     requested_after_value = _resolve_value(
@@ -1946,7 +1963,12 @@ def _download_qianniu_export_report(
         if button is not None:
             with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
                 button.click(timeout=min(30000, timeout_ms))
-            return _save_download(info.value, download_dir=download_dir, capture_files=capture_files)
+            return _save_download(
+                info.value,
+                download_dir=download_dir,
+                capture_files=capture_files,
+                storage_context=storage_context,
+            )
         remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
         if remaining_ms <= 0:
             break
@@ -1979,6 +2001,7 @@ def _download_history_file(
     capture_files: list[dict[str, Any]],
     download_dir: Path,
     timeout_ms: int,
+    storage_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
     history_row_selectors = _configured_selectors_with_primary(
@@ -2098,11 +2121,12 @@ def _download_history_file(
 
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
         row.locator(download_selector).click(timeout=timeout_ms)
-    download = info.value
-    target = download_dir / (download.suggested_filename or "download.bin")
-    download.save_as(str(target))
-    capture_files.append({"storage_path": str(target), "encoding": "", "checksum": "", "row_count": 0})
-    return {"last_download": str(target)}
+    return _save_download(
+        info.value,
+        download_dir=download_dir,
+        capture_files=capture_files,
+        storage_context=storage_context,
+    )
 
 
 class BrowserActionError(Exception):
@@ -2175,6 +2199,7 @@ def _run_playbook_with_playwright_inner(
     config = config or PlaywrightRunConfig.from_env()
     playbook = dict(message.get("playbook_body") or {})
     params = dict(message.get("params") or {})
+    company_id = str(message.get("company_id") or params.get("company_id") or "")
     shop_id = str(message.get("shop_id") or params.get("shop_id") or "unknown")
     runtime_profile_ref = str(message.get("runtime_profile_ref") or "")
     job_id = str(message.get("job_id") or "unknown")
@@ -2190,6 +2215,12 @@ def _run_playbook_with_playwright_inner(
 
     rows: list[dict[str, Any]] = []
     capture_files: list[dict[str, Any]] = []
+    storage_context = {
+        "company_id": company_id,
+        "shop_id": shop_id,
+        "biz_date": str(params.get("biz_date") or ""),
+        "sync_job_id": job_id,
+    }
     extracted: dict[str, Any] = {}
     steps = [dict(step) for step in playbook.get("steps") or []]
     try:
@@ -2270,6 +2301,7 @@ def _run_playbook_with_playwright_inner(
                             allow_auth_redirect=allow_auth_redirect,
                             run_config=config,
                             sync_job_id=job_id,
+                            storage_context=storage_context,
                             handoff_coordinator=handoff_coordinator,
                         )
                         if result.get("rows"):

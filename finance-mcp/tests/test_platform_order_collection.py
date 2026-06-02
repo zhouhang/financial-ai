@@ -2581,6 +2581,86 @@ async def test_list_collection_records_reads_alipay_platform_bill_lines(
 
 
 @pytest.mark.anyio
+async def test_list_collection_records_reads_browser_collection_records(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: {
+            "id": dataset_id,
+            "data_source_id": "source-browser-1",
+            "dataset_code": "browser_orders",
+            "resource_key": "playbook-orders@1",
+            "extract_config": {
+                "source_type": "browser_collection_records",
+                "storage": "browser_collection_records",
+            },
+            "schema_summary": {"storage": "browser_collection_records"},
+            "meta": {"source_type": "browser_collection_records"},
+        },
+    )
+
+    def fake_list_browser_collection_records(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_browser_collection_records"] = kwargs
+        return [{"payload": {"订单编号": "T1001", "买家实付金额": "0.00"}}]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        fake_list_browser_collection_records,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_browser_collection_record_stats",
+        lambda **kwargs: {"total_count": 1, "active_count": 0, "unchanged_count": 1},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+
+    result = await data_sources._handle_data_source_list_collection_records(
+        {
+            "auth_token": "token",
+            "source_id": "source-browser-1",
+            "dataset_id": "dataset-browser-1",
+            "biz_date": "2026-06-01",
+            "item_key": "T1001",
+            "filters": {"订单编号": "T1001"},
+        }
+    )
+
+    assert result["success"] is True
+    assert result["records"][0]["payload"]["订单编号"] == "T1001"
+    assert result["stats"]["unchanged_count"] == 1
+    assert result["count"] == 1
+    assert calls["list_browser_collection_records"]["biz_date"] == "2026-06-01"
+    assert calls["list_browser_collection_records"]["item_key"] == "T1001"
+    assert calls["list_browser_collection_records"]["filters"] == {"订单编号": "T1001"}
+
+
+@pytest.mark.anyio
 async def test_list_collection_records_passes_payload_filters_to_generic_storage(
     monkeypatch,
 ) -> None:

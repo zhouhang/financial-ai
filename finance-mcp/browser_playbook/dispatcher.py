@@ -39,6 +39,7 @@ class BrowserPlaybookDispatcher:
         payload = dict(job.get("request_payload") or {})
         message = {
             "job_id": str(job["id"]),
+            "company_id": company_id,
             "shop_id": str(binding["shop_id"]),
             "playbook_id": str(playbook["playbook_id"]),
             "playbook_version": str(playbook["version"]),
@@ -89,4 +90,3 @@ class BrowserPlaybookDispatcher:
         summary["capture_file_count"] = int((file_summary or {}).get("inserted_count") or 0)
         self.db.mark_browser_sync_job_success(sync_job_id=str(job["id"]), summary=summary)
         return {"status": "success", "summary": summary}
-

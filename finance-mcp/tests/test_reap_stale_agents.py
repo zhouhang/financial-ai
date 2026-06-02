@@ -72,3 +72,29 @@ def test_reap_stale_agent_running_jobs_filters_and_threshold(monkeypatch) -> Non
     assert cursor.params[0][0] == 180
     assert result["failed_count"] == 1
     assert result["sync_job_ids"] == ["sync-stale-1"]
+
+
+class TupleCursor(FakeCursor):
+    def fetchall(self):  # fail_waiting iterates (queue_id, company_id, failed_error)
+        return [("queue-001", "company-001", "AGENT_HEARTBEAT_LOST: stale")]
+
+
+class TupleConnManager(FakeConnManager):
+    def __enter__(self) -> FakeConn:
+        return FakeConn(self.cursor)
+
+
+def test_stale_agent_running_job_is_reaped_then_cascaded(monkeypatch) -> None:
+    # 1) reap marks the stale agent's running job failed (dict cursor from Task 3)
+    reap_cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(reap_cursor))
+    reaped = auth_db.reap_stale_agent_running_jobs(stale_after_seconds=180)
+    assert reaped["failed_count"] >= 1
+
+    # 2) the fail_failed reaper targets waiting_data queue rows whose sync_job is now failed
+    fail_cursor = TupleCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: TupleConnManager(fail_cursor))
+    auth_db.fail_waiting_recon_runs_with_failed_collection_jobs()
+    sql = "\n".join(fail_cursor.sql)
+    assert "status = 'waiting_data'" in sql
+    assert "job_status IN ('failed', 'cancelled')" in sql

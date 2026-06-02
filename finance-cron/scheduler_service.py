@@ -371,9 +371,16 @@ class FinanceCronSchedulerService:
         )
         for label, call in steps:
             try:
-                await call()
+                result = await call()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[finance-cron] reaper 步骤失败: step=%s error=%s", label, exc)
+                logger.warning("[finance-cron] reaper 步骤异常: step=%s error=%s", label, exc)
+                continue
+            if isinstance(result, dict) and result.get("success") is False:
+                logger.warning(
+                    "[finance-cron] reaper 步骤失败: step=%s error=%s",
+                    label,
+                    result.get("error"),
+                )
 
     async def refresh_run_plans(self) -> None:
         scheduler_token = create_scheduler_auth_token()

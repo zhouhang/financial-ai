@@ -88,6 +88,7 @@ async def test_dispatcher_builds_message_from_claim_enrichment_not_raw_payload()
     captured: dict[str, dict] = {}
     job = {
         "id": "sync-001",
+        "company_id": "company-001",
         "request_payload": {"biz_date": "2026-05-18"},
         "shop_id": "shop-001",
         "playbook_id": "qianniu-daily-bill-export",
@@ -108,6 +109,7 @@ async def test_dispatcher_builds_message_from_claim_enrichment_not_raw_payload()
     await loop.run_once()
 
     assert captured["message"]["shop_id"] == "shop-001"
+    assert captured["message"]["company_id"] == "company-001"
     assert captured["message"]["playbook_body"] == job["playbook_body"]
     assert captured["message"]["runtime_profile_ref"] == "profile-001"
     assert captured["message"]["playbook_version"] == "1.0.0"
@@ -199,6 +201,30 @@ async def test_dispatcher_retries_when_completion_write_fails() -> None:
     # Must NOT report success when the server rejected the completion write.
     assert result["status"] != "success"
     assert client.failed, "expected a retryable failure to be recorded"
+    assert client.failed[0]["retryable"] is True
+    assert client.failed[0]["fail_reason"] == "COMPLETE_PERSIST_FAILED"
+
+
+class RaisingCompleteClient(FakeClient):
+    async def mark_browser_job_success(self, payload: dict) -> dict:
+        self.completed.append(payload)
+        raise RuntimeError("ws boom")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retries_when_completion_call_raises() -> None:
+    job = {
+        "id": "sync-001", "shop_id": "shop-001",
+        "playbook_body": {"steps": [], "output": {"columns": [], "item_key_fields": []}, "quality_gate": {}},
+        "request_payload": {"biz_date": "2026-05-31"},
+    }
+    client = RaisingCompleteClient([job], {"job_id": "sync-001", "status": "success", "records": [], "capture_files": []})
+    loop = BrowserDispatcherLoop(client=client, runner=lambda message: client.result, max_concurrency=1)
+
+    result = await loop.run_once()
+
+    assert result["status"] != "success"
+    assert client.failed
     assert client.failed[0]["retryable"] is True
     assert client.failed[0]["fail_reason"] == "COMPLETE_PERSIST_FAILED"
 

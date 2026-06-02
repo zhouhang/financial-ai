@@ -103,18 +103,23 @@ class BrowserDispatcherLoop:
                 message["on_risk_waiting"] = _on_risk_waiting
                 result = await asyncio.to_thread(self.runner, message)
         if isinstance(result, dict) and result.get("status") == "success":
-            ack = await self.client.mark_browser_job_success(
-                {
-                    "sync_job_id": sync_job_id,
-                    "summary": {
-                        "record_count": len(result.get("records") or []),
-                        "quality_summary": result.get("quality_summary") or {},
-                    },
-                    "records": list(result.get("records") or []),
-                    "capture_files": list(result.get("capture_files") or []),
-                }
-            )
-            ack_rejected = isinstance(ack, dict) and ack.get("success") is False
+            try:
+                ack = await self.client.mark_browser_job_success(
+                    {
+                        "sync_job_id": sync_job_id,
+                        "summary": {
+                            "record_count": len(result.get("records") or []),
+                            "quality_summary": result.get("quality_summary") or {},
+                        },
+                        "records": list(result.get("records") or []),
+                        "capture_files": list(result.get("capture_files") or []),
+                    }
+                )
+                ack_rejected = isinstance(ack, dict) and ack.get("success") is False
+                ack_error = str((ack or {}).get("error") or "completion persist failed")
+            except Exception as exc:  # noqa: BLE001
+                ack_rejected = True
+                ack_error = f"completion call raised: {exc}"
             if ack_rejected:
                 # Runner succeeded but the server explicitly rejected the completion write
                 # (e.g. a transient DB error). Do NOT claim success — re-fail as retryable so the
@@ -124,7 +129,7 @@ class BrowserDispatcherLoop:
                 # capture-files upsert via ON CONFLICT and records via key-field upsert (see
                 # _handle_browser_sync_job_complete). If a non-idempotent side effect is ever
                 # added to that handler, this retry path would duplicate it.
-                error_message = str((ack or {}).get("error") or "completion persist failed")
+                error_message = ack_error
                 await self.client.mark_browser_job_failed(
                     {
                         "sync_job_id": sync_job_id,
@@ -197,6 +202,7 @@ class BrowserDispatcherLoop:
         params = inject_credentials_into_params(params, credential_ref)
         return {
             "job_id": str(job.get("id") or ""),
+            "company_id": str(job.get("company_id") or ""),
             "shop_id": str(job.get("shop_id") or ""),
             "playbook_id": str(job.get("playbook_id") or ""),
             "playbook_version": str(job.get("playbook_version") or ""),
