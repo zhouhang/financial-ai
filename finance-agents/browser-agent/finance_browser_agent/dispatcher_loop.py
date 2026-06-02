@@ -103,7 +103,7 @@ class BrowserDispatcherLoop:
                 message["on_risk_waiting"] = _on_risk_waiting
                 result = await asyncio.to_thread(self.runner, message)
         if isinstance(result, dict) and result.get("status") == "success":
-            await self.client.mark_browser_job_success(
+            ack = await self.client.mark_browser_job_success(
                 {
                     "sync_job_id": sync_job_id,
                     "summary": {
@@ -114,6 +114,26 @@ class BrowserDispatcherLoop:
                     "capture_files": list(result.get("capture_files") or []),
                 }
             )
+            if not (isinstance(ack, dict) and ack.get("success", True) is not False):
+                # Runner succeeded but the server could not persist the result. Do NOT claim
+                # success — re-fail as retryable so the job re-collects and re-completes.
+                error_message = str((ack or {}).get("error") or "completion persist failed")
+                await self.client.mark_browser_job_failed(
+                    {
+                        "sync_job_id": sync_job_id,
+                        "fail_reason": "COMPLETE_PERSIST_FAILED",
+                        "error_message": error_message,
+                        "retryable": True,
+                        "max_attempts": 3,
+                        "retry_delay_seconds": 60,
+                    }
+                )
+                logger.warning(
+                    "browser completion persist failed, re-failing as retryable: sync_job_id=%s error=%s",
+                    sync_job_id,
+                    error_message,
+                )
+                return {"status": "failed", "sync_job_id": sync_job_id, "retryable": True}
             logger.info(
                 "browser runner succeeded: sync_job_id=%s record_count=%s capture_file_count=%s",
                 sync_job_id,
