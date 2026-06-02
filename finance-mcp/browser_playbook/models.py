@@ -16,6 +16,7 @@ ActionType = Literal[
     "wait_ms",
     "extract_text",
     "extract_summary",
+    "stop_if_summary_zero",
     "select_checkboxes",
     "download",
     "download_history_file",
@@ -97,6 +98,8 @@ class PlaybookStep(BaseModel):
     username_value_from: str | None = None
     password_value_from: str | None = None
     post_login_wait_selector: str | None = None
+    summary_field: str | None = None
+    record_as: str | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "PlaybookStep":

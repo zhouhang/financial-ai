@@ -15,12 +15,14 @@ class FakeWs:
     """假 WS:记录 sent;recv 按脚本返回;支持 async for(reader)。"""
     def __init__(self, scripted_incoming):
         self.sent: list[dict] = []
+        self.raw_sent: list[str] = []
         self._incoming = asyncio.Queue()
         for item in scripted_incoming:
             self._incoming.put_nowait(item)
         self.closed = False
 
     async def send(self, raw):
+        self.raw_sent.append(raw)
         self.sent.append(json.loads(raw))
 
     async def recv(self):
@@ -79,6 +81,21 @@ async def test_request_returns_error_on_not_ok():
     fake.feed({"type": "result", "id": fake.sent[-1]["id"], "ok": False, "error": "boom"})
     res = await task
     assert res["success"] is False and "boom" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_request_sends_compact_utf8_json_for_large_chinese_payloads():
+    fake = FakeWs([json.dumps({"type": "hello_ack", "ok": True})])
+    client = _client(fake)
+
+    task = asyncio.create_task(client.request("job_complete", {"records": [{"业务大类": "交易货款"}]}))
+    await asyncio.sleep(0.05)
+    fake.feed({"type": "result", "id": fake.sent[-1]["id"], "ok": True, "data": {"success": True}})
+
+    assert await task == {"success": True}
+    raw_request = fake.raw_sent[-1]
+    assert "业务大类" in raw_request
+    assert "\\u4e1a\\u52a1" not in raw_request
 
 
 @pytest.mark.asyncio

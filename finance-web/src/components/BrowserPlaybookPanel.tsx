@@ -5,6 +5,7 @@ import {
   ClipboardCopy,
   Eraser,
   Eye,
+  KeyRound,
   Loader2,
   MonitorSmartphone,
   RefreshCw,
@@ -30,6 +31,16 @@ interface BrowserCollectionRegistrationResponse {
   source_id?: string;
   verification_sync_job_id?: string;
   verification_biz_date?: string;
+  message?: string;
+  detail?: string;
+  error?: string;
+}
+
+interface BrowserCredentialUpdateResponse {
+  success?: boolean;
+  source_id?: string;
+  credential?: Record<string, unknown>;
+  binding?: Record<string, unknown> | null;
   message?: string;
   detail?: string;
   error?: string;
@@ -70,6 +81,11 @@ interface BrowserCollectionFormState {
   playbookBodyText: string;
 }
 
+interface CredentialFormState {
+  credentialUsername: string;
+  credentialPassword: string;
+}
+
 interface BrowserCollectionRow {
   source: DataSourceListItem;
   title: string;
@@ -98,11 +114,23 @@ interface VerificationState {
   errorMessage: string;
 }
 
+interface CredentialDialogState {
+  row: BrowserCollectionRow | null;
+  form: CredentialFormState;
+  error: string;
+  submitting: boolean;
+}
+
 const emptyForm: BrowserCollectionFormState = {
   title: '',
   credentialUsername: '',
   credentialPassword: '',
   playbookBodyText: '',
+};
+
+const emptyCredentialForm: CredentialFormState = {
+  credentialUsername: '',
+  credentialPassword: '',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,6 +143,21 @@ function text(value: unknown): string {
 
 function registrationTitle(source: DataSourceListItem): string {
   return text(source.metadata?.registration_title) || source.name || source.code || '未命名浏览器采集';
+}
+
+function defaultCredentialUsername(title: string): string {
+  const shopName = title.replace(/-(店铺订单|收支明细|收支账单)$/, '').trim();
+  return shopName ? `${shopName}:ai财务` : '';
+}
+
+function browserTaskGroupKey(title: string): string {
+  return title.replace(/-(店铺订单|收支明细|收支账单)$/, '').trim() || title;
+}
+
+function browserTaskKindOrder(title: string): number {
+  if (/-店铺订单$/.test(title)) return 0;
+  if (/-(收支明细|收支账单)$/.test(title)) return 1;
+  return 2;
 }
 
 function statusLabel(status: string): string {
@@ -217,6 +260,7 @@ function prettyJson(value: unknown): string {
 }
 
 const BROWSER_DETAIL_RECORD_LIMIT = 100;
+const BROWSER_TASK_PAGE_SIZE = 20;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -242,11 +286,12 @@ export function BrowserPlaybookPanel({
   );
 
   const rows = useMemo<BrowserCollectionRow[]>(
-    () =>
-      sources
+    () => {
+      const browserSources = sources
         .filter((source) => source.source_kind === 'browser_playbook')
-        .map((source) => ({
+        .map((source, index) => ({
           source,
+          index,
           title: registrationTitle(source),
           status: source.status || source.health_status || 'unknown',
           taskStatus: text(source.browser_verification?.job_status),
@@ -254,9 +299,34 @@ export function BrowserPlaybookPanel({
           taskError: taskError(source),
           taskUpdatedAt: taskUpdatedAt(source),
           updatedAt: source.updated_at || source.last_checked_at || '',
-        })),
+        }));
+
+      browserSources.sort((left, right) => {
+        const leftGroup = browserTaskGroupKey(left.title);
+        const rightGroup = browserTaskGroupKey(right.title);
+        const groupCompare = leftGroup.localeCompare(rightGroup, 'zh-CN');
+        if (groupCompare !== 0) return groupCompare;
+
+        const kindCompare = browserTaskKindOrder(left.title) - browserTaskKindOrder(right.title);
+        if (kindCompare !== 0) return kindCompare;
+
+        return left.index - right.index;
+      });
+
+      return browserSources.map(({ index: _index, ...row }) => row);
+    },
     [sources],
   );
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(rows.length / BROWSER_TASK_PAGE_SIZE));
+  const normalizedPage = Math.min(page, totalPages);
+  const pagedRows = useMemo(
+    () => rows.slice((normalizedPage - 1) * BROWSER_TASK_PAGE_SIZE, normalizedPage * BROWSER_TASK_PAGE_SIZE),
+    [normalizedPage, rows],
+  );
+  const pageStart = rows.length === 0 ? 0 : (normalizedPage - 1) * BROWSER_TASK_PAGE_SIZE + 1;
+  const pageEnd = rows.length === 0 ? 0 : pageStart + pagedRows.length - 1;
+  const showPagination = rows.length > BROWSER_TASK_PAGE_SIZE;
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [form, setForm] = useState<BrowserCollectionFormState>(emptyForm);
@@ -269,6 +339,12 @@ export function BrowserPlaybookPanel({
     error: '',
     detail: null,
     copied: false,
+  });
+  const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState>({
+    row: null,
+    form: emptyCredentialForm,
+    error: '',
+    submitting: false,
   });
   const [actionBusy, setActionBusy] = useState('');
   const [actionError, setActionError] = useState('');
@@ -289,6 +365,10 @@ export function BrowserPlaybookPanel({
     setVerification({ syncJobId: '', bizDate: '', status: 'idle', message: '', errorMessage: '' });
     setIsCreateOpen(true);
   }, [openCreateSignal]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
   const finalizeRegistration = useCallback(
     async (syncJobId: string) => {
@@ -578,6 +658,81 @@ export function BrowserPlaybookPanel({
     [authHeaders, authToken, onRegistered],
   );
 
+  const openCredentialDialog = useCallback((row: BrowserCollectionRow) => {
+    setCredentialDialog({
+      row,
+      form: {
+        credentialUsername: defaultCredentialUsername(row.title),
+        credentialPassword: '',
+      },
+      error: '',
+      submitting: false,
+    });
+  }, []);
+
+  const closeCredentialDialog = useCallback(() => {
+    setCredentialDialog({
+      row: null,
+      form: emptyCredentialForm,
+      error: '',
+      submitting: false,
+    });
+  }, []);
+
+  const submitCredentialUpdate = useCallback(async () => {
+    const row = credentialDialog.row;
+    if (!row) return;
+    if (!authToken) {
+      setCredentialDialog((prev) => ({ ...prev, error: '未登录' }));
+      return;
+    }
+    const credentialUsername = credentialDialog.form.credentialUsername.trim();
+    const credentialPassword = credentialDialog.form.credentialPassword;
+    if (!credentialUsername || !credentialPassword) {
+      setCredentialDialog((prev) => ({ ...prev, error: '登录账号和密码不能为空' }));
+      return;
+    }
+
+    setCredentialDialog((prev) => ({ ...prev, error: '', submitting: true }));
+    setActionError('');
+    setActionNotice('');
+    try {
+      const response = await fetch(
+        `/api/data-sources/${encodeURIComponent(row.source.id)}/browser-playbook/credential`,
+        {
+          method: 'POST',
+          headers: authHeaders,
+          body: JSON.stringify({
+            credential_username: credentialUsername,
+            credential_password: credentialPassword,
+          }),
+        },
+      );
+      const body = (await response.json().catch(() => ({}))) as BrowserCredentialUpdateResponse;
+      if (!response.ok || !body.success) {
+        throw new Error(String(body.detail || body.error || body.message || '浏览器任务凭证保存失败'));
+      }
+      setActionNotice(String(body.message || '浏览器任务凭证已保存'));
+      setCredentialDialog({
+        row: null,
+        form: emptyCredentialForm,
+        error: '',
+        submitting: false,
+      });
+      await onRegistered?.();
+    } catch (error) {
+      setCredentialDialog((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : '浏览器任务凭证保存失败',
+        submitting: false,
+        form: {
+          ...prev.form,
+          credentialPassword: '',
+        },
+      }));
+    }
+  }, [authHeaders, authToken, credentialDialog, onRegistered]);
+
   const openTaskDetail = useCallback(
     async (row: BrowserCollectionRow) => {
       setSelectedRow(row);
@@ -709,104 +864,144 @@ export function BrowserPlaybookPanel({
             暂无浏览器任务
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border">
-            <table className="min-w-[1060px] w-full table-fixed text-sm">
-              <colgroup>
-                <col className="w-[25%]" />
-                <col className="w-[14%]" />
-                <col className="w-[12%]" />
-                <col className="w-[17%]" />
-                <col className="w-[32%]" />
-              </colgroup>
-              <thead className="bg-surface-secondary text-left text-text-secondary">
-                <tr>
-                  <th className="px-4 py-3 font-medium">标题</th>
-                  <th className="px-4 py-3 font-medium">任务状态</th>
-                  <th className="px-4 py-3 font-medium">启用状态</th>
-                  <th className="px-4 py-3 font-medium">最近更新</th>
-                  <th className="px-4 py-3 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.source.id} className="border-t border-border-subtle">
-                    <td className="px-4 py-3">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <MonitorSmartphone className="h-4 w-4 shrink-0 text-cyan-600" />
-                        <span className="truncate font-medium text-text-primary">{row.title}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs ${taskStatusClass(row.taskLabel)}`}
-                      >
-                        {row.taskLabel}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
-                    <td className="px-4 py-3 text-text-secondary">{formatDateTime(row.updatedAt)}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex min-w-[272px] items-center gap-2 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => void openTaskDetail(row)}
-                          disabled={Boolean(actionBusy)}
-                          aria-label={`详情 ${row.title}`}
-                          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
+          <div className="rounded-xl border border-border">
+            <div className="overflow-x-auto">
+              <table className="min-w-[1060px] w-full table-fixed text-sm">
+                <colgroup>
+                  <col className="w-[25%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[12%]" />
+                  <col className="w-[17%]" />
+                  <col className="w-[32%]" />
+                </colgroup>
+                <thead className="bg-surface-secondary text-left text-text-secondary">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">标题</th>
+                    <th className="px-4 py-3 font-medium">任务状态</th>
+                    <th className="px-4 py-3 font-medium">启用状态</th>
+                    <th className="px-4 py-3 font-medium">最近更新</th>
+                    <th className="px-4 py-3 font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedRows.map((row) => (
+                    <tr key={row.source.id} className="border-t border-border-subtle">
+                      <td className="px-4 py-3">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <MonitorSmartphone className="h-4 w-4 shrink-0 text-cyan-600" />
+                          <span className="truncate font-medium text-text-primary">{row.title}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs ${taskStatusClass(row.taskLabel)}`}
                         >
-                          <Eye className="h-3.5 w-3.5" />
-                          详情
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void retryBrowserTask(row)}
-                          disabled={Boolean(actionBusy)}
-                          aria-label={`重试 ${row.title}`}
-                          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
-                        >
-                          {actionBusy === `retry:${row.source.id}` ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <RefreshCw className="h-3.5 w-3.5" />
-                          )}
-                          重试
-                        </button>
-                        {canClearBrowserTask(row.source) && (
+                          {row.taskLabel}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
+                      <td className="px-4 py-3 text-text-secondary">{formatDateTime(row.updatedAt)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex min-w-[340px] items-center gap-2 whitespace-nowrap">
                           <button
                             type="button"
-                            onClick={() => void clearBrowserTask(row)}
+                            onClick={() => void openTaskDetail(row)}
                             disabled={Boolean(actionBusy)}
-                            aria-label={`清除任务 ${row.title}`}
-                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-60"
+                            aria-label={`详情 ${row.title}`}
+                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
                           >
-                            {actionBusy === `clear:${text(row.source.browser_verification?.sync_job_id)}` ? (
+                            <Eye className="h-3.5 w-3.5" />
+                            详情
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openCredentialDialog(row)}
+                            disabled={Boolean(actionBusy)}
+                            aria-label={`填密码 ${row.title}`}
+                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
+                          >
+                            <KeyRound className="h-3.5 w-3.5" />
+                            填密码
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void retryBrowserTask(row)}
+                            disabled={Boolean(actionBusy)}
+                            aria-label={`重试 ${row.title}`}
+                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
+                          >
+                            {actionBusy === `retry:${row.source.id}` ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             ) : (
-                              <Eraser className="h-3.5 w-3.5" />
+                              <RefreshCw className="h-3.5 w-3.5" />
                             )}
-                            清除任务
+                            重试
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => void deleteBrowserTask(row)}
-                          disabled={Boolean(actionBusy)}
-                          aria-label={`删除 ${row.title}`}
-                          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-60"
-                        >
-                          {actionBusy === `delete:${row.source.id}` ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
+                          {canClearBrowserTask(row.source) && (
+                            <button
+                              type="button"
+                              onClick={() => void clearBrowserTask(row)}
+                              disabled={Boolean(actionBusy)}
+                              aria-label={`清除任务 ${row.title}`}
+                              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-60"
+                            >
+                              {actionBusy === `clear:${text(row.source.browser_verification?.sync_job_id)}` ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Eraser className="h-3.5 w-3.5" />
+                              )}
+                              清除任务
+                            </button>
                           )}
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                          <button
+                            type="button"
+                            onClick={() => void deleteBrowserTask(row)}
+                            disabled={Boolean(actionBusy)}
+                            aria-label={`删除 ${row.title}`}
+                            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-60"
+                          >
+                            {actionBusy === `delete:${row.source.id}` ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {showPagination && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-sm text-text-secondary">
+                <span>
+                  显示 {pageStart}-{pageEnd} / {rows.length} 条
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPage((current) => Math.max(1, current - 1))}
+                    disabled={normalizedPage <= 1}
+                    className="inline-flex items-center rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-50"
+                  >
+                    上一页
+                  </button>
+                  <span className="min-w-[72px] text-center">
+                    第 {normalizedPage} / {totalPages} 页
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                    disabled={normalizedPage >= totalPages}
+                    className="inline-flex items-center rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-50"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -868,6 +1063,68 @@ export function BrowserPlaybookPanel({
                   注册
                 </button>
               )}
+            </div>
+          </div>
+        </Dialog>
+      )}
+
+      {credentialDialog.row && (
+        <Dialog title="填写浏览器任务密码" onClose={closeCredentialDialog}>
+          <div className="space-y-4">
+            <section className="rounded-xl border border-border bg-surface-secondary p-3">
+              <DetailItem label="任务" value={credentialDialog.row.title} />
+            </section>
+            <Field
+              label="登录账号"
+              value={credentialDialog.form.credentialUsername}
+              onChange={(credentialUsername) =>
+                setCredentialDialog((prev) => ({
+                  ...prev,
+                  form: { ...prev.form, credentialUsername },
+                  error: '',
+                }))
+              }
+            />
+            <Field
+              label="密码"
+              type="password"
+              value={credentialDialog.form.credentialPassword}
+              onChange={(credentialPassword) =>
+                setCredentialDialog((prev) => ({
+                  ...prev,
+                  form: { ...prev.form, credentialPassword },
+                  error: '',
+                }))
+              }
+            />
+            {credentialDialog.error && (
+              <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{credentialDialog.error}</span>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeCredentialDialog}
+                disabled={credentialDialog.submitting}
+                className="inline-flex items-center rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitCredentialUpdate()}
+                disabled={credentialDialog.submitting}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+              >
+                {credentialDialog.submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <KeyRound className="h-4 w-4" />
+                )}
+                保存
+              </button>
             </div>
           </div>
         </Dialog>

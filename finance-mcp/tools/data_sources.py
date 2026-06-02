@@ -31,6 +31,7 @@ from mcp import Tool
 from app_config import SERVICE_PROVIDER_COMPANY_ID
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
+from browser_playbook.credentials import update_browser_playbook_credential
 from connectors.factory import build_connector
 from platforms.base import PlatformAppConfig, PlatformTokenBundle
 from platforms.factory import build_connector as build_platform_connector
@@ -115,6 +116,7 @@ VALID_BROWSER_PLAYBOOK_ACTIONS = {
     "wait_ms",
     "extract_text",
     "extract_summary",
+    "stop_if_summary_zero",
     "select_checkboxes",
     "download",
     "download_history_file",
@@ -5738,6 +5740,25 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_update_browser_playbook_credential",
+            description="更新已有 browser_playbook 任务的商家登录凭证。只保存密封后的凭证并返回安全摘要，不返回密码，不创建 sync_job。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "credential_username": {"type": "string"},
+                    "credential_password": {"type": "string"},
+                },
+                "required": [
+                    "auth_token",
+                    "source_id",
+                    "credential_username",
+                    "credential_password",
+                ],
+            },
+        ),
+        Tool(
             name="data_source_finalize_browser_playbook_registration",
             description="校验 verification sync_job 已 success,原子翻转 playbook(draft→active) + binding(verifying→active)。失败时返回 sync_job 的 fail_reason / error_message。",
             inputSchema={
@@ -6143,6 +6164,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_register_browser_collection(arguments)
         if name == "data_source_register_browser_playbook":
             return await _handle_data_source_register_browser_playbook(arguments)
+        if name == "data_source_update_browser_playbook_credential":
+            return await _handle_data_source_update_browser_playbook_credential(arguments)
         if name == "data_source_finalize_browser_playbook_registration":
             return await _handle_data_source_finalize_browser_playbook_registration(arguments)
         if name == "data_source_retry_browser_playbook_verification":
@@ -7909,6 +7932,33 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
         "verification_biz_date": verification_biz_date,
         "message": "浏览器 playbook 已注册并触发首次验证;请等待 sync_job 完成后调用 finalize 接口激活",
     }
+
+
+async def _handle_data_source_update_browser_playbook_credential(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(
+        company_id=company_id,
+        data_source_id=source_id,
+    )
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+    if str(source_row.get("source_kind") or "") != "browser_playbook":
+        return {"success": False, "error": "仅 browser_playbook 数据源支持更新凭证"}
+
+    result = update_browser_playbook_credential(
+        company_id=company_id,
+        data_source_id=source_id,
+        credential_username=str(arguments.get("credential_username") or "").strip(),
+        credential_password=str(arguments.get("credential_password") or ""),
+    )
+    if not result.get("success"):
+        return result
+    result["source"] = _build_data_source_view(source_row, datasets=[])
+    return result
 
 
 def _browser_collection_dataset_source_type(row: dict[str, Any]) -> str:

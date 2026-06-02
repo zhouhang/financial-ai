@@ -3560,6 +3560,33 @@ async def data_source_register_browser_collection(
     )
 
 
+async def data_source_update_browser_playbook_credential(
+    auth_token: str,
+    source_id: str,
+    *,
+    credential_username: str,
+    credential_password: str,
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+    if not str(credential_username or "").strip():
+        return {"success": False, "error": "登录账号不能为空"}
+    if not credential_password:
+        return {"success": False, "error": "密码不能为空"}
+
+    return await call_mcp_tool(
+        "data_source_update_browser_playbook_credential",
+        {
+            "auth_token": auth_token,
+            "source_id": source_id,
+            "credential_username": credential_username,
+            "credential_password": credential_password,
+        },
+    )
+
+
 async def data_source_retry_browser_playbook_verification(
     auth_token: str,
     source_id: str,

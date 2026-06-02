@@ -113,7 +113,13 @@ class DataAgentWsClient:
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[req_id] = fut
         try:
-            await self._ws.send(json.dumps({"type": msg_type, "id": req_id, **payload}))
+            await self._ws.send(
+                json.dumps(
+                    {"type": msg_type, "id": req_id, **payload},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
             result = await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)

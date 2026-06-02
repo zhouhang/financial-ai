@@ -95,16 +95,38 @@ _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS = 1000
 
 _KNOWN_OVERLAY_MARKERS = (
     "text=预警通知",
+    "text=新手引导",
+    "text=操作指引",
+    "text=功能介绍",
+    "text=下次再说",
     ".normal_headTitle__iJ44s:has-text('预警通知')",
+    ".driver-popover",
+    ".driver-overlay",
 )
 _KNOWN_OVERLAY_PANEL_TITLE_SELECTORS = (
     "text=重要消息",
+    "text=新手引导",
+    "text=操作指引",
+    "text=功能介绍",
 )
 _KNOWN_OVERLAY_CONTAINER_SELECTORS = (
     ".normal_container__13Xbj",
     ".container--SMNuCb74",
+    ".next-dialog",
+    ".next-balloon",
+    ".driver-popover",
+    "[class*='guide']",
+    "[class*='Guide']",
+    "[class*='tour']",
+    "[class*='Tour']",
+)
+_KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS = (
+    "button.driver-popover-next-btn:has-text('完成')",
+    ".driver-popover button.driver-popover-next-btn:has-text('完成')",
+    ".driver-popover .driver-popover-next-btn:has-text('完成')",
 )
 _KNOWN_OVERLAY_CLOSE_SELECTORS = (
+    *_KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS,
     ".notify_headRight__XdjnE .next-icon-close_blod",
     "[class*='notify_headRight'] .next-icon-close_blod",
     "[class*='notify_headRight'] [class*='next-icon-close']",
@@ -123,6 +145,31 @@ _KNOWN_OVERLAY_CLOSE_SELECTORS = (
     ".container--SMNuCb74 [role='button']:has-text('确定')",
     ".container--SMNuCb74 .next-dialog-close",
     ".container--SMNuCb74 .next-icon-close",
+    ".next-dialog button:has-text('知道了')",
+    ".next-dialog button:has-text('我知道了')",
+    ".next-dialog button:has-text('完成')",
+    ".next-dialog button:has-text('下次再说')",
+    ".next-dialog button:has-text('跳过')",
+    ".next-dialog button:has-text('关闭')",
+    ".next-dialog [role='button']:has-text('知道了')",
+    ".next-dialog [role='button']:has-text('我知道了')",
+    ".next-dialog [role='button']:has-text('完成')",
+    ".next-dialog [role='button']:has-text('下次再说')",
+    ".next-dialog [role='button']:has-text('跳过')",
+    ".next-dialog .next-dialog-close",
+    ".next-dialog .next-icon-close",
+    ".next-balloon button:has-text('知道了')",
+    ".next-balloon button:has-text('我知道了')",
+    ".next-balloon button:has-text('完成')",
+    ".next-balloon button:has-text('下次再说')",
+    ".next-balloon button:has-text('跳过')",
+    ".next-balloon .next-balloon-close",
+    "[class*='guide'] button:has-text('知道了')",
+    "[class*='guide'] button:has-text('完成')",
+    "[class*='guide'] button:has-text('跳过')",
+    "[class*='Guide'] button:has-text('知道了')",
+    "[class*='Guide'] button:has-text('完成')",
+    "[class*='Guide'] button:has-text('跳过')",
 )
 
 _KNOWN_OVERLAY_CLOSE_POINT_SCRIPT = r"""
@@ -387,6 +434,29 @@ def _render_template(value: str, *, params: dict[str, Any], extracted: dict[str,
     return re.sub(r"\{\{\s*([^{}]+?)\s*\}\}", repl, text)
 
 
+def _int_from_summary_text(value: Any) -> int | None:
+    text = str(value or "").strip().replace(",", "")
+    empty_markers = (
+        "暂无数据",
+        "暂无记录",
+        "无数据",
+        "没有数据",
+        "未查询到",
+        "查询不到",
+        "无符合条件",
+        "no data",
+    )
+    if not text:
+        return 0
+    if text in {"-", "--", "---", "—", "——", "–", "－"}:
+        return 0
+    lowered = text.lower()
+    if any(marker in lowered for marker in empty_markers):
+        return 0
+    match = re.search(r"\d+", text)
+    return int(match.group(0)) if match else None
+
+
 def _execute_action(
     page: Any,
     action: dict[str, Any],
@@ -474,6 +544,13 @@ def _execute_action(
         for key, css in mapping.items():
             text = page.locator(str(css)).first.inner_text(timeout=timeout_ms)
             extracted[str(key)] = text.strip()
+        return {}
+    if name == "stop_if_summary_zero":
+        summary_field = str(action.get("summary_field") or "row_count").strip()
+        count = _int_from_summary_text(extracted.get(summary_field))
+        if count == 0:
+            extracted[str(action.get("record_as") or "empty_result")] = True
+            return {"stop_playbook": True}
         return {}
     if name == "select_checkboxes":
         return _select_checkboxes(
@@ -1092,6 +1169,22 @@ def _dismiss_known_overlays(context: Any) -> bool:
     if not has_overlay:
         return False
 
+    dismissed = False
+    for selector in _KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
+        locator = _safe_first_locator(context, selector)
+        if locator is None:
+            continue
+        try:
+            locator.click(timeout=1000)
+            dismissed = True
+            _wait_for_timeout(context, 300)
+            break
+        except Exception:
+            continue
+    if dismissed:
+        logger.info("browser known overlay dismissed: overlay=driver_popover clicked=True")
+        return True
+
     keyboard = getattr(context, "keyboard", None)
     press = getattr(keyboard, "press", None)
     if callable(press):
@@ -1101,7 +1194,6 @@ def _dismiss_known_overlays(context: Any) -> bool:
             pass
         _wait_for_timeout(context, 200)
 
-    dismissed = False
     for selector in _KNOWN_OVERLAY_CLOSE_SELECTORS:
         locator = _safe_first_locator(context, selector)
         if locator is None:
@@ -1166,9 +1258,27 @@ def _type_like_human(
     locator.type(value, delay=type_delay_ms, timeout=timeout_ms)
 
 
+def _close_open_datepicker_overlay(page: Any) -> None:
+    """Close a previous date-picker popup before targeting the next readonly input."""
+    overlay = _safe_first_locator(page, ".next-overlay-wrapper.opened")
+    if overlay is None or not _locator_visible(overlay, timeout_ms=200):
+        return
+    keyboard = getattr(page, "keyboard", None)
+    press = getattr(keyboard, "press", None)
+    if not callable(press):
+        return
+    try:
+        press("Escape")
+        _wait_for_timeout(page, 200)
+    except Exception:
+        return
+
+
 def _set_date_value(page: Any, selector: str, value: str, *, timeout_ms: int) -> None:
     if not selector or not value:
         raise BrowserActionError("PAGE_CHANGED", "set_date requires selector and value")
+    _dismiss_known_overlays(page)
+    _close_open_datepicker_overlay(page)
     locator = page.locator(selector).first
     locator.click(timeout=timeout_ms)
     try:
@@ -1700,7 +1810,8 @@ def _download_qianniu_export_report(
     download_button_text = str(action.get("download_button_text") or "").strip()
     refresh_selector = str(action.get("refresh_selector") or "").strip()
     refresh_interval_ms = max(1000, int(action.get("refresh_interval_ms") or 15000))
-    request_time_tolerance_seconds = int(action.get("request_time_tolerance_seconds") or 5)
+    requested_tolerance_seconds = int(action.get("request_time_tolerance_seconds") or 5)
+    request_time_tolerance_seconds = max(requested_tolerance_seconds, 60)
     if not row_selector or not requested_after or not download_button_text:
         raise BrowserActionError(
             "PAGE_CHANGED",
@@ -1717,11 +1828,19 @@ def _download_qianniu_export_report(
         ".next-table-row, "
         "[role='row']"
     )
+    detail_selector = str(
+        action.get("detail_selector")
+        or (
+            "body"
+            f":has-text({_playwright_text_arg('订单导出报表')})"
+            f":has-text({_playwright_text_arg(download_button_text)})"
+        )
+    ).strip()
     earliest_allowed = requested_after - timedelta(seconds=max(0, request_time_tolerance_seconds))
 
     def _find_download_button() -> tuple[Any | None, str]:
         row_sources: list[tuple[str, Any]] = []
-        for selector in [row_selector, fallback_row_selector]:
+        for selector in [row_selector, fallback_row_selector, detail_selector]:
             if not selector:
                 continue
             try:
@@ -2155,6 +2274,13 @@ def _run_playbook_with_playwright_inner(
                         )
                         if result.get("rows"):
                             rows.extend(result["rows"])
+                        if result.get("stop_playbook"):
+                            logger.info(
+                                "browser playbook stopped early: job_id=%s step_id=%s",
+                                job_id,
+                                step_id,
+                            )
+                            break
                 finally:
                     try:
                         browser.close()

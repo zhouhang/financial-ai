@@ -1,0 +1,129 @@
+name: tally
+
+x-python-image: &python_image
+  image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/tally-python:${IMAGE_TAG:-local}
+
+x-common-env: &common_env
+  env_file:
+    - ./.env.prod
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+  finance-mcp:
+    <<: [*python_image, *common_env]
+    working_dir: /app/finance-mcp
+    command: ["python", "unified_mcp_server.py"]
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 3335
+      DB_POOL: ${DB_POOL:-1}
+      DB_POOL_MAXCONN: ${DB_POOL_MAXCONN:-16}
+    ports:
+      - "127.0.0.1:3335:3335"
+    volumes:
+      - tally-uploads:/app/finance-mcp/uploads
+      - tally-recon-output:/app/finance-mcp/recon/output
+      - tally-proc-output:/app/finance-mcp/proc/output
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3335/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  data-agent:
+    <<: [*python_image, *common_env]
+    working_dir: /app/finance-agents/data-agent
+    command: ["python", "-m", "server"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8100
+      FINANCE_MCP_BASE_URL: http://finance-mcp:3335
+    ports:
+      - "127.0.0.1:8100:8100"
+    depends_on:
+      finance-mcp:
+        condition: service_healthy
+    volumes:
+      - tally-uploads:/app/finance-mcp/uploads
+      - tally-recon-output:/app/finance-mcp/recon/output
+      - tally-proc-output:/app/finance-mcp/proc/output
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  finance-cron:
+    <<: [*python_image, *common_env]
+    working_dir: /app/finance-cron
+    command: ["python", "run_scheduler.py", "--config", "config/cron_config.yaml"]
+    environment:
+      DATA_AGENT_BASE_URL: http://data-agent:8100
+      FINANCE_MCP_BASE_URL: http://finance-mcp:3335
+    depends_on:
+      data-agent:
+        condition: service_healthy
+
+  recon-worker-1:
+    <<: [*python_image, *common_env]
+    working_dir: /app/finance-agents/data-agent
+    command: ["python", "recon_worker.py"]
+    environment:
+      FINANCE_MCP_BASE_URL: http://finance-mcp:3335
+    depends_on:
+      data-agent:
+        condition: service_healthy
+      finance-mcp:
+        condition: service_healthy
+    volumes:
+      - tally-uploads:/app/finance-mcp/uploads
+      - tally-recon-output:/app/finance-mcp/recon/output
+      - tally-proc-output:/app/finance-mcp/proc/output
+
+  recon-worker-2:
+    <<: [*python_image, *common_env]
+    working_dir: /app/finance-agents/data-agent
+    command: ["python", "recon_worker.py"]
+    environment:
+      FINANCE_MCP_BASE_URL: http://finance-mcp:3335
+    depends_on:
+      data-agent:
+        condition: service_healthy
+      finance-mcp:
+        condition: service_healthy
+    volumes:
+      - tally-uploads:/app/finance-mcp/uploads
+      - tally-recon-output:/app/finance-mcp/recon/output
+      - tally-proc-output:/app/finance-mcp/proc/output
+
+  finance-web:
+    image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/finance-web:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      data-agent:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  tally-uploads:
+  tally-recon-output:
+  tally-proc-output:

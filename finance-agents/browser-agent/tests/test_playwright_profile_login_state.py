@@ -51,6 +51,197 @@ def test_should_skip_login_action_only_skips_login_steps_when_authenticated() ->
     assert should_skip_login_action({"action": "click"}, authenticated=True) is False
 
 
+def test_playwright_runner_stops_with_empty_records_when_summary_count_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeZeroCountRunnerPage()
+    monkeypatch.setattr(playwright_runner, "launch_chrome", lambda **_kwargs: FakeChromeProcess())
+    monkeypatch.setattr(playwright_runner, "sync_playwright", lambda: FakeSyncPlaywright(page))
+
+    result = playwright_runner._run_playbook_with_playwright_inner(
+        {
+            "job_id": "job-zero",
+            "shop_id": "shop-zero",
+            "playbook_body": {
+                "steps": [
+                    {
+                        "id": "wait_order_count",
+                        "action": "wait_for",
+                        "selector": ".sold_number-order__I8dbF",
+                    },
+                    {
+                        "id": "read_order_count",
+                        "action": "extract_summary",
+                        "mapping": {"row_count": ".sold_number-order__I8dbF"},
+                    },
+                    {
+                        "id": "stop_when_zero_orders",
+                        "action": "stop_if_summary_zero",
+                        "summary_field": "row_count",
+                    },
+                    {
+                        "id": "open_export_dialog",
+                        "action": "click",
+                        "selector": "button.next-btn:has-text('批量导出')",
+                    },
+                ],
+                "output": {
+                    "columns": [
+                        {"name": "订单编号", "required": True},
+                        {"name": "订单付款时间", "required": True},
+                        {"name": "买家实付金额", "required": True},
+                    ],
+                    "item_key_fields": ["订单编号"],
+                },
+                "quality_gate": {
+                    "summary_step_id": "read_order_count",
+                    "row_count_field": "row_count",
+                    "date_field": "订单付款时间",
+                    "amount_field": "买家实付金额",
+                },
+            },
+            "params": {"biz_date": "2026-06-01"},
+        },
+        config=PlaywrightRunConfig(
+            profile_root=str(tmp_path / "profiles"),
+            download_root=str(tmp_path / "downloads"),
+            headless=True,
+            timezone_id="Asia/Shanghai",
+            browser_channel="chrome",
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["records"] == []
+    assert result["quality_summary"]["row_count"] == 0
+    assert page.export_clicked is False
+
+
+def test_playwright_runner_stops_when_summary_text_has_no_number(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeNoNumberSummaryRunnerPage()
+    monkeypatch.setattr(playwright_runner, "launch_chrome", lambda **_kwargs: FakeChromeProcess())
+    monkeypatch.setattr(playwright_runner, "sync_playwright", lambda: FakeSyncPlaywright(page))
+
+    result = playwright_runner._run_playbook_with_playwright_inner(
+        {
+            "job_id": "job-empty-summary",
+            "shop_id": "shop-empty-summary",
+            "playbook_body": {
+                "steps": [
+                    {
+                        "id": "read_summary",
+                        "action": "extract_summary",
+                        "mapping": {"row_count": ".SearchTable--messageBox--3uyzOoz"},
+                    },
+                    {
+                        "id": "stop_when_zero_bill_details",
+                        "action": "stop_if_summary_zero",
+                        "summary_field": "row_count",
+                    },
+                    {
+                        "id": "wait_summary_row",
+                        "action": "wait_for",
+                        "selector": "tr.next-table-row:has-text('交易货款'):has-text('下载明细')",
+                    },
+                ],
+                "output": {
+                    "columns": [
+                        {"name": "业务流水号", "required": True},
+                        {"name": "订单实际金额（元）", "required": True},
+                        {"name": "打款时间", "required": True},
+                    ],
+                    "item_key_fields": ["业务流水号"],
+                },
+                "quality_gate": {
+                    "summary_step_id": "read_summary",
+                    "row_count_field": "row_count",
+                    "date_field": "打款时间",
+                    "amount_field": "订单实际金额（元）",
+                },
+            },
+            "params": {"biz_date": "2026-06-01"},
+        },
+        config=PlaywrightRunConfig(
+            profile_root=str(tmp_path / "profiles"),
+            download_root=str(tmp_path / "downloads"),
+            headless=True,
+            timezone_id="Asia/Shanghai",
+            browser_channel="chrome",
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["records"] == []
+    assert result["quality_summary"]["row_count"] == 0
+    assert page.waited_for_summary_row is False
+
+
+def test_playwright_runner_stops_when_summary_text_is_placeholder_dash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeNoNumberSummaryRunnerPage(summary_text="-")
+    monkeypatch.setattr(playwright_runner, "launch_chrome", lambda **_kwargs: FakeChromeProcess())
+    monkeypatch.setattr(playwright_runner, "sync_playwright", lambda: FakeSyncPlaywright(page))
+
+    result = playwright_runner._run_playbook_with_playwright_inner(
+        {
+            "job_id": "job-placeholder-summary",
+            "shop_id": "shop-placeholder-summary",
+            "playbook_body": {
+                "steps": [
+                    {
+                        "id": "read_summary",
+                        "action": "extract_summary",
+                        "mapping": {"row_count": ".SearchTable--messageBox--3uyzOoz"},
+                    },
+                    {
+                        "id": "stop_when_zero_bill_details",
+                        "action": "stop_if_summary_zero",
+                        "summary_field": "row_count",
+                    },
+                    {
+                        "id": "wait_summary_row",
+                        "action": "wait_for",
+                        "selector": "tr.next-table-row:has-text('交易货款'):has-text('下载明细')",
+                    },
+                ],
+                "output": {
+                    "columns": [
+                        {"name": "业务流水号", "required": True},
+                        {"name": "订单实际金额（元）", "required": True},
+                        {"name": "打款时间", "required": True},
+                    ],
+                    "item_key_fields": ["业务流水号"],
+                },
+                "quality_gate": {
+                    "summary_step_id": "read_summary",
+                    "row_count_field": "row_count",
+                    "date_field": "打款时间",
+                    "amount_field": "订单实际金额（元）",
+                },
+            },
+            "params": {"biz_date": "2026-06-01"},
+        },
+        config=PlaywrightRunConfig(
+            profile_root=str(tmp_path / "profiles"),
+            download_root=str(tmp_path / "downloads"),
+            headless=True,
+            timezone_id="Asia/Shanghai",
+            browser_channel="chrome",
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["records"] == []
+    assert result["quality_summary"]["row_count"] == 0
+    assert page.waited_for_summary_row is False
+
+
 class FakePage:
     def __init__(
         self,
@@ -88,6 +279,85 @@ class FakePage:
 
     def wait_for_timeout(self, timeout: int) -> None:
         self.timeouts.append(timeout)
+
+
+class FakeZeroCountLocator:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.first = self
+
+    def inner_text(self, *, timeout: int) -> str:
+        return self._text
+
+
+class FakeZeroCountRunnerPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(
+            url="https://myseller.taobao.com/home.htm/trade-platform/tp/sold",
+            selectors={".sold_number-order__I8dbF"},
+        )
+        self.export_clicked = False
+
+    def locator(self, selector: str) -> FakeZeroCountLocator:
+        if selector == ".sold_number-order__I8dbF":
+            return FakeZeroCountLocator("共查询到 0 条订单")
+        return FakeZeroCountLocator("")
+
+    def click(self, selector: str, *, timeout: int) -> None:
+        if "批量导出" in selector:
+            self.export_clicked = True
+        super().click(selector, timeout=timeout)
+
+
+class FakeNoNumberSummaryRunnerPage(FakePage):
+    def __init__(self, *, summary_text: str = "暂无数据") -> None:
+        super().__init__(
+            url="https://myseller.taobao.com/home.htm/whale-accountant/bill/summary",
+            selectors={".SearchTable--messageBox--3uyzOoz"},
+        )
+        self.waited_for_summary_row = False
+        self.summary_text = summary_text
+
+    def locator(self, selector: str) -> FakeZeroCountLocator:
+        if selector == ".SearchTable--messageBox--3uyzOoz":
+            return FakeZeroCountLocator(self.summary_text)
+        return FakeZeroCountLocator("")
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        if "下载明细" in selector:
+            self.waited_for_summary_row = True
+        super().wait_for_selector(selector, timeout=timeout)
+
+
+class FakeBrowser:
+    def __init__(self, page: FakePage) -> None:
+        self.contexts = [type("FakeContext", (), {"pages": [page]})()]
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeSyncPlaywright:
+    def __init__(self, page: FakePage) -> None:
+        self.chromium = type(
+            "FakeChromium",
+            (),
+            {"connect_over_cdp": lambda _self, _url: FakeBrowser(page)},
+        )()
+
+    def __enter__(self) -> "FakeSyncPlaywright":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class FakeChromeProcess:
+    cdp_url = "http://127.0.0.1:9222"
+
+    def terminate(self) -> None:
+        return None
 
 
 class TransientAuthRedirectPage(FakePage):
@@ -166,13 +436,16 @@ class FakeDateInputLocator:
         return self.page.values.get(self.selector, "")
 
     def click(self, *, timeout: int) -> None:
+        self.page.events.append(("click", self.selector))
         self.page.locator_clicks.append((self.selector, timeout))
 
     def fill(self, value: str, *, timeout: int) -> None:
+        self.page.events.append(("fill", self.selector, value))
         self.page.locator_fills.append((self.selector, value, timeout))
         self.page.values[self.selector] = value
 
     def evaluate(self, script: str, arg: object | None = None) -> None:
+        self.page.events.append(("evaluate", self.selector, arg))
         self.page.locator_evaluations.append((self.selector, script, arg))
 
 
@@ -181,7 +454,10 @@ class FakeDateKeyboard:
         self.page = page
 
     def press(self, key: str) -> None:
+        self.page.events.append(("press", key))
         self.page.key_presses.append(key)
+        if key == "Escape" and hasattr(self.page, "overlay_open"):
+            self.page.overlay_open = False
 
 
 class FakeDateInputPage(FakePage):
@@ -192,6 +468,7 @@ class FakeDateInputPage(FakePage):
         self.locator_fills: list[tuple[str, str, int]] = []
         self.locator_evaluations: list[tuple[str, str, object | None]] = []
         self.key_presses: list[str] = []
+        self.events: list[tuple] = []
         self.keyboard = FakeDateKeyboard(self)
 
     def fill(self, selector: str, value: str, *, timeout: int) -> None:
@@ -199,6 +476,63 @@ class FakeDateInputPage(FakePage):
         self.values[selector] = value
 
     def locator(self, selector: str) -> FakeDateInputLocator:
+        return FakeDateInputLocator(self, selector)
+
+
+class FakeDatePickerOverlayLocator:
+    def __init__(self, page: "FakeDateInputWithOpenOverlayPage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+        self.first = self
+
+    def is_visible(self, timeout: int = 0) -> bool:
+        self.page.events.append(("overlay_visible", self.selector, timeout))
+        return self.page.overlay_open
+
+
+class FakeDateInputWithOpenOverlayPage(FakeDateInputPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.overlay_open = True
+
+    def locator(self, selector: str) -> FakeDateInputLocator | FakeDatePickerOverlayLocator:
+        if selector == ".next-overlay-wrapper.opened":
+            return FakeDatePickerOverlayLocator(self, selector)
+        return FakeDateInputLocator(self, selector)
+
+
+class FakeDateInputWithDriverPopoverPage(FakeDateInputPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.driver_popover_open = True
+
+    def locator(self, selector: str) -> FakeDateInputLocator:
+        if selector in {".driver-popover", ".driver-overlay"}:
+            page = self
+
+            class _PopoverLocator:
+                first = None
+
+                def is_visible(self, timeout: int = 0) -> bool:
+                    page.events.append(("popover_visible", selector, timeout))
+                    return page.driver_popover_open
+
+            locator = _PopoverLocator()
+            locator.first = locator
+            return locator
+        if selector == "button.driver-popover-next-btn:has-text('完成')":
+            page = self
+
+            class _FinishButtonLocator:
+                first = None
+
+                def click(self, timeout: int = 0) -> None:
+                    page.events.append(("click", selector))
+                    page.driver_popover_open = False
+
+            locator = _FinishButtonLocator()
+            locator.first = locator
+            return locator
         return FakeDateInputLocator(self, selector)
 
 
@@ -1195,6 +1529,59 @@ def test_set_date_action_commits_datepicker_value_with_events_and_blur(tmp_path)
     assert page.key_presses == ["Enter", "Tab"]
 
 
+def test_set_date_action_closes_previous_datepicker_overlay_before_clicking_next_input(
+    tmp_path,
+) -> None:
+    page = FakeDateInputWithOpenOverlayPage()
+
+    _execute_action(
+        page,
+        {
+            "id": "set_end_date",
+            "action": "set_date",
+            "selector": "input[placeholder='结束日期']",
+            "value": "2026-06-01",
+            "timeout_ms": 30000,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.events.index(("press", "Escape")) < page.events.index(
+        ("click", "input[placeholder='结束日期']")
+    )
+
+
+def test_set_date_action_closes_driver_popover_before_clicking_date_input(tmp_path) -> None:
+    page = FakeDateInputWithDriverPopoverPage()
+
+    _execute_action(
+        page,
+        {
+            "id": "set_start_date",
+            "action": "set_date",
+            "selector": "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
+            "value": "2026-06-01",
+            "timeout_ms": 30000,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.events.index(("click", "button.driver-popover-next-btn:has-text('完成')")) < (
+        page.events.index(
+            (
+                "click",
+                "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
+            )
+        )
+    )
+
+
 def test_set_date_action_presses_enter_before_blur_for_controlled_datepicker(tmp_path) -> None:
     page = FakeControlledDateInputPage()
 
@@ -1518,6 +1905,106 @@ class FakeHistoryPage(FakePage):
     def expect_download(self, *, timeout: int) -> FakeDownloadInfo:
         return FakeDownloadInfo(self.download)
 
+
+class FakeOrderExportButton:
+    def __init__(self, page: "FakeOrderExportDetailPage") -> None:
+        self.page = page
+        self.first = self
+
+    def count(self) -> int:
+        return 1
+
+    def is_visible(self, *, timeout: int) -> bool:
+        return True
+
+    def is_disabled(self, *, timeout: int) -> bool:
+        return False
+
+    def click(self, *, timeout: int, force: bool = False) -> None:
+        self.page.download_clicked = True
+        self.page.clicked_timeout = timeout
+
+
+class FakeOrderExportEmptyLocator:
+    first = None
+
+    def __init__(self) -> None:
+        self.first = self
+
+    def count(self) -> int:
+        return 0
+
+    def nth(self, index: int):
+        raise IndexError(index)
+
+    def is_visible(self, *, timeout: int) -> bool:
+        return False
+
+
+class FakeOrderExportDetailRoot:
+    def __init__(self, page: "FakeOrderExportDetailPage") -> None:
+        self.page = page
+
+    def inner_text(self, *, timeout: int) -> str:
+        return self.page.detail_text
+
+    def is_visible(self, *, timeout: int) -> bool:
+        return True
+
+    def locator(self, selector: str) -> FakeOrderExportButton | FakeOrderExportEmptyLocator:
+        if "下载订单报表" in selector:
+            return FakeOrderExportButton(self.page)
+        return FakeOrderExportEmptyLocator()
+
+
+class FakeOrderExportDetailLocator:
+    def __init__(self, page: "FakeOrderExportDetailPage", roots: list[FakeOrderExportDetailRoot]) -> None:
+        self.page = page
+        self.roots = roots
+        self.first = roots[0] if roots else FakeOrderExportEmptyLocator()
+
+    def count(self) -> int:
+        return len(self.roots)
+
+    def nth(self, index: int) -> FakeOrderExportDetailRoot:
+        return self.roots[index]
+
+    def is_visible(self, *, timeout: int) -> bool:
+        return bool(self.roots)
+
+    def inner_text(self, *, timeout: int) -> str:
+        return self.page.detail_text
+
+    def locator(self, selector: str) -> FakeOrderExportButton | FakeOrderExportEmptyLocator:
+        return self.first.locator(selector)
+
+
+class FakeOrderExportDetailPage(FakePage):
+    def __init__(self, *, detail_text: str) -> None:
+        super().__init__(url="https://myseller.taobao.com/home.htm/trade-platform/tp/export-list")
+        self.detail_text = detail_text
+        self.download = FakeDownload()
+        self.download_clicked = False
+        self.clicked_timeout: int | None = None
+        self.reload_count = 0
+
+    def locator(self, selector: str) -> FakeOrderExportDetailLocator | FakeOrderExportEmptyLocator:
+        if selector == "body" or "订单导出报表" in selector or "下载订单报表" in selector:
+            return FakeOrderExportDetailLocator(self, [FakeOrderExportDetailRoot(self)])
+        return FakeOrderExportEmptyLocator()
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        return None
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        return None
+
+    def reload(self, *, wait_until: str, timeout: int) -> None:
+        self.reload_count += 1
+
+    def expect_download(self, *, timeout: int) -> FakeDownloadInfo:
+        return FakeDownloadInfo(self.download)
+
     def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
         if selector == ".next-dialog button:has-text('历史下载记录')":
             self.dialog_history_clicked.append((timeout, force))
@@ -1776,6 +2263,66 @@ def test_download_history_file_picks_matching_biz_date_row(tmp_path) -> None:
     assert old_row.clicked_timeout is None
     assert target_row.clicked_timeout == 900000
     assert capture_files[0]["storage_path"] == result["last_download"]
+
+
+def test_download_qianniu_export_report_clicks_detail_page_button(tmp_path) -> None:
+    page = FakeOrderExportDetailPage(
+        detail_text=(
+            "订单导出报表 报表申请时间：2026-06-02 14:13:00 "
+            "报表类型：订单报表 下载订单报表"
+        )
+    )
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_latest_order_report",
+            "action": "download_qianniu_export_report",
+            "selector": "[class*='order-export_order-block']",
+            "report_type": "订单报表",
+            "download_button_text": "下载订单报表",
+            "requested_after_from": "extracted.report_requested_at",
+            "request_time_tolerance_seconds": 5,
+            "timeout_ms": 1000,
+        },
+        params={},
+        extracted={"report_requested_at": "2026-06-02T14:13:02"},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+    )
+
+    assert page.download_clicked is True
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_qianniu_export_report_allows_minute_truncated_request_time(tmp_path) -> None:
+    page = FakeOrderExportDetailPage(
+        detail_text=(
+            "订单导出报表 报表申请时间：2026-06-02 14:13:00 "
+            "报表类型：订单报表 下载订单报表"
+        )
+    )
+
+    _execute_action(
+        page,
+        {
+            "id": "download_latest_order_report",
+            "action": "download_qianniu_export_report",
+            "selector": "[class*='order-export_order-block']",
+            "report_type": "订单报表",
+            "download_button_text": "下载订单报表",
+            "requested_after_from": "extracted.report_requested_at",
+            "request_time_tolerance_seconds": 5,
+            "timeout_ms": 1000,
+        },
+        params={},
+        extracted={"report_requested_at": "2026-06-02T14:13:59"},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.download_clicked is True
 
 
 def test_download_history_file_clicks_completed_target_range_without_download_text(

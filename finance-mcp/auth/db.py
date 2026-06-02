@@ -8225,7 +8225,7 @@ def insert_browser_capture_files(
                         shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count,
                         storage_provider, storage_bucket, storage_key, storage_uri, content_type, size_bytes
                     ) VALUES %s
-                    ON CONFLICT (sync_job_id, storage_path) DO UPDATE SET
+                    ON CONFLICT (sync_job_id, storage_path) WHERE sync_job_id IS NOT NULL DO UPDATE SET
                         encoding = EXCLUDED.encoding,
                         checksum = EXCLUDED.checksum,
                         row_count = EXCLUDED.row_count,

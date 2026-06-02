@@ -141,11 +141,12 @@
       "id": "download_latest_order_report",
       "action": "download_qianniu_export_report",
       "selector": "[class*='order-export_order-block']",
+      "detail_selector": "body:has-text('订单导出报表'):has-text('下载订单报表')",
       "requested_after_from": "extracted.report_requested_at",
       "report_type": "订单报表",
       "download_button_text": "下载订单报表",
       "refresh_interval_ms": 10000,
-      "request_time_tolerance_seconds": 5,
+      "request_time_tolerance_seconds": 60,
       "download_timeout_ms": 600000,
       "timeout_ms": 900000
     },

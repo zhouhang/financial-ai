@@ -14,6 +14,7 @@ VALID_ACTIONS = {
     "wait_ms",
     "extract_text",
     "extract_summary",
+    "stop_if_summary_zero",
     "select_checkboxes",
     "download",
     "download_history_file",

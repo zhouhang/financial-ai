@@ -95,6 +95,87 @@ describe('BrowserPlaybookPanel', () => {
     expect(deleteButton).toHaveClass('whitespace-nowrap');
   });
 
+  it('浏览器任务列表超过一页时分页显示', () => {
+    const manySources = Array.from({ length: 25 }, (_, index) => {
+      const itemNumber = String(index + 1).padStart(2, '0');
+      const title = `浏览器任务 ${itemNumber}`;
+      return {
+        ...sources[0],
+        id: `source-${itemNumber}`,
+        code: `browser-task-${itemNumber}`,
+        name: title,
+        metadata: {
+          ...sources[0].metadata,
+          registration_title: title,
+        },
+      };
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={manySources} />);
+
+    expect(screen.getByText('浏览器任务 01')).toBeInTheDocument();
+    expect(screen.getByText('浏览器任务 20')).toBeInTheDocument();
+    expect(screen.queryByText('浏览器任务 21')).not.toBeInTheDocument();
+    expect(screen.getByText('显示 1-20 / 25 条')).toBeInTheDocument();
+    expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+
+    expect(screen.queryByText('浏览器任务 01')).not.toBeInTheDocument();
+    expect(screen.getByText('浏览器任务 21')).toBeInTheDocument();
+    expect(screen.getByText('浏览器任务 25')).toBeInTheDocument();
+    expect(screen.getByText('显示 21-25 / 25 条')).toBeInTheDocument();
+    expect(screen.getByText('第 2 / 2 页')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '上一页' }));
+
+    expect(screen.getByText('浏览器任务 01')).toBeInTheDocument();
+    expect(screen.queryByText('浏览器任务 21')).not.toBeInTheDocument();
+  });
+
+  it('按店铺归组展示店铺订单和收支明细任务', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            id: 'shop-a-order',
+            name: '甲店-店铺订单',
+            metadata: { registration_title: '甲店-店铺订单' },
+          },
+          {
+            ...sources[0],
+            id: 'shop-b-order',
+            name: '乙店-店铺订单',
+            metadata: { registration_title: '乙店-店铺订单' },
+          },
+          {
+            ...sources[0],
+            id: 'shop-a-bill',
+            name: '甲店-收支明细',
+            metadata: { registration_title: '甲店-收支明细' },
+          },
+          {
+            ...sources[0],
+            id: 'shop-b-bill',
+            name: '乙店-收支账单',
+            metadata: { registration_title: '乙店-收支账单' },
+          },
+        ]}
+      />,
+    );
+
+    const shopAOrder = screen.getByText('甲店-店铺订单');
+    const shopABill = screen.getByText('甲店-收支明细');
+    const shopBOrder = screen.getByText('乙店-店铺订单');
+    const shopBBill = screen.getByText('乙店-收支账单');
+
+    expect(shopAOrder.compareDocumentPosition(shopABill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shopABill.compareDocumentPosition(shopBOrder) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shopBOrder.compareDocumentPosition(shopBBill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('手动清除只展示在卡住任务上并将 MANUAL_CLEARED 显示为已清除', () => {
     render(
       <BrowserPlaybookPanel
@@ -317,6 +398,54 @@ describe('BrowserPlaybookPanel', () => {
     const notice = await screen.findByText(/sync-retry-1/);
     const table = screen.getByRole('table');
     expect(notice.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+  });
+
+  it('更新浏览器任务密码时只提交凭证且不回显密码', async () => {
+    const onRegistered = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/credential') {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        expect(JSON.parse(String(init?.body))).toEqual({
+          credential_username: '千牛每日资金账单:ai财务',
+          credential_password: 'secret-password',
+        });
+        return jsonResponse({
+          success: true,
+          source_id: 'source-1',
+          credential: {
+            username: '千牛每日资金账单:ai财务',
+            password_saved: true,
+          },
+          message: '浏览器任务凭证已保存',
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} onRegistered={onRegistered} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /填密码 千牛每日资金账单/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: '填写浏览器任务密码' });
+    fireEvent.change(within(dialog).getByLabelText('登录账号'), {
+      target: { value: '千牛每日资金账单:ai财务' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('密码'), {
+      target: { value: 'secret-password' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存' }));
+
+    await waitFor(() => {
+      const credentialCalls = fetchSpy.mock.calls.filter(
+        ([input]) => String(input) === '/api/data-sources/source-1/browser-playbook/credential',
+      );
+      expect(credentialCalls).toHaveLength(1);
+    });
+    expect(await screen.findByText('浏览器任务凭证已保存')).toBeInTheDocument();
+    expect(screen.queryByText('secret-password')).not.toBeInTheDocument();
     await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
   });
 
