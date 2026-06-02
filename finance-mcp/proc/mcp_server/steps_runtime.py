@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from security_utils import resolve_upload_file_path
+from storage.input_resolver import materialize_input_file
 
 logger = logging.getLogger(__name__)
 
@@ -2509,26 +2509,26 @@ def _normalize_alias_key(name: Any) -> str:
 
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
-    path = resolve_upload_file_path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"文件不存在: {file_path}")
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        try:
-            return pd.read_csv(path, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            import chardet
+    with materialize_input_file(file_path) as path:
+        if not path.exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            try:
+                return pd.read_csv(path, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                import chardet
 
-            with open(path, "rb") as file:
-                encoding = chardet.detect(file.read()).get("encoding", "gbk")
-            return pd.read_csv(path, encoding=encoding)
-    if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-        return pd.read_excel(path, dtype=object)
-    raise ProcUserDataError(
-        summary="数据整理遇到不支持的文件格式",
-        cause=f"文件格式「{suffix}」不受支持。",
-        suggestion="请上传 Excel 或 CSV 文件。",
-    )
+                with open(path, "rb") as file:
+                    encoding = chardet.detect(file.read()).get("encoding", "gbk")
+                return pd.read_csv(path, encoding=encoding)
+        if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+            return pd.read_excel(path, dtype=object)
+        raise ProcUserDataError(
+            summary="数据整理遇到不支持的文件格式",
+            cause=f"文件格式「{suffix}」不受支持。",
+            suggestion="请上传 Excel 或 CSV 文件。",
+        )
 
 
 def _normalize_excel_text_dataframe(df: pd.DataFrame) -> pd.DataFrame:

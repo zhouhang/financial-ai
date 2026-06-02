@@ -125,6 +125,16 @@ def _normalize_file_columns(
     return normalized_set
 
 
+def _is_oss_logical_upload_ref(file_path: str) -> bool:
+    return str(file_path or "").strip().startswith("/uploads/oss/")
+
+
+def _coerce_columns(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
 def _schema_candidate_names(
     *,
     file_name: str,
@@ -433,14 +443,40 @@ def _normalize_uploaded_file_entry(
     if isinstance(item, dict):
         raw_path = str(item.get("file_path") or item.get("path") or "").strip()
         original_filename = str(item.get("original_filename") or item.get("name") or "").strip()
+        columns = _coerce_columns(item.get("columns"))
+        has_data_rows = bool(item.get("has_data_rows", item.get("row_count", 1)))
     else:
         raw_path = str(item or "").strip()
         original_filename = ""
+        columns = []
+        has_data_rows = True
 
     if not raw_path:
         return None
 
     upload_ref = _normalize_upload_ref(raw_path, upload_root)
+    if _is_oss_logical_upload_ref(upload_ref):
+        display_name = (
+            str(
+                item.get("display_name")
+                or item.get("name")
+                or item.get("original_filename")
+                or Path(upload_ref).name
+            ).strip()
+            if isinstance(item, dict)
+            else Path(upload_ref).name
+        )
+        return {
+            "upload_ref": upload_ref,
+            "abs_path": None,
+            "stored_name": Path(upload_ref).name,
+            "display_name": display_name,
+            "original_filename": original_filename or display_name,
+            "extension": Path(upload_ref).suffix.lower(),
+            "provided_columns": columns,
+            "provided_has_data_rows": has_data_rows,
+        }
+
     abs_path = _resolve_upload_abs_path(upload_ref or raw_path, upload_root)
     stored_name = abs_path.name
     display_name = original_filename or stored_name
@@ -483,12 +519,14 @@ def build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[s
             continue
 
         upload_ref = _normalize_upload_ref(file_path, upload_root)
-        try:
-            abs_path = _resolve_upload_abs_path(upload_ref or file_path, upload_root)
-        except ValueError:
-            continue
+        abs_path: Path | None = None
+        if not _is_oss_logical_upload_ref(upload_ref):
+            try:
+                abs_path = _resolve_upload_abs_path(upload_ref or file_path, upload_root)
+            except ValueError:
+                continue
 
-        stored_name = abs_path.name
+        stored_name = abs_path.name if abs_path is not None else Path(upload_ref).name
         final_display_name = display_name or stored_name
 
         if final_display_name:
@@ -500,7 +538,8 @@ def build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[s
 
         if upload_ref:
             ref_to_display_name[upload_ref] = final_display_name
-        ref_to_display_name[str(abs_path)] = final_display_name
+        if abs_path is not None:
+            ref_to_display_name[str(abs_path)] = final_display_name
         if stored_name:
             ref_to_display_name[stored_name] = final_display_name
 
@@ -532,7 +571,29 @@ def prepare_logical_upload_files(
         if extension not in SUPPORTED_EXTENSIONS:
             raise ValueError(f"不支持的文件类型：{extension}")
 
-        if extension == ".csv":
+        if entry.get("provided_columns") is not None:
+            logical_file = _build_logical_file_entry(
+                file_path=entry["upload_ref"],
+                display_name=entry["display_name"],
+                workbook_original_filename=entry["original_filename"],
+                workbook_display_name=entry["display_name"],
+                workbook_file_path=entry["upload_ref"],
+                sheet_name=None,
+                sheet_index=None,
+                is_logical_split=False,
+            )
+            prepared_items = [
+                (
+                    logical_file,
+                    _build_prefilter_decision(
+                        logical_file=logical_file,
+                        columns=list(entry.get("provided_columns") or []),
+                        has_data_rows=bool(entry.get("provided_has_data_rows", True)),
+                        validation_rules=validation_rules,
+                    ),
+                )
+            ]
+        elif extension == ".csv":
             prepared_items = [_prepare_csv_logical_entry(entry, validation_rules)]
         else:
             prepared_items = _prepare_excel_logical_entries(entry, validation_rules)
