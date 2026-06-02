@@ -327,6 +327,78 @@ async def test_storage_backed_download_maps_storage_errors(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_storage_backed_download_maps_storage_factory_errors(monkeypatch, tmp_path: Path):
+    import unified_mcp_server
+
+    monkeypatch.setattr(unified_mcp_server, "_MODULE_OUTPUT_DIRS", {"recon": tmp_path})
+    monkeypatch.setattr(unified_mcp_server, "_get_module_output_dir", lambda module: tmp_path)
+    monkeypatch.setattr(
+        unified_mcp_server,
+        "get_user_from_token",
+        lambda token: {"user_id": "owner-1", "role": "member"},
+    )
+    monkeypatch.setattr(
+        unified_mcp_server.storage_repository,
+        "get_storage_object_by_logical_path",
+        lambda logical_path: {
+            "owner_user_id": "owner-1",
+            "storage_provider": "oss",
+            "storage_bucket": "bucket-a",
+            "storage_key": "outputs/recon/report.xlsx",
+            "original_filename": "report.xlsx",
+            "content_type": "application/octet-stream",
+        },
+    )
+    monkeypatch.setattr(
+        unified_mcp_server,
+        "storage_from_env",
+        lambda *, local_root: (_ for _ in ()).throw(RuntimeError("storage config broken")),
+    )
+
+    response = await unified_mcp_server.download_output_file(_FakeRequest())
+
+    assert response.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_storage_backed_download_maps_initial_stream_errors(monkeypatch, tmp_path: Path):
+    import unified_mcp_server
+
+    class FakeClient:
+        def exists(self, ref):
+            return True
+
+        def iter_bytes(self, ref):
+            raise RuntimeError("oss stream failed")
+            yield b"unreachable"
+
+    monkeypatch.setattr(unified_mcp_server, "_MODULE_OUTPUT_DIRS", {"recon": tmp_path})
+    monkeypatch.setattr(unified_mcp_server, "_get_module_output_dir", lambda module: tmp_path)
+    monkeypatch.setattr(
+        unified_mcp_server,
+        "get_user_from_token",
+        lambda token: {"user_id": "owner-1", "role": "member"},
+    )
+    monkeypatch.setattr(
+        unified_mcp_server.storage_repository,
+        "get_storage_object_by_logical_path",
+        lambda logical_path: {
+            "owner_user_id": "owner-1",
+            "storage_provider": "oss",
+            "storage_bucket": "bucket-a",
+            "storage_key": "outputs/recon/report.xlsx",
+            "original_filename": "report.xlsx",
+            "content_type": "application/octet-stream",
+        },
+    )
+    monkeypatch.setattr(unified_mcp_server, "storage_from_env", lambda *, local_root: FakeClient())
+
+    response = await unified_mcp_server.download_output_file(_FakeRequest())
+
+    assert response.status_code == 502
+
+
+@pytest.mark.asyncio
 async def test_storage_backed_download_allows_admin(monkeypatch, tmp_path: Path):
     import unified_mcp_server
 
