@@ -88,6 +88,7 @@ async def test_dispatcher_builds_message_from_claim_enrichment_not_raw_payload()
     captured: dict[str, dict] = {}
     job = {
         "id": "sync-001",
+        "company_id": "company-001",
         "request_payload": {"biz_date": "2026-05-18"},
         "shop_id": "shop-001",
         "playbook_id": "qianniu-daily-bill-export",
@@ -108,6 +109,7 @@ async def test_dispatcher_builds_message_from_claim_enrichment_not_raw_payload()
     await loop.run_once()
 
     assert captured["message"]["shop_id"] == "shop-001"
+    assert captured["message"]["company_id"] == "company-001"
     assert captured["message"]["playbook_body"] == job["playbook_body"]
     assert captured["message"]["runtime_profile_ref"] == "profile-001"
     assert captured["message"]["playbook_version"] == "1.0.0"

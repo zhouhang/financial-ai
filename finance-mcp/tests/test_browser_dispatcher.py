@@ -5,11 +5,40 @@ from pathlib import Path
 from typing import Any
 
 FINANCE_MCP_ROOT = Path(__file__).resolve().parents[1]
-if str(FINANCE_MCP_ROOT) not in sys.path:
-    sys.path.insert(0, str(FINANCE_MCP_ROOT))
+if str(FINANCE_MCP_ROOT) in sys.path:
+    sys.path.remove(str(FINANCE_MCP_ROOT))
+sys.path.insert(0, str(FINANCE_MCP_ROOT))
 
 from browser_playbook.agent_connection import FakeAgentConnectionManager
 from browser_playbook.dispatcher import BrowserPlaybookDispatcher
+
+
+def _import_mcp_data_sources():
+    import importlib
+    import types
+
+    saved_tool_modules = {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == "tools" or module_name.startswith("tools.")
+    }
+    for module_name in list(saved_tool_modules):
+        if module_name == "tools" or module_name.startswith("tools."):
+            del sys.modules[module_name]
+    tools_module = types.ModuleType("tools")
+    tools_module.__path__ = [str(FINANCE_MCP_ROOT / "tools")]
+    sys.modules["tools"] = tools_module
+    if str(FINANCE_MCP_ROOT) in sys.path:
+        sys.path.remove(str(FINANCE_MCP_ROOT))
+    sys.path.insert(0, str(FINANCE_MCP_ROOT))
+    importlib.invalidate_caches()
+    try:
+        return importlib.import_module("tools.data_sources")
+    finally:
+        for module_name in list(sys.modules):
+            if module_name == "tools" or module_name.startswith("tools."):
+                del sys.modules[module_name]
+        sys.modules.update(saved_tool_modules)
 
 
 class FakeDb:
@@ -158,6 +187,7 @@ def test_dispatcher_writes_success_records() -> None:
     assert fake_db.dispatched[0]["shop_id"] == "shop-001"
     assert fake_db.dispatched[0]["dataset_id"] == "dataset-001"
     assert fake_db.successes[0]["sync_job_id"] == "job-001"
+    assert manager.messages[0]["message"]["company_id"] == "company-001"
     assert manager.messages[0]["message"]["params"]["biz_date"] == "2026-05-18"
 
 
@@ -675,7 +705,7 @@ def test_upsert_browser_agent_heartbeat_marks_online(monkeypatch) -> None:
 def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
     import asyncio
 
-    from tools import data_sources
+    data_sources = _import_mcp_data_sources()
 
     expected_job = {"id": "sync-001", "shop_id": "shop-001", "playbook_body": {}}
     monkeypatch.setattr(
@@ -703,7 +733,7 @@ def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
 def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
     import asyncio
 
-    from tools import data_sources
+    data_sources = _import_mcp_data_sources()
 
     captured: dict[str, object] = {}
 
@@ -741,7 +771,7 @@ def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
 def test_browser_sync_job_startup_cleanup_tool_calls_helper(monkeypatch) -> None:
     import asyncio
 
-    from tools import data_sources
+    data_sources = _import_mcp_data_sources()
 
     captured: dict[str, object] = {}
 
@@ -830,7 +860,7 @@ def test_fail_running_browser_sync_jobs_for_agent_updates_only_agent_browser_job
 def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
     import asyncio
 
-    from tools import data_sources
+    data_sources = _import_mcp_data_sources()
 
     captured: dict[str, object] = {}
 
@@ -842,6 +872,11 @@ def test_browser_sync_job_fail_calls_helper(monkeypatch) -> None:
         data_sources,
         "_require_scheduler_user",
         lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {"id": sync_job_id, "job_status": "running"},
     )
     monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_failed", fake_fail)
 
@@ -871,7 +906,7 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
     import asyncio
     from contextlib import nullcontext
 
-    from tools import data_sources
+    data_sources = _import_mcp_data_sources()
 
     upserted: dict[str, object] = {}
     files: dict[str, object] = {}
@@ -1009,3 +1044,37 @@ def test_dispatcher_persists_capture_files() -> None:
     assert hasattr(fake_db, "capture_files")
     assert fake_db.capture_files[0]["sync_job_id"] == "job-001"
     assert fake_db.capture_files[0]["capture_files"][0]["storage_path"] == "/tmp/qn.csv"
+
+
+def test_dispatcher_persists_oss_capture_metadata() -> None:
+    fake_db = FakeDb()
+    manager = FakeAgentConnectionManager()
+    manager.register_result(
+        "agent-001",
+        {
+            "job_id": "job-001",
+            "status": "success",
+            "records": [],
+            "capture_files": [
+                {
+                    "storage_path": "oss://bucket-a/browser-captures/c1/qn.csv",
+                    "storage_provider": "oss",
+                    "storage_bucket": "bucket-a",
+                    "storage_key": "browser-captures/c1/qn.csv",
+                    "storage_uri": "oss://bucket-a/browser-captures/c1/qn.csv",
+                    "content_type": "text/csv",
+                    "size_bytes": 20,
+                    "encoding": "utf-8",
+                    "checksum": "sha256:abc",
+                    "row_count": 0,
+                }
+            ],
+        },
+    )
+
+    dispatcher = BrowserPlaybookDispatcher(db=fake_db, connections=manager)
+    dispatcher.run_once()
+
+    capture = fake_db.capture_files[0]["capture_files"][0]
+    assert capture["storage_provider"] == "oss"
+    assert capture["storage_key"] == "browser-captures/c1/qn.csv"

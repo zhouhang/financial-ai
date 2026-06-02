@@ -202,6 +202,7 @@ class BrowserDispatcherLoop:
         params = inject_credentials_into_params(params, credential_ref)
         return {
             "job_id": str(job.get("id") or ""),
+            "company_id": str(job.get("company_id") or ""),
             "shop_id": str(job.get("shop_id") or ""),
             "playbook_id": str(job.get("playbook_id") or ""),
             "playbook_version": str(job.get("playbook_version") or ""),
