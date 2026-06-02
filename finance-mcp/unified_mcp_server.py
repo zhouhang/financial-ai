@@ -31,6 +31,10 @@ from tools.file_upload_tool import (
     create_file_upload_tools,
     handle_file_upload_tool_call,
 )
+from tools.storage_upload_tool import (
+    create_storage_upload_tools,
+    handle_storage_upload_tool_call,
+)
 
 # 导入认证和规则管理模块
 from auth.tools import create_auth_tools, handle_auth_tool_call
@@ -98,6 +102,7 @@ async def list_tools() -> list[types.Tool]:
 
     try:
         upload_tools = [t for t in create_file_upload_tools() if t.name == "file_upload"]
+        upload_tools += create_storage_upload_tools()
         logger.info(f"上传工具数量: {len(upload_tools)}")
     except Exception as e:
         logger.error(f"加载上传工具失败: {str(e)}", exc_info=True)
@@ -336,7 +341,8 @@ _EXECUTION_TOOL_NAMES = {
     "execution_recon_rule_compatibility_check",
 }
 
-_UPLOAD_TOOL_NAMES = {"file_upload"}
+_UPLOAD_TOOL_NAMES = {"file_upload", "file_upload_presign", "file_upload_confirm"}
+_STORAGE_UPLOAD_TOOL_NAMES = {"file_upload_presign", "file_upload_confirm"}
 
 
 @mcp_server.call_tool()
@@ -349,7 +355,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
 
         # 2) 上传工具
         elif name in _UPLOAD_TOOL_NAMES:
-            result = await handle_file_upload_tool_call(name, arguments)
+            if name in _STORAGE_UPLOAD_TOOL_NAMES:
+                result = await handle_storage_upload_tool_call(name, arguments)
+            else:
+                result = await handle_file_upload_tool_call(name, arguments)
 
         # 3) 文件校验模块
         elif name in _FILE_VALIDATE_TOOL_NAMES:
