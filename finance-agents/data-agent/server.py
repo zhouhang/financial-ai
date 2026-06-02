@@ -550,19 +550,25 @@ async def upload_confirm(request: Request, body: UploadConfirmRequest):
     if not auth_token:
         raise HTTPException(401, "缺少 auth_token，请先登录")
 
+    payload = {
+        "auth_token": auth_token,
+        "storage_key": body.storage_key,
+        "filename": body.filename,
+        "size": body.size,
+        "content_type": body.content_type,
+        "checksum": body.checksum,
+        "thread_id": body.thread_id,
+    }
     result = await mcp_call_tool(
         "file_upload_confirm",
-        {
-            "auth_token": auth_token,
-            "storage_key": body.storage_key,
-            "filename": body.filename,
-            "size": body.size,
-            "content_type": body.content_type,
-            "checksum": body.checksum,
-            "thread_id": body.thread_id,
-        },
+        payload,
     )
-    return _require_upload_success(result, "确认上传失败")
+    normalized = _require_upload_success(result, "确认上传失败").copy()
+    normalized["filename"] = (
+        normalized.get("filename") or normalized.get("original_filename") or payload["filename"]
+    )
+    normalized["size"] = normalized.get("size") or normalized.get("size_bytes") or payload["size"]
+    return normalized
 
 
 @app.post("/upload")

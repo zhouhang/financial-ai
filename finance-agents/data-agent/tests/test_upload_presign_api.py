@@ -72,6 +72,8 @@ def test_upload_confirm_calls_mcp_with_upload_metadata(monkeypatch) -> None:
             "success": True,
             "file_id": "file-1",
             "file_path": "oss://bucket/uploads/a.csv",
+            "original_filename": "orders.csv",
+            "size_bytes": 5678,
         }
 
     monkeypatch.setattr(server, "mcp_call_tool", fake_call)
@@ -94,6 +96,10 @@ def test_upload_confirm_calls_mcp_with_upload_metadata(monkeypatch) -> None:
         "success": True,
         "file_id": "file-1",
         "file_path": "oss://bucket/uploads/a.csv",
+        "original_filename": "orders.csv",
+        "size_bytes": 5678,
+        "filename": "orders.csv",
+        "size": 5678,
     }
     assert calls == [
         {
