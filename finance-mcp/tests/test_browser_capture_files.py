@@ -10,6 +10,48 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
 from auth import db as auth_db
 
 
+class FakeCursor:
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple | None = None) -> None:
+        self.sql.append(sql)
+
+
+class FakeConn:
+    def __init__(self, cursor: FakeCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> "FakeConn":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def cursor(self, *args, **kwargs) -> FakeCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        pass
+
+
+class FakeConnManager:
+    def __init__(self, cursor: FakeCursor) -> None:
+        self.cursor = cursor
+
+    def __enter__(self) -> FakeConn:
+        return FakeConn(self.cursor)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
 class _FakeCursor:
     def __enter__(self):
         return self
@@ -228,3 +270,24 @@ def test_insert_browser_capture_files_empty_returns_zero(monkeypatch) -> None:
     )
 
     assert result == {"inserted_count": 0}
+
+
+def test_insert_browser_capture_files_upserts_on_conflict(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+    # execute_values writes via cur.execute under the hood for our FakeCursor; capture the SQL.
+    monkeypatch.setattr(
+        auth_db.psycopg2.extras,
+        "execute_values",
+        lambda cur, sql, rows, template=None, **kw: cur.execute(sql, tuple(rows)),
+    )
+
+    auth_db.insert_browser_capture_files(
+        company_id="c1", data_source_id="d1", dataset_id="ds1", sync_job_id="j1",
+        resource_key="rk", shop_id="s1", playbook_id="p1", biz_date="2026-05-31",
+        capture_files=[{"storage_path": "/tmp/a.csv", "checksum": "x", "row_count": 1}],
+    )
+
+    sql = "\n".join(cursor.sql)
+    assert "ON CONFLICT (sync_job_id, storage_path)" in sql
+    assert "DO UPDATE" in sql
