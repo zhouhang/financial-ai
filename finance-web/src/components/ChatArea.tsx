@@ -23,6 +23,32 @@ interface StagedFile {
   size: number;
 }
 
+interface UploadPresignPayload {
+  direct_upload?: boolean;
+  url?: string;
+  key?: string;
+  storage_key?: string;
+  headers?: Record<string, string>;
+}
+
+interface UploadResponsePayload {
+  filename?: string;
+  name?: string;
+  size?: number | string;
+  file_path?: string;
+  path?: string;
+}
+
+interface UploadStagedFileResult {
+  attachment: MessageAttachment;
+  uploadedFile: UploadedFile;
+}
+
+interface UploadFailureError extends Error {
+  authExpired?: boolean;
+  isUploadFailure?: boolean;
+}
+
 const EMPTY_STATE_CAPABILITIES = [
   {
     key: 'proc',
@@ -47,6 +73,40 @@ function _formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 void _formatFileSize; // Reserved for future use
+
+function createUploadFailure(message: string, authExpired = false): UploadFailureError {
+  const error = new Error(message) as UploadFailureError;
+  error.authExpired = authExpired;
+  error.isUploadFailure = true;
+  return error;
+}
+
+function isAuthExpiredUploadError(status: number, detail: string): boolean {
+  return (
+    status === 401 ||
+    detail.includes('无效的 auth_token') ||
+    detail.includes('token') ||
+    detail.includes('登录')
+  );
+}
+
+async function createUploadFailureFromResponse(resp: Response): Promise<UploadFailureError> {
+  const err = (await resp.json().catch(() => ({}))) as { detail?: unknown; message?: unknown };
+  const detail = String(err.detail || err.message || '上传失败');
+  return createUploadFailure(detail, isAuthExpiredUploadError(resp.status, detail));
+}
+
+function normalizeUploadAttachment(
+  result: UploadResponsePayload,
+  staged: StagedFile,
+): MessageAttachment {
+  const parsedSize = typeof result.size === 'number' ? result.size : Number(result.size ?? staged.size);
+  return {
+    name: String(result.filename ?? result.name ?? staged.name),
+    size: Number.isFinite(parsedSize) ? parsedSize : staged.size,
+    path: String(result.file_path ?? result.path ?? ''),
+  };
+}
 
 interface ChatAreaProps {
   messages: Message[];
@@ -236,6 +296,118 @@ export default function ChatArea({
     setIsUploading(false);
   }, []);
 
+  const uploadStagedFile = useCallback(
+    async (staged: StagedFile, index: number): Promise<UploadStagedFileResult> => {
+      const uploadWithLegacyEndpoint = async (): Promise<MessageAttachment> => {
+        const formData = new FormData();
+        formData.append('file', staged.file);
+        formData.append('thread_id', threadId);
+        // 第一个文件时设置 is_first_file=1，其他为0，避免字符串 "false" 被后端当成真值。
+        formData.append('is_first_file', index === 0 ? '1' : '0');
+        if (authToken) {
+          formData.append('auth_token', authToken);
+        }
+
+        const resp = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!resp.ok) {
+          throw await createUploadFailureFromResponse(resp);
+        }
+
+        const result = (await resp.json()) as UploadResponsePayload;
+        return normalizeUploadAttachment(result, staged);
+      };
+
+      let presign: UploadPresignPayload | null = null;
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (authToken) {
+          headers.Authorization = `Bearer ${authToken}`;
+        }
+
+        const presignResp = await fetch('/api/upload/presign', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            filename: staged.name,
+            size: staged.size,
+            content_type: staged.file.type,
+          }),
+        });
+
+        if (presignResp.ok) {
+          presign = (await presignResp.json()) as UploadPresignPayload;
+        }
+      } catch {
+        presign = null;
+      }
+
+      const storageKey = presign?.key || presign?.storage_key;
+      if (!presign?.direct_upload || !presign.url || !storageKey) {
+        const attachment = await uploadWithLegacyEndpoint();
+        return {
+          attachment,
+          uploadedFile: {
+            name: attachment.name,
+            path: attachment.path ?? '',
+            size: attachment.size,
+            uploadedAt: new Date(),
+          },
+        };
+      }
+
+      const ossResp = await fetch(presign.url, {
+        method: 'PUT',
+        headers: presign.headers ?? {},
+        body: staged.file,
+      });
+      if (!ossResp.ok) {
+        throw createUploadFailure('上传失败');
+      }
+
+      const confirmHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (authToken) {
+        confirmHeaders.Authorization = `Bearer ${authToken}`;
+      }
+
+      const confirmResp = await fetch('/api/upload/confirm', {
+        method: 'POST',
+        headers: confirmHeaders,
+        body: JSON.stringify({
+          storage_key: storageKey,
+          filename: staged.name,
+          size: staged.size,
+          content_type: staged.file.type,
+          thread_id: threadId,
+        }),
+      });
+
+      if (!confirmResp.ok) {
+        throw await createUploadFailureFromResponse(confirmResp);
+      }
+
+      const result = (await confirmResp.json()) as UploadResponsePayload;
+      const attachment = normalizeUploadAttachment(result, staged);
+      return {
+        attachment,
+        uploadedFile: {
+          name: attachment.name,
+          path: attachment.path ?? '',
+          size: attachment.size,
+          uploadedAt: new Date(),
+        },
+      };
+    },
+    [authToken, threadId],
+  );
+
   // 发送消息（含文件上传）
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
@@ -247,68 +419,27 @@ export default function ChatArea({
     // 有暂存文件时先上传
     if (activeStagedFiles.length > 0) {
       setIsUploading(true);
-      let uploadFailed = false;
-      let uploadErrorMessage = '';
-      let authExpired = false;
       try {
         const attachmentsList: MessageAttachment[] = [];
 
         for (const [index, staged] of activeStagedFiles.entries()) {
-          const formData = new FormData();
-          formData.append('file', staged.file);
-          formData.append('thread_id', threadId);
-          // 第一个文件时设置 is_first_file=1，其他为0，避免字符串 "false" 被后端当成真值。
-          formData.append('is_first_file', index === 0 ? '1' : '0');
-          if (authToken) {
-            formData.append('auth_token', authToken);
-          }
-
-          const resp = await fetch('/api/upload', {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            const detail = String(err.detail || err.message || '上传失败');
-            uploadFailed = true;
-            uploadErrorMessage = detail;
-            authExpired =
-              resp.status === 401 ||
-              detail.includes('无效的 auth_token') ||
-              detail.includes('token') ||
-              detail.includes('登录');
-            break;
-          }
-
-          const result = await resp.json();
-          attachmentsList.push({
-            name: result.filename,
-            size: result.size,
-            path: result.file_path,
-          });
-          uploadedList.push({
-            name: result.filename,
-            path: result.file_path,
-            size: result.size,
-            uploadedAt: new Date(),
-          });
-        }
-
-        if (uploadFailed) {
-          const message = authExpired
-            ? '登录已过期，请重新登录后再上传文件。'
-            : uploadErrorMessage || '文件上传失败，请重试。';
-          window.alert(message);
-          if (authExpired) {
-            onLogin?.();
-          }
-          return;
+          const result = await uploadStagedFile(staged, index);
+          attachmentsList.push(result.attachment);
+          uploadedList.push(result.uploadedFile);
         }
 
         attachments = attachmentsList;
-      } catch {
-        window.alert('文件上传失败，请重试。');
+      } catch (error) {
+        const uploadError = error as UploadFailureError;
+        const message = uploadError.authExpired
+          ? '登录已过期，请重新登录后再上传文件。'
+          : uploadError.isUploadFailure
+            ? uploadError.message || '文件上传失败，请重试。'
+            : '文件上传失败，请重试。';
+        window.alert(message);
+        if (uploadError.authExpired) {
+          onLogin?.();
+        }
         return;
       } finally {
         setIsUploading(false);
@@ -341,12 +472,11 @@ export default function ChatArea({
     inputText,
     isLoading,
     isUploading,
-    authToken,
     isReconContext,
     onFileUploaded,
     onLogin,
     onSendMessage,
-    threadId,
+    uploadStagedFile,
   ]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
