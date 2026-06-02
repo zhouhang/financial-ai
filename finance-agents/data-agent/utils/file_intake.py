@@ -6,8 +6,10 @@ import csv
 import hashlib
 import logging
 import re
+import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from config import UPLOAD_DIR
 
@@ -129,10 +131,25 @@ def _is_oss_logical_upload_ref(file_path: str) -> bool:
     return str(file_path or "").strip().startswith("/uploads/oss/")
 
 
-def _coerce_columns(value: Any) -> list[str]:
+def _coerce_columns(value: Any) -> list[str] | None:
     if not isinstance(value, list):
-        return []
+        return None
     return [str(item) for item in value]
+
+
+def _finance_mcp_root() -> Path:
+    return Path(__file__).resolve().parents[3] / "finance-mcp"
+
+
+@contextmanager
+def _materialize_oss_logical_file(file_ref: str) -> Iterator[Path]:
+    finance_mcp_root = _finance_mcp_root()
+    if str(finance_mcp_root) not in sys.path:
+        sys.path.insert(0, str(finance_mcp_root))
+    from storage.input_resolver import materialize_input_file
+
+    with materialize_input_file(file_ref) as path:
+        yield path
 
 
 def _schema_candidate_names(
@@ -325,6 +342,18 @@ def _prepare_csv_logical_entry(entry: dict[str, Any], validation_rules: dict[str
     return logical_file, summary
 
 
+def _prepare_materialized_oss_logical_entry(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    with _materialize_oss_logical_file(entry["upload_ref"]) as path:
+        materialized_entry = dict(entry)
+        materialized_entry["abs_path"] = Path(path)
+        if materialized_entry["extension"] == ".csv":
+            return [_prepare_csv_logical_entry(materialized_entry, validation_rules)]
+        return _prepare_excel_logical_entries(materialized_entry, validation_rules)
+
+
 def _prepare_excel_logical_entries(entry: dict[str, Any], validation_rules: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     abs_path = entry["abs_path"]
     display_name = entry["display_name"]
@@ -443,12 +472,12 @@ def _normalize_uploaded_file_entry(
     if isinstance(item, dict):
         raw_path = str(item.get("file_path") or item.get("path") or "").strip()
         original_filename = str(item.get("original_filename") or item.get("name") or "").strip()
-        columns = _coerce_columns(item.get("columns"))
+        columns = _coerce_columns(item.get("columns")) if "columns" in item else None
         has_data_rows = bool(item.get("has_data_rows", item.get("row_count", 1)))
     else:
         raw_path = str(item or "").strip()
         original_filename = ""
-        columns = []
+        columns = None
         has_data_rows = True
 
     if not raw_path:
@@ -475,6 +504,7 @@ def _normalize_uploaded_file_entry(
             "extension": Path(upload_ref).suffix.lower(),
             "provided_columns": columns,
             "provided_has_data_rows": has_data_rows,
+            "is_oss_logical_ref": True,
         }
 
     abs_path = _resolve_upload_abs_path(upload_ref or raw_path, upload_root)
@@ -593,6 +623,8 @@ def prepare_logical_upload_files(
                     ),
                 )
             ]
+        elif entry.get("is_oss_logical_ref"):
+            prepared_items = _prepare_materialized_oss_logical_entry(entry, validation_rules)
         elif extension == ".csv":
             prepared_items = [_prepare_csv_logical_entry(entry, validation_rules)]
         else:

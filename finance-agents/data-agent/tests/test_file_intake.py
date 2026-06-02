@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ DATA_AGENT_ROOT = Path(__file__).resolve().parents[1]
 if str(DATA_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(DATA_AGENT_ROOT))
 
+from utils import file_intake
 from utils.file_intake import build_upload_name_maps, prepare_logical_upload_files
 
 
@@ -54,18 +56,80 @@ def test_oss_logical_upload_ref_with_columns_is_accepted_without_local_file() ->
     ]
 
 
-def test_oss_logical_upload_ref_without_columns_does_not_resolve_local_file() -> None:
+def test_oss_logical_upload_ref_without_columns_reads_headers_from_storage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    materialized = tmp_path / "orders.csv"
+    materialized.write_text("订单号,金额\nA001,12.3\n", encoding="utf-8-sig")
+    calls: list[str] = []
+
+    def fake_materialize_oss_logical_file(file_ref: str):
+        calls.append(file_ref)
+
+        @contextmanager
+        def _materialized():
+            yield materialized
+
+        return _materialized()
+
+    monkeypatch.setattr(
+        file_intake,
+        "_materialize_oss_logical_file",
+        fake_materialize_oss_logical_file,
+    )
+
     result = prepare_logical_upload_files(
         [
             {
                 "file_path": "/uploads/oss/company-1/a.csv",
-                "display_name": "orders.csv",
                 "original_filename": "orders.csv",
+                "size_bytes": 123,
+            }
+        ],
+        file_rule={
+            "file_validation_rules": {
+                "validation_config": {},
+                "table_schemas": [
+                    {
+                        "table_name": "订单表",
+                        "file_type": ["csv"],
+                        "required_columns": ["订单号", "金额"],
+                    }
+                ],
+            }
+        },
+    )
+
+    assert calls == ["/uploads/oss/company-1/a.csv"]
+    assert result["kept_count"] == 1
+    assert result["logical_uploaded_files"][0]["file_path"] == "/uploads/oss/company-1/a.csv"
+    assert result["files_with_columns"] == [
+        {"file_name": "orders.csv", "columns": ["订单号", "金额"]}
+    ]
+
+
+def test_oss_logical_upload_ref_with_explicit_empty_columns_prefilters_empty_header(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        file_intake,
+        "_materialize_oss_logical_file",
+        lambda file_ref: calls.append(file_ref),
+    )
+
+    result = prepare_logical_upload_files(
+        [
+            {
+                "file_path": "/uploads/oss/company-1/a.csv",
+                "original_filename": "orders.csv",
+                "columns": [],
             }
         ],
         file_rule=None,
     )
 
+    assert calls == []
     assert result["kept_count"] == 0
-    assert result["prefilter_summary"][0]["file_path"] == "/uploads/oss/company-1/a.csv"
     assert result["prefilter_summary"][0]["reason_code"] == "empty_header"
