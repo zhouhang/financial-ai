@@ -25,13 +25,12 @@ import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
 
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import write_output_metadata
-from storage.output_manager import persist_generated_output
+from storage.output_manager import build_output_download_url, persist_generated_output_safely
 from storage.input_resolver import materialize_input_file, split_input_file_ref
 from tools.rule_schema import load_and_validate_rule
 from proc.mcp_server.steps_runtime import (
@@ -634,19 +633,18 @@ async def _handle_proc_execute(arguments: dict) -> dict:
         def _build_download_url(file_path: str, logical_path: str = "") -> Optional[str]:
             if not file_path and not logical_path:
                 return None
-            path_for_url = ""
             if logical_path.startswith("/output/proc/"):
-                path_for_url = logical_path.removeprefix("/output/")
+                logical_download_path = logical_path
             else:
                 file_name = Path(file_path).name
-                path_for_url = f"proc/{rule_code}/{file_name}"
+                logical_download_path = f"/output/proc/{rule_code}/{file_name}"
             try:
                 import unified_mcp_server
 
                 base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
             except (ImportError, AttributeError):
                 base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-            return f"{base_url}/output/{path_for_url}?auth_token={quote(auth_token, safe='')}"
+            return build_output_download_url(base_url, logical_download_path, auth_token)
 
         for item in generated_files:
             output_file = item.get("output_file")
@@ -660,14 +658,16 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                         "rule_code": rule_code,
                     },
                 )
-                storage_output_path = persist_generated_output(
+                storage_output_path = persist_generated_output_safely(
                     output_file,
                     module="proc",
                     owner_user_id=user_id,
                     company_id=company_id,
                     rule_code=rule_code,
+                    logger=logger,
                 )
-                item["storage_output_path"] = storage_output_path
+                if storage_output_path:
+                    item["storage_output_path"] = storage_output_path
             item["download_url"] = _build_download_url(output_file, storage_output_path)
 
         return {
@@ -723,18 +723,17 @@ async def _handle_proc_execute(arguments: dict) -> dict:
         def _build_download_url(file_path: str, logical_path: str = "") -> Optional[str]:
             if not file_path and not logical_path:
                 return None
-            path_for_url = ""
             if logical_path.startswith("/output/proc/"):
-                path_for_url = logical_path.removeprefix("/output/")
+                logical_download_path = logical_path
             else:
                 file_name = Path(file_path).name
-                path_for_url = f"proc/{rule_code}/{file_name}"
+                logical_download_path = f"/output/proc/{rule_code}/{file_name}"
             try:
                 import unified_mcp_server
                 base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
             except (ImportError, AttributeError):
                 base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-            return f"{base_url}/output/{path_for_url}?auth_token={quote(auth_token, safe='')}"
+            return build_output_download_url(base_url, logical_download_path, auth_token)
 
         for merged in merge_result.get("merged_files", []):
             merged_file_path = merged.get("merged_file_path")
@@ -748,14 +747,16 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                         "rule_code": rule_code,
                     },
                 )
-                storage_merged_output_path = persist_generated_output(
+                storage_merged_output_path = persist_generated_output_safely(
                     merged_file_path,
                     module="proc",
                     owner_user_id=user_id,
                     company_id=company_id,
                     rule_code=rule_code,
+                    logger=logger,
                 )
-                merged["storage_merged_output_path"] = storage_merged_output_path
+                if storage_merged_output_path:
+                    merged["storage_merged_output_path"] = storage_merged_output_path
 
         return {
             "success": merge_result.get("success", False),
@@ -824,18 +825,17 @@ async def _handle_proc_execute(arguments: dict) -> dict:
         """构建下载 URL"""
         if not file_path and not logical_path:
             return None
-        path_for_url = ""
         if logical_path.startswith("/output/proc/"):
-            path_for_url = logical_path.removeprefix("/output/")
+            logical_download_path = logical_path
         else:
             file_name = Path(file_path).name
-            path_for_url = f"proc/{rule_code}/{file_name}"
+            logical_download_path = f"/output/proc/{rule_code}/{file_name}"
         try:
             import unified_mcp_server
             base_url = unified_mcp_server.MCP_PUBLIC_BASE_URL.rstrip("/")
         except (ImportError, AttributeError):
             base_url = os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:3335").rstrip("/")
-        return f"{base_url}/output/{path_for_url}?auth_token={quote(auth_token, safe='')}"
+        return build_output_download_url(base_url, logical_download_path, auth_token)
 
     # 为每个生成的文件添加 download_url
     for f in generated_files:
@@ -850,14 +850,16 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                     "rule_code": rule_code,
                 },
             )
-            storage_output_path = persist_generated_output(
+            storage_output_path = persist_generated_output_safely(
                 output_file,
                 module="proc",
                 owner_user_id=user_id,
                 company_id=company_id,
                 rule_code=rule_code,
+                logger=logger,
             )
-            f["storage_output_path"] = storage_output_path
+            if storage_output_path:
+                f["storage_output_path"] = storage_output_path
         f["download_url"] = _build_download_url(f.get("output_file"), storage_output_path)
         # 为合并文件也添加 download_url
         if f.get("merge_result", {}).get("merged_file_path"):
@@ -869,14 +871,16 @@ async def _handle_proc_execute(arguments: dict) -> dict:
                     "rule_code": rule_code,
                 },
             )
-            storage_merged_output_path = persist_generated_output(
+            storage_merged_output_path = persist_generated_output_safely(
                 f["merge_result"]["merged_file_path"],
                 module="proc",
                 owner_user_id=user_id,
                 company_id=company_id,
                 rule_code=rule_code,
+                logger=logger,
             )
-            f["merge_result"]["storage_merged_output_path"] = storage_merged_output_path
+            if storage_merged_output_path:
+                f["merge_result"]["storage_merged_output_path"] = storage_merged_output_path
             f["merge_result"]["download_url"] = _build_download_url(
                 f["merge_result"]["merged_file_path"],
                 storage_merged_output_path,

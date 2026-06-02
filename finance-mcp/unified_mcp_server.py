@@ -19,7 +19,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import Response, JSONResponse, FileResponse
+from starlette.responses import Response, JSONResponse, FileResponse, StreamingResponse
 import uvicorn
 import logging
 from auth.jwt_utils import get_user_from_token
@@ -533,11 +533,26 @@ async def download_output_file(request):
 
         storage_ref = parse_storage_ref(storage_row)
         client = storage_from_env(local_root=output_dir)
-        content = client.read_bytes(storage_ref)
+        try:
+            if not client.exists(storage_ref):
+                logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
+                return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+        except FileNotFoundError:
+            logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
+            return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+        except Exception as exc:
+            logger.error(
+                "[download] 读取存储对象失败: logical_path=%s ref=%s error=%s",
+                logical_path,
+                storage_ref,
+                exc,
+                exc_info=True,
+            )
+            return JSONResponse({"error": "读取存储文件失败，请稍后重试"}, status_code=502)
         filename = storage_ref.original_filename or Path(file_path).name
         encoded_filename = quote(filename, safe="")
-        return Response(
-            content,
+        return StreamingResponse(
+            client.iter_bytes(storage_ref),
             media_type=storage_ref.content_type or "application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"

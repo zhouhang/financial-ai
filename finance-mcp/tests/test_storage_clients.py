@@ -28,6 +28,7 @@ def test_local_put_and_download_to_temp(tmp_path: Path) -> None:
     assert (root / "uploads/c1/source.csv").read_text(encoding="utf-8") == "a,b\n1,2\n"
     with materialize_to_temp(client, ref) as path:
         assert path.read_text(encoding="utf-8") == "a,b\n1,2\n"
+    assert b"".join(client.iter_bytes(ref, chunk_size=3)) == b"a,b\n1,2\n"
 
 
 def test_local_rejects_path_escape(tmp_path: Path) -> None:
@@ -95,7 +96,20 @@ class _FakeBucket:
 
     def get_object(self, key: str):
         data = self.objects[key]
-        return type("Body", (), {"read": lambda self_: data})()
+
+        class Body:
+            def __init__(self, payload: bytes) -> None:
+                self.payload = payload
+                self.offset = 0
+
+            def read(self, size: int | None = None) -> bytes:
+                if size is None:
+                    size = len(self.payload) - self.offset
+                chunk = self.payload[self.offset:self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        return Body(data)
 
     def object_exists(self, key: str):
         return key in self.objects
@@ -127,6 +141,7 @@ def test_oss_client_with_fake_bucket(monkeypatch, tmp_path: Path) -> None:
     assert fake_bucket.headers["uploads/c1/a.txt"] == {"Content-Type": "text/plain"}
     assert client.exists(ref)
     assert client.read_bytes(ref) == b"abc"
+    assert b"".join(client.iter_bytes(ref, chunk_size=2)) == b"abc"
     assert client.create_presigned_upload(key="uploads/c1/b.txt", content_type="text/plain")[
         "url"
     ].startswith("https://oss.test/uploads/c1/b.txt")

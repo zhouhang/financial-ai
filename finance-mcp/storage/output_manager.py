@@ -3,7 +3,9 @@ from __future__ import annotations
 import mimetypes
 import os
 from datetime import datetime
+from logging import Logger
 from pathlib import Path
+from urllib.parse import quote
 
 from storage import repository
 from storage.client import storage_from_env
@@ -97,3 +99,48 @@ def persist_generated_output(
         metadata={"rule_code": rule_code, "run_id": run_id},
     )
     return logical_path
+
+
+def persist_generated_output_safely(
+    output_path: str | Path,
+    *,
+    module: str,
+    owner_user_id: str | None,
+    company_id: str | None,
+    rule_code: str,
+    run_id: str = "",
+    logger: Logger | None = None,
+) -> str:
+    """Persist generated output without failing the completed local run."""
+    try:
+        return persist_generated_output(
+            output_path,
+            module=module,
+            owner_user_id=owner_user_id,
+            company_id=company_id,
+            rule_code=rule_code,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        if logger:
+            logger.error(
+                "生成文件持久化到对象存储失败，回退本地下载: module=%s path=%s error=%s",
+                module,
+                output_path,
+                exc,
+                exc_info=True,
+            )
+        return ""
+
+
+def build_output_download_url(base_url: str, logical_path: str, auth_token: str) -> str:
+    """Build an output download URL with each path segment RFC3986-encoded."""
+    clean_logical_path = str(logical_path or "").strip()
+    if not clean_logical_path.startswith("/output/"):
+        raise ValueError(f"invalid output logical path: {logical_path}")
+    encoded_path = "/".join(
+        quote(segment, safe="")
+        for segment in clean_logical_path.removeprefix("/output/").split("/")
+        if segment
+    )
+    return f"{str(base_url).rstrip('/')}/output/{encoded_path}?auth_token={quote(str(auth_token or ''), safe='')}"

@@ -19,13 +19,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import quote
 
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import write_output_metadata
-from storage.output_manager import persist_generated_output
+from storage.output_manager import build_output_download_url, persist_generated_output_safely
 from storage.input_resolver import materialize_input_file, split_input_file_ref
 from .dataset_loader import (
     DatasetLoadError,
@@ -778,18 +777,16 @@ def execute_single_recon(
                 "rule_id": rule_id,
             },
         )
-        storage_output_path = persist_generated_output(
+        storage_output_path = persist_generated_output_safely(
             output_path,
             module="recon",
             owner_user_id=user_id,
             company_id=company_id,
             rule_code=rule_code,
+            logger=logger,
         )
-        if storage_output_path.startswith("/output/recon/"):
-            download_path = storage_output_path.removeprefix("/output/")
-            download_url = f"{base_url}/output/{download_path}?auth_token={quote(auth_token, safe='')}"
-        else:
-            download_url = f"{base_url}/output/recon/{file_name}?auth_token={quote(auth_token, safe='')}"
+        logical_download_path = storage_output_path or f"/output/recon/{file_name}"
+        download_url = build_output_download_url(base_url, logical_download_path, auth_token)
     
     # 9. 构建过滤提示信息
     filter_messages = []
@@ -1574,7 +1571,7 @@ def _write_recon_result(
     from openpyxl.utils import get_column_letter
     
     # 生成文件名
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_rule_name = re.sub(r'[\\/:*?"<>|]', "_", rule_name)
     filename = f"{safe_rule_name}_核对结果_{timestamp}.xlsx"
     output_path = str(Path(output_dir) / filename)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 import shutil
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from storage.config import StorageSettings
 from storage.refs import StorageObjectRef
@@ -33,6 +33,9 @@ class StorageClient(Protocol):
         raise NotImplementedError
 
     def read_bytes(self, ref: StorageObjectRef) -> bytes:
+        raise NotImplementedError
+
+    def iter_bytes(self, ref: StorageObjectRef, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
         raise NotImplementedError
 
     def exists(self, ref: StorageObjectRef) -> bool:
@@ -119,6 +122,14 @@ class LocalStorageClient:
     def read_bytes(self, ref: StorageObjectRef) -> bytes:
         return self._path_for_ref(ref).read_bytes()
 
+    def iter_bytes(self, ref: StorageObjectRef, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        with self._path_for_ref(ref).open("rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
     def exists(self, ref: StorageObjectRef) -> bool:
         return self._path_for_ref(ref).is_file()
 
@@ -187,6 +198,14 @@ class OssStorageClient:
 
     def read_bytes(self, ref: StorageObjectRef) -> bytes:
         return self.bucket.get_object(ref.key).read()
+
+    def iter_bytes(self, ref: StorageObjectRef, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        stream = self.bucket.get_object(ref.key)
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
     def exists(self, ref: StorageObjectRef) -> bool:
         return bool(ref.key) and bool(self.bucket.object_exists(ref.key))
