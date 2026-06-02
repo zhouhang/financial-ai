@@ -62,6 +62,84 @@ async def test_local_backend_presign_returns_proxy_upload_fallback(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_presign_accepts_size_alias_and_normalizes_size_bytes(
+    monkeypatch,
+    upload_user,
+) -> None:
+    import tools.storage_upload_tool as storage_upload_tool
+
+    monkeypatch.setattr(storage_upload_tool, "get_user_from_token", lambda token: upload_user)
+    monkeypatch.setenv("STORAGE_BACKEND", "local")
+    monkeypatch.setenv("OSS_UPLOAD_MAX_SIZE", "1024")
+
+    result = await storage_upload_tool.create_upload_presign(
+        {
+            "auth_token": "token",
+            "filename": "report.csv",
+            "size": 34,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["size_bytes"] == 34
+
+
+@pytest.mark.asyncio
+async def test_oss_presign_exposes_top_level_direct_upload_fields(
+    monkeypatch,
+    upload_user,
+) -> None:
+    import tools.storage_upload_tool as storage_upload_tool
+
+    captured: dict = {}
+
+    class FakeOssStorageClient:
+        def __init__(self, settings):
+            captured["settings"] = settings
+
+        def create_presigned_upload(self, *, key: str, content_type: str = ""):
+            captured["key"] = key
+            captured["content_type"] = content_type
+            return {
+                "provider": "oss",
+                "bucket": "finance-bucket",
+                "key": key,
+                "url": "https://oss.example.com/upload.csv?signature=yes",
+                "method": "PUT",
+                "headers": {"Content-Type": content_type},
+                "expires_in": 900,
+            }
+
+    monkeypatch.setattr(storage_upload_tool, "get_user_from_token", lambda token: upload_user)
+    monkeypatch.setattr(storage_upload_tool, "OssStorageClient", FakeOssStorageClient)
+    monkeypatch.setenv("STORAGE_BACKEND", "oss")
+    monkeypatch.setenv("OSS_BUCKET", "finance-bucket")
+    monkeypatch.setenv("OSS_ENDPOINT", "https://oss.example.com")
+    monkeypatch.setenv("OSS_ACCESS_KEY_ID", "ak")
+    monkeypatch.setenv("OSS_ACCESS_KEY_SECRET", "sk")
+    monkeypatch.setenv("OSS_PREFIX", "financial-ai/test")
+
+    result = await storage_upload_tool.create_upload_presign(
+        {
+            "auth_token": "token",
+            "filename": "upload.csv",
+            "size": 34,
+            "content_type": "text/csv",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["direct_upload"] is True
+    assert result["storage_key"] == captured["key"]
+    assert result["key"] == captured["key"]
+    assert result["url"] == "https://oss.example.com/upload.csv?signature=yes"
+    assert result["method"] == "PUT"
+    assert result["headers"] == {"Content-Type": "text/csv"}
+    assert result["upload"]["key"] == captured["key"]
+    assert result["presigned_upload"]["url"] == result["url"]
+
+
+@pytest.mark.asyncio
 async def test_oss_confirm_saves_metadata_and_returns_logical_path(monkeypatch, upload_user) -> None:
     import tools.storage_upload_tool as storage_upload_tool
     from storage.refs import StorageObjectRef
@@ -112,6 +190,48 @@ async def test_oss_confirm_saves_metadata_and_returns_logical_path(monkeypatch, 
     assert saved["ref"].provider == "oss"
     assert saved["ref"].bucket == "finance-bucket"
     assert saved["ref"].key == storage_key
+
+
+@pytest.mark.asyncio
+async def test_oss_confirm_accepts_size_alias_and_normalizes_size_bytes(
+    monkeypatch,
+    upload_user,
+) -> None:
+    import tools.storage_upload_tool as storage_upload_tool
+
+    saved: dict = {}
+    storage_key = (
+        "financial-ai/test/uploads/"
+        "00000000-0000-0000-0000-000000000002/2026/06/02/abc-report.csv"
+    )
+
+    monkeypatch.setattr(storage_upload_tool, "get_user_from_token", lambda token: upload_user)
+    monkeypatch.setenv("STORAGE_BACKEND", "oss")
+    monkeypatch.setenv("OSS_BUCKET", "finance-bucket")
+    monkeypatch.setenv("OSS_ENDPOINT", "https://oss.example.com")
+    monkeypatch.setenv("OSS_ACCESS_KEY_ID", "ak")
+    monkeypatch.setenv("OSS_ACCESS_KEY_SECRET", "sk")
+    monkeypatch.setenv("OSS_PREFIX", "financial-ai/test")
+    monkeypatch.setattr(storage_upload_tool, "_oss_object_exists", lambda ref, settings: True)
+    monkeypatch.setattr(
+        storage_upload_tool.repository,
+        "save_storage_object_metadata",
+        lambda **kwargs: saved.update(kwargs) or {"logical_path": kwargs["logical_path"]},
+    )
+
+    result = await storage_upload_tool.confirm_upload(
+        {
+            "auth_token": "token",
+            "storage_key": storage_key,
+            "filename": "report.csv",
+            "size": 34,
+            "content_type": "text/csv",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["size_bytes"] == 34
+    assert saved["ref"].size_bytes == 34
 
 
 @pytest.mark.asyncio

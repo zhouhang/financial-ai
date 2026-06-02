@@ -34,9 +34,10 @@ def create_storage_upload_tools() -> list[Tool]:
                     "auth_token": {"type": "string", "description": "JWT token，用于校验用户身份"},
                     "filename": {"type": "string", "description": "原始文件名"},
                     "size_bytes": {"type": "integer", "description": "文件大小（字节）"},
+                    "size": {"type": "integer", "description": "文件大小（字节），兼容前端字段"},
                     "content_type": {"type": "string", "description": "文件 MIME 类型，可选"},
                 },
-                "required": ["auth_token", "filename", "size_bytes"],
+                "required": ["auth_token", "filename"],
             },
         ),
         Tool(
@@ -49,10 +50,11 @@ def create_storage_upload_tools() -> list[Tool]:
                     "storage_key": {"type": "string", "description": "OSS 对象 key"},
                     "filename": {"type": "string", "description": "原始文件名"},
                     "size_bytes": {"type": "integer", "description": "文件大小（字节）"},
+                    "size": {"type": "integer", "description": "文件大小（字节），兼容前端字段"},
                     "content_type": {"type": "string", "description": "文件 MIME 类型，可选"},
                     "checksum": {"type": "string", "description": "文件校验和，可选"},
                 },
-                "required": ["auth_token", "storage_key", "filename", "size_bytes"],
+                "required": ["auth_token", "storage_key", "filename"],
             },
         ),
     ]
@@ -135,12 +137,20 @@ async def create_upload_presign(args: dict[str, Any]) -> dict[str, Any]:
             "storage_provider": "oss",
             "storage_bucket": settings.oss_bucket,
             "storage_key": storage_key,
+            "key": presigned_upload.get("key", storage_key),
+            "url": presigned_upload.get("url", ""),
+            "headers": presigned_upload.get("headers", {}),
             "filename": filename,
             "content_type": content_type,
             "size_bytes": size_bytes,
             "max_size_bytes": settings.oss_upload_max_size,
             "upload": presigned_upload,
             "presigned_upload": presigned_upload,
+            **(
+                {"method": presigned_upload["method"]}
+                if presigned_upload.get("method") is not None
+                else {}
+            ),
         }
     except Exception as exc:
         logger.error(f"创建上传预签名失败: {exc}", exc_info=True)
@@ -257,15 +267,10 @@ def _validate_upload_request(
         return {}, {"success": False, "error": f"不支持的文件类型: {file_ext}"}
 
     try:
-        size_bytes = int(
-            args.get("size_bytes")
-            if args.get("size_bytes") is not None
-            else args.get("file_size")
-            if args.get("file_size") is not None
-            else args.get("content_length")
-        )
+        raw_size = _first_present_arg(args, "size_bytes", "size", "file_size", "content_length")
+        size_bytes = int(raw_size)
     except (TypeError, ValueError):
-        return {}, {"success": False, "error": "缺少或非法的 size_bytes 参数"}
+        return {}, {"success": False, "error": "缺少或非法的 size/size_bytes 参数"}
 
     if size_bytes < 0:
         return {}, {"success": False, "error": "size_bytes 不能小于 0"}
@@ -289,6 +294,13 @@ def _validate_upload_request(
         },
         None,
     )
+
+
+def _first_present_arg(args: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if args.get(name) is not None:
+            return args.get(name)
+    return None
 
 
 def _resolve_content_type(filename: str, content_type: str = "") -> str:
