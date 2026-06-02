@@ -351,7 +351,58 @@ def _prepare_materialized_oss_logical_entry(
         materialized_entry["abs_path"] = Path(path)
         if materialized_entry["extension"] == ".csv":
             return [_prepare_csv_logical_entry(materialized_entry, validation_rules)]
-        return _prepare_excel_logical_entries(materialized_entry, validation_rules)
+        return _prepare_oss_excel_logical_entries(materialized_entry, validation_rules)
+
+
+def _prepare_oss_excel_logical_entries(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    import openpyxl
+
+    abs_path = entry["abs_path"]
+    display_name = entry["display_name"]
+    upload_ref = entry["upload_ref"]
+    workbook = openpyxl.load_workbook(abs_path, read_only=True, data_only=True)
+    try:
+        sheet_names = list(workbook.sheetnames)
+        split_required = len(sheet_names) > 1
+        results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for sheet_index, sheet_name in enumerate(sheet_names, start=1):
+            source_sheet = workbook[sheet_name]
+            header, has_data_rows = _analyze_openpyxl_sheet(source_sheet)
+            logical_display_name = (
+                _build_split_display_name(
+                    workbook_name=display_name,
+                    upload_ref=upload_ref,
+                    abs_path=abs_path,
+                    sheet_name=sheet_name,
+                    sheet_index=sheet_index,
+                    display_extension=entry["extension"],
+                )
+                if split_required
+                else display_name
+            )
+            logical_file = _build_logical_file_entry(
+                file_path=upload_ref,
+                display_name=logical_display_name,
+                workbook_original_filename=entry["original_filename"],
+                workbook_display_name=display_name,
+                workbook_file_path=upload_ref,
+                sheet_name=sheet_name,
+                sheet_index=sheet_index,
+                is_logical_split=split_required,
+            )
+            summary = _build_prefilter_decision(
+                logical_file=logical_file,
+                columns=header,
+                has_data_rows=has_data_rows,
+                validation_rules=validation_rules,
+            )
+            results.append((logical_file, summary))
+        return results
+    finally:
+        workbook.close()
 
 
 def _prepare_excel_logical_entries(entry: dict[str, Any], validation_rules: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:

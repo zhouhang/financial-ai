@@ -109,6 +109,77 @@ def test_oss_logical_upload_ref_without_columns_reads_headers_from_storage(
     ]
 
 
+def test_oss_logical_upload_multi_sheet_workbook_preserves_logical_refs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import openpyxl
+
+    materialized = tmp_path / "workbook.xlsx"
+    workbook = openpyxl.Workbook()
+    first_sheet = workbook.active
+    first_sheet.title = "订单"
+    first_sheet.append(["订单号", "金额"])
+    first_sheet.append(["A001", 12.3])
+    second_sheet = workbook.create_sheet("退款")
+    second_sheet.append(["退款单号", "退款金额"])
+    second_sheet.append(["R001", 4.5])
+    workbook.save(materialized)
+
+    def fake_materialize_oss_logical_file(file_ref: str):
+        assert file_ref == "/uploads/oss/company-1/workbook.xlsx"
+
+        @contextmanager
+        def _materialized():
+            yield materialized
+
+        return _materialized()
+
+    monkeypatch.setattr(
+        file_intake,
+        "_materialize_oss_logical_file",
+        fake_materialize_oss_logical_file,
+    )
+
+    result = prepare_logical_upload_files(
+        [
+            {
+                "file_path": "/uploads/oss/company-1/workbook.xlsx",
+                "original_filename": "workbook.xlsx",
+            }
+        ],
+        file_rule={
+            "file_validation_rules": {
+                "validation_config": {},
+                "table_schemas": [
+                    {
+                        "table_name": "订单表",
+                        "file_type": ["xlsx"],
+                        "required_columns": ["订单号", "金额"],
+                    },
+                    {
+                        "table_name": "退款表",
+                        "file_type": ["xlsx"],
+                        "required_columns": ["退款单号", "退款金额"],
+                    },
+                ],
+            }
+        },
+    )
+
+    logical_files = result["logical_uploaded_files"]
+    summaries = result["prefilter_summary"]
+
+    assert result["kept_count"] == 2
+    assert {item["sheet_name"] for item in logical_files} == {"订单", "退款"}
+    assert {item["sheet_index"] for item in logical_files} == {1, 2}
+    assert all(item["is_logical_split"] is True for item in logical_files)
+    assert all(item["file_path"].startswith("/uploads/oss/") for item in logical_files)
+    assert all(item["workbook_file_path"] == "/uploads/oss/company-1/workbook.xlsx" for item in logical_files)
+    assert all(summary["file_path"].startswith("/uploads/oss/") for summary in summaries)
+    assert all(str(tmp_path) not in summary["file_path"] for summary in summaries)
+
+
 def test_oss_logical_upload_ref_with_explicit_empty_columns_prefilters_empty_header(
     monkeypatch,
 ) -> None:
