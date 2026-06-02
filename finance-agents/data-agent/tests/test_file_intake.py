@@ -12,6 +12,23 @@ from utils import file_intake
 from utils.file_intake import build_upload_name_maps, prepare_logical_upload_files
 
 
+def test_xls_engine_is_declared_for_runtime_installs() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    data_agent_requirements = (
+        repo_root / "finance-agents" / "data-agent" / "requirements.txt"
+    ).read_text(encoding="utf-8")
+    data_agent_pyproject = (
+        repo_root / "finance-agents" / "data-agent" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    finance_mcp_requirements = (
+        repo_root / "finance-mcp" / "requirements.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "xlrd>=2.0.1" in data_agent_requirements
+    assert '"xlrd>=2.0.1"' in data_agent_pyproject
+    assert "xlrd>=2.0.1" in finance_mcp_requirements
+
+
 def test_oss_logical_upload_ref_is_mapped_without_local_file() -> None:
     logical_file = {
         "file_path": "/uploads/oss/company-1/a.csv",

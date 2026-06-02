@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
-from security_utils import UPLOAD_ROOT, resolve_recon_input_file_path
+from security_utils import UPLOAD_ROOT, resolve_recon_input_file_path, resolve_upload_file_path
 from storage import repository
 from storage.client import storage_from_env
 from storage.refs import parse_storage_ref
@@ -35,7 +35,7 @@ def split_input_file_ref(file_ref: str) -> tuple[str, str | None]:
 
 
 @contextmanager
-def materialize_input_file(file_ref: str) -> Iterator[Path]:
+def materialize_input_file(file_ref: str, *, legacy_mode: str = "recon") -> Iterator[Path]:
     """Resolve an input file ref to a local path for the lifetime of this context."""
     base_ref, _ = split_input_file_ref(file_ref)
     row = repository.get_storage_object_by_logical_path(base_ref)
@@ -46,4 +46,10 @@ def materialize_input_file(file_ref: str) -> Iterator[Path]:
             yield path
         return
 
-    yield resolve_recon_input_file_path(base_ref)
+    if legacy_mode == "upload":
+        yield resolve_upload_file_path(base_ref)
+        return
+    if legacy_mode == "recon":
+        yield resolve_recon_input_file_path(base_ref)
+        return
+    raise ValueError(f"不支持的 legacy input 解析模式: {legacy_mode}")

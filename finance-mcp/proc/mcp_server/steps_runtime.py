@@ -2510,7 +2510,7 @@ def _normalize_alias_key(name: Any) -> str:
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     _, sheet_name = split_input_file_ref(file_path)
-    with materialize_input_file(file_path) as path:
+    with materialize_input_file(file_path, legacy_mode="upload") as path:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
         suffix = path.suffix.lower()

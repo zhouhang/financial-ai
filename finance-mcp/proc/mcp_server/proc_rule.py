@@ -1039,7 +1039,7 @@ def _load_source_df(source_tables: Any, table_file_map: dict[str, str]) -> pd.Da
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
     _, sheet_name = split_input_file_ref(file_path)
-    with materialize_input_file(file_path) as path:
+    with materialize_input_file(file_path, legacy_mode="upload") as path:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
         ext = path.suffix.lower()

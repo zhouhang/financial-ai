@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 FINANCE_MCP_ROOT = Path(__file__).resolve().parents[1]
 if str(FINANCE_MCP_ROOT) not in sys.path:
@@ -12,6 +13,7 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
 from storage import input_resolver
 from storage.refs import StorageObjectRef
 from recon.mcp_server import recon_tool
+from proc.mcp_server import proc_rule
 
 
 def test_materialize_input_file_falls_back_to_legacy_local_resolver(
@@ -37,6 +39,51 @@ def test_materialize_input_file_falls_back_to_legacy_local_resolver(
         assert resolved.read_bytes() == b"legacy"
 
     assert legacy_path.exists()
+
+
+def test_materialize_input_file_upload_mode_uses_upload_only_resolver(monkeypatch) -> None:
+    calls: dict[str, str] = {}
+    upload_path = Path("/tmp/upload-only.csv")
+
+    monkeypatch.setattr(
+        input_resolver.repository,
+        "get_storage_object_by_logical_path",
+        lambda logical_path: None,
+    )
+    def fake_resolve_upload_file_path(file_ref: str) -> Path:
+        calls["upload"] = file_ref
+        return upload_path
+
+    monkeypatch.setattr(
+        input_resolver,
+        "resolve_upload_file_path",
+        fake_resolve_upload_file_path,
+    )
+    monkeypatch.setattr(
+        input_resolver,
+        "resolve_recon_input_file_path",
+        lambda file_ref: (_ for _ in ()).throw(AssertionError("recon resolver should not run")),
+    )
+
+    with input_resolver.materialize_input_file("/uploads/a.csv", legacy_mode="upload") as resolved:
+        assert resolved == upload_path
+
+    assert calls == {"upload": "/uploads/a.csv"}
+
+
+def test_proc_reader_rejects_legacy_proc_output_paths(monkeypatch, tmp_path: Path) -> None:
+    proc_output = tmp_path / "proc-output.xlsx"
+    proc_output.write_bytes(b"not-read")
+
+    def fake_materialize_input_file(file_ref: str, *, legacy_mode: str = "recon"):
+        assert file_ref == str(proc_output)
+        assert legacy_mode == "upload"
+        raise ValueError("文件路径不在允许目录内")
+
+    monkeypatch.setattr(proc_rule, "materialize_input_file", fake_materialize_input_file)
+
+    with pytest.raises(ValueError, match="允许目录"):
+        proc_rule._read_file_as_df(str(proc_output))
 
 
 def test_materialize_input_file_downloads_storage_object_to_temp_file(
