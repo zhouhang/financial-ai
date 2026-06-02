@@ -71,6 +71,33 @@ def test_materialize_input_file_upload_mode_uses_upload_only_resolver(monkeypatc
     assert calls == {"upload": "/uploads/a.csv"}
 
 
+def test_materialize_input_file_upload_mode_rejects_stored_output_rows(monkeypatch) -> None:
+    logical_path = "/output/proc/rule-a/out.xlsx"
+    row = {
+        "logical_path": logical_path,
+        "storage_provider": "oss",
+        "storage_bucket": "finance-oss",
+        "storage_key": "proc-output/company/out.xlsx",
+        "storage_uri": "oss://finance-oss/proc-output/company/out.xlsx",
+        "original_filename": "out.xlsx",
+    }
+
+    monkeypatch.setattr(
+        input_resolver.repository,
+        "get_storage_object_by_logical_path",
+        lambda requested_path: row if requested_path == logical_path else None,
+    )
+    monkeypatch.setattr(
+        input_resolver,
+        "storage_from_env",
+        lambda *, local_root: (_ for _ in ()).throw(AssertionError("storage client should not run")),
+    )
+
+    with pytest.raises(ValueError, match="允许目录"):
+        with input_resolver.materialize_input_file(logical_path, legacy_mode="upload"):
+            pass
+
+
 def test_proc_reader_rejects_legacy_proc_output_paths(monkeypatch, tmp_path: Path) -> None:
     proc_output = tmp_path / "proc-output.xlsx"
     proc_output.write_bytes(b"not-read")

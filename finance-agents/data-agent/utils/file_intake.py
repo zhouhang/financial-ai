@@ -433,32 +433,51 @@ def _prepare_oss_xls_logical_entry(
     upload_ref = entry["upload_ref"]
     workbook = pd.read_excel(abs_path, sheet_name=None, header=None, dtype=object)
     if not workbook:
-        sheet_name = None
-        rows: list[list[Any]] = []
-    else:
-        sheet_name, frame = next(iter(workbook.items()))
-        rows = frame.values.tolist() if hasattr(frame, "values") else []
+        workbook = {None: pd.DataFrame()}
 
-    header_row = rows[0] if rows else []
-    header = [_coerce_cell_text(cell) for cell in header_row]
-    has_data_rows = any(_row_has_values(row) for row in rows[1:])
-    logical_file = _build_logical_file_entry(
-        file_path=upload_ref,
-        display_name=display_name,
-        workbook_original_filename=entry["original_filename"],
-        workbook_display_name=display_name,
-        workbook_file_path=upload_ref,
-        sheet_name=str(sheet_name) if sheet_name is not None else None,
-        sheet_index=1 if sheet_name is not None else None,
-        is_logical_split=False,
-    )
-    summary = _build_prefilter_decision(
-        logical_file=logical_file,
-        columns=header,
-        has_data_rows=has_data_rows,
-        validation_rules=validation_rules,
-    )
-    return [(logical_file, summary)]
+    split_required = len(workbook) > 1
+    results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for sheet_index, (sheet_name, frame) in enumerate(workbook.items(), start=1):
+        rows = frame.values.tolist() if hasattr(frame, "values") else []
+        header_row = rows[0] if rows else []
+        header = [_coerce_cell_text(cell) for cell in header_row]
+        has_data_rows = any(_row_has_values(row) for row in rows[1:])
+        sheet_name_text = str(sheet_name) if sheet_name is not None else ""
+        logical_display_name = (
+            _build_split_display_name(
+                workbook_name=display_name,
+                upload_ref=upload_ref,
+                abs_path=abs_path,
+                sheet_name=sheet_name_text,
+                sheet_index=sheet_index,
+                display_extension=entry["extension"],
+            )
+            if split_required
+            else display_name
+        )
+        sheet_file_path = (
+            _build_oss_sheet_input_ref(upload_ref, sheet_name_text)
+            if split_required
+            else upload_ref
+        )
+        logical_file = _build_logical_file_entry(
+            file_path=sheet_file_path,
+            display_name=logical_display_name,
+            workbook_original_filename=entry["original_filename"],
+            workbook_display_name=display_name,
+            workbook_file_path=upload_ref,
+            sheet_name=sheet_name_text or None,
+            sheet_index=sheet_index if sheet_name is not None else None,
+            is_logical_split=split_required,
+        )
+        summary = _build_prefilter_decision(
+            logical_file=logical_file,
+            columns=header,
+            has_data_rows=has_data_rows,
+            validation_rules=validation_rules,
+        )
+        results.append((logical_file, summary))
+    return results
 
 
 def _prepare_excel_logical_entries(entry: dict[str, Any], validation_rules: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:

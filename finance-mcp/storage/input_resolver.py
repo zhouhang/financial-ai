@@ -34,12 +34,23 @@ def split_input_file_ref(file_ref: str) -> tuple[str, str | None]:
     return base_ref, str(sheet_values[0])
 
 
+def _storage_row_allowed_for_mode(row: dict, logical_path: str, legacy_mode: str) -> bool:
+    provider = str(row.get("storage_provider") or "").strip()
+    if not provider:
+        return False
+    if legacy_mode == "upload":
+        return logical_path.startswith("/uploads/")
+    if legacy_mode == "recon":
+        return logical_path.startswith("/uploads/") or logical_path.startswith("/output/proc/")
+    return False
+
+
 @contextmanager
 def materialize_input_file(file_ref: str, *, legacy_mode: str = "recon") -> Iterator[Path]:
     """Resolve an input file ref to a local path for the lifetime of this context."""
     base_ref, _ = split_input_file_ref(file_ref)
     row = repository.get_storage_object_by_logical_path(base_ref)
-    if row:
+    if row and _storage_row_allowed_for_mode(row, base_ref, legacy_mode):
         storage_ref = parse_storage_ref(row)
         client = storage_from_env(local_root=UPLOAD_ROOT)
         with materialize_to_temp(client, storage_ref) as path:
