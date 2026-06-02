@@ -203,6 +203,30 @@ async def test_dispatcher_retries_when_completion_write_fails() -> None:
     assert client.failed[0]["fail_reason"] == "COMPLETE_PERSIST_FAILED"
 
 
+class RaisingCompleteClient(FakeClient):
+    async def mark_browser_job_success(self, payload: dict) -> dict:
+        self.completed.append(payload)
+        raise RuntimeError("ws boom")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retries_when_completion_call_raises() -> None:
+    job = {
+        "id": "sync-001", "shop_id": "shop-001",
+        "playbook_body": {"steps": [], "output": {"columns": [], "item_key_fields": []}, "quality_gate": {}},
+        "request_payload": {"biz_date": "2026-05-31"},
+    }
+    client = RaisingCompleteClient([job], {"job_id": "sync-001", "status": "success", "records": [], "capture_files": []})
+    loop = BrowserDispatcherLoop(client=client, runner=lambda message: client.result, max_concurrency=1)
+
+    result = await loop.run_once()
+
+    assert result["status"] != "success"
+    assert client.failed
+    assert client.failed[0]["retryable"] is True
+    assert client.failed[0]["fail_reason"] == "COMPLETE_PERSIST_FAILED"
+
+
 @pytest.mark.asyncio
 async def test_dispatcher_create_worker_tasks_spawns_n_workers() -> None:
     client = FakeClient([], {"status": "success"})

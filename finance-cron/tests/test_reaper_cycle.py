@@ -42,3 +42,35 @@ async def test_run_reaper_cycle_calls_tools_in_order(monkeypatch) -> None:
     await service.run_reaper_cycle()
 
     assert calls == ["reap_stale_agents", "fail_failed", "requeue_ready", "fail_expired"]
+
+
+@pytest.mark.asyncio
+async def test_run_reaper_cycle_continues_when_a_step_raises(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def _reap(token, *, stale_after_seconds=180):
+        calls.append("reap_stale_agents")
+        raise RuntimeError("boom")  # an exception mid-cycle must not abort later steps
+
+    async def _fail_failed(token):
+        calls.append("fail_failed")
+        return {"success": True}
+
+    async def _requeue(token):
+        calls.append("requeue_ready")
+        return {"success": False, "error": "mcp down"}  # logical failure must not abort either
+
+    async def _fail_expired(token):
+        calls.append("fail_expired")
+        return {"success": True}
+
+    monkeypatch.setattr(scheduler_service, "browser_sync_job_reap_stale_agents", _reap)
+    monkeypatch.setattr(scheduler_service, "recon_queue_fail_failed_collection_waiting", _fail_failed)
+    monkeypatch.setattr(scheduler_service, "recon_queue_requeue_ready_waiting", _requeue)
+    monkeypatch.setattr(scheduler_service, "recon_queue_fail_expired_waiting", _fail_expired)
+
+    service = FinanceCronSchedulerService(load_cron_config(None))
+    await service.run_reaper_cycle()
+
+    # All four steps attempted despite the first raising and the third returning success:False.
+    assert calls == ["reap_stale_agents", "fail_failed", "requeue_ready", "fail_expired"]
