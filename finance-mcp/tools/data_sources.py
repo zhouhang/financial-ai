@@ -5976,6 +5976,18 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="browser_sync_job_reap_stale_agents",
+            description="调度器专用：将心跳过期 agent 名下仍 running 的 browser_playbook sync_job 标记失败（孤立作业兜底）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "stale_after_seconds": {"type": "integer"},
+                },
+                "required": ["worker_token"],
+            },
+        ),
+        Tool(
             name="browser_sync_job_complete",
             description="Worker 专用：browser-agent 完成 sync_job 后回写 records / capture_files 并将 sync_job 标记 success。",
             inputSchema={
@@ -6163,6 +6175,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_browser_agent_heartbeat(arguments)
         if name == "browser_sync_job_startup_cleanup":
             return await _handle_browser_sync_job_startup_cleanup(arguments)
+        if name == "browser_sync_job_reap_stale_agents":
+            return await _handle_browser_sync_job_reap_stale_agents(arguments)
         if name == "browser_sync_job_complete":
             return await _handle_browser_sync_job_complete(arguments)
         if name == "browser_sync_job_fail":
@@ -9698,6 +9712,19 @@ async def _handle_browser_sync_job_startup_cleanup(arguments: dict[str, Any]) ->
     if not agent_id:
         return {"success": False, "error": "missing agent_id"}
     result = auth_db.fail_running_browser_sync_jobs_for_agent(agent_id=agent_id)
+    if result.get("error"):
+        return {"success": False, **result}
+    return {"success": True, **result}
+
+
+async def _handle_browser_sync_job_reap_stale_agents(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    raw = arguments.get("stale_after_seconds")
+    stale_after_seconds = int(raw) if isinstance(raw, (int, float)) and int(raw) > 0 else 180
+    result = auth_db.reap_stale_agent_running_jobs(stale_after_seconds=stale_after_seconds)
     if result.get("error"):
         return {"success": False, **result}
     return {"success": True, **result}

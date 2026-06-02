@@ -6553,6 +6553,59 @@ def fail_running_browser_sync_jobs_for_agent(*, agent_id: str) -> dict[str, Any]
     return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
 
 
+def reap_stale_agent_running_jobs(*, stale_after_seconds: int = 180) -> dict[str, Any]:
+    """Fail browser_playbook sync_jobs left 'running' by agents whose heartbeat has gone stale.
+
+    Independent (finance-cron-driven) safety net for when the whole browser-agent process dies
+    mid/after a job: its heartbeat stops, so after ``stale_after_seconds`` we presume the agent
+    dead and mark its in-flight running jobs failed (AGENT_HEARTBEAT_LOST). The recon-queue
+    'fail_failed' reaper then cascades the failure to the blocked execution_run. Healthy agents
+    (fresh heartbeat) are never touched.
+    """
+    threshold = max(1, int(stale_after_seconds))
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'failed',
+                        browser_fail_reason = 'AGENT_HEARTBEAT_LOST',
+                        error_message = 'AGENT_HEARTBEAT_LOST: browser-agent heartbeat stale, job presumed orphaned',
+                        next_retry_at = NULL,
+                        completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE sync_jobs.job_status = 'running'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM data_sources ds
+                          JOIN shop_runtime_bindings srb
+                            ON srb.company_id = sync_jobs.company_id
+                           AND srb.data_source_id = sync_jobs.data_source_id
+                          JOIN agents a
+                            ON a.company_id = srb.company_id
+                           AND a.agent_id = srb.agent_id
+                          WHERE ds.id = sync_jobs.data_source_id
+                            AND ds.source_kind = 'browser_playbook'
+                            AND (
+                                a.last_heartbeat_at IS NULL
+                                OR a.last_heartbeat_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                            )
+                      )
+                    RETURNING sync_jobs.id
+                    """,
+                    (threshold,),
+                )
+                rows = cur.fetchall() or []
+                conn.commit()
+    except Exception as e:
+        logger.error(f"reap_stale_agent_running_jobs 失败 (stale_after_seconds={threshold}): {e}")
+        return {"failed_count": 0, "sync_job_ids": [], "error": str(e)}
+    sync_job_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
+
+
 def mark_browser_sync_job_failed(
     *,
     sync_job_id: str,
