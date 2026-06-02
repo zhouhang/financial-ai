@@ -320,3 +320,30 @@ async def data_source_trigger_dataset_collection(
     if params:
         payload["params"] = params
     return await call_mcp_tool("data_source_trigger_dataset_collection", payload)
+
+
+async def recon_queue_fail_failed_collection_waiting(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_queue_fail_failed_collection_waiting", {"worker_token": worker_token}
+    )
+
+
+async def recon_queue_requeue_ready_waiting(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_queue_requeue_ready_waiting", {"worker_token": worker_token}
+    )
+
+
+async def recon_queue_fail_expired_waiting(worker_token: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_queue_fail_expired_waiting", {"worker_token": worker_token}
+    )
+
+
+async def browser_sync_job_reap_stale_agents(
+    worker_token: str, *, stale_after_seconds: int = 180
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "browser_sync_job_reap_stale_agents",
+        {"worker_token": worker_token, "stale_after_seconds": stale_after_seconds},
+    )

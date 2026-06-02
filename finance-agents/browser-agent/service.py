@@ -8,12 +8,12 @@ Two coroutines run side by side:
   - ``_dispatcher`` spawns ``BROWSER_AGENT_MAX_CONCURRENCY`` worker coroutines via
     ``BrowserDispatcherLoop.create_worker_tasks()``. Each worker claims, runs (in a thread to
     avoid blocking the event loop), and reports.
-  - ``_waiting_reconciler`` periodically calls the three recon-queue helpers to (a) fast-fail
-    waiting jobs whose collection sync_job already failed, (b) requeue waiting jobs whose
-    collection succeeded, (c) fail waiting jobs that exceeded their deadline. This replaces the
-    per-worker polling that used to live in recon-worker.
 
 SIGTERM/SIGINT cleanly cancels both coroutines.
+
+Note: recon-queue reapers (fail_failed, requeue_ready, fail_expired) and the heartbeat-stale
+reaper now run in the finance-cron process (``recon-browser-reaper`` APScheduler job) so they
+survive browser-agent restarts.
 """
 
 from __future__ import annotations
@@ -39,17 +39,6 @@ def _handle_signal(signum, frame) -> None:
     global _shutdown
     _shutdown = True
     logger.info("收到停止信号: %s", signum)
-
-
-async def _waiting_reconciler(client: BrowserAgentTallyClient, interval_seconds: float) -> None:
-    while not _shutdown:
-        try:
-            await client.fail_failed_waiting()
-            await client.requeue_ready_waiting()
-            await client.fail_expired_waiting()
-        except Exception:
-            logger.exception("waiting-data 调和异常")
-        await asyncio.sleep(interval_seconds)
 
 
 async def _heartbeat(client: BrowserAgentTallyClient, config: BrowserAgentConfig) -> None:
@@ -114,7 +103,6 @@ async def main() -> None:
     await asyncio.gather(
         _heartbeat(client, config),
         _dispatcher(client, config),
-        _waiting_reconciler(client, config.waiting_poll_interval_seconds),
     )
 
 

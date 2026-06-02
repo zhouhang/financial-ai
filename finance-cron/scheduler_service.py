@@ -18,10 +18,14 @@ from apscheduler.triggers.cron import CronTrigger
 from data_agent_client import sync_pending_todo_exceptions, trigger_run_plan
 from mcp_client import (
     aclose_mcp_session,
+    browser_sync_job_reap_stale_agents,
     data_source_scheduler_list_collection_plans,
     data_source_trigger_dataset_collection,
     execution_scheduler_get_slot_run,
     execution_scheduler_list_run_plans,
+    recon_queue_fail_expired_waiting,
+    recon_queue_fail_failed_collection_waiting,
+    recon_queue_requeue_ready_waiting,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,8 @@ class FinanceCronConfig:
     plan_page_size: int = 200
     misfire_grace_seconds: int = 60
     todo_sync_interval_seconds: int = 300
+    reaper_interval_seconds: int = 30
+    reaper_stale_after_seconds: int = 180
 
 
 def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
@@ -90,6 +96,14 @@ def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
                 or 300
             ),
             30,
+        ),
+        reaper_interval_seconds=max(
+            5,
+            int(scheduler.get("reaper_interval_seconds") or 30),
+        ),
+        reaper_stale_after_seconds=max(
+            30,
+            int(scheduler.get("reaper_stale_after_seconds") or 180),
         ),
     )
 
@@ -265,6 +279,16 @@ class FinanceCronSchedulerService:
             max_instances=1,
             misfire_grace_time=self.config.misfire_grace_seconds,
         )
+        self.scheduler.add_job(
+            self.run_reaper_cycle,
+            trigger="interval",
+            seconds=self.config.reaper_interval_seconds,
+            id="recon-browser-reaper",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=self.config.misfire_grace_seconds,
+        )
         self.scheduler.start()
         await self._safe_initial_refresh("运行计划", self.refresh_run_plans)
         await self._safe_initial_refresh("采集计划", self.refresh_collection_plans)
@@ -330,6 +354,26 @@ class FinanceCronSchedulerService:
                 "[finance-cron] 待办状态同步失败: error=%s",
                 result.get("error"),
             )
+
+    async def run_reaper_cycle(self) -> None:
+        """Independent recon/browser reaper net (relocated from the browser-agent).
+
+        Order matters: reap stale-agent running jobs first so the just-failed jobs are
+        cascaded by fail_failed in the same cycle.
+        """
+        token = create_scheduler_auth_token()
+        steps = (
+            ("reap_stale_agents", lambda: browser_sync_job_reap_stale_agents(
+                token, stale_after_seconds=self.config.reaper_stale_after_seconds)),
+            ("fail_failed", lambda: recon_queue_fail_failed_collection_waiting(token)),
+            ("requeue_ready", lambda: recon_queue_requeue_ready_waiting(token)),
+            ("fail_expired", lambda: recon_queue_fail_expired_waiting(token)),
+        )
+        for label, call in steps:
+            try:
+                await call()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[finance-cron] reaper 步骤失败: step=%s error=%s", label, exc)
 
     async def refresh_run_plans(self) -> None:
         scheduler_token = create_scheduler_auth_token()

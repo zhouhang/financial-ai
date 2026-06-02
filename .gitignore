@@ -281,6 +281,10 @@ check_*.json
 !finance-agents/data-agent/tests/**
 !finance-mcp/tests/
 !finance-mcp/tests/**
+!finance-cron/tests/
+!finance-cron/tests/**
+!finance-agents/browser-agent/tests/
+!finance-agents/browser-agent/tests/**
 
 # macOS
 .DS_Store
@@ -295,6 +299,10 @@ check_*.json
 !.gitattributes
 !.env.example
 !.cursorrules
+!.dockerignore
+!.github/
+!.github/workflows/
+!.github/workflows/deploy-ghcr.yml
 !.planning/
 !.planning/**
 
@@ -303,9 +311,16 @@ finance-ai/finance-mcp/data_preparation/output
 finance-ai/finance-mcp/data_preparation/report
 finance-ai/finance-mcp/reconciliation/output
 finance-ai/finance-mcp/reconciliation/report
+/finance-mcp/recon/output
+/finance-mcp/recon/output/**
 finance-ui/.vite/
 /finance-agents/proc-agent
 /docs
+!/docs/
+/docs/*
+!/docs/deployment/
+/docs/deployment/*
+!/docs/deployment/ghcr-ecs.md
 /temp
 /finance-mcp/proc/output
 /finance-mcp/proc/output
