@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from security_utils import PROC_OUTPUT_ROOT, UPLOAD_ROOT, resolve_path_under_roots
+from storage.input_resolver import materialize_input_file, split_input_file_ref
 from tools.rule_schema import load_and_validate_rule
 from proc.mcp_server.steps_runtime import ProcUserDataError
 
@@ -531,7 +532,7 @@ def execute_merge(
 
     # ── 读取两个文件 ──────────────────────────────────────────────────────────
     try:
-        df_generated = _read_file_as_df(generated_file_path)
+        df_generated = _read_file_as_df(generated_file_path, legacy_mode="recon")
     except Exception as e:
         msg = f"读取新生成文件失败: {e}"
         logger.error(f"[merge_rule] [{rule_id}] {msg}")
@@ -543,7 +544,7 @@ def execute_merge(
         }
 
     try:
-        df_target = _read_file_as_df(target_file_path)
+        df_target = _read_file_as_df(target_file_path, legacy_mode="upload")
     except Exception as e:
         msg = f"读取 merge 目标文件失败: {e}"
         logger.error(f"[merge_rule] [{rule_id}] {msg}")
@@ -705,32 +706,33 @@ def _merge_append_rows(
 # 文件读写
 # ════════════════════════════════════════════════════════════════════════════
 
-def _read_file_as_df(file_path: str) -> pd.DataFrame:
+def _read_file_as_df(file_path: str, *, legacy_mode: str = "upload") -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = resolve_path_under_roots(file_path, [UPLOAD_ROOT, PROC_OUTPUT_ROOT])
-    if not path.exists():
-        raise ProcUserDataError(
-            summary="数据整理找不到文件",
-            cause=f"文件「{file_path}」不存在。",
-            suggestion="请重新上传该文件。",
-        )
-    ext = path.suffix.lower()
-    if ext == ".csv":
-        try:
-            return pd.read_csv(path, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            import chardet
-            with open(path, "rb") as f:
-                enc = chardet.detect(f.read()).get("encoding", "gbk")
-            return pd.read_csv(path, encoding=enc)
-    elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(path)
-    else:
-        raise ProcUserDataError(
-            summary="数据整理遇到不支持的文件格式",
-            cause=f"文件格式「{ext}」不受支持。",
-            suggestion="请上传 Excel 或 CSV 文件。",
-        )
+    _, sheet_name = split_input_file_ref(file_path)
+    with materialize_input_file(file_path, legacy_mode=legacy_mode) as path:
+        if not path.exists():
+            raise ProcUserDataError(
+                summary="数据整理找不到文件",
+                cause=f"文件「{file_path}」不存在。",
+                suggestion="请重新上传该文件。",
+            )
+        ext = path.suffix.lower()
+        if ext == ".csv":
+            try:
+                return pd.read_csv(path, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                import chardet
+                with open(path, "rb") as f:
+                    enc = chardet.detect(f.read()).get("encoding", "gbk")
+                return pd.read_csv(path, encoding=enc)
+        elif ext in (".xlsx", ".xls"):
+            return pd.read_excel(path, sheet_name=sheet_name or 0)
+        else:
+            raise ProcUserDataError(
+                summary="数据整理遇到不支持的文件格式",
+                cause=f"文件格式「{ext}」不受支持。",
+                suggestion="请上传 Excel 或 CSV 文件。",
+            )
 
 
 def _write_merged_file(df: pd.DataFrame, output_dir: str, rule_id: str, match_field: str = "") -> str:

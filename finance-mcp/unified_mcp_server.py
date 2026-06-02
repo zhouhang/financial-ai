@@ -19,17 +19,24 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import Response, JSONResponse, FileResponse
+from starlette.responses import Response, JSONResponse, FileResponse, StreamingResponse
 import uvicorn
 import logging
 from auth.jwt_utils import get_user_from_token
 from auth import db as auth_db
 from security_utils import read_output_metadata
+from storage import repository as storage_repository
+from storage.client import storage_from_env
+from storage.refs import parse_storage_ref
 
 # 导入上传模块
 from tools.file_upload_tool import (
     create_file_upload_tools,
     handle_file_upload_tool_call,
+)
+from tools.storage_upload_tool import (
+    create_storage_upload_tools,
+    handle_storage_upload_tool_call,
 )
 
 # 导入认证和规则管理模块
@@ -98,6 +105,7 @@ async def list_tools() -> list[types.Tool]:
 
     try:
         upload_tools = [t for t in create_file_upload_tools() if t.name == "file_upload"]
+        upload_tools += create_storage_upload_tools()
         logger.info(f"上传工具数量: {len(upload_tools)}")
     except Exception as e:
         logger.error(f"加载上传工具失败: {str(e)}", exc_info=True)
@@ -248,6 +256,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "data_source_test",
     "data_source_register_browser_collection",
     "data_source_register_browser_playbook",
+    "data_source_update_browser_playbook_credential",
     "data_source_finalize_browser_playbook_registration",
     "data_source_retry_browser_playbook_verification",
     "data_source_authorize",
@@ -264,6 +273,7 @@ _DATA_SOURCE_TOOL_NAMES = {
     "browser_agent_heartbeat",
     "browser_sync_job_claim",
     "browser_sync_job_startup_cleanup",
+    "browser_sync_job_reap_stale_agents",
     "browser_sync_job_complete",
     "browser_sync_job_fail",
     "browser_handoff_session_create",
@@ -336,7 +346,8 @@ _EXECUTION_TOOL_NAMES = {
     "execution_recon_rule_compatibility_check",
 }
 
-_UPLOAD_TOOL_NAMES = {"file_upload"}
+_UPLOAD_TOOL_NAMES = {"file_upload", "file_upload_presign", "file_upload_confirm"}
+_STORAGE_UPLOAD_TOOL_NAMES = {"file_upload_presign", "file_upload_confirm"}
 
 
 @mcp_server.call_tool()
@@ -349,7 +360,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
 
         # 2) 上传工具
         elif name in _UPLOAD_TOOL_NAMES:
-            result = await handle_file_upload_tool_call(name, arguments)
+            if name in _STORAGE_UPLOAD_TOOL_NAMES:
+                result = await handle_storage_upload_tool_call(name, arguments)
+            else:
+                result = await handle_file_upload_tool_call(name, arguments)
 
         # 3) 文件校验模块
         elif name in _FILE_VALIDATE_TOOL_NAMES:
@@ -501,6 +515,51 @@ async def download_output_file(request):
     except ValueError:
         logger.warning(f"[download] 路径遍历攻击尝试: {file_path}")
         return JSONResponse({"error": "无效的文件路径"}, status_code=400)
+
+    logical_path = f"/output/{module}/{file_path}"
+    storage_row = storage_repository.get_storage_object_by_logical_path(logical_path)
+    if storage_row:
+        owner_user_id = str(storage_row.get("owner_user_id") or "")
+        current_user_id = str(user.get("user_id") or user.get("id") or "")
+        current_role = str(user.get("role") or "")
+        if current_role != "admin" and (not owner_user_id or owner_user_id != current_user_id):
+            logger.warning(
+                "[download] 存储对象越权下载被拒绝: user_id=%s owner_user_id=%s logical_path=%s",
+                current_user_id,
+                owner_user_id,
+                logical_path,
+            )
+            return JSONResponse({"error": "无权下载该文件"}, status_code=403)
+
+        from urllib.parse import quote
+
+        storage_ref = parse_storage_ref(storage_row)
+        client = storage_from_env(local_root=output_dir)
+        try:
+            if not client.exists(storage_ref):
+                logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
+                return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+        except FileNotFoundError:
+            logger.warning("[download] 存储对象不存在: logical_path=%s ref=%s", logical_path, storage_ref)
+            return JSONResponse({"error": f"文件不存在: {file_path}"}, status_code=404)
+        except Exception as exc:
+            logger.error(
+                "[download] 读取存储对象失败: logical_path=%s ref=%s error=%s",
+                logical_path,
+                storage_ref,
+                exc,
+                exc_info=True,
+            )
+            return JSONResponse({"error": "读取存储文件失败，请稍后重试"}, status_code=502)
+        filename = storage_ref.original_filename or Path(file_path).name
+        encoded_filename = quote(filename, safe="")
+        return StreamingResponse(
+            client.iter_bytes(storage_ref),
+            media_type=storage_ref.content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            },
+        )
 
     if not full_path.exists() or not full_path.is_file():
         logger.warning(f"[download] 文件不存在: {full_path}")

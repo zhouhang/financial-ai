@@ -452,6 +452,65 @@ def test_register_browser_playbook_upserts_playbook_and_binding(monkeypatch) -> 
     assert inserted_verification["request_payload"]["playbook_id"] == "qianniu-daily-bill-export"
 
 
+def test_update_browser_playbook_credential_returns_safe_summary(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda auth_token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda *, company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "code": "browser-collection-qn",
+            "name": "千牛每日资金账单",
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "domain_type": "ecommerce",
+            "execution_mode": "deterministic",
+        },
+    )
+
+    def fake_update(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "source_id": kwargs["data_source_id"],
+            "credential": {
+                "username": kwargs["credential_username"],
+                "password_saved": True,
+            },
+            "binding": {
+                "profile_status": "verifying",
+                "playbook_status": "ok",
+                "cron_pause_reason": None,
+            },
+            "message": "浏览器任务凭证已保存",
+        }
+
+    monkeypatch.setattr(data_sources, "update_browser_playbook_credential", fake_update)
+
+    result = asyncio.run(
+        data_sources._handle_data_source_update_browser_playbook_credential(
+            {
+                "auth_token": "token",
+                "source_id": "source-001",
+                "credential_username": "shop:ai财务",
+                "credential_password": "secret-password",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["credential"] == {
+        "username": "shop:ai财务",
+        "password_saved": True,
+    }
+    assert result["binding"]["profile_status"] == "verifying"
+    assert captured["credential_password"] == "secret-password"
+    assert "secret-password" not in str(result)
+
+
 def test_normalize_qianniu_browser_playbook_expands_refund_safe_item_key_fields() -> None:
     playbook_body = {
         "schema_version": "1.0",

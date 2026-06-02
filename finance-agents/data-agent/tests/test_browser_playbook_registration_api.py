@@ -338,6 +338,118 @@ def test_browser_playbook_detail_route_returns_safe_task_detail(monkeypatch) -> 
     assert "secret" not in str(body)
 
 
+def test_browser_playbook_credential_update_route_does_not_echo_password(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_update(
+        auth_token: str,
+        source_id: str,
+        *,
+        credential_username: str,
+        credential_password: str,
+    ):
+        calls.append(
+            {
+                "auth_token": auth_token,
+                "source_id": source_id,
+                "credential_username": credential_username,
+                "credential_password": credential_password,
+            }
+        )
+        return {
+            "success": True,
+            "source_id": source_id,
+            "credential": {
+                "username": credential_username,
+                "password_saved": True,
+            },
+            "binding": {
+                "profile_status": "verifying",
+                "playbook_status": "ok",
+                "cron_pause_reason": None,
+            },
+            "message": "浏览器任务凭证已保存",
+        }
+
+    monkeypatch.setattr(api, "data_source_update_browser_playbook_credential", fake_update)
+
+    response = _client().post(
+        "/data-sources/source-1/browser-playbook/credential",
+        headers={"Authorization": "Bearer token-1"},
+        json={
+            "credential_username": "shop:ai财务",
+            "credential_password": "secret-password",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "auth_token": "token-1",
+            "source_id": "source-1",
+            "credential_username": "shop:ai财务",
+            "credential_password": "secret-password",
+        }
+    ]
+    body = response.json()
+    assert body == {
+        "success": True,
+        "source_id": "source-1",
+        "credential": {
+            "username": "shop:ai财务",
+            "password_saved": True,
+        },
+        "binding": {
+            "profile_status": "verifying",
+            "playbook_status": "ok",
+            "cron_pause_reason": None,
+        },
+        "message": "浏览器任务凭证已保存",
+    }
+    assert "secret-password" not in str(body)
+
+
+def test_browser_playbook_credential_update_requires_authorization(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_update(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(api, "data_source_update_browser_playbook_credential", fake_update)
+
+    response = _client().post(
+        "/data-sources/source-1/browser-playbook/credential",
+        json={
+            "credential_username": "shop:ai财务",
+            "credential_password": "secret-password",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "未提供认证 token，请先登录"}
+    assert calls == []
+
+
+def test_browser_playbook_credential_update_returns_400_when_wrapper_fails(monkeypatch) -> None:
+    async def fake_update(*args, **kwargs):
+        return {"success": False, "error": "密码不能为空"}
+
+    monkeypatch.setattr(api, "data_source_update_browser_playbook_credential", fake_update)
+
+    response = _client().post(
+        "/data-sources/source-1/browser-playbook/credential",
+        headers={"Authorization": "Bearer token-1"},
+        json={
+            "credential_username": "shop:ai财务",
+            "credential_password": "",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "密码不能为空"}
+
+
 def test_clear_browser_sync_job_route_dispatches_mcp_wrapper(monkeypatch) -> None:
     calls: list[dict] = []
 

@@ -19,12 +19,13 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import quote
 
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
-from security_utils import resolve_recon_input_file_path, write_output_metadata
+from security_utils import write_output_metadata
+from storage.output_manager import build_output_download_url, persist_generated_output_safely
+from storage.input_resolver import materialize_input_file, split_input_file_ref
 from .dataset_loader import (
     DatasetLoadError,
     dataset_display_name,
@@ -464,6 +465,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     user_id = str(user.get("user_id") or user.get("id") or "")
     if not user_id:
         return {"success": False, "error": "token 中缺少用户标识"}
+    company_id = str(user.get("company_id") or "")
     
     # 使用常量定义的输出目录
     output_dir = str(RECON_OUTPUT_DIR)
@@ -534,6 +536,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
                     output_dir,
                     auth_token,
                     user_id,
+                    company_id,
                     rule_code,
                     rules_config,
                 )
@@ -586,6 +589,7 @@ def execute_single_recon(
     output_dir: str,
     auth_token: str,
     user_id: str,
+    company_id: str,
     rule_code: str,
     rule_meta: dict[str, Any] | None = None,
 ) -> dict:
@@ -755,6 +759,7 @@ def execute_single_recon(
     
     # 8. 生成下载链接
     download_url = None
+    storage_output_path = None
     if output_path:
         file_name = Path(output_path).name
         # MCP_PUBLIC_BASE_URL 在 unified_mcp_server.py 中定义
@@ -772,7 +777,16 @@ def execute_single_recon(
                 "rule_id": rule_id,
             },
         )
-        download_url = f"{base_url}/output/recon/{file_name}?auth_token={quote(auth_token, safe='')}"
+        storage_output_path = persist_generated_output_safely(
+            output_path,
+            module="recon",
+            owner_user_id=user_id,
+            company_id=company_id,
+            rule_code=rule_code,
+            logger=logger,
+        )
+        logical_download_path = storage_output_path or f"/output/recon/{file_name}"
+        download_url = build_output_download_url(base_url, logical_download_path, auth_token)
     
     # 9. 构建过滤提示信息
     filter_messages = []
@@ -819,6 +833,7 @@ def execute_single_recon(
         "matched_exact": len(diff_result.get("matched_exact", [])),
         "anomaly_rows": anomaly_rows,
         "output_file": output_path,
+        "storage_output_path": storage_output_path,
         "download_url": download_url,
         "message": "；".join(message_parts)
     }
@@ -1556,7 +1571,7 @@ def _write_recon_result(
     from openpyxl.utils import get_column_letter
     
     # 生成文件名
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_rule_name = re.sub(r'[\\/:*?"<>|]', "_", rule_name)
     filename = f"{safe_rule_name}_核对结果_{timestamp}.xlsx"
     output_path = str(Path(output_dir) / filename)
@@ -1786,20 +1801,21 @@ def _apply_column_highlighting(
 
 def _read_file_as_df(file_path: str) -> pd.DataFrame:
     """读取 CSV 或 Excel 文件为 DataFrame"""
-    path = resolve_recon_input_file_path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"文件不存在: {file_path}")
-    
-    ext = path.suffix.lower()
-    if ext == ".csv":
-        try:
-            return pd.read_csv(path, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            import chardet
-            with open(path, "rb") as f:
-                enc = chardet.detect(f.read()).get("encoding", "gbk")
-            return pd.read_csv(path, encoding=enc)
-    elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(path, dtype=object)
-    else:
-        raise ValueError(f"不支持的文件格式: {ext}")
+    _, sheet_name = split_input_file_ref(file_path)
+    with materialize_input_file(file_path) as path:
+        if not path.exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        ext = path.suffix.lower()
+        if ext == ".csv":
+            try:
+                return pd.read_csv(path, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                import chardet
+                with open(path, "rb") as f:
+                    enc = chardet.detect(f.read()).get("encoding", "gbk")
+                return pd.read_csv(path, encoding=enc)
+        elif ext in (".xlsx", ".xls"):
+            return pd.read_excel(path, dtype=object, sheet_name=sheet_name or 0)
+        else:
+            raise ValueError(f"不支持的文件格式: {ext}")

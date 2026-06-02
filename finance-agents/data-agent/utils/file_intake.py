@@ -6,8 +6,10 @@ import csv
 import hashlib
 import logging
 import re
+import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from config import UPLOAD_DIR
 
@@ -123,6 +125,40 @@ def _normalize_file_columns(
         normalized_col = _normalize_column_name(str(col), config)
         normalized_set.add(alias_map.get(normalized_col, normalized_col))
     return normalized_set
+
+
+def _is_oss_logical_upload_ref(file_path: str) -> bool:
+    return str(file_path or "").strip().startswith("/uploads/oss/")
+
+
+def _coerce_columns(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(item) for item in value]
+
+
+def _finance_mcp_root() -> Path:
+    return Path(__file__).resolve().parents[3] / "finance-mcp"
+
+
+@contextmanager
+def _materialize_oss_logical_file(file_ref: str) -> Iterator[Path]:
+    finance_mcp_root = _finance_mcp_root()
+    if str(finance_mcp_root) not in sys.path:
+        sys.path.insert(0, str(finance_mcp_root))
+    from storage.input_resolver import materialize_input_file
+
+    with materialize_input_file(file_ref) as path:
+        yield path
+
+
+def _build_oss_sheet_input_ref(base_ref: str, sheet_name: str) -> str:
+    finance_mcp_root = _finance_mcp_root()
+    if str(finance_mcp_root) not in sys.path:
+        sys.path.insert(0, str(finance_mcp_root))
+    from storage.input_resolver import build_sheet_input_ref
+
+    return build_sheet_input_ref(base_ref, sheet_name)
 
 
 def _schema_candidate_names(
@@ -315,6 +351,135 @@ def _prepare_csv_logical_entry(entry: dict[str, Any], validation_rules: dict[str
     return logical_file, summary
 
 
+def _prepare_materialized_oss_logical_entry(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    with _materialize_oss_logical_file(entry["upload_ref"]) as path:
+        materialized_entry = dict(entry)
+        materialized_entry["abs_path"] = Path(path)
+        if materialized_entry["extension"] == ".csv":
+            return [_prepare_csv_logical_entry(materialized_entry, validation_rules)]
+        return _prepare_oss_excel_logical_entries(materialized_entry, validation_rules)
+
+
+def _prepare_oss_excel_logical_entries(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    if entry["extension"] == ".xls":
+        return _prepare_oss_xls_logical_entry(entry, validation_rules)
+
+    import openpyxl
+
+    abs_path = entry["abs_path"]
+    display_name = entry["display_name"]
+    upload_ref = entry["upload_ref"]
+    workbook = openpyxl.load_workbook(abs_path, read_only=True, data_only=True)
+    try:
+        sheet_names = list(workbook.sheetnames)
+        split_required = len(sheet_names) > 1
+        results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for sheet_index, sheet_name in enumerate(sheet_names, start=1):
+            source_sheet = workbook[sheet_name]
+            header, has_data_rows = _analyze_openpyxl_sheet(source_sheet)
+            logical_display_name = (
+                _build_split_display_name(
+                    workbook_name=display_name,
+                    upload_ref=upload_ref,
+                    abs_path=abs_path,
+                    sheet_name=sheet_name,
+                    sheet_index=sheet_index,
+                    display_extension=entry["extension"],
+                )
+                if split_required
+                else display_name
+            )
+            sheet_file_path = (
+                _build_oss_sheet_input_ref(upload_ref, sheet_name)
+                if split_required
+                else upload_ref
+            )
+            logical_file = _build_logical_file_entry(
+                file_path=sheet_file_path,
+                display_name=logical_display_name,
+                workbook_original_filename=entry["original_filename"],
+                workbook_display_name=display_name,
+                workbook_file_path=upload_ref,
+                sheet_name=sheet_name,
+                sheet_index=sheet_index,
+                is_logical_split=split_required,
+            )
+            summary = _build_prefilter_decision(
+                logical_file=logical_file,
+                columns=header,
+                has_data_rows=has_data_rows,
+                validation_rules=validation_rules,
+            )
+            results.append((logical_file, summary))
+        return results
+    finally:
+        workbook.close()
+
+
+def _prepare_oss_xls_logical_entry(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    import pandas as pd
+
+    abs_path = entry["abs_path"]
+    display_name = entry["display_name"]
+    upload_ref = entry["upload_ref"]
+    workbook = pd.read_excel(abs_path, sheet_name=None, header=None, dtype=object)
+    if not workbook:
+        workbook = {None: pd.DataFrame()}
+
+    split_required = len(workbook) > 1
+    results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for sheet_index, (sheet_name, frame) in enumerate(workbook.items(), start=1):
+        rows = frame.values.tolist() if hasattr(frame, "values") else []
+        header_row = rows[0] if rows else []
+        header = [_coerce_cell_text(cell) for cell in header_row]
+        has_data_rows = any(_row_has_values(row) for row in rows[1:])
+        sheet_name_text = str(sheet_name) if sheet_name is not None else ""
+        logical_display_name = (
+            _build_split_display_name(
+                workbook_name=display_name,
+                upload_ref=upload_ref,
+                abs_path=abs_path,
+                sheet_name=sheet_name_text,
+                sheet_index=sheet_index,
+                display_extension=entry["extension"],
+            )
+            if split_required
+            else display_name
+        )
+        sheet_file_path = (
+            _build_oss_sheet_input_ref(upload_ref, sheet_name_text)
+            if split_required
+            else upload_ref
+        )
+        logical_file = _build_logical_file_entry(
+            file_path=sheet_file_path,
+            display_name=logical_display_name,
+            workbook_original_filename=entry["original_filename"],
+            workbook_display_name=display_name,
+            workbook_file_path=upload_ref,
+            sheet_name=sheet_name_text or None,
+            sheet_index=sheet_index if sheet_name is not None else None,
+            is_logical_split=split_required,
+        )
+        summary = _build_prefilter_decision(
+            logical_file=logical_file,
+            columns=header,
+            has_data_rows=has_data_rows,
+            validation_rules=validation_rules,
+        )
+        results.append((logical_file, summary))
+    return results
+
+
 def _prepare_excel_logical_entries(entry: dict[str, Any], validation_rules: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     abs_path = entry["abs_path"]
     display_name = entry["display_name"]
@@ -433,14 +598,41 @@ def _normalize_uploaded_file_entry(
     if isinstance(item, dict):
         raw_path = str(item.get("file_path") or item.get("path") or "").strip()
         original_filename = str(item.get("original_filename") or item.get("name") or "").strip()
+        columns = _coerce_columns(item.get("columns")) if "columns" in item else None
+        has_data_rows = bool(item.get("has_data_rows", item.get("row_count", 1)))
     else:
         raw_path = str(item or "").strip()
         original_filename = ""
+        columns = None
+        has_data_rows = True
 
     if not raw_path:
         return None
 
     upload_ref = _normalize_upload_ref(raw_path, upload_root)
+    if _is_oss_logical_upload_ref(upload_ref):
+        display_name = (
+            str(
+                item.get("display_name")
+                or item.get("name")
+                or item.get("original_filename")
+                or Path(upload_ref).name
+            ).strip()
+            if isinstance(item, dict)
+            else Path(upload_ref).name
+        )
+        return {
+            "upload_ref": upload_ref,
+            "abs_path": None,
+            "stored_name": Path(upload_ref).name,
+            "display_name": display_name,
+            "original_filename": original_filename or display_name,
+            "extension": Path(upload_ref).suffix.lower(),
+            "provided_columns": columns,
+            "provided_has_data_rows": has_data_rows,
+            "is_oss_logical_ref": True,
+        }
+
     abs_path = _resolve_upload_abs_path(upload_ref or raw_path, upload_root)
     stored_name = abs_path.name
     display_name = original_filename or stored_name
@@ -483,12 +675,14 @@ def build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[s
             continue
 
         upload_ref = _normalize_upload_ref(file_path, upload_root)
-        try:
-            abs_path = _resolve_upload_abs_path(upload_ref or file_path, upload_root)
-        except ValueError:
-            continue
+        abs_path: Path | None = None
+        if not _is_oss_logical_upload_ref(upload_ref):
+            try:
+                abs_path = _resolve_upload_abs_path(upload_ref or file_path, upload_root)
+            except ValueError:
+                continue
 
-        stored_name = abs_path.name
+        stored_name = abs_path.name if abs_path is not None else Path(upload_ref).name
         final_display_name = display_name or stored_name
 
         if final_display_name:
@@ -500,7 +694,8 @@ def build_upload_name_maps(raw_files: list[Any]) -> tuple[dict[str, str], dict[s
 
         if upload_ref:
             ref_to_display_name[upload_ref] = final_display_name
-        ref_to_display_name[str(abs_path)] = final_display_name
+        if abs_path is not None:
+            ref_to_display_name[str(abs_path)] = final_display_name
         if stored_name:
             ref_to_display_name[stored_name] = final_display_name
 
@@ -532,7 +727,31 @@ def prepare_logical_upload_files(
         if extension not in SUPPORTED_EXTENSIONS:
             raise ValueError(f"不支持的文件类型：{extension}")
 
-        if extension == ".csv":
+        if entry.get("provided_columns") is not None:
+            logical_file = _build_logical_file_entry(
+                file_path=entry["upload_ref"],
+                display_name=entry["display_name"],
+                workbook_original_filename=entry["original_filename"],
+                workbook_display_name=entry["display_name"],
+                workbook_file_path=entry["upload_ref"],
+                sheet_name=None,
+                sheet_index=None,
+                is_logical_split=False,
+            )
+            prepared_items = [
+                (
+                    logical_file,
+                    _build_prefilter_decision(
+                        logical_file=logical_file,
+                        columns=list(entry.get("provided_columns") or []),
+                        has_data_rows=bool(entry.get("provided_has_data_rows", True)),
+                        validation_rules=validation_rules,
+                    ),
+                )
+            ]
+        elif entry.get("is_oss_logical_ref"):
+            prepared_items = _prepare_materialized_oss_logical_entry(entry, validation_rules)
+        elif extension == ".csv":
             prepared_items = [_prepare_csv_logical_entry(entry, validation_rules)]
         else:
             prepared_items = _prepare_excel_logical_entries(entry, validation_rules)

@@ -103,7 +103,7 @@ class BrowserDispatcherLoop:
                 message["on_risk_waiting"] = _on_risk_waiting
                 result = await asyncio.to_thread(self.runner, message)
         if isinstance(result, dict) and result.get("status") == "success":
-            await self.client.mark_browser_job_success(
+            ack = await self.client.mark_browser_job_success(
                 {
                     "sync_job_id": sync_job_id,
                     "summary": {
@@ -114,6 +114,36 @@ class BrowserDispatcherLoop:
                     "capture_files": list(result.get("capture_files") or []),
                 }
             )
+            ack_rejected = isinstance(ack, dict) and ack.get("success") is False
+            if ack_rejected:
+                # Runner succeeded but the server explicitly rejected the completion write
+                # (e.g. a transient DB error). Do NOT claim success — re-fail as retryable so the
+                # job re-collects and re-completes.
+                #
+                # SAFE ONLY because the server-side completion writes are idempotent:
+                # capture-files upsert via ON CONFLICT and records via key-field upsert (see
+                # _handle_browser_sync_job_complete). If a non-idempotent side effect is ever
+                # added to that handler, this retry path would duplicate it.
+                error_message = str((ack or {}).get("error") or "completion persist failed")
+                await self.client.mark_browser_job_failed(
+                    {
+                        "sync_job_id": sync_job_id,
+                        "fail_reason": "COMPLETE_PERSIST_FAILED",
+                        "error_message": error_message,
+                        # Bounded retries: a transient persist error tends to clear within the 60s
+                        # backoff; a deterministic one (e.g. schema mismatch) exhausts max_attempts
+                        # and goes terminal-failed, then surfaces via the finance-cron reaper.
+                        "retryable": True,
+                        "max_attempts": 3,
+                        "retry_delay_seconds": 60,
+                    }
+                )
+                logger.warning(
+                    "browser completion persist failed, re-failing as retryable: sync_job_id=%s error=%s",
+                    sync_job_id,
+                    error_message,
+                )
+                return {"status": "failed", "sync_job_id": sync_job_id, "retryable": True}
             logger.info(
                 "browser runner succeeded: sync_job_id=%s record_count=%s capture_file_count=%s",
                 sync_job_id,

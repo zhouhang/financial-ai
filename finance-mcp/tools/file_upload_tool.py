@@ -178,6 +178,14 @@ async def _file_upload(args: dict[str, Any]) -> dict[str, Any]:
 
                 relative_path = file_path.relative_to(UPLOAD_DIR.parent)
                 file_path_str = f"/{relative_path.as_posix()}"
+                _save_local_storage_metadata(
+                    user_info=user_info,
+                    logical_path=file_path_str,
+                    file_path=file_path,
+                    original_filename=filename,
+                    content_type="",
+                    size_bytes=len(file_content),
+                )
                 uploaded_files.append(
                     {
                         "original_filename": filename,
@@ -213,3 +221,37 @@ async def _file_upload(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         logger.error(f"文件上传失败: {exc}", exc_info=True)
         return {"success": False, "error": f"文件上传失败: {exc}"}
+
+
+def _save_local_storage_metadata(
+    *,
+    user_info: dict[str, Any],
+    logical_path: str,
+    file_path: Path,
+    original_filename: str,
+    content_type: str,
+    size_bytes: int,
+) -> None:
+    """Best-effort 保存本地上传文件元数据；失败不影响旧上传返回。"""
+    try:
+        from storage import repository
+        from storage.refs import StorageObjectRef
+
+        repository.save_storage_object_metadata(
+            owner_user_id=(
+                str(user_info.get("user_id") or user_info.get("id") or "").strip() or None
+            ),
+            company_id=str(user_info.get("company_id") or "").strip() or None,
+            module="upload",
+            logical_path=logical_path,
+            ref=StorageObjectRef(
+                provider="local",
+                local_path=str(file_path),
+                original_filename=original_filename,
+                content_type=content_type,
+                size_bytes=size_bytes,
+            ),
+            metadata={"source": "file_upload"},
+        )
+    except Exception as exc:
+        logger.warning(f"保存本地上传存储元数据失败: {exc}", exc_info=True)

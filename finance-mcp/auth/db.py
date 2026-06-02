@@ -16,6 +16,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 from psycopg2 import OperationalError, InterfaceError
+from storage.refs import parse_storage_ref
 
 try:
     from auth.crypto import open_secret, seal_secret
@@ -36,6 +37,7 @@ _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
 _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = False
 _RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
+_STORAGE_OBJECTS_SCHEMA_READY = False
 _BROWSER_HANDOFF_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
@@ -142,6 +144,35 @@ _RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS = (
 
 _RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS = (
     "recon_execution_queue_status_check",
+)
+
+_STORAGE_OBJECTS_REQUIRED_COLUMNS = (
+    "object_id",
+    "logical_path",
+    "owner_user_id",
+    "company_id",
+    "module",
+    "storage_provider",
+    "storage_bucket",
+    "storage_key",
+    "storage_uri",
+    "local_path",
+    "original_filename",
+    "content_type",
+    "size_bytes",
+    "checksum",
+    "metadata_json",
+    "created_at",
+    "updated_at",
+)
+
+_BROWSER_CAPTURE_STORAGE_COLUMNS = (
+    "storage_provider",
+    "storage_bucket",
+    "storage_key",
+    "storage_uri",
+    "content_type",
+    "size_bytes",
 )
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
@@ -637,6 +668,19 @@ def _browser_playbook_collection_schema_ready() -> bool:
     )
 
 
+def _storage_objects_schema_ready() -> bool:
+    if not _table_exists("storage_objects") or not _table_exists("browser_capture_files"):
+        return False
+
+    return all(
+        _column_exists("storage_objects", column_name)
+        for column_name in _STORAGE_OBJECTS_REQUIRED_COLUMNS
+    ) and all(
+        _column_exists("browser_capture_files", column_name)
+        for column_name in _BROWSER_CAPTURE_STORAGE_COLUMNS
+    ) and _constraint_exists("storage_objects", "storage_objects_logical_path_key")
+
+
 def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
     if not _table_exists("data_source_datasets"):
         return False
@@ -1014,6 +1058,25 @@ def ensure_browser_playbook_collection_schema() -> list[str]:
     return applied
 
 
+def ensure_storage_objects_schema() -> list[str]:
+    """确保存储对象元数据表和浏览器采集 OSS 字段已安装。"""
+    global _STORAGE_OBJECTS_SCHEMA_READY
+    if _STORAGE_OBJECTS_SCHEMA_READY:
+        return []
+    if _storage_objects_schema_ready():
+        _STORAGE_OBJECTS_SCHEMA_READY = True
+        return []
+
+    migration_name = "037_storage_objects_and_browser_capture_oss.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _storage_objects_schema_ready():
+        raise RuntimeError("storage_objects schema 升级失败，OSS 存储字段仍不完整")
+
+    _STORAGE_OBJECTS_SCHEMA_READY = True
+    logger.info("storage_objects schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
 def _browser_handoff_schema_ready() -> bool:
     try:
         with get_conn() as conn:
@@ -1070,6 +1133,7 @@ def ensure_schema() -> list[str]:
     """确保 auth 侧当前任务需要的基础 schema 已就绪。"""
     applied = ensure_unified_data_source_schema()
     applied.extend(ensure_browser_playbook_collection_schema())
+    applied.extend(ensure_storage_objects_schema())
     applied.extend(ensure_browser_handoff_schema())
     return applied
 
@@ -6489,6 +6553,59 @@ def fail_running_browser_sync_jobs_for_agent(*, agent_id: str) -> dict[str, Any]
     return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
 
 
+def reap_stale_agent_running_jobs(*, stale_after_seconds: int = 180) -> dict[str, Any]:
+    """Fail browser_playbook sync_jobs left 'running' by agents whose heartbeat has gone stale.
+
+    Independent (finance-cron-driven) safety net for when the whole browser-agent process dies
+    mid/after a job: its heartbeat stops, so after ``stale_after_seconds`` we presume the agent
+    dead and mark its in-flight running jobs failed (AGENT_HEARTBEAT_LOST). The recon-queue
+    'fail_failed' reaper then cascades the failure to the blocked execution_run. Healthy agents
+    (fresh heartbeat) are never touched.
+    """
+    threshold = max(1, int(stale_after_seconds))
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET job_status = 'failed',
+                        browser_fail_reason = 'AGENT_HEARTBEAT_LOST',
+                        error_message = 'AGENT_HEARTBEAT_LOST: browser-agent heartbeat stale, job presumed orphaned',
+                        next_retry_at = NULL,
+                        completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE sync_jobs.job_status = 'running'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM data_sources ds
+                          JOIN shop_runtime_bindings srb
+                            ON srb.company_id = sync_jobs.company_id
+                           AND srb.data_source_id = sync_jobs.data_source_id
+                          JOIN agents a
+                            ON a.company_id = srb.company_id
+                           AND a.agent_id = srb.agent_id
+                          WHERE ds.id = sync_jobs.data_source_id
+                            AND ds.source_kind = 'browser_playbook'
+                            AND (
+                                a.last_heartbeat_at IS NULL
+                                OR a.last_heartbeat_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                            )
+                      )
+                    RETURNING sync_jobs.id
+                    """,
+                    (threshold,),
+                )
+                rows = cur.fetchall() or []
+                conn.commit()
+    except Exception as e:
+        logger.error(f"reap_stale_agent_running_jobs 失败 (stale_after_seconds={threshold}): {e}")
+        return {"failed_count": 0, "sync_job_ids": [], "error": str(e)}
+    sync_job_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
+
+
 def mark_browser_sync_job_failed(
     *,
     sync_job_id: str,
@@ -8060,6 +8177,17 @@ def insert_browser_capture_files(
         storage_path = str(entry.get("storage_path") or "").strip()
         if not storage_path:
             continue
+        storage_uri = str(entry.get("storage_uri") or "").strip()
+        parsed_ref = parse_storage_ref(storage_uri or storage_path)
+        storage_provider = str(entry.get("storage_provider") or "").strip()
+        if not storage_provider:
+            storage_provider = parsed_ref.provider
+        storage_bucket = str(entry.get("storage_bucket") or parsed_ref.bucket or "")
+        storage_key = str(entry.get("storage_key") or parsed_ref.key or "")
+        if not storage_uri and storage_provider == "oss" and storage_bucket and storage_key:
+            storage_uri = f"oss://{storage_bucket}/{storage_key.lstrip('/')}"
+        elif not storage_uri and parsed_ref.provider == "oss":
+            storage_uri = parsed_ref.to_uri()
         rows.append(
             (
                 company_id,
@@ -8074,6 +8202,12 @@ def insert_browser_capture_files(
                 str(entry.get("encoding") or ""),
                 str(entry.get("checksum") or ""),
                 int(entry.get("row_count") or 0),
+                storage_provider,
+                storage_bucket,
+                storage_key,
+                storage_uri,
+                str(entry.get("content_type") or ""),
+                int(entry.get("size_bytes") or 0),
             )
         )
     if not rows:
@@ -8088,11 +8222,26 @@ def insert_browser_capture_files(
                     """
                     INSERT INTO browser_capture_files (
                         company_id, data_source_id, dataset_id, sync_job_id, resource_key,
-                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count
+                        shop_id, playbook_id, biz_date, storage_path, encoding, checksum, row_count,
+                        storage_provider, storage_bucket, storage_key, storage_uri, content_type, size_bytes
                     ) VALUES %s
+                    ON CONFLICT (sync_job_id, storage_path) WHERE sync_job_id IS NOT NULL DO UPDATE SET
+                        encoding = EXCLUDED.encoding,
+                        checksum = EXCLUDED.checksum,
+                        row_count = EXCLUDED.row_count,
+                        storage_provider = EXCLUDED.storage_provider,
+                        storage_bucket = EXCLUDED.storage_bucket,
+                        storage_key = EXCLUDED.storage_key,
+                        storage_uri = EXCLUDED.storage_uri,
+                        content_type = EXCLUDED.content_type,
+                        size_bytes = EXCLUDED.size_bytes,
+                        updated_at = CURRENT_TIMESTAMP
                     """,
                     rows,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s)",
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, "
+                        "%s, %s, %s, %s, %s, %s)"
+                    ),
                 )
                 conn.commit()
         return {"inserted_count": len(rows)}

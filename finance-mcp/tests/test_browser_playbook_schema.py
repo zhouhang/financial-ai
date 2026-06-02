@@ -13,6 +13,7 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
 from browser_playbook.registry import validate_emergency_promote
 from browser_playbook.models import RunPlaybookMessage, TaskResult
 from auth import db as auth_db
+from tools.data_sources import _normalize_browser_playbook_body
 
 
 def _valid_playbook_body() -> dict[str, object]:
@@ -248,6 +249,38 @@ def test_playbook_accepts_download_history_file_action() -> None:
     ]
     assert msg.playbook_body.steps[6].history_completed_status_text == "已完成"
     assert msg.playbook_body.steps[6].history_download_selector == "button:has-text('下载')"
+
+
+def test_playbook_accepts_stop_if_summary_zero_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        6,
+        {
+            "id": "stop_when_no_bill_rows",
+            "action": "stop_if_summary_zero",
+            "summary_field": "row_count",
+            "record_as": "empty_result",
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+    normalized, error = _normalize_browser_playbook_body(playbook)
+
+    assert msg.playbook_body.steps[6].action == "stop_if_summary_zero"
+    assert error == ""
+    assert normalized["steps"][6]["action"] == "stop_if_summary_zero"  # type: ignore[index]
 
 
 def test_playbook_accepts_select_checkboxes_and_wait_ms_actions() -> None:

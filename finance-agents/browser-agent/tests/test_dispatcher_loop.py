@@ -178,6 +178,31 @@ async def test_dispatcher_runs_sync_runner_in_thread(monkeypatch) -> None:
     assert called["to_thread"] is True
 
 
+class FailingCompleteClient(FakeClient):
+    async def mark_browser_job_success(self, payload: dict) -> dict:
+        self.completed.append(payload)
+        return {"success": False, "error": "column \"storage_provider\" does not exist"}
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retries_when_completion_write_fails() -> None:
+    job = {
+        "id": "sync-001", "shop_id": "shop-001",
+        "playbook_body": {"steps": [], "output": {"columns": [], "item_key_fields": []}, "quality_gate": {}},
+        "request_payload": {"biz_date": "2026-05-31"},
+    }
+    client = FailingCompleteClient([job], {"job_id": "sync-001", "status": "success", "records": [], "capture_files": []})
+    loop = BrowserDispatcherLoop(client=client, runner=lambda message: client.result, max_concurrency=1)
+
+    result = await loop.run_once()
+
+    # Must NOT report success when the server rejected the completion write.
+    assert result["status"] != "success"
+    assert client.failed, "expected a retryable failure to be recorded"
+    assert client.failed[0]["retryable"] is True
+    assert client.failed[0]["fail_reason"] == "COMPLETE_PERSIST_FAILED"
+
+
 @pytest.mark.asyncio
 async def test_dispatcher_create_worker_tasks_spawns_n_workers() -> None:
     client = FakeClient([], {"status": "success"})

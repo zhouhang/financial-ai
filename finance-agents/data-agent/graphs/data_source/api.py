@@ -22,6 +22,7 @@ from tools.mcp_client import (
     data_source_register_browser_collection,
     data_source_register_browser_playbook,
     data_source_retry_browser_playbook_verification,
+    data_source_update_browser_playbook_credential,
     data_source_create,
     data_source_delete,
     data_source_disable_dataset,
@@ -482,6 +483,21 @@ class BrowserCollectionRegistrationResponse(BaseModel):
     source: dict[str, Any] | None = None
     dataset: dict[str, Any] | None = None
     playbook: dict[str, Any] | None = None
+    binding: dict[str, Any] | None = None
+    message: str = ""
+
+
+class BrowserPlaybookCredentialUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credential_username: str
+    credential_password: str
+
+
+class BrowserPlaybookCredentialUpdateResponse(BaseModel):
+    success: bool
+    source_id: str = ""
+    credential: dict[str, Any] = Field(default_factory=dict)
     binding: dict[str, Any] | None = None
     message: str = ""
 
@@ -1074,6 +1090,36 @@ async def get_browser_playbook_detail(
         playbook=dict(result.get("playbook") or {}),
         credential=dict(result.get("credential") or {}),
         message=str(result.get("message") or ""),
+    )
+
+
+@router.post(
+    "/data-sources/{source_id}/browser-playbook/credential",
+    response_model=BrowserPlaybookCredentialUpdateResponse,
+)
+async def update_browser_playbook_credential_route(
+    source_id: str,
+    body: BrowserPlaybookCredentialUpdateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    result = await data_source_update_browser_playbook_credential(
+        auth_token,
+        source_id,
+        credential_username=body.credential_username,
+        credential_password=body.credential_password,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=_safe_result_error(result, "浏览器任务凭证保存失败"))
+    return BrowserPlaybookCredentialUpdateResponse(
+        success=True,
+        source_id=str(result.get("source_id") or source_id),
+        credential=dict(result.get("credential") or {}),
+        binding=result.get("binding"),
+        message=str(result.get("message") or "浏览器任务凭证已保存"),
     )
 
 
