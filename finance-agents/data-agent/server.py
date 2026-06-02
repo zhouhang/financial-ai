@@ -21,12 +21,24 @@ import asyncio
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Header, Body
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
+from pydantic import BaseModel
 from psycopg import connect, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
@@ -55,6 +67,8 @@ from tools.mcp_client import (
     data_source_preflight_rule_binding,
     call_mcp_tool,
 )
+
+mcp_call_tool = call_mcp_tool
 
 # 导入 proc 路由
 from graphs.proc.api import router as proc_router
@@ -481,6 +495,75 @@ async def _get_interrupt_info(config: dict) -> tuple[bool, Any, str | None]:
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /upload — 文件上传
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+class UploadPresignRequest(BaseModel):
+    filename: str
+    size: int
+    content_type: str = ""
+
+
+class UploadConfirmRequest(BaseModel):
+    storage_key: str
+    filename: str
+    size: int
+    content_type: str = ""
+    checksum: str = ""
+    thread_id: str = "default"
+
+
+def _extract_bearer_token(headers) -> str:
+    authorization = str(headers.get("authorization") or headers.get("Authorization") or "").strip()
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return ""
+    return parts[1].strip()
+
+
+def _require_upload_success(result: dict[str, Any], default_error: str) -> dict[str, Any]:
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", default_error))
+    return result
+
+
+@app.post("/upload/presign")
+async def upload_presign(request: Request, body: UploadPresignRequest):
+    auth_token = _extract_bearer_token(request.headers)
+    if not auth_token:
+        raise HTTPException(401, "缺少 auth_token，请先登录")
+
+    result = await mcp_call_tool(
+        "file_upload_presign",
+        {
+            "auth_token": auth_token,
+            "filename": body.filename,
+            "size": body.size,
+            "content_type": body.content_type,
+        },
+    )
+    return _require_upload_success(result, "获取上传签名失败")
+
+
+@app.post("/upload/confirm")
+async def upload_confirm(request: Request, body: UploadConfirmRequest):
+    auth_token = _extract_bearer_token(request.headers)
+    if not auth_token:
+        raise HTTPException(401, "缺少 auth_token，请先登录")
+
+    result = await mcp_call_tool(
+        "file_upload_confirm",
+        {
+            "auth_token": auth_token,
+            "storage_key": body.storage_key,
+            "filename": body.filename,
+            "size": body.size,
+            "content_type": body.content_type,
+            "checksum": body.checksum,
+            "thread_id": body.thread_id,
+        },
+    )
+    return _require_upload_success(result, "确认上传失败")
+
 
 @app.post("/upload")
 async def upload_file(
