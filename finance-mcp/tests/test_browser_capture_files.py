@@ -289,5 +289,5 @@ def test_insert_browser_capture_files_upserts_on_conflict(monkeypatch) -> None:
     )
 
     sql = "\n".join(cursor.sql)
-    assert "ON CONFLICT (sync_job_id, storage_path)" in sql
+    assert "ON CONFLICT (sync_job_id, storage_path) WHERE sync_job_id IS NOT NULL" in sql
     assert "DO UPDATE" in sql
