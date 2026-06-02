@@ -139,6 +139,26 @@ def test_sheet_input_ref_uses_base_ref_for_materialization() -> None:
     )
 
 
+def test_sheet_input_ref_preserves_literal_percent_escape_sheet_names() -> None:
+    ref = input_resolver.build_sheet_input_ref(
+        "/uploads/oss/company-1/workbook.xlsx",
+        "A%2FB",
+    )
+
+    assert ref == "/uploads/oss/company-1/workbook.xlsx#sheet=A%252FB"
+    assert input_resolver.split_input_file_ref(ref) == (
+        "/uploads/oss/company-1/workbook.xlsx",
+        "A%2FB",
+    )
+
+
+def test_split_input_file_ref_preserves_non_sheet_fragments() -> None:
+    assert input_resolver.split_input_file_ref("/uploads/a.csv#legacy") == (
+        "/uploads/a.csv#legacy",
+        None,
+    )
+
+
 def test_recon_reader_reads_selected_excel_sheet(monkeypatch, tmp_path: Path) -> None:
     workbook_path = tmp_path / "workbook.xlsx"
     with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:

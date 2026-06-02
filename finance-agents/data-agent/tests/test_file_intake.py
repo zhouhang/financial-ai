@@ -185,6 +185,85 @@ def test_oss_logical_upload_multi_sheet_workbook_preserves_logical_refs(
         assert display_name_to_ref[item["display_name"]] == item["file_path"]
 
 
+def test_oss_logical_upload_xls_without_columns_reads_headers_with_pandas(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import openpyxl
+    import pandas as pd
+
+    materialized = tmp_path / "legacy.xls"
+    materialized.write_bytes(b"xls")
+    header_frame = pd.DataFrame([["订单号", "金额"], ["A001", 12.3]])
+    materialize_calls: list[str] = []
+    read_excel_calls: list[dict[str, object]] = []
+
+    def fake_materialize_oss_logical_file(file_ref: str):
+        materialize_calls.append(file_ref)
+
+        @contextmanager
+        def _materialized():
+            yield materialized
+
+        return _materialized()
+
+    def fake_read_excel(path: Path, **kwargs):
+        read_excel_calls.append({"path": path, **kwargs})
+        return {"Sheet1": header_frame}
+
+    monkeypatch.setattr(
+        file_intake,
+        "_materialize_oss_logical_file",
+        fake_materialize_oss_logical_file,
+    )
+    monkeypatch.setattr(pd, "read_excel", fake_read_excel)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("openpyxl called")),
+    )
+
+    result = prepare_logical_upload_files(
+        [
+            {
+                "file_path": "/uploads/oss/company-1/legacy.xls",
+                "original_filename": "legacy.xls",
+            }
+        ],
+        file_rule={
+            "file_validation_rules": {
+                "validation_config": {},
+                "table_schemas": [
+                    {
+                        "table_name": "订单表",
+                        "file_type": ["xls"],
+                        "required_columns": ["订单号", "金额"],
+                    }
+                ],
+            }
+        },
+    )
+
+    assert materialize_calls == ["/uploads/oss/company-1/legacy.xls"]
+    assert read_excel_calls == [
+        {
+            "path": materialized,
+            "sheet_name": None,
+            "header": None,
+            "dtype": object,
+        }
+    ]
+    assert result["kept_count"] == 1
+    logical_file = result["logical_uploaded_files"][0]
+    assert logical_file["file_path"] == "/uploads/oss/company-1/legacy.xls"
+    assert logical_file["workbook_file_path"] == "/uploads/oss/company-1/legacy.xls"
+    assert logical_file["sheet_name"] == "Sheet1"
+    assert logical_file["is_logical_split"] is False
+    assert result["files_with_columns"] == [
+        {"file_name": "legacy.xls", "columns": ["订单号", "金额"]}
+    ]
+
+
 def test_oss_logical_upload_ref_with_explicit_empty_columns_prefilters_empty_header(
     monkeypatch,
 ) -> None:

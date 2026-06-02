@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import parse_qs, quote, urlsplit, urlunsplit, unquote
+from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
 from security_utils import UPLOAD_ROOT, resolve_recon_input_file_path
 from storage import repository
@@ -23,15 +23,15 @@ def split_input_file_ref(file_ref: str) -> tuple[str, str | None]:
     raw_ref = str(file_ref or "").strip()
     parsed = urlsplit(raw_ref)
     fragment = parsed.fragment
-    base_ref = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
     if not fragment:
-        return base_ref, None
+        return raw_ref, None
 
     params = parse_qs(fragment, keep_blank_values=True)
     sheet_values = params.get("sheet")
     if not sheet_values:
-        return base_ref, None
-    return base_ref, unquote(str(sheet_values[0]))
+        return raw_ref, None
+    base_ref = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+    return base_ref, str(sheet_values[0])
 
 
 @contextmanager

@@ -367,6 +367,9 @@ def _prepare_oss_excel_logical_entries(
     entry: dict[str, Any],
     validation_rules: dict[str, Any],
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    if entry["extension"] == ".xls":
+        return _prepare_oss_xls_logical_entry(entry, validation_rules)
+
     import openpyxl
 
     abs_path = entry["abs_path"]
@@ -417,6 +420,45 @@ def _prepare_oss_excel_logical_entries(
         return results
     finally:
         workbook.close()
+
+
+def _prepare_oss_xls_logical_entry(
+    entry: dict[str, Any],
+    validation_rules: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    import pandas as pd
+
+    abs_path = entry["abs_path"]
+    display_name = entry["display_name"]
+    upload_ref = entry["upload_ref"]
+    workbook = pd.read_excel(abs_path, sheet_name=None, header=None, dtype=object)
+    if not workbook:
+        sheet_name = None
+        rows: list[list[Any]] = []
+    else:
+        sheet_name, frame = next(iter(workbook.items()))
+        rows = frame.values.tolist() if hasattr(frame, "values") else []
+
+    header_row = rows[0] if rows else []
+    header = [_coerce_cell_text(cell) for cell in header_row]
+    has_data_rows = any(_row_has_values(row) for row in rows[1:])
+    logical_file = _build_logical_file_entry(
+        file_path=upload_ref,
+        display_name=display_name,
+        workbook_original_filename=entry["original_filename"],
+        workbook_display_name=display_name,
+        workbook_file_path=upload_ref,
+        sheet_name=str(sheet_name) if sheet_name is not None else None,
+        sheet_index=1 if sheet_name is not None else None,
+        is_logical_split=False,
+    )
+    summary = _build_prefilter_decision(
+        logical_file=logical_file,
+        columns=header,
+        has_data_rows=has_data_rows,
+        validation_rules=validation_rules,
+    )
+    return [(logical_file, summary)]
 
 
 def _prepare_excel_logical_entries(entry: dict[str, Any], validation_rules: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
