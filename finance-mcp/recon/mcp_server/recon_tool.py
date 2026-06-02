@@ -25,6 +25,7 @@ import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
 from security_utils import write_output_metadata
+from storage.output_manager import persist_generated_output
 from storage.input_resolver import materialize_input_file, split_input_file_ref
 from .dataset_loader import (
     DatasetLoadError,
@@ -465,6 +466,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     user_id = str(user.get("user_id") or user.get("id") or "")
     if not user_id:
         return {"success": False, "error": "token 中缺少用户标识"}
+    company_id = str(user.get("company_id") or "")
     
     # 使用常量定义的输出目录
     output_dir = str(RECON_OUTPUT_DIR)
@@ -535,6 +537,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
                     output_dir,
                     auth_token,
                     user_id,
+                    company_id,
                     rule_code,
                     rules_config,
                 )
@@ -587,6 +590,7 @@ def execute_single_recon(
     output_dir: str,
     auth_token: str,
     user_id: str,
+    company_id: str,
     rule_code: str,
     rule_meta: dict[str, Any] | None = None,
 ) -> dict:
@@ -756,6 +760,7 @@ def execute_single_recon(
     
     # 8. 生成下载链接
     download_url = None
+    storage_output_path = None
     if output_path:
         file_name = Path(output_path).name
         # MCP_PUBLIC_BASE_URL 在 unified_mcp_server.py 中定义
@@ -773,7 +778,18 @@ def execute_single_recon(
                 "rule_id": rule_id,
             },
         )
-        download_url = f"{base_url}/output/recon/{file_name}?auth_token={quote(auth_token, safe='')}"
+        storage_output_path = persist_generated_output(
+            output_path,
+            module="recon",
+            owner_user_id=user_id,
+            company_id=company_id,
+            rule_code=rule_code,
+        )
+        if storage_output_path.startswith("/output/recon/"):
+            download_path = storage_output_path.removeprefix("/output/")
+            download_url = f"{base_url}/output/{download_path}?auth_token={quote(auth_token, safe='')}"
+        else:
+            download_url = f"{base_url}/output/recon/{file_name}?auth_token={quote(auth_token, safe='')}"
     
     # 9. 构建过滤提示信息
     filter_messages = []
@@ -820,6 +836,7 @@ def execute_single_recon(
         "matched_exact": len(diff_result.get("matched_exact", [])),
         "anomaly_rows": anomaly_rows,
         "output_file": output_path,
+        "storage_output_path": storage_output_path,
         "download_url": download_url,
         "message": "；".join(message_parts)
     }

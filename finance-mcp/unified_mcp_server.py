@@ -25,6 +25,9 @@ import logging
 from auth.jwt_utils import get_user_from_token
 from auth import db as auth_db
 from security_utils import read_output_metadata
+from storage import repository as storage_repository
+from storage.client import storage_from_env
+from storage.refs import parse_storage_ref
 
 # 导入上传模块
 from tools.file_upload_tool import (
@@ -510,6 +513,36 @@ async def download_output_file(request):
     except ValueError:
         logger.warning(f"[download] 路径遍历攻击尝试: {file_path}")
         return JSONResponse({"error": "无效的文件路径"}, status_code=400)
+
+    logical_path = f"/output/{module}/{file_path}"
+    storage_row = storage_repository.get_storage_object_by_logical_path(logical_path)
+    if storage_row:
+        owner_user_id = str(storage_row.get("owner_user_id") or "")
+        current_user_id = str(user.get("user_id") or user.get("id") or "")
+        current_role = str(user.get("role") or "")
+        if current_role != "admin" and (not owner_user_id or owner_user_id != current_user_id):
+            logger.warning(
+                "[download] 存储对象越权下载被拒绝: user_id=%s owner_user_id=%s logical_path=%s",
+                current_user_id,
+                owner_user_id,
+                logical_path,
+            )
+            return JSONResponse({"error": "无权下载该文件"}, status_code=403)
+
+        from urllib.parse import quote
+
+        storage_ref = parse_storage_ref(storage_row)
+        client = storage_from_env(local_root=output_dir)
+        content = client.read_bytes(storage_ref)
+        filename = storage_ref.original_filename or Path(file_path).name
+        encoded_filename = quote(filename, safe="")
+        return Response(
+            content,
+            media_type=storage_ref.content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            },
+        )
 
     if not full_path.exists() or not full_path.is_file():
         logger.warning(f"[download] 文件不存在: {full_path}")
