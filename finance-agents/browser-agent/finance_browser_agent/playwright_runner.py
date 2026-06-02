@@ -471,6 +471,8 @@ def _execute_action(
     sync_job_id: str = "",
     storage_context: dict[str, str] | None = None,
     handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -500,6 +502,8 @@ def _execute_action(
                 run_config=run_config,
                 sync_job_id=sync_job_id,
                 handoff_coordinator=handoff_coordinator,
+                backend_factory=backend_factory,
+                chrome=chrome,
             )
         if detected:
             raise BrowserActionError(detected, f"navigate detected {detected}: url={_page_url(page)}")
@@ -535,6 +539,8 @@ def _execute_action(
             run_config=run_config,
             sync_job_id=sync_job_id,
             handoff_coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            chrome=chrome,
         )
         return {}
     if name == "extract_text":
@@ -642,6 +648,8 @@ def _execute_login_action(
     run_config: PlaywrightRunConfig | None = None,
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> None:
     username_selector = str(action.get("username_selector") or "").strip()
     password_selector = str(action.get("password_selector") or "").strip()
@@ -670,6 +678,8 @@ def _execute_login_action(
         run_config=run_config,
         sync_job_id=sync_job_id,
         handoff_coordinator=handoff_coordinator,
+        backend_factory=backend_factory,
+        chrome=chrome,
     )
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     if post_login_wait_selector:
@@ -681,6 +691,8 @@ def _execute_login_action(
             run_config=run_config,
             sync_job_id=sync_job_id,
             handoff_coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            chrome=chrome,
         )
 
 
@@ -696,6 +708,8 @@ def _find_login_context(
     run_config: PlaywrightRunConfig | None = None,
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> Any:
     attempt_timeout_ms = min(timeout_ms, _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS)
     last_error: Exception | None = None
@@ -759,6 +773,8 @@ def _find_login_context(
                     poll_interval_ms=1000,
                     sync_job_id=sync_job_id,
                     coordinator=handoff_coordinator,
+                    backend_factory=backend_factory,
+                    chrome=chrome,
                 )
                 if risk_cleared:
                     continue
@@ -851,6 +867,8 @@ def _wait_for_risk_to_clear_with_handoff(
     poll_interval_ms: int,
     sync_job_id: str,
     coordinator: RemoteControlCoordinator | None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> bool:
     if coordinator is None:
         return _wait_for_risk_to_clear(
@@ -858,7 +876,14 @@ def _wait_for_risk_to_clear_with_handoff(
             timeout_ms=timeout_ms,
             poll_interval_ms=poll_interval_ms,
         )
-    backend = PlaywrightControlBackend(page=page, risk_contexts=contexts)
+    if backend_factory is not None:
+        backend = backend_factory.create_backend(page=page, chrome=chrome, risk_contexts=contexts)
+    else:
+        backend = PlaywrightControlBackend(page=page, risk_contexts=contexts)
+    try:
+        backend.bind_window()
+    except Exception:
+        logger.exception("OS 后端窗口绑定失败,降级为不可控等待")
     coordinator.register_backend(sync_job_id=sync_job_id, backend=backend)
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     try:
@@ -893,6 +918,10 @@ def _wait_for_risk_to_clear_with_handoff(
     finally:
         backend.stop_stream()
         coordinator.unregister_backend(sync_job_id=sync_job_id)
+        try:
+            backend.teardown()
+        except Exception:
+            pass
 
 
 def _await_navigate_risk_clearance(
@@ -901,6 +930,8 @@ def _await_navigate_risk_clearance(
     run_config: "PlaywrightRunConfig | None",
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> str | None:
     """navigate 落到风控页时,不立即失败:保持页面打开,轮询等待人工清除,
     上限 risk_manual_timeout_ms。清除返回 None(继续 playbook);超时或未配置超时返回
@@ -920,6 +951,8 @@ def _await_navigate_risk_clearance(
         poll_interval_ms=1000,
         sync_job_id=sync_job_id,
         coordinator=handoff_coordinator,
+        backend_factory=backend_factory,
+        chrome=chrome,
     )
     return None if cleared else "RISK_VERIFICATION"
 
@@ -1469,6 +1502,8 @@ def _wait_for_post_login_selector(
     run_config: PlaywrightRunConfig | None = None,
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    chrome: Any = None,
 ) -> None:
     contexts = [login_context]
     if page is not login_context:
@@ -1504,6 +1539,8 @@ def _wait_for_post_login_selector(
                             poll_interval_ms=1000,
                             sync_job_id=sync_job_id,
                             coordinator=handoff_coordinator,
+                            backend_factory=backend_factory,
+                            chrome=chrome,
                         )
         for context in contexts:
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
@@ -2204,6 +2241,7 @@ def _run_playbook_with_playwright_inner(
     runtime_profile_ref = str(message.get("runtime_profile_ref") or "")
     job_id = str(message.get("job_id") or "unknown")
     handoff_coordinator = message.get("handoff_coordinator")
+    backend_factory = message.get("handoff_backend_factory")
 
     user_data_dir = build_user_data_dir(
         config=config,
@@ -2303,6 +2341,8 @@ def _run_playbook_with_playwright_inner(
                             sync_job_id=job_id,
                             storage_context=storage_context,
                             handoff_coordinator=handoff_coordinator,
+                            backend_factory=backend_factory,
+                            chrome=chrome,
                         )
                         if result.get("rows"):
                             rows.extend(result["rows"])

@@ -129,3 +129,48 @@ def test_navigate_risk_wait_registers_handoff_backend(monkeypatch):
     assert unregistered == ["j1"]
     assert emitted_frames[0]["sync_job_id"] == "j1"
     assert emitted_frames[0]["frame"]["mime"] == "image/jpeg"
+
+
+def test_handoff_uses_factory_to_build_backend(monkeypatch):
+    import finance_browser_agent.playwright_runner as pr
+
+    built = {}
+
+    class FakeBackend:
+        handoff_session_id = ""
+        controller_id = ""
+        def bind_window(self): built["bound"] = True
+        def start_stream(self, **k): self.handoff_session_id = k["handoff_session_id"]
+        def stop_stream(self): pass
+        def should_capture_frame(self): return False
+        def capture_frame(self): return {"mime": "image/jpeg", "width": 0, "height": 0, "data": ""}
+        def drain_pending_input(self): pass
+        def queue_input_event(self, e): pass
+        def pop_resume_check_requested(self): return False
+        def diagnostics(self): return {"backend": "fake"}
+        def teardown(self): built["torn"] = True
+
+    class FakeFactory:
+        def create_backend(self, *, page, chrome, risk_contexts):
+            built["created"] = True
+            return FakeBackend()
+
+    monkeypatch.setattr(pr, "_risk_cleared", lambda contexts: True)
+
+    sent = []
+    async def emit(p): sent.append(p)
+    from finance_browser_agent.remote_control import RemoteControlCoordinator
+    coordinator = RemoteControlCoordinator(send_event=emit)
+
+    pr._wait_for_risk_to_clear_with_handoff(
+        page=object(),
+        contexts=[],
+        timeout_ms=50,
+        poll_interval_ms=10,
+        sync_job_id="j1",
+        coordinator=coordinator,
+        backend_factory=FakeFactory(),
+        chrome=None,
+    )
+    assert built.get("created") is True
+    assert built.get("bound") is True
