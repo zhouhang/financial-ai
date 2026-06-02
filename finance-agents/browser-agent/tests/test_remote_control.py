@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finance_browser_agent.remote_control import PlaywrightControlBackend, RemoteControlCoordinator
+from remote_control_contract import RemoteControlBackendContract
 
 
 class FakeMouse:
@@ -134,3 +136,29 @@ def test_coordinator_emits_frame_and_status_via_send_event():
     assert sent[0]["type"] == "handoff_frame"
     assert sent[0]["handoff_session_id"] == "h1"
     assert sent[1] == {"type": "handoff_completed", "sync_job_id": "j1"}
+
+
+class TestPlaywrightBackendContract(RemoteControlBackendContract):
+    def make_backend(self):
+        page = FakePage()
+        return PlaywrightControlBackend(page=page, risk_contexts=[page])
+
+
+def test_backend_rejects_input_from_non_active_controller():
+    page = FakePage()
+    backend = PlaywrightControlBackend(page=page, risk_contexts=[page])
+    backend.start_stream(handoff_session_id="h1", controller_id="ctrl-1", idle_fps=1, interactive_fps=5)
+    backend.queue_input_event({"kind": "click", "x": 0.5, "y": 0.5, "controller_id": "ctrl-OLD"})
+    backend.drain_pending_input()
+    assert page.mouse.calls == []
+    backend.queue_input_event({"kind": "click", "x": 0.5, "y": 0.5, "controller_id": "ctrl-1"})
+    backend.drain_pending_input()
+    assert page.mouse.calls == [("click", 500, 400, "left")]
+
+
+def test_diagnostics_reports_playwright_backend():
+    page = FakePage()
+    backend = PlaywrightControlBackend(page=page, risk_contexts=[page])
+    diag = backend.diagnostics()
+    assert diag["backend"] == "playwright"
+    assert diag["can_inject_keyboard"] is True

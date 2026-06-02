@@ -87,8 +87,13 @@ class PlaywrightControlBackend:
                 event = self._input_queue.get_nowait()
             except queue.Empty:
                 return
-            if str(event.get("kind") or "") == "__resume_check__":
+            kind = str(event.get("kind") or "")
+            if kind == "__resume_check__":
                 self._resume_check_requested = True
+                continue
+            event_controller = str(event.get("controller_id") or "")
+            if event_controller and self.controller_id and event_controller != self.controller_id:
+                logger.warning("丢弃非当前 controller 的 input: got=%s active=%s", event_controller, self.controller_id)
                 continue
             self.apply_input_event(event)
 
@@ -120,13 +125,38 @@ class PlaywrightControlBackend:
         height = float(viewport.get("height") or 0)
         return float(event.get("x") or 0) * width, float(event.get("y") or 0) * height
 
+    def bind_window(self) -> None:
+        return None
+
+    def teardown(self) -> None:
+        self.stop_stream()
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "backend": "playwright",
+            "platform": "any",
+            "capture": "cdp_screenshot",
+            "can_capture": True,
+            "can_inject_mouse": True,
+            "can_inject_keyboard": True,
+            "can_clipboard_paste": False,
+        }
+
+    def inject_mouse(self, event: dict[str, Any]) -> None:
+        self.apply_input_event(event)
+
+    def inject_key(self, event: dict[str, Any]) -> None:
+        self.apply_input_event(event)
+
+    def inject_text(self, text: str) -> None:
+        if text:
+            self.page.keyboard.type(text)
+
     def apply_input_event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("kind") or "")
         self._interactive_until = time.monotonic() + 2.0
         if kind == "text":
-            text = str(event.get("text") or "")
-            if text:
-                self.page.keyboard.type(text)
+            self.inject_text(str(event.get("text") or ""))
             return
         if kind in {"key_down", "key_up"}:
             key = str(event.get("key") or "")
@@ -184,7 +214,9 @@ class RemoteControlCoordinator:
         elif event == "handoff_stop":
             backend.stop_stream()
         elif event == "handoff_input":
-            backend.queue_input_event(dict(msg.get("input") or {}))
+            payload = dict(msg.get("input") or {})
+            payload["controller_id"] = str(msg.get("controller_id") or "")
+            backend.queue_input_event(payload)
         elif event == "handoff_frame_rate":
             profile = str(msg.get("profile") or "interactive")
             backend.start_stream(
