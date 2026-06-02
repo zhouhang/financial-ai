@@ -37,7 +37,6 @@ class BrowserAgentConfig:
     data_agent_ws_url: str
     poll_interval_seconds: float
     max_concurrency: int
-    waiting_poll_interval_seconds: float
     heartbeat_interval_seconds: float
 
     @classmethod
@@ -51,9 +50,6 @@ class BrowserAgentConfig:
                 1.0, float(os.getenv("BROWSER_AGENT_POLL_INTERVAL_SECONDS", "2"))
             ),
             max_concurrency=max(1, int(os.getenv("BROWSER_AGENT_MAX_CONCURRENCY", "2"))),
-            waiting_poll_interval_seconds=max(
-                5.0, float(os.getenv("BROWSER_AGENT_WAITING_POLL_INTERVAL_SECONDS", "30"))
-            ),
             heartbeat_interval_seconds=max(
                 10.0, float(os.getenv("BROWSER_AGENT_HEARTBEAT_INTERVAL_SECONDS", "30"))
             ),
@@ -147,15 +143,6 @@ class BrowserAgentTallyClient:
 
     async def mark_browser_job_failed(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._client.request("job_fail", dict(payload))
-
-    async def requeue_ready_waiting(self) -> dict[str, Any]:
-        return await self._client.request("queue_requeue_ready", {})
-
-    async def fail_failed_waiting(self) -> dict[str, Any]:
-        return await self._client.request("queue_fail_failed", {})
-
-    async def fail_expired_waiting(self) -> dict[str, Any]:
-        return await self._client.request("queue_fail_expired", {})
 
     async def report_risk_waiting(self, **kwargs):
         return await self._client.report_risk_waiting(**kwargs)
