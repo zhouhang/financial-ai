@@ -66,9 +66,121 @@ def test_schema_bootstrap_runs_recon_queue_before_browser(monkeypatch: pytest.Mo
         lambda table_name, constraint_name, schema="public": "draft replayed approved canary active deprecated",
     )
     monkeypatch.setattr(auth_db, "_constraint_exists", lambda *args, **kwargs: True)
+    monkeypatch.setattr(auth_db, "ensure_storage_objects_schema", lambda: [])
+    monkeypatch.setattr(auth_db, "ensure_browser_handoff_schema", lambda: [])
 
     assert auth_db.ensure_schema() == ["019", "031_browser_playbook_collection.sql"]
     assert calls == ["recon", "031_browser_playbook_collection.sql"]
+
+
+def test_schema_bootstrap_runs_storage_after_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(auth_db, "ensure_unified_data_source_schema", lambda: calls.append("unified") or [])
+    monkeypatch.setattr(
+        auth_db,
+        "ensure_browser_playbook_collection_schema",
+        lambda: calls.append("browser") or ["031_browser_playbook_collection.sql"],
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "ensure_storage_objects_schema",
+        lambda: calls.append("storage") or ["037_storage_objects_and_browser_capture_oss.sql"],
+    )
+    monkeypatch.setattr(auth_db, "ensure_browser_handoff_schema", lambda: calls.append("handoff") or [])
+
+    assert auth_db.ensure_schema() == [
+        "031_browser_playbook_collection.sql",
+        "037_storage_objects_and_browser_capture_oss.sql",
+    ]
+    assert calls == ["unified", "browser", "storage", "handoff"]
+
+
+def test_storage_objects_schema_bootstrap_applies_037_for_pre_oss_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    tables = {
+        "playbooks",
+        "agents",
+        "shop_runtime_bindings",
+        "browser_collection_records",
+        "browser_capture_files",
+        "recon_execution_queue",
+    }
+    browser_capture_columns = {
+        "company_id",
+        "data_source_id",
+        "dataset_id",
+        "sync_job_id",
+        "resource_key",
+        "shop_id",
+        "playbook_id",
+        "biz_date",
+        "storage_path",
+        "encoding",
+        "checksum",
+        "row_count",
+        "created_at",
+        "updated_at",
+    }
+    storage_object_columns: set[str] = set()
+
+    def fake_table_exists(table_name: str, *, schema: str = "public") -> bool:
+        return table_name in tables
+
+    def fake_column_exists(table_name: str, column_name: str, *, schema: str = "public") -> bool:
+        if table_name == "browser_capture_files":
+            return column_name in browser_capture_columns
+        if table_name == "storage_objects":
+            return column_name in storage_object_columns
+        return True
+
+    def fake_execute_sql_script(script_path: Path) -> None:
+        calls.append(script_path.name)
+        tables.add("storage_objects")
+        storage_object_columns.update(
+            {
+                "object_id",
+                "logical_path",
+                "owner_user_id",
+                "company_id",
+                "module",
+                "storage_provider",
+                "storage_bucket",
+                "storage_key",
+                "storage_uri",
+                "local_path",
+                "original_filename",
+                "content_type",
+                "size_bytes",
+                "checksum",
+                "metadata_json",
+                "created_at",
+                "updated_at",
+            }
+        )
+        browser_capture_columns.update(
+            {
+                "storage_provider",
+                "storage_bucket",
+                "storage_key",
+                "storage_uri",
+                "content_type",
+                "size_bytes",
+            }
+        )
+
+    monkeypatch.setattr(auth_db, "_table_exists", fake_table_exists)
+    monkeypatch.setattr(auth_db, "_column_exists", fake_column_exists)
+    monkeypatch.setattr(auth_db, "_execute_sql_script", fake_execute_sql_script)
+    monkeypatch.setattr(auth_db, "_migration_path", lambda filename: Path(filename))
+    monkeypatch.setattr(auth_db, "_STORAGE_OBJECTS_SCHEMA_READY", False)
+
+    assert auth_db.ensure_storage_objects_schema() == [
+        "037_storage_objects_and_browser_capture_oss.sql"
+    ]
+    assert calls == ["037_storage_objects_and_browser_capture_oss.sql"]
 
 
 def test_browser_collection_records_schema_has_required_columns(monkeypatch: pytest.MonkeyPatch) -> None:

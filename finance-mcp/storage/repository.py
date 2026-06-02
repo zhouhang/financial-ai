@@ -34,7 +34,7 @@ def save_storage_object_metadata(
         "content_type": storage_ref.content_type,
         "size_bytes": storage_ref.size_bytes,
         "checksum": storage_ref.checksum,
-        "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+        "metadata_json": json.dumps(metadata or {}, ensure_ascii=False, default=str),
     }
 
     conn_manager = auth_db.get_conn()

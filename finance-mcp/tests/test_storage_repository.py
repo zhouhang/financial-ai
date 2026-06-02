@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sys
+import uuid
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 FINANCE_MCP_ROOT = Path(__file__).resolve().parents[1]
@@ -126,6 +129,30 @@ def test_save_storage_object_metadata_returns_params_fallback_when_no_row(monkey
     assert result["local_path"] == "/tmp/export.csv"
     assert result["metadata_json"] == "{}"
     assert captured["committed"] is True
+
+
+def test_save_storage_object_metadata_serializes_non_json_native_metadata(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(repository.auth_db, "get_conn", lambda: _FakeConnManager(captured))
+
+    metadata_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    result = repository.save_storage_object_metadata(
+        owner_user_id=None,
+        company_id=None,
+        module="exports",
+        logical_path="local/report.csv",
+        ref=StorageObjectRef(provider="local", local_path="/tmp/report.csv"),
+        metadata={
+            "id": metadata_id,
+            "biz_date": date(2026, 5, 18),
+            "amount": Decimal("12.34"),
+        },
+    )
+
+    assert result["metadata_json"] == (
+        '{"id": "00000000-0000-0000-0000-000000000001", '
+        '"biz_date": "2026-05-18", "amount": "12.34"}'
+    )
 
 
 def test_get_storage_object_by_logical_path_selects_by_logical_path(monkeypatch) -> None:

@@ -37,6 +37,7 @@ _SYNC_JOBS_TRIGGER_MODES_SCHEMA_READY = False
 _SYNC_JOBS_HANDOFF_STATUSES_SCHEMA_READY = False
 _RECON_EXECUTION_QUEUE_SCHEMA_READY = False
 _BROWSER_PLAYBOOK_COLLECTION_SCHEMA_READY = False
+_STORAGE_OBJECTS_SCHEMA_READY = False
 _BROWSER_HANDOFF_SCHEMA_READY = False
 
 _UNIFIED_DATA_SOURCE_BASE_TABLES = {
@@ -143,6 +144,35 @@ _RECON_EXECUTION_QUEUE_REQUIRED_COLUMNS = (
 
 _RECON_EXECUTION_QUEUE_REQUIRED_CONSTRAINTS = (
     "recon_execution_queue_status_check",
+)
+
+_STORAGE_OBJECTS_REQUIRED_COLUMNS = (
+    "object_id",
+    "logical_path",
+    "owner_user_id",
+    "company_id",
+    "module",
+    "storage_provider",
+    "storage_bucket",
+    "storage_key",
+    "storage_uri",
+    "local_path",
+    "original_filename",
+    "content_type",
+    "size_bytes",
+    "checksum",
+    "metadata_json",
+    "created_at",
+    "updated_at",
+)
+
+_BROWSER_CAPTURE_STORAGE_COLUMNS = (
+    "storage_provider",
+    "storage_bucket",
+    "storage_key",
+    "storage_uri",
+    "content_type",
+    "size_bytes",
 )
 
 _UNIFIED_DATASET_SELECT_COLUMNS_SQL = """
@@ -638,6 +668,19 @@ def _browser_playbook_collection_schema_ready() -> bool:
     )
 
 
+def _storage_objects_schema_ready() -> bool:
+    if not _table_exists("storage_objects") or not _table_exists("browser_capture_files"):
+        return False
+
+    return all(
+        _column_exists("storage_objects", column_name)
+        for column_name in _STORAGE_OBJECTS_REQUIRED_COLUMNS
+    ) and all(
+        _column_exists("browser_capture_files", column_name)
+        for column_name in _BROWSER_CAPTURE_STORAGE_COLUMNS
+    )
+
+
 def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
     if not _table_exists("data_source_datasets"):
         return False
@@ -1015,6 +1058,25 @@ def ensure_browser_playbook_collection_schema() -> list[str]:
     return applied
 
 
+def ensure_storage_objects_schema() -> list[str]:
+    """确保存储对象元数据表和浏览器采集 OSS 字段已安装。"""
+    global _STORAGE_OBJECTS_SCHEMA_READY
+    if _STORAGE_OBJECTS_SCHEMA_READY:
+        return []
+    if _storage_objects_schema_ready():
+        _STORAGE_OBJECTS_SCHEMA_READY = True
+        return []
+
+    migration_name = "037_storage_objects_and_browser_capture_oss.sql"
+    _execute_sql_script(_migration_path(migration_name))
+    if not _storage_objects_schema_ready():
+        raise RuntimeError("storage_objects schema 升级失败，OSS 存储字段仍不完整")
+
+    _STORAGE_OBJECTS_SCHEMA_READY = True
+    logger.info("storage_objects schema 已自动补齐: %s", migration_name)
+    return [migration_name]
+
+
 def _browser_handoff_schema_ready() -> bool:
     try:
         with get_conn() as conn:
@@ -1071,6 +1133,7 @@ def ensure_schema() -> list[str]:
     """确保 auth 侧当前任务需要的基础 schema 已就绪。"""
     applied = ensure_unified_data_source_schema()
     applied.extend(ensure_browser_playbook_collection_schema())
+    applied.extend(ensure_storage_objects_schema())
     applied.extend(ensure_browser_handoff_schema())
     return applied
 
@@ -8066,6 +8129,12 @@ def insert_browser_capture_files(
         storage_provider = str(entry.get("storage_provider") or "").strip()
         if not storage_provider:
             storage_provider = parsed_ref.provider
+        storage_bucket = str(entry.get("storage_bucket") or parsed_ref.bucket or "")
+        storage_key = str(entry.get("storage_key") or parsed_ref.key or "")
+        if not storage_uri and storage_provider == "oss" and storage_bucket and storage_key:
+            storage_uri = f"oss://{storage_bucket}/{storage_key.lstrip('/')}"
+        elif not storage_uri and parsed_ref.provider == "oss":
+            storage_uri = parsed_ref.to_uri()
         rows.append(
             (
                 company_id,
@@ -8081,9 +8150,9 @@ def insert_browser_capture_files(
                 str(entry.get("checksum") or ""),
                 int(entry.get("row_count") or 0),
                 storage_provider,
-                str(entry.get("storage_bucket") or parsed_ref.bucket or ""),
-                str(entry.get("storage_key") or parsed_ref.key or ""),
-                storage_uri or (parsed_ref.to_uri() if parsed_ref.provider == "oss" else ""),
+                storage_bucket,
+                storage_key,
+                storage_uri,
                 str(entry.get("content_type") or ""),
                 int(entry.get("size_bytes") or 0),
             )

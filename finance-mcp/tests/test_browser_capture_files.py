@@ -134,6 +134,46 @@ def test_insert_browser_capture_files_parses_minimal_oss_storage_path(monkeypatc
     assert row[15] == "oss://finance-oss/browser-captures/shop-001/export.csv"
 
 
+def test_insert_browser_capture_files_synthesizes_oss_uri_from_bucket_and_key(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_execute_values(cur, sql, values, template=None, page_size=1000, fetch=False):
+        captured["values"] = list(values)
+        return []
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _FakeConnManager(captured))
+    monkeypatch.setattr(auth_db.psycopg2.extras, "execute_values", fake_execute_values)
+
+    result = auth_db.insert_browser_capture_files(
+        company_id="00000000-0000-0000-0000-000000000001",
+        data_source_id="00000000-0000-0000-0000-000000000002",
+        dataset_id="00000000-0000-0000-0000-000000000003",
+        sync_job_id="00000000-0000-0000-0000-000000000004",
+        resource_key="qianniu-daily-bill-export@1.0.0",
+        shop_id="shop-001",
+        playbook_id="qianniu-daily-bill-export",
+        biz_date="2026-05-18",
+        capture_files=[
+            {
+                "storage_path": "browser-captures/shop-001/export.csv",
+                "storage_provider": "oss",
+                "storage_bucket": "finance-oss",
+                "storage_key": "browser-captures/shop-001/export.csv",
+                "encoding": "utf-8",
+                "checksum": "sha256:abc",
+                "row_count": 10,
+            }
+        ],
+    )
+
+    assert result["inserted_count"] == 1
+    row = captured["values"][0]
+    assert row[12] == "oss"
+    assert row[13] == "finance-oss"
+    assert row[14] == "browser-captures/shop-001/export.csv"
+    assert row[15] == "oss://finance-oss/browser-captures/shop-001/export.csv"
+
+
 def test_insert_browser_capture_files_keeps_legacy_local_defaults(monkeypatch) -> None:
     captured: dict = {}
 
