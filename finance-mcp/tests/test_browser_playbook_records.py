@@ -125,6 +125,7 @@ def test_storage_objects_schema_bootstrap_applies_037_for_pre_oss_shape(
         "updated_at",
     }
     storage_object_columns: set[str] = set()
+    constraints: set[str] = set()
 
     def fake_table_exists(table_name: str, *, schema: str = "public") -> bool:
         return table_name in tables
@@ -139,6 +140,7 @@ def test_storage_objects_schema_bootstrap_applies_037_for_pre_oss_shape(
     def fake_execute_sql_script(script_path: Path) -> None:
         calls.append(script_path.name)
         tables.add("storage_objects")
+        constraints.add("storage_objects_logical_path_key")
         storage_object_columns.update(
             {
                 "object_id",
@@ -173,6 +175,11 @@ def test_storage_objects_schema_bootstrap_applies_037_for_pre_oss_shape(
 
     monkeypatch.setattr(auth_db, "_table_exists", fake_table_exists)
     monkeypatch.setattr(auth_db, "_column_exists", fake_column_exists)
+    monkeypatch.setattr(
+        auth_db,
+        "_constraint_exists",
+        lambda table_name, constraint_name, schema="public": constraint_name in constraints,
+    )
     monkeypatch.setattr(auth_db, "_execute_sql_script", fake_execute_sql_script)
     monkeypatch.setattr(auth_db, "_migration_path", lambda filename: Path(filename))
     monkeypatch.setattr(auth_db, "_STORAGE_OBJECTS_SCHEMA_READY", False)
@@ -223,6 +230,7 @@ def test_storage_objects_schema_bootstrap_repairs_old_id_shape(
         "created_at",
         "updated_at",
     }
+    constraints: set[str] = set()
 
     def fake_table_exists(table_name: str, *, schema: str = "public") -> bool:
         return table_name in tables
@@ -238,6 +246,7 @@ def test_storage_objects_schema_bootstrap_repairs_old_id_shape(
         calls.append(script_path.name)
         storage_object_columns.discard("id")
         storage_object_columns.add("object_id")
+        constraints.add("storage_objects_logical_path_key")
         browser_capture_columns.update(
             {
                 "storage_provider",
@@ -251,6 +260,11 @@ def test_storage_objects_schema_bootstrap_repairs_old_id_shape(
 
     monkeypatch.setattr(auth_db, "_table_exists", fake_table_exists)
     monkeypatch.setattr(auth_db, "_column_exists", fake_column_exists)
+    monkeypatch.setattr(
+        auth_db,
+        "_constraint_exists",
+        lambda table_name, constraint_name, schema="public": constraint_name in constraints,
+    )
     monkeypatch.setattr(auth_db, "_execute_sql_script", fake_execute_sql_script)
     monkeypatch.setattr(auth_db, "_migration_path", lambda filename: Path(filename))
     monkeypatch.setattr(auth_db, "_STORAGE_OBJECTS_SCHEMA_READY", False)
@@ -261,6 +275,71 @@ def test_storage_objects_schema_bootstrap_repairs_old_id_shape(
     assert calls == ["037_storage_objects_and_browser_capture_oss.sql"]
     assert "object_id" in storage_object_columns
     assert "id" not in storage_object_columns
+
+
+def test_storage_objects_schema_bootstrap_applies_037_when_unique_constraint_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    tables = {"storage_objects", "browser_capture_files"}
+    browser_capture_columns = {
+        "storage_provider",
+        "storage_bucket",
+        "storage_key",
+        "storage_uri",
+        "content_type",
+        "size_bytes",
+    }
+    storage_object_columns = {
+        "object_id",
+        "logical_path",
+        "owner_user_id",
+        "company_id",
+        "module",
+        "storage_provider",
+        "storage_bucket",
+        "storage_key",
+        "storage_uri",
+        "local_path",
+        "original_filename",
+        "content_type",
+        "size_bytes",
+        "checksum",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+    }
+    constraints: set[str] = set()
+
+    def fake_table_exists(table_name: str, *, schema: str = "public") -> bool:
+        return table_name in tables
+
+    def fake_column_exists(table_name: str, column_name: str, *, schema: str = "public") -> bool:
+        if table_name == "browser_capture_files":
+            return column_name in browser_capture_columns
+        if table_name == "storage_objects":
+            return column_name in storage_object_columns
+        return False
+
+    def fake_execute_sql_script(script_path: Path) -> None:
+        calls.append(script_path.name)
+        constraints.add("storage_objects_logical_path_key")
+
+    monkeypatch.setattr(auth_db, "_table_exists", fake_table_exists)
+    monkeypatch.setattr(auth_db, "_column_exists", fake_column_exists)
+    monkeypatch.setattr(
+        auth_db,
+        "_constraint_exists",
+        lambda table_name, constraint_name, schema="public": constraint_name in constraints,
+    )
+    monkeypatch.setattr(auth_db, "_execute_sql_script", fake_execute_sql_script)
+    monkeypatch.setattr(auth_db, "_migration_path", lambda filename: Path(filename))
+    monkeypatch.setattr(auth_db, "_STORAGE_OBJECTS_SCHEMA_READY", False)
+
+    assert auth_db.ensure_storage_objects_schema() == [
+        "037_storage_objects_and_browser_capture_oss.sql"
+    ]
+    assert calls == ["037_storage_objects_and_browser_capture_oss.sql"]
 
 
 def test_browser_collection_records_schema_has_required_columns(monkeypatch: pytest.MonkeyPatch) -> None:

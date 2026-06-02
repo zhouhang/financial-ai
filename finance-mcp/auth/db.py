@@ -678,7 +678,7 @@ def _storage_objects_schema_ready() -> bool:
     ) and all(
         _column_exists("browser_capture_files", column_name)
         for column_name in _BROWSER_CAPTURE_STORAGE_COLUMNS
-    )
+    ) and _constraint_exists("storage_objects", "storage_objects_logical_path_key")
 
 
 def _alipay_semantic_profiles_need_hidden_field_cleanup() -> bool:
