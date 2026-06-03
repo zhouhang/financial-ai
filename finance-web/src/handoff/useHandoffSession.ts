@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildHandoffWsUrl } from './handoffWs';
 import type { HandoffFrame, HandoffInputEvent, HandoffSession, HandoffStatus } from './types';
 
+export function buildReconnectCleanupEvents(
+  state: { gestureActive: boolean; button: 'left' | 'middle' | 'right' },
+): { kind: 'mouse_up'; button: 'left' | 'middle' | 'right' }[] {
+  return state.gestureActive ? [{ kind: 'mouse_up', button: state.button }] : [];
+}
+
 interface HandoffMessage {
   type: string;
   status?: HandoffStatus;
@@ -20,6 +26,7 @@ const TERMINAL_STATUSES = new Set<HandoffStatus>(['completed', 'expired', 'revok
 
 export function useHandoffSession(token: string) {
   const wsRef = useRef<WebSocket | null>(null);
+  const gestureActiveRef = useRef(false);
   const [status, setStatus] = useState<HandoffStatus>(token ? 'connecting' : 'expired');
   const [session, setSession] = useState<HandoffSession | null>(null);
   const [frame, setFrame] = useState<HandoffFrame | null>(null);
@@ -37,6 +44,11 @@ export function useHandoffSession(token: string) {
 
   const sendInput = useCallback(
     (event: HandoffInputEvent) => {
+      if (event.kind === 'mouse_down') {
+        gestureActiveRef.current = true;
+      } else if (event.kind === 'mouse_up') {
+        gestureActiveRef.current = false;
+      }
       send({ type: 'handoff_input', event });
     },
     [send],
@@ -61,6 +73,14 @@ export function useHandoffSession(token: string) {
 
     ws.onopen = () => {
       setStatus((current) => (current === 'connecting' ? 'active' : current));
+      const cleanupEvents = buildReconnectCleanupEvents({
+        gestureActive: gestureActiveRef.current,
+        button: 'left',
+      });
+      for (const evt of cleanupEvents) {
+        ws.send(JSON.stringify({ type: 'handoff_input', event: evt }));
+        gestureActiveRef.current = false;
+      }
     };
 
     ws.onmessage = (event) => {
