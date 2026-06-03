@@ -7,7 +7,16 @@ export type HandoffStatus =
   | 'still_blocked'
   | 'completed'
   | 'expired'
-  | 'error';
+  | 'error'
+  | 'control_unavailable'
+  | 'window_unavailable'
+  | 'desktop_locked';
+
+export interface HandoffCapabilities {
+  backend?: 'playwright' | 'os_windows' | 'os_macos';
+  can_clipboard_paste?: boolean;
+  text_input?: boolean;
+}
 
 export interface HandoffSession {
   handoff_session_id?: string;
@@ -19,6 +28,7 @@ export interface HandoffSession {
   status?: string;
   expires_at?: string;
   controller_id?: string;
+  capabilities?: HandoffCapabilities;
 }
 
 export interface HandoffFrame {
@@ -46,4 +56,5 @@ export interface HandoffInputEvent {
   delta_y?: number;
   key?: string;
   text?: string;
+  controller_id?: string;
 }
