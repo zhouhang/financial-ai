@@ -2543,22 +2543,43 @@ def _summary_pending_total(summary: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
+def _first_policy_int(
+    *policies: dict[str, Any],
+    keys: tuple[str, ...],
+    env_name: str,
+    default: int,
+) -> int:
+    for policy in policies:
+        for key in keys:
+            if key not in policy:
+                continue
+            value = policy.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return _safe_int(os.getenv(env_name), default)
+
+
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
     legacy_policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
     notify_policy = _safe_dict(meta.get("notify_policy"))
-    policy = {**legacy_policy, **notify_policy}
-    threshold = _safe_int(
-        policy.get("explosion_threshold")
-        or policy.get("max_detail_reminders")
-        or os.getenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT"),
-        _DEFAULT_NOTIFY_EXPLOSION_LIMIT,
+    threshold = _first_policy_int(
+        notify_policy,
+        legacy_policy,
+        keys=("explosion_threshold", "max_detail_reminders"),
+        env_name="RECON_AUTO_NOTIFY_EXPLOSION_LIMIT",
+        default=_DEFAULT_NOTIFY_EXPLOSION_LIMIT,
     )
-    sample_limit = _safe_int(
-        policy.get("sample_exception_limit")
-        or policy.get("explosion_sample_limit")
-        or os.getenv("RECON_EXCEPTION_SAMPLE_LIMIT"),
-        _DEFAULT_EXCEPTION_SAMPLE_LIMIT,
+    sample_limit = _first_policy_int(
+        notify_policy,
+        legacy_policy,
+        keys=("sample_exception_limit", "explosion_sample_limit"),
+        env_name="RECON_EXCEPTION_SAMPLE_LIMIT",
+        default=_DEFAULT_EXCEPTION_SAMPLE_LIMIT,
     )
     threshold = max(1, threshold)
     sample_limit = max(1, sample_limit)
@@ -2581,6 +2602,27 @@ def _anomaly_sampling_owner_identifier(item: dict[str, Any]) -> str:
 def _sampling_group_key(item: dict[str, Any]) -> tuple[str, str]:
     anomaly_type = str(item.get("anomaly_type") or "unknown").strip() or "unknown"
     return anomaly_type, _anomaly_sampling_owner_identifier(item)
+
+
+def _sampling_type_first_group_order(
+    group_order: list[tuple[str, str]],
+    sample_limit: int,
+) -> list[tuple[str, str]]:
+    if len(group_order) <= sample_limit:
+        return group_order
+
+    type_order: list[str] = []
+    first_group_by_type: dict[str, tuple[str, str]] = {}
+    for key in group_order:
+        anomaly_type = key[0]
+        if anomaly_type not in first_group_by_type:
+            first_group_by_type[anomaly_type] = key
+            type_order.append(anomaly_type)
+
+    prioritized = [first_group_by_type[anomaly_type] for anomaly_type in type_order]
+    selected = set(prioritized)
+    prioritized.extend(key for key in group_order if key not in selected)
+    return prioritized
 
 
 def _sample_anomalies_for_exception_creation(
@@ -2614,10 +2656,11 @@ def _sample_anomalies_for_exception_creation(
                 groups[key] = []
                 group_order.append(key)
             groups[key].append(item)
+        first_pass_order = _sampling_type_first_group_order(group_order, safe_limit)
 
         sampled: list[dict[str, Any]] = []
         selected_by_key: dict[tuple[str, str], int] = {}
-        for key in group_order:
+        for key in first_pass_order:
             if len(sampled) >= safe_limit:
                 break
             sampled.append(groups[key][0])

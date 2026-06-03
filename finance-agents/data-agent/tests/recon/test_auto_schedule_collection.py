@@ -1425,6 +1425,60 @@ def test_resolve_notify_policy_keeps_legacy_reminder_policy(
     assert policy["explosion_sample_limit"] == 40
 
 
+def test_resolve_notify_policy_prefers_notify_policy_across_aliases() -> None:
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy": {
+                    "explosion_threshold": 300,
+                    "sample_exception_limit": 50,
+                },
+                "notify_policy": {
+                    "explosion_sample_limit": 20,
+                },
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 300
+    assert policy["sample_exception_limit"] == 20
+    assert policy["explosion_sample_limit"] == 20
+
+
+def test_resolve_notify_policy_uses_defaults_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+    monkeypatch.delenv("RECON_EXCEPTION_SAMPLE_LIMIT", raising=False)
+
+    policy = nodes._resolve_notify_policy({})
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
+def test_resolve_notify_policy_uses_sample_limit_env_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+    monkeypatch.setenv("RECON_EXCEPTION_SAMPLE_LIMIT", "25")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "notify_policy": {
+                    "explosion_threshold": 500,
+                }
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 500
+    assert policy["sample_exception_limit"] == 25
+    assert policy["explosion_sample_limit"] == 25
+
+
 def test_sample_anomalies_for_exception_creation_stratifies_by_type_and_owner() -> None:
     anomalies = [
         {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
@@ -1446,6 +1500,29 @@ def test_sample_anomalies_for_exception_creation_stratifies_by_type_and_owner() 
     assert metadata["sample_count"] == 4
     assert metadata["total_count"] == 6
     assert metadata["strategy"] == "stratified_by_anomaly_type_owner"
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_covers_distinct_types_when_group_count_exceeds_limit() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
+        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-2"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-3"},
+        {
+            "item_id": "c1",
+            "anomaly_type": "matched_with_diff",
+            "_exception_owner_identifier": "owner-4",
+        },
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=2,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
+    assert {item["anomaly_type"] for item in sampled} == {"source_only", "target_only"}
+    assert metadata["sample_count"] == 2
     assert metadata["fallback_used"] is False
 
 
