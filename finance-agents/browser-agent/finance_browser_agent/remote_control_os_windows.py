@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Any
 
@@ -94,3 +95,28 @@ def selfcheck(*, win32=None) -> dict[str, Any]:
     return evaluate_session_interactivity(
         process_session_id=int(pid_session), active_console_session_id=int(console_session)
     )
+
+
+class WindowCapturer:
+    def __init__(self, *, mss: Any, pillow: Any) -> None:
+        self._mss = mss
+        self._pillow = pillow
+
+    def capture(self, *, capture_rect: dict[str, int], window_title: str) -> dict[str, Any]:
+        region = {
+            "left": int(capture_rect["left"]), "top": int(capture_rect["top"]),
+            "width": int(capture_rect["width"]), "height": int(capture_rect["height"]),
+        }
+        shot = self._mss.grab(region)
+        width, height = int(shot.size[0]), int(shot.size[1])
+        jpeg = self._pillow.encode_jpeg(width, height, shot.bgra)
+        return {
+            "mime": "image/jpeg",
+            "width": width,
+            "height": height,
+            "data": base64.b64encode(jpeg).decode("ascii"),
+            # 仅供调试的 metadata;window_title 上送前需脱敏(见 data-agent 中转层约束)
+            "backend": "os_windows",
+            "window_title": window_title,
+            "capture_rect": region,
+        }

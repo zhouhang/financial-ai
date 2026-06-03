@@ -86,3 +86,32 @@ def test_non_console_session_rejected():
     # 进程会话与活动控制台会话不一致 → 非活动交互式
     result = evaluate_session_interactivity(process_session_id=2, active_console_session_id=1)
     assert result["available"] is False
+
+
+from finance_browser_agent.remote_control_os_windows import WindowCapturer
+
+
+class FakeMss:
+    def grab(self, region):
+        class Shot:
+            size = (region["width"], region["height"])
+            bgra = b"\x00\x00\x00\xff" * (region["width"] * region["height"])
+        return Shot()
+
+
+class FakePillow:
+    @staticmethod
+    def encode_jpeg(width, height, bgra_bytes):
+        return b"jpeg" + bytes([width % 256, height % 256])
+
+
+def test_capture_frame_uses_capture_rect_and_returns_metadata():
+    cap = WindowCapturer(mss=FakeMss(), pillow=FakePillow())
+    rect = {"left": 100, "top": 80, "width": 4, "height": 2}
+    frame = cap.capture(capture_rect=rect, window_title="短信验证 - Google Chrome")
+    assert frame["mime"] == "image/jpeg"
+    assert frame["width"] == 4 and frame["height"] == 2
+    import base64
+    assert base64.b64decode(frame["data"]).startswith(b"jpeg")
+    assert frame["capture_rect"] == rect
+    assert frame["backend"] == "os_windows"
