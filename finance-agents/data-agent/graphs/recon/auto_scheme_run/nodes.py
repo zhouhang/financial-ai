@@ -2612,16 +2612,34 @@ def _sampling_type_first_group_order(
         return group_order
 
     type_order: list[str] = []
-    first_group_by_type: dict[str, tuple[str, str]] = {}
+    groups_by_type: dict[str, list[tuple[str, str]]] = {}
     for key in group_order:
         anomaly_type = key[0]
-        if anomaly_type not in first_group_by_type:
-            first_group_by_type[anomaly_type] = key
+        if anomaly_type not in groups_by_type:
+            groups_by_type[anomaly_type] = []
             type_order.append(anomaly_type)
+        groups_by_type[anomaly_type].append(key)
 
-    prioritized = [first_group_by_type[anomaly_type] for anomaly_type in type_order]
-    selected = set(prioritized)
-    prioritized.extend(key for key in group_order if key not in selected)
+    prioritized: list[tuple[str, str]] = []
+    for anomaly_type in type_order:
+        prioritized.append(groups_by_type[anomaly_type][0])
+        if len(prioritized) >= sample_limit:
+            return prioritized
+
+    depth = 1
+    while len(prioritized) < sample_limit:
+        appended = False
+        for anomaly_type in type_order:
+            owner_groups = groups_by_type[anomaly_type]
+            if depth >= len(owner_groups):
+                continue
+            prioritized.append(owner_groups[depth])
+            appended = True
+            if len(prioritized) >= sample_limit:
+                return prioritized
+        if not appended:
+            break
+        depth += 1
     return prioritized
 
 
@@ -2631,7 +2649,11 @@ def _sample_anomalies_for_exception_creation(
     sample_limit: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     total_count = len(anomalies)
-    safe_limit = max(1, int(sample_limit or _DEFAULT_EXCEPTION_SAMPLE_LIMIT))
+    try:
+        safe_limit = int(sample_limit)
+    except (TypeError, ValueError):
+        safe_limit = _DEFAULT_EXCEPTION_SAMPLE_LIMIT
+    safe_limit = max(1, safe_limit)
     metadata = {
         "enabled": True,
         "reason": "explosion_threshold_exceeded",

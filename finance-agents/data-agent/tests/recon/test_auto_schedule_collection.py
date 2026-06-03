@@ -1526,6 +1526,60 @@ def test_sample_anomalies_covers_distinct_types_when_group_count_exceeds_limit()
     assert metadata["fallback_used"] is False
 
 
+def test_sample_anomalies_clamps_zero_sample_limit_to_one() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-2"},
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=0,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1"]
+    assert metadata["sample_limit"] == 1
+    assert metadata["sample_count"] == 1
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_round_robins_extra_group_coverage_across_types() -> None:
+    anomalies = [
+        {
+            "item_id": f"s{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_identifier": f"owner-s{index}",
+        }
+        for index in range(1, 6)
+    ] + [
+        {
+            "item_id": f"t{index}",
+            "anomaly_type": "target_only",
+            "_exception_owner_identifier": f"owner-t{index}",
+        }
+        for index in range(1, 6)
+    ] + [
+        {
+            "item_id": f"m{index}",
+            "anomaly_type": "matched_with_diff",
+            "_exception_owner_identifier": f"owner-m{index}",
+        }
+        for index in range(1, 6)
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=6,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["s1", "t1", "m1", "s2", "t2", "m2"]
+    assert [item["anomaly_type"] for item in sampled].count("source_only") == 2
+    assert [item["anomaly_type"] for item in sampled].count("target_only") == 2
+    assert [item["anomaly_type"] for item in sampled].count("matched_with_diff") == 2
+    assert metadata["sample_count"] == 6
+    assert metadata["fallback_used"] is False
+
+
 def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _BatchNotifyAdapter()
     updated_payloads: list[tuple[str, dict[str, object]]] = []
