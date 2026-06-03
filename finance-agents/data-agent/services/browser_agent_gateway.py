@@ -177,32 +177,36 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
     recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
     reason = str(msg.get("reason") or "RISK_VERIFICATION")
     notified = False
-    if channel_id and recipient:
-        channel = load_company_channel_config_by_id(channel_id=channel_id)
-        if channel is None:
-            logger.warning("handoff 通知通道不存在或不可用 channel_id=%s sync_job_id=%s", channel_id, sync_job_id)
+    if recipient:
+        # 配了责任人:走 per-company 通道。通道缺失/发送失败只记日志,不兜底(兜底仅针对"没配责任人")。
+        if channel_id:
+            channel = load_company_channel_config_by_id(channel_id=channel_id)
+            if channel is None:
+                logger.warning("handoff 通知通道不存在或不可用 channel_id=%s sync_job_id=%s", channel_id, sync_job_id)
+            else:
+                try:
+                    adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
+                    target = _resolve_handoff_recipient(adapter, owner)
+                    if target:
+                        adapter.send_bot_message(
+                            content=(
+                                "采集店铺需要人工验证。\n\n"
+                                f"原因：{reason}\n\n"
+                                f"[打开验证链接]({link})\n\n"
+                                "完成验证后请点击页面底部“我已完成验证”。"
+                            ),
+                            content_type="markdown",
+                            title="Tally 浏览器人工验证",
+                            to_user_id=target,
+                        )
+                        notified = True
+                except Exception:
+                    logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
         else:
-            try:
-                adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
-                target = _resolve_handoff_recipient(adapter, owner)
-                if target:
-                    adapter.send_bot_message(
-                        content=(
-                            "采集店铺需要人工验证。\n\n"
-                            f"原因：{reason}\n\n"
-                            f"[打开验证链接]({link})\n\n"
-                            "完成验证后请点击页面底部“我已完成验证”。"
-                        ),
-                        content_type="markdown",
-                        title="Tally 浏览器人工验证",
-                        to_user_id=target,
-                    )
-                    notified = True
-            except Exception:
-                logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
-    if not notified:
-        # 没配责任人 / 主通道未发出 → 兜底发给 .env 的 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD 接收人
-        logger.info("handoff 主通道未通知,走采集告警兜底接收人 sync_job_id=%s", sync_job_id)
+            logger.info("handoff 有责任人但未配置通知通道,跳过通知 sync_job_id=%s", sync_job_id)
+    else:
+        # 没配责任人 → 兜底发给 .env 的 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD 接收人
+        logger.info("handoff 无对账任务责任人,走采集告警兜底接收人 sync_job_id=%s", sync_job_id)
         notified = _notify_handoff_fallback(
             company_id=company_id,
             sync_job_id=sync_job_id,

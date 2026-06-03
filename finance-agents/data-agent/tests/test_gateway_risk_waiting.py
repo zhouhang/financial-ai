@@ -161,6 +161,56 @@ def test_risk_waiting_without_owner_falls_back_to_alert_recipient(monkeypatch):
     assert calls["fallback"][0]["link"] == "https://dev.tallyai.cn/handoff?t=TKN2"
 
 
+def test_owner_present_but_send_fails_does_not_fall_back(monkeypatch):
+    # 收窄后:配了责任人但发送失败,不走兜底(兜底仅针对"没配责任人")。
+    gw._NOTIFIED_RISK_JOBS.clear()
+    calls = {"fallback": 0}
+
+    async def fake_call(tool, args):
+        if tool == "browser_handoff_session_create":
+            return {
+                "success": True,
+                "handoff_session_id": "h3",
+                "handoff_token": "TKN3",
+                "status": "pending",
+                "channel_config_id": "chan1",
+                "owner": {"identifier": "u1", "name": "周行"},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(gw, "call_mcp_tool", fake_call)
+
+    class FailingAdapter:
+        def resolve_user(self, *, user_id="", mobile="", keyword=""):
+            return type("R", (), {"success": True, "resolved_user": type("U", (), {"user_id": "ding-u1"})()})()
+
+        def send_bot_message(self, *, content, to_user_id="", **kwargs):
+            raise RuntimeError("send boom")
+
+    monkeypatch.setattr(gw, "get_notification_adapter", lambda **kwargs: FailingAdapter())
+    monkeypatch.setattr(gw, "load_company_channel_config_by_id", lambda **kwargs: type("C", (), {"provider": "dingtalk"})())
+
+    def counting_fallback(**kwargs):
+        calls["fallback"] += 1
+        return True
+
+    monkeypatch.setattr(gw, "_notify_handoff_fallback", counting_fallback)
+
+    result = asyncio.run(
+        gw.handle_domain_message(
+            _conn(),
+            {
+                "type": "risk_waiting", "id": "e1", "sync_job_id": "j-owner-fail",
+                "reason": "RISK_VERIFICATION", "company_id": "c1", "shop_id": "s1",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["notified"] is False
+    assert calls["fallback"] == 0  # 配了责任人 → 不兜底
+
+
 def test_handoff_fallback_reuses_browser_alert_service(monkeypatch):
     import services.browser_alerts as ba
 
