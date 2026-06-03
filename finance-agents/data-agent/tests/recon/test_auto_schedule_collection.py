@@ -1635,6 +1635,30 @@ def test_resolve_notify_policy_uses_defaults_without_env(monkeypatch: pytest.Mon
     }
 
 
+def test_resolve_notify_policy_invalid_values_fall_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", "0")
+    monkeypatch.setenv("RECON_EXCEPTION_SAMPLE_LIMIT", "-5")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "notify_policy": {
+                    "explosion_threshold": 0,
+                    "sample_exception_limit": -20,
+                },
+            }
+        }
+    )
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
 def test_resolve_notify_policy_uses_sample_limit_env_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1876,6 +1900,13 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
             "anomaly_items": [{"anomaly_type": "source_only"} for _ in created_exceptions],
             "created_exceptions": created_exceptions,
             "auto_notify_policy": {"explosion_threshold": 1, "explosion": True},
+            "exception_sampling": {
+                "enabled": True,
+                "total_count": 1200,
+                "sample_count": 3,
+                "sample_limit": 200,
+                "threshold": 1,
+            },
         },
     }
 
@@ -1888,7 +1919,7 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert adapter.reminder_calls[0]["assignee_user_id"] == "ding-user-001"
     assert "你有3条异常待处理" in str(adapter.reminder_calls[0]["todo_title"])
     owner_content = str(adapter.reminder_calls[0]["content"])
-    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
+    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
         owner_content
     )
     assert "数据集 A" not in owner_content
@@ -1900,7 +1931,8 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert "执行完成，待处理异常已催办责任人「周行」" in summary_content
     assert "待处理异常已按责任人聚合催办" not in summary_content
     assert "如异常数量或类型不符合预期，请检查方案配置或数据日期范围。" not in summary_content
-    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
+    assert "异常明细：\n已按异常类型和责任人抽样创建 3 条" in summary_content
+    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
         summary_content
     )
     assert len(updated_payloads) == 3

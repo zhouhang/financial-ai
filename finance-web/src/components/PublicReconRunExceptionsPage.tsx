@@ -802,6 +802,9 @@ export default function PublicReconRunExceptionsPage() {
   const statusMeta = formatExecutionStatus(bundle?.run?.executionStatus || '');
   const runtimeSummary = useMemo(() => buildRuntimeSummaryView(bundle?.run), [bundle?.run]);
   const pendingDifferenceTotal = bundle?.total ?? bundleExceptions.length;
+  const sampledDisplayCount = initialOwner
+    ? filteredExceptions.length
+    : (runtimeSummary.exceptionSampling.sampleCount ?? filteredExceptions.length);
   const hasPrevious = offset > 0;
   const hasNext = bundle ? offset + bundle.limit < bundle.total : false;
   const uniqueStatuses = statusOptions(bundleExceptions);
@@ -959,14 +962,14 @@ export default function PublicReconRunExceptionsPage() {
             <h2 className="text-base font-semibold text-text-primary">差异列表</h2>
             <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
               {runtimeSummary.exceptionSampling.enabled
-                ? `全量差异 ${formatCount(runtimeSummary.exceptionSampling.totalCount ?? pendingDifferenceTotal)} 条，当前抽样展示 ${formatCount(runtimeSummary.exceptionSampling.sampleCount ?? filteredExceptions.length)} 条`
+                ? `全量差异 ${formatCount(runtimeSummary.exceptionSampling.totalCount ?? pendingDifferenceTotal)} 条，当前抽样展示 ${formatCount(sampledDisplayCount)} 条`
                 : `待处理差异 ${formatCount(pendingDifferenceTotal)} 条`}
             </span>
           </div>
           {loading ? (
             <div className="flex min-h-[280px] items-center justify-center gap-2 text-sm text-text-secondary">
               <RefreshCw className="h-4 w-4 animate-spin" />
-              正在加载全量差异...
+              {runtimeSummary.exceptionSampling.enabled ? '正在加载抽样差异...' : '正在加载差异...'}
             </div>
           ) : filteredExceptions.length > 0 ? (
             <>
@@ -1039,7 +1042,7 @@ export default function PublicReconRunExceptionsPage() {
           )}
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border-subtle px-5 py-4 text-sm text-text-secondary">
             <span>
-              第 {Math.floor(offset / PAGE_SIZE) + 1} 页 · 当前页 {filteredExceptions.length} 条 · 总计 {bundle?.total ?? 0} 条
+              第 {Math.floor(offset / PAGE_SIZE) + 1} 页 · 当前页 {filteredExceptions.length} 条 · {runtimeSummary.exceptionSampling.enabled ? '抽样可见' : '总计'} {bundle?.total ?? 0} 条
             </span>
             <div className="flex items-center gap-2">
               <button

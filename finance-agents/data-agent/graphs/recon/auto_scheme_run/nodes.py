@@ -558,6 +558,11 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
+def _positive_int_or_default(value: Any, default: int) -> int:
+    parsed = _safe_int(value, default)
+    return parsed if parsed >= 1 else default
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -2694,11 +2699,8 @@ def _first_policy_int(
             value = policy.get(key)
             if value is None or str(value).strip() == "":
                 continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                continue
-    return _safe_int(os.getenv(env_name), default)
+            return _positive_int_or_default(value, default)
+    return _positive_int_or_default(os.getenv(env_name), default)
 
 
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
@@ -2719,8 +2721,6 @@ def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
         env_name="RECON_EXCEPTION_SAMPLE_LIMIT",
         default=_DEFAULT_EXCEPTION_SAMPLE_LIMIT,
     )
-    threshold = max(1, threshold)
-    sample_limit = max(1, sample_limit)
     return {
         "explosion_threshold": threshold,
         "sample_exception_limit": sample_limit,
@@ -2992,6 +2992,7 @@ def _compose_owner_batch_reminder_text(
     detail_url: str,
     left_name: str = "",
     right_name: str = "",
+    sampled: bool = False,
 ) -> tuple[str, str, str]:
     plan_name = str(
         run_plan.get("plan_name")
@@ -3035,7 +3036,8 @@ def _compose_owner_batch_reminder_text(
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(count_lines))
     if detail_url:
-        lines.append(f"[查看全量差异]({detail_url})")
+        link_label = "查看抽样差异" if sampled else "查看差异"
+        lines.append(f"[{link_label}]({detail_url})")
     lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
     return todo_title, bot_title, "\n\n".join(line for line in lines if line)
 
@@ -3062,6 +3064,8 @@ def _compose_run_summary_notification_text(
 
     summary = _safe_dict(ctx.get("recon_result_summary_json"))
     total = _summary_pending_total(summary, len(anomalies))
+    sampling = _safe_dict(ctx.get("exception_sampling"))
+    sample_count = _safe_int(sampling.get("sample_count"), 0)
     owner_names = _notified_owner_names_from_context(ctx)
     status = (
         f"执行完成，待处理异常已催办责任人「{'、'.join(owner_names)}」"
@@ -3077,13 +3081,16 @@ def _compose_run_summary_notification_text(
         f"执行结果：\n{status}",
         f"待处理差异：\n{total} 条",
     ]
+    if explosion and sample_count > 0:
+        lines.append(f"异常明细：\n已按异常类型和责任人抽样创建 {sample_count} 条")
     count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
     if not _summary_has_difference_counts(summary):
         count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
     if detail_url:
-        lines.append(f"[查看全量差异]({detail_url})")
+        link_label = "查看抽样差异" if explosion else "查看差异"
+        lines.append(f"[{link_label}]({detail_url})")
     content = "\n\n".join(line for line in lines if line)
     return title, content
 
@@ -3336,6 +3343,7 @@ async def _send_execution_run_exception_batch_reminder(
     run_id: str,
     left_name: str = "",
     right_name: str = "",
+    sampled: bool = False,
 ) -> dict[str, Any]:
     exception_refs = [item for item in _safe_list(owner_group.get("items")) if isinstance(item, dict)]
     if not exception_refs:
@@ -3397,6 +3405,7 @@ async def _send_execution_run_exception_batch_reminder(
         detail_url=detail_url,
         left_name=left_name,
         right_name=right_name,
+        sampled=sampled,
     )
     reminder = adapter.send_reminder(
         title=bot_title,
@@ -3881,6 +3890,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     owner_groups = _group_exception_refs_by_owner(created_exceptions)
     run_id = str(_safe_dict(ctx.get("execution_run_record")).get("id") or "")
     left_name, right_name = _resolve_side_names(ctx)
+    sampled_exceptions = bool(_safe_dict(ctx.get("exception_sampling")).get("enabled"))
 
     try:
         for owner_group in owner_groups:
@@ -3894,6 +3904,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 run_id=run_id,
                 left_name=left_name,
                 right_name=right_name,
+                sampled=sampled_exceptions,
             )
             status = str(result.get("status") or "")
             item_count = len(_safe_list(result.get("items")))
