@@ -958,7 +958,9 @@ export default function PublicReconRunExceptionsPage() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-5 py-4">
             <h2 className="text-base font-semibold text-text-primary">差异列表</h2>
             <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
-              待处理差异 {formatCount(pendingDifferenceTotal)} 条
+              {runtimeSummary.exceptionSampling.enabled
+                ? `全量差异 ${formatCount(runtimeSummary.exceptionSampling.totalCount ?? pendingDifferenceTotal)} 条，当前抽样展示 ${formatCount(runtimeSummary.exceptionSampling.sampleCount ?? filteredExceptions.length)} 条`
+                : `待处理差异 ${formatCount(pendingDifferenceTotal)} 条`}
             </span>
           </div>
           {loading ? (

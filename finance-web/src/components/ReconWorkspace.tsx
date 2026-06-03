@@ -6976,7 +6976,9 @@ export default function ReconWorkspace({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h4 className="text-base font-semibold text-text-primary">差异列表</h4>
             <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-700">
-              待处理差异 {formatCount(run.anomalyCount)} 条
+              {runtimeSummary.exceptionSampling.enabled
+                ? `全量差异 ${formatCount(runtimeSummary.exceptionSampling.totalCount ?? run.anomalyCount)} 条，当前抽样展示 ${formatCount(runtimeSummary.exceptionSampling.sampleCount ?? modalExceptions.length)} 条`
+                : `待处理差异 ${formatCount(run.anomalyCount)} 条`}
             </span>
           </div>
 

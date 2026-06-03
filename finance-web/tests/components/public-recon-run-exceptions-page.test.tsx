@@ -73,6 +73,14 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
               message_id: 'msg-001',
               error: '',
             },
+            exception_sampling: {
+              enabled: true,
+              total_count: 35665,
+              sample_count: 200,
+              sample_limit: 200,
+              threshold: 1000,
+              strategy: 'stratified_by_anomaly_type_owner',
+            },
           },
         },
         recon_result_summary_json: {
@@ -167,7 +175,7 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     expect(headerView.queryByText('新增 0 / 更新 340')).not.toBeInTheDocument();
     expect(headerView.queryByText((_, element) => element?.textContent === '本次读取 1 条')).not.toBeInTheDocument();
     expect(screen.getByText('差异列表')).toBeInTheDocument();
-    expect(screen.getByText((_, element) => element?.textContent === '待处理差异 60 条')).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === '全量差异 35,665 条，当前抽样展示 200 条')).toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/recon/public/runs/run-001/exceptions?limit=100&offset=0&owner=ding-user-001',
