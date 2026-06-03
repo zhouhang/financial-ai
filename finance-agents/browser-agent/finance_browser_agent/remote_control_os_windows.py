@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import queue
+import time
 from typing import Any
 
 from finance_browser_agent.remote_control_codes import ControlErrorCode
@@ -226,3 +228,195 @@ class TextBridge:
             return readback == text  # 被抢占/粘错 → False
         finally:
             self._clip.set_text(original)  # 由回执驱动:立即恢复,缩短明文驻留窗口
+
+
+# ---------------------------------------------------------------------------
+# Task 15: WindowsControlBackend — assembles all components into RemoteControlBackend contract
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_KEYS = {"Enter", "Backspace", "Tab", "Escape", "Control", "a", "v"}
+
+
+class WindowsControlBackend:
+    def __init__(self, *, page: Any = None, chrome: Any = None, risk_contexts: list[Any] | None = None,
+                 win32: Any = None, mss: Any = None, pillow: Any = None, cdp: Any = None,
+                 clipboard: Any = None, send_input: Any = None, dpi_readback: str = "",
+                 virtual_desktop: dict[str, int] | None = None) -> None:
+        self.page = page
+        self.chrome = chrome
+        self.risk_contexts = risk_contexts or []
+        self.handoff_session_id = ""
+        self.controller_id = ""
+        self._win32 = win32
+        self._mss = mss
+        self._pillow = pillow
+        self._cdp = cdp
+        self._clipboard = clipboard
+        self._send_input = send_input
+        self._dpi_readback = dpi_readback or "unknown"
+        self._virtual_desktop = virtual_desktop or {}
+        self._binder: WindowBinder | None = None
+        self._capturer = WindowCapturer(mss=mss, pillow=pillow)
+        self._text_bridge = TextBridge(cdp=cdp, clipboard=clipboard)
+        self._last_error: ControlErrorCode | None = None
+        self.stream_active = False
+        self.idle_fps = 1.0
+        self.interactive_fps = 5.0
+        self._last_frame_at = 0.0
+        self._interactive_until = 0.0
+        self._resume_check_requested = False
+        self._input_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def _chrome_pids(self) -> list[int]:
+        pid = getattr(getattr(self.chrome, "process", None), "pid", None)
+        return [int(pid)] if pid else []
+
+    def _current_page_title(self) -> str:
+        try:
+            return str(getattr(self.page, "title", lambda: "")() or "")
+        except Exception:
+            return ""
+
+    def bind_window(self) -> None:
+        self._binder = WindowBinder(win32=self._win32, chrome_pids=self._chrome_pids())
+        self._binder.bind(current_page_title=self._current_page_title())
+
+    def teardown(self) -> None:
+        self.stream_active = False
+
+    def start_stream(self, *, handoff_session_id, controller_id, idle_fps, interactive_fps):
+        self.handoff_session_id = handoff_session_id
+        self.controller_id = controller_id
+        self.idle_fps = max(0.2, float(idle_fps or 1))
+        self.interactive_fps = max(self.idle_fps, float(interactive_fps or 5))
+        self.stream_active = True
+
+    def stop_stream(self):
+        self.stream_active = False
+
+    def should_capture_frame(self) -> bool:
+        if not self.stream_active or self._binder is None:
+            return False
+        fps = self.interactive_fps if time.monotonic() <= self._interactive_until else self.idle_fps
+        return time.monotonic() - self._last_frame_at >= 1.0 / max(0.2, fps)
+
+    def capture_frame(self) -> dict[str, Any]:
+        assert self._binder is not None
+        self._last_frame_at = time.monotonic()
+        return self._capturer.capture(
+            capture_rect=self._binder.capture_rect, window_title=self._binder.window_title
+        )
+
+    def _gate(self) -> "ForegroundGate":
+        assert self._binder and self._binder.window_handle is not None
+        return ForegroundGate(win32=self._win32, window_handle=self._binder.window_handle)
+
+    def inject_mouse(self, event: dict[str, Any]) -> None:
+        assert self._binder is not None
+        injector = MouseInjector(
+            send_input=self._send_input, gate=self._gate(),
+            capture_rect=self._binder.capture_rect, virtual_desktop=self._virtual_desktop,
+        )
+        injector.inject(event)
+        self._last_error = injector.last_error
+
+    def inject_key(self, event: dict[str, Any]) -> None:
+        key = str(event.get("key") or "")
+        if key not in _SUPPORTED_KEYS:
+            return
+        if not self._gate().check():
+            self._last_error = ControlErrorCode.CONTROL_UNAVAILABLE
+            return
+        self._send_input.key(key, str(event.get("kind")) == "key_down")
+
+    def inject_text(self, text: str) -> None:
+        if not self._text_bridge.send_text(text):
+            self._last_error = ControlErrorCode.CONTROL_UNAVAILABLE
+
+    def apply_input_event(self, event: dict[str, Any]) -> None:
+        self._interactive_until = time.monotonic() + 2.0
+        kind = str(event.get("kind") or "")
+        if kind == "text":
+            self.inject_text(str(event.get("text") or ""))
+        elif kind in {"key_down", "key_up"}:
+            self.inject_key(event)
+        else:
+            self.inject_mouse(event)
+
+    def queue_input_event(self, event: dict[str, Any]) -> None:
+        self._input_queue.put(dict(event or {}))
+
+    def drain_pending_input(self) -> None:
+        while True:
+            try:
+                event = self._input_queue.get_nowait()
+            except queue.Empty:
+                return
+            if str(event.get("kind") or "") == "__resume_check__":
+                self._resume_check_requested = True
+                continue
+            ec = str(event.get("controller_id") or "")
+            if ec and self.controller_id and ec != self.controller_id:
+                continue
+            self.apply_input_event(event)
+
+    def pop_resume_check_requested(self) -> bool:
+        v = self._resume_check_requested
+        self._resume_check_requested = False
+        return v
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "backend": "os_windows",
+            "platform": "Windows",
+            "capture": "mss",
+            "can_capture": self._mss is not None,
+            "can_inject_mouse": self._send_input is not None,
+            "can_inject_keyboard": self._send_input is not None,
+            "can_clipboard_paste": self._clipboard is not None,
+            "dpi_awareness": self._dpi_readback,
+            "last_error": self._last_error.value if self._last_error else "",
+        }
+
+
+def build_test_backend(*, dpi_readback: str = "per_monitor_v2") -> WindowsControlBackend:
+    """供契约测试用的 fake 组装。"""
+    class _Win32:
+        def enum_windows(self): return [11]
+        def get_window_pid(self, h): return 100
+        def is_visible(self, h): return True
+        def get_window_text(self, h): return "验证 - Google Chrome"
+        def get_extended_frame_bounds(self, h): return {"left": 0, "top": 0, "width": 100, "height": 100}
+        def get_foreground_window(self): return 11
+
+    class _Mss:
+        def grab(self, region):
+            class S:
+                size = (region["width"], region["height"]); bgra = b"\x00" * 4
+            return S()
+
+    class _Pillow:
+        @staticmethod
+        def encode_jpeg(w, h, b): return b"jpeg"
+
+    class _Cdp:
+        def is_available(self): return True
+        def active_element_editable(self): return True
+        def insert_text(self, t): pass
+        def read_active_value(self): return ""
+
+    class _Send:
+        def move_absolute(self, nx, ny): pass
+        def button(self, name, down): pass
+        def wheel(self, dx, dy): pass
+        def key(self, key, down): pass
+
+    class _Chrome:
+        class process: pid = 100
+
+    return WindowsControlBackend(
+        page=None, chrome=_Chrome(), risk_contexts=[],
+        win32=_Win32(), mss=_Mss(), pillow=_Pillow(), cdp=_Cdp(),
+        clipboard=object(), send_input=_Send(), dpi_readback=dpi_readback,
+        virtual_desktop={"left": 0, "top": 0, "width": 100, "height": 100},
+    )

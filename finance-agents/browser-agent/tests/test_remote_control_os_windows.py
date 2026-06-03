@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finance_browser_agent.remote_control_os_windows import WindowBinder
 
@@ -269,3 +270,30 @@ def test_clipboard_fallback_fails_on_readback_mismatch():
     bridge = TextBridge(cdp=cdp, clipboard=clip)
     assert bridge.send_text("123456") is False
     assert clip.value == "原始剪贴板"
+
+
+# ---------------------------------------------------------------------------
+# Task 15: WindowsControlBackend contract + diagnostics DPI + key whitelist
+# ---------------------------------------------------------------------------
+from remote_control_contract import RemoteControlBackendContract
+from finance_browser_agent.remote_control_os_windows import WindowsControlBackend, build_test_backend
+
+
+class TestWindowsBackendContract(RemoteControlBackendContract):
+    def make_backend(self):
+        return build_test_backend()
+
+
+def test_supported_keys_whitelist():
+    backend = build_test_backend()
+    backend.bind_window()
+    for key in ("Enter", "Backspace", "Tab", "Escape"):
+        backend.inject_key({"kind": "key_down", "key": key})
+        backend.inject_key({"kind": "key_up", "key": key})
+
+
+def test_diagnostics_reads_back_dpi_awareness_not_hardcoded():
+    backend = build_test_backend(dpi_readback="per_monitor_v2")
+    assert backend.diagnostics()["dpi_awareness"] == "per_monitor_v2"
+    backend2 = build_test_backend(dpi_readback="system")
+    assert backend2.diagnostics()["dpi_awareness"] == "system"
