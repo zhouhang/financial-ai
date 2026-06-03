@@ -10,7 +10,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import HandoffViewport from './HandoffViewport';
+import HandoffViewport, { gestureLockState } from './HandoffViewport';
 import { parseHandoffToken } from './handoffWs';
 import { useHandoffSession } from './useHandoffSession';
 
@@ -51,8 +51,10 @@ export default function HandoffPage() {
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [panMode, setPanMode] = useState(false);
   const [zoomIndex, setZoomIndex] = useState(0);
+  const [gestureActive, setGestureActive] = useState(false);
   const zoom = ZOOM_LEVELS[zoomIndex] || 1;
   const disabled = status === 'revoked' || status === 'completed' || status === 'expired' || status === 'error';
+  const { controlsLocked } = gestureLockState(gestureActive);
 
   return (
     <main className="h-dvh overflow-hidden bg-neutral-100 text-neutral-950">
@@ -90,6 +92,7 @@ export default function HandoffPage() {
             mode={panMode ? 'pan' : 'control'}
             zoom={zoom}
             onInput={sendInput}
+            onGestureChange={setGestureActive}
           />
         </div>
 
@@ -146,7 +149,7 @@ export default function HandoffPage() {
               }`}
               aria-label={keyboardOpen ? '关闭键盘输入' : '打开键盘输入'}
               aria-pressed={keyboardOpen}
-              disabled={disabled}
+              disabled={disabled || controlsLocked}
             >
               <Keyboard size={17} className="shrink-0 text-neutral-500" />
             </button>
@@ -155,7 +158,7 @@ export default function HandoffPage() {
               onClick={() => setZoomIndex((value) => Math.max(0, value - 1))}
               className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm disabled:opacity-40"
               aria-label="缩小画面"
-              disabled={zoomIndex === 0}
+              disabled={zoomIndex === 0 || controlsLocked}
             >
               <Minus size={18} />
             </button>
@@ -164,19 +167,24 @@ export default function HandoffPage() {
               onClick={() => setZoomIndex((value) => Math.min(ZOOM_LEVELS.length - 1, value + 1))}
               className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm disabled:opacity-40"
               aria-label="放大画面"
-              disabled={zoomIndex >= ZOOM_LEVELS.length - 1}
+              disabled={zoomIndex >= ZOOM_LEVELS.length - 1 || controlsLocked}
             >
               <Plus size={18} />
             </button>
             <button
               type="button"
-              onClick={() => setPanMode((value) => !value)}
+              onClick={() => {
+                if (gestureActive) {
+                  sendInput({ kind: 'mouse_up', button: 'left', x: 0, y: 0 });
+                }
+                setPanMode((value) => !value);
+              }}
               className={`grid h-11 w-11 shrink-0 place-items-center rounded-md border shadow-sm disabled:opacity-40 ${
                 panMode ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-neutral-200 bg-white text-neutral-700'
               }`}
               aria-label={panMode ? '切换到远程操作' : '切换到移动画面'}
               aria-pressed={panMode}
-              disabled={disabled}
+              disabled={disabled || controlsLocked}
             >
               {panMode ? <Move size={18} /> : <MousePointerClick size={18} />}
             </button>
