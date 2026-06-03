@@ -355,6 +355,11 @@ async def route_agent_message(*, agent_id: str, token: str, msg: dict[str, Any])
             await controller.send_json({"type": "frame", **frame})
         return True
 
+    if msg_type == "handoff_focus_state":
+        if controller:
+            await controller.send_json({"type": "focus_state", "editable": bool(msg.get("editable"))})
+        return True
+
     if msg_type == "handoff_control_status":
         code = str(msg.get("code") or "")
         # 三态:control_unavailable(可恢复)/window_unavailable/desktop_locked

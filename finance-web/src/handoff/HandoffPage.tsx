@@ -14,6 +14,12 @@ import HandoffViewport, { gestureLockState } from './HandoffViewport';
 import { parseHandoffToken } from './handoffWs';
 import { useHandoffSession } from './useHandoffSession';
 
+export function canSendText(
+  s: { text: string; disabled: boolean; focusEditable: boolean | null },
+): boolean {
+  return Boolean(s.text) && !s.disabled && s.focusEditable === true;
+}
+
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     connecting: '连接中',
@@ -46,7 +52,7 @@ const ZOOM_LEVELS = [1, 1.5, 2.25];
 
 export default function HandoffPage() {
   const token = useMemo(() => parseHandoffToken(), []);
-  const { status, session, frame, error, sendInput, resume, reconnect } = useHandoffSession(token);
+  const { status, session, frame, error, sendInput, resume, reconnect, focusEditable } = useHandoffSession(token);
   const [text, setText] = useState('');
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [panMode, setPanMode] = useState(false);
@@ -110,33 +116,38 @@ export default function HandoffPage() {
 
           {keyboardOpen ? (
             <form
-              className="flex gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-2"
+              className="flex flex-col gap-1.5 rounded-md border border-neutral-200 bg-neutral-50 p-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!text || disabled) return;
+                if (!canSendText({ text, disabled, focusEditable })) return;
                 sendInput({ kind: 'text', text });
                 setText('');
               }}
             >
-              <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-neutral-300 bg-white px-3 py-2 focus-within:border-orange-500">
-                <Keyboard size={17} className="shrink-0 text-neutral-500" />
-                <input
-                  value={text}
-                  onChange={(event) => setText(event.target.value)}
-                  disabled={disabled}
-                  className="min-w-0 flex-1 bg-transparent text-base leading-6 outline-none placeholder:text-neutral-400"
-                  placeholder="短信验证码或文本"
-                  inputMode="text"
-                  enterKeyHint="send"
-                />
-              </label>
-              <button
-                type="submit"
-                disabled={disabled || !text}
-                className="h-11 shrink-0 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white disabled:opacity-40"
-              >
-                发送
-              </button>
+              <div className="flex gap-2">
+                <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-neutral-300 bg-white px-3 py-2 focus-within:border-orange-500">
+                  <Keyboard size={17} className="shrink-0 text-neutral-500" />
+                  <input
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    disabled={disabled}
+                    className="min-w-0 flex-1 bg-transparent text-base leading-6 outline-none placeholder:text-neutral-400"
+                    placeholder="短信验证码或文本"
+                    inputMode="text"
+                    enterKeyHint="send"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!canSendText({ text, disabled, focusEditable })}
+                  className="h-11 shrink-0 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white disabled:opacity-40"
+                >
+                  发送
+                </button>
+              </div>
+              {focusEditable === false ? (
+                <p className="px-1 text-xs text-amber-700">请先点中输入框</p>
+              ) : null}
             </form>
           ) : null}
 

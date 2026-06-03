@@ -332,3 +332,23 @@ async def test_relay_does_not_log_frame_data_text_or_metadata(monkeypatch, caplo
     assert "BASE64SECRETFRAME" not in blob
     assert "SMSCODE123" not in blob
     assert "店铺机密标题" not in blob
+
+
+@pytest.mark.asyncio
+async def test_agent_focus_state_relayed_to_controller(monkeypatch):
+    hg.reset_for_tests()
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+    sent = []
+    async def send(p):
+        sent.append(p)
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    handled = await hg.route_agent_message(agent_id="agentA", token="t", msg={
+        "type": "handoff_focus_state", "handoff_session_id": "h1", "editable": False,
+    })
+    assert handled is True
+    assert sent[-1] == {"type": "focus_state", "editable": False}

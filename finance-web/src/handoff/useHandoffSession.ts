@@ -20,6 +20,7 @@ interface HandoffMessage {
   width?: number;
   height?: number;
   data?: string;
+  editable?: boolean;
 }
 
 const TERMINAL_STATUSES = new Set<HandoffStatus>(['completed', 'expired', 'revoked']);
@@ -31,6 +32,7 @@ export function useHandoffSession(token: string) {
   const [session, setSession] = useState<HandoffSession | null>(null);
   const [frame, setFrame] = useState<HandoffFrame | null>(null);
   const [error, setError] = useState('');
+  const [focusEditable, setFocusEditable] = useState<boolean | null>(null);
   const wsUrl = useMemo(() => (token ? buildHandoffWsUrl(token) : ''), [token]);
 
   const send = useCallback((payload: unknown) => {
@@ -123,6 +125,11 @@ export function useHandoffSession(token: string) {
         return;
       }
 
+      if (msg.type === 'focus_state') {
+        setFocusEditable(Boolean(msg.editable));
+        return;
+      }
+
       if (msg.type === 'error') {
         setStatus(msg.status || 'error');
         setError(msg.error || '链接不可用');
@@ -147,5 +154,6 @@ export function useHandoffSession(token: string) {
     sendInput,
     resume,
     reconnect,
+    focusEditable,
   };
 }

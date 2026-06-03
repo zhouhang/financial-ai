@@ -125,6 +125,9 @@ describe('HandoffPage', () => {
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
     const ws = FakeWebSocket.instances[0];
 
+    // Establish editable focus so the send button is enabled (focusEditable gates send).
+    ws.feed({ type: 'focus_state', editable: true });
+
     expect(screen.queryByPlaceholderText('短信验证码或文本')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开键盘输入' }));
     fireEvent.change(screen.getByPlaceholderText('短信验证码或文本'), { target: { value: '123456' } });
