@@ -13,6 +13,7 @@ import { useMemo, useState } from 'react';
 import HandoffViewport, { gestureLockState } from './HandoffViewport';
 import { parseHandoffToken } from './handoffWs';
 import { useHandoffSession } from './useHandoffSession';
+import type { HandoffCapabilities } from './types';
 
 export function canSendText(
   s: { text: string; disabled: boolean; focusEditable: boolean | null },
@@ -48,6 +49,12 @@ function statusTone(status: string): string {
   return 'text-orange-700 bg-orange-50 border-orange-200';
 }
 
+export function backendStatusLabel(caps: HandoffCapabilities | undefined): string {
+  if (!caps?.backend) return '';
+  if (caps.backend === 'playwright') return '兼容模式';
+  return '远程操作';
+}
+
 const ZOOM_LEVELS = [1, 1.5, 2.25];
 
 export default function HandoffPage() {
@@ -77,6 +84,9 @@ export default function HandoffPage() {
               </h1>
               <p className="mt-1 truncate text-xs leading-5 text-neutral-500">
                 {session?.reason || 'RISK_VERIFICATION'} · {session?.agent_id || '采集机'}
+                {backendStatusLabel(session?.capabilities) ? (
+                  <> · {backendStatusLabel(session?.capabilities)}</>
+                ) : null}
               </p>
             </div>
             <button
