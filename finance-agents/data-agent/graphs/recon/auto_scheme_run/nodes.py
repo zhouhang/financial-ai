@@ -769,6 +769,42 @@ def _merge_runtime_summary_notification(
     return patched
 
 
+def _merge_runtime_exception_sampling(
+    artifacts: dict[str, Any],
+    sampling: dict[str, Any],
+) -> dict[str, Any]:
+    patched = dict(artifacts or {})
+    runtime_summary = _safe_dict(patched.get("runtime_summary"))
+    runtime_summary["exception_sampling"] = _safe_dict(sampling)
+    patched["runtime_summary"] = runtime_summary
+    return patched
+
+
+async def _persist_runtime_exception_sampling(
+    *,
+    auth_token: str,
+    ctx: dict[str, Any],
+    sampling: dict[str, Any],
+) -> None:
+    run = _safe_dict(ctx.get("execution_run_record"))
+    run_id = str(run.get("id") or "").strip()
+    if not auth_token or not run_id or not sampling:
+        return
+    artifacts = _merge_runtime_exception_sampling(
+        _safe_dict(run.get("artifacts_json")),
+        sampling,
+    )
+    update_result = await call_mcp_tool(
+        "execution_run_update",
+        {"auth_token": auth_token, "run_id": run_id, "artifacts_json": artifacts},
+    )
+    if bool(update_result.get("success")):
+        ctx["execution_run_record"] = _safe_dict(update_result.get("run")) or {
+            **run,
+            "artifacts_json": artifacts,
+        }
+
+
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
@@ -3516,14 +3552,32 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     }
     notify_policy = _resolve_notify_policy(run_plan)
     explosion_threshold = int(notify_policy["explosion_threshold"])
-    explosion_sample_limit = int(notify_policy["explosion_sample_limit"])
+    sample_limit = int(notify_policy["sample_exception_limit"])
     total_anomaly_count = len(anomalies)
     notify_explosion = total_anomaly_count > explosion_threshold
+    sampled_anomalies = anomalies
+    sampling_metadata: dict[str, Any] = {
+        "enabled": False,
+        "threshold": explosion_threshold,
+        "sample_limit": sample_limit,
+        "total_count": total_anomaly_count,
+        "sample_count": total_anomaly_count,
+        "created_count": 0,
+        "create_failed_count": 0,
+        "strategy": _EXCEPTION_SAMPLING_STRATEGY,
+        "fallback_used": False,
+    }
+    if notify_explosion:
+        sampled_anomalies, sampling_metadata = _sample_anomalies_for_exception_creation(
+            anomalies,
+            sample_limit=sample_limit,
+        )
+        sampling_metadata["threshold"] = explosion_threshold
     ctx["auto_notify_policy"] = {
         **notify_policy,
         "anomaly_count": total_anomaly_count,
         "explosion": notify_explosion,
-        "created_exception_sample_limit": total_anomaly_count,
+        "created_exception_sample_limit": len(sampled_anomalies),
     }
 
     # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
@@ -3536,7 +3590,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
     created = 0
     created_exceptions: list[dict[str, Any]] = []
-    for idx, item in enumerate(anomalies, start=1):
+    for idx, item in enumerate(sampled_anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
         payload = {
@@ -3565,11 +3619,20 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
                 }
             )
 
+    sampling_metadata["created_count"] = created
+    sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
-    ctx["exception_creation_limited"] = False
+    ctx["exception_creation_limited"] = notify_explosion
     ctx["exception_total_count"] = total_anomaly_count
-    ctx["exception_created_sample_count"] = created
+    ctx["exception_created_sample_count"] = len(sampled_anomalies)
+    ctx["exception_sampling"] = sampling_metadata
+    if notify_explosion:
+        await _persist_runtime_exception_sampling(
+            auth_token=auth_token,
+            ctx=ctx,
+            sampling=sampling_metadata,
+        )
     return {"recon_ctx": ctx}
 
 
