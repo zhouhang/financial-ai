@@ -162,3 +162,37 @@ class ForegroundGate:
             return True
         self.last_error = ControlErrorCode.CONTROL_UNAVAILABLE
         return False
+
+
+class MouseInjector:
+    def __init__(self, *, send_input: Any, gate: "ForegroundGate",
+                 capture_rect: dict[str, int], virtual_desktop: dict[str, int]) -> None:
+        self._send = send_input
+        self._gate = gate
+        self._rect = capture_rect
+        self._vd = virtual_desktop
+        self.last_error: ControlErrorCode | None = None
+
+    def _move(self, x: float, y: float) -> None:
+        nx, ny = map_normalized_to_virtualdesk(x, y, capture_rect=self._rect, virtual_desktop=self._vd)
+        self._send.move_absolute(nx, ny)
+
+    def inject(self, event: dict[str, Any]) -> None:
+        if not self._gate.check():
+            self.last_error = self._gate.last_error
+            return
+        self.last_error = None
+        kind = str(event.get("kind") or "")
+        button = str(event.get("button") or "left")
+        if kind == "wheel":
+            self._send.wheel(float(event.get("delta_x") or 0), float(event.get("delta_y") or 0))
+            return
+        x, y = float(event.get("x") or 0), float(event.get("y") or 0)
+        if kind == "click":
+            self._move(x, y); self._send.button(button, True); self._send.button(button, False)
+        elif kind == "mouse_down":
+            self._move(x, y); self._send.button(button, True)
+        elif kind == "mouse_move":
+            self._move(x, y)
+        elif kind == "mouse_up":
+            self._move(x, y); self._send.button(button, False)

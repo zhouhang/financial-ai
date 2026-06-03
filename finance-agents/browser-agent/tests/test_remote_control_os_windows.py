@@ -164,3 +164,42 @@ def test_gate_blocks_and_reports_control_unavailable_when_not_foreground():
     gate = ForegroundGate(win32=FakeForeground(fg=22), window_handle=11)
     assert gate.check() is False
     assert gate.last_error == ControlErrorCode.CONTROL_UNAVAILABLE
+
+
+from finance_browser_agent.remote_control_os_windows import MouseInjector
+
+
+class RecordingSendInput:
+    def __init__(self):
+        self.events = []
+    def move_absolute(self, nx, ny):
+        self.events.append(("move", nx, ny))
+    def button(self, name, down):
+        self.events.append(("button", name, down))
+    def wheel(self, dx, dy):
+        self.events.append(("wheel", dx, dy))
+
+
+def _injector(fg_handle=11, foreground=11):
+    rect = {"left": 0, "top": 0, "width": 1000, "height": 1000}
+    vd = {"left": 0, "top": 0, "width": 1000, "height": 1000}
+    send = RecordingSendInput()
+    gate = ForegroundGate(win32=FakeForeground(fg=foreground), window_handle=fg_handle)
+    inj = MouseInjector(send_input=send, gate=gate, capture_rect=rect, virtual_desktop=vd)
+    return inj, send
+
+
+def test_click_moves_then_presses_when_focused():
+    inj, send = _injector()
+    inj.inject({"kind": "click", "x": 0.5, "y": 0.5, "button": "left"})
+    kinds = [e[0] for e in send.events]
+    assert kinds == ["move", "button", "button"]
+    assert send.events[1] == ("button", "left", True)
+    assert send.events[2] == ("button", "left", False)
+
+
+def test_injection_dropped_when_not_foreground():
+    inj, send = _injector(foreground=999)
+    inj.inject({"kind": "click", "x": 0.5, "y": 0.5})
+    assert send.events == []
+    assert inj.last_error == ControlErrorCode.CONTROL_UNAVAILABLE
