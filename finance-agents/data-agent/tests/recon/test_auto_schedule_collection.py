@@ -1472,6 +1472,88 @@ def test_create_exception_tasks_node_persists_exception_sampling_runtime_summary
     assert result["recon_ctx"]["execution_run_record"]["artifacts_json"] == artifacts
 
 
+def test_create_exception_tasks_node_samples_with_owner_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_create":
+            create_payloads.append(payload)
+            return {
+                "success": True,
+                "exception": {
+                    "id": f"exception-{len(create_payloads)}",
+                    "run_id": payload["run_id"],
+                    "owner_name": payload["owner_name"],
+                    "owner_identifier": payload["owner_identifier"],
+                    "feedback_json": {},
+                },
+            }
+        if name == "execution_run_update":
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "artifacts_json": payload["artifacts_json"],
+                },
+            }
+        raise AssertionError(f"unexpected MCP tool: {name}")
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    anomalies = [
+        {"item_id": "source-1", "anomaly_type": "source_only", "summary": "仅订单表存在"},
+        {"item_id": "source-2", "anomaly_type": "source_only", "summary": "仅订单表存在"},
+        {"item_id": "target-1", "anomaly_type": "target_only", "summary": "仅账单存在"},
+        {"item_id": "target-2", "anomaly_type": "target_only", "summary": "仅账单存在"},
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-001", "artifacts_json": {}},
+            "scheme_code": "scheme-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "默认责任人", "identifier": "owner-default"},
+                    "anomaly_type_to_owner": {
+                        "source_only": {"name": "订单责任人", "identifier": "owner-source"},
+                    },
+                    "mappings": [
+                        {
+                            "anomaly_types": ["target_only"],
+                            "keywords": ["账单"],
+                            "owner": {"name": "账单责任人", "identifier": "owner-target"},
+                        }
+                    ],
+                },
+                "plan_meta_json": {
+                    "notify_policy": {
+                        "explosion_threshold": 1,
+                        "sample_exception_limit": 2,
+                    }
+                },
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+
+    assert [payload["owner_identifier"] for payload in create_payloads] == [
+        "owner-source",
+        "owner-target",
+    ]
+    assert [payload["owner_name"] for payload in create_payloads] == [
+        "订单责任人",
+        "账单责任人",
+    ]
+    for payload in create_payloads:
+        assert not any(str(key).startswith("_exception_") for key in payload["detail_json"])
+    assert result["recon_ctx"]["created_exceptions"][0]["exception"]["owner_identifier"] == "owner-source"
+    assert result["recon_ctx"]["created_exceptions"][1]["exception"]["owner_identifier"] == "owner-target"
+
+
 def test_resolve_notify_policy_prefers_notify_policy_sample_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1672,6 +1754,33 @@ def test_sample_anomalies_round_robins_extra_group_coverage_across_types() -> No
     assert [item["anomaly_type"] for item in sampled].count("target_only") == 2
     assert [item["anomaly_type"] for item in sampled].count("matched_with_diff") == 2
     assert metadata["sample_count"] == 6
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_groups_name_only_owners() -> None:
+    anomalies = [
+        {
+            "item_id": f"a{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_name": "订单责任人",
+        }
+        for index in range(1, 4)
+    ] + [
+        {
+            "item_id": f"b{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_name": "账单责任人",
+        }
+        for index in range(1, 4)
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=2,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
+    assert metadata["sample_count"] == 2
     assert metadata["fallback_used"] is False
 
 

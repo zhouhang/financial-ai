@@ -2276,20 +2276,122 @@ async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     return {"recon_ctx": ctx}
 
 
-def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
-    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
-    default_owner = _safe_dict(owner_mapping.get("default_owner"))
-    owner_name = str(default_owner.get("name") or default_owner.get("display_name") or "")
-    owner_identifier = str(default_owner.get("identifier") or default_owner.get("owner_identifier") or "")
+def _owner_payload_parts(owner: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
+    owner_name = str(
+        owner.get("name")
+        or owner.get("display_name")
+        or owner.get("owner_name")
+        or ""
+    ).strip()
+    owner_identifier = str(
+        owner.get("identifier")
+        or owner.get("owner_identifier")
+        or owner.get("user_id")
+        or ""
+    ).strip()
     raw_contact = (
-        default_owner.get("contact")
-        or default_owner.get("owner_contact_json")
-        or default_owner.get("contact_json")
-        or default_owner.get("contact_info")
+        owner.get("contact")
+        or owner.get("owner_contact_json")
+        or owner.get("contact_json")
+        or owner.get("contact_info")
     )
     owner_contact_json = _safe_dict(raw_contact)
     owner_available = bool(owner_name or owner_identifier or owner_contact_json)
     return owner_name, owner_identifier, owner_contact_json, owner_available
+
+
+def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
+    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+    return _owner_payload_parts(_safe_dict(owner_mapping.get("default_owner")))
+
+
+def _resolve_owner_for_anomaly(owner_mapping: dict[str, Any], anomaly: dict[str, Any]) -> dict[str, Any]:
+    if not owner_mapping:
+        return {}
+
+    anomaly_type = str(anomaly.get("anomaly_type") or "").strip()
+    summary = str(anomaly.get("summary") or "").strip()
+
+    by_type = owner_mapping.get("anomaly_type_to_owner")
+    if isinstance(by_type, dict):
+        owner = by_type.get(anomaly_type)
+        if isinstance(owner, dict):
+            return owner
+
+    mappings = owner_mapping.get("mappings")
+    if isinstance(mappings, list):
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            match_types = mapping.get("anomaly_types")
+            if not isinstance(match_types, list):
+                single_type = str(mapping.get("anomaly_type") or "").strip()
+                match_types = [single_type] if single_type else []
+            match_types = [str(item).strip() for item in match_types if str(item).strip()]
+            if match_types and anomaly_type not in match_types:
+                continue
+
+            keywords = mapping.get("keywords")
+            if not isinstance(keywords, list):
+                keyword = str(mapping.get("keyword") or "").strip()
+                keywords = [keyword] if keyword else []
+            keywords = [str(item).strip() for item in keywords if str(item).strip()]
+            if keywords and not any(keyword in summary for keyword in keywords):
+                continue
+
+            owner = mapping.get("owner")
+            if isinstance(owner, dict):
+                return owner
+
+    default_owner = owner_mapping.get("default_owner")
+    return default_owner if isinstance(default_owner, dict) else {}
+
+
+def _strip_internal_exception_owner_fields(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in item.items()
+        if not str(key).startswith("_exception_")
+    }
+
+
+def _enrich_anomalies_with_exception_owner(
+    anomalies: list[dict[str, Any]],
+    *,
+    run_plan: dict[str, Any],
+    left_name: str = "",
+    right_name: str = "",
+    field_labels: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+    enriched: list[dict[str, Any]] = []
+    for item in anomalies:
+        atype = str(item.get("anomaly_type") or "unknown")
+        raw_summary = str(item.get("summary") or "").strip()
+        summary = _build_anomaly_summary(
+            atype,
+            item,
+            left_name=left_name,
+            right_name=right_name,
+            field_labels=field_labels or {},
+        )
+        owner_match_summary = summary
+        if raw_summary and raw_summary not in owner_match_summary:
+            owner_match_summary = f"{owner_match_summary} {raw_summary}".strip()
+        item_for_owner = {**item, "summary": owner_match_summary}
+        owner = _resolve_owner_for_anomaly(owner_mapping, item_for_owner)
+        owner_name, owner_identifier, owner_contact_json, owner_available = _owner_payload_parts(owner)
+        enriched.append(
+            {
+                **item,
+                "_exception_summary": summary,
+                "_exception_owner_name": owner_name,
+                "_exception_owner_identifier": owner_identifier,
+                "_exception_owner_contact_json": owner_contact_json,
+                "_exception_owner_available": owner_available,
+            }
+        )
+    return enriched
 
 
 def _lookup_local_user(user_id: str) -> dict[str, Any]:
@@ -2627,9 +2729,13 @@ def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
 
 
 def _anomaly_sampling_owner_identifier(item: dict[str, Any]) -> str:
+    contact = _safe_dict(item.get("_exception_owner_contact_json") or item.get("owner_contact_json"))
     return str(
         item.get("_exception_owner_identifier")
         or item.get("owner_identifier")
+        or contact.get("mobile")
+        or item.get("_exception_owner_name")
+        or item.get("owner_name")
         or item.get("owner")
         or ""
     ).strip()
@@ -3550,12 +3656,28 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "identifier": owner_identifier,
         "contact_json": owner_contact_json,
     }
+
+    # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要和责任人映射关键词匹配
+    left_name, right_name = _resolve_side_names(ctx)
+    scheme = _safe_dict(ctx.get("scheme"))
+    scheme_meta = _safe_dict(
+        scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta")
+    )
+    field_labels = _build_field_label_map(scheme_meta)
+    owner_enriched_anomalies = _enrich_anomalies_with_exception_owner(
+        anomalies,
+        run_plan=run_plan,
+        left_name=left_name,
+        right_name=right_name,
+        field_labels=field_labels,
+    )
+
     notify_policy = _resolve_notify_policy(run_plan)
     explosion_threshold = int(notify_policy["explosion_threshold"])
     sample_limit = int(notify_policy["sample_exception_limit"])
-    total_anomaly_count = len(anomalies)
+    total_anomaly_count = len(owner_enriched_anomalies)
     notify_explosion = total_anomaly_count > explosion_threshold
-    sampled_anomalies = anomalies
+    sampled_anomalies = owner_enriched_anomalies
     sampling_metadata: dict[str, Any] = {
         "enabled": False,
         "threshold": explosion_threshold,
@@ -3569,7 +3691,7 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     }
     if notify_explosion:
         sampled_anomalies, sampling_metadata = _sample_anomalies_for_exception_creation(
-            anomalies,
+            owner_enriched_anomalies,
             sample_limit=sample_limit,
         )
         sampling_metadata["threshold"] = explosion_threshold
@@ -3580,32 +3702,36 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "created_exception_sample_limit": len(sampled_anomalies),
     }
 
-    # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
-    left_name, right_name = _resolve_side_names(ctx)
-    scheme = _safe_dict(ctx.get("scheme"))
-    scheme_meta = _safe_dict(
-        scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta")
-    )
-    field_labels = _build_field_label_map(scheme_meta)
-
     created = 0
     created_exceptions: list[dict[str, Any]] = []
     for idx, item in enumerate(sampled_anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
+        item_owner_name = str(item.get("_exception_owner_name") or owner_name or "").strip()
+        item_owner_identifier = str(
+            item.get("_exception_owner_identifier") or owner_identifier or ""
+        ).strip()
+        item_owner_contact_json = (
+            _safe_dict(item.get("_exception_owner_contact_json")) or owner_contact_json
+        )
         payload = {
             "auth_token": auth_token,
             "run_id": run_id,
             "scheme_code": scheme_code,
             "anomaly_key": anomaly_key,
             "anomaly_type": atype,
-            "summary": _build_anomaly_summary(
-                atype, item, left_name=left_name, right_name=right_name, field_labels=field_labels
+            "summary": str(item.get("_exception_summary") or "").strip()
+            or _build_anomaly_summary(
+                atype,
+                item,
+                left_name=left_name,
+                right_name=right_name,
+                field_labels=field_labels,
             ),
-            "detail_json": item,
-            "owner_name": owner_name,
-            "owner_identifier": owner_identifier,
-            "owner_contact_json": owner_contact_json,
+            "detail_json": _strip_internal_exception_owner_fields(item),
+            "owner_name": item_owner_name,
+            "owner_identifier": item_owner_identifier,
+            "owner_contact_json": item_owner_contact_json,
         }
         result = await call_mcp_tool("execution_run_exception_create", payload)
         if bool(result.get("success")):
