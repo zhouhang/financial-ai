@@ -141,3 +141,26 @@ def test_clamps_outside_rect_into_range():
     vd = {"left": 0, "top": 0, "width": 100, "height": 100}
     nx, ny = map_normalized_to_virtualdesk(1.5, -0.2, capture_rect=rect, virtual_desktop=vd)
     assert 0 <= nx <= 65535 and 0 <= ny <= 65535
+
+
+from finance_browser_agent.remote_control_os_windows import ForegroundGate
+from finance_browser_agent.remote_control_codes import ControlErrorCode
+
+
+class FakeForeground:
+    def __init__(self, fg):
+        self.fg = fg
+    def get_foreground_window(self):
+        return self.fg
+
+
+def test_gate_allows_when_bound_window_is_foreground():
+    gate = ForegroundGate(win32=FakeForeground(fg=11), window_handle=11)
+    assert gate.check() is True
+    assert gate.last_error is None
+
+
+def test_gate_blocks_and_reports_control_unavailable_when_not_foreground():
+    gate = ForegroundGate(win32=FakeForeground(fg=22), window_handle=11)
+    assert gate.check() is False
+    assert gate.last_error == ControlErrorCode.CONTROL_UNAVAILABLE

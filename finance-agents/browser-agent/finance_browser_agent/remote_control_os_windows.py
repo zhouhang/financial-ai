@@ -140,3 +140,25 @@ def map_normalized_to_virtualdesk(
     nx = round(max(0.0, min(1.0, rel_x)) * 65535)
     ny = round(max(0.0, min(1.0, rel_y)) * 65535)
     return int(nx), int(ny)
+
+
+class ForegroundGate:
+    """注入前硬门禁:GetForegroundWindow()==绑定窗口才放行;否则丢弃事件并报 control_unavailable。
+    clamp 只约束坐标,不保证事件进入 Chrome,真正隔离靠这道门禁。"""
+
+    def __init__(self, *, win32: Any, window_handle: int) -> None:
+        self._win32 = win32
+        self._window_handle = int(window_handle)
+        self.last_error: ControlErrorCode | None = None
+
+    def check(self) -> bool:
+        try:
+            fg = self._win32.get_foreground_window()
+        except Exception:
+            self.last_error = ControlErrorCode.CONTROL_UNAVAILABLE
+            return False
+        if int(fg) == self._window_handle:
+            self.last_error = None
+            return True
+        self.last_error = ControlErrorCode.CONTROL_UNAVAILABLE
+        return False
