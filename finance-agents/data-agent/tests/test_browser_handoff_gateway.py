@@ -272,3 +272,29 @@ async def test_agent_heartbeat_timeout_downgrades_active_to_waiting_then_expired
     # 超过 5min → expired/failed
     await hg.on_agent_heartbeat_timeout(agent_id="agentA", elapsed_seconds=301)
     assert any(p.get("status") in {"expired", "failed"} for p in sent)
+
+
+@pytest.mark.asyncio
+async def test_agent_reports_control_unavailable_maps_to_web_status(monkeypatch):
+    hg.reset_for_tests()
+
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+
+    sent = []
+    async def send(p):
+        sent.append(p)
+
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    handled = await hg.route_agent_message(
+        agent_id="agentA", token="t",
+        msg={"type": "handoff_control_status", "handoff_session_id": "h1",
+             "code": "control_unavailable"},
+    )
+    assert handled is True
+    assert sent[-1]["type"] == "status"
+    assert sent[-1]["status"] == "control_unavailable"

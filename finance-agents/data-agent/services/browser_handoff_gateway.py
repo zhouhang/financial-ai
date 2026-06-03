@@ -355,6 +355,22 @@ async def route_agent_message(*, agent_id: str, token: str, msg: dict[str, Any])
             await controller.send_json({"type": "frame", **frame})
         return True
 
+    if msg_type == "handoff_control_status":
+        code = str(msg.get("code") or "")
+        # 三态:control_unavailable(可恢复)/window_unavailable/desktop_locked
+        valid = {"control_unavailable", "window_unavailable", "desktop_locked"}
+        if code not in valid:
+            return True
+        if controller:
+            await controller.send_json({"type": "status", "status": code, "reason": str(msg.get("reason") or "")})
+        # window_unavailable 同时落 waiting_agent 事件(等过期/下次降级);desktop_locked 仅告警不改 job
+        if code == "window_unavailable":
+            await call_mcp_tool("browser_handoff_session_event", {
+                "worker_token": token, "handoff_session_id": handoff_session_id,
+                "agent_id": agent_id, "event_type": "window_unavailable", "status": "waiting_agent",
+            })
+        return True
+
     if msg_type in {"handoff_completed", "handoff_still_blocked", "handoff_failed"}:
         event_type_by_msg = {
             "handoff_completed": "completed",
