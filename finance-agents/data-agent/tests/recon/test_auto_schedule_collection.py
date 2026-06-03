@@ -1377,6 +1377,78 @@ def test_create_exception_tasks_node_creates_all_anomalies(monkeypatch: pytest.M
     assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == len(anomalies)
 
 
+def test_resolve_notify_policy_prefers_notify_policy_sample_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", "9")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy_json": {
+                    "explosion_threshold": 50,
+                    "explosion_sample_limit": 10,
+                },
+                "notify_policy": {
+                    "explosion_threshold": 1000,
+                    "sample_exception_limit": 200,
+                },
+            }
+        }
+    )
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
+def test_resolve_notify_policy_keeps_legacy_reminder_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy": {
+                    "explosion_threshold": 300,
+                    "explosion_sample_limit": 40,
+                }
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 300
+    assert policy["sample_exception_limit"] == 40
+    assert policy["explosion_sample_limit"] == 40
+
+
+def test_sample_anomalies_for_exception_creation_stratifies_by_type_and_owner() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
+        {"item_id": "b2", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
+        {"item_id": "c1", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "c2", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=4,
+    )
+
+    assert [item["item_id"] for item in sampled[:3]] == ["a1", "b1", "c1"]
+    assert len(sampled) == 4
+    assert metadata["enabled"] is True
+    assert metadata["sample_count"] == 4
+    assert metadata["total_count"] == 6
+    assert metadata["strategy"] == "stratified_by_anomaly_type_owner"
+    assert metadata["fallback_used"] is False
+
+
 def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _BatchNotifyAdapter()
     updated_payloads: list[tuple[str, dict[str, object]]] = []

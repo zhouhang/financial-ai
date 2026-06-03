@@ -53,7 +53,9 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
     "unknown": "未知异常",
 }
 
-_DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
+_DEFAULT_NOTIFY_EXPLOSION_LIMIT = 1000
+_DEFAULT_EXCEPTION_SAMPLE_LIMIT = 200
+_EXCEPTION_SAMPLING_STRATEGY = "stratified_by_anomaly_type_owner"
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
 _BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
 _COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
@@ -2543,18 +2545,130 @@ def _summary_pending_total(summary: dict[str, Any], fallback: int) -> int:
 
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
-    policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
-    limit = _safe_int(
+    legacy_policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
+    notify_policy = _safe_dict(meta.get("notify_policy"))
+    policy = {**legacy_policy, **notify_policy}
+    threshold = _safe_int(
         policy.get("explosion_threshold")
         or policy.get("max_detail_reminders")
         or os.getenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT"),
         _DEFAULT_NOTIFY_EXPLOSION_LIMIT,
     )
-    limit = max(1, limit)
+    sample_limit = _safe_int(
+        policy.get("sample_exception_limit")
+        or policy.get("explosion_sample_limit")
+        or os.getenv("RECON_EXCEPTION_SAMPLE_LIMIT"),
+        _DEFAULT_EXCEPTION_SAMPLE_LIMIT,
+    )
+    threshold = max(1, threshold)
+    sample_limit = max(1, sample_limit)
     return {
-        "explosion_threshold": limit,
-        "explosion_sample_limit": limit,
+        "explosion_threshold": threshold,
+        "sample_exception_limit": sample_limit,
+        "explosion_sample_limit": sample_limit,
     }
+
+
+def _anomaly_sampling_owner_identifier(item: dict[str, Any]) -> str:
+    return str(
+        item.get("_exception_owner_identifier")
+        or item.get("owner_identifier")
+        or item.get("owner")
+        or ""
+    ).strip()
+
+
+def _sampling_group_key(item: dict[str, Any]) -> tuple[str, str]:
+    anomaly_type = str(item.get("anomaly_type") or "unknown").strip() or "unknown"
+    return anomaly_type, _anomaly_sampling_owner_identifier(item)
+
+
+def _sample_anomalies_for_exception_creation(
+    anomalies: list[dict[str, Any]],
+    *,
+    sample_limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    total_count = len(anomalies)
+    safe_limit = max(1, int(sample_limit or _DEFAULT_EXCEPTION_SAMPLE_LIMIT))
+    metadata = {
+        "enabled": True,
+        "reason": "explosion_threshold_exceeded",
+        "sample_limit": safe_limit,
+        "total_count": total_count,
+        "sample_count": 0,
+        "created_count": 0,
+        "create_failed_count": 0,
+        "strategy": _EXCEPTION_SAMPLING_STRATEGY,
+        "fallback_used": False,
+    }
+    if total_count <= safe_limit:
+        metadata["sample_count"] = total_count
+        return list(anomalies), metadata
+
+    try:
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        group_order: list[tuple[str, str]] = []
+        for item in anomalies:
+            key = _sampling_group_key(item)
+            if key not in groups:
+                groups[key] = []
+                group_order.append(key)
+            groups[key].append(item)
+
+        sampled: list[dict[str, Any]] = []
+        selected_by_key: dict[tuple[str, str], int] = {}
+        for key in group_order:
+            if len(sampled) >= safe_limit:
+                break
+            sampled.append(groups[key][0])
+            selected_by_key[key] = 1
+
+        remaining_slots = safe_limit - len(sampled)
+        remaining_total = sum(
+            max(0, len(groups[key]) - selected_by_key.get(key, 0)) for key in group_order
+        )
+        if remaining_slots > 0 and remaining_total > 0:
+            fractional_allocations: list[tuple[float, tuple[str, str], int]] = []
+            for key in group_order:
+                remaining_in_group = max(0, len(groups[key]) - selected_by_key.get(key, 0))
+                if remaining_in_group <= 0:
+                    continue
+                raw_share = remaining_slots * (remaining_in_group / remaining_total)
+                whole_share = min(remaining_in_group, int(raw_share))
+                if whole_share:
+                    sampled.extend(
+                        groups[key][
+                            selected_by_key.get(key, 0) : selected_by_key.get(key, 0)
+                            + whole_share
+                        ]
+                    )
+                    selected_by_key[key] = selected_by_key.get(key, 0) + whole_share
+                fractional_allocations.append((raw_share - whole_share, key, remaining_in_group))
+
+            leftover_slots = safe_limit - len(sampled)
+            for _, key, _ in sorted(
+                fractional_allocations,
+                key=lambda item: (-item[0], group_order.index(item[1])),
+            ):
+                if leftover_slots <= 0:
+                    break
+                cursor = selected_by_key.get(key, 0)
+                if cursor >= len(groups[key]):
+                    continue
+                sampled.append(groups[key][cursor])
+                selected_by_key[key] = cursor + 1
+                leftover_slots -= 1
+
+        sampled = sampled[:safe_limit]
+        metadata["sample_count"] = len(sampled)
+        return sampled, metadata
+    except Exception as exc:
+        logger.error("[recon][exception_sampling] 分层抽样失败，回退为前 %s 条: %s", safe_limit, exc)
+        fallback = list(anomalies[:safe_limit])
+        metadata["sample_count"] = len(fallback)
+        metadata["fallback_used"] = True
+        metadata["fallback_error"] = str(exc)
+        return fallback, metadata
 
 
 def _get_nested_value(payload: Any, path: str) -> Any:
