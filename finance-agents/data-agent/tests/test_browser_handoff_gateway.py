@@ -298,3 +298,37 @@ async def test_agent_reports_control_unavailable_maps_to_web_status(monkeypatch)
     assert handled is True
     assert sent[-1]["type"] == "status"
     assert sent[-1]["status"] == "control_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_relay_does_not_log_frame_data_text_or_metadata(monkeypatch, caplog):
+    import logging
+    hg.reset_for_tests()
+
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+
+    sent = []
+    async def send(p):
+        sent.append(p)
+
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    hg._agents["agentA"] = hg.BrowserAgentPeer(agent_id="agentA", token="t", send_event=send)
+
+    with caplog.at_level(logging.DEBUG):
+        await hg.route_agent_message(agent_id="agentA", token="t", msg={
+            "type": "handoff_frame", "handoff_session_id": "h1", "controller_id": "c1",
+            "data": "BASE64SECRETFRAME", "window_title": "店铺机密标题",
+        })
+        await hg.route_controller_message(hg._controllers["h1"], {
+            "type": "handoff_input", "event": {"kind": "text", "text": "SMSCODE123"},
+        })
+
+    blob = caplog.text
+    assert "BASE64SECRETFRAME" not in blob
+    assert "SMSCODE123" not in blob
+    assert "店铺机密标题" not in blob
