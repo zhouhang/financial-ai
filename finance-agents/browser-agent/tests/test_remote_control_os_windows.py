@@ -203,3 +203,69 @@ def test_injection_dropped_when_not_foreground():
     inj.inject({"kind": "click", "x": 0.5, "y": 0.5})
     assert send.events == []
     assert inj.last_error == ControlErrorCode.CONTROL_UNAVAILABLE
+
+
+from finance_browser_agent.remote_control_os_windows import TextBridge
+
+
+class FakeCdp:
+    def __init__(self, *, focused=True, available=True, readback=None):
+        self.focused = focused
+        self.available = available
+        self.inserted = []
+        self.readback = readback
+    def is_available(self):
+        return self.available
+    def active_element_editable(self):
+        return self.focused
+    def insert_text(self, text):
+        self.inserted.append(text)
+    def read_active_value(self):
+        return self.readback
+
+
+class FakeClipboard:
+    def __init__(self):
+        self.value = "原始剪贴板"
+        self.history = []
+        self.pastes = []
+    def get_text(self):
+        return self.value
+    def set_text(self, t):
+        self.history.append(t); self.value = t
+    def send_paste(self):
+        self.pastes.append(self.value)
+
+
+def test_prefers_cdp_inserttext_when_focused():
+    cdp = FakeCdp(focused=True)
+    clip = FakeClipboard()
+    bridge = TextBridge(cdp=cdp, clipboard=clip)
+    assert bridge.send_text("123456") is True
+    assert cdp.inserted == ["123456"]
+    assert clip.history == []
+
+
+def test_refuses_when_focus_not_editable():
+    cdp = FakeCdp(focused=False)
+    bridge = TextBridge(cdp=cdp, clipboard=FakeClipboard())
+    ok = bridge.send_text("123456")
+    assert ok is False
+    assert bridge.last_focus_editable is False
+
+
+def test_clipboard_fallback_verifies_readback_and_restores():
+    cdp = FakeCdp(available=False, focused=True, readback="123456")
+    clip = FakeClipboard()
+    bridge = TextBridge(cdp=cdp, clipboard=clip)
+    assert bridge.send_text("123456") is True
+    assert clip.pastes == ["123456"]
+    assert clip.value == "原始剪贴板"
+
+
+def test_clipboard_fallback_fails_on_readback_mismatch():
+    cdp = FakeCdp(available=False, focused=True, readback="999999")
+    clip = FakeClipboard()
+    bridge = TextBridge(cdp=cdp, clipboard=clip)
+    assert bridge.send_text("123456") is False
+    assert clip.value == "原始剪贴板"

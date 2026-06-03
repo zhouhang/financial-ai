@@ -196,3 +196,33 @@ class MouseInjector:
             self._move(x, y)
         elif kind == "mouse_up":
             self._move(x, y); self._send.button(button, False)
+
+
+class TextBridge:
+    """文本桥:优先 CDP Input.insertText(绕开系统剪贴板);CDP 不可用才退回剪贴板粘贴,
+    且粘贴后读回校验、立即恢复原剪贴板。任何时候焦点不在可编辑框都拒绝注入。"""
+
+    def __init__(self, *, cdp: Any, clipboard: Any) -> None:
+        self._cdp = cdp
+        self._clip = clipboard
+        self.last_focus_editable: bool | None = None
+
+    def send_text(self, text: str) -> bool:
+        text = str(text or "")
+        if not text:
+            return False
+        self.last_focus_editable = bool(self._cdp.active_element_editable())
+        if not self.last_focus_editable:
+            return False  # 焦点不在输入框,绝不盲注
+        if self._cdp.is_available():
+            self._cdp.insert_text(text)
+            return True
+        # 剪贴板回退
+        original = self._clip.get_text()
+        try:
+            self._clip.set_text(text)
+            self._clip.send_paste()
+            readback = self._cdp.read_active_value()
+            return readback == text  # 被抢占/粘错 → False
+        finally:
+            self._clip.set_text(original)  # 由回执驱动:立即恢复,缩短明文驻留窗口
