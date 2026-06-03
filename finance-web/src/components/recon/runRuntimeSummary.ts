@@ -16,6 +16,16 @@ export interface RuntimeNotificationView {
   error: string;
 }
 
+export interface RuntimeExceptionSamplingView {
+  enabled: boolean;
+  totalCount: number | null;
+  sampleCount: number | null;
+  sampleLimit: number | null;
+  threshold: number | null;
+  strategy: string;
+  fallbackUsed: boolean;
+}
+
 export interface RuntimeSummaryViewModel {
   bizDate: string;
   queueJobId: string;
@@ -26,6 +36,7 @@ export interface RuntimeSummaryViewModel {
   preparationMetrics: RuntimeStageMetric[];
   reconciliationDurationSeconds: number | null;
   notification: RuntimeNotificationView;
+  exceptionSampling: RuntimeExceptionSamplingView;
 }
 
 export interface RunLikeForRuntimeSummary {
@@ -162,6 +173,19 @@ function normalizeNotification(value: unknown): RuntimeNotificationView {
   };
 }
 
+function normalizeExceptionSampling(value: unknown): RuntimeExceptionSamplingView {
+  const item = asRecord(value);
+  return {
+    enabled: item.enabled === true,
+    totalCount: toOptionalInt(item.total_count ?? item.totalCount),
+    sampleCount: toOptionalInt(item.sample_count ?? item.sampleCount),
+    sampleLimit: toOptionalInt(item.sample_limit ?? item.sampleLimit),
+    threshold: toOptionalInt(item.threshold),
+    strategy: toText(item.strategy).trim(),
+    fallbackUsed: item.fallback_used === true || item.fallbackUsed === true,
+  };
+}
+
 export function buildRuntimeSummaryView(run: RunLikeForRuntimeSummary | null | undefined): RuntimeSummaryViewModel {
   const rawRun = asRecord(run?.raw);
   const runContext = asRecord(rawRun.run_context_json);
@@ -189,5 +213,6 @@ export function buildRuntimeSummaryView(run: RunLikeForRuntimeSummary | null | u
     preparationMetrics: preparation.length > 0 ? preparation : derivedPreparation(rawRun, collections),
     reconciliationDurationSeconds: toOptionalNumber(reconciliation.duration_seconds ?? reconciliation.durationSeconds),
     notification: normalizeNotification(runtimeSummary.summary_notification),
+    exceptionSampling: normalizeExceptionSampling(runtimeSummary.exception_sampling ?? runtimeSummary.exceptionSampling),
   };
 }
