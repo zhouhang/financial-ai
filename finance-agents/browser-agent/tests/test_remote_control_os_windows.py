@@ -63,3 +63,26 @@ def test_invisible_windows_excluded():
     import pytest
     with pytest.raises(Exception):
         binder.bind(current_page_title="")
+
+
+from finance_browser_agent.remote_control_os_windows import evaluate_session_interactivity
+
+
+def test_session_zero_is_rejected():
+    result = evaluate_session_interactivity(process_session_id=0, active_console_session_id=1)
+    assert result["available"] is False
+    assert result["reason"] == "session_not_interactive"
+    assert result["is_interactive_session"] is False
+
+
+def test_interactive_console_session_ok():
+    result = evaluate_session_interactivity(process_session_id=1, active_console_session_id=1)
+    assert result["available"] is True
+    assert result["is_interactive_session"] is True
+    assert result["session_id"] == 1
+
+
+def test_non_console_session_rejected():
+    # 进程会话与活动控制台会话不一致 → 非活动交互式
+    result = evaluate_session_interactivity(process_session_id=2, active_console_session_id=1)
+    assert result["available"] is False

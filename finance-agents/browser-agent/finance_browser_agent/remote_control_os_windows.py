@@ -64,3 +64,33 @@ class WindowBinder:
             "width": int(rect["width"]), "height": int(rect["height"]),
         }
         self.window_title = self._win32.get_window_text(chosen) or ""
+
+
+def evaluate_session_interactivity(*, process_session_id: int, active_console_session_id: int) -> dict[str, Any]:
+    """Session 0 或非活动控制台会话都判为不可用 —— Task Scheduler"不管用户是否登录"
+    常误配落到 Session 0,截图全黑、输入无效,必须拒绝启动 OS 后端。"""
+    interactive = process_session_id != 0 and process_session_id == active_console_session_id
+    return {
+        "available": interactive,
+        "reason": "" if interactive else ControlErrorCode.SESSION_NOT_INTERACTIVE.value,
+        "session_id": int(process_session_id),
+        "is_interactive_session": interactive,
+    }
+
+
+def selfcheck(*, win32=None) -> dict[str, Any]:
+    """启动自检:用真实 win32 读会话/权限;import 或调用失败一律 unavailable 而非崩溃。"""
+    try:
+        if win32 is None:
+            import win32process  # type: ignore
+            import win32ts  # type: ignore
+            pid_session = win32process.ProcessIdToSessionId(__import__("os").getpid())
+            console_session = win32ts.WTSGetActiveConsoleSessionId()
+        else:
+            pid_session = win32.process_session_id()
+            console_session = win32.active_console_session_id()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": ControlErrorCode.CONTROL_UNAVAILABLE.value, "detail": str(exc)}
+    return evaluate_session_interactivity(
+        process_session_id=int(pid_session), active_console_session_id=int(console_session)
+    )
