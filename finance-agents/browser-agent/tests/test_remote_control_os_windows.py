@@ -115,3 +115,29 @@ def test_capture_frame_uses_capture_rect_and_returns_metadata():
     assert base64.b64decode(frame["data"]).startswith(b"jpeg")
     assert frame["capture_rect"] == rect
     assert frame["backend"] == "os_windows"
+
+
+from finance_browser_agent.remote_control_os_windows import map_normalized_to_virtualdesk
+
+
+def test_maps_center_of_window_to_virtualdesk_65535():
+    rect = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+    vd = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+    nx, ny = map_normalized_to_virtualdesk(0.5, 0.5, capture_rect=rect, virtual_desktop=vd)
+    assert abs(nx - round(960 / 1919 * 65535)) <= 1
+    assert abs(ny - round(540 / 1079 * 65535)) <= 1
+
+
+def test_maps_negative_origin_secondary_monitor():
+    rect = {"left": -1280, "top": 0, "width": 1280, "height": 720}
+    vd = {"left": -1280, "top": 0, "width": 1280 + 1920, "height": 1080}
+    nx, ny = map_normalized_to_virtualdesk(0.0, 0.0, capture_rect=rect, virtual_desktop=vd)
+    assert nx == 0
+    assert ny == 0
+
+
+def test_clamps_outside_rect_into_range():
+    rect = {"left": 0, "top": 0, "width": 100, "height": 100}
+    vd = {"left": 0, "top": 0, "width": 100, "height": 100}
+    nx, ny = map_normalized_to_virtualdesk(1.5, -0.2, capture_rect=rect, virtual_desktop=vd)
+    assert 0 <= nx <= 65535 and 0 <= ny <= 65535

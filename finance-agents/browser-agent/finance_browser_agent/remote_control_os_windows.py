@@ -120,3 +120,23 @@ class WindowCapturer:
             "window_title": window_title,
             "capture_rect": region,
         }
+
+
+def map_normalized_to_virtualdesk(
+    x: float, y: float, *, capture_rect: dict[str, int], virtual_desktop: dict[str, int]
+) -> tuple[int, int]:
+    """归一化(0..1,相对窗口) → SendInput 绝对坐标(0..65535,相对整个虚拟桌面)。
+
+    注入时必须带 MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK。
+    """
+    cx = max(0.0, min(1.0, float(x)))
+    cy = max(0.0, min(1.0, float(y)))
+    phys_x = capture_rect["left"] + cx * capture_rect["width"]
+    phys_y = capture_rect["top"] + cy * capture_rect["height"]
+    vd_w = max(1, int(virtual_desktop["width"]) - 1)
+    vd_h = max(1, int(virtual_desktop["height"]) - 1)
+    rel_x = (phys_x - virtual_desktop["left"]) / vd_w
+    rel_y = (phys_y - virtual_desktop["top"]) / vd_h
+    nx = round(max(0.0, min(1.0, rel_x)) * 65535)
+    ny = round(max(0.0, min(1.0, rel_y)) * 65535)
+    return int(nx), int(ny)
