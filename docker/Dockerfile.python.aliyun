@@ -1,0 +1,50 @@
+FROM docker.m.daocloud.io/library/python:3.12-slim AS runtime
+
+ARG OCI_SOURCE=""
+ARG OCI_REVISION=""
+
+LABEL org.opencontainers.image.title="tally-python" \
+    org.opencontainers.image.description="Tally finance-mcp, data-agent, cron, and worker runtime" \
+    org.opencontainers.image.source="${OCI_SOURCE}" \
+    org.opencontainers.image.revision="${OCI_REVISION}"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PYTHONPATH=/app/finance-mcp:/app/finance-agents/data-agent:/app/finance-cron
+
+WORKDIR /app
+
+RUN sed -i \
+        -e 's#http://deb.debian.org/debian#https://mirrors.aliyun.com/debian#g' \
+        -e 's#http://deb.debian.org/debian-security#https://mirrors.aliyun.com/debian-security#g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY finance-mcp/requirements.txt /tmp/finance-mcp-requirements.txt
+COPY finance-agents/data-agent/requirements.txt /tmp/data-agent-requirements.txt
+COPY finance-cron/requirements.txt /tmp/finance-cron-requirements.txt
+
+RUN pip install -r /tmp/finance-mcp-requirements.txt \
+    && pip install -r /tmp/data-agent-requirements.txt \
+    && pip install -r /tmp/finance-cron-requirements.txt
+
+COPY finance-mcp /app/finance-mcp
+COPY finance-agents/data-agent /app/finance-agents/data-agent
+COPY finance-cron /app/finance-cron
+
+RUN mkdir -p \
+    /app/finance-mcp/uploads \
+    /app/finance-mcp/recon/output \
+    /app/finance-mcp/proc/output \
+    /app/logs
+
+CMD ["python", "finance-mcp/unified_mcp_server.py"]

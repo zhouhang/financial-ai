@@ -56,7 +56,7 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
 _DEFAULT_NOTIFY_EXPLOSION_LIMIT = 1000
 _DEFAULT_EXCEPTION_SAMPLE_LIMIT = 200
 _EXCEPTION_SAMPLING_STRATEGY = "stratified_by_anomaly_type_owner"
-_DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
+_DEFAULT_PUBLIC_WEB_BASE_URL = "https://www.tallyai.cn"
 _BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
 _COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
 
