@@ -3119,6 +3119,7 @@ export default function ReconWorkspace({
   const [runsPageLoading, setRunsPageLoading] = useState(false);
   const [runsTotal, setRunsTotal] = useState(0);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
+  const [schemesByRunId, setSchemesByRunId] = useState<Record<string, ReconSchemeListItem>>({});
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
   const [loadingCenter, setLoadingCenter] = useState(false);
   const [loadingChannels, setLoadingChannels] = useState(false);
@@ -3402,12 +3403,14 @@ export default function ReconWorkspace({
       options?: {
         notice?: string | null;
         exceptionsByRunId?: Record<string, ReconRunExceptionDetail[]>;
+        schemesByRunId?: Record<string, ReconSchemeListItem>;
       },
     ) => {
       setSchemes(nextSchemes);
       setTasks(nextTasks);
       setRuns(nextRuns);
       setExceptionsByRunId(options?.exceptionsByRunId || {});
+      setSchemesByRunId(options?.schemesByRunId || {});
       setCenterNotice(options?.notice || null);
       setCenterError(null);
       setSchemeDeleteGuard(null);
@@ -3670,6 +3673,13 @@ export default function ReconWorkspace({
           ...prev,
           [runId]: asList(data.exceptions).map(mapRunException),
         }));
+        const hydratedScheme = mapScheme(data.scheme);
+        if (hydratedScheme.schemeCode) {
+          setSchemesByRunId((prev) => ({
+            ...prev,
+            [runId]: hydratedScheme,
+          }));
+        }
       } catch (error) {
         setCenterError(error instanceof Error ? error.message : '异常处理加载失败');
       } finally {
@@ -5718,7 +5728,9 @@ export default function ReconWorkspace({
   const selectedExceptionRun =
     selectedExceptionDetail && modalState?.kind === 'run-exceptions' ? modalState.run : null;
   const selectedExceptionScheme = selectedExceptionRun
-    ? schemes.find((item) => item.schemeCode === selectedExceptionRun.schemeCode) || null
+    ? schemesByRunId[selectedExceptionRun.id]
+      || schemes.find((item) => item.schemeCode === selectedExceptionRun.schemeCode)
+      || null
     : null;
   const selectedExceptionSchemeMeta = selectedExceptionScheme
     ? extractSchemeMeta(selectedExceptionScheme)
@@ -6895,7 +6907,7 @@ export default function ReconWorkspace({
     const { run } = modalState;
     const modalExceptions = exceptionsByRunId[run.id] || [];
     const statusMeta = executionStatusMeta(run.executionStatus);
-    const exceptionScheme = schemes.find((item) => item.schemeCode === run.schemeCode) || null;
+    const exceptionScheme = schemesByRunId[run.id] || schemes.find((item) => item.schemeCode === run.schemeCode) || null;
     const exceptionSchemeMeta = exceptionScheme ? extractSchemeMeta(exceptionScheme) : null;
     const normalizedRunStatus = run.executionStatus.trim().toLowerCase();
     const shouldShowRunFailureInfo = !['success', 'succeeded', 'completed'].includes(normalizedRunStatus);
