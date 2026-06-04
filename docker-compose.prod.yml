@@ -29,6 +29,8 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3335/health >/dev/null"]
       interval: 30s
@@ -53,6 +55,8 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health >/dev/null"]
       interval: 30s
@@ -86,6 +90,8 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
 
   recon-worker-2:
     <<: [*python_image, *common_env]
@@ -102,6 +108,8 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
 
   finance-web:
     image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/finance-web:${IMAGE_TAG:-local}
