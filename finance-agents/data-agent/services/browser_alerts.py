@@ -181,6 +181,7 @@ def collect_browser_alert_events(
                       ON b.company_id = s.company_id
                      AND b.data_source_id = s.data_source_id
                     WHERE ds.source_kind = 'browser_playbook'
+                      AND ds.status <> 'deleted'
                       AND s.job_status = 'failed'
                       AND COALESCE(s.browser_fail_reason, '') <> ''
                       AND s.completed_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
@@ -242,6 +243,7 @@ def collect_browser_alert_events(
                     FROM shop_runtime_bindings b
                     JOIN data_sources ds ON ds.id = b.data_source_id
                     WHERE ds.source_kind = 'browser_playbook'
+                      AND ds.status <> 'deleted'
                       AND b.profile_status = 'active'
                       AND b.playbook_status = 'ok'
                       AND (
