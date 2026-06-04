@@ -2648,7 +2648,7 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
     run = auth_db.get_execution_run(company_id=company_id, run_id=run_id) or {}
     scheme = _get_run_scheme_for_hydration(company_id, run)
     items = hydrate_execution_exception_details(run=run, scheme=scheme, exceptions=items)
-    return {"success": True, "count": len(items), "exceptions": items}
+    return {"success": True, "count": len(items), "run": run, "scheme": scheme, "exceptions": items}
 
 
 def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
