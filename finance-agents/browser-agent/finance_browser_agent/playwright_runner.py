@@ -14,6 +14,7 @@ Fail-reason mapping:
 - login redirect or auth-required body → AUTH_EXPIRED
 - risk-verification keywords visible (验证 / 滑块 / 安全校验) → RISK_VERIFICATION
 - quality gate mismatch → DATA_MISMATCH
+- newly requested export report not yet downloadable → EXPORT_REPORT_NOT_READY
 - anything else → OTHER (retryable)
 
 Exact-match Layer 2 quality gate is delegated to ``finance_browser_agent.quality_gate``.
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import contextlib
 import logging
 import os
 import random
@@ -42,6 +44,11 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 
 _risk_waiting_cb: contextvars.ContextVar = contextvars.ContextVar("risk_waiting_cb", default=None)
 
@@ -122,9 +129,19 @@ _KNOWN_OVERLAY_CONTAINER_SELECTORS = (
     "[class*='Tour']",
 )
 _KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS = (
+    "button.driver-popover-close-btn",
+    ".driver-popover button.driver-popover-close-btn",
+    ".driver-popover .driver-popover-close-btn",
+    ".driver-popover button:has-text('跳过')",
+    ".driver-popover button:has-text('关闭')",
+    ".driver-popover button:has-text('知道了')",
+    ".driver-popover button:has-text('我知道了')",
     "button.driver-popover-next-btn:has-text('完成')",
     ".driver-popover button.driver-popover-next-btn:has-text('完成')",
     ".driver-popover .driver-popover-next-btn:has-text('完成')",
+    "button.driver-popover-next-btn:has-text('下一步')",
+    ".driver-popover button.driver-popover-next-btn:has-text('下一步')",
+    ".driver-popover .driver-popover-next-btn:has-text('下一步')",
 )
 _KNOWN_OVERLAY_CLOSE_SELECTORS = (
     *_KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS,
@@ -295,6 +312,22 @@ def build_user_data_dir(
     """
     raw_key = str(runtime_profile_ref or shop_id or "unknown")
     return str(Path(config.profile_root) / sanitize_profile_key(raw_key))
+
+
+@contextlib.contextmanager
+def _profile_file_lock(user_data_dir: str):
+    """Serialize access to one Chrome user-data-dir across browser-agent processes."""
+    profile_path = Path(user_data_dir)
+    profile_path.mkdir(parents=True, exist_ok=True)
+    lock_path = profile_path.with_suffix(profile_path.suffix + ".lock")
+    with lock_path.open("a+") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def sanitize_profile_key(value: str) -> str:
@@ -742,6 +775,18 @@ def _find_login_context(
                     timeout_ms=interaction_timeout_ms,
                     run_config=run_config,
                 )
+                if not _login_inputs_are_complete(
+                    candidate,
+                    username_selector=username_selector,
+                    password_selector=password_selector,
+                    expected_username=username,
+                    expected_password=password,
+                    timeout_ms=interaction_timeout_ms,
+                ):
+                    raise BrowserActionError(
+                        "AUTH_EXPIRED",
+                        "login input did not finish before submit",
+                    )
                 _click_like_human(
                     candidate,
                     submit_selector,
@@ -750,6 +795,8 @@ def _find_login_context(
                 )
                 return candidate
             except Exception as exc:
+                if isinstance(exc, BrowserActionError) and "input did not finish" in str(exc):
+                    raise exc
                 last_error = exc
         detected_states = [_detect_auth_or_risk(candidate) for candidate in candidates]
         if "RISK_VERIFICATION" in detected_states:
@@ -829,6 +876,41 @@ def _ensure_login_controls_ready(
         if callable(wait_for):
             wait_for(timeout=timeout_ms)
     return True
+
+
+def _input_value(context: Any, selector: str, *, timeout_ms: int) -> str | None:
+    locator_factory = getattr(context, "locator", None)
+    if callable(locator_factory):
+        try:
+            return str(locator_factory(selector).first.input_value(timeout=timeout_ms) or "")
+        except Exception:
+            return None
+    return None
+
+
+def _login_inputs_are_complete(
+    context: Any,
+    *,
+    username_selector: str,
+    password_selector: str,
+    expected_username: str,
+    expected_password: str,
+    timeout_ms: int,
+) -> bool:
+    username_value = _input_value(context, username_selector, timeout_ms=min(timeout_ms, 2000))
+    password_value = _input_value(context, password_selector, timeout_ms=min(timeout_ms, 2000))
+    if username_value is None or password_value is None:
+        return True
+    complete = username_value == expected_username and password_value == expected_password
+    if not complete:
+        logger.warning(
+            "browser login input incomplete before submit: username_len=%s/%s password_len=%s/%s",
+            len(username_value),
+            len(expected_username),
+            len(password_value),
+            len(expected_password),
+        )
+    return complete
 
 
 def _wait_for_risk_to_clear(
@@ -1279,14 +1361,29 @@ def _type_like_human(
         context.fill(selector, value, timeout=timeout_ms)
         return
     locator = locator_factory(selector).first
-    locator.click(timeout=timeout_ms)
-    try:
-        if locator.input_value(timeout=timeout_ms) == value:
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        locator.click(timeout=timeout_ms)
+        try:
+            if locator.input_value(timeout=timeout_ms) == value:
+                return
+        except Exception:
+            pass
+        locator.fill("", timeout=timeout_ms)
+        locator.type(value, delay=type_delay_ms, timeout=timeout_ms)
+        try:
+            if locator.input_value(timeout=min(timeout_ms, 2000)) == value:
+                return
+        except Exception:
             return
-    except Exception:
-        pass
-    locator.fill("", timeout=timeout_ms)
-    locator.type(value, delay=type_delay_ms, timeout=timeout_ms)
+        if attempt < max_attempts - 1:
+            logger.warning(
+                "browser input incomplete after type; retrying: selector=%s attempt=%s/%s",
+                selector,
+                attempt + 1,
+                max_attempts,
+            )
+    raise BrowserActionError("AUTH_EXPIRED", f"input did not finish before submit: selector={selector}")
 
 
 def _close_open_datepicker_overlay(page: Any) -> None:
@@ -1311,7 +1408,14 @@ def _set_date_value(page: Any, selector: str, value: str, *, timeout_ms: int) ->
     _dismiss_known_overlays(page)
     _close_open_datepicker_overlay(page)
     locator = page.locator(selector).first
-    locator.click(timeout=timeout_ms)
+    try:
+        locator.click(timeout=timeout_ms)
+    except Exception as exc:
+        if _dismiss_known_overlays(page):
+            _close_open_datepicker_overlay(page)
+            locator.click(timeout=timeout_ms)
+        else:
+            raise exc
     try:
         readonly = bool(
             locator.evaluate(
@@ -1666,17 +1770,22 @@ def _parse_local_datetime(value: str) -> datetime | None:
 
 
 def _extract_export_row_requested_time(row_text: str, requested_after: datetime | None) -> datetime | None:
-    compact_text = " ".join(str(row_text or "").split())
-    matches = re.findall(
-        r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?",
-        compact_text,
-    )
-    parsed = [item for item in (_parse_local_datetime(match) for match in matches) if item is not None]
+    parsed = _extract_export_report_request_times(row_text)
     if not parsed:
         return None
     if requested_after is None:
         return parsed[0]
     return min(parsed, key=lambda item: abs((item - requested_after).total_seconds()))
+
+
+def _extract_export_report_request_times(row_text: str) -> list[datetime]:
+    compact_text = " ".join(str(row_text or "").split())
+    matches = re.findall(
+        r"报表申请时间[:：]?\s*"
+        r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)",
+        compact_text,
+    )
+    return [item for item in (_parse_local_datetime(match) for match in matches) if item is not None]
 
 
 def _playwright_text_arg(value: str) -> str:
@@ -1882,14 +1991,7 @@ def _download_qianniu_export_report(
         ".next-table-row, "
         "[role='row']"
     )
-    detail_selector = str(
-        action.get("detail_selector")
-        or (
-            "body"
-            f":has-text({_playwright_text_arg('订单导出报表')})"
-            f":has-text({_playwright_text_arg(download_button_text)})"
-        )
-    ).strip()
+    detail_selector = str(action.get("detail_selector") or "").strip()
     earliest_allowed = requested_after - timedelta(seconds=max(0, request_time_tolerance_seconds))
 
     def _find_download_button() -> tuple[Any | None, str]:
@@ -1929,6 +2031,17 @@ def _download_qianniu_export_report(
                     continue
                 checked_any_row = True
                 if report_type and report_type not in compact_text:
+                    continue
+                row_requested_times = _extract_export_report_request_times(compact_text)
+                if len(row_requested_times) > 1:
+                    logger.info(
+                        "qianniu export row skipped because it contains multiple request times: "
+                        "selector=%s row=%s requested_after=%s text=%s",
+                        source_selector,
+                        index,
+                        requested_after.isoformat(sep=" ", timespec="seconds"),
+                        compact_text[:500],
+                    )
                     continue
                 row_requested_at = _extract_export_row_requested_time(compact_text, requested_after)
                 if row_requested_at is None:
@@ -1970,6 +2083,73 @@ def _download_qianniu_export_report(
                     compact_text[:500],
                 )
                 return button, ""
+        try:
+            buttons = page.locator(button_selector)
+            button_count = buttons.count()
+        except Exception as exc:
+            logger.info("qianniu export button selector failed: selector=%s error=%s", button_selector, exc)
+            button_count = 0
+            buttons = None
+        for index in range(button_count):
+            button = buttons.nth(index)
+            try:
+                if not button.is_visible(timeout=500):
+                    continue
+            except Exception:
+                continue
+            try:
+                if button.is_disabled(timeout=500):
+                    continue
+            except Exception:
+                pass
+            try:
+                row = button.locator("xpath=ancestor::*[contains(., '报表申请时间')][1]").first
+                text = row.inner_text(timeout=min(timeout_ms, 5000))
+            except Exception as exc:
+                logger.info(
+                    "qianniu export button ancestor lookup failed: button=%s error=%s",
+                    index,
+                    exc,
+                )
+                continue
+            compact_text = " ".join(str(text or "").split())
+            if "报表申请时间" not in compact_text:
+                continue
+            checked_any_row = True
+            if report_type and report_type not in compact_text:
+                continue
+            row_requested_times = _extract_export_report_request_times(compact_text)
+            if len(row_requested_times) > 1:
+                logger.info(
+                    "qianniu export button ancestor skipped because it contains multiple request times: "
+                    "button=%s requested_after=%s text=%s",
+                    index,
+                    requested_after.isoformat(sep=" ", timespec="seconds"),
+                    compact_text[:500],
+                )
+                continue
+            row_requested_at = _extract_export_row_requested_time(compact_text, requested_after)
+            if row_requested_at is None:
+                logger.info(
+                    "qianniu export button ancestor skipped because request time was not found: "
+                    "button=%s text=%s",
+                    index,
+                    compact_text[:300],
+                )
+                continue
+            if row_requested_at < earliest_allowed:
+                nearest_skipped_time = row_requested_at.isoformat(sep=" ", timespec="seconds")
+                continue
+            logger.info(
+                "qianniu export report matched by button ancestor for download: "
+                "requested_after=%s row_requested_at=%s report_type=%s button=%s text=%s",
+                requested_after.isoformat(sep=" ", timespec="seconds"),
+                row_requested_at.isoformat(sep=" ", timespec="seconds"),
+                report_type,
+                index,
+                compact_text[:500],
+            )
+            return button, ""
         if not checked_any_row:
             return None, "no_export_rows"
         return None, nearest_skipped_time
@@ -1982,6 +2162,18 @@ def _download_qianniu_export_report(
             except Exception as exc:
                 logger.info("qianniu export list refresh click failed, reloading page: %s", exc)
         page.reload(wait_until="domcontentloaded", timeout=min(30000, timeout_ms))
+
+    def _wait_for_export_candidates_after_refresh() -> None:
+        wait_timeout = min(5000, timeout_ms)
+        for selector in [row_selector, button_selector, fallback_row_selector, detail_selector]:
+            if not selector:
+                continue
+            try:
+                page.wait_for_selector(selector, timeout=wait_timeout)
+                logger.info("qianniu export list hydrated after refresh: selector=%s", selector)
+                return
+            except Exception:
+                continue
 
     try:
         page.wait_for_selector(row_selector, timeout=min(timeout_ms, 5000))
@@ -2021,9 +2213,10 @@ def _download_qianniu_export_report(
         page.wait_for_timeout(wait_ms)
         if time.monotonic() <= deadline:
             _refresh_export_list()
+            _wait_for_export_candidates_after_refresh()
 
     raise BrowserActionError(
-        "PAGE_CHANGED",
+        "EXPORT_REPORT_NOT_READY",
         "download_qianniu_export_report timed out waiting for a newly generated report "
         f"after {requested_after.isoformat(sep=' ', timespec='seconds')}",
     )
@@ -2288,78 +2481,80 @@ def _run_playbook_with_playwright_inner(
     )
 
     try:
-        chrome = launch_chrome(
-            user_data_dir=user_data_dir,
-            headless=config.headless,
-            channel=config.browser_channel,
-            timezone_id=config.timezone_id,
-        )
-        try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(chrome.cdp_url)
-                context = browser.contexts[0] if browser.contexts else browser.new_context(accept_downloads=True)
-                page = context.pages[0] if context.pages else context.new_page()
-                try:
-                    for index, step_dict in enumerate(steps):
-                        step_action = str(step_dict.get("action") or "").strip()
-                        step_id = str(step_dict.get("id") or "").strip()
-                        if step_action in {"login", "login_if_needed"}:
-                            authenticated = _profile_is_authenticated(page, playbook)
-                            if should_skip_login_action(step_dict, authenticated=authenticated):
-                                logger.info(
-                                    "browser login skipped because profile is authenticated: "
-                                    "job_id=%s step_id=%s",
-                                    job_id,
-                                    step_dict.get("id") or "",
-                                )
-                                continue
-                            logger.info(
-                                "browser login required for profile: job_id=%s step_id=%s diagnostics=%s",
-                                job_id,
-                                step_id,
-                                _profile_auth_check_diagnostics(page, user_data_dir=user_data_dir),
-                            )
-                        _pause_before_step(
-                            page,
-                            run_config=config,
-                            step_id=step_id,
-                            action_name=step_action,
-                        )
-                        allow_auth_redirect = step_action == "navigate" and any(
-                            str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
-                            for next_step in steps[index + 1 :]
-                        )
-                        result = _execute_action(
-                            page,
-                            step_dict,
-                            params=params,
-                            extracted=extracted,
-                            capture_files=capture_files,
-                            download_dir=download_dir,
-                            allow_auth_redirect=allow_auth_redirect,
-                            run_config=config,
-                            sync_job_id=job_id,
-                            storage_context=storage_context,
-                            handoff_coordinator=handoff_coordinator,
-                            backend_factory=backend_factory,
-                            chrome=chrome,
-                        )
-                        if result.get("rows"):
-                            rows.extend(result["rows"])
-                        if result.get("stop_playbook"):
-                            logger.info(
-                                "browser playbook stopped early: job_id=%s step_id=%s",
-                                job_id,
-                                step_id,
-                            )
-                            break
-                finally:
+        profile_lock = _profile_file_lock(user_data_dir)
+        with profile_lock:
+            chrome = launch_chrome(
+                user_data_dir=user_data_dir,
+                headless=config.headless,
+                channel=config.browser_channel,
+                timezone_id=config.timezone_id,
+            )
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.connect_over_cdp(chrome.cdp_url)
+                    context = browser.contexts[0] if browser.contexts else browser.new_context(accept_downloads=True)
+                    page = context.pages[0] if context.pages else context.new_page()
                     try:
-                        browser.close()
-                    except Exception:
-                        pass
-        finally:
-            chrome.terminate()
+                        for index, step_dict in enumerate(steps):
+                            step_action = str(step_dict.get("action") or "").strip()
+                            step_id = str(step_dict.get("id") or "").strip()
+                            if step_action in {"login", "login_if_needed"}:
+                                authenticated = _profile_is_authenticated(page, playbook)
+                                if should_skip_login_action(step_dict, authenticated=authenticated):
+                                    logger.info(
+                                        "browser login skipped because profile is authenticated: "
+                                        "job_id=%s step_id=%s",
+                                        job_id,
+                                        step_dict.get("id") or "",
+                                    )
+                                    continue
+                                logger.info(
+                                    "browser login required for profile: job_id=%s step_id=%s diagnostics=%s",
+                                    job_id,
+                                    step_id,
+                                    _profile_auth_check_diagnostics(page, user_data_dir=user_data_dir),
+                                )
+                            _pause_before_step(
+                                page,
+                                run_config=config,
+                                step_id=step_id,
+                                action_name=step_action,
+                            )
+                            allow_auth_redirect = step_action == "navigate" and any(
+                                str(next_step.get("action") or "").strip() in {"login", "login_if_needed"}
+                                for next_step in steps[index + 1 :]
+                            )
+                            result = _execute_action(
+                                page,
+                                step_dict,
+                                params=params,
+                                extracted=extracted,
+                                capture_files=capture_files,
+                                download_dir=download_dir,
+                                allow_auth_redirect=allow_auth_redirect,
+                                run_config=config,
+                                sync_job_id=job_id,
+                                storage_context=storage_context,
+                                handoff_coordinator=handoff_coordinator,
+                                backend_factory=backend_factory,
+                                chrome=chrome,
+                            )
+                            if result.get("rows"):
+                                rows.extend(result["rows"])
+                            if result.get("stop_playbook"):
+                                logger.info(
+                                    "browser playbook stopped early: job_id=%s step_id=%s",
+                                    job_id,
+                                    step_id,
+                                )
+                                break
+                    finally:
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+            finally:
+                chrome.terminate()
     except BrowserActionError as exc:
         logger.warning(
             "playwright browser run failed: job_id=%s fail_reason=%s error=%s",

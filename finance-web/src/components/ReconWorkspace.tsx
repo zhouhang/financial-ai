@@ -316,7 +316,7 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.7fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
+  'minmax(0,2.7fr) minmax(150px,0.9fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -1057,8 +1057,8 @@ function mapRun(
     runCode: toText(raw.run_code),
     schemeCode,
     planCode,
-    schemeName: schemeNameByCode.get(schemeCode) || schemeCode || '--',
-    planName: taskNameByCode.get(planCode) || planCode || '--',
+    schemeName: toText(raw.scheme_name) || schemeNameByCode.get(schemeCode) || schemeCode || '--',
+    planName: toText(raw.plan_name) || taskNameByCode.get(planCode) || planCode || '--',
     executionStatus: toText(raw.execution_status),
     triggerType: toText(runContext.trigger_type, toText(raw.trigger_type)),
     entryMode: toText(raw.entry_mode),
@@ -5998,7 +5998,7 @@ export default function ReconWorkspace({
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
       <div className="min-w-[1080px]">
         <ListHeader
-          columns={['运行任务', '异常数', '状态', '操作']}
+          columns={['运行任务', '运行时间', '异常数', '状态', '操作']}
           template={RUN_LIST_TEMPLATE}
         />
         {runs.map((item) => {
@@ -6021,9 +6021,10 @@ export default function ReconWorkspace({
                 <p className="mt-1 line-clamp-2 text-sm leading-6 text-text-secondary">
                   {item.failedReason
                     ? `失败于 ${item.failedStage || '未知阶段'} · ${item.failedReason}`
-                    : `${item.schemeName} · ${formatDateTime(item.startedAt)}`}
+                    : item.schemeName}
                 </p>
               </div>
+              <span className="text-sm text-text-secondary">{formatDateTime(item.startedAt)}</span>
               <span className="text-sm text-text-secondary">{item.anomalyCount}</span>
               <span
                 className={cn(

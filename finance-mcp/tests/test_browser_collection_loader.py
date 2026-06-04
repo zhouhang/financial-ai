@@ -209,3 +209,82 @@ def test_load_browser_collection_records_applies_payload_filters(monkeypatch):
     )
 
     assert list(df["bill_no"]) == ["B001"]
+
+
+def test_browser_collection_records_loader_accepts_successful_empty_collection(monkeypatch):
+    """A browser sync job may validly succeed with zero rows. The loader should
+    expose that as an empty dataframe with the published dataset schema instead
+    of reporting that no collection has happened."""
+    monkeypatch.setattr(
+        dataset_loader,
+        "_table_columns",
+        lambda table_name: {
+            "data_source_id",
+            "dataset_id",
+            "resource_key",
+            "biz_date",
+            "payload",
+            "captured_at",
+        },
+    )
+    monkeypatch.setattr(dataset_loader, "_load_browser_collection_record_rows", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        dataset_loader,
+        "_empty_browser_collection_schema_columns_for_success_job",
+        lambda *, source_key, query: ["订单编号", "订单付款时间", "买家实付金额"],
+        raising=False,
+    )
+
+    df = dataset_loader.load_dataset_as_df(
+        {
+            "source_type": "browser_collection_records",
+            "source_key": "source-001",
+            "query": {
+                "dataset_id": "dataset-001",
+                "resource_key": "browser-collection-001@1",
+                "biz_date": "2026-06-02",
+                "filters": {"订单付款时间": "2026-06-02"},
+            },
+        },
+        "店铺订单",
+    )
+
+    assert df.empty
+    assert list(df.columns) == ["订单编号", "订单付款时间", "买家实付金额"]
+
+
+def test_browser_collection_records_loader_still_rejects_missing_collection(monkeypatch):
+    monkeypatch.setattr(
+        dataset_loader,
+        "_table_columns",
+        lambda table_name: {
+            "data_source_id",
+            "dataset_id",
+            "resource_key",
+            "biz_date",
+            "payload",
+            "captured_at",
+        },
+    )
+    monkeypatch.setattr(dataset_loader, "_load_browser_collection_record_rows", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        dataset_loader,
+        "_empty_browser_collection_schema_columns_for_success_job",
+        lambda *, source_key, query: None,
+    )
+
+    with pytest.raises(dataset_loader.DatasetLoadError) as exc_info:
+        dataset_loader.load_dataset_as_df(
+            {
+                "source_type": "browser_collection_records",
+                "source_key": "source-001",
+                "query": {
+                    "dataset_id": "dataset-001",
+                    "resource_key": "browser-collection-001@1",
+                    "biz_date": "2026-06-02",
+                },
+            },
+            "店铺订单",
+        )
+
+    assert "暂无浏览器采集记录" in str(exc_info.value)

@@ -489,6 +489,20 @@ def test_update_browser_playbook_credential_returns_safe_summary(monkeypatch) ->
         }
 
     monkeypatch.setattr(data_sources, "update_browser_playbook_credential", fake_update)
+    async def fake_retry_verification(arguments):
+        return {
+            "success": True,
+            "status": "verification_pending",
+            "verification_sync_job_id": "sync-retry-1",
+            "verification_biz_date": "2026-05-20",
+            "source": {"id": "source-001"},
+        }
+
+    monkeypatch.setattr(
+        data_sources,
+        "_handle_data_source_retry_browser_playbook_verification",
+        fake_retry_verification,
+    )
 
     result = asyncio.run(
         data_sources._handle_data_source_update_browser_playbook_credential(
@@ -507,6 +521,7 @@ def test_update_browser_playbook_credential_returns_safe_summary(monkeypatch) ->
         "password_saved": True,
     }
     assert result["binding"]["profile_status"] == "verifying"
+    assert result["verification_sync_job_id"] == "sync-retry-1"
     assert captured["credential_password"] == "secret-password"
     assert "secret-password" not in str(result)
 

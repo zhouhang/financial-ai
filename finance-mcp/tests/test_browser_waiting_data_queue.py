@@ -76,6 +76,7 @@ def test_requeue_ready_waiting_requires_non_empty_collection_jobs(monkeypatch) -
 def test_mark_waiting_data_persists_collection_job_ids_and_timestamp(monkeypatch) -> None:
     cursor = FakeCursor()
     monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+    monkeypatch.setattr(auth_db, "_RECON_WAITING_DATA_RETRY_SECONDS", 30)
 
     auth_db.mark_recon_run_waiting_data(
         job_id="queue-001",
@@ -90,6 +91,9 @@ def test_mark_waiting_data_persists_collection_job_ids_and_timestamp(monkeypatch
     assert "jsonb_set(run_context, '{execution_run_id}'" in sql
     assert "collection_job_ids = %s::jsonb" in sql
     assert "updated_at = CURRENT_TIMESTAMP" in sql
+    assert "INTERVAL '5 minutes'" not in sql
+    assert "INTERVAL '1 second'" in sql
+    assert cursor.params[0][2] == 30
 
 
 def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_ids(monkeypatch) -> None:

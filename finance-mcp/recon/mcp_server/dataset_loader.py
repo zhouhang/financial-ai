@@ -1292,6 +1292,131 @@ def _strip_browser_payload_values(payload: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _summary_count_or_none(summary: dict[str, Any]) -> int | None:
+    for container in (
+        summary,
+        summary.get("quality_summary") if isinstance(summary.get("quality_summary"), dict) else {},
+        summary.get("records") if isinstance(summary.get("records"), dict) else {},
+    ):
+        if not isinstance(container, dict):
+            continue
+        for key in ("record_count", "row_count", "input_count", "upserted_count", "inserted_count"):
+            if key not in container:
+                continue
+            try:
+                return int(container.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _schema_column_names(schema_summary: Any) -> list[str]:
+    if not isinstance(schema_summary, dict):
+        return []
+    columns = schema_summary.get("columns")
+    if not isinstance(columns, list):
+        columns = schema_summary.get("fields")
+    names: list[str] = []
+    if not isinstance(columns, list):
+        return names
+    for item in columns:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("field") or item.get("column") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _empty_browser_collection_schema_columns_for_success_job(
+    *,
+    source_key: str,
+    query: dict[str, Any],
+) -> list[str] | None:
+    dataset_id = str(query.get("dataset_id") or "").strip()
+    resource_key = str(query.get("resource_key") or "").strip()
+    biz_date = str(query.get("biz_date") or "").strip()
+    if not dataset_id or not resource_key or not biz_date:
+        return None
+
+    conn = None
+    cur = None
+    try:
+        import psycopg2.extras
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT d.schema_summary, s.checkpoint_after
+            FROM data_source_datasets d
+            JOIN sync_jobs s
+              ON s.company_id = d.company_id
+             AND s.data_source_id = d.data_source_id
+             AND s.resource_key = %s
+             AND s.job_status = 'success'
+             AND s.request_payload ->> 'dataset_id' = d.id::text
+             AND s.request_payload ->> 'biz_date' = %s
+            WHERE d.id::text = %s
+              AND d.data_source_id::text = %s
+              AND d.status <> 'deleted'
+            ORDER BY s.completed_at DESC NULLS LAST, s.updated_at DESC, s.created_at DESC
+            LIMIT 1
+            """,
+            (resource_key, biz_date, dataset_id, source_key),
+        )
+        row = cur.fetchone()
+    except Exception:
+        logger.warning(
+            "[recon][dataset] source_key=%s 查询浏览器空采集成功任务失败",
+            source_key,
+            exc_info=True,
+        )
+        return None
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        finally:
+            if conn is not None:
+                conn.close()
+
+    if not row:
+        return None
+    checkpoint_after = row.get("checkpoint_after")
+    if not isinstance(checkpoint_after, dict):
+        return None
+    summary = checkpoint_after.get("browser_collection_summary")
+    if not isinstance(summary, dict):
+        return None
+    if _summary_count_or_none(summary) != 0:
+        return None
+    return _schema_column_names(row.get("schema_summary"))
+
+
+def _validate_browser_empty_collection_filters(
+    *,
+    filters: Any,
+    schema_columns: list[str],
+    table_columns: set[str],
+) -> None:
+    if filters is None:
+        return
+    if not isinstance(filters, dict):
+        raise DatasetLoadError("browser_collection_records query.filters 必须是对象")
+    schema_column_set = set(schema_columns)
+    for field, value in filters.items():
+        field_name = str(field or "").strip()
+        if not field_name:
+            continue
+        if field_name not in schema_column_set and field_name not in table_columns:
+            raise DatasetLoadError(f"browser_collection_records 数据中不存在过滤字段: {field_name}")
+        if not _is_collection_filter_value(value):
+            raise DatasetLoadError(
+                f"browser_collection_records query.filters 字段 '{field_name}' 仅支持标量值或标量数组"
+            )
+
+
 def _load_from_browser_collection_records(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
     """Load dataset from published browser_collection_records rows."""
     _, source_key, query = _require_dataset_protocol(dataset_ref, table_name)
@@ -1314,6 +1439,17 @@ def _load_from_browser_collection_records(dataset_ref: dict[str, Any], table_nam
             payload_rows.append(_strip_browser_payload_values(payload))
 
     if not payload_rows:
+        empty_columns = _empty_browser_collection_schema_columns_for_success_job(
+            source_key=source_key,
+            query=query,
+        )
+        if empty_columns is not None:
+            _validate_browser_empty_collection_filters(
+                filters=query.get("filters"),
+                schema_columns=empty_columns,
+                table_columns=columns,
+            )
+            return pd.DataFrame(columns=empty_columns)
         raise DatasetLoadError(f"source_key={source_key} 暂无浏览器采集记录。请先采集数据后再执行对账。")
 
     df = pd.DataFrame(payload_rows)
