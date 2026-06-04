@@ -116,6 +116,8 @@ rm -f /tmp/finance-cron.pid
 # 兜底清理 PID 文件丢失后遗留的旧 finance-cron。
 pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
 # 停止已有的 browser-agent 进程
+[ -f "$LOG_DIR/browser-agent.pid" ] && kill -9 "$(cat "$LOG_DIR/browser-agent.pid")" 2>/dev/null || true
+rm -f "$LOG_DIR/browser-agent.pid"
 [ -f /tmp/browser-agent.pid ] && kill -9 "$(cat /tmp/browser-agent.pid)" 2>/dev/null || true
 rm -f /tmp/browser-agent.pid
 pkill -f "finance-agents/browser-agent/service.py" 2>/dev/null || true
@@ -152,7 +154,6 @@ source .venv/bin/activate
 cd finance-agents/data-agent
 load_project_env
 # 在 Python 启动前导出 LangSmith 环境变量（必须在进程启动时已存在，否则 LangSmith 追踪不生效）
-[ -f .env ] && source .env
 configure_langsmith_env
 DATA_AGENT_PID="$(start_detached "$LOG_DIR/data-agent.log" "$PROJECT_ROOT/finance-agents/data-agent" python -m server)"
 echo "✅ data-agent 已启动 (PID: $DATA_AGENT_PID)"
@@ -180,13 +181,18 @@ echo ""
 echo "📌 步骤 4b: 启动 browser-agent..."
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
-load_project_env
-BROWSER_AGENT_PID="$(start_detached "$LOG_DIR/browser-agent.log" "$PROJECT_ROOT/finance-agents/browser-agent" python service.py)"
-echo "$BROWSER_AGENT_PID" > /tmp/browser-agent.pid
-echo "✅ browser-agent 已启动 (PID: $BROWSER_AGENT_PID)"
-sleep 2
-if ! kill -0 "$BROWSER_AGENT_PID" 2>/dev/null; then
-    echo "⚠️  browser-agent 启动后立即退出，请查看日志：tail -80 $LOG_DIR/browser-agent.log"
+if [ -f "$PROJECT_ROOT/finance-agents/browser-agent/.env" ]; then
+    BROWSER_AGENT_ENV_FILE="$PROJECT_ROOT/finance-agents/browser-agent/.env" \
+    BROWSER_AGENT_LOG_DIR="$LOG_DIR" \
+    "$PROJECT_ROOT/scripts/start-browser-agent.sh" --daemon
+    sleep 2
+    if [ -f "$LOG_DIR/browser-agent.pid" ] && kill -0 "$(cat "$LOG_DIR/browser-agent.pid")" 2>/dev/null; then
+        echo "✅ browser-agent 已启动 (PID: $(cat "$LOG_DIR/browser-agent.pid"))"
+    else
+        echo "⚠️  browser-agent 启动后立即退出，请查看日志：tail -80 $LOG_DIR/browser-agent.log"
+    fi
+else
+    echo "⚠️  browser-agent 配置缺失，已跳过：finance-agents/browser-agent/.env"
 fi
 
 # 启动 recon-worker（默认 4 个进程，可通过 RECON_WORKER_COUNT 覆盖）
@@ -262,7 +268,7 @@ else
 fi
 
 # 检查 browser-agent
-if [ -f /tmp/browser-agent.pid ] && kill -0 "$(cat /tmp/browser-agent.pid)" 2>/dev/null; then
+if [ -f "$LOG_DIR/browser-agent.pid" ] && kill -0 "$(cat "$LOG_DIR/browser-agent.pid")" 2>/dev/null; then
     echo "✅ browser-agent (collection) - 运行正常"
 else
     echo "⚠️  browser-agent - 未运行 (首店上线前可忽略)"

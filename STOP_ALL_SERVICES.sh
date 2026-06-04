@@ -1,5 +1,8 @@
 #!/bin/bash
 
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$PROJECT_ROOT/logs"
+
 echo "=========================================="
 echo "  Finance AI - 停止所有服务"
 echo "=========================================="
@@ -29,6 +32,7 @@ stop_pid_file() {
 stop_pid_file "finance-cron" "/tmp/finance-cron.pid"
 pkill -f "finance-cron/run_scheduler.py" 2>/dev/null || true
 
+stop_pid_file "browser-agent" "$LOG_DIR/browser-agent.pid"
 stop_pid_file "browser-agent" "/tmp/browser-agent.pid"
 pkill -f "finance-agents/browser-agent/service.py" 2>/dev/null || true
 
