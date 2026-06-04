@@ -70,6 +70,34 @@ def _build_handoff_link(token: str) -> str:
     return f"{base}/handoff?t={token}" if base else f"/handoff?t={token}"
 
 
+def _notify_handoff_fallback(
+    *, company_id: str, sync_job_id: str, shop_id: str, reason: str, link: str
+) -> bool:
+    """没配责任人(或主通道未发出)时的兜底:直接复用浏览器采集告警发送方法,把验证链接
+    发给 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD 解析出的接收人(不重写收件人解析/发送/去重)。"""
+    try:
+        from services.browser_alerts import BrowserAlertEvent, BrowserAlertService
+
+        result = BrowserAlertService().send_alert(
+            BrowserAlertEvent(
+                event_type="risk_blocked",
+                company_id=company_id,
+                shop_id=shop_id,
+                data_source_name="",
+                sync_job_id=sync_job_id,
+                reason=reason,
+                message=(
+                    f"采集店铺需要人工验证，请打开链接完成：[打开验证链接]({link})"
+                    "（完成后点页面底部“我已完成验证”）"
+                ),
+            )
+        )
+        return str(result.get("status") or "") == "sent"
+    except Exception:
+        logger.exception("handoff 兜底通知发送失败 sync_job_id=%s", sync_job_id)
+        return False
+
+
 def verify_system_token(token: str) -> dict[str, Any] | None:
     """校验 JWT 且必须 role=system,否则返回 None。"""
     try:
@@ -147,33 +175,45 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
         owner = {}
     channel_id = str(created.get("channel_config_id") or "").strip()
     recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
+    reason = str(msg.get("reason") or "RISK_VERIFICATION")
     notified = False
-    if channel_id and recipient:
-        channel = load_company_channel_config_by_id(channel_id=channel_id)
-        if channel is None:
-            logger.warning("handoff 通知通道不存在或不可用 channel_id=%s sync_job_id=%s", channel_id, sync_job_id)
+    if recipient:
+        # 配了责任人:走 per-company 通道。通道缺失/发送失败只记日志,不兜底(兜底仅针对"没配责任人")。
+        if channel_id:
+            channel = load_company_channel_config_by_id(channel_id=channel_id)
+            if channel is None:
+                logger.warning("handoff 通知通道不存在或不可用 channel_id=%s sync_job_id=%s", channel_id, sync_job_id)
+            else:
+                try:
+                    adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
+                    target = _resolve_handoff_recipient(adapter, owner)
+                    if target:
+                        adapter.send_bot_message(
+                            content=(
+                                "采集店铺需要人工验证。\n\n"
+                                f"原因：{reason}\n\n"
+                                f"[打开验证链接]({link})\n\n"
+                                "完成验证后请点击页面底部“我已完成验证”。"
+                            ),
+                            content_type="markdown",
+                            title="Tally 浏览器人工验证",
+                            to_user_id=target,
+                        )
+                        notified = True
+                except Exception:
+                    logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
         else:
-            try:
-                adapter = get_notification_adapter(provider=getattr(channel, "provider", ""), channel_config=channel)
-                target = _resolve_handoff_recipient(adapter, owner)
-                if target:
-                    reason = str(msg.get("reason") or "RISK_VERIFICATION")
-                    adapter.send_bot_message(
-                        content=(
-                            "采集店铺需要人工验证。\n\n"
-                            f"原因：{reason}\n\n"
-                            f"[打开验证链接]({link})\n\n"
-                            "完成验证后请点击页面底部“我已完成验证”。"
-                        ),
-                        content_type="markdown",
-                        title="Tally 浏览器人工验证",
-                        to_user_id=target,
-                    )
-                    notified = True
-            except Exception:
-                logger.exception("handoff 通知发送失败 sync_job_id=%s", sync_job_id)
+            logger.info("handoff 有责任人但未配置通知通道,跳过通知 sync_job_id=%s", sync_job_id)
     else:
-        logger.info("handoff 无对账任务责任人,跳过通知 sync_job_id=%s", sync_job_id)
+        # 没配责任人 → 兜底发给 .env 的 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD 接收人
+        logger.info("handoff 无对账任务责任人,走采集告警兜底接收人 sync_job_id=%s", sync_job_id)
+        notified = _notify_handoff_fallback(
+            company_id=company_id,
+            sync_job_id=sync_job_id,
+            shop_id=str(msg.get("shop_id") or ""),
+            reason=reason,
+            link=link,
+        )
     _NOTIFIED_RISK_JOBS.add(sync_job_id)
     return {"type": "result", "id": req_id, "ok": True,
             "data": {"handoff_session_id": created.get("handoff_session_id"), "notified": notified}}

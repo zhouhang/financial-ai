@@ -29,6 +29,10 @@ except Exception:
         return value or ""
 
 logger = logging.getLogger(__name__)
+_RECON_WAITING_DATA_RETRY_SECONDS = max(
+    5,
+    int(os.getenv("RECON_WAITING_DATA_RETRY_SECONDS", "30") or "30"),
+)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
@@ -5871,19 +5875,27 @@ def find_inflight_dataset_collection_sync_job(
     dataset_id: str,
     resource_key: str,
     biz_date: str,
+    is_verification: bool | None = None,
 ) -> dict | None:
     """查找同一数据集业务日期正在执行的采集任务。"""
     conn_manager = get_conn()
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                params: list[Any] = [company_id, data_source_id, resource_key, dataset_id, biz_date]
+                verification_filter = ""
+                if is_verification is True:
+                    verification_filter = " AND is_verification IS TRUE"
+                elif is_verification is False:
+                    verification_filter = " AND COALESCE(is_verification, FALSE) IS FALSE"
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, company_id, data_source_id, trigger_mode, resource_key,
                            window_start, window_end, idempotency_key, job_status,
                            request_payload, checkpoint_before, checkpoint_after,
                            active_snapshot_id, published_snapshot_id, current_attempt,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, started_at, completed_at, created_at, updated_at,
+                           is_verification
                     FROM sync_jobs
                     WHERE company_id = %s
                       AND data_source_id = %s
@@ -5892,10 +5904,11 @@ def find_inflight_dataset_collection_sync_job(
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                       AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+                      {verification_filter}
                     ORDER BY created_at ASC
                     LIMIT 1
                     """,
-                    (company_id, data_source_id, resource_key, dataset_id, biz_date),
+                    tuple(params),
                 )
                 row = cur.fetchone()
                 return _normalize_record(dict(row)) if row else None
@@ -6317,6 +6330,11 @@ def activate_browser_playbook_and_binding(
     Called by ``data_source_finalize_browser_playbook_registration`` after the verification
     sync_job ends in ``success``. Resets ``cron_pause_reason`` so the binding immediately
     becomes eligible for production claim.
+
+    Idempotent: re-running finalize (e.g. retrying an already-active task) keeps both rows
+    as ``active`` and returns them, instead of returning ``None`` and surfacing a spurious
+    "not in draft/verifying" error. ``approved_at`` is preserved via COALESCE so the original
+    approval time is not overwritten on re-activation.
     """
     conn_manager = get_conn()
     try:
@@ -6326,12 +6344,12 @@ def activate_browser_playbook_and_binding(
                     """
                     UPDATE playbooks
                     SET status = 'active',
-                        approved_at = CURRENT_TIMESTAMP,
+                        approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE company_id = %s
                       AND playbook_id = %s
                       AND version = %s
-                      AND status IN ('draft', 'replayed', 'approved')
+                      AND status IN ('draft', 'replayed', 'approved', 'active')
                     RETURNING id, playbook_id, version, status
                     """,
                     (company_id, playbook_id, version),
@@ -6974,7 +6992,7 @@ def mark_recon_run_waiting_data(
                             WHEN %s = '' THEN run_context
                             ELSE jsonb_set(run_context, '{execution_run_id}', to_jsonb(%s::text), TRUE)
                         END,
-                        next_retry_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                        next_retry_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
                         wait_deadline_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
                         waiting_reason = %s,
                         waiting_datasets = %s::jsonb,
@@ -6986,6 +7004,7 @@ def mark_recon_run_waiting_data(
                     (
                         run_id,
                         run_id,
+                        _RECON_WAITING_DATA_RETRY_SECONDS,
                         max(1, int(wait_minutes or 1)),
                         waiting_reason,
                         json.dumps(waiting_datasets or [], ensure_ascii=False),
@@ -10563,23 +10582,33 @@ def list_execution_runs(
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 sql = """
-                    SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
-                           trigger_type, entry_mode, execution_status,
-                           failed_stage, failed_reason,
-                           run_context_json, source_snapshot_json, subtasks_json,
-                           proc_result_json, recon_result_summary_json, artifacts_json,
-                           anomaly_count, started_at, finished_at, created_at, updated_at
-                    FROM execution_runs
-                    WHERE company_id = %s
+                    SELECT runs.id, runs.company_id, runs.run_code, runs.scheme_code,
+                           runs.plan_code, runs.scheme_type,
+                           runs.trigger_type, runs.entry_mode, runs.execution_status,
+                           runs.failed_stage, runs.failed_reason,
+                           runs.run_context_json, runs.source_snapshot_json, runs.subtasks_json,
+                           runs.proc_result_json, runs.recon_result_summary_json, runs.artifacts_json,
+                           runs.anomaly_count, runs.started_at, runs.finished_at,
+                           runs.created_at, runs.updated_at,
+                           plan.plan_name,
+                           scheme.scheme_name
+                    FROM execution_runs runs
+                    LEFT JOIN execution_run_plans plan
+                      ON plan.company_id = runs.company_id
+                     AND plan.plan_code = runs.plan_code
+                    LEFT JOIN execution_schemes scheme
+                      ON scheme.company_id = runs.company_id
+                     AND scheme.scheme_code = runs.scheme_code
+                    WHERE runs.company_id = %s
                 """
                 params: list[Any] = [company_id]
                 if scheme_code:
-                    sql += " AND scheme_code = %s"
+                    sql += " AND runs.scheme_code = %s"
                     params.append(scheme_code)
                 if plan_code:
-                    sql += " AND plan_code = %s"
+                    sql += " AND runs.plan_code = %s"
                     params.append(plan_code)
-                sql += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                sql += " ORDER BY runs.created_at DESC LIMIT %s OFFSET %s"
                 params.extend([limit, offset])
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()

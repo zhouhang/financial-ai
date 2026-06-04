@@ -10,9 +10,16 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import HandoffViewport from './HandoffViewport';
+import HandoffViewport, { gestureLockState } from './HandoffViewport';
 import { parseHandoffToken } from './handoffWs';
 import { useHandoffSession } from './useHandoffSession';
+import type { HandoffCapabilities } from './types';
+
+export function canSendText(
+  s: { text: string; disabled: boolean; focusEditable: boolean | null },
+): boolean {
+  return Boolean(s.text) && !s.disabled && s.focusEditable === true;
+}
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
@@ -42,17 +49,25 @@ function statusTone(status: string): string {
   return 'text-orange-700 bg-orange-50 border-orange-200';
 }
 
+export function backendStatusLabel(caps: HandoffCapabilities | undefined): string {
+  if (!caps?.backend) return '';
+  if (caps.backend === 'playwright') return '兼容模式';
+  return '远程操作';
+}
+
 const ZOOM_LEVELS = [1, 1.5, 2.25];
 
 export default function HandoffPage() {
   const token = useMemo(() => parseHandoffToken(), []);
-  const { status, session, frame, error, sendInput, resume, reconnect } = useHandoffSession(token);
+  const { status, session, frame, error, sendInput, resume, reconnect, focusEditable } = useHandoffSession(token);
   const [text, setText] = useState('');
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [panMode, setPanMode] = useState(false);
   const [zoomIndex, setZoomIndex] = useState(0);
+  const [gestureActive, setGestureActive] = useState(false);
   const zoom = ZOOM_LEVELS[zoomIndex] || 1;
   const disabled = status === 'revoked' || status === 'completed' || status === 'expired' || status === 'error';
+  const { controlsLocked } = gestureLockState(gestureActive);
 
   return (
     <main className="h-dvh overflow-hidden bg-neutral-100 text-neutral-950">
@@ -69,6 +84,9 @@ export default function HandoffPage() {
               </h1>
               <p className="mt-1 truncate text-xs leading-5 text-neutral-500">
                 {session?.reason || 'RISK_VERIFICATION'} · {session?.agent_id || '采集机'}
+                {backendStatusLabel(session?.capabilities) ? (
+                  <> · {backendStatusLabel(session?.capabilities)}</>
+                ) : null}
               </p>
             </div>
             <button
@@ -90,6 +108,7 @@ export default function HandoffPage() {
             mode={panMode ? 'pan' : 'control'}
             zoom={zoom}
             onInput={sendInput}
+            onGestureChange={setGestureActive}
           />
         </div>
 
@@ -107,33 +126,38 @@ export default function HandoffPage() {
 
           {keyboardOpen ? (
             <form
-              className="flex gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-2"
+              className="flex flex-col gap-1.5 rounded-md border border-neutral-200 bg-neutral-50 p-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!text || disabled) return;
+                if (!canSendText({ text, disabled, focusEditable })) return;
                 sendInput({ kind: 'text', text });
                 setText('');
               }}
             >
-              <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-neutral-300 bg-white px-3 py-2 focus-within:border-orange-500">
-                <Keyboard size={17} className="shrink-0 text-neutral-500" />
-                <input
-                  value={text}
-                  onChange={(event) => setText(event.target.value)}
-                  disabled={disabled}
-                  className="min-w-0 flex-1 bg-transparent text-base leading-6 outline-none placeholder:text-neutral-400"
-                  placeholder="短信验证码或文本"
-                  inputMode="text"
-                  enterKeyHint="send"
-                />
-              </label>
-              <button
-                type="submit"
-                disabled={disabled || !text}
-                className="h-11 shrink-0 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white disabled:opacity-40"
-              >
-                发送
-              </button>
+              <div className="flex gap-2">
+                <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-neutral-300 bg-white px-3 py-2 focus-within:border-orange-500">
+                  <Keyboard size={17} className="shrink-0 text-neutral-500" />
+                  <input
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    disabled={disabled}
+                    className="min-w-0 flex-1 bg-transparent text-base leading-6 outline-none placeholder:text-neutral-400"
+                    placeholder="短信验证码或文本"
+                    inputMode="text"
+                    enterKeyHint="send"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!canSendText({ text, disabled, focusEditable })}
+                  className="h-11 shrink-0 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white disabled:opacity-40"
+                >
+                  发送
+                </button>
+              </div>
+              {focusEditable === false ? (
+                <p className="px-1 text-xs text-amber-700">请先点中输入框</p>
+              ) : null}
             </form>
           ) : null}
 
@@ -146,7 +170,7 @@ export default function HandoffPage() {
               }`}
               aria-label={keyboardOpen ? '关闭键盘输入' : '打开键盘输入'}
               aria-pressed={keyboardOpen}
-              disabled={disabled}
+              disabled={disabled || controlsLocked}
             >
               <Keyboard size={17} className="shrink-0 text-neutral-500" />
             </button>
@@ -155,7 +179,7 @@ export default function HandoffPage() {
               onClick={() => setZoomIndex((value) => Math.max(0, value - 1))}
               className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm disabled:opacity-40"
               aria-label="缩小画面"
-              disabled={zoomIndex === 0}
+              disabled={zoomIndex === 0 || controlsLocked}
             >
               <Minus size={18} />
             </button>
@@ -164,19 +188,24 @@ export default function HandoffPage() {
               onClick={() => setZoomIndex((value) => Math.min(ZOOM_LEVELS.length - 1, value + 1))}
               className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm disabled:opacity-40"
               aria-label="放大画面"
-              disabled={zoomIndex >= ZOOM_LEVELS.length - 1}
+              disabled={zoomIndex >= ZOOM_LEVELS.length - 1 || controlsLocked}
             >
               <Plus size={18} />
             </button>
             <button
               type="button"
-              onClick={() => setPanMode((value) => !value)}
+              onClick={() => {
+                if (gestureActive) {
+                  sendInput({ kind: 'mouse_up', button: 'left', x: 0, y: 0 });
+                }
+                setPanMode((value) => !value);
+              }}
               className={`grid h-11 w-11 shrink-0 place-items-center rounded-md border shadow-sm disabled:opacity-40 ${
                 panMode ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-neutral-200 bg-white text-neutral-700'
               }`}
               aria-label={panMode ? '切换到远程操作' : '切换到移动画面'}
               aria-pressed={panMode}
-              disabled={disabled}
+              disabled={disabled || controlsLocked}
             >
               {panMode ? <Move size={18} /> : <MousePointerClick size={18} />}
             </button>

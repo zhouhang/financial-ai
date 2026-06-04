@@ -62,6 +62,17 @@ async def test_complete_and_fail_map_to_domain_types():
     assert ws.calls[0][1]["sync_job_id"] == "j1"
 
 
+@pytest.mark.asyncio
+async def test_heartbeat_includes_handoff_control_capabilities():
+    client, ws = _client()
+    await client.heartbeat(company_id="c1")
+    msg_type, payload = ws.calls[0]
+    caps = payload["capabilities"]
+    assert "handoff_control" in caps
+    assert "backend" in caps["handoff_control"]
+    assert "status" in caps["handoff_control"]
+
+
 def test_config_from_env_uses_data_agent_ws_url(monkeypatch):
     monkeypatch.setenv("DATA_AGENT_WS_URL", "wss://cloud/browser-agent")
     cfg = BrowserAgentConfig.from_env()

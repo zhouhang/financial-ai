@@ -73,6 +73,14 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
               message_id: 'msg-001',
               error: '',
             },
+            exception_sampling: {
+              enabled: true,
+              total_count: 35665,
+              sample_count: 200,
+              sample_limit: 200,
+              threshold: 1000,
+              strategy: 'stratified_by_anomaly_type_owner',
+            },
           },
         },
         recon_result_summary_json: {
@@ -135,8 +143,26 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
         plan_code: 'plan-001',
         plan_name: '泰斯支付宝对账',
       },
-      exceptions: [],
-      total: 60,
+      exceptions: [
+        {
+          id: 'exception-owner-001',
+          anomaly_type: 'source_only',
+          summary: '仅交易订单明细表存在：订单号=ORDER-001',
+          owner_name: '张三',
+          owner_identifier: 'ding-user-001',
+          processing_status: 'pending',
+          detail_json: {
+            join_key: [
+              {
+                source_field: '订单号',
+                source_value: 'ORDER-001',
+              },
+            ],
+            compare_values: [],
+          },
+        },
+      ],
+      total: 1,
       limit: 100,
       offset: 0,
     }));
@@ -167,7 +193,8 @@ describe('PublicReconRunExceptionsPage run metrics', () => {
     expect(headerView.queryByText('新增 0 / 更新 340')).not.toBeInTheDocument();
     expect(headerView.queryByText((_, element) => element?.textContent === '本次读取 1 条')).not.toBeInTheDocument();
     expect(screen.getByText('差异列表')).toBeInTheDocument();
-    expect(screen.getByText((_, element) => element?.textContent === '待处理差异 60 条')).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === '全量差异 35,665 条，当前抽样展示 1 条')).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === '第 1 页 · 当前页 1 条 · 抽样可见 1 条')).toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/recon/public/runs/run-001/exceptions?limit=100&offset=0&owner=ding-user-001',

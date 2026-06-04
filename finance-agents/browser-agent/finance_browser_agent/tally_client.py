@@ -25,6 +25,21 @@ from finance_browser_agent.data_agent_ws import DataAgentWsClient
 from finance_browser_agent.remote_control import RemoteControlCoordinator
 
 
+def _handoff_os_selfcheck() -> dict[str, Any]:
+    import platform as _p
+    system = _p.system()
+    try:
+        if system == "Windows":
+            from finance_browser_agent.remote_control_os_windows import selfcheck
+            return selfcheck()
+        if system == "Darwin":
+            from finance_browser_agent.remote_control_os_macos import selfcheck
+            return selfcheck()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": "control_unavailable", "detail": str(exc)}
+    return {"available": True, "reason": ""}
+
+
 JWT_ALGORITHM = "HS256"
 _TOKEN_LIFETIME = timedelta(hours=2)
 _TOKEN_REFRESH_LEAD_SECONDS = 300  # refresh 5 min before expiry
@@ -107,6 +122,13 @@ class BrowserAgentTallyClient:
             )
             self._client = ws_client
 
+        from finance_browser_agent.remote_control_factory import RemoteControlFactory
+
+        self.handoff_backend_factory = RemoteControlFactory(
+            configured_backend=os.getenv("HANDOFF_CONTROL_BACKEND", "auto"),
+            os_selfcheck=_handoff_os_selfcheck,
+        )
+
     @property
     def worker_token(self) -> str:
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -135,6 +157,7 @@ class BrowserAgentTallyClient:
                 "browser_channel": os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome"),
                 "headless": os.getenv("BROWSER_AGENT_HEADLESS", "0"),
                 "max_concurrency": self.config.max_concurrency,
+                "handoff_control": self.handoff_backend_factory.diagnostics(),
             },
         })
 

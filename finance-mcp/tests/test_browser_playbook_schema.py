@@ -740,6 +740,71 @@ def test_activate_browser_playbook_allows_already_active_binding(
     assert result["binding"]["profile_status"] == "active"
 
 
+def test_activate_browser_playbook_is_idempotent_for_already_active_playbook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-finalize (e.g. retrying an already-active task) must keep the playbook active
+    instead of failing because its UPDATE WHERE excluded 'active'."""
+
+    executed_sql: list[str] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._fetch_index = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, *args, **kwargs) -> None:
+            executed_sql.append(sql)
+
+        def fetchone(self):
+            self._fetch_index += 1
+            if self._fetch_index == 1:
+                return {"id": "playbook-001", "status": "active"}
+            return {"id": "binding-001", "profile_status": "active", "playbook_status": "ok"}
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        def commit(self) -> None:
+            pass
+
+    class FakeConnManager:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager())
+
+    result = auth_db.activate_browser_playbook_and_binding(
+        company_id="company-001",
+        playbook_id="qianniu-daily-bill-export",
+        version="1.0.0",
+        data_source_id="source-001",
+    )
+
+    assert result["playbook"] and result["binding"]
+    playbook_sql = next(sql for sql in executed_sql if "UPDATE playbooks" in sql)
+    # 已 active 也要能命中(否则重试时翻不动 → finalize 报"不在 draft/verifying 状态")
+    assert "'active'" in playbook_sql
+    assert "status IN ('draft', 'replayed', 'approved', 'active')" in playbook_sql
+    # 保留原审批时间,不被重试覆盖
+    assert "COALESCE(approved_at, CURRENT_TIMESTAMP)" in playbook_sql
+
+
 def test_clear_page_changed_bindings_matches_canonical_pause_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

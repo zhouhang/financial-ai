@@ -610,20 +610,67 @@ class FakeDateInputWithDriverPopoverPage(FakeDateInputPage):
             locator = _PopoverLocator()
             locator.first = locator
             return locator
-        if selector == "button.driver-popover-next-btn:has-text('完成')":
+        if selector in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
             page = self
 
-            class _FinishButtonLocator:
+            class _CloseButtonLocator:
                 first = None
 
                 def click(self, timeout: int = 0) -> None:
                     page.events.append(("click", selector))
                     page.driver_popover_open = False
 
-            locator = _FinishButtonLocator()
+            locator = _CloseButtonLocator()
             locator.first = locator
             return locator
         return FakeDateInputLocator(self, selector)
+
+
+class FakeDateInputWithLateDriverPopoverPage(FakeDateInputPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.driver_popover_open = False
+        self.date_clicks = 0
+
+    def locator(self, selector: str) -> FakeDateInputLocator:
+        if selector in {".driver-popover", ".driver-overlay"}:
+            page = self
+
+            class _PopoverLocator:
+                first = None
+
+                def is_visible(self, timeout: int = 0) -> bool:
+                    page.events.append(("popover_visible", selector, timeout))
+                    return page.driver_popover_open
+
+            locator = _PopoverLocator()
+            locator.first = locator
+            return locator
+        if selector in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
+            page = self
+
+            class _CloseButtonLocator:
+                first = None
+
+                def click(self, timeout: int = 0) -> None:
+                    page.events.append(("click", selector))
+                    page.driver_popover_open = False
+
+            locator = _CloseButtonLocator()
+            locator.first = locator
+            return locator
+        return FakeLatePopoverDateInputLocator(self, selector)
+
+
+class FakeLatePopoverDateInputLocator(FakeDateInputLocator):
+    def click(self, *, timeout: int) -> None:
+        self.page.events.append(("click", self.selector))
+        self.page.locator_clicks.append((self.selector, timeout))
+        if self.selector == "input[placeholder='起始日期']":
+            self.page.date_clicks += 1
+            if self.page.date_clicks == 1:
+                self.page.driver_popover_open = True
+                raise TimeoutError("driver-overlay intercepts pointer events")
 
 
 class FakeControlledDateInputLocator:
@@ -974,6 +1021,43 @@ class SlowTypeLongUsernamePage(FakePage):
                     page.values[selector] = page.values.get(selector, "") + value[:partial_len]
                     raise TimeoutError(selector)
                 page.values[selector] = page.values.get(selector, "") + value
+
+        return _Locator()
+
+
+class PartialLoginInputPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__(url="https://login.example", selectors={".dashboard"})
+        self.values: dict[str, str] = {}
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Locator:
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self, *, timeout: int) -> str:
+                return ""
+
+            def wait_for(self, *, timeout: int) -> None:
+                return None
+
+            def input_value(self, *, timeout: int) -> str:
+                return page.values.get(selector, "")
+
+            def click(self, *, timeout: int) -> None:
+                return None
+
+            def fill(self, value: str, *, timeout: int) -> None:
+                page.values[selector] = value
+
+            def type(self, value: str, *, delay: int, timeout: int) -> None:
+                if selector == "#password":
+                    page.values[selector] = value[:3]
+                    return
+                page.values[selector] = value
 
         return _Locator()
 
@@ -1370,6 +1454,42 @@ def test_login_action_allows_long_username_to_finish_human_typing(tmp_path) -> N
     assert page.username_type_timeouts == [4321]
 
 
+def test_login_action_does_not_submit_when_password_input_is_partial(tmp_path) -> None:
+    page = PartialLoginInputPage()
+    config = PlaywrightRunConfig(
+        profile_root=str(tmp_path / "profiles"),
+        download_root=str(tmp_path / "downloads"),
+        headless=False,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        type_delay_ms=160,
+    )
+
+    with pytest.raises(BrowserActionError) as exc:
+        _execute_action(
+            page,
+            {
+                "action": "login_if_needed",
+                "username_selector": "#username",
+                "password_selector": "#password",
+                "submit_selector": "button[type='submit']",
+                "username_value_from": "params.login_username",
+                "password_value_from": "params.login_password",
+                "post_login_wait_selector": ".dashboard",
+                "timeout_ms": 4321,
+            },
+            params={"login_username": "alice", "login_password": "secret"},
+            extracted={},
+            capture_files=[],
+            download_dir=tmp_path,
+            run_config=config,
+        )
+
+    assert exc.value.fail_reason == "AUTH_EXPIRED"
+    assert page.clicks == []
+    assert page.values["#password"] == "sec"
+
+
 def test_login_action_does_not_mutate_username_before_all_controls_are_ready(tmp_path) -> None:
     page = MissingPasswordControlPage()
     config = PlaywrightRunConfig(
@@ -1693,13 +1813,44 @@ def test_set_date_action_closes_driver_popover_before_clicking_date_input(tmp_pa
         download_dir=tmp_path,
     )
 
-    assert page.events.index(("click", "button.driver-popover-next-btn:has-text('完成')")) < (
+    close_click_index = next(
+        index
+        for index, event in enumerate(page.events)
+        if event[0] == "click" and event[1] in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS
+    )
+    assert close_click_index < (
         page.events.index(
             (
                 "click",
                 "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
             )
         )
+    )
+
+
+def test_set_date_action_retries_when_driver_popover_appears_during_click(tmp_path) -> None:
+    page = FakeDateInputWithLateDriverPopoverPage()
+
+    _execute_action(
+        page,
+        {
+            "id": "set_start_date",
+            "action": "set_date",
+            "selector": "input[placeholder='起始日期']",
+            "value": "2026-06-01",
+            "timeout_ms": 30000,
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.date_clicks == 2
+    assert page.values["input[placeholder='起始日期']"] == "2026-06-01"
+    assert any(
+        event[0] == "click" and event[1] in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS
+        for event in page.events
     )
 
 
@@ -2028,8 +2179,13 @@ class FakeHistoryPage(FakePage):
 
 
 class FakeOrderExportButton:
-    def __init__(self, page: "FakeOrderExportDetailPage") -> None:
+    def __init__(
+        self,
+        page: "FakeOrderExportDetailPage",
+        ancestor: "FakeOrderExportDetailRoot | None" = None,
+    ) -> None:
         self.page = page
+        self.ancestor = ancestor
         self.first = self
 
     def count(self) -> int:
@@ -2044,6 +2200,29 @@ class FakeOrderExportButton:
     def click(self, *, timeout: int, force: bool = False) -> None:
         self.page.download_clicked = True
         self.page.clicked_timeout = timeout
+
+    def locator(self, selector: str) -> "FakeOrderExportDetailLocator | FakeOrderExportEmptyLocator":
+        if selector.startswith("xpath=ancestor::") and self.ancestor is not None:
+            return FakeOrderExportDetailLocator(self.page, [self.ancestor])
+        return FakeOrderExportEmptyLocator()
+
+
+class FakeOrderExportButtonLocator:
+    def __init__(self, buttons: list[FakeOrderExportButton]) -> None:
+        self.buttons = buttons
+        self.first = buttons[0] if buttons else FakeOrderExportEmptyLocator()
+
+    def count(self) -> int:
+        return len(self.buttons)
+
+    def nth(self, index: int) -> FakeOrderExportButton:
+        return self.buttons[index]
+
+    def is_visible(self, *, timeout: int) -> bool:
+        return bool(self.buttons)
+
+    def inner_text(self, *, timeout: int) -> str:
+        raise AssertionError("button locators should not be read as rows")
 
 
 class FakeOrderExportEmptyLocator:
@@ -2074,7 +2253,7 @@ class FakeOrderExportDetailRoot:
 
     def locator(self, selector: str) -> FakeOrderExportButton | FakeOrderExportEmptyLocator:
         if "下载订单报表" in selector:
-            return FakeOrderExportButton(self.page)
+            return FakeOrderExportButton(self.page, self)
         return FakeOrderExportEmptyLocator()
 
 
@@ -2131,6 +2310,38 @@ class FakeOrderExportDetailPage(FakePage):
             self.dialog_history_clicked.append((timeout, force))
             return
         super().click(selector, timeout=timeout)
+
+
+class ButtonOnlyOrderExportPage(FakeOrderExportDetailPage):
+    def locator(
+        self,
+        selector: str,
+    ) -> FakeOrderExportDetailLocator | FakeOrderExportButtonLocator | FakeOrderExportEmptyLocator:
+        if "下载订单报表" in selector:
+            root = FakeOrderExportDetailRoot(self)
+            return FakeOrderExportButtonLocator([FakeOrderExportButton(self, root)])
+        return FakeOrderExportEmptyLocator()
+
+
+class HydratingOrderExportPage(FakeOrderExportDetailPage):
+    def __init__(self, *, detail_text: str) -> None:
+        super().__init__(detail_text=detail_text)
+        self.hydrated = False
+        self.waited_selectors: list[str] = []
+
+    def locator(self, selector: str) -> FakeOrderExportDetailLocator | FakeOrderExportEmptyLocator:
+        if self.hydrated and (
+            selector == "[class*='order-export_order-block']" or "下载订单报表" in selector
+        ):
+            return FakeOrderExportDetailLocator(self, [FakeOrderExportDetailRoot(self)])
+        return FakeOrderExportEmptyLocator()
+
+    def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        self.waited_selectors.append(selector)
+        if "下载订单报表" in selector:
+            self.hydrated = True
+            return
+        raise TimeoutError(selector)
 
 
 class ClosedHistoryPage(FakeHistoryPage):
@@ -2403,6 +2614,7 @@ def test_download_qianniu_export_report_clicks_detail_page_button(tmp_path) -> N
             "selector": "[class*='order-export_order-block']",
             "report_type": "订单报表",
             "download_button_text": "下载订单报表",
+            "detail_selector": "body:has-text('订单导出报表'):has-text('下载订单报表')",
             "requested_after_from": "extracted.report_requested_at",
             "request_time_tolerance_seconds": 5,
             "timeout_ms": 1000,
@@ -2433,6 +2645,7 @@ def test_download_qianniu_export_report_allows_minute_truncated_request_time(tmp
             "selector": "[class*='order-export_order-block']",
             "report_type": "订单报表",
             "download_button_text": "下载订单报表",
+            "detail_selector": "body:has-text('订单导出报表'):has-text('下载订单报表')",
             "requested_after_from": "extracted.report_requested_at",
             "request_time_tolerance_seconds": 5,
             "timeout_ms": 1000,
@@ -2444,6 +2657,164 @@ def test_download_qianniu_export_report_allows_minute_truncated_request_time(tmp
     )
 
     assert page.download_clicked is True
+
+
+def test_download_qianniu_export_report_accepts_single_report_with_creation_range(tmp_path) -> None:
+    page = FakeOrderExportDetailPage(
+        detail_text=(
+            "订单导出报表 报表申请时间：2026-06-03 10:46:09 "
+            "报表类型：订单报表 创建时间：2026-03-05 10:46:09 到 2026-06-03 10:46:09 "
+            "订单状态：全部 下载订单报表"
+        )
+    )
+
+    _execute_action(
+        page,
+        {
+            "id": "download_latest_order_report",
+            "action": "download_qianniu_export_report",
+            "selector": "[class*='order-export_order-block']",
+            "report_type": "订单报表",
+            "download_button_text": "下载订单报表",
+            "detail_selector": "body:has-text('订单导出报表'):has-text('下载订单报表')",
+            "requested_after_from": "extracted.report_requested_at",
+            "request_time_tolerance_seconds": 60,
+            "timeout_ms": 1000,
+        },
+        params={},
+        extracted={"report_requested_at": "2026-06-03T10:46:04"},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.download_clicked is True
+
+
+def test_download_qianniu_export_report_does_not_click_stale_body_button(tmp_path) -> None:
+    page = FakeOrderExportDetailPage(
+        detail_text=(
+            "订单导出报表 "
+            "报表申请时间：2026-06-03 10:46:23 报表类型：订单报表 报表生成中，请稍等几分钟 "
+            "报表申请时间：2026-06-02 16:34:38 报表类型：订单报表 下载订单报表"
+        )
+    )
+
+    with pytest.raises(BrowserActionError) as exc_info:
+        _execute_action(
+            page,
+            {
+                "id": "download_latest_order_report",
+                "action": "download_qianniu_export_report",
+                "selector": "[class*='order-export_order-block']",
+                "report_type": "订单报表",
+                "download_button_text": "下载订单报表",
+                "detail_selector": "body:has-text('订单导出报表'):has-text('下载订单报表')",
+                "requested_after_from": "extracted.report_requested_at",
+                "request_time_tolerance_seconds": 5,
+                "refresh_interval_ms": 100,
+                "timeout_ms": 100,
+            },
+            params={},
+            extracted={"report_requested_at": "2026-06-03T10:46:23"},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc_info.value.fail_reason == "EXPORT_REPORT_NOT_READY"
+    assert page.download_clicked is False
+
+
+def test_download_qianniu_export_report_falls_back_to_button_ancestor(tmp_path) -> None:
+    page = ButtonOnlyOrderExportPage(
+        detail_text=(
+            "报表申请时间：2026-06-03 13:39:57 "
+            "报表类型：订单报表 下载订单报表"
+        )
+    )
+
+    _execute_action(
+        page,
+        {
+            "id": "download_latest_order_report",
+            "action": "download_qianniu_export_report",
+            "selector": "[class*='order-export_order-block']",
+            "report_type": "订单报表",
+            "download_button_text": "下载订单报表",
+            "requested_after_from": "extracted.report_requested_at",
+            "request_time_tolerance_seconds": 60,
+            "timeout_ms": 1000,
+        },
+        params={},
+        extracted={"report_requested_at": "2026-06-03T13:39:57"},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.download_clicked is True
+
+
+def test_download_qianniu_export_report_button_ancestor_rejects_multiple_reports(tmp_path) -> None:
+    page = ButtonOnlyOrderExportPage(
+        detail_text=(
+            "订单导出报表 "
+            "报表申请时间：2026-06-03 13:39:57 报表类型：订单报表 报表生成中 "
+            "报表申请时间：2026-06-02 16:34:38 报表类型：订单报表 下载订单报表"
+        )
+    )
+
+    with pytest.raises(BrowserActionError) as exc_info:
+        _execute_action(
+            page,
+            {
+                "id": "download_latest_order_report",
+                "action": "download_qianniu_export_report",
+                "selector": "[class*='order-export_order-block']",
+                "report_type": "订单报表",
+                "download_button_text": "下载订单报表",
+                "requested_after_from": "extracted.report_requested_at",
+                "request_time_tolerance_seconds": 60,
+                "refresh_interval_ms": 100,
+                "timeout_ms": 100,
+            },
+            params={},
+            extracted={"report_requested_at": "2026-06-03T13:39:57"},
+            capture_files=[],
+            download_dir=tmp_path,
+        )
+
+    assert exc_info.value.fail_reason == "EXPORT_REPORT_NOT_READY"
+    assert page.download_clicked is False
+
+
+def test_download_qianniu_export_report_waits_for_hydration_after_reload(tmp_path) -> None:
+    page = HydratingOrderExportPage(
+        detail_text=(
+            "报表申请时间：2026-06-03 14:19:23 "
+            "报表类型：订单报表 下载订单报表"
+        )
+    )
+
+    _execute_action(
+        page,
+        {
+            "id": "download_latest_order_report",
+            "action": "download_qianniu_export_report",
+            "selector": "[class*='order-export_order-block']",
+            "report_type": "订单报表",
+            "download_button_text": "下载订单报表",
+            "requested_after_from": "extracted.report_requested_at",
+            "request_time_tolerance_seconds": 60,
+            "refresh_interval_ms": 1,
+            "timeout_ms": 1000,
+        },
+        params={},
+        extracted={"report_requested_at": "2026-06-03T14:19:16"},
+        capture_files=[],
+        download_dir=tmp_path,
+    )
+
+    assert page.download_clicked is True
+    assert "button:has-text('下载订单报表'), [role='button']:has-text('下载订单报表')" in page.waited_selectors
 
 
 def test_download_history_file_clicks_completed_target_range_without_download_text(

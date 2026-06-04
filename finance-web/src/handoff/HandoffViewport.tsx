@@ -1,12 +1,17 @@
 import { useRef } from 'react';
 import type { HandoffFrame, HandoffInputEvent } from './types';
 
+export function gestureLockState(gestureActive: boolean): { controlsLocked: boolean } {
+  return { controlsLocked: gestureActive };
+}
+
 interface HandoffViewportProps {
   frame: HandoffFrame | null;
   disabled?: boolean;
   mode?: 'control' | 'pan';
   zoom?: number;
   onInput: (event: HandoffInputEvent) => void;
+  onGestureChange?: (active: boolean) => void;
 }
 
 function clamp(value: number): number {
@@ -77,6 +82,7 @@ export default function HandoffViewport({
   mode = 'control',
   zoom = 1,
   onInput,
+  onGestureChange,
 }: HandoffViewportProps) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const src = frame ? `data:${frame.mime};base64,${frame.data}` : '';
@@ -91,6 +97,7 @@ export default function HandoffViewport({
       onPointerDown={(event) => {
         if (!controlsEnabled) return;
         event.currentTarget.setPointerCapture?.(event.pointerId);
+        onGestureChange?.(true);
         onInput({
           kind: 'mouse_down',
           ...pointFromImageOrContainer(event.currentTarget, imageRef.current, event, frame),
@@ -107,6 +114,16 @@ export default function HandoffViewport({
       }}
       onPointerUp={(event) => {
         if (!controlsEnabled) return;
+        onGestureChange?.(false);
+        onInput({
+          kind: 'mouse_up',
+          ...pointFromImageOrContainer(event.currentTarget, imageRef.current, event, frame),
+          button: 'left',
+        });
+      }}
+      onPointerCancel={(event) => {
+        if (!controlsEnabled) return;
+        onGestureChange?.(false);
         onInput({
           kind: 'mouse_up',
           ...pointFromImageOrContainer(event.currentTarget, imageRef.current, event, frame),

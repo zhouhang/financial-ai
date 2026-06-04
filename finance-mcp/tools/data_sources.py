@@ -7981,6 +7981,33 @@ async def _handle_data_source_update_browser_playbook_credential(
     )
     if not result.get("success"):
         return result
+    verification_result = await _handle_data_source_retry_browser_playbook_verification(
+        {
+            "auth_token": arguments.get("auth_token"),
+            "source_id": source_id,
+            "force_collection": True,
+        }
+    )
+    if not verification_result.get("success"):
+        return {
+            "success": False,
+            "source_id": source_id,
+            "credential": result.get("credential") or {},
+            "binding": result.get("binding"),
+            "error": (
+                "浏览器任务凭证已保存，但验证任务创建失败: "
+                f"{verification_result.get('error') or verification_result.get('message') or '未知错误'}"
+            ),
+        }
+    result["status"] = str(verification_result.get("status") or "verification_pending")
+    result["verification_sync_job_id"] = str(verification_result.get("verification_sync_job_id") or "")
+    result["verification_biz_date"] = str(verification_result.get("verification_biz_date") or "")
+    result["source"] = verification_result.get("source")
+    result["message"] = (
+        "浏览器任务凭证已保存，并已重新下发验证任务"
+        if result["verification_sync_job_id"]
+        else str(result.get("message") or "浏览器任务凭证已保存")
+    )
     result["source"] = _build_data_source_view(source_row, datasets=[])
     return result
 
@@ -8076,6 +8103,7 @@ async def _handle_data_source_retry_browser_playbook_verification(
         dataset_id=dataset_id,
         resource_key=resource_key,
         biz_date=verification_biz_date,
+        is_verification=True,
     )
     if _safe_text((existing_job or {}).get("job_status")).lower() in BROWSER_COLLECTION_ASYNC_JOB_STATUSES:
         return {

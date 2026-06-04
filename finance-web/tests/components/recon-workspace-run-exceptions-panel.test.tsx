@@ -104,6 +104,18 @@ describe('ReconWorkspace 运行记录异常看板', () => {
               failed_reason: '成功运行不应展示这段失败原因',
               started_at: '2026-05-12T09:00:00+08:00',
               finished_at: '2026-05-12T09:05:00+08:00',
+              artifacts_json: {
+                runtime_summary: {
+                  exception_sampling: {
+                    enabled: true,
+                    total_count: 35665,
+                    sample_count: 200,
+                    sample_limit: 200,
+                    threshold: 1000,
+                    strategy: 'stratified_by_anomaly_type_owner',
+                  },
+                },
+              },
             },
           ],
         });
@@ -160,6 +172,8 @@ describe('ReconWorkspace 运行记录异常看板', () => {
     await waitFor(() => {
       expect(within(dialog).getByText('资金流水缺失平台订单客户订单号 5115360674997007548')).toBeInTheDocument();
     });
+
+    expect(within(dialog).getByText((_, element) => element?.textContent === '全量差异 35,665 条，当前抽样展示 200 条')).toBeInTheDocument();
 
     expect(within(dialog).queryByText('失败阶段')).not.toBeInTheDocument();
     expect(within(dialog).queryByText('失败原因')).not.toBeInTheDocument();

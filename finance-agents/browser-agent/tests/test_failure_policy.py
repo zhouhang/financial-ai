@@ -18,7 +18,14 @@ def test_deterministic_failures_are_not_retried() -> None:
 
 
 def test_transient_failures_are_retried() -> None:
-    for reason in ["AGENT_OFFLINE", "TIMEOUT", "CHROME_CRASH", "NETWORK_ERROR", "OTHER"]:
+    for reason in [
+        "AGENT_OFFLINE",
+        "TIMEOUT",
+        "CHROME_CRASH",
+        "NETWORK_ERROR",
+        "EXPORT_REPORT_NOT_READY",
+        "OTHER",
+    ]:
         policy = classify_failure(reason)
         assert policy.retryable is True
 

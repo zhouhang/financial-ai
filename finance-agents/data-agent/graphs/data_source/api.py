@@ -496,7 +496,10 @@ class BrowserPlaybookCredentialUpdateRequest(BaseModel):
 
 class BrowserPlaybookCredentialUpdateResponse(BaseModel):
     success: bool
+    status: str = "verification_pending"
     source_id: str = ""
+    verification_sync_job_id: str = ""
+    verification_biz_date: str = ""
     credential: dict[str, Any] = Field(default_factory=dict)
     binding: dict[str, Any] | None = None
     message: str = ""
@@ -1116,7 +1119,10 @@ async def update_browser_playbook_credential_route(
         raise HTTPException(status_code=400, detail=_safe_result_error(result, "浏览器任务凭证保存失败"))
     return BrowserPlaybookCredentialUpdateResponse(
         success=True,
+        status=str(result.get("status") or "verification_pending"),
         source_id=str(result.get("source_id") or source_id),
+        verification_sync_job_id=str(result.get("verification_sync_job_id") or ""),
+        verification_biz_date=str(result.get("verification_biz_date") or ""),
         credential=dict(result.get("credential") or {}),
         binding=result.get("binding"),
         message=str(result.get("message") or "浏览器任务凭证已保存"),

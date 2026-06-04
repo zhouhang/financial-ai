@@ -248,3 +248,107 @@ async def test_controller_input_and_resume_relay_to_agent(monkeypatch):
         },
     )
     assert any(msg["type"] == "status" and msg["status"] == "resuming" for msg in controller_socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_agent_heartbeat_timeout_downgrades_active_to_waiting_then_expired(monkeypatch):
+    hg.reset_for_tests()
+
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+
+    sent = []
+    async def send(p):
+        sent.append(p)
+
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA", "status": "active"}, send_json=send,
+    )
+    # 心跳超时(>30s)→ waiting_agent
+    await hg.on_agent_heartbeat_timeout(agent_id="agentA", elapsed_seconds=31)
+    assert any(p.get("status") == "waiting_agent" for p in sent)
+    # 超过 5min → expired/failed
+    await hg.on_agent_heartbeat_timeout(agent_id="agentA", elapsed_seconds=301)
+    assert any(p.get("status") in {"expired", "failed"} for p in sent)
+
+
+@pytest.mark.asyncio
+async def test_agent_reports_control_unavailable_maps_to_web_status(monkeypatch):
+    hg.reset_for_tests()
+
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+
+    sent = []
+    async def send(p):
+        sent.append(p)
+
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    handled = await hg.route_agent_message(
+        agent_id="agentA", token="t",
+        msg={"type": "handoff_control_status", "handoff_session_id": "h1",
+             "code": "control_unavailable"},
+    )
+    assert handled is True
+    assert sent[-1]["type"] == "status"
+    assert sent[-1]["status"] == "control_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_relay_does_not_log_frame_data_text_or_metadata(monkeypatch, caplog):
+    import logging
+    hg.reset_for_tests()
+
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+
+    sent = []
+    async def send(p):
+        sent.append(p)
+
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    hg._agents["agentA"] = hg.BrowserAgentPeer(agent_id="agentA", token="t", send_event=send)
+
+    with caplog.at_level(logging.DEBUG):
+        await hg.route_agent_message(agent_id="agentA", token="t", msg={
+            "type": "handoff_frame", "handoff_session_id": "h1", "controller_id": "c1",
+            "data": "BASE64SECRETFRAME", "window_title": "店铺机密标题",
+        })
+        await hg.route_controller_message(hg._controllers["h1"], {
+            "type": "handoff_input", "event": {"kind": "text", "text": "SMSCODE123"},
+        })
+
+    blob = caplog.text
+    assert "BASE64SECRETFRAME" not in blob
+    assert "SMSCODE123" not in blob
+    assert "店铺机密标题" not in blob
+
+
+@pytest.mark.asyncio
+async def test_agent_focus_state_relayed_to_controller(monkeypatch):
+    hg.reset_for_tests()
+    async def fake_call(tool, payload):
+        return {"success": True}
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+    sent = []
+    async def send(p):
+        sent.append(p)
+    hg._controllers["h1"] = hg.HandoffController(
+        handoff_session_id="h1", controller_id="c1", token="t",
+        session={"agent_id": "agentA"}, send_json=send,
+    )
+    handled = await hg.route_agent_message(agent_id="agentA", token="t", msg={
+        "type": "handoff_focus_state", "handoff_session_id": "h1", "editable": False,
+    })
+    assert handled is True
+    assert sent[-1] == {"type": "focus_state", "editable": False}

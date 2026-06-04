@@ -31,6 +31,7 @@ TRANSIENT_FAILURES = frozenset(
         "TIMEOUT",
         "CHROME_CRASH",
         "NETWORK_ERROR",
+        "EXPORT_REPORT_NOT_READY",
         "OTHER",
     }
 )

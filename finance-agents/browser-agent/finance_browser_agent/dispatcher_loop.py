@@ -213,4 +213,5 @@ class BrowserDispatcherLoop:
             "credential_ref": credential_ref,
             "timeout_ms": int(params.get("timeout_ms") or payload.get("timeout_ms") or 900000),
             "handoff_coordinator": getattr(self.client, "handoff_coordinator", None),
+            "handoff_backend_factory": getattr(self.client, "handoff_backend_factory", None),
         }

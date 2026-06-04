@@ -18,6 +18,19 @@ survive browser-agent restarts.
 
 from __future__ import annotations
 
+# DPI awareness 必须在任何 win32/GDI/Playwright/mss import 之前设置,否则 >100% 缩放下坐标错位。
+import platform as _platform
+if _platform.system() == "Windows":
+    try:
+        import ctypes
+        # PER_MONITOR_AWARE_V2 = -4
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            pass
+
 import asyncio
 import logging
 import signal

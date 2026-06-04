@@ -53,7 +53,9 @@ _ANOMALY_TYPE_LABELS: dict[str, str] = {
     "unknown": "未知异常",
 }
 
-_DEFAULT_NOTIFY_EXPLOSION_LIMIT = 50
+_DEFAULT_NOTIFY_EXPLOSION_LIMIT = 1000
+_DEFAULT_EXCEPTION_SAMPLE_LIMIT = 200
+_EXCEPTION_SAMPLING_STRATEGY = "stratified_by_anomaly_type_owner"
 _DEFAULT_PUBLIC_WEB_BASE_URL = "https://dev.tallyai.cn"
 _BROWSER_COLLECTION_DRIVER = "browser_playbook_remote"
 _COLLECTION_WAITING_STATUSES = {"queued", "pending", "running"}
@@ -556,6 +558,11 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
+def _positive_int_or_default(value: Any, default: int) -> int:
+    parsed = _safe_int(value, default)
+    return parsed if parsed >= 1 else default
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -765,6 +772,42 @@ def _merge_runtime_summary_notification(
     }
     patched["runtime_summary"] = runtime_summary
     return patched
+
+
+def _merge_runtime_exception_sampling(
+    artifacts: dict[str, Any],
+    sampling: dict[str, Any],
+) -> dict[str, Any]:
+    patched = dict(artifacts or {})
+    runtime_summary = _safe_dict(patched.get("runtime_summary"))
+    runtime_summary["exception_sampling"] = _safe_dict(sampling)
+    patched["runtime_summary"] = runtime_summary
+    return patched
+
+
+async def _persist_runtime_exception_sampling(
+    *,
+    auth_token: str,
+    ctx: dict[str, Any],
+    sampling: dict[str, Any],
+) -> None:
+    run = _safe_dict(ctx.get("execution_run_record"))
+    run_id = str(run.get("id") or "").strip()
+    if not auth_token or not run_id or not sampling:
+        return
+    artifacts = _merge_runtime_exception_sampling(
+        _safe_dict(run.get("artifacts_json")),
+        sampling,
+    )
+    update_result = await call_mcp_tool(
+        "execution_run_update",
+        {"auth_token": auth_token, "run_id": run_id, "artifacts_json": artifacts},
+    )
+    if bool(update_result.get("success")):
+        ctx["execution_run_record"] = _safe_dict(update_result.get("run")) or {
+            **run,
+            "artifacts_json": artifacts,
+        }
 
 
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
@@ -2238,20 +2281,122 @@ async def persist_auto_run_node(state: AgentState) -> dict[str, Any]:
     return {"recon_ctx": ctx}
 
 
-def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
-    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
-    default_owner = _safe_dict(owner_mapping.get("default_owner"))
-    owner_name = str(default_owner.get("name") or default_owner.get("display_name") or "")
-    owner_identifier = str(default_owner.get("identifier") or default_owner.get("owner_identifier") or "")
+def _owner_payload_parts(owner: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
+    owner_name = str(
+        owner.get("name")
+        or owner.get("display_name")
+        or owner.get("owner_name")
+        or ""
+    ).strip()
+    owner_identifier = str(
+        owner.get("identifier")
+        or owner.get("owner_identifier")
+        or owner.get("user_id")
+        or ""
+    ).strip()
     raw_contact = (
-        default_owner.get("contact")
-        or default_owner.get("owner_contact_json")
-        or default_owner.get("contact_json")
-        or default_owner.get("contact_info")
+        owner.get("contact")
+        or owner.get("owner_contact_json")
+        or owner.get("contact_json")
+        or owner.get("contact_info")
     )
     owner_contact_json = _safe_dict(raw_contact)
     owner_available = bool(owner_name or owner_identifier or owner_contact_json)
     return owner_name, owner_identifier, owner_contact_json, owner_available
+
+
+def _resolve_run_plan_default_owner(run_plan: dict[str, Any]) -> tuple[str, str, dict[str, Any], bool]:
+    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+    return _owner_payload_parts(_safe_dict(owner_mapping.get("default_owner")))
+
+
+def _resolve_owner_for_anomaly(owner_mapping: dict[str, Any], anomaly: dict[str, Any]) -> dict[str, Any]:
+    if not owner_mapping:
+        return {}
+
+    anomaly_type = str(anomaly.get("anomaly_type") or "").strip()
+    summary = str(anomaly.get("summary") or "").strip()
+
+    by_type = owner_mapping.get("anomaly_type_to_owner")
+    if isinstance(by_type, dict):
+        owner = by_type.get(anomaly_type)
+        if isinstance(owner, dict):
+            return owner
+
+    mappings = owner_mapping.get("mappings")
+    if isinstance(mappings, list):
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            match_types = mapping.get("anomaly_types")
+            if not isinstance(match_types, list):
+                single_type = str(mapping.get("anomaly_type") or "").strip()
+                match_types = [single_type] if single_type else []
+            match_types = [str(item).strip() for item in match_types if str(item).strip()]
+            if match_types and anomaly_type not in match_types:
+                continue
+
+            keywords = mapping.get("keywords")
+            if not isinstance(keywords, list):
+                keyword = str(mapping.get("keyword") or "").strip()
+                keywords = [keyword] if keyword else []
+            keywords = [str(item).strip() for item in keywords if str(item).strip()]
+            if keywords and not any(keyword in summary for keyword in keywords):
+                continue
+
+            owner = mapping.get("owner")
+            if isinstance(owner, dict):
+                return owner
+
+    default_owner = owner_mapping.get("default_owner")
+    return default_owner if isinstance(default_owner, dict) else {}
+
+
+def _strip_internal_exception_owner_fields(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in item.items()
+        if not str(key).startswith("_exception_")
+    }
+
+
+def _enrich_anomalies_with_exception_owner(
+    anomalies: list[dict[str, Any]],
+    *,
+    run_plan: dict[str, Any],
+    left_name: str = "",
+    right_name: str = "",
+    field_labels: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    owner_mapping = _safe_dict(run_plan.get("owner_mapping_json"))
+    enriched: list[dict[str, Any]] = []
+    for item in anomalies:
+        atype = str(item.get("anomaly_type") or "unknown")
+        raw_summary = str(item.get("summary") or "").strip()
+        summary = _build_anomaly_summary(
+            atype,
+            item,
+            left_name=left_name,
+            right_name=right_name,
+            field_labels=field_labels or {},
+        )
+        owner_match_summary = summary
+        if raw_summary and raw_summary not in owner_match_summary:
+            owner_match_summary = f"{owner_match_summary} {raw_summary}".strip()
+        item_for_owner = {**item, "summary": owner_match_summary}
+        owner = _resolve_owner_for_anomaly(owner_mapping, item_for_owner)
+        owner_name, owner_identifier, owner_contact_json, owner_available = _owner_payload_parts(owner)
+        enriched.append(
+            {
+                **item,
+                "_exception_summary": summary,
+                "_exception_owner_name": owner_name,
+                "_exception_owner_identifier": owner_identifier,
+                "_exception_owner_contact_json": owner_contact_json,
+                "_exception_owner_available": owner_available,
+            }
+        )
+    return enriched
 
 
 def _lookup_local_user(user_id: str) -> dict[str, Any]:
@@ -2541,20 +2686,196 @@ def _summary_pending_total(summary: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
+def _first_policy_int(
+    *policies: dict[str, Any],
+    keys: tuple[str, ...],
+    env_name: str,
+    default: int,
+) -> int:
+    for policy in policies:
+        for key in keys:
+            if key not in policy:
+                continue
+            value = policy.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            return _positive_int_or_default(value, default)
+    return _positive_int_or_default(os.getenv(env_name), default)
+
+
 def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
-    policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
-    limit = _safe_int(
-        policy.get("explosion_threshold")
-        or policy.get("max_detail_reminders")
-        or os.getenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT"),
-        _DEFAULT_NOTIFY_EXPLOSION_LIMIT,
+    legacy_policy = _safe_dict(meta.get("reminder_policy_json") or meta.get("reminder_policy"))
+    notify_policy = _safe_dict(meta.get("notify_policy"))
+    threshold = _first_policy_int(
+        notify_policy,
+        legacy_policy,
+        keys=("explosion_threshold", "max_detail_reminders"),
+        env_name="RECON_AUTO_NOTIFY_EXPLOSION_LIMIT",
+        default=_DEFAULT_NOTIFY_EXPLOSION_LIMIT,
     )
-    limit = max(1, limit)
+    sample_limit = _first_policy_int(
+        notify_policy,
+        legacy_policy,
+        keys=("sample_exception_limit", "explosion_sample_limit"),
+        env_name="RECON_EXCEPTION_SAMPLE_LIMIT",
+        default=_DEFAULT_EXCEPTION_SAMPLE_LIMIT,
+    )
     return {
-        "explosion_threshold": limit,
-        "explosion_sample_limit": limit,
+        "explosion_threshold": threshold,
+        "sample_exception_limit": sample_limit,
+        "explosion_sample_limit": sample_limit,
     }
+
+
+def _anomaly_sampling_owner_identifier(item: dict[str, Any]) -> str:
+    contact = _safe_dict(item.get("_exception_owner_contact_json") or item.get("owner_contact_json"))
+    return str(
+        item.get("_exception_owner_identifier")
+        or item.get("owner_identifier")
+        or contact.get("mobile")
+        or item.get("_exception_owner_name")
+        or item.get("owner_name")
+        or item.get("owner")
+        or ""
+    ).strip()
+
+
+def _sampling_group_key(item: dict[str, Any]) -> tuple[str, str]:
+    anomaly_type = str(item.get("anomaly_type") or "unknown").strip() or "unknown"
+    return anomaly_type, _anomaly_sampling_owner_identifier(item)
+
+
+def _sampling_type_first_group_order(
+    group_order: list[tuple[str, str]],
+    sample_limit: int,
+) -> list[tuple[str, str]]:
+    if len(group_order) <= sample_limit:
+        return group_order
+
+    type_order: list[str] = []
+    groups_by_type: dict[str, list[tuple[str, str]]] = {}
+    for key in group_order:
+        anomaly_type = key[0]
+        if anomaly_type not in groups_by_type:
+            groups_by_type[anomaly_type] = []
+            type_order.append(anomaly_type)
+        groups_by_type[anomaly_type].append(key)
+
+    prioritized: list[tuple[str, str]] = []
+    for anomaly_type in type_order:
+        prioritized.append(groups_by_type[anomaly_type][0])
+        if len(prioritized) >= sample_limit:
+            return prioritized
+
+    depth = 1
+    while len(prioritized) < sample_limit:
+        appended = False
+        for anomaly_type in type_order:
+            owner_groups = groups_by_type[anomaly_type]
+            if depth >= len(owner_groups):
+                continue
+            prioritized.append(owner_groups[depth])
+            appended = True
+            if len(prioritized) >= sample_limit:
+                return prioritized
+        if not appended:
+            break
+        depth += 1
+    return prioritized
+
+
+def _sample_anomalies_for_exception_creation(
+    anomalies: list[dict[str, Any]],
+    *,
+    sample_limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    total_count = len(anomalies)
+    try:
+        safe_limit = int(sample_limit)
+    except (TypeError, ValueError):
+        safe_limit = _DEFAULT_EXCEPTION_SAMPLE_LIMIT
+    safe_limit = max(1, safe_limit)
+    metadata = {
+        "enabled": True,
+        "reason": "explosion_threshold_exceeded",
+        "sample_limit": safe_limit,
+        "total_count": total_count,
+        "sample_count": 0,
+        "created_count": 0,
+        "create_failed_count": 0,
+        "strategy": _EXCEPTION_SAMPLING_STRATEGY,
+        "fallback_used": False,
+    }
+    if total_count <= safe_limit:
+        metadata["sample_count"] = total_count
+        return list(anomalies), metadata
+
+    try:
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        group_order: list[tuple[str, str]] = []
+        for item in anomalies:
+            key = _sampling_group_key(item)
+            if key not in groups:
+                groups[key] = []
+                group_order.append(key)
+            groups[key].append(item)
+        first_pass_order = _sampling_type_first_group_order(group_order, safe_limit)
+
+        sampled: list[dict[str, Any]] = []
+        selected_by_key: dict[tuple[str, str], int] = {}
+        for key in first_pass_order:
+            if len(sampled) >= safe_limit:
+                break
+            sampled.append(groups[key][0])
+            selected_by_key[key] = 1
+
+        remaining_slots = safe_limit - len(sampled)
+        remaining_total = sum(
+            max(0, len(groups[key]) - selected_by_key.get(key, 0)) for key in group_order
+        )
+        if remaining_slots > 0 and remaining_total > 0:
+            fractional_allocations: list[tuple[float, tuple[str, str], int]] = []
+            for key in group_order:
+                remaining_in_group = max(0, len(groups[key]) - selected_by_key.get(key, 0))
+                if remaining_in_group <= 0:
+                    continue
+                raw_share = remaining_slots * (remaining_in_group / remaining_total)
+                whole_share = min(remaining_in_group, int(raw_share))
+                if whole_share:
+                    sampled.extend(
+                        groups[key][
+                            selected_by_key.get(key, 0) : selected_by_key.get(key, 0)
+                            + whole_share
+                        ]
+                    )
+                    selected_by_key[key] = selected_by_key.get(key, 0) + whole_share
+                fractional_allocations.append((raw_share - whole_share, key, remaining_in_group))
+
+            leftover_slots = safe_limit - len(sampled)
+            for _, key, _ in sorted(
+                fractional_allocations,
+                key=lambda item: (-item[0], group_order.index(item[1])),
+            ):
+                if leftover_slots <= 0:
+                    break
+                cursor = selected_by_key.get(key, 0)
+                if cursor >= len(groups[key]):
+                    continue
+                sampled.append(groups[key][cursor])
+                selected_by_key[key] = cursor + 1
+                leftover_slots -= 1
+
+        sampled = sampled[:safe_limit]
+        metadata["sample_count"] = len(sampled)
+        return sampled, metadata
+    except Exception as exc:
+        logger.error("[recon][exception_sampling] 分层抽样失败，回退为前 %s 条: %s", safe_limit, exc)
+        fallback = list(anomalies[:safe_limit])
+        metadata["sample_count"] = len(fallback)
+        metadata["fallback_used"] = True
+        metadata["fallback_error"] = str(exc)
+        return fallback, metadata
 
 
 def _get_nested_value(payload: Any, path: str) -> Any:
@@ -2671,6 +2992,7 @@ def _compose_owner_batch_reminder_text(
     detail_url: str,
     left_name: str = "",
     right_name: str = "",
+    sampled: bool = False,
 ) -> tuple[str, str, str]:
     plan_name = str(
         run_plan.get("plan_name")
@@ -2714,7 +3036,8 @@ def _compose_owner_batch_reminder_text(
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(count_lines))
     if detail_url:
-        lines.append(f"[查看全量差异]({detail_url})")
+        link_label = "查看抽样差异" if sampled else "查看差异"
+        lines.append(f"[{link_label}]({detail_url})")
     lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
     return todo_title, bot_title, "\n\n".join(line for line in lines if line)
 
@@ -2741,6 +3064,8 @@ def _compose_run_summary_notification_text(
 
     summary = _safe_dict(ctx.get("recon_result_summary_json"))
     total = _summary_pending_total(summary, len(anomalies))
+    sampling = _safe_dict(ctx.get("exception_sampling"))
+    sample_count = _safe_int(sampling.get("sample_count"), 0)
     owner_names = _notified_owner_names_from_context(ctx)
     status = (
         f"执行完成，待处理异常已催办责任人「{'、'.join(owner_names)}」"
@@ -2756,13 +3081,16 @@ def _compose_run_summary_notification_text(
         f"执行结果：\n{status}",
         f"待处理差异：\n{total} 条",
     ]
+    if explosion and sample_count > 0:
+        lines.append(f"异常明细：\n已按异常类型和责任人抽样创建 {sample_count} 条")
     count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
     if not _summary_has_difference_counts(summary):
         count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
     if detail_url:
-        lines.append(f"[查看全量差异]({detail_url})")
+        link_label = "查看抽样差异" if explosion else "查看差异"
+        lines.append(f"[{link_label}]({detail_url})")
     content = "\n\n".join(line for line in lines if line)
     return title, content
 
@@ -3015,6 +3343,7 @@ async def _send_execution_run_exception_batch_reminder(
     run_id: str,
     left_name: str = "",
     right_name: str = "",
+    sampled: bool = False,
 ) -> dict[str, Any]:
     exception_refs = [item for item in _safe_list(owner_group.get("items")) if isinstance(item, dict)]
     if not exception_refs:
@@ -3076,6 +3405,7 @@ async def _send_execution_run_exception_batch_reminder(
         detail_url=detail_url,
         left_name=left_name,
         right_name=right_name,
+        sampled=sampled,
     )
     reminder = adapter.send_reminder(
         title=bot_title,
@@ -3335,44 +3665,82 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "identifier": owner_identifier,
         "contact_json": owner_contact_json,
     }
-    notify_policy = _resolve_notify_policy(run_plan)
-    explosion_threshold = int(notify_policy["explosion_threshold"])
-    explosion_sample_limit = int(notify_policy["explosion_sample_limit"])
-    total_anomaly_count = len(anomalies)
-    notify_explosion = total_anomaly_count > explosion_threshold
-    ctx["auto_notify_policy"] = {
-        **notify_policy,
-        "anomaly_count": total_anomaly_count,
-        "explosion": notify_explosion,
-        "created_exception_sample_limit": total_anomaly_count,
-    }
 
-    # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要
+    # 提取左右数据集业务名称和字段标签，用于生成财务友好的异常摘要和责任人映射关键词匹配
     left_name, right_name = _resolve_side_names(ctx)
     scheme = _safe_dict(ctx.get("scheme"))
     scheme_meta = _safe_dict(
         scheme.get("scheme_meta_json") or scheme.get("scheme_meta") or scheme.get("meta")
     )
     field_labels = _build_field_label_map(scheme_meta)
+    owner_enriched_anomalies = _enrich_anomalies_with_exception_owner(
+        anomalies,
+        run_plan=run_plan,
+        left_name=left_name,
+        right_name=right_name,
+        field_labels=field_labels,
+    )
+
+    notify_policy = _resolve_notify_policy(run_plan)
+    explosion_threshold = int(notify_policy["explosion_threshold"])
+    sample_limit = int(notify_policy["sample_exception_limit"])
+    total_anomaly_count = len(owner_enriched_anomalies)
+    notify_explosion = total_anomaly_count > explosion_threshold
+    sampled_anomalies = owner_enriched_anomalies
+    sampling_metadata: dict[str, Any] = {
+        "enabled": False,
+        "threshold": explosion_threshold,
+        "sample_limit": sample_limit,
+        "total_count": total_anomaly_count,
+        "sample_count": total_anomaly_count,
+        "created_count": 0,
+        "create_failed_count": 0,
+        "strategy": _EXCEPTION_SAMPLING_STRATEGY,
+        "fallback_used": False,
+    }
+    if notify_explosion:
+        sampled_anomalies, sampling_metadata = _sample_anomalies_for_exception_creation(
+            owner_enriched_anomalies,
+            sample_limit=sample_limit,
+        )
+        sampling_metadata["threshold"] = explosion_threshold
+    ctx["auto_notify_policy"] = {
+        **notify_policy,
+        "anomaly_count": total_anomaly_count,
+        "explosion": notify_explosion,
+        "created_exception_sample_limit": len(sampled_anomalies),
+    }
 
     created = 0
     created_exceptions: list[dict[str, Any]] = []
-    for idx, item in enumerate(anomalies, start=1):
+    for idx, item in enumerate(sampled_anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
+        item_owner_name = str(item.get("_exception_owner_name") or owner_name or "").strip()
+        item_owner_identifier = str(
+            item.get("_exception_owner_identifier") or owner_identifier or ""
+        ).strip()
+        item_owner_contact_json = (
+            _safe_dict(item.get("_exception_owner_contact_json")) or owner_contact_json
+        )
         payload = {
             "auth_token": auth_token,
             "run_id": run_id,
             "scheme_code": scheme_code,
             "anomaly_key": anomaly_key,
             "anomaly_type": atype,
-            "summary": _build_anomaly_summary(
-                atype, item, left_name=left_name, right_name=right_name, field_labels=field_labels
+            "summary": str(item.get("_exception_summary") or "").strip()
+            or _build_anomaly_summary(
+                atype,
+                item,
+                left_name=left_name,
+                right_name=right_name,
+                field_labels=field_labels,
             ),
-            "detail_json": item,
-            "owner_name": owner_name,
-            "owner_identifier": owner_identifier,
-            "owner_contact_json": owner_contact_json,
+            "detail_json": _strip_internal_exception_owner_fields(item),
+            "owner_name": item_owner_name,
+            "owner_identifier": item_owner_identifier,
+            "owner_contact_json": item_owner_contact_json,
         }
         result = await call_mcp_tool("execution_run_exception_create", payload)
         if bool(result.get("success")):
@@ -3386,11 +3754,20 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
                 }
             )
 
+    sampling_metadata["created_count"] = created
+    sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
-    ctx["exception_creation_limited"] = False
+    ctx["exception_creation_limited"] = notify_explosion
     ctx["exception_total_count"] = total_anomaly_count
-    ctx["exception_created_sample_count"] = created
+    ctx["exception_created_sample_count"] = len(sampled_anomalies)
+    ctx["exception_sampling"] = sampling_metadata
+    if notify_explosion:
+        await _persist_runtime_exception_sampling(
+            auth_token=auth_token,
+            ctx=ctx,
+            sampling=sampling_metadata,
+        )
     return {"recon_ctx": ctx}
 
 
@@ -3513,6 +3890,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     owner_groups = _group_exception_refs_by_owner(created_exceptions)
     run_id = str(_safe_dict(ctx.get("execution_run_record")).get("id") or "")
     left_name, right_name = _resolve_side_names(ctx)
+    sampled_exceptions = bool(_safe_dict(ctx.get("exception_sampling")).get("enabled"))
 
     try:
         for owner_group in owner_groups:
@@ -3526,6 +3904,7 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 run_id=run_id,
                 left_name=left_name,
                 right_name=right_name,
+                sampled=sampled_exceptions,
             )
             status = str(result.get("status") or "")
             item_count = len(_safe_list(result.get("items")))

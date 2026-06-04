@@ -1308,22 +1308,33 @@ def test_update_rerun_exception_verification_reopens_when_anomaly_remains(monkey
     assert payload["feedback_json"]["verify_anomaly_count"] == 1
 
 
-def test_create_exception_tasks_node_creates_all_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_exception_tasks_node_samples_exploding_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
     created_payloads: list[dict[str, object]] = []
+    update_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        assert name == "execution_run_exception_create"
-        created_payloads.append(payload)
-        index = len(created_payloads)
-        return {
-            "success": True,
-            "exception": {
-                "id": f"exception-{index}",
-                "run_id": payload["run_id"],
-                "owner_identifier": payload["owner_identifier"],
-                "feedback_json": {},
-            },
-        }
+        if name == "execution_run_exception_create":
+            created_payloads.append(payload)
+            index = len(created_payloads)
+            return {
+                "success": True,
+                "exception": {
+                    "id": f"exception-{index}",
+                    "run_id": payload["run_id"],
+                    "owner_identifier": payload["owner_identifier"],
+                    "feedback_json": {},
+                },
+            }
+        if name == "execution_run_update":
+            update_payloads.append(payload)
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "artifacts_json": payload["artifacts_json"],
+                },
+            }
+        raise AssertionError(f"unexpected MCP tool: {name}")
 
     monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
 
@@ -1352,7 +1363,7 @@ def test_create_exception_tasks_node_creates_all_anomalies(monkeypatch: pytest.M
                 "plan_meta_json": {
                     "notify_policy": {
                         "explosion_threshold": 10,
-                        "explosion_sample_limit": 3,
+                        "sample_exception_limit": 3,
                     }
                 },
             },
@@ -1369,12 +1380,432 @@ def test_create_exception_tasks_node_creates_all_anomalies(monkeypatch: pytest.M
     result = asyncio.run(nodes.create_exception_tasks_node(state))
     recon_ctx = result["recon_ctx"]
 
-    assert len(created_payloads) == len(anomalies)
-    assert recon_ctx["exception_created_count"] == len(anomalies)
-    assert recon_ctx["exception_creation_limited"] is False
-    assert recon_ctx["exception_created_sample_count"] == len(anomalies)
+    assert len(created_payloads) == 3
+    assert recon_ctx["exception_created_count"] == 3
+    assert recon_ctx["exception_creation_limited"] is True
+    assert recon_ctx["exception_total_count"] == len(anomalies)
+    assert recon_ctx["exception_created_sample_count"] == 3
     assert recon_ctx["auto_notify_policy"]["explosion"] is True
-    assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == len(anomalies)
+    assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == 3
+    assert recon_ctx["exception_sampling"]["enabled"] is True
+    assert recon_ctx["exception_sampling"]["threshold"] == 10
+    assert recon_ctx["exception_sampling"]["sample_limit"] == 3
+    assert recon_ctx["exception_sampling"]["total_count"] == len(anomalies)
+    assert recon_ctx["exception_sampling"]["sample_count"] == 3
+    assert len(update_payloads) == 1
+
+
+def test_create_exception_tasks_node_persists_exception_sampling_runtime_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    update_payloads: list[dict[str, object]] = []
+    create_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_create":
+            create_payloads.append(payload)
+            return {
+                "success": True,
+                "exception": {
+                    "id": f"exception-{len(create_payloads)}",
+                    "run_id": payload["run_id"],
+                    "owner_identifier": payload["owner_identifier"],
+                    "feedback_json": {},
+                },
+            }
+        if name == "execution_run_update":
+            update_payloads.append(payload)
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "artifacts_json": payload["artifacts_json"],
+                },
+            }
+        raise AssertionError(f"unexpected MCP tool: {name}")
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    anomalies = [
+        {"item_id": f"anomaly-{index}", "anomaly_type": "source_only"}
+        for index in range(1, 8)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {
+                "id": "run-001",
+                "artifacts_json": {
+                    "runtime_summary": {
+                        "queue": {"job_id": "queue-001"},
+                        "summary_notification": {"status": "sent"},
+                    }
+                },
+            },
+            "scheme_code": "scheme-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "周行", "identifier": "ding-user-001"}
+                },
+                "plan_meta_json": {
+                    "notify_policy": {
+                        "explosion_threshold": 3,
+                        "sample_exception_limit": 2,
+                    }
+                },
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+
+    assert len(create_payloads) == 2
+    assert len(update_payloads) == 1
+    artifacts = update_payloads[0]["artifacts_json"]
+    runtime_summary = artifacts["runtime_summary"]
+    assert runtime_summary["queue"] == {"job_id": "queue-001"}
+    assert runtime_summary["summary_notification"] == {"status": "sent"}
+    assert runtime_summary["exception_sampling"]["enabled"] is True
+    assert runtime_summary["exception_sampling"]["total_count"] == 7
+    assert runtime_summary["exception_sampling"]["sample_count"] == 2
+    assert result["recon_ctx"]["execution_run_record"]["artifacts_json"] == artifacts
+
+
+def test_create_exception_tasks_node_samples_with_owner_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_create":
+            create_payloads.append(payload)
+            return {
+                "success": True,
+                "exception": {
+                    "id": f"exception-{len(create_payloads)}",
+                    "run_id": payload["run_id"],
+                    "owner_name": payload["owner_name"],
+                    "owner_identifier": payload["owner_identifier"],
+                    "feedback_json": {},
+                },
+            }
+        if name == "execution_run_update":
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "artifacts_json": payload["artifacts_json"],
+                },
+            }
+        raise AssertionError(f"unexpected MCP tool: {name}")
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    anomalies = [
+        {"item_id": "source-1", "anomaly_type": "source_only", "summary": "仅订单表存在"},
+        {"item_id": "source-2", "anomaly_type": "source_only", "summary": "仅订单表存在"},
+        {"item_id": "target-1", "anomaly_type": "target_only", "summary": "仅账单存在"},
+        {"item_id": "target-2", "anomaly_type": "target_only", "summary": "仅账单存在"},
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-001", "artifacts_json": {}},
+            "scheme_code": "scheme-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "默认责任人", "identifier": "owner-default"},
+                    "anomaly_type_to_owner": {
+                        "source_only": {"name": "订单责任人", "identifier": "owner-source"},
+                    },
+                    "mappings": [
+                        {
+                            "anomaly_types": ["target_only"],
+                            "keywords": ["账单"],
+                            "owner": {"name": "账单责任人", "identifier": "owner-target"},
+                        }
+                    ],
+                },
+                "plan_meta_json": {
+                    "notify_policy": {
+                        "explosion_threshold": 1,
+                        "sample_exception_limit": 2,
+                    }
+                },
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+
+    assert [payload["owner_identifier"] for payload in create_payloads] == [
+        "owner-source",
+        "owner-target",
+    ]
+    assert [payload["owner_name"] for payload in create_payloads] == [
+        "订单责任人",
+        "账单责任人",
+    ]
+    for payload in create_payloads:
+        assert not any(str(key).startswith("_exception_") for key in payload["detail_json"])
+    assert result["recon_ctx"]["created_exceptions"][0]["exception"]["owner_identifier"] == "owner-source"
+    assert result["recon_ctx"]["created_exceptions"][1]["exception"]["owner_identifier"] == "owner-target"
+
+
+def test_resolve_notify_policy_prefers_notify_policy_sample_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", "9")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy_json": {
+                    "explosion_threshold": 50,
+                    "explosion_sample_limit": 10,
+                },
+                "notify_policy": {
+                    "explosion_threshold": 1000,
+                    "sample_exception_limit": 200,
+                },
+            }
+        }
+    )
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
+def test_resolve_notify_policy_keeps_legacy_reminder_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy": {
+                    "explosion_threshold": 300,
+                    "explosion_sample_limit": 40,
+                }
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 300
+    assert policy["sample_exception_limit"] == 40
+    assert policy["explosion_sample_limit"] == 40
+
+
+def test_resolve_notify_policy_prefers_notify_policy_across_aliases() -> None:
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "reminder_policy": {
+                    "explosion_threshold": 300,
+                    "sample_exception_limit": 50,
+                },
+                "notify_policy": {
+                    "explosion_sample_limit": 20,
+                },
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 300
+    assert policy["sample_exception_limit"] == 20
+    assert policy["explosion_sample_limit"] == 20
+
+
+def test_resolve_notify_policy_uses_defaults_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+    monkeypatch.delenv("RECON_EXCEPTION_SAMPLE_LIMIT", raising=False)
+
+    policy = nodes._resolve_notify_policy({})
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
+def test_resolve_notify_policy_invalid_values_fall_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", "0")
+    monkeypatch.setenv("RECON_EXCEPTION_SAMPLE_LIMIT", "-5")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "notify_policy": {
+                    "explosion_threshold": 0,
+                    "sample_exception_limit": -20,
+                },
+            }
+        }
+    )
+
+    assert policy == {
+        "explosion_threshold": 1000,
+        "sample_exception_limit": 200,
+        "explosion_sample_limit": 200,
+    }
+
+
+def test_resolve_notify_policy_uses_sample_limit_env_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECON_AUTO_NOTIFY_EXPLOSION_LIMIT", raising=False)
+    monkeypatch.setenv("RECON_EXCEPTION_SAMPLE_LIMIT", "25")
+
+    policy = nodes._resolve_notify_policy(
+        {
+            "plan_meta_json": {
+                "notify_policy": {
+                    "explosion_threshold": 500,
+                }
+            }
+        }
+    )
+
+    assert policy["explosion_threshold"] == 500
+    assert policy["sample_exception_limit"] == 25
+    assert policy["explosion_sample_limit"] == 25
+
+
+def test_sample_anomalies_for_exception_creation_stratifies_by_type_and_owner() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
+        {"item_id": "b2", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
+        {"item_id": "c1", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
+        {"item_id": "c2", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=4,
+    )
+
+    assert [item["item_id"] for item in sampled[:3]] == ["a1", "b1", "c1"]
+    assert len(sampled) == 4
+    assert metadata["enabled"] is True
+    assert metadata["sample_count"] == 4
+    assert metadata["total_count"] == 6
+    assert metadata["strategy"] == "stratified_by_anomaly_type_owner"
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_covers_distinct_types_when_group_count_exceeds_limit() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
+        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-2"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-3"},
+        {
+            "item_id": "c1",
+            "anomaly_type": "matched_with_diff",
+            "_exception_owner_identifier": "owner-4",
+        },
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=2,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
+    assert {item["anomaly_type"] for item in sampled} == {"source_only", "target_only"}
+    assert metadata["sample_count"] == 2
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_clamps_zero_sample_limit_to_one() -> None:
+    anomalies = [
+        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
+        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-2"},
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=0,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1"]
+    assert metadata["sample_limit"] == 1
+    assert metadata["sample_count"] == 1
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_round_robins_extra_group_coverage_across_types() -> None:
+    anomalies = [
+        {
+            "item_id": f"s{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_identifier": f"owner-s{index}",
+        }
+        for index in range(1, 6)
+    ] + [
+        {
+            "item_id": f"t{index}",
+            "anomaly_type": "target_only",
+            "_exception_owner_identifier": f"owner-t{index}",
+        }
+        for index in range(1, 6)
+    ] + [
+        {
+            "item_id": f"m{index}",
+            "anomaly_type": "matched_with_diff",
+            "_exception_owner_identifier": f"owner-m{index}",
+        }
+        for index in range(1, 6)
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=6,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["s1", "t1", "m1", "s2", "t2", "m2"]
+    assert [item["anomaly_type"] for item in sampled].count("source_only") == 2
+    assert [item["anomaly_type"] for item in sampled].count("target_only") == 2
+    assert [item["anomaly_type"] for item in sampled].count("matched_with_diff") == 2
+    assert metadata["sample_count"] == 6
+    assert metadata["fallback_used"] is False
+
+
+def test_sample_anomalies_groups_name_only_owners() -> None:
+    anomalies = [
+        {
+            "item_id": f"a{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_name": "订单责任人",
+        }
+        for index in range(1, 4)
+    ] + [
+        {
+            "item_id": f"b{index}",
+            "anomaly_type": "source_only",
+            "_exception_owner_name": "账单责任人",
+        }
+        for index in range(1, 4)
+    ]
+
+    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
+        anomalies,
+        sample_limit=2,
+    )
+
+    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
+    assert metadata["sample_count"] == 2
+    assert metadata["fallback_used"] is False
 
 
 def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1469,6 +1900,13 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
             "anomaly_items": [{"anomaly_type": "source_only"} for _ in created_exceptions],
             "created_exceptions": created_exceptions,
             "auto_notify_policy": {"explosion_threshold": 1, "explosion": True},
+            "exception_sampling": {
+                "enabled": True,
+                "total_count": 1200,
+                "sample_count": 3,
+                "sample_limit": 200,
+                "threshold": 1,
+            },
         },
     }
 
@@ -1481,7 +1919,7 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert adapter.reminder_calls[0]["assignee_user_id"] == "ding-user-001"
     assert "你有3条异常待处理" in str(adapter.reminder_calls[0]["todo_title"])
     owner_content = str(adapter.reminder_calls[0]["content"])
-    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
+    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
         owner_content
     )
     assert "数据集 A" not in owner_content
@@ -1493,7 +1931,8 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert "执行完成，待处理异常已催办责任人「周行」" in summary_content
     assert "待处理异常已按责任人聚合催办" not in summary_content
     assert "如异常数量或类型不符合预期，请检查方案配置或数据日期范围。" not in summary_content
-    assert "[查看全量差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
+    assert "异常明细：\n已按异常类型和责任人抽样创建 3 条" in summary_content
+    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
         summary_content
     )
     assert len(updated_payloads) == 3

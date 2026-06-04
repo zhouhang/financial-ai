@@ -38,7 +38,10 @@ interface BrowserCollectionRegistrationResponse {
 
 interface BrowserCredentialUpdateResponse {
   success?: boolean;
+  status?: string;
   source_id?: string;
+  verification_sync_job_id?: string;
+  verification_biz_date?: string;
   credential?: Record<string, unknown>;
   binding?: Record<string, unknown> | null;
   message?: string;
@@ -474,7 +477,28 @@ export function BrowserPlaybookPanel({
         const job = isRecord(body.job) ? body.job : null;
         const status = syncJobStatus(job).toLowerCase();
         if (status === 'success' || status === 'completed') {
-          setActionNotice(`浏览器任务已完成（任务ID：${syncJobId}）`);
+          setActionNotice(`浏览器任务已完成，正在激活（任务ID：${syncJobId}）`);
+          const finalizeResponse = await fetch('/api/data-sources/browser-playbook/finalize', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({ verification_sync_job_id: syncJobId }),
+          });
+          const finalizeBody = (await finalizeResponse.json().catch(() => ({}))) as BrowserPlaybookFinalizeResponse;
+          if (!finalizeResponse.ok || !finalizeBody.success) {
+            setActionError(
+              String(
+                finalizeBody.detail ||
+                  finalizeBody.error_message ||
+                  finalizeBody.error ||
+                  finalizeBody.message ||
+                  '浏览器任务激活失败',
+              ),
+            );
+            setActionNotice('');
+            await onRegistered?.();
+            return;
+          }
+          setActionNotice(String(finalizeBody.message || `浏览器任务已完成并激活（任务ID：${syncJobId}）`));
           await onRegistered?.();
           return;
         }
@@ -712,7 +736,12 @@ export function BrowserPlaybookPanel({
       if (!response.ok || !body.success) {
         throw new Error(String(body.detail || body.error || body.message || '浏览器任务凭证保存失败'));
       }
-      setActionNotice(String(body.message || '浏览器任务凭证已保存'));
+      const syncJobId = String(body.verification_sync_job_id || '');
+      setActionNotice(
+        syncJobId
+          ? `${String(body.message || '浏览器任务凭证已保存，并已重新下发验证任务')}（任务ID：${syncJobId}）`
+          : String(body.message || '浏览器任务凭证已保存'),
+      );
       setCredentialDialog({
         row: null,
         form: emptyCredentialForm,
@@ -720,6 +749,12 @@ export function BrowserPlaybookPanel({
         submitting: false,
       });
       await onRegistered?.();
+      if (syncJobId) {
+        void pollRetryJob(syncJobId).catch((error) => {
+          setActionError(error instanceof Error ? error.message : '浏览器任务执行失败');
+          setActionNotice('');
+        });
+      }
     } catch (error) {
       setCredentialDialog((prev) => ({
         ...prev,
@@ -731,7 +766,7 @@ export function BrowserPlaybookPanel({
         },
       }));
     }
-  }, [authHeaders, authToken, credentialDialog, onRegistered]);
+  }, [authHeaders, authToken, credentialDialog, onRegistered, pollRetryJob]);
 
   const openTaskDetail = useCallback(
     async (row: BrowserCollectionRow) => {

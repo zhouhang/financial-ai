@@ -109,6 +109,10 @@ async def register_browser_agent(*, agent_id: str, token: str, send_event: SendJ
         await _send_handoff_start(peer, controller)
 
 
+_AGENT_HEARTBEAT_WAITING_SECONDS = 30
+_AGENT_HEARTBEAT_EXPIRE_SECONDS = 300
+
+
 async def unregister_browser_agent(agent_id: str) -> None:
     normalized_agent_id = str(agent_id)
     async with _lock:
@@ -134,6 +138,21 @@ async def unregister_browser_agent(agent_id: str) -> None:
             )
         except Exception:
             logger.exception("记录 handoff agent_offline 失败 handoff_session_id=%s", controller.handoff_session_id)
+
+
+async def on_agent_heartbeat_timeout(*, agent_id: str, elapsed_seconds: float) -> None:
+    """agent WSS 心跳超时的 session 收尾:>30s 降 waiting_agent,>5min 置 expired/failed,
+    同步 sync job 终态。避免 agent 崩溃后 session 静止停在 active。"""
+    async with _lock:
+        affected = [c for c in _controllers.values()
+                    if str(c.session.get("agent_id") or "") == str(agent_id)]
+    if elapsed_seconds >= _AGENT_HEARTBEAT_EXPIRE_SECONDS:
+        for c in affected:
+            await call_mcp_tool("browser_handoff_session_expire", {"token": c.token, "reason": "agent_offline_timeout"})
+            await c.send_json({"type": "status", "status": "expired", "reason": "采集机离线"})
+    elif elapsed_seconds >= _AGENT_HEARTBEAT_WAITING_SECONDS:
+        for c in affected:
+            await c.send_json({"type": "status", "status": "waiting_agent", "reason": "采集机离线"})
 
 
 async def open_controller(*, token: str, send_json: SendJson) -> HandoffController:
@@ -334,6 +353,27 @@ async def route_agent_message(*, agent_id: str, token: str, msg: dict[str, Any])
             _latest_frames[handoff_session_id] = frame
         if controller and controller.controller_id == str(msg.get("controller_id") or ""):
             await controller.send_json({"type": "frame", **frame})
+        return True
+
+    if msg_type == "handoff_focus_state":
+        if controller:
+            await controller.send_json({"type": "focus_state", "editable": bool(msg.get("editable"))})
+        return True
+
+    if msg_type == "handoff_control_status":
+        code = str(msg.get("code") or "")
+        # 三态:control_unavailable(可恢复)/window_unavailable/desktop_locked
+        valid = {"control_unavailable", "window_unavailable", "desktop_locked"}
+        if code not in valid:
+            return True
+        if controller:
+            await controller.send_json({"type": "status", "status": code, "reason": str(msg.get("reason") or "")})
+        # window_unavailable 同时落 waiting_agent 事件(等过期/下次降级);desktop_locked 仅告警不改 job
+        if code == "window_unavailable":
+            await call_mcp_tool("browser_handoff_session_event", {
+                "worker_token": token, "handoff_session_id": handoff_session_id,
+                "agent_id": agent_id, "event_type": "window_unavailable", "status": "waiting_agent",
+            })
         return True
 
     if msg_type in {"handoff_completed", "handoff_still_blocked", "handoff_failed"}:

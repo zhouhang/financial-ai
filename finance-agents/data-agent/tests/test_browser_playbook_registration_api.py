@@ -358,7 +358,10 @@ def test_browser_playbook_credential_update_route_does_not_echo_password(monkeyp
         )
         return {
             "success": True,
+            "status": "verification_pending",
             "source_id": source_id,
+            "verification_sync_job_id": "sync-retry-1",
+            "verification_biz_date": "2026-05-20",
             "credential": {
                 "username": credential_username,
                 "password_saved": True,
@@ -394,7 +397,10 @@ def test_browser_playbook_credential_update_route_does_not_echo_password(monkeyp
     body = response.json()
     assert body == {
         "success": True,
+        "status": "verification_pending",
         "source_id": "source-1",
+        "verification_sync_job_id": "sync-retry-1",
+        "verification_biz_date": "2026-05-20",
         "credential": {
             "username": "shop:ai财务",
             "password_saved": True,
