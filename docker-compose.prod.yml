@@ -31,6 +31,9 @@ services:
       - tally-proc-output:/app/finance-mcp/proc/output
       # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
       - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3335/health >/dev/null"]
       interval: 30s
@@ -57,6 +60,9 @@ services:
       - tally-proc-output:/app/finance-mcp/proc/output
       # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
       - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health >/dev/null"]
       interval: 30s
@@ -92,6 +98,9 @@ services:
       - tally-proc-output:/app/finance-mcp/proc/output
       # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
       - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
 
   recon-worker-2:
     <<: [*python_image, *common_env]
@@ -110,6 +119,9 @@ services:
       - tally-proc-output:/app/finance-mcp/proc/output
       # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
       - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
 
   finance-web:
     image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/finance-web:${IMAGE_TAG:-local}
@@ -135,3 +147,5 @@ volumes:
   tally-uploads:
   tally-recon-output:
   tally-proc-output:
+  tally-dws-config:
+  tally-dws-keychain:
