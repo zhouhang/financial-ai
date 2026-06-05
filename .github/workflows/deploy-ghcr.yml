@@ -105,6 +105,20 @@ jobs:
              set -a && . ./deploy.env && set +a && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml pull && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans && \
-             curl -fsS http://127.0.0.1:3335/health >/dev/null && \
-             curl -fsS http://127.0.0.1:8100/health >/dev/null && \
-             curl -fsS http://127.0.0.1:5173/health >/dev/null"
+             wait_health() { \
+               service=\"\$1\"; \
+               url=\"\$2\"; \
+               for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+                 if curl -fsS --connect-timeout 3 --max-time 8 \"\$url\" >/dev/null; then \
+                   echo \"health OK: \$service\"; \
+                   return 0; \
+                 fi; \
+                 echo \"waiting for \$service health (\$attempt/20)\"; \
+                 sleep 3; \
+               done; \
+               echo \"health FAILED: \$service (\$url)\" >&2; \
+               return 1; \
+             }; \
+             wait_health finance-mcp http://127.0.0.1:3335/health && \
+             wait_health data-agent http://127.0.0.1:8100/health && \
+             wait_health finance-web http://127.0.0.1:5173/health"
