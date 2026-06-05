@@ -67,6 +67,7 @@ def test_invisible_windows_excluded():
 
 
 from finance_browser_agent.remote_control_os_windows import evaluate_session_interactivity
+from finance_browser_agent.remote_control_os_windows import selfcheck
 
 
 def test_session_zero_is_rejected():
@@ -87,6 +88,31 @@ def test_non_console_session_rejected():
     # 进程会话与活动控制台会话不一致 → 非活动交互式
     result = evaluate_session_interactivity(process_session_id=2, active_console_session_id=1)
     assert result["available"] is False
+
+
+def test_selfcheck_reports_missing_runtime_dependencies():
+    result = selfcheck(
+        dependency_check=lambda: {
+            "available": False,
+            "reason": "control_unavailable",
+            "detail": "missing Windows handoff dependencies: win32gui",
+        }
+    )
+    assert result["available"] is False
+    assert result["reason"] == ControlErrorCode.CONTROL_UNAVAILABLE.value
+    assert "win32gui" in result["detail"]
+
+
+def test_selfcheck_allows_injected_win32_without_platform_dependencies():
+    class FakeSessionWin32:
+        def process_session_id(self):
+            return 1
+
+        def active_console_session_id(self):
+            return 1
+
+    result = selfcheck(win32=FakeSessionWin32())
+    assert result["available"] is True
 
 
 from finance_browser_agent.remote_control_os_windows import WindowCapturer
@@ -276,7 +302,11 @@ def test_clipboard_fallback_fails_on_readback_mismatch():
 # Task 15: WindowsControlBackend contract + diagnostics DPI + key whitelist
 # ---------------------------------------------------------------------------
 from remote_control_contract import RemoteControlBackendContract
-from finance_browser_agent.remote_control_os_windows import WindowsControlBackend, build_test_backend
+from finance_browser_agent.remote_control_os_windows import (
+    WindowsControlBackend,
+    build_test_backend,
+    build_windows_backend,
+)
 
 
 class TestWindowsBackendContract(RemoteControlBackendContract):
@@ -297,3 +327,27 @@ def test_diagnostics_reads_back_dpi_awareness_not_hardcoded():
     assert backend.diagnostics()["dpi_awareness"] == "per_monitor_v2"
     backend2 = build_test_backend(dpi_readback="system")
     assert backend2.diagnostics()["dpi_awareness"] == "system"
+
+
+def test_build_windows_backend_assembles_injected_dependencies():
+    backend = build_windows_backend(
+        page=None,
+        chrome=type("Chrome", (), {"process": type("Process", (), {"pid": 100})()})(),
+        risk_contexts=[],
+        win32=FakeWin32([
+            {"hwnd": 11, "pid": 100, "visible": True, "title": "验证 - Google Chrome",
+             "rect": {"left": 0, "top": 0, "width": 100, "height": 100}},
+        ]),
+        mss=FakeMss(),
+        pillow=FakePillow(),
+        cdp=FakeCdp(focused=True),
+        clipboard=FakeClipboard(),
+        send_input=RecordingSendInput(),
+        virtual_desktop={"left": 0, "top": 0, "width": 100, "height": 100},
+        dpi_readback="per_monitor_v2",
+    )
+    backend.bind_window()
+    frame = backend.capture_frame()
+    assert backend.diagnostics()["backend"] == "os_windows"
+    assert backend.diagnostics()["dpi_awareness"] == "per_monitor_v2"
+    assert frame["mime"] == "image/jpeg"

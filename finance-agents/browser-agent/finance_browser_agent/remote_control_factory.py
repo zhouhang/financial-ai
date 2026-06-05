@@ -66,9 +66,9 @@ class RemoteControlFactory:
         """按 effective_backend_kind 建后端实例。延迟 import 平台模块,避免在不支持平台 import 失败。"""
         kind = self.effective_backend_kind
         if kind == "os_windows":
-            from finance_browser_agent.remote_control_os_windows import WindowsControlBackend
+            from finance_browser_agent.remote_control_os_windows import build_windows_backend
 
-            return WindowsControlBackend(page=page, chrome=chrome, risk_contexts=risk_contexts)
+            return build_windows_backend(page=page, chrome=chrome, risk_contexts=risk_contexts)
         if kind == "os_macos":
             from finance_browser_agent.remote_control_os_macos import MacControlBackend
 
