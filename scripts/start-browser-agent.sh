@@ -82,7 +82,12 @@ is_running() {
     return 1
   fi
 
-  kill -0 "$pid" >/dev/null 2>&1
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Some sandboxed shells return EPERM for kill -0 even when the process exists.
+  ps -p "$pid" >/dev/null 2>&1
 }
 
 if [ "$STATUS_MODE" -eq 1 ]; then
@@ -196,9 +201,31 @@ if [ "$DAEMON_MODE" = "1" ]; then
     exit 0
   fi
 
-  nohup "$PYTHON_BIN" service.py >>"$LOG_FILE" 2>&1 &
-  agent_pid="$!"
-  echo "$agent_pid" >"$PID_FILE"
+  agent_pid="$("$PYTHON_BIN" - "$LOG_FILE" "$PID_FILE" "$BROWSER_AGENT_DIR" "$PYTHON_BIN" <<'PY'
+import os
+import subprocess
+import sys
+
+log_path, pid_path, work_dir, python_bin = sys.argv[1:]
+log_file = open(log_path, "ab", buffering=0)
+env = os.environ.copy()
+for key in list(env):
+    if key.startswith("CODEX_"):
+        env.pop(key, None)
+process = subprocess.Popen(
+    [python_bin, "service.py"],
+    cwd=work_dir,
+    stdin=subprocess.DEVNULL,
+    stdout=log_file,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    env=env,
+)
+with open(pid_path, "w", encoding="utf-8") as handle:
+    handle.write(f"{process.pid}\n")
+print(process.pid)
+PY
+)"
   echo "browser-agent started in background: pid=$agent_pid"
   echo "log=$LOG_FILE"
   exit 0
