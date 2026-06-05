@@ -6,11 +6,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-LOCAL_ENV_PATH = Path(__file__).resolve().parent / ".env"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 load_dotenv(ROOT_ENV_PATH)
-load_dotenv(LOCAL_ENV_PATH, override=True)
 
 
 # ── LLM 配置 ─────────────────────────────────────────────────────────────────

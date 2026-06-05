@@ -9,10 +9,8 @@ import re
 from dotenv import load_dotenv
 
 ROOT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-LOCAL_ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 load_dotenv(ROOT_ENV_PATH)
-load_dotenv(LOCAL_ENV_PATH, override=True)
 
 import json
 import logging

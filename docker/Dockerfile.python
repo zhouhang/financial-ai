@@ -22,6 +22,18 @@ RUN apt-get update \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# 钉钉 Workspace CLI (dws):对账差异通知/待办 + 采集告警经 dingtalk_dws 适配器调用。
+# 固定版本、按架构下载;配 .env 的 DINGTALK_DWS_BIN=/usr/local/bin/dws 使用。
+ARG DWS_VERSION=v1.0.34
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) dwsarch=amd64 ;; arm64) dwsarch=arm64 ;; *) dwsarch=amd64 ;; esac; \
+    curl -fSL "https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/releases/download/${DWS_VERSION}/dws-linux-${dwsarch}.tar.gz" -o /tmp/dws.tgz; \
+    tar -xzf /tmp/dws.tgz -C /tmp dws; \
+    install -m 0755 /tmp/dws /usr/local/bin/dws; \
+    rm -f /tmp/dws.tgz /tmp/dws; \
+    /usr/local/bin/dws --version
+
 COPY finance-mcp/requirements.txt /tmp/finance-mcp-requirements.txt
 COPY finance-agents/data-agent/requirements.txt /tmp/data-agent-requirements.txt
 COPY finance-cron/requirements.txt /tmp/finance-cron-requirements.txt

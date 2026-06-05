@@ -795,11 +795,7 @@ def _load_semantic_env_values() -> dict[str, str]:
 
     merged: dict[str, str] = {}
     project_root = Path(__file__).resolve().parents[2]
-    candidate_paths = (
-        project_root / ".env",
-        project_root / "finance-mcp" / ".env",
-        project_root / "finance-agents" / "data-agent" / ".env",
-    )
+    candidate_paths = (project_root / ".env",)
     for path in candidate_paths:
         if not path.exists():
             continue

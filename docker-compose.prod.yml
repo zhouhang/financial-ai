@@ -1,7 +1,7 @@
 name: tally
 
 x-python-image: &python_image
-  image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/tally-python:${IMAGE_TAG:-local}
+  image: ${IMAGE_PREFIX:-tally-acr-registry-vpc.cn-hangzhou.cr.aliyuncs.com/tally-acr}/tally-python:${IMAGE_TAG:-local}
 
 x-common-env: &common_env
   env_file:
@@ -29,6 +29,11 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3335/health >/dev/null"]
       interval: 30s
@@ -53,6 +58,11 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health >/dev/null"]
       interval: 30s
@@ -86,6 +96,11 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
 
   recon-worker-2:
     <<: [*python_image, *common_env]
@@ -102,9 +117,14 @@ services:
       - tally-uploads:/app/finance-mcp/uploads
       - tally-recon-output:/app/finance-mcp/recon/output
       - tally-proc-output:/app/finance-mcp/proc/output
+      # dws (钉钉 Workspace CLI) 二进制由 host 提供,容器内 /usr/local/bin/dws;见 DINGTALK_DWS_BIN
+      - /opt/tally/bin/dws:/usr/local/bin/dws:ro
+      # dws OAuth 登录态持久化(设备流登录后 token 自动刷新,容器重建不丢;多容器共享)
+      - tally-dws-config:/root/.dws
+      - tally-dws-keychain:/root/.local/share/dws-cli
 
   finance-web:
-    image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/finance-web:${IMAGE_TAG:-local}
+    image: ${IMAGE_PREFIX:-tally-acr-registry-vpc.cn-hangzhou.cr.aliyuncs.com/tally-acr}/finance-web:${IMAGE_TAG:-local}
     restart: unless-stopped
     ports:
       - "127.0.0.1:5173:80"
@@ -127,3 +147,5 @@ volumes:
   tally-uploads:
   tally-recon-output:
   tally-proc-output:
+  tally-dws-config:
+  tally-dws-keychain:

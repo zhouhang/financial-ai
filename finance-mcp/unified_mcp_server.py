@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 from mcp import types
 
 # 加载环境变量
-load_dotenv()
+ROOT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ROOT_ENV_PATH)
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
