@@ -1,7 +1,7 @@
 name: tally
 
 x-python-image: &python_image
-  image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/tally-python:${IMAGE_TAG:-local}
+  image: ${IMAGE_PREFIX:-tally-acr-registry.cn-hangzhou.cr.aliyuncs.com/tally-acr}/tally-python:${IMAGE_TAG:-local}
 
 x-common-env: &common_env
   env_file:
@@ -124,7 +124,7 @@ services:
       - tally-dws-keychain:/root/.local/share/dws-cli
 
   finance-web:
-    image: ghcr.io/${GHCR_OWNER:-your-org}/${GHCR_REPOSITORY:-financial-ai}/finance-web:${IMAGE_TAG:-local}
+    image: ${IMAGE_PREFIX:-tally-acr-registry.cn-hangzhou.cr.aliyuncs.com/tally-acr}/finance-web:${IMAGE_TAG:-local}
     restart: unless-stopped
     ports:
       - "127.0.0.1:5173:80"
