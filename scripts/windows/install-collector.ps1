@@ -38,8 +38,10 @@ $reqs = Join-Path $AgentDir 'requirements.txt'
 if ((Test-Path $reqs) -and ((Get-Content $reqs | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') }).Count -gt 0)) {
   & $VenvPy -m pip install -r $reqs
 }
-# 核心依赖(显式装,防 requirements.txt 不全);后三个是 OS 级远控用(pywin32/mss/Pillow)
-& $VenvPy -m pip install PyJWT websockets playwright httpx pandas openpyxl pywin32 mss Pillow
+# 核心依赖(显式装,防 requirements.txt 不全):
+#   oss2 = 上传原始下载文件到 OSS(STORAGE_BACKEND=oss 必需)
+#   pywin32/mss/Pillow = OS 级远控接管(截屏/窗口/注入)
+& $VenvPy -m pip install PyJWT websockets playwright httpx pandas openpyxl oss2 pywin32 mss Pillow
 & $VenvPy -m playwright install chrome
 
 Write-Host '== 2) 电源策略:交流电下不睡眠/不息屏/不休眠 =='

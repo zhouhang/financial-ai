@@ -23,6 +23,9 @@ notepad finance-agents\browser-agent\.env
 - `JWT_SECRET=` **填 ECS `/opt/tally/.env.prod` 里同一个 JWT_SECRET**（必须一致，否则云端拒绝）
 - `BROWSER_AGENT_COMPANY_ID=` 你的 company_id
 - `BROWSER_AGENT_ID=collector-win-1`（给这台机器一个稳定唯一 id）
+- **OSS（必配）**：采集机和云端不在一台机器，下载的原始文件必须传到 OSS，否则文件只留在 Windows 本地、云端/前端取不到（对账数字不受影响，但"下载/查看/审计原始采集文件"会失效）。下面这组值**照抄 ECS `/opt/tally/.env.prod`**（bucket/endpoint/key/prefix 要一致，capture 路径才对得上）：
+  - `STORAGE_BACKEND=oss`
+  - `OSS_BUCKET=...`、`OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com`、`OSS_ACCESS_KEY_ID=...`、`OSS_ACCESS_KEY_SECRET=...`、`OSS_PREFIX=...`（与 prod 一致）
 - 可选 `BROWSER_AGENT_PROFILE_ROOT` / `DOWNLOAD_ROOT` 用 Windows 路径，如 `C:\tally\profiles`
 
 ## 三、一键安装（管理员 PowerShell，用采集账号登录后运行）
