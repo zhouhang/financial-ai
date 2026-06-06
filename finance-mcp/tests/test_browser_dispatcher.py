@@ -855,7 +855,65 @@ def test_list_browser_bindings_includes_running_job_flags(monkeypatch) -> None:
     assert "sj.data_source_id = srb.data_source_id" in captured["sql"]
     assert "sj.job_status = 'running'" in captured["sql"]
     assert "array_agg" in captured["sql"].lower()
+    assert "array_agg(sj.id::text" in captured["sql"]
+    assert "ARRAY[]::text[]" in captured["sql"]
     assert captured["params"] == ("company-001", "collector-mac-1")
+
+
+def test_list_browser_bindings_normalizes_raw_empty_running_job_array(monkeypatch) -> None:
+    from browser_playbook import assignment
+
+    rows = [
+        {
+            "data_source_id": "source-001",
+            "data_source_code": "shop-code-001",
+            "data_source_name": "Shop 001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily",
+            "agent_id": "collector-mac-1",
+            "profile_status": "active",
+            "playbook_status": "ok",
+            "running_sync_job_ids": "{}",
+            "has_running_job": False,
+        }
+    ]
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(assignment, "get_conn", lambda: _ConnManager())
+
+    result = assignment.list_browser_bindings(company_id="company-001")
+
+    assert result["success"] is True
+    assert result["bindings"][0]["running_sync_job_ids"] == []
 
 
 def test_reassign_browser_bindings_dry_run_does_not_update(monkeypatch) -> None:
@@ -1010,6 +1068,72 @@ def test_reassign_browser_bindings_dry_run_reports_offline_target(monkeypatch) -
     assert result["blocked_reason"] == "target_agent_offline"
 
 
+def test_reassign_browser_bindings_dry_run_reports_missing_target(monkeypatch) -> None:
+    from browser_playbook import assignment
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchone(self):
+            if "FROM agents" in self.sql:
+                return None
+            return None
+
+        def fetchall(self):
+            return [
+                {
+                    "data_source_id": "source-001",
+                    "data_source_code": "shop-code-001",
+                    "data_source_name": "Shop 001",
+                    "shop_id": "shop-001",
+                    "playbook_id": "qianniu-daily",
+                    "agent_id": "collector-mac-1",
+                    "profile_status": "active",
+                    "playbook_status": "ok",
+                    "running_sync_job_ids": [],
+                    "has_running_job": False,
+                }
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(assignment, "get_conn", lambda: _ConnManager())
+
+    result = assignment.reassign_browser_bindings(
+        company_id="company-001",
+        from_agent_id="collector-mac-1",
+        to_agent_id="collector-win-1",
+        dry_run=True,
+        require_online=True,
+    )
+
+    assert result["success"] is True
+    assert result["would_block"] is True
+    assert result["blocked_reason"] == "target_agent_missing"
+
+
 def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
     from browser_playbook import assignment
 
@@ -1037,6 +1161,8 @@ def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
         def fetchall(self):
             if "RETURNING" in self.sql and "UPDATE shop_runtime_bindings" in self.sql:
                 return [{"data_source_id": "source-001", "agent_id": "collector-win-1"}]
+            if "FROM sync_jobs sj" in self.sql and "sj.data_source_id = ANY" in self.sql:
+                return []
             return [
                 {
                     "data_source_id": "source-001",
@@ -1258,6 +1384,84 @@ def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
     assert result["success"] is False
     assert result["error_code"] == "running_jobs_present"
     assert result["running_sync_job_ids"] == ["sync-running-001"]
+    assert not any("UPDATE shop_runtime_bindings" in sql for sql in calls)
+    assert "commit" not in calls
+
+
+def test_reassign_browser_bindings_rechecks_running_jobs_after_lock(monkeypatch) -> None:
+    from browser_playbook import assignment
+
+    now = datetime(2026, 6, 6, 10, 0, tzinfo=timezone.utc)
+    calls: list[str] = []
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            calls.append(sql)
+            self.sql = sql
+            self.params = params
+
+        def fetchone(self):
+            if "FROM agents" in self.sql:
+                return {"agent_id": "collector-win-1", "last_heartbeat_at": now, "status": "online"}
+            return None
+
+        def fetchall(self):
+            if "FROM sync_jobs sj" in self.sql and "sj.data_source_id = ANY" in self.sql:
+                return [{"id": "sync-late-001"}]
+            return [
+                {
+                    "data_source_id": "source-001",
+                    "data_source_code": "shop-code-001",
+                    "data_source_name": "Shop 001",
+                    "shop_id": "shop-001",
+                    "playbook_id": "qianniu-daily",
+                    "agent_id": "collector-mac-1",
+                    "profile_status": "active",
+                    "playbook_status": "ok",
+                    "running_sync_job_ids": [],
+                    "has_running_job": False,
+                }
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            calls.append("commit")
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(assignment, "get_conn", lambda: _ConnManager())
+    monkeypatch.setattr(assignment, "_now_utc", lambda: now)
+
+    result = assignment.reassign_browser_bindings(
+        company_id="company-001",
+        from_agent_id="collector-mac-1",
+        to_agent_id="collector-win-1",
+        dry_run=False,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "running_jobs_present"
+    assert result["running_sync_job_ids"] == ["sync-late-001"]
     assert not any("UPDATE shop_runtime_bindings" in sql for sql in calls)
     assert "commit" not in calls
 

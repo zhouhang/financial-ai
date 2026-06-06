@@ -23,8 +23,33 @@ def _now_utc() -> datetime:
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for key, value in row.items():
-        normalized[key] = _normalize_value(value)
+        if key == "running_sync_job_ids":
+            normalized[key] = _normalize_running_sync_job_ids(value)
+        else:
+            normalized[key] = _normalize_value(value)
     return normalized
+
+
+def _normalize_running_sync_job_ids(value: Any) -> list[str]:
+    if value in (None, "", "{}"):
+        return []
+    if isinstance(value, str):
+        raw_value = value.strip()
+        if raw_value in ("", "{}"):
+            return []
+        if raw_value.startswith("{") and raw_value.endswith("}"):
+            raw_value = raw_value[1:-1]
+            if not raw_value:
+                return []
+            return [
+                item.strip().strip('"')
+                for item in raw_value.split(",")
+                if item.strip().strip('"')
+            ]
+        return [raw_value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(_normalize_value(item)) for item in value if _normalize_value(item) not in (None, "")]
+    return [str(_normalize_value(value))]
 
 
 def _normalize_value(value: Any) -> Any:
@@ -166,14 +191,14 @@ def _list_browser_bindings_in_cursor(
                srb.playbook_status,
                srb.cron_pause_reason,
                srb.last_collection_at,
-               COALESCE(running_jobs.running_sync_job_ids, ARRAY[]::uuid[]) AS running_sync_job_ids,
+               COALESCE(running_jobs.running_sync_job_ids, ARRAY[]::text[]) AS running_sync_job_ids,
                COALESCE(running_jobs.has_running_job, FALSE) AS has_running_job
         FROM shop_runtime_bindings srb
         JOIN data_sources ds
           ON ds.id = srb.data_source_id
          AND ds.company_id = srb.company_id
         LEFT JOIN LATERAL (
-            SELECT array_agg(sj.id ORDER BY sj.created_at ASC) AS running_sync_job_ids,
+            SELECT array_agg(sj.id::text ORDER BY sj.created_at ASC) AS running_sync_job_ids,
                    COUNT(sj.id) > 0 AS has_running_job
             FROM sync_jobs sj
             WHERE sj.company_id = srb.company_id
@@ -227,6 +252,28 @@ def _flatten_running_sync_job_ids(bindings: list[dict[str, Any]]) -> list[str]:
         for sync_job_id in binding.get("running_sync_job_ids") or []:
             ids.append(str(sync_job_id))
     return ids
+
+
+def _running_sync_job_ids_for_data_sources(
+    cur: Any,
+    *,
+    company_id: str,
+    data_source_ids: list[str],
+) -> list[str]:
+    if not data_source_ids:
+        return []
+    cur.execute(
+        """
+        SELECT sj.id::text AS id
+        FROM sync_jobs sj
+        WHERE sj.company_id = %s
+          AND sj.data_source_id = ANY(%s::uuid[])
+          AND sj.job_status = 'running'
+        ORDER BY sj.created_at ASC, sj.id ASC
+        """,
+        (company_id, data_source_ids),
+    )
+    return [str(row["id"]) for row in cur.fetchall()]
 
 
 def reassign_browser_bindings(
@@ -283,7 +330,10 @@ def reassign_browser_bindings(
                 target_missing = not target_status.get("exists")
                 target_offline = require_online and not target_status.get("is_online")
                 if dry_run:
-                    if (target_missing or target_offline) and not force_offline_target:
+                    if target_missing and not force_offline_target:
+                        base_result["would_block"] = True
+                        base_result["blocked_reason"] = "target_agent_missing"
+                    elif target_offline and not force_offline_target:
                         base_result["would_block"] = True
                         base_result["blocked_reason"] = "target_agent_offline"
                     return base_result
@@ -317,6 +367,20 @@ def reassign_browser_bindings(
                 data_source_ids = [str(binding["data_source_id"]) for binding in bindings]
                 if not data_source_ids:
                     return base_result
+
+                running_sync_job_ids = _running_sync_job_ids_for_data_sources(
+                    cur,
+                    company_id=company_id,
+                    data_source_ids=data_source_ids,
+                )
+                if running_sync_job_ids:
+                    return {
+                        **base_result,
+                        "success": False,
+                        "error": "matched bindings have running jobs",
+                        "error_code": "running_jobs_present",
+                        "running_sync_job_ids": running_sync_job_ids,
+                    }
 
                 cur.execute(
                     """
