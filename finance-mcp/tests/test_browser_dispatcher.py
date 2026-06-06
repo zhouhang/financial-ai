@@ -1085,6 +1085,15 @@ def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
     assert result["updated_count"] == 1
     assert captured["commit_count"] == 1
     assert "UPDATE shop_runtime_bindings" in str(captured["last_sql"])
+    assert "WHERE company_id = %s" in str(captured["last_sql"])
+    assert "AND agent_id = %s" in str(captured["last_sql"])
+    assert "data_source_id = ANY" in str(captured["last_sql"])
+    assert captured["last_params"] == (
+        "collector-win-1",
+        "company-001",
+        "collector-mac-1",
+        ["source-001"],
+    )
 
 
 def test_reassign_browser_bindings_rejects_same_agent() -> None:
