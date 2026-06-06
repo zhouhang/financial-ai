@@ -1950,6 +1950,14 @@ def _require_user(auth_token: str) -> dict[str, Any]:
     return user
 
 
+def _require_operator_user(auth_token: str) -> dict[str, Any]:
+    user = _require_user(auth_token)
+    role = str(user.get("role") or "").strip().lower()
+    if role in {"system", "scheduler"}:
+        raise ValueError("当前 token 无权限执行采集机运维操作")
+    return user
+
+
 def _require_scheduler_user(auth_token: str) -> dict[str, Any]:
     token = str(auth_token or "").strip()
     if not token:
@@ -9877,7 +9885,7 @@ async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str
 
 
 async def _handle_browser_agent_list(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(str(arguments.get("auth_token") or ""))
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
     threshold = max(1, int(arguments.get("online_threshold_seconds") or 180))
     return browser_assignment.list_browser_agents(
         company_id=str(user["company_id"]),
@@ -9886,7 +9894,7 @@ async def _handle_browser_agent_list(arguments: dict[str, Any]) -> dict[str, Any
 
 
 async def _handle_browser_binding_list(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(str(arguments.get("auth_token") or ""))
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
     return browser_assignment.list_browser_bindings(
         company_id=str(user["company_id"]),
         agent_id=str(arguments.get("agent_id") or "").strip(),
@@ -9897,7 +9905,7 @@ async def _handle_browser_binding_list(arguments: dict[str, Any]) -> dict[str, A
 
 
 async def _handle_browser_binding_reassign(arguments: dict[str, Any]) -> dict[str, Any]:
-    user = _require_user(str(arguments.get("auth_token") or ""))
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
     return browser_assignment.reassign_browser_bindings(
         company_id=str(user["company_id"]),
         from_agent_id=str(arguments.get("from_agent_id") or "").strip(),

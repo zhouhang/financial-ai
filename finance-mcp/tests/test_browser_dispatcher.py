@@ -1692,6 +1692,74 @@ def test_browser_binding_reassign_tool_parses_false_boolean_strings(monkeypatch)
     assert captured["force_offline_target"] is True
 
 
+def test_browser_binding_reassign_tool_rejects_system_role(monkeypatch) -> None:
+    import asyncio
+
+    import pytest
+
+    data_sources = _import_mcp_data_sources()
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-001", "role": "system"},
+    )
+
+    def fail_reassign_browser_bindings(**kwargs):
+        raise AssertionError("reassign_browser_bindings should not be called")
+
+    monkeypatch.setattr(
+        data_sources.browser_assignment,
+        "reassign_browser_bindings",
+        fail_reassign_browser_bindings,
+    )
+
+    with pytest.raises(ValueError, match="当前 token 无权限执行采集机运维操作"):
+        asyncio.run(
+            data_sources._handle_browser_binding_reassign(
+                {
+                    "auth_token": "system-token",
+                    "from_agent_id": "collector-mac-1",
+                    "to_agent_id": "collector-win-1",
+                },
+            )
+        )
+
+
+def test_browser_binding_reassign_tool_rejects_scheduler_role(monkeypatch) -> None:
+    import asyncio
+
+    import pytest
+
+    data_sources = _import_mcp_data_sources()
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"company_id": "company-001", "role": "scheduler"},
+    )
+
+    def fail_reassign_browser_bindings(**kwargs):
+        raise AssertionError("reassign_browser_bindings should not be called")
+
+    monkeypatch.setattr(
+        data_sources.browser_assignment,
+        "reassign_browser_bindings",
+        fail_reassign_browser_bindings,
+    )
+
+    with pytest.raises(ValueError, match="当前 token 无权限执行采集机运维操作"):
+        asyncio.run(
+            data_sources._handle_browser_binding_reassign(
+                {
+                    "auth_token": "scheduler-token",
+                    "from_agent_id": "collector-mac-1",
+                    "to_agent_id": "collector-win-1",
+                },
+            )
+        )
+
+
 def test_browser_sync_job_startup_cleanup_tool_calls_helper(monkeypatch) -> None:
     import asyncio
 
