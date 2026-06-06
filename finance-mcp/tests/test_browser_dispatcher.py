@@ -851,7 +851,9 @@ def test_list_browser_bindings_includes_running_job_flags(monkeypatch) -> None:
     assert "JOIN data_sources ds" in captured["sql"]
     assert "srb.agent_id = %s" in captured["sql"]
     assert "sync_jobs" in captured["sql"]
-    assert "job_status = 'running'" in captured["sql"]
+    assert "sj.company_id = srb.company_id" in captured["sql"]
+    assert "sj.data_source_id = srb.data_source_id" in captured["sql"]
+    assert "sj.job_status = 'running'" in captured["sql"]
     assert "array_agg" in captured["sql"].lower()
     assert captured["params"] == ("company-001", "collector-mac-1")
 
@@ -1012,7 +1014,7 @@ def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
     from browser_playbook import assignment
 
     now = datetime(2026, 6, 6, 10, 0, tzinfo=timezone.utc)
-    captured: dict[str, object] = {"commit_count": 0}
+    captured: dict[str, object] = {"commit_count": 0, "statements": []}
 
     class _Cursor:
         def __enter__(self):
@@ -1025,6 +1027,7 @@ def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
             self.sql = sql
             captured["last_sql"] = sql
             captured["last_params"] = params
+            captured["statements"].append((sql, params))
 
         def fetchone(self):
             if "FROM agents" in self.sql:
@@ -1084,11 +1087,17 @@ def test_reassign_browser_bindings_updates_when_safe(monkeypatch) -> None:
     assert result["matched_count"] == 1
     assert result["updated_count"] == 1
     assert captured["commit_count"] == 1
-    assert "UPDATE shop_runtime_bindings" in str(captured["last_sql"])
-    assert "WHERE company_id = %s" in str(captured["last_sql"])
-    assert "AND agent_id = %s" in str(captured["last_sql"])
-    assert "data_source_id = ANY" in str(captured["last_sql"])
-    assert captured["last_params"] == (
+    update_statements = [
+        (sql, params)
+        for sql, params in captured["statements"]
+        if "UPDATE shop_runtime_bindings" in sql
+    ]
+    assert len(update_statements) == 1
+    update_sql, update_params = update_statements[0]
+    assert "WHERE company_id = %s" in update_sql
+    assert "AND agent_id = %s" in update_sql
+    assert "data_source_id = ANY" in update_sql
+    assert update_params == (
         "collector-win-1",
         "company-001",
         "collector-mac-1",
