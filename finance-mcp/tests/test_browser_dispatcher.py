@@ -1262,6 +1262,30 @@ def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
     assert "commit" not in calls
 
 
+def test_browser_assignment_helpers_return_database_error_when_connection_fails(monkeypatch) -> None:
+    from browser_playbook import assignment
+
+    def raise_db_down():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(assignment, "get_conn", raise_db_down)
+
+    results = [
+        assignment.list_browser_agents(company_id="company-001"),
+        assignment.list_browser_bindings(company_id="company-001"),
+        assignment.reassign_browser_bindings(
+            company_id="company-001",
+            from_agent_id="collector-mac-1",
+            to_agent_id="collector-win-1",
+        ),
+    ]
+
+    for result in results:
+        assert result["success"] is False
+        assert result["error_code"] == "database_error"
+        assert "db down" in result["error"]
+
+
 def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
     import asyncio
 

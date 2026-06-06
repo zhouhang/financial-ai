@@ -81,8 +81,8 @@ def list_browser_agents(
     online_threshold_seconds: int = DEFAULT_ONLINE_THRESHOLD_SECONDS,
 ) -> dict[str, Any]:
     """List browser agents for a company with computed online status."""
-    conn_manager = get_conn()
     try:
+        conn_manager = get_conn()
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -199,8 +199,8 @@ def list_browser_bindings(
     playbook_id: str = "",
 ) -> dict[str, Any]:
     """List browser playbook runtime bindings and running-job flags."""
-    conn_manager = get_conn()
     try:
+        conn_manager = get_conn()
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 bindings = _list_browser_bindings_in_cursor(
@@ -252,8 +252,8 @@ def reassign_browser_bindings(
     if from_agent_id == to_agent_id:
         return _validation_error("source and target agent are the same", "same_agent")
 
-    conn_manager = get_conn()
     try:
+        conn_manager = get_conn()
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 target_status = _target_agent_status(
