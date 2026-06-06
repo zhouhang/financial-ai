@@ -724,6 +724,14 @@ def test_list_browser_agents_computes_online_status(monkeypatch) -> None:
             "capabilities": {},
             "last_heartbeat_at": now - timedelta(seconds=240),
         },
+        {
+            "agent_id": "collector-draining-1",
+            "hostname": "draining-host",
+            "version": "v1",
+            "status": "draining",
+            "capabilities": {},
+            "last_heartbeat_at": now - timedelta(seconds=30),
+        },
     ]
     captured: dict[str, object] = {}
 
@@ -767,11 +775,13 @@ def test_list_browser_agents_computes_online_status(monkeypatch) -> None:
     )
 
     assert result["success"] is True
-    assert result["count"] == 2
+    assert result["count"] == 3
     assert result["agents"][0]["agent_id"] == "collector-win-1"
     assert result["agents"][0]["is_online"] is True
     assert result["agents"][1]["agent_id"] == "collector-mac-1"
     assert result["agents"][1]["is_online"] is False
+    assert result["agents"][2]["agent_id"] == "collector-draining-1"
+    assert result["agents"][2]["is_online"] is False
     assert "FROM agents" in captured["sql"]
     assert captured["params"] == ("company-001",)
 
@@ -840,6 +850,9 @@ def test_list_browser_bindings_includes_running_job_flags(monkeypatch) -> None:
     assert result["bindings"][0]["running_sync_job_ids"] == ["sync-001"]
     assert "JOIN data_sources ds" in captured["sql"]
     assert "srb.agent_id = %s" in captured["sql"]
+    assert "sync_jobs" in captured["sql"]
+    assert "job_status = 'running'" in captured["sql"]
+    assert "array_agg" in captured["sql"].lower()
     assert captured["params"] == ("company-001", "collector-mac-1")
 
 
@@ -1093,6 +1106,7 @@ def test_reassign_browser_bindings_rejects_offline_target_unless_forced(monkeypa
     from browser_playbook import assignment
 
     now = datetime(2026, 6, 6, 10, 0, tzinfo=timezone.utc)
+    calls: list[str] = []
 
     class _Cursor:
         def __enter__(self):
@@ -1102,6 +1116,7 @@ def test_reassign_browser_bindings_rejects_offline_target_unless_forced(monkeypa
             return None
 
         def execute(self, sql, params=None):
+            calls.append(sql)
             self.sql = sql
 
         def fetchone(self):
@@ -1126,6 +1141,9 @@ def test_reassign_browser_bindings_rejects_offline_target_unless_forced(monkeypa
         def cursor(self, *args, **kwargs):
             return _Cursor()
 
+        def commit(self):
+            calls.append("commit")
+
     class _ConnManager:
         def __enter__(self):
             return _Conn()
@@ -1147,12 +1165,15 @@ def test_reassign_browser_bindings_rejects_offline_target_unless_forced(monkeypa
 
     assert result["success"] is False
     assert result["error_code"] == "target_agent_offline"
+    assert not any("UPDATE shop_runtime_bindings" in sql for sql in calls)
+    assert "commit" not in calls
 
 
 def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
     from browser_playbook import assignment
 
     now = datetime(2026, 6, 6, 10, 0, tzinfo=timezone.utc)
+    calls: list[str] = []
 
     class _Cursor:
         def __enter__(self):
@@ -1162,6 +1183,7 @@ def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
             return None
 
         def execute(self, sql, params=None):
+            calls.append(sql)
             self.sql = sql
 
         def fetchone(self):
@@ -1195,6 +1217,9 @@ def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
         def cursor(self, *args, **kwargs):
             return _Cursor()
 
+        def commit(self):
+            calls.append("commit")
+
     class _ConnManager:
         def __enter__(self):
             return _Conn()
@@ -1215,6 +1240,8 @@ def test_reassign_browser_bindings_blocks_running_jobs(monkeypatch) -> None:
     assert result["success"] is False
     assert result["error_code"] == "running_jobs_present"
     assert result["running_sync_job_ids"] == ["sync-running-001"]
+    assert not any("UPDATE shop_runtime_bindings" in sql for sql in calls)
+    assert "commit" not in calls
 
 
 def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
