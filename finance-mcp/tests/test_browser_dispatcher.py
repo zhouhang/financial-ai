@@ -1556,6 +1556,142 @@ def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
     assert captured["capabilities"] == {"browser": "chrome"}
 
 
+def test_browser_agent_list_tool_calls_assignment(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    captured: dict[str, object] = {}
+
+    def fake_list_browser_agents(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "count": 1, "agents": [{"agent_id": "collector-win-1"}]}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-001"})
+    monkeypatch.setattr(data_sources.browser_assignment, "list_browser_agents", fake_list_browser_agents)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_agent_list",
+            {"auth_token": "user-token", "online_threshold_seconds": 180},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["agents"][0]["agent_id"] == "collector-win-1"
+    assert captured == {"company_id": "company-001", "online_threshold_seconds": 180}
+
+
+def test_browser_binding_list_tool_calls_assignment(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    captured: dict[str, object] = {}
+
+    def fake_list_browser_bindings(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "count": 1, "bindings": [{"agent_id": "collector-mac-1"}]}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-001"})
+    monkeypatch.setattr(data_sources.browser_assignment, "list_browser_bindings", fake_list_browser_bindings)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_binding_list",
+            {
+                "auth_token": "user-token",
+                "agent_id": "collector-mac-1",
+                "source_id": "source-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured == {
+        "company_id": "company-001",
+        "agent_id": "collector-mac-1",
+        "data_source_id": "source-001",
+        "shop_id": "shop-001",
+        "playbook_id": "qianniu-daily",
+    }
+
+
+def test_browser_binding_reassign_tool_defaults_to_dry_run(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    captured: dict[str, object] = {}
+
+    def fake_reassign_browser_bindings(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "dry_run": True, "matched_count": 2, "updated_count": 0}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.browser_assignment,
+        "reassign_browser_bindings",
+        fake_reassign_browser_bindings,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_binding_reassign",
+            {
+                "auth_token": "user-token",
+                "from_agent_id": "collector-mac-1",
+                "to_agent_id": "collector-win-1",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["dry_run"] is True
+    assert captured["company_id"] == "company-001"
+    assert captured["from_agent_id"] == "collector-mac-1"
+    assert captured["to_agent_id"] == "collector-win-1"
+    assert captured["dry_run"] is True
+    assert captured["require_online"] is True
+    assert captured["force_offline_target"] is False
+
+
+def test_browser_binding_reassign_tool_parses_false_boolean_strings(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    captured: dict[str, object] = {}
+
+    def fake_reassign_browser_bindings(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "dry_run": False, "matched_count": 0, "updated_count": 0}
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-001"})
+    monkeypatch.setattr(
+        data_sources.browser_assignment,
+        "reassign_browser_bindings",
+        fake_reassign_browser_bindings,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_binding_reassign",
+            {
+                "auth_token": "user-token",
+                "from_agent_id": "collector-mac-1",
+                "to_agent_id": "collector-win-1",
+                "dry_run": "false",
+                "require_online": "false",
+                "force_offline_target": "true",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["dry_run"] is False
+    assert captured["require_online"] is False
+    assert captured["force_offline_target"] is True
+
+
 def test_browser_sync_job_startup_cleanup_tool_calls_helper(monkeypatch) -> None:
     import asyncio
 
