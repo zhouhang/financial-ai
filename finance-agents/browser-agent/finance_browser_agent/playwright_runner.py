@@ -348,6 +348,7 @@ def _execute_action(
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
     chrome: Any = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -387,13 +388,25 @@ def _execute_action(
         record_time_as = str(action.get("record_time_as") or "").strip()
         if record_time_as:
             extracted[record_time_as] = _now_local_iso()
-        _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
+        _click_like_human(
+            page,
+            selector,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+            overlays=overlays,
+        )
         return {}
     if name == "fill":
         page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
         return {}
     if name == "set_date":
-        _set_date_value(page, selector, _resolve_value(action, params, extracted), timeout_ms=timeout_ms)
+        _set_date_value(
+            page,
+            selector,
+            _resolve_value(action, params, extracted),
+            timeout_ms=timeout_ms,
+            overlays=overlays,
+        )
         return {}
     if name == "wait_for":
         page.wait_for_selector(selector, timeout=timeout_ms)
@@ -442,10 +455,17 @@ def _execute_action(
             params=params,
             extracted=extracted,
             timeout_ms=timeout_ms,
+            overlays=overlays,
         )
     if name == "download":
         with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-            _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
+            _click_like_human(
+                page,
+                selector,
+                timeout_ms=timeout_ms,
+                run_config=run_config,
+                overlays=overlays,
+            )
         return _save_download(
             info.value,
             download_dir=download_dir,
@@ -462,6 +482,7 @@ def _execute_action(
             download_dir=download_dir,
             timeout_ms=timeout_ms,
             storage_context=storage_context,
+            overlays=overlays,
         )
     if name == "download_qianniu_export_report":
         return _download_qianniu_export_report(
@@ -473,6 +494,7 @@ def _execute_action(
             download_dir=download_dir,
             timeout_ms=timeout_ms,
             storage_context=storage_context,
+            overlays=overlays,
         )
     if name == "parse_table":
         source = str(action.get("source") or "last_download")
@@ -1023,7 +1045,15 @@ def _click_like_human(
     *,
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> None:
+    _pause_before_click(context, run_config=run_config)
+    try:
+        context.click(selector, timeout=timeout_ms)
+        return
+    except Exception:
+        if not _dismiss_configured_overlays(context, overlays):
+            raise
     _pause_before_click(context, run_config=run_config)
     context.click(selector, timeout=timeout_ms)
 
@@ -1083,9 +1113,17 @@ def _close_open_datepicker_overlay(page: Any) -> None:
         return
 
 
-def _set_date_value(page: Any, selector: str, value: str, *, timeout_ms: int) -> None:
+def _set_date_value(
+    page: Any,
+    selector: str,
+    value: str,
+    *,
+    timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
+) -> None:
     if not selector or not value:
         raise BrowserActionError("PAGE_CHANGED", "set_date requires selector and value")
+    _dismiss_configured_overlays(page, overlays)
     _close_open_datepicker_overlay(page)
     locator = page.locator(selector).first
     locator.click(timeout=timeout_ms)
@@ -1162,10 +1200,12 @@ def _select_checkboxes(
     params: dict[str, Any],
     extracted: dict[str, Any],
     timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
     if not selector:
         raise BrowserActionError("PAGE_CHANGED", "select_checkboxes requires selector")
+    _dismiss_configured_overlays(page, overlays)
     root = page.locator(selector).last
     root.wait_for(state="visible", timeout=timeout_ms)
     label_selector = str(action.get("label_selector") or "label.next-checkbox-wrapper").strip()
@@ -1210,6 +1250,7 @@ def _select_checkboxes(
             )
             return {"selected_labels": selected}
         for label in [*extra, *missing_checked]:
+            _dismiss_configured_overlays(page, overlays)
             clicked = _click_exact_checkbox_label(root, label_selector=label_selector, label=label)
             if not clicked:
                 raise BrowserActionError("PAGE_CHANGED", f"select_checkboxes label not clickable: {label}")
@@ -1634,6 +1675,7 @@ def _download_qianniu_export_report(
     download_dir: Path,
     timeout_ms: int,
     storage_context: dict[str, str] | None = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     row_selector = str(action.get("selector") or "").strip()
     requested_after_value = _resolve_value(
@@ -1830,6 +1872,7 @@ def _download_qianniu_export_report(
     def _refresh_export_list() -> None:
         if refresh_selector:
             try:
+                _dismiss_configured_overlays(page, overlays)
                 page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True)
                 return
             except Exception as exc:
@@ -1864,6 +1907,7 @@ def _download_qianniu_export_report(
             last_skipped_time = skipped_time
         if button is not None:
             with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
+                _dismiss_configured_overlays(page, overlays)
                 button.click(timeout=min(30000, timeout_ms))
             return _save_download(
                 info.value,
@@ -1905,6 +1949,7 @@ def _download_history_file(
     download_dir: Path,
     timeout_ms: int,
     storage_context: dict[str, str] | None = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
     history_row_selectors = _configured_selectors_with_primary(
@@ -1954,6 +1999,7 @@ def _download_history_file(
             return
         if not history_open_selectors:
             return
+        _dismiss_configured_overlays(page, overlays)
         _click_first_available_selector(
             page,
             history_open_selectors,
@@ -1984,6 +2030,7 @@ def _download_history_file(
         if not history_open_selectors:
             return
         try:
+            _dismiss_configured_overlays(page, overlays)
             closed = _click_first_available_selector(
                 page,
                 history_close_selectors,
@@ -1996,6 +2043,7 @@ def _download_history_file(
         if closed:
             page.wait_for_timeout(min(1000, max(0, history_refresh_interval_ms)))
         try:
+            _dismiss_configured_overlays(page, overlays)
             _open_history()
         except Exception as exc:
             logger.info("browser history reopen skipped; keeping current history list: %s", exc)
@@ -2023,6 +2071,7 @@ def _download_history_file(
         raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
 
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
+        _dismiss_configured_overlays(page, overlays)
         row.locator(download_selector).click(timeout=timeout_ms)
     return _save_download(
         info.value,
@@ -2127,6 +2176,7 @@ def _run_playbook_with_playwright_inner(
     }
     extracted: dict[str, Any] = {}
     steps = [dict(step) for step in playbook.get("steps") or []]
+    overlays = _normalize_overlay_configs(playbook.get("overlays"))
     try:
         validate_step_actions(steps)
     except ValueError as exc:
@@ -2211,6 +2261,7 @@ def _run_playbook_with_playwright_inner(
                                 handoff_coordinator=handoff_coordinator,
                                 backend_factory=backend_factory,
                                 chrome=chrome,
+                                overlays=overlays,
                             )
                             if result.get("rows"):
                                 rows.extend(result["rows"])

@@ -1032,6 +1032,69 @@ def test_login_action_fills_credentials_clicks_submit_and_waits(tmp_path) -> Non
     assert page.waits == [(".dashboard", 2000)]
 
 
+class OverlayBlockingClickPage:
+    def __init__(self) -> None:
+        self.overlay_visible = True
+        self.main_clicks = 0
+        self.overlay_clicks = 0
+        self.waits: list[int] = []
+
+    def locator(self, selector: str):
+        page = self
+
+        class Locator:
+            first = None
+
+            def __init__(self) -> None:
+                self.first = self
+
+            def is_visible(self, timeout: int = 0) -> bool:
+                return selector == ".overlay" and page.overlay_visible
+
+            def click(self, timeout: int = 0) -> None:
+                if selector == ".overlay-close" and page.overlay_visible:
+                    page.overlay_visible = False
+                    page.overlay_clicks += 1
+                    return
+                raise RuntimeError("not clickable")
+
+        return Locator()
+
+    def click(self, selector: str, timeout: int = 0) -> None:
+        if selector == ".target" and self.overlay_visible:
+            raise RuntimeError("overlay blocks click")
+        if selector == ".target":
+            self.main_clicks += 1
+            return
+        raise RuntimeError("unexpected selector")
+
+    def wait_for_timeout(self, delay_ms: int) -> None:
+        self.waits.append(delay_ms)
+
+
+def test_click_action_dismisses_configured_overlay_before_retry(tmp_path) -> None:
+    page = OverlayBlockingClickPage()
+
+    _execute_action(
+        page,
+        {"id": "click_target", "action": "click", "selector": ".target", "timeout_ms": 1000},
+        params={"biz_date": "2026-06-08"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        overlays=[
+            {
+                "id": "blocking_overlay",
+                "markers": [".overlay"],
+                "close_selectors": [".overlay-close"],
+            }
+        ],
+    )
+
+    assert page.overlay_clicks == 1
+    assert page.main_clicks == 1
+
+
 def test_login_action_falls_back_to_child_frame_when_main_page_has_no_fields(tmp_path) -> None:
     login_frame = FakePage(url="https://login.example/iframe", selectors={".dashboard"})
     page = FakePageWithFrames(frames=[login_frame])
@@ -2216,6 +2279,43 @@ class ClosedHistoryPage(FakeHistoryPage):
         super().click(selector, timeout=timeout, force=force)
 
 
+class OverlayHistoryOpenPage(ClosedHistoryPage):
+    def __init__(self, rows: list[FakeHistoryRow]) -> None:
+        super().__init__(rows)
+        self.overlay_visible = True
+        self.overlay_clicks = 0
+
+    def locator(self, selector: str):
+        if selector == ".history-overlay":
+            page = self
+
+            class Marker:
+                first = None
+
+                def __init__(self) -> None:
+                    self.first = self
+
+                def is_visible(self, timeout: int = 0) -> bool:
+                    return page.overlay_visible
+
+            return Marker()
+        if selector == ".history-overlay-close":
+            page = self
+
+            class Close:
+                first = None
+
+                def __init__(self) -> None:
+                    self.first = self
+
+                def click(self, timeout: int = 0) -> None:
+                    page.overlay_visible = False
+                    page.overlay_clicks += 1
+
+            return Close()
+        return super().locator(selector)
+
+
 class RefreshingHistoryPage(FakeHistoryPage):
     def __init__(self, row_sets: list[list[FakeHistoryRow]]) -> None:
         super().__init__([])
@@ -2753,6 +2853,40 @@ def test_download_history_file_can_open_history_from_dialog_with_forced_click(tm
         download_dir=tmp_path,
     )
 
+    assert page.dialog_history_clicked == [(30000, True)]
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_dismisses_configured_overlay_before_opening_history(tmp_path) -> None:
+    target_row = FakeHistoryRow("2026-06-08 ~ 2026-06-08 交易货款 已完成 下载")
+    page = OverlayHistoryOpenPage([target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-06-08"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+        overlays=[
+            {
+                "id": "history_overlay",
+                "markers": [".history-overlay"],
+                "close_selectors": [".history-overlay-close"],
+            }
+        ],
+    )
+
+    assert page.overlay_clicks == 1
     assert page.dialog_history_clicked == [(30000, True)]
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
