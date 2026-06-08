@@ -1039,6 +1039,19 @@ def _dismiss_configured_overlays(context: Any, overlays: list[dict[str, Any]] | 
     return dismissed_any
 
 
+def _dismiss_overlays_and_retry_once(
+    context: Any,
+    overlays: list[dict[str, Any]] | None,
+    operation: Any,
+) -> Any:
+    try:
+        return operation()
+    except Exception:
+        if not _dismiss_configured_overlays(context, overlays):
+            raise
+    return operation()
+
+
 def _click_like_human(
     context: Any,
     selector: str,
@@ -1047,15 +1060,11 @@ def _click_like_human(
     run_config: PlaywrightRunConfig | None,
     overlays: list[dict[str, Any]] | None = None,
 ) -> None:
-    _pause_before_click(context, run_config=run_config)
-    try:
+    def _click_once() -> None:
+        _pause_before_click(context, run_config=run_config)
         context.click(selector, timeout=timeout_ms)
-        return
-    except Exception:
-        if not _dismiss_configured_overlays(context, overlays):
-            raise
-    _pause_before_click(context, run_config=run_config)
-    context.click(selector, timeout=timeout_ms)
+
+    _dismiss_overlays_and_retry_once(context, overlays, _click_once)
 
 
 def _type_like_human(
@@ -1126,7 +1135,7 @@ def _set_date_value(
     _dismiss_configured_overlays(page, overlays)
     _close_open_datepicker_overlay(page)
     locator = page.locator(selector).first
-    locator.click(timeout=timeout_ms)
+    _dismiss_overlays_and_retry_once(page, overlays, lambda: locator.click(timeout=timeout_ms))
     try:
         readonly = bool(
             locator.evaluate(
@@ -1251,7 +1260,11 @@ def _select_checkboxes(
             return {"selected_labels": selected}
         for label in [*extra, *missing_checked]:
             _dismiss_configured_overlays(page, overlays)
-            clicked = _click_exact_checkbox_label(root, label_selector=label_selector, label=label)
+            clicked = _dismiss_overlays_and_retry_once(
+                page,
+                overlays,
+                lambda: _click_exact_checkbox_label(root, label_selector=label_selector, label=label),
+            )
             if not clicked:
                 raise BrowserActionError("PAGE_CHANGED", f"select_checkboxes label not clickable: {label}")
             page.wait_for_timeout(120)
@@ -1873,7 +1886,11 @@ def _download_qianniu_export_report(
         if refresh_selector:
             try:
                 _dismiss_configured_overlays(page, overlays)
-                page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True)
+                _dismiss_overlays_and_retry_once(
+                    page,
+                    overlays,
+                    lambda: page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True),
+                )
                 return
             except Exception as exc:
                 logger.info("qianniu export list refresh click failed, reloading page: %s", exc)
@@ -1908,7 +1925,11 @@ def _download_qianniu_export_report(
         if button is not None:
             with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
                 _dismiss_configured_overlays(page, overlays)
-                button.click(timeout=min(30000, timeout_ms))
+                _dismiss_overlays_and_retry_once(
+                    page,
+                    overlays,
+                    lambda: button.click(timeout=min(30000, timeout_ms)),
+                )
             return _save_download(
                 info.value,
                 download_dir=download_dir,
@@ -2000,11 +2021,15 @@ def _download_history_file(
         if not history_open_selectors:
             return
         _dismiss_configured_overlays(page, overlays)
-        _click_first_available_selector(
+        _dismiss_overlays_and_retry_once(
             page,
-            history_open_selectors,
-            timeout_ms=history_open_timeout_ms,
-            force=True,
+            overlays,
+            lambda: _click_first_available_selector(
+                page,
+                history_open_selectors,
+                timeout_ms=history_open_timeout_ms,
+                force=True,
+            ),
         )
 
     def _find_completed_row() -> Any | None:
@@ -2031,11 +2056,15 @@ def _download_history_file(
             return
         try:
             _dismiss_configured_overlays(page, overlays)
-            closed = _click_first_available_selector(
+            closed = _dismiss_overlays_and_retry_once(
                 page,
-                history_close_selectors,
-                timeout_ms=history_refresh_close_timeout_ms,
-                force=True,
+                overlays,
+                lambda: _click_first_available_selector(
+                    page,
+                    history_close_selectors,
+                    timeout_ms=history_refresh_close_timeout_ms,
+                    force=True,
+                ),
             )
         except Exception as exc:
             closed = False
@@ -2072,7 +2101,11 @@ def _download_history_file(
 
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
         _dismiss_configured_overlays(page, overlays)
-        row.locator(download_selector).click(timeout=timeout_ms)
+        _dismiss_overlays_and_retry_once(
+            page,
+            overlays,
+            lambda: row.locator(download_selector).click(timeout=timeout_ms),
+        )
     return _save_download(
         info.value,
         download_dir=download_dir,

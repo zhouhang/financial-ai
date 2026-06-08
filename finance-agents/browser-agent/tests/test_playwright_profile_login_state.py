@@ -14,6 +14,7 @@ from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.playwright_runner import (
     BrowserActionError,
     PlaywrightRunConfig,
+    _dismiss_overlays_and_retry_once,
     _detect_auth_or_risk,
     _execute_action,
     _history_row_matches_target_date,
@@ -1091,6 +1092,36 @@ def test_click_action_dismisses_configured_overlay_before_retry(tmp_path) -> Non
         ],
     )
 
+    assert page.overlay_clicks == 1
+    assert page.main_clicks == 1
+
+
+def test_overlay_retry_helper_retries_operation_after_late_overlay_dismissal() -> None:
+    page = OverlayBlockingClickPage()
+    page.overlay_visible = False
+    attempts = 0
+
+    def operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            page.overlay_visible = True
+            raise RuntimeError("late overlay blocks click")
+        page.click(".target", timeout=1000)
+
+    _dismiss_overlays_and_retry_once(
+        page,
+        [
+            {
+                "id": "blocking_overlay",
+                "markers": [".overlay"],
+                "close_selectors": [".overlay-close"],
+            }
+        ],
+        operation,
+    )
+
+    assert attempts == 2
     assert page.overlay_clicks == 1
     assert page.main_clicks == 1
 
