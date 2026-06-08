@@ -242,6 +242,13 @@ export interface Message {
    - Do not perform broad one-shot rewrites solely to reduce line count. Split by responsibility and keep each refactor behavior-preserving with focused tests or verification.
    - If a change would make a large file larger, document why extraction is not practical in the final response and keep the added surface minimal.
 
+7. **Browser Collection Playbook First**:
+   - For browser collection page changes, popup changes, selector drift, or new page collection,
+     prefer modifying or adding browser playbooks.
+   - Change Python runner code only when a reusable browser capability is missing.
+   - Site-specific selectors, popup markers, and popup close selectors belong in playbooks, not in
+     `finance_browser_agent.playwright_runner`.
+
 ## File Locations
 
 | Component | Path |
