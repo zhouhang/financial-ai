@@ -1,0 +1,38 @@
+# browser-agent 运行依赖锁文件。
+# 来源:collector-win-1(C:\tally\browser-agent\.venv)实跑环境 pip freeze,2026-06-08。
+# 维护:在 mac 开发环境验证新依赖后,更新此文件并随 deploy-browser-agent-win.sh 一起下发。
+# 注意:pywin32 仅 Windows 可装;CI 与采集机均为 Windows,故直接列入。
+aliyun-python-sdk-core==2.16.0
+aliyun-python-sdk-kms==2.16.5
+anyio==4.13.0
+certifi==2026.5.20
+cffi==2.0.0
+charset-normalizer==3.4.7
+crcmod==1.7
+cryptography==48.0.0
+et_xmlfile==2.0.0
+greenlet==3.5.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.18
+jmespath==0.10.0
+mss==10.2.0
+numpy==2.4.6
+openpyxl==3.1.5
+oss2==2.19.1
+pandas==3.0.0
+pillow==12.2.0
+playwright==1.57.0
+pycparser==3.0
+pycryptodome==3.23.0
+pyee==13.0.1
+PyJWT==2.10.1
+python-dateutil==2.9.0.post0
+pywin32==312
+requests==2.34.2
+six==1.17.0
+typing_extensions==4.15.0
+tzdata==2026.2
+urllib3==2.7.0
+websockets==16.0

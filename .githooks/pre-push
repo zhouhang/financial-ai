@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Auto-deploy browser-agent to the Windows collector when pushing main.
+#
+# Why a local hook (not GitHub Actions): the Windows collector lives on a private
+# intranet (10.0.80.75) reachable only from the mac dev box, not from cloud runners.
+# ECS still deploys via GitHub Actions on push; this hook covers the Windows side so
+# one `git push origin main` ships both.
+#
+# Enable once (per clone):   git config core.hooksPath .githooks
+# Skip for one push:         SKIP_WIN_DEPLOY=1 git push
+#
+# Args: $1=remote name, $2=remote url. Ref lines arrive on stdin:
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+set -euo pipefail
+
+[ "${SKIP_WIN_DEPLOY:-0}" = "1" ] && exit 0
+
+AGENT_DIR="finance-agents/browser-agent"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ZERO="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "${remote_ref:-}" = "refs/heads/main" ] || continue
+  [ "${local_sha:-$ZERO}" = "$ZERO" ] && continue   # branch deletion, nothing to deploy
+
+  if [ "${remote_sha:-$ZERO}" = "$ZERO" ]; then
+    # remote has no main yet: deploy current tree
+    changed="$AGENT_DIR"
+  else
+    changed="$(git diff --name-only "$remote_sha" "$local_sha" -- "$AGENT_DIR" || true)"
+  fi
+
+  if [ -n "$changed" ]; then
+    echo "[pre-push] browser-agent changed on main -> deploying to Windows collector..."
+    if ( cd "$REPO_ROOT/$AGENT_DIR" && bash scripts/deploy-browser-agent-win.sh ); then
+      echo "[pre-push] Windows collector deploy OK."
+    else
+      echo "[pre-push] WARN: Windows deploy failed; push continues." >&2
+      echo "[pre-push]       Re-run manually: (cd $AGENT_DIR && ./scripts/deploy-browser-agent-win.sh)" >&2
+    fi
+  else
+    echo "[pre-push] no browser-agent changes on main; skip Windows deploy."
+  fi
+done
+
+exit 0

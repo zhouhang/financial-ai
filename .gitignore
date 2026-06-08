@@ -286,23 +286,17 @@ check_*.json
 !finance-mcp/tests/**
 !finance-cron/tests/
 !finance-cron/tests/**
-!finance-agents/browser-agent/tests/
-!finance-agents/browser-agent/tests/**
 
 # macOS
 .DS_Store
 
-<<<<<<< HEAD
 # LangGraph CLI 本地开发缓存（langgraph dev 生成的运行时数据）
 .langgraph_api/
 
-# 以 . 开头的目录和文件（保留项目所需配置）
-=======
 # 以 . 开头的目录（任意层级）及其内容
 **/.*/
 
 # 以 . 开头的目录和文件（仅保留必要配置）
->>>>>>> recon
 .*
 !.git/
 !.gitignore
@@ -310,6 +304,8 @@ check_*.json
 !.env.example
 !.cursorrules
 !.dockerignore
+!.githooks/
+!.githooks/**
 !.github/
 !.github/workflows/
 !.github/workflows/deploy-ghcr.yml
@@ -324,11 +320,10 @@ finance-ai/finance-mcp/reconciliation/report
 /finance-mcp/recon/output
 /finance-mcp/recon/output/**
 finance-ui/.vite/
-<<<<<<< HEAD
 
 # LangGraph runtime (local state)
 finance-agents/data-agent/.langgraph_api/
-=======
+
 /finance-agents/proc-agent
 /docs
 !/docs/
@@ -341,12 +336,6 @@ finance-agents/data-agent/.langgraph_api/
 /finance-mcp/proc/output
 /proc-agent/*
 /proc-agent
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> recon
-======
->>>>>>> recon
-=======
 
 !finance-agents/data-agent/tests/
 !finance-agents/data-agent/tests/test_notifications_dingtalk.py
@@ -359,4 +348,17 @@ finance-mcp/tests/**/__pycache__/**
 
 # Ralph (cloned repo - only keep scripts/ralph)
 /ralph/
->>>>>>> recon
+
+# Python 字节码 / 缓存 —— 始终忽略,即使在被 ! 反向包含的 tests/** 目录下
+**/__pycache__/
+*.pyc
+*.pyo
+*$py.class
+
+# 临时文件 / 编辑器与合并残留
+*.tmp
+*.temp
+*.bak
+*.orig
+*~
+*.swp

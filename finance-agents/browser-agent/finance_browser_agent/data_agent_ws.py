@@ -123,6 +123,10 @@ class DataAgentWsClient:
             result = await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
+            # 超时往往意味着连接已半开(没收到关闭帧、ping 超时又被中间代理掩盖),
+            # reader 仍阻塞、ws 仍在。必须主动销毁连接,否则下次 request 会复用死连接、
+            # 永不重连(生产里 win-1 因此卡约 11 分钟才恢复心跳)。
+            await self._close()
             return {"success": False, "error": "等待 data-agent 响应超时"}
         except Exception as exc:  # noqa: BLE001
             self._pending.pop(req_id, None)
