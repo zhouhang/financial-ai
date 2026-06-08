@@ -53,3 +53,25 @@ def test_factory_keeps_os_when_selfcheck_ok():
     )
     assert factory.effective_backend_kind == "os_windows"
     assert factory.diagnostics()["status"] == "available"
+
+
+def test_factory_uses_windows_backend_builder(monkeypatch):
+    import finance_browser_agent.remote_control_os_windows as windows_backend
+
+    calls = {}
+
+    def fake_builder(*, page, chrome, risk_contexts):
+        calls["page"] = page
+        calls["chrome"] = chrome
+        calls["risk_contexts"] = risk_contexts
+        return {"backend": "fake-os-windows"}
+
+    monkeypatch.setattr(windows_backend, "build_windows_backend", fake_builder)
+    factory = RemoteControlFactory(
+        configured_backend="os_windows",
+        platform_system="Windows",
+        os_selfcheck=lambda: {"available": True, "reason": ""},
+    )
+    result = factory.create_backend(page="page", chrome="chrome", risk_contexts=["ctx"])
+    assert result == {"backend": "fake-os-windows"}
+    assert calls == {"page": "page", "chrome": "chrome", "risk_contexts": ["ctx"]}

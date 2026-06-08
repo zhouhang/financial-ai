@@ -14,6 +14,7 @@ from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.playwright_runner import (
     BrowserActionError,
     PlaywrightRunConfig,
+    _dismiss_overlays_and_retry_once,
     _detect_auth_or_risk,
     _execute_action,
     _history_row_matches_target_date,
@@ -591,88 +592,6 @@ class FakeDateInputWithOpenOverlayPage(FakeDateInputPage):
         return FakeDateInputLocator(self, selector)
 
 
-class FakeDateInputWithDriverPopoverPage(FakeDateInputPage):
-    def __init__(self) -> None:
-        super().__init__()
-        self.driver_popover_open = True
-
-    def locator(self, selector: str) -> FakeDateInputLocator:
-        if selector in {".driver-popover", ".driver-overlay"}:
-            page = self
-
-            class _PopoverLocator:
-                first = None
-
-                def is_visible(self, timeout: int = 0) -> bool:
-                    page.events.append(("popover_visible", selector, timeout))
-                    return page.driver_popover_open
-
-            locator = _PopoverLocator()
-            locator.first = locator
-            return locator
-        if selector in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
-            page = self
-
-            class _CloseButtonLocator:
-                first = None
-
-                def click(self, timeout: int = 0) -> None:
-                    page.events.append(("click", selector))
-                    page.driver_popover_open = False
-
-            locator = _CloseButtonLocator()
-            locator.first = locator
-            return locator
-        return FakeDateInputLocator(self, selector)
-
-
-class FakeDateInputWithLateDriverPopoverPage(FakeDateInputPage):
-    def __init__(self) -> None:
-        super().__init__()
-        self.driver_popover_open = False
-        self.date_clicks = 0
-
-    def locator(self, selector: str) -> FakeDateInputLocator:
-        if selector in {".driver-popover", ".driver-overlay"}:
-            page = self
-
-            class _PopoverLocator:
-                first = None
-
-                def is_visible(self, timeout: int = 0) -> bool:
-                    page.events.append(("popover_visible", selector, timeout))
-                    return page.driver_popover_open
-
-            locator = _PopoverLocator()
-            locator.first = locator
-            return locator
-        if selector in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
-            page = self
-
-            class _CloseButtonLocator:
-                first = None
-
-                def click(self, timeout: int = 0) -> None:
-                    page.events.append(("click", selector))
-                    page.driver_popover_open = False
-
-            locator = _CloseButtonLocator()
-            locator.first = locator
-            return locator
-        return FakeLatePopoverDateInputLocator(self, selector)
-
-
-class FakeLatePopoverDateInputLocator(FakeDateInputLocator):
-    def click(self, *, timeout: int) -> None:
-        self.page.events.append(("click", self.selector))
-        self.page.locator_clicks.append((self.selector, timeout))
-        if self.selector == "input[placeholder='起始日期']":
-            self.page.date_clicks += 1
-            if self.page.date_clicks == 1:
-                self.page.driver_popover_open = True
-                raise TimeoutError("driver-overlay intercepts pointer events")
-
-
 class FakeControlledDateInputLocator:
     def __init__(self, page: "FakeControlledDateInputPage", selector: str) -> None:
         self.page = page
@@ -1112,6 +1031,99 @@ def test_login_action_fills_credentials_clicks_submit_and_waits(tmp_path) -> Non
     ]
     assert page.clicks == [("button[type='submit']", 1000)]
     assert page.waits == [(".dashboard", 2000)]
+
+
+class OverlayBlockingClickPage:
+    def __init__(self) -> None:
+        self.overlay_visible = True
+        self.main_clicks = 0
+        self.overlay_clicks = 0
+        self.waits: list[int] = []
+
+    def locator(self, selector: str):
+        page = self
+
+        class Locator:
+            first = None
+
+            def __init__(self) -> None:
+                self.first = self
+
+            def is_visible(self, timeout: int = 0) -> bool:
+                return selector == ".overlay" and page.overlay_visible
+
+            def click(self, timeout: int = 0) -> None:
+                if selector == ".overlay-close" and page.overlay_visible:
+                    page.overlay_visible = False
+                    page.overlay_clicks += 1
+                    return
+                raise RuntimeError("not clickable")
+
+        return Locator()
+
+    def click(self, selector: str, timeout: int = 0) -> None:
+        if selector == ".target" and self.overlay_visible:
+            raise RuntimeError("overlay blocks click")
+        if selector == ".target":
+            self.main_clicks += 1
+            return
+        raise RuntimeError("unexpected selector")
+
+    def wait_for_timeout(self, delay_ms: int) -> None:
+        self.waits.append(delay_ms)
+
+
+def test_click_action_dismisses_configured_overlay_before_retry(tmp_path) -> None:
+    page = OverlayBlockingClickPage()
+
+    _execute_action(
+        page,
+        {"id": "click_target", "action": "click", "selector": ".target", "timeout_ms": 1000},
+        params={"biz_date": "2026-06-08"},
+        extracted={},
+        capture_files=[],
+        download_dir=tmp_path,
+        overlays=[
+            {
+                "id": "blocking_overlay",
+                "markers": [".overlay"],
+                "close_selectors": [".overlay-close"],
+            }
+        ],
+    )
+
+    assert page.overlay_clicks == 1
+    assert page.main_clicks == 1
+
+
+def test_overlay_retry_helper_retries_operation_after_late_overlay_dismissal() -> None:
+    page = OverlayBlockingClickPage()
+    page.overlay_visible = False
+    attempts = 0
+
+    def operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            page.overlay_visible = True
+            raise RuntimeError("late overlay blocks click")
+        page.click(".target", timeout=1000)
+
+    _dismiss_overlays_and_retry_once(
+        page,
+        [
+            {
+                "id": "blocking_overlay",
+                "markers": [".overlay"],
+                "close_selectors": [".overlay-close"],
+            }
+        ],
+        operation,
+    )
+
+    assert attempts == 2
+    assert page.overlay_clicks == 1
+    assert page.main_clicks == 1
 
 
 def test_login_action_falls_back_to_child_frame_when_main_page_has_no_fields(tmp_path) -> None:
@@ -1795,65 +1807,6 @@ def test_set_date_action_closes_previous_datepicker_overlay_before_clicking_next
     )
 
 
-def test_set_date_action_closes_driver_popover_before_clicking_date_input(tmp_path) -> None:
-    page = FakeDateInputWithDriverPopoverPage()
-
-    _execute_action(
-        page,
-        {
-            "id": "set_start_date",
-            "action": "set_date",
-            "selector": "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
-            "value": "2026-06-01",
-            "timeout_ms": 30000,
-        },
-        params={},
-        extracted={},
-        capture_files=[],
-        download_dir=tmp_path,
-    )
-
-    close_click_index = next(
-        index
-        for index, event in enumerate(page.events)
-        if event[0] == "click" and event[1] in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS
-    )
-    assert close_click_index < (
-        page.events.index(
-            (
-                "click",
-                "div.next-form-item:has-text('付款时间') input[placeholder='起始日期']",
-            )
-        )
-    )
-
-
-def test_set_date_action_retries_when_driver_popover_appears_during_click(tmp_path) -> None:
-    page = FakeDateInputWithLateDriverPopoverPage()
-
-    _execute_action(
-        page,
-        {
-            "id": "set_start_date",
-            "action": "set_date",
-            "selector": "input[placeholder='起始日期']",
-            "value": "2026-06-01",
-            "timeout_ms": 30000,
-        },
-        params={},
-        extracted={},
-        capture_files=[],
-        download_dir=tmp_path,
-    )
-
-    assert page.date_clicks == 2
-    assert page.values["input[placeholder='起始日期']"] == "2026-06-01"
-    assert any(
-        event[0] == "click" and event[1] in playwright_runner._KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS
-        for event in page.events
-    )
-
-
 def test_set_date_action_presses_enter_before_blur_for_controlled_datepicker(tmp_path) -> None:
     page = FakeControlledDateInputPage()
 
@@ -2354,6 +2307,52 @@ class ClosedHistoryPage(FakeHistoryPage):
             self.dialog_history_clicked.append((timeout, force))
             self.rows = self.rows_after_open
             return
+        super().click(selector, timeout=timeout, force=force)
+
+
+class OverlayHistoryOpenPage(ClosedHistoryPage):
+    def __init__(self, rows: list[FakeHistoryRow]) -> None:
+        super().__init__(rows)
+        self.overlay_visible = True
+        self.overlay_clicks = 0
+        self.events: list[str] = []
+
+    def locator(self, selector: str):
+        if selector == ".history-overlay":
+            page = self
+
+            class Marker:
+                first = None
+
+                def __init__(self) -> None:
+                    self.first = self
+
+                def is_visible(self, timeout: int = 0) -> bool:
+                    return page.overlay_visible
+
+            return Marker()
+        if selector == ".history-overlay-close":
+            page = self
+
+            class Close:
+                first = None
+
+                def __init__(self) -> None:
+                    self.first = self
+
+                def click(self, timeout: int = 0) -> None:
+                    page.overlay_visible = False
+                    page.overlay_clicks += 1
+                    page.events.append("overlay_close")
+
+            return Close()
+        return super().locator(selector)
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            if self.overlay_visible:
+                raise RuntimeError("history open blocked by overlay")
+            self.events.append("history_open")
         super().click(selector, timeout=timeout, force=force)
 
 
@@ -2895,6 +2894,41 @@ def test_download_history_file_can_open_history_from_dialog_with_forced_click(tm
     )
 
     assert page.dialog_history_clicked == [(30000, True)]
+    assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
+
+
+def test_download_history_file_dismisses_configured_overlay_before_opening_history(tmp_path) -> None:
+    target_row = FakeHistoryRow("2026-06-08 ~ 2026-06-08 交易货款 已完成 下载")
+    page = OverlayHistoryOpenPage([target_row])
+    capture_files: list[dict[str, object]] = []
+
+    result = _execute_action(
+        page,
+        {
+            "id": "download_completed_file",
+            "action": "download_history_file",
+            "selector": ".history tr",
+            "history_open_selector": ".next-dialog button:has-text('历史下载记录')",
+            "value_from": "params.biz_date",
+            "download_timeout_ms": 600000,
+            "timeout_ms": 1000,
+        },
+        params={"biz_date": "2026-06-08"},
+        extracted={},
+        capture_files=capture_files,
+        download_dir=tmp_path,
+        overlays=[
+            {
+                "id": "history_overlay",
+                "markers": [".history-overlay"],
+                "close_selectors": [".history-overlay-close"],
+            }
+        ],
+    )
+
+    assert page.overlay_clicks == 1
+    assert page.dialog_history_clicked == [(30000, True)]
+    assert page.events == ["overlay_close", "history_open"]
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
 

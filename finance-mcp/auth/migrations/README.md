@@ -44,25 +44,32 @@
 36. **036_execution_run_exceptions_pending_index.sql** - 待处理异常同步待办状态的部分索引
 37. **037_storage_objects_and_browser_capture_oss.sql** - 存储对象元数据表与浏览器采集 OSS 文件字段
 
-## 使用方法
+## 使用方法（推荐：迁移运行器 `auth/migrate.py`）
+
+运行器把每个已应用的文件记录在 `schema_migrations` 表里，保证**每条只跑一次、可重复执行、失败即回滚中止**，并用 pg advisory lock 串行化并发运行。连接取 `DATABASE_URL`（缺省则由 `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` 拼装）。
 
 ```bash
 # 在 finance-mcp 目录下执行
 cd finance-mcp
 
-# 按文件名顺序执行全部迁移
-for file in auth/migrations/*.sql; do
-  psql -h localhost -p 5432 -U tally_user -d tally -v ON_ERROR_STOP=1 -f "$file"
-done
+python -m auth.migrate            # 应用全部待执行迁移（默认；发版时自动跑这个）
+python -m auth.migrate status     # 查看已应用/待应用，并检测文件漂移（checksum 不匹配）
+python -m auth.migrate backfill              # 把现有文件标记为已应用而不执行——“已存在的库”一次性接入
+python -m auth.migrate backfill --through 038 # 只回填到指定版本号（含）
 ```
 
-或使用环境变量一次性执行：
+- **新增迁移**：在 `auth/migrations/` 加 `NNN_xxx.sql`（版本号递增），本地 `python -m auth.migrate` 验证，连同代码一起提交。发版时 GitHub Actions 构建镜像、ECS 端在 `compose pull` 后、`up -d` 前自动执行 `python -m auth.migrate`，只跑新增的那条；失败则中止发版、服务不动。
+- **全新空库**（本地开发/新环境）：直接 `python -m auth.migrate`，从 001 全量执行，无需 backfill。
+- **已存在的库**（本运行器接入前就有数据）：先 `python -m auth.migrate backfill` 标记历史迁移，再 apply。生产库已于接入时完成回填（001–038）。
+- 安全护栏：若 `schema_migrations` 为空但库里已有基线表，`apply` 会拒绝执行并提示先 backfill（确需从 001 重跑可设 `MIGRATE_ALLOW_DIRTY_BASELINE=1`）。
 
-```bash
-for file in auth/migrations/*.sql; do
-  psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -v ON_ERROR_STOP=1 -f "$file"
-done
-```
+> 兜底（无 Python 环境时）：仍可用 psql 按文件名顺序手动执行，但不再推荐——它不追踪状态、易导致 drift。
+>
+> ```bash
+> for file in auth/migrations/*.sql; do
+>   psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$file"
+> done
+> ```
 
 ## 数据说明
 

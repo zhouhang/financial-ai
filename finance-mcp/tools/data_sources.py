@@ -31,6 +31,7 @@ from mcp import Tool
 from app_config import SERVICE_PROVIDER_COMPANY_ID
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
+from browser_playbook import assignment as browser_assignment
 from browser_playbook.credentials import update_browser_playbook_credential
 from connectors.factory import build_connector
 from platforms.base import PlatformAppConfig, PlatformTokenBundle
@@ -1946,6 +1947,14 @@ def _require_user(auth_token: str) -> dict[str, Any]:
         raise ValueError("token 无效或已过期，请重新登录")
     if not user.get("company_id"):
         raise ValueError("当前用户未绑定公司，无法配置数据源")
+    return user
+
+
+def _require_operator_user(auth_token: str) -> dict[str, Any]:
+    user = _require_user(auth_token)
+    role = str(user.get("role") or "").strip().lower()
+    if role in {"system", "scheduler"}:
+        raise ValueError("当前 token 无权限执行采集机运维操作")
     return user
 
 
@@ -6005,6 +6014,53 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="browser_agent_list",
+            description="运维专用：列出当前公司的 browser-agent 采集节点及在线状态。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "online_threshold_seconds": {"type": "integer"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="browser_binding_list",
+            description="运维专用：列出 browser_playbook 运行绑定及当前分配的采集机。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    **source_id_schema,
+                    "shop_id": {"type": "string"},
+                    "playbook_id": {"type": "string"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="browser_binding_reassign",
+            description="运维专用：将 browser_playbook 绑定从一个采集机迁移到另一个采集机。默认 dry_run=true，只预览不更新。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "from_agent_id": {"type": "string"},
+                    "to_agent_id": {"type": "string"},
+                    **source_id_schema,
+                    "shop_id": {"type": "string"},
+                    "playbook_id": {"type": "string"},
+                    "dry_run": {"type": "boolean"},
+                    "require_online": {"type": "boolean"},
+                    "force_offline_target": {"type": "boolean"},
+                    "online_threshold_seconds": {"type": "integer"},
+                },
+                "required": ["auth_token", "from_agent_id", "to_agent_id"],
+            },
+        ),
+        Tool(
             name="browser_sync_job_startup_cleanup",
             description="Worker 专用：browser-agent 启动后清理本 agent 上次进程遗留的 running browser_playbook sync_job。",
             inputSchema={
@@ -6216,6 +6272,12 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_browser_sync_job_claim(arguments)
         if name == "browser_agent_heartbeat":
             return await _handle_browser_agent_heartbeat(arguments)
+        if name == "browser_agent_list":
+            return await _handle_browser_agent_list(arguments)
+        if name == "browser_binding_list":
+            return await _handle_browser_binding_list(arguments)
+        if name == "browser_binding_reassign":
+            return await _handle_browser_binding_reassign(arguments)
         if name == "browser_sync_job_startup_cleanup":
             return await _handle_browser_sync_job_startup_cleanup(arguments)
         if name == "browser_sync_job_reap_stale_agents":
@@ -9820,6 +9882,42 @@ async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str
         capabilities=dict(arguments.get("capabilities") or {}),
     )
     return {"success": bool(row), "agent": row}
+
+
+async def _handle_browser_agent_list(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
+    threshold = max(1, int(arguments.get("online_threshold_seconds") or 180))
+    return browser_assignment.list_browser_agents(
+        company_id=str(user["company_id"]),
+        online_threshold_seconds=threshold,
+    )
+
+
+async def _handle_browser_binding_list(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
+    return browser_assignment.list_browser_bindings(
+        company_id=str(user["company_id"]),
+        agent_id=str(arguments.get("agent_id") or "").strip(),
+        data_source_id=_source_id_from_args(arguments),
+        shop_id=str(arguments.get("shop_id") or "").strip(),
+        playbook_id=str(arguments.get("playbook_id") or "").strip(),
+    )
+
+
+async def _handle_browser_binding_reassign(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_operator_user(str(arguments.get("auth_token") or ""))
+    return browser_assignment.reassign_browser_bindings(
+        company_id=str(user["company_id"]),
+        from_agent_id=str(arguments.get("from_agent_id") or "").strip(),
+        to_agent_id=str(arguments.get("to_agent_id") or "").strip(),
+        data_source_id=_source_id_from_args(arguments),
+        shop_id=str(arguments.get("shop_id") or "").strip(),
+        playbook_id=str(arguments.get("playbook_id") or "").strip(),
+        dry_run=_normalize_bool(arguments.get("dry_run"), default=True),
+        require_online=_normalize_bool(arguments.get("require_online"), default=True),
+        force_offline_target=_normalize_bool(arguments.get("force_offline_target"), default=False),
+        online_threshold_seconds=max(1, int(arguments.get("online_threshold_seconds") or 180)),
+    )
 
 
 async def _handle_browser_sync_job_startup_cleanup(arguments: dict[str, Any]) -> dict[str, Any]:

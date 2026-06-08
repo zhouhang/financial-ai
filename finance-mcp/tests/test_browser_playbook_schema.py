@@ -251,6 +251,88 @@ def test_playbook_accepts_download_history_file_action() -> None:
     assert msg.playbook_body.steps[6].history_download_selector == "button:has-text('下载')"
 
 
+def test_playbook_accepts_top_level_overlays() -> None:
+    playbook = _valid_playbook_body()
+    playbook["overlays"] = [
+        {
+            "id": "finance_survey",
+            "markers": [" .aes-survey-hanging ", " text=财务管理工具 "],
+            "close_selectors": [" .aes-survey-hanging--close "],
+        }
+    ]
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.overlays[0].id == "finance_survey"
+    assert msg.playbook_body.overlays[0].markers == [
+        ".aes-survey-hanging",
+        "text=财务管理工具",
+    ]
+    assert msg.playbook_body.overlays[0].close_selectors == [".aes-survey-hanging--close"]
+
+
+def test_playbook_rejects_overlay_without_markers_or_close_selectors() -> None:
+    playbook = _valid_playbook_body()
+    playbook["overlays"] = [
+        {
+            "id": "finance_survey",
+            "markers": [],
+            "close_selectors": [],
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
+
+    assert "overlays.markers cannot be empty" in str(exc_info.value)
+
+
+def test_playbook_rejects_overlay_without_close_selectors() -> None:
+    playbook = _valid_playbook_body()
+    playbook["overlays"] = [
+        {
+            "id": "finance_survey",
+            "markers": [".aes-survey-hanging"],
+            "close_selectors": [" ", ""],
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlaybookMessage.model_validate(
+            {
+                "job_id": "job-001",
+                "shop_id": "shop-001",
+                "playbook_id": "qianniu-daily-bill-export",
+                "playbook_version": "1.0.0",
+                "playbook_body": playbook,
+                "params": {"biz_date": "2026-05-18"},
+                "runtime_profile_ref": "profiles/shop-001",
+            }
+        )
+
+    assert "overlays.close_selectors cannot be empty" in str(exc_info.value)
+
+
 def test_playbook_accepts_stop_if_summary_zero_action() -> None:
     playbook = _valid_playbook_body()
     steps = playbook["steps"]  # type: ignore[index]

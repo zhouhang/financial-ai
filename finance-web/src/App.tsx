@@ -6,6 +6,7 @@ import ReconWorkspace from './components/ReconWorkspace';
 import PublicReconRunExceptionsPage from './components/PublicReconRunExceptionsPage';
 import { isPublicReconRunExceptionsPath } from './components/publicReconRunExceptionsRoute';
 import LoginModal from './components/LoginModal';
+import SiteFiling from './components/SiteFiling';
 import HandoffPage from './handoff/HandoffPage';
 import type { ReconExecutionMode } from './components/recon/ReconConversationBar';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -1695,40 +1696,45 @@ function AppShell() {
         onSelectReconEntry={handleSelectReconEntry}
         rulesVersion={rulesVersion}
       />
-      {panelView !== 'data-connections' ? (
-        isReconWorkspace ? (
-          <ReconWorkspace
-            selectedTask={reconWorkspaceRule}
-            mode={reconWorkspaceMode}
-            availableRules={datasetReconRules}
-            selectedRuleCode={selectedTask?.task_type === 'recon' ? selectedTask.rule_code : null}
-            executionMode={reconExecutionMode}
-            authToken={authToken}
-            onSelectRule={handleSelectReconRule}
-            onChangeExecutionMode={setReconExecutionMode}
-            onOpenDataConnections={() => setPanelView('data-connections')}
-            onOpenCollaborationChannels={handleOpenCollaborationChannels}
-            onSchemeCreated={() => setRulesVersion((v) => v + 1)}
-          >
-            {chatAreaNode}
-          </ReconWorkspace>
-        ) : (
-          chatAreaNode
-        )
-      ) : (
-        <DataConnectionsPanel
-          authToken={authToken}
-          initialCallback={authCallbackPayload}
-          onBackToChat={handleBackToChat}
-          onLoginRequired={() => {
-            setLoginModalTitleHint('登录后查看支付宝授权结果');
-            setIsLoginModalOpen(true);
-          }}
-          selectedConnectionView={selectedDataConnectionView}
-          selectedSourceKind={selectedDataSourceKind}
-          selectedCollaborationProvider={selectedCollaborationProvider}
-        />
-      )}
+      <main className="site-main-column flex min-w-0 flex-1 flex-col bg-surface-secondary">
+        <div className="min-h-0 flex flex-1 overflow-hidden">
+          {panelView !== 'data-connections' ? (
+            isReconWorkspace ? (
+              <ReconWorkspace
+                selectedTask={reconWorkspaceRule}
+                mode={reconWorkspaceMode}
+                availableRules={datasetReconRules}
+                selectedRuleCode={selectedTask?.task_type === 'recon' ? selectedTask.rule_code : null}
+                executionMode={reconExecutionMode}
+                authToken={authToken}
+                onSelectRule={handleSelectReconRule}
+                onChangeExecutionMode={setReconExecutionMode}
+                onOpenDataConnections={() => setPanelView('data-connections')}
+                onOpenCollaborationChannels={handleOpenCollaborationChannels}
+                onSchemeCreated={() => setRulesVersion((v) => v + 1)}
+              >
+                {chatAreaNode}
+              </ReconWorkspace>
+            ) : (
+              chatAreaNode
+            )
+          ) : (
+            <DataConnectionsPanel
+              authToken={authToken}
+              initialCallback={authCallbackPayload}
+              onBackToChat={handleBackToChat}
+              onLoginRequired={() => {
+                setLoginModalTitleHint('登录后查看支付宝授权结果');
+                setIsLoginModalOpen(true);
+              }}
+              selectedConnectionView={selectedDataConnectionView}
+              selectedSourceKind={selectedDataSourceKind}
+              selectedCollaborationProvider={selectedCollaborationProvider}
+            />
+          )}
+        </div>
+        <SiteFiling className="site-filing--main" />
+      </main>
       {!authToken && isLoginModalOpen && (
         <LoginModal
           isOpen={isLoginModalOpen}
@@ -1746,11 +1752,25 @@ function AppShell() {
 
 export default function App() {
   if (window.location.pathname.toLowerCase() === '/handoff') {
-    return <HandoffPage />;
+    return (
+      <div className="site-shell h-dvh w-screen overflow-hidden bg-neutral-100 text-neutral-950">
+        <div className="site-shell-content overflow-hidden">
+          <HandoffPage />
+        </div>
+        <SiteFiling className="site-filing--handoff" />
+      </div>
+    );
   }
 
   if (isPublicReconRunExceptionsPath()) {
-    return <PublicReconRunExceptionsPage />;
+    return (
+      <div className="site-shell h-dvh w-screen overflow-hidden bg-surface-secondary text-text-primary">
+        <div className="site-shell-content overflow-hidden">
+          <PublicReconRunExceptionsPage />
+        </div>
+        <SiteFiling />
+      </div>
+    );
   }
   return <AppShell />;
 }

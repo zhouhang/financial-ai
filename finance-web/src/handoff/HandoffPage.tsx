@@ -70,8 +70,8 @@ export default function HandoffPage() {
   const { controlsLocked } = gestureLockState(gestureActive);
 
   return (
-    <main className="h-dvh overflow-hidden bg-neutral-100 text-neutral-950">
-      <section className="mx-auto flex h-dvh w-full max-w-3xl flex-col bg-white">
+    <main className="h-full overflow-hidden bg-neutral-100 text-neutral-950">
+      <section className="mx-auto flex h-full w-full max-w-3xl flex-col bg-white">
         <header className="shrink-0 border-b border-neutral-200 px-3 pb-2 pt-[calc(env(safe-area-inset-top)+8px)]">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">

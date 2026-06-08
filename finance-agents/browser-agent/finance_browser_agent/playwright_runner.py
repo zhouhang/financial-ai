@@ -101,164 +101,6 @@ _DEFAULT_PASSWORD_LOGIN_SELECTORS = (
 )
 _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS = 1000
 
-_KNOWN_OVERLAY_MARKERS = (
-    "text=预警通知",
-    "text=新手引导",
-    "text=操作指引",
-    "text=功能介绍",
-    "text=下次再说",
-    ".normal_headTitle__iJ44s:has-text('预警通知')",
-    ".driver-popover",
-    ".driver-overlay",
-)
-_KNOWN_OVERLAY_PANEL_TITLE_SELECTORS = (
-    "text=重要消息",
-    "text=新手引导",
-    "text=操作指引",
-    "text=功能介绍",
-)
-_KNOWN_OVERLAY_CONTAINER_SELECTORS = (
-    ".normal_container__13Xbj",
-    ".container--SMNuCb74",
-    ".next-dialog",
-    ".next-balloon",
-    ".driver-popover",
-    "[class*='guide']",
-    "[class*='Guide']",
-    "[class*='tour']",
-    "[class*='Tour']",
-)
-_KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS = (
-    "button.driver-popover-close-btn",
-    ".driver-popover button.driver-popover-close-btn",
-    ".driver-popover .driver-popover-close-btn",
-    ".driver-popover button:has-text('跳过')",
-    ".driver-popover button:has-text('关闭')",
-    ".driver-popover button:has-text('知道了')",
-    ".driver-popover button:has-text('我知道了')",
-    "button.driver-popover-next-btn:has-text('完成')",
-    ".driver-popover button.driver-popover-next-btn:has-text('完成')",
-    ".driver-popover .driver-popover-next-btn:has-text('完成')",
-    "button.driver-popover-next-btn:has-text('下一步')",
-    ".driver-popover button.driver-popover-next-btn:has-text('下一步')",
-    ".driver-popover .driver-popover-next-btn:has-text('下一步')",
-)
-_KNOWN_OVERLAY_CLOSE_SELECTORS = (
-    *_KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS,
-    ".notify_headRight__XdjnE .next-icon-close_blod",
-    "[class*='notify_headRight'] .next-icon-close_blod",
-    "[class*='notify_headRight'] [class*='next-icon-close']",
-    ".normal_container__13Xbj button:has-text('知道了')",
-    ".normal_container__13Xbj button:has-text('确定')",
-    ".normal_container__13Xbj button:has-text('关闭')",
-    ".normal_container__13Xbj button:has-text('我知道了')",
-    ".normal_container__13Xbj [role='button']:has-text('知道了')",
-    ".normal_container__13Xbj [role='button']:has-text('确定')",
-    ".normal_container__13Xbj .next-dialog-close",
-    ".normal_container__13Xbj .next-icon-close",
-    ".container--SMNuCb74 button:has-text('知道了')",
-    ".container--SMNuCb74 button:has-text('确定')",
-    ".container--SMNuCb74 button:has-text('关闭')",
-    ".container--SMNuCb74 [role='button']:has-text('知道了')",
-    ".container--SMNuCb74 [role='button']:has-text('确定')",
-    ".container--SMNuCb74 .next-dialog-close",
-    ".container--SMNuCb74 .next-icon-close",
-    ".next-dialog button:has-text('知道了')",
-    ".next-dialog button:has-text('我知道了')",
-    ".next-dialog button:has-text('完成')",
-    ".next-dialog button:has-text('下次再说')",
-    ".next-dialog button:has-text('跳过')",
-    ".next-dialog button:has-text('关闭')",
-    ".next-dialog [role='button']:has-text('知道了')",
-    ".next-dialog [role='button']:has-text('我知道了')",
-    ".next-dialog [role='button']:has-text('完成')",
-    ".next-dialog [role='button']:has-text('下次再说')",
-    ".next-dialog [role='button']:has-text('跳过')",
-    ".next-dialog .next-dialog-close",
-    ".next-dialog .next-icon-close",
-    ".next-balloon button:has-text('知道了')",
-    ".next-balloon button:has-text('我知道了')",
-    ".next-balloon button:has-text('完成')",
-    ".next-balloon button:has-text('下次再说')",
-    ".next-balloon button:has-text('跳过')",
-    ".next-balloon .next-balloon-close",
-    "[class*='guide'] button:has-text('知道了')",
-    "[class*='guide'] button:has-text('完成')",
-    "[class*='guide'] button:has-text('跳过')",
-    "[class*='Guide'] button:has-text('知道了')",
-    "[class*='Guide'] button:has-text('完成')",
-    "[class*='Guide'] button:has-text('跳过')",
-)
-
-_KNOWN_OVERLAY_CLOSE_POINT_SCRIPT = r"""
-() => {
-  const visible = (el) => {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    const style = window.getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
-  };
-  const textOf = (el) => (el && el.innerText ? el.innerText : '').trim();
-  const all = Array.from(document.querySelectorAll('body *')).filter(visible);
-  const warningCandidates = all
-    .filter((el) => textOf(el).includes('预警通知'))
-    .sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      return (ar.width * ar.height) - (br.width * br.height);
-    });
-  const warning = warningCandidates[0];
-  if (!warning) return { present: false };
-
-  const importantCandidates = all
-    .filter((el) => textOf(el).includes('重要消息'))
-    .sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      return (ar.width * ar.height) - (br.width * br.height);
-    });
-  const important = importantCandidates[0];
-  const warningRect = warning.getBoundingClientRect();
-  const importantRect = important ? important.getBoundingClientRect() : warningRect;
-  const panelLeft = Math.min(importantRect.left, warningRect.left) - 24;
-  const panelTop = Math.min(importantRect.top, warningRect.top) - 24;
-  const panelRight = Math.max(importantRect.right, warningRect.right) + 260;
-  const panelBottom = Math.max(importantRect.bottom, warningRect.bottom) + 160;
-  const candidates = all
-    .map((el) => {
-      const rect = el.getBoundingClientRect();
-      const text = textOf(el);
-      const label = [
-        el.getAttribute('aria-label') || '',
-        el.getAttribute('title') || '',
-        el.getAttribute('class') || '',
-        text,
-      ].join(' ');
-      return { el, rect, text, label };
-    })
-    .filter(({ rect, label }) => {
-      if (rect.left < panelLeft || rect.right > panelRight) return false;
-      if (rect.top < panelTop || rect.bottom > panelBottom) return false;
-      if (rect.top > warningRect.top + 45) return false;
-      if (rect.width > 48 || rect.height > 48) return false;
-      return /关闭|close|icon|×|✕|\bx\b/i.test(label);
-    })
-    .sort((a, b) => (b.rect.left - a.rect.left) || (a.rect.top - b.rect.top));
-  const target = candidates[0];
-  if (!target) return null;
-  return {
-    x: target.rect.left + target.rect.width / 2,
-    y: target.rect.top + target.rect.height / 2,
-    panel_left: panelLeft,
-    panel_top: panelTop,
-    panel_right: panelRight,
-    panel_bottom: panelBottom,
-    source: target.label.slice(0, 120),
-  };
-}
-"""
-
 
 @dataclass(frozen=True)
 class PlaywrightRunConfig:
@@ -506,6 +348,7 @@ def _execute_action(
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
     chrome: Any = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute one step. Returns a dict with ``rows`` (when parse_table) or empty dict.
 
@@ -545,13 +388,25 @@ def _execute_action(
         record_time_as = str(action.get("record_time_as") or "").strip()
         if record_time_as:
             extracted[record_time_as] = _now_local_iso()
-        _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
+        _click_like_human(
+            page,
+            selector,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+            overlays=overlays,
+        )
         return {}
     if name == "fill":
         page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
         return {}
     if name == "set_date":
-        _set_date_value(page, selector, _resolve_value(action, params, extracted), timeout_ms=timeout_ms)
+        _set_date_value(
+            page,
+            selector,
+            _resolve_value(action, params, extracted),
+            timeout_ms=timeout_ms,
+            overlays=overlays,
+        )
         return {}
     if name == "wait_for":
         page.wait_for_selector(selector, timeout=timeout_ms)
@@ -600,10 +455,17 @@ def _execute_action(
             params=params,
             extracted=extracted,
             timeout_ms=timeout_ms,
+            overlays=overlays,
         )
     if name == "download":
         with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-            _click_like_human(page, selector, timeout_ms=timeout_ms, run_config=run_config)
+            _click_like_human(
+                page,
+                selector,
+                timeout_ms=timeout_ms,
+                run_config=run_config,
+                overlays=overlays,
+            )
         return _save_download(
             info.value,
             download_dir=download_dir,
@@ -620,6 +482,7 @@ def _execute_action(
             download_dir=download_dir,
             timeout_ms=timeout_ms,
             storage_context=storage_context,
+            overlays=overlays,
         )
     if name == "download_qianniu_export_report":
         return _download_qianniu_export_report(
@@ -631,6 +494,7 @@ def _execute_action(
             download_dir=download_dir,
             timeout_ms=timeout_ms,
             storage_context=storage_context,
+            overlays=overlays,
         )
     if name == "parse_table":
         source = str(action.get("source") or "last_download")
@@ -966,6 +830,15 @@ def _wait_for_risk_to_clear_with_handoff(
         backend.bind_window()
     except Exception:
         logger.exception("OS 后端窗口绑定失败,降级为不可控等待")
+        try:
+            backend.teardown()
+        except Exception:
+            pass
+        return _wait_for_risk_to_clear(
+            contexts,
+            timeout_ms=timeout_ms,
+            poll_interval_ms=poll_interval_ms,
+        )
     coordinator.register_backend(sync_job_id=sync_job_id, backend=backend)
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     try:
@@ -1104,228 +977,88 @@ def _locator_visible(locator: Any, *, timeout_ms: int = 300) -> bool:
         return False
 
 
-def _locator_bounding_box(locator: Any, *, timeout_ms: int = 300) -> dict[str, float] | None:
-    try:
-        box = locator.bounding_box(timeout=timeout_ms)
-    except TypeError:
-        try:
-            box = locator.bounding_box()
-        except Exception:
-            return None
-    except Exception:
-        return None
-    if not isinstance(box, dict):
-        return None
-    try:
-        x = float(box.get("x") or 0)
-        y = float(box.get("y") or 0)
-        width = float(box.get("width") or 0)
-        height = float(box.get("height") or 0)
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return {"x": x, "y": y, "width": width, "height": height}
-
-
-def _box_is_reasonable_overlay_card(box: dict[str, float]) -> bool:
-    width = box["width"]
-    height = box["height"]
-    # QianNiu's outer .container--SMNuCb74 can be a page-wide top bar such as 1280x65.
-    # Clicking its top-right hits the page chrome area, not the notice card close button.
-    if width >= 900 and height <= 120:
-        return False
-    if height < 80:
-        return False
-    return True
-
-
-def _click_dom_detected_overlay_close(context: Any) -> bool:
-    evaluate = getattr(context, "evaluate", None)
-    mouse = getattr(context, "mouse", None)
-    mouse_click = getattr(mouse, "click", None)
-    if not callable(evaluate) or not callable(mouse_click):
-        return False
-    try:
-        point = evaluate(_KNOWN_OVERLAY_CLOSE_POINT_SCRIPT)
-    except Exception:
-        return False
-    if not isinstance(point, dict):
-        return False
-    try:
-        x = float(point.get("x"))
-        y = float(point.get("y"))
-    except (TypeError, ValueError):
-        return False
-    if x <= 0 or y <= 0:
-        return False
-    try:
-        panel_left = float(point.get("panel_left"))
-        panel_top = float(point.get("panel_top"))
-        panel_right = float(point.get("panel_right"))
-        panel_bottom = float(point.get("panel_bottom"))
-    except (TypeError, ValueError):
-        panel_left = panel_top = panel_right = panel_bottom = None
-    if panel_left is not None and not (
-        panel_left <= x <= panel_right and panel_top <= y <= panel_bottom
-    ):
-        logger.info("browser known overlay dom close rejected outside panel: point=%s", point)
-        return False
-    try:
-        mouse_click(x, y)
-        _wait_for_timeout(context, 300)
-        logger.info(
-            "browser known overlay dom close clicked: point=%s x=%s y=%s",
-            point,
-            x,
-            y,
-        )
-        return True
-    except Exception:
-        return False
-
-
-def _click_overlay_panel_header_close(context: Any) -> bool:
-    mouse = getattr(context, "mouse", None)
-    mouse_click = getattr(mouse, "click", None)
-    if not callable(mouse_click):
-        return False
-    title_box = None
-    title_selector = ""
-    for selector in _KNOWN_OVERLAY_PANEL_TITLE_SELECTORS:
-        locator = _safe_first_locator(context, selector)
-        if locator is None or not _locator_visible(locator, timeout_ms=300):
+def _normalize_overlay_configs(raw_overlays: Any) -> list[dict[str, Any]]:
+    overlays: list[dict[str, Any]] = []
+    if not isinstance(raw_overlays, list):
+        return overlays
+    for index, raw_overlay in enumerate(raw_overlays):
+        if not isinstance(raw_overlay, dict):
             continue
-        title_box = _locator_bounding_box(locator, timeout_ms=300)
-        if title_box:
-            title_selector = selector
-            break
-    if not title_box:
-        return False
-
-    for container_selector in _KNOWN_OVERLAY_CONTAINER_SELECTORS:
-        container_locator = _safe_first_locator(context, container_selector)
-        if container_locator is None:
-            continue
-        container_box = _locator_bounding_box(container_locator, timeout_ms=300)
-        if not container_box or not _box_is_reasonable_overlay_card(container_box):
-            continue
-        if container_box["y"] < title_box["y"] - 10:
-            continue
-        x = container_box["x"] + container_box["width"] - 12
-        y = title_box["y"] + min(12, max(6, title_box["height"] / 2))
-        try:
-            mouse_click(x, y)
-            _wait_for_timeout(context, 300)
-            logger.info(
-                "browser known overlay panel header close clicked: "
-                "title_selector=%s title_box=%s container_selector=%s container_box=%s x=%s y=%s",
-                title_selector,
-                title_box,
-                container_selector,
-                container_box,
-                x,
-                y,
+        overlay_id = str(raw_overlay.get("id") or f"overlay_{index + 1}").strip()
+        markers = [
+            str(selector or "").strip()
+            for selector in list(raw_overlay.get("markers") or [])
+            if str(selector or "").strip()
+        ]
+        close_selectors = [
+            str(selector or "").strip()
+            for selector in list(raw_overlay.get("close_selectors") or [])
+            if str(selector or "").strip()
+        ]
+        if overlay_id and markers and close_selectors:
+            overlays.append(
+                {
+                    "id": overlay_id,
+                    "markers": markers,
+                    "close_selectors": close_selectors,
+                }
             )
-            return True
-        except Exception:
-            continue
-    return False
+    return overlays
 
 
-def _click_overlay_top_right_close(context: Any) -> bool:
-    mouse = getattr(context, "mouse", None)
-    mouse_click = getattr(mouse, "click", None)
-    if not callable(mouse_click):
-        return False
-    for selector in _KNOWN_OVERLAY_CONTAINER_SELECTORS:
-        locator = _safe_first_locator(context, selector)
-        if locator is None:
+def _dismiss_configured_overlays(context: Any, overlays: list[dict[str, Any]] | None) -> bool:
+    dismissed_any = False
+    for overlay in overlays or []:
+        overlay_id = str(overlay.get("id") or "overlay").strip()
+        markers = list(overlay.get("markers") or [])
+        close_selectors = list(overlay.get("close_selectors") or [])
+        has_overlay = False
+        for marker in markers:
+            locator = _safe_first_locator(context, str(marker))
+            if locator is not None and _locator_visible(locator, timeout_ms=300):
+                has_overlay = True
+                break
+        if not has_overlay:
             continue
-        box = _locator_bounding_box(locator, timeout_ms=300)
-        if not box:
-            continue
-        if not _box_is_reasonable_overlay_card(box):
-            logger.info(
-                "browser known overlay top-right close skipped unsuitable container: "
-                "selector=%s box=%s",
-                selector,
-                box,
-            )
-            continue
-        x = box["x"] + max(8, box["width"] - 16)
-        y = box["y"] + 16
-        try:
-            mouse_click(x, y)
-            _wait_for_timeout(context, 300)
-            logger.info(
-                "browser known overlay top-right close clicked: selector=%s box=%s x=%s y=%s",
-                selector,
-                box,
-                x,
-                y,
-            )
-            return True
-        except Exception:
-            continue
-    return False
+        clicked = False
+        for selector in close_selectors:
+            locator = _safe_first_locator(context, str(selector))
+            if locator is None:
+                continue
+            try:
+                locator.click(timeout=1000)
+                _wait_for_timeout(context, 300)
+                clicked = True
+                dismissed_any = True
+                logger.info(
+                    "browser configured overlay dismissed: overlay_id=%s selector=%s",
+                    overlay_id,
+                    selector,
+                )
+                break
+            except Exception as exc:
+                logger.info(
+                    "browser configured overlay close skipped: overlay_id=%s selector=%s error=%s",
+                    overlay_id,
+                    selector,
+                    exc,
+                )
+        if not clicked:
+            logger.info("browser configured overlay detected but not dismissed: overlay_id=%s", overlay_id)
+    return dismissed_any
 
 
-def _dismiss_known_overlays(context: Any) -> bool:
-    """Close known QianNiu non-risk overlays that can intercept ordinary clicks."""
-    has_overlay = False
-    for marker in _KNOWN_OVERLAY_MARKERS:
-        locator = _safe_first_locator(context, marker)
-        if locator is not None and _locator_visible(locator, timeout_ms=300):
-            has_overlay = True
-            break
-    if not has_overlay:
-        return False
-
-    dismissed = False
-    for selector in _KNOWN_DRIVER_POPOVER_CLOSE_SELECTORS:
-        locator = _safe_first_locator(context, selector)
-        if locator is None:
-            continue
-        try:
-            locator.click(timeout=1000)
-            dismissed = True
-            _wait_for_timeout(context, 300)
-            break
-        except Exception:
-            continue
-    if dismissed:
-        logger.info("browser known overlay dismissed: overlay=driver_popover clicked=True")
-        return True
-
-    keyboard = getattr(context, "keyboard", None)
-    press = getattr(keyboard, "press", None)
-    if callable(press):
-        try:
-            press("Escape")
-        except Exception:
-            pass
-        _wait_for_timeout(context, 200)
-
-    for selector in _KNOWN_OVERLAY_CLOSE_SELECTORS:
-        locator = _safe_first_locator(context, selector)
-        if locator is None:
-            continue
-        try:
-            locator.click(timeout=1000)
-            dismissed = True
-            _wait_for_timeout(context, 300)
-            break
-        except Exception:
-            continue
-    if not dismissed:
-        dismissed = _click_dom_detected_overlay_close(context)
-    if not dismissed:
-        dismissed = _click_overlay_panel_header_close(context)
-    if not dismissed:
-        dismissed = _click_overlay_top_right_close(context)
-    logger.info("browser known overlay dismissed: overlay=qianniu_warning_notice clicked=%s", dismissed)
-    return True
+def _dismiss_overlays_and_retry_once(
+    context: Any,
+    overlays: list[dict[str, Any]] | None,
+    operation: Any,
+) -> Any:
+    try:
+        return operation()
+    except Exception:
+        if not _dismiss_configured_overlays(context, overlays):
+            raise
+    return operation()
 
 
 def _click_like_human(
@@ -1334,17 +1067,13 @@ def _click_like_human(
     *,
     timeout_ms: int,
     run_config: PlaywrightRunConfig | None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> None:
-    _dismiss_known_overlays(context)
-    _pause_before_click(context, run_config=run_config)
-    try:
+    def _click_once() -> None:
+        _pause_before_click(context, run_config=run_config)
         context.click(selector, timeout=timeout_ms)
-    except Exception as exc:
-        if _dismiss_known_overlays(context):
-            _pause_before_click(context, run_config=run_config)
-            context.click(selector, timeout=timeout_ms)
-            return
-        raise exc
+
+    _dismiss_overlays_and_retry_once(context, overlays, _click_once)
 
 
 def _type_like_human(
@@ -1402,20 +1131,20 @@ def _close_open_datepicker_overlay(page: Any) -> None:
         return
 
 
-def _set_date_value(page: Any, selector: str, value: str, *, timeout_ms: int) -> None:
+def _set_date_value(
+    page: Any,
+    selector: str,
+    value: str,
+    *,
+    timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
+) -> None:
     if not selector or not value:
         raise BrowserActionError("PAGE_CHANGED", "set_date requires selector and value")
-    _dismiss_known_overlays(page)
+    _dismiss_configured_overlays(page, overlays)
     _close_open_datepicker_overlay(page)
     locator = page.locator(selector).first
-    try:
-        locator.click(timeout=timeout_ms)
-    except Exception as exc:
-        if _dismiss_known_overlays(page):
-            _close_open_datepicker_overlay(page)
-            locator.click(timeout=timeout_ms)
-        else:
-            raise exc
+    _dismiss_overlays_and_retry_once(page, overlays, lambda: locator.click(timeout=timeout_ms))
     try:
         readonly = bool(
             locator.evaluate(
@@ -1489,10 +1218,12 @@ def _select_checkboxes(
     params: dict[str, Any],
     extracted: dict[str, Any],
     timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
     if not selector:
         raise BrowserActionError("PAGE_CHANGED", "select_checkboxes requires selector")
+    _dismiss_configured_overlays(page, overlays)
     root = page.locator(selector).last
     root.wait_for(state="visible", timeout=timeout_ms)
     label_selector = str(action.get("label_selector") or "label.next-checkbox-wrapper").strip()
@@ -1537,7 +1268,12 @@ def _select_checkboxes(
             )
             return {"selected_labels": selected}
         for label in [*extra, *missing_checked]:
-            clicked = _click_exact_checkbox_label(root, label_selector=label_selector, label=label)
+            _dismiss_configured_overlays(page, overlays)
+            clicked = _dismiss_overlays_and_retry_once(
+                page,
+                overlays,
+                lambda: _click_exact_checkbox_label(root, label_selector=label_selector, label=label),
+            )
             if not clicked:
                 raise BrowserActionError("PAGE_CHANGED", f"select_checkboxes label not clickable: {label}")
             page.wait_for_timeout(120)
@@ -1961,6 +1697,7 @@ def _download_qianniu_export_report(
     download_dir: Path,
     timeout_ms: int,
     storage_context: dict[str, str] | None = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     row_selector = str(action.get("selector") or "").strip()
     requested_after_value = _resolve_value(
@@ -2157,7 +1894,12 @@ def _download_qianniu_export_report(
     def _refresh_export_list() -> None:
         if refresh_selector:
             try:
-                page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True)
+                _dismiss_configured_overlays(page, overlays)
+                _dismiss_overlays_and_retry_once(
+                    page,
+                    overlays,
+                    lambda: page.click(refresh_selector, timeout=min(10000, timeout_ms), force=True),
+                )
                 return
             except Exception as exc:
                 logger.info("qianniu export list refresh click failed, reloading page: %s", exc)
@@ -2191,7 +1933,12 @@ def _download_qianniu_export_report(
             last_skipped_time = skipped_time
         if button is not None:
             with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-                button.click(timeout=min(30000, timeout_ms))
+                _dismiss_configured_overlays(page, overlays)
+                _dismiss_overlays_and_retry_once(
+                    page,
+                    overlays,
+                    lambda: button.click(timeout=min(30000, timeout_ms)),
+                )
             return _save_download(
                 info.value,
                 download_dir=download_dir,
@@ -2232,6 +1979,7 @@ def _download_history_file(
     download_dir: Path,
     timeout_ms: int,
     storage_context: dict[str, str] | None = None,
+    overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selector = str(action.get("selector") or "").strip()
     history_row_selectors = _configured_selectors_with_primary(
@@ -2281,11 +2029,16 @@ def _download_history_file(
             return
         if not history_open_selectors:
             return
-        _click_first_available_selector(
+        _dismiss_configured_overlays(page, overlays)
+        _dismiss_overlays_and_retry_once(
             page,
-            history_open_selectors,
-            timeout_ms=history_open_timeout_ms,
-            force=True,
+            overlays,
+            lambda: _click_first_available_selector(
+                page,
+                history_open_selectors,
+                timeout_ms=history_open_timeout_ms,
+                force=True,
+            ),
         )
 
     def _find_completed_row() -> Any | None:
@@ -2311,11 +2064,16 @@ def _download_history_file(
         if not history_open_selectors:
             return
         try:
-            closed = _click_first_available_selector(
+            _dismiss_configured_overlays(page, overlays)
+            closed = _dismiss_overlays_and_retry_once(
                 page,
-                history_close_selectors,
-                timeout_ms=history_refresh_close_timeout_ms,
-                force=True,
+                overlays,
+                lambda: _click_first_available_selector(
+                    page,
+                    history_close_selectors,
+                    timeout_ms=history_refresh_close_timeout_ms,
+                    force=True,
+                ),
             )
         except Exception as exc:
             closed = False
@@ -2323,6 +2081,7 @@ def _download_history_file(
         if closed:
             page.wait_for_timeout(min(1000, max(0, history_refresh_interval_ms)))
         try:
+            _dismiss_configured_overlays(page, overlays)
             _open_history()
         except Exception as exc:
             logger.info("browser history reopen skipped; keeping current history list: %s", exc)
@@ -2350,7 +2109,12 @@ def _download_history_file(
         raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
 
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-        row.locator(download_selector).click(timeout=timeout_ms)
+        _dismiss_configured_overlays(page, overlays)
+        _dismiss_overlays_and_retry_once(
+            page,
+            overlays,
+            lambda: row.locator(download_selector).click(timeout=timeout_ms),
+        )
     return _save_download(
         info.value,
         download_dir=download_dir,
@@ -2454,6 +2218,7 @@ def _run_playbook_with_playwright_inner(
     }
     extracted: dict[str, Any] = {}
     steps = [dict(step) for step in playbook.get("steps") or []]
+    overlays = _normalize_overlay_configs(playbook.get("overlays"))
     try:
         validate_step_actions(steps)
     except ValueError as exc:
@@ -2538,6 +2303,7 @@ def _run_playbook_with_playwright_inner(
                                 handoff_coordinator=handoff_coordinator,
                                 backend_factory=backend_factory,
                                 chrome=chrome,
+                                overlays=overlays,
                             )
                             if result.get("rows"):
                                 rows.extend(result["rows"])

@@ -104,6 +104,7 @@ jobs:
                'DB_POOL_MAXCONN=16' > deploy.env && \
              set -a && . ./deploy.env && set +a && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml pull && \
+             docker compose --env-file deploy.env -f docker-compose.prod.yml run --rm --no-deps finance-mcp python -m auth.migrate && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans && \
              wait_health() { \
                service=\"\$1\"; \
