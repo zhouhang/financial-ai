@@ -104,6 +104,7 @@ jobs:
                'DB_POOL_MAXCONN=16' > deploy.env && \
              set -a && . ./deploy.env && set +a && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml pull && \
+             docker compose --env-file deploy.env -f docker-compose.prod.yml run --rm --no-deps finance-mcp python -m auth.migrate && \
              docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans && \
              curl -fsS http://127.0.0.1:3335/health >/dev/null && \
              curl -fsS http://127.0.0.1:8100/health >/dev/null && \

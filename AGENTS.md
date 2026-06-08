@@ -226,6 +226,10 @@ export interface Message {
    logger.info("Action completed")
    logger.error(f"Failed: {e}")
    ```
+   - Log to **stdout/stderr** only; never open log files from application code. Containers
+     collect stdout via Docker's `json-file` driver, and the local script redirects stdout
+     to `logs/`. Do not add per-service `logs/` directories. See the log strategy in
+     `docs/deployment/ghcr-ecs.md` (`## Logs`).
 
 4. **Environment Variables**: Document any new required env vars in comments
 

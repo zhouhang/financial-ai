@@ -154,13 +154,66 @@ docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-o
 
 ## Logs
 
-Docker JSON logs are capped at `50m x 5` per service in `docker-compose.prod.yml`.
+Logging follows the runtime form, not the service. There are three forms, and each
+has one correct log destination. Do **not** add per-service `logs/` directories inside
+the repo — that is a half-measure between file logging and container logging that
+fits neither.
 
-For script-based local deployments, install the provided logrotate config or adapt the path:
+### 1. Cloud services in containers (canonical production path)
+
+`finance-mcp`, `data-agent`, `finance-cron`, `recon-worker-*`, and `finance-web` run as
+containers from `docker-compose.prod.yml`. They log to **stdout/stderr**, and Docker's
+`json-file` driver captures them. Do not write log files inside these containers — the
+container filesystem is ephemeral and would be lost on restart.
+
+Read them with:
+
+```bash
+docker compose -f docker-compose.prod.yml logs -f data-agent
+```
+
+Rotation is set once for all services via the `x-common-env` anchor:
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "50m"   # roll to a new file once the current one hits 50 MB
+    max-file: "5"     # keep 5 files (1 active + 4 archived), delete the oldest
+```
+
+So `50m x 5` means each container's logs are capped at a rolling **250 MB** window
+(`50 MB x 5`); older lines are dropped automatically and never fill the disk. For
+long-term retention beyond that window, forward stdout to an external sink
+(Loki/ELK) — do not raise the cap to "keep everything".
+
+### 2. Browser-agent on the collection machine (not containerized)
+
+The browser-agent runs as a bare process on the Windows/collection machine with a real
+Chrome, so file logging in its **own** directory is correct. `scripts/start-browser-agent.sh`
+already defaults there:
+
+```bash
+LOG_DIR="${BROWSER_AGENT_LOG_DIR:-$BROWSER_AGENT_DIR/logs}"   # finance-agents/browser-agent/logs/
+```
+
+It is intentionally separate from the cloud services because it is deployed on a
+different host. Leave its log under `finance-agents/browser-agent/logs/`.
+
+### 3. Local all-in-one (`START_ALL_SERVICES.sh`, dev only)
+
+When everything runs on one machine as `nohup` processes, there is no container runtime
+to collect stdout, so the script redirects every service to a single `logs/` directory
+at the repo root (`LOG_DIR="$PROJECT_ROOT/logs"`) for easy `tail`. In this mode it also
+overrides `BROWSER_AGENT_LOG_DIR="$LOG_DIR"` so the agent log joins the others. This is a
+dev convenience only and does not apply to production.
+
+For this bare-metal/script form, install the provided logrotate config (the container
+`json-file` rotation does **not** cover these host files):
 
 ```bash
 sudo cp deploy/logrotate/financial-ai /etc/logrotate.d/financial-ai
-sudo logrotate -d /etc/logrotate.d/financial-ai
+sudo logrotate -d /etc/logrotate.d/financial-ai   # -d = dry run, prints what it would do
 ```
 
 ## Nginx/SSL Front Door
@@ -246,7 +299,8 @@ server {
 
 - `DB_POOL_MAXCONN=16` matches the current application default and is appropriate for the first
   RDS 2c8g rollout.
-- Docker JSON logs are capped at `50m x 5` per container in `docker-compose.prod.yml`.
+- Logging policy (containers vs. browser-agent vs. local script) lives in the `## Logs`
+  section above; do not add per-service `logs/` directories in the repo.
 - Uploads, generated outputs, and browser capture files should use the private OSS bucket in
   production. Docker volumes remain mounted for local fallback, temporary files, and legacy
   compatibility.

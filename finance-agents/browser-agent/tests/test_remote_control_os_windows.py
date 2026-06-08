@@ -66,6 +66,7 @@ def test_invisible_windows_excluded():
         binder.bind(current_page_title="")
 
 
+from finance_browser_agent.remote_control_os_windows import _process_session_id
 from finance_browser_agent.remote_control_os_windows import evaluate_session_interactivity
 from finance_browser_agent.remote_control_os_windows import selfcheck
 
@@ -88,6 +89,21 @@ def test_non_console_session_rejected():
     # 进程会话与活动控制台会话不一致 → 非活动交互式
     result = evaluate_session_interactivity(process_session_id=2, active_console_session_id=1)
     assert result["available"] is False
+
+
+def test_process_session_id_falls_back_to_kernel32_when_pywin32_missing_function():
+    class FakeKernel32:
+        def ProcessIdToSessionId(self, pid, session_ptr):
+            session_ptr._obj.value = 7
+            return 1
+
+    result = _process_session_id(
+        123,
+        win32process=object(),
+        kernel32=FakeKernel32(),
+    )
+
+    assert result == 7
 
 
 def test_selfcheck_reports_missing_runtime_dependencies():

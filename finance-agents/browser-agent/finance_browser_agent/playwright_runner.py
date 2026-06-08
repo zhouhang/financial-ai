@@ -830,6 +830,15 @@ def _wait_for_risk_to_clear_with_handoff(
         backend.bind_window()
     except Exception:
         logger.exception("OS 后端窗口绑定失败,降级为不可控等待")
+        try:
+            backend.teardown()
+        except Exception:
+            pass
+        return _wait_for_risk_to_clear(
+            contexts,
+            timeout_ms=timeout_ms,
+            poll_interval_ms=poll_interval_ms,
+        )
     coordinator.register_backend(sync_job_id=sync_job_id, backend=backend)
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     try:

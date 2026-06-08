@@ -18,6 +18,24 @@ from finance_browser_agent.remote_control_codes import ControlErrorCode
 logger = logging.getLogger(__name__)
 
 
+def _process_session_id(pid: int, *, win32process: Any | None = None, kernel32: Any | None = None) -> int:
+    """Return the Windows session id for pid across pywin32 versions."""
+    if win32process is not None:
+        process_id_to_session_id = getattr(win32process, "ProcessIdToSessionId", None)
+        if callable(process_id_to_session_id):
+            return int(process_id_to_session_id(int(pid)))
+
+    kernel32 = kernel32 or ctypes.windll.kernel32
+    session_id = wintypes.DWORD()
+    ok = kernel32.ProcessIdToSessionId(
+        wintypes.DWORD(int(pid)),
+        ctypes.byref(session_id),
+    )
+    if not ok:
+        raise ctypes.WinError()
+    return int(session_id.value)
+
+
 class Win32Adapter:
     """Thin wrapper around Windows APIs used by the handoff backend.
 
@@ -91,7 +109,7 @@ class Win32Adapter:
         return int(self._win32gui.GetForegroundWindow())
 
     def process_session_id(self) -> int:
-        return int(self._win32process.ProcessIdToSessionId(self._os.getpid()))
+        return _process_session_id(self._os.getpid(), win32process=self._win32process)
 
     def active_console_session_id(self) -> int:
         return int(self._win32ts.WTSGetActiveConsoleSessionId())
@@ -451,9 +469,12 @@ def selfcheck(*, win32=None, dependency_check: Any | None = None) -> dict[str, A
             dep_result = dict((dependency_check or _verify_runtime_dependencies)() or {})
             if not bool(dep_result.get("available", True)):
                 return dep_result
-            import win32process  # type: ignore
             import win32ts  # type: ignore
-            pid_session = win32process.ProcessIdToSessionId(__import__("os").getpid())
+            import win32process  # type: ignore
+            pid_session = _process_session_id(
+                __import__("os").getpid(),
+                win32process=win32process,
+            )
             console_session = win32ts.WTSGetActiveConsoleSessionId()
         else:
             pid_session = win32.process_session_id()

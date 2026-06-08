@@ -174,3 +174,46 @@ def test_handoff_uses_factory_to_build_backend(monkeypatch):
     )
     assert built.get("created") is True
     assert built.get("bound") is True
+
+
+def test_handoff_bind_failure_falls_back_to_plain_wait(monkeypatch):
+    import finance_browser_agent.playwright_runner as pr
+
+    calls = {"plain_wait": 0, "registered": 0, "teardown": 0}
+
+    class FailingBackend:
+        def bind_window(self):
+            raise RuntimeError("window unavailable")
+
+        def teardown(self):
+            calls["teardown"] += 1
+
+    class FakeFactory:
+        def create_backend(self, *, page, chrome, risk_contexts):
+            return FailingBackend()
+
+    class FakeCoordinator:
+        def register_backend(self, *, sync_job_id, backend):
+            calls["registered"] += 1
+
+    def fake_plain_wait(contexts, *, timeout_ms, poll_interval_ms=1000):
+        calls["plain_wait"] += 1
+        assert timeout_ms == 50
+        assert poll_interval_ms == 10
+        return True
+
+    monkeypatch.setattr(pr, "_wait_for_risk_to_clear", fake_plain_wait)
+
+    cleared = pr._wait_for_risk_to_clear_with_handoff(
+        page=object(),
+        contexts=[object()],
+        timeout_ms=50,
+        poll_interval_ms=10,
+        sync_job_id="j1",
+        coordinator=FakeCoordinator(),
+        backend_factory=FakeFactory(),
+        chrome=None,
+    )
+
+    assert cleared is True
+    assert calls == {"plain_wait": 1, "registered": 0, "teardown": 1}
