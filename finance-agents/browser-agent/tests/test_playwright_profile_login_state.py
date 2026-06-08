@@ -2284,6 +2284,7 @@ class OverlayHistoryOpenPage(ClosedHistoryPage):
         super().__init__(rows)
         self.overlay_visible = True
         self.overlay_clicks = 0
+        self.events: list[str] = []
 
     def locator(self, selector: str):
         if selector == ".history-overlay":
@@ -2311,9 +2312,17 @@ class OverlayHistoryOpenPage(ClosedHistoryPage):
                 def click(self, timeout: int = 0) -> None:
                     page.overlay_visible = False
                     page.overlay_clicks += 1
+                    page.events.append("overlay_close")
 
             return Close()
         return super().locator(selector)
+
+    def click(self, selector: str, *, timeout: int, force: bool = False) -> None:
+        if selector == ".next-dialog button:has-text('历史下载记录')":
+            if self.overlay_visible:
+                raise RuntimeError("history open blocked by overlay")
+            self.events.append("history_open")
+        super().click(selector, timeout=timeout, force=force)
 
 
 class RefreshingHistoryPage(FakeHistoryPage):
@@ -2888,6 +2897,7 @@ def test_download_history_file_dismisses_configured_overlay_before_opening_histo
 
     assert page.overlay_clicks == 1
     assert page.dialog_history_clicked == [(30000, True)]
+    assert page.events == ["overlay_close", "history_open"]
     assert result["last_download"].endswith("交易货款_20260521_20260521.csv")
 
 
