@@ -220,6 +220,28 @@ class PlaybookAuthCheck(BaseModel):
         return self
 
 
+class PlaybookOverlay(BaseModel):
+    id: str
+    markers: list[str]
+    close_selectors: list[str]
+
+    @model_validator(mode="after")
+    def validate_overlay(self) -> "PlaybookOverlay":
+        if not self.id.strip():
+            raise ValueError("overlays.id cannot be empty")
+        self.markers = [selector.strip() for selector in self.markers if selector.strip()]
+        self.close_selectors = [
+            selector.strip()
+            for selector in self.close_selectors
+            if selector.strip()
+        ]
+        if not self.markers:
+            raise ValueError("overlays.markers cannot be empty")
+        if not self.close_selectors:
+            raise ValueError("overlays.close_selectors cannot be empty")
+        return self
+
+
 class PlaybookBody(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     playbook_id: str
@@ -232,6 +254,7 @@ class PlaybookBody(BaseModel):
     accounting_policy: AccountingPolicy
     failure_mapping: FailureMapping
     auth_check: PlaybookAuthCheck = Field(default_factory=PlaybookAuthCheck)
+    overlays: list[PlaybookOverlay] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_cross_references(self) -> "PlaybookBody":
