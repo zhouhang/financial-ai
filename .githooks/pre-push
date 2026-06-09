@@ -8,6 +8,7 @@
 #
 # Enable once (per clone):   git config core.hooksPath .githooks
 # Skip for one push:         SKIP_WIN_DEPLOY=1 git push
+# Block push on deploy fail: WIN_DEPLOY_STRICT=1 git push   (default: loud warn, push continues)
 #
 # Args: $1=remote name, $2=remote url. Ref lines arrive on stdin:
 #   <local_ref> <local_sha> <remote_ref> <remote_sha>
@@ -35,8 +36,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     if ( cd "$REPO_ROOT/$AGENT_DIR" && bash scripts/deploy-browser-agent-win.sh ); then
       echo "[pre-push] Windows collector deploy OK."
     else
-      echo "[pre-push] WARN: Windows deploy failed; push continues." >&2
-      echo "[pre-push]       Re-run manually: (cd $AGENT_DIR && ./scripts/deploy-browser-agent-win.sh)" >&2
+      rc=$?
+      {
+        printf '\a'
+        echo "########################################################################"
+        echo "##  [pre-push] !!! WINDOWS 采集机部署失败 (exit $rc) !!!"
+        echo "##  browser-agent 改动已 push,但采集机【没更新】,仍在跑旧代码。"
+        echo "##  周末/无人值守可能照旧失效。请处理后手动补发:"
+        echo "##    (cd $AGENT_DIR && ./scripts/deploy-browser-agent-win.sh)"
+        if [ "${WIN_DEPLOY_STRICT:-0}" = "1" ]; then
+          echo "##  WIN_DEPLOY_STRICT=1 -> 阻断本次 push。"
+        else
+          echo "##  默认放行 push。要让部署失败直接阻断: WIN_DEPLOY_STRICT=1 git push"
+        fi
+        echo "########################################################################"
+      } >&2
+      if [ "${WIN_DEPLOY_STRICT:-0}" = "1" ]; then
+        exit 1
+      fi
     fi
   else
     echo "[pre-push] no browser-agent changes on main; skip Windows deploy."

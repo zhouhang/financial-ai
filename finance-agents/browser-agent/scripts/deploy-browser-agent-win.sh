@@ -23,7 +23,17 @@ echo "==> 部署源: $AGENT_DIR"
 echo "==> 目标:  $WIN_HOST : $WIN_ROOT"
 
 # 1) 本地冒烟测试(跨平台子集,缓存 venv 复用)
-if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
+SMOKE_TESTS=(tests/test_data_agent_ws.py tests/test_tally_client.py tests/test_service_config.py)
+PRESENT_TESTS=()
+for t in "${SMOKE_TESTS[@]}"; do [[ -f "$t" ]] && PRESENT_TESTS+=("$t"); done
+
+if [[ "${SKIP_TESTS:-0}" == "1" ]]; then
+  echo "==> 跳过本地测试(SKIP_TESTS=1)"
+elif [[ ${#PRESENT_TESTS[@]} -eq 0 ]]; then
+  # test_*.py 按约定不入库(.gitignore 的 *TEST*),clean clone 上本就不存在。
+  # 这种情况优雅跳过冒烟门、不当作失败 —— 否则会让 pre-push 误报"部署失败"并(strict 下)阻断 push。
+  echo "==> 未发现本地 test_*.py(按约定不提交 git),跳过冒烟测试"
+else
   GATE_VENV="$HOME/.cache/tally-browser-agent-gate-venv"
   if [[ ! -x "$GATE_VENV/bin/python" ]]; then
     echo "==> 首次创建测试 venv: $GATE_VENV"
@@ -31,12 +41,9 @@ if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
     "$GATE_VENV/bin/pip" install -q --upgrade pip
     "$GATE_VENV/bin/pip" install -q pytest pytest-asyncio websockets PyJWT httpx
   fi
-  echo "==> 本地冒烟测试(轻量单元子集,不拉 playwright/win32)"
+  echo "==> 本地冒烟测试(轻量单元子集,不拉 playwright/win32): ${PRESENT_TESTS[*]}"
   # 仅纯单元测试;需 playwright/真实浏览器的集成测试由 CI(windows-latest)或采集机覆盖。
-  "$GATE_VENV/bin/python" -m pytest -q \
-    tests/test_data_agent_ws.py tests/test_tally_client.py tests/test_service_config.py
-else
-  echo "==> 跳过本地测试(SKIP_TESTS=1)"
+  "$GATE_VENV/bin/python" -m pytest -q "${PRESENT_TESTS[@]}"
 fi
 
 # 2) 打包(排除运行态/机器本地内容)

@@ -380,7 +380,7 @@ normalize：对账产出差异行后，按源平台 `field_mapping` 投影 paylo
 1. **字段映射确认页**：平台×dataset_kind，DeepSeek 提案 + 真实样本并排，低置信高亮，确认/改 → 存版本化。
 2. **规则库编辑页**：按 domain/scope 列归因+预警规则，表单编 `when/then`、`metric/condition`、优先级、启停；DeepSeek 提案收件箱（review/改/晋升）。
 3. **订阅 & 接收人多选页**：建订阅（period/scope/view/schedule/anchor），接收人走通讯录搜索多选（复用 dws contact search）。
-4. **对账日报详情页**：structured 表 + 叙事 + 差异清单(带归因) + 预警(带挂账天数) + `标记已核销/转人工`。
+4. **对账日报详情页**：老板详情页 / 财务详情页两个独立免登录公开页，配置驱动、响应式。**完整内容契约见 §17**。
 
 ## 13. 错误处理（失败安全、不阻断、可重跑）
 
@@ -446,3 +446,104 @@ normalize：对账产出差异行后，按源平台 `field_mapping` 投影 paylo
 8. 订阅&接收人页 + 日报详情页。
 9. 调度（日报发送窗口 + 完整性硬闸门 + 重试；周/月只预留）。
 10. 端到端集成测试 + fixture。
+
+## 17. 对账日报详情页内容契约（老板 / 财务 · 配置驱动 · 响应式）
+
+> 本节细化 §12.4，是钉钉卡片「查看详细」按钮落地页的完整内容契约。设计于 2026-06-09 brainstorming 确认。**核心铁律与 §6.4 / rollup-foundation 一致：页面通用，行业知识全进配置。** 页面代码不得出现「买家实付 / 退款 / 钱卡住 / 资金对账 / 订单对账」等任何电商/淘系词——这些只能出现在 `view_layout` 配置与 fixture 中。换行业 = 加配置，页面不改。
+
+### 17.1 页面架构
+
+- **两个独立免登录公开页**：`老板详情页`、`财务详情页`。各由对应钉钉卡片的带 token 链接打开；`view`（老板|财务）**编码在链接里，不靠身份识别**（公开页无登录态）。token 限定到 `公司 + biz_date + view`，**沿用现有 `PublicReconRunExceptionsPage` 的 token / 有效期策略**（不另造一套）。
+- **两视图取数逻辑与展示维度不同，故做成两页**（非同页切 tab）；但二者共用同一套渲染器与数据源。
+- **配置驱动的通用渲染器**：详情页是一个「报表渲染器」，输入 = `view_layout` 配置（按 `域 × 视图`）+ 通用 digest 结构化数据，输出 = 页面。渲染器只认 §17.2 的 **8 类通用 section 类型**。
+- **数据源全通用，零行业专有表**：`recon_period_rollup`（全量金额）、`canonical_recon_line`（差异行）、`recon_alert`（预警）、`recon_digest.narrative`（叙事）。**金额一律取自 rollup，绝不从 `execution_run_exceptions` SUM**（§6.2/§10 同律）。
+
+### 17.2 通用 section 类型目录（渲染器内置，共 8 类）
+
+| section 类型 | 职责 | 数据源 | 手机端降级 |
+|---|---|---|---|
+| `funnel` | 有序阶段漏斗，每段绑一个 metric | rollup | 横向条 → 竖向堆叠，每段一行 |
+| `ranking_table` | 按实体（plan）列若干 metric，可排序 | rollup | 多列表格 → 每实体一卡（关键 2-3 指标 + 展开） |
+| `metric_kpi` | 单个/几个关键数 + 口径标签；**可带 `group_by` 出分组计数** | rollup | 一排卡 → 2 列网格自动换行 |
+| `alert_list` | 预警项，可下钻到明细行 | alert + canonical | 表格 → 卡片，点开下钻 |
+| `diff_list` | 差异行 + 归因 + 左右原值，可筛选/导出/标记；**带 `group_by` 动态分 Tab** | canonical + 归因 | 表格(ResponsiveTable) → 每行卡片(复用 `PublicReconRunExceptionMobileCard`) |
+| `distribution` | 均值/分位 | rollup | 均值+分位一行 → 纵向 |
+| `locked_placeholder` | 未解锁指标 + 「如何解锁」 | 配置 | 灰显块（同） |
+| `narrative` | DeepSeek 正文（数字只传不算） | digest | 正文段（react-markdown，同） |
+
+**响应式总则**：断点沿用 Tailwind 默认 `md`(768px)；电脑表格 ↔ 手机卡片；导出在手机端走「生成后给下载链接」。
+
+### 17.3 `view_layout` 配置格式（按 `域 × 视图`，渲染器据此渲染）
+
+```json
+{ "domain": "ecom", "view": "boss",
+  "sections": [
+    {"type":"funnel", "title":"资金到账总览（货款口径）",
+     "stages":[
+       {"metric":"receivable_total","label":"买家实付"},
+       {"metric":"refund_total","label":"退款"},
+       {"metric":"settled_total","label":"已到账"},
+       {"metric":"normal_in_transit_amount","label":"正常在途"},
+       {"metric":"stuck_amount","label":"待核查"}],
+     "caption":"货款口径"},
+    {"type":"ranking_table","title":"按店铺拆解","entity":"plan_code",
+     "columns":["net_receivable_total","settled_total","normal_in_transit_amount","stuck_amount"],
+     "sort":"stuck_amount desc"},
+    {"type":"metric_kpi","title":"平台综合扣减",
+     "metrics":["net_deduction_total","net_deduction_rate"],"caption":"含手续费/营销，非精确佣金"},
+    {"type":"alert_list","title":"钱卡住预警（疑似）","alert_code":"unsettled_amount_aged",
+     "drilldown":{"source":"canonical","filter":"match_status=left_only & aging>N",
+                  "columns":["order_no","net_receivable","aging_days"]}},
+    {"type":"locked_placeholder","items":[
+       {"metric":"midplatform_gross_profit","state":"beta","unlock":"按 order_type/form_type 切口径并 beta 校验后解锁"},
+       {"metric":"net_profit","state":"locked","unlock":"补费用明细+银行流水+经营费用台账"}]}
+  ]}
+```
+
+> `group_label_map` / `group_by` 用于财务视图分组（见 §17.5）。所有 `metric` / `label` / `stages` / `columns` 均来自配置；渲染器不内置任何具体指标名。
+
+### 17.4 电商·老板视图（首批配置实例）
+
+护栏：头部固定「本报告反映对账与资金健康，非经营损益（不含成本/毛利/利润）」，所有金额带口径标签。`sections` 顺序：
+
+1. `funnel`：买家实付 → 退款 → 已到账 → 正常在途 → 待核查（货款口径）。
+2. `ranking_table`：按店铺(plan)列 应收净额 / 已到账 / 在途 / 待核查。**【确认要】**
+3. `metric_kpi` + `ranking_table`：平台综合扣减额 / 率 + 按店铺扣减率排名。**【确认要，数据已具备】**——`recon_period_rollup` 已按 `plan_code` 落 `net_deduction_total` / `net_deduction_rate`（§6.2），排名 = 对 rollup 按率排序，零额外取数；口径「综合净扣减·非精确佣金」。
+4. `alert_list`：钱卡住，下钻到订单明细（订单号 / 净应收 / 挂账天数）。**【确认要，数据已具备】**——`left_only` 单边缺失行落 `canonical_recon_line`（§6.2），可逐笔列出；差异行 >1000 被采样时标「已采样 N/M」。
+5. `locked_placeholder`：**中台口径含税毛利（beta 校验中）** + **净利润（灰显）** + 如何解锁。**【确认要】**——见 §17.6 数据裁决。
+
+### 17.5 电商·财务视图（首批配置实例）
+
+`sections` 顺序：
+
+1. `metric_kpi`（计数，带 `group_by`）：按对账类型分组出四类计数。
+2. `diff_list`（带 `group_by` 动态分 Tab）：差异行 + 归因（`reason_code` / `is_true_diff`）+ 左右原值，**扩展现有 `PublicReconRunExceptionsPage`**；采样时标「已采样 N/M，导出取全量」。
+3. `distribution`：回款周期 均值 + P90（按 plan）。
+4. `ranking_table`：健康度红黄绿排名。
+5. `narrative`：DeepSeek 叙事段。**【确认要】**
+
+**导出底稿** **【确认】**：全 canonical 字段 + 归因 + 左右原值；格式 Excel(.xlsx，前端无导出库则退 CSV)；范围 = 当前筛选；文件名 `{公司}_{biz_date}_{分组标签}对账底稿`。手机端走「生成后给下载链接」。
+
+**标记处理** **【确认】**：粒度 = **逐差异行**，复用现有 处理状态 / 修复状态 / 责任人 / 反馈。钉钉卡片与 Web 页**写同一后端**（`recon_alert.status` / `execution_run_exceptions`）：卡片做粗粒度 ack、Web 做逐行；两条回写路径统一到同一更新入口（§10 机器人回调）。
+
+> **通用性关键：分组维度不得硬编码「资金对账 / 订单对账」。** `diff_list` 与计数 `metric_kpi` 带一个**可配置 `group_by`**（默认 `recon_type`，它是 rollup/canonical 上的通用列）+ **`group_label_map`**（配置）。渲染器只认「按 `group_by` 分组、每组一 Tab、标签取 `group_label_map`」：
+> - **电商配置**：`group_by=recon_type`，`group_label_map={"fund":"资金对账","order":"订单对账"}` → 渲两个 Tab。
+> - **其他行业**（如银行/往来/存货对账）：同样 `group_by=recon_type`，换自己的 `group_label_map` → 渲它自己的 N 个 Tab。
+> - **退化规则**：scope 内只有 1 个分组值 → 不出 Tab 栏，直接单清单；0 个 → 空态。Tab 数量由数据 + 配置决定，页面代码不变。
+>
+> 「资金对账 / 订单对账」只是**电商 view_layout 配置的示例值，非渲染器内置**。
+
+### 17.6 数据可得性裁决（写入作为实现依据）
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| 平台扣减 + 店铺扣减率排名（B） | **能，数据已就位** | `recon_period_rollup` 按 `plan_code` 已落 `net_deduction_total`/`net_deduction_rate`（§6.2）；排名=排序 |
+| 钱卡住下钻订单明细（C） | **能** | `left_only` 落 `canonical_recon_line`（§6.2），带订单号/净应收/付款时间→挂账天数；注意采样标注 |
+| 中台口径含税毛利（D） | **数据有，需切口径 + beta 校验后解锁** | `ods_yxst_trd_order_di_o` 有 `tax_sale_amount`/`tax_cost_amount`；必须按 `order_type='销售' + form_type='正向交易' + tax_cost_amount>0` 切口径（排除供货 cost=0 / 逆向 / 负成本，§15.1）；解锁前以 `locked_placeholder` state=beta 呈现 |
+| 净利润（D） | **数据没有，永久灰显占位** | 缺平台费用明细 / 银行流水 / 人工营销费用（§15.1）；`locked_placeholder` state=locked + 如何解锁 |
+
+### 17.7 数据模型增量（迁移 039+ 接缝，供写计划细化）
+
+- **`view_layout` 配置表**：`layout_code, domain, view(boss|finance), sections(jsonb), version, status` —— Web 管理界面读写，与 §6.1 配置表同构。
+- 详情页读取 = `view_layout`(按 domain×view) + `recon_digest.structured` + 按需查 `recon_period_rollup` / `canonical_recon_line` / `recon_alert`。
+- 详情页公开链接 token 解析复用现有 `PublicReconRunExceptions` 路由机制，扩 `view` 维度。
