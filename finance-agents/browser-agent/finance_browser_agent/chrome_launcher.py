@@ -56,7 +56,17 @@ def pick_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def build_chrome_args(*, binary: str, user_data_dir: str, port: int, headless: bool) -> list[str]:
+def build_chrome_args(
+    *,
+    binary: str,
+    user_data_dir: str,
+    port: int,
+    headless: bool,
+    window_width: int = 0,
+    window_height: int = 0,
+    window_x: int = 0,
+    window_y: int = 0,
+) -> list[str]:
     """拼启动参数:仅绑 127.0.0.1 的 CDP 端口 + 持久化 profile + 默认 headed。"""
     args = [
         binary,
@@ -69,6 +79,13 @@ def build_chrome_args(*, binary: str, user_data_dir: str, port: int, headless: b
     ]
     if headless:
         args.append("--headless=new")
+    elif window_width > 0 and window_height > 0:
+        args.extend(
+            [
+                f"--window-size={window_width},{window_height}",
+                f"--window-position={max(0, window_x)},{max(0, window_y)}",
+            ]
+        )
     return args
 
 
@@ -212,17 +229,41 @@ def launch_chrome(
     headless: bool,
     channel: str = "chrome",
     timezone_id: str = "",
+    window_width: int = 0,
+    window_height: int = 0,
+    window_x: int = 0,
+    window_y: int = 0,
     cdp_ready_timeout_seconds: float = 20.0,
 ) -> ChromeProcess:
     """启动本机 Chrome 并等待 CDP 就绪,返回句柄。就绪失败则终止并抛错。"""
     binary = resolve_chrome_binary(channel)
     port = pick_free_port()
-    args = build_chrome_args(binary=binary, user_data_dir=user_data_dir, port=port, headless=headless)
+    args = build_chrome_args(
+        binary=binary,
+        user_data_dir=user_data_dir,
+        port=port,
+        headless=headless,
+        window_width=window_width,
+        window_height=window_height,
+        window_x=window_x,
+        window_y=window_y,
+    )
     proc_env = dict(os.environ)
     if timezone_id:
         proc_env["TZ"] = timezone_id
     terminate_existing_profile_chrome(user_data_dir)
-    logger.info("launching chrome: binary=%s port=%s user_data_dir=%s headless=%s", binary, port, user_data_dir, headless)
+    logger.info(
+        "launching chrome: binary=%s port=%s user_data_dir=%s headless=%s "
+        "window=%sx%s+%s+%s",
+        binary,
+        port,
+        user_data_dir,
+        headless,
+        window_width,
+        window_height,
+        window_x,
+        window_y,
+    )
     process = subprocess.Popen(args, env=proc_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     handle = ChromeProcess(process=process, port=port, user_data_dir=user_data_dir)
     if not wait_for_cdp(port, timeout_seconds=cdp_ready_timeout_seconds):

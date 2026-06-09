@@ -109,6 +109,10 @@ class PlaywrightRunConfig:
     headless: bool
     timezone_id: str
     browser_channel: str
+    window_width: int = 1600
+    window_height: int = 1000
+    window_x: int = 0
+    window_y: int = 0
     step_delay_min_ms: int = 1000
     step_delay_max_ms: int = 3000
     click_delay_min_ms: int = 800
@@ -125,6 +129,10 @@ class PlaywrightRunConfig:
             headless=os.getenv("BROWSER_AGENT_HEADLESS", "0") == "1",
             timezone_id=os.getenv("BROWSER_AGENT_TIMEZONE", "Asia/Shanghai"),
             browser_channel=os.getenv("BROWSER_AGENT_BROWSER_CHANNEL", "chrome").strip() or "chrome",
+            window_width=_env_int("BROWSER_AGENT_CHROME_WINDOW_WIDTH", 1600),
+            window_height=_env_int("BROWSER_AGENT_CHROME_WINDOW_HEIGHT", 1000),
+            window_x=_env_int("BROWSER_AGENT_CHROME_WINDOW_X", 0),
+            window_y=_env_int("BROWSER_AGENT_CHROME_WINDOW_Y", 0),
             step_delay_min_ms=_env_int("BROWSER_AGENT_STEP_DELAY_MIN_MS", 1000),
             step_delay_max_ms=_env_int("BROWSER_AGENT_STEP_DELAY_MAX_MS", 3000),
             click_delay_min_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MIN_MS", 800),
@@ -139,6 +147,38 @@ def _env_int(name: str, default: int) -> int:
         return max(0, int(os.getenv(name, str(default))))
     except (TypeError, ValueError):
         return default
+
+
+def _set_browser_window_bounds(page: Any, config: PlaywrightRunConfig) -> None:
+    if config.headless or config.window_width <= 0 or config.window_height <= 0:
+        return
+    try:
+        session = page.context.new_cdp_session(page)
+        window_info = session.send("Browser.getWindowForTarget")
+        window_id = int(window_info.get("windowId"))
+        session.send(
+            "Browser.setWindowBounds",
+            {
+                "windowId": window_id,
+                "bounds": {
+                    "left": max(0, int(config.window_x)),
+                    "top": max(0, int(config.window_y)),
+                    "width": int(config.window_width),
+                    "height": int(config.window_height),
+                    "windowState": "normal",
+                },
+            },
+        )
+        logger.info(
+            "browser window bounds applied: window_id=%s width=%s height=%s x=%s y=%s",
+            window_id,
+            config.window_width,
+            config.window_height,
+            config.window_x,
+            config.window_y,
+        )
+    except Exception:
+        logger.exception("browser window bounds update failed")
 
 
 def build_user_data_dir(
@@ -2235,7 +2275,7 @@ def _run_playbook_with_playwright_inner(
         }
     logger.info(
         "playwright browser run starting: job_id=%s shop_id=%s playbook_id=%s "
-        "user_data_dir=%s download_dir=%s headless=%s browser_channel=%s",
+        "user_data_dir=%s download_dir=%s headless=%s browser_channel=%s window=%sx%s+%s+%s",
         job_id,
         shop_id,
         message.get("playbook_id") or playbook.get("playbook_id") or "",
@@ -2243,6 +2283,10 @@ def _run_playbook_with_playwright_inner(
         str(download_dir),
         config.headless,
         config.browser_channel,
+        config.window_width,
+        config.window_height,
+        config.window_x,
+        config.window_y,
     )
 
     try:
@@ -2253,12 +2297,17 @@ def _run_playbook_with_playwright_inner(
                 headless=config.headless,
                 channel=config.browser_channel,
                 timezone_id=config.timezone_id,
+                window_width=config.window_width,
+                window_height=config.window_height,
+                window_x=config.window_x,
+                window_y=config.window_y,
             )
             try:
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.connect_over_cdp(chrome.cdp_url)
                     context = browser.contexts[0] if browser.contexts else browser.new_context(accept_downloads=True)
                     page = context.pages[0] if context.pages else context.new_page()
+                    _set_browser_window_bounds(page, config)
                     try:
                         for index, step_dict in enumerate(steps):
                             step_action = str(step_dict.get("action") or "").strip()
