@@ -54,6 +54,29 @@ def _handle_signal(signum, frame) -> None:
     logger.info("收到停止信号: %s", signum)
 
 
+def _prevent_system_sleep() -> None:
+    """Windows: agent 在跑时阻止系统空闲睡眠(S3)。
+
+    采集机为桌面机,默认空闲 30min 进 S3 睡眠,会冻结 service.py/Chrome/wss,导致无人值守
+    (如周末)期间整机睡眠、无法采集。ES_CONTINUOUS 把状态绑在当前(主)线程上,进程退出即
+    自动失效、机器恢复正常睡眠,无需手动复位。只保系统不睡,不含 ES_DISPLAY_REQUIRED——
+    允许关显示器(息屏不冻结进程,无害)。比 powercfg 改电源方案更稳:不怕方案被重置。"""
+    if _platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        result = ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        if result == 0:
+            logger.warning("SetThreadExecutionState 返回 0,阻止系统空闲睡眠可能未生效")
+        else:
+            logger.info("已阻止系统空闲睡眠(ES_CONTINUOUS|ES_SYSTEM_REQUIRED),agent 退出后自动恢复")
+    except Exception:
+        logger.exception("设置阻止系统空闲睡眠失败,采集机仍可能在空闲时睡眠")
+
+
 async def _heartbeat(client: BrowserAgentTallyClient, config: BrowserAgentConfig) -> None:
     while not _shutdown:
         try:
@@ -103,6 +126,7 @@ async def _dispatcher(client: BrowserAgentTallyClient, config: BrowserAgentConfi
 async def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    _prevent_system_sleep()
     config = BrowserAgentConfig.from_env()
     client = BrowserAgentTallyClient(config=config)
     logger.info(

@@ -362,3 +362,6 @@ finance-mcp/tests/**/__pycache__/**
 *.orig
 *~
 *.swp
+
+# superpowers brainstorm visual companion (local-only)
+.superpowers/
