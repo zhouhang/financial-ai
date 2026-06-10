@@ -161,6 +161,19 @@ class BrowserAgentTallyClient:
             },
         })
 
+    async def self_check(
+        self, *, agent_id: str | None = None, company_id: str | None = None
+    ) -> dict[str, Any]:
+        """自检 agent_id 是否与 tally 的采集绑定/注册匹配(能否收到下发的采集任务)。
+
+        agent_id/company_id 显式传入,以便用一个临时连接(throwaway agent_id)去查
+        "真实 agent_id"的匹配情况,而不打扰正在运行的采集机在网关里的注册。
+        """
+        return await self._client.request("self_check", {
+            "agent_id": (agent_id or self.config.agent_id),
+            "company_id": (company_id or self.config.company_id or "").strip(),
+        })
+
     async def mark_browser_job_success(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._client.request("job_complete", dict(payload))
 

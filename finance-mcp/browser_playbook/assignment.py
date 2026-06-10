@@ -242,6 +242,50 @@ def list_browser_bindings(
         return {"success": False, "error": str(e), "error_code": "database_error"}
 
 
+def self_check_browser_agent(
+    *,
+    company_id: str,
+    agent_id: str,
+    online_threshold_seconds: int = DEFAULT_ONLINE_THRESHOLD_SECONDS,
+) -> dict[str, Any]:
+    """采集机自检:校验 agent_id 是否被 tally 认可,且有采集绑定指向它。
+
+    解决的隐性故障:采集机 WS 连得上、心跳正常,但本机 BROWSER_AGENT_ID 与
+    shop_runtime_bindings.agent_id 不一致时,tally 永远不会把采集任务下发到它
+    (任务按 agent_id 路由)。本自检直接回答"我能不能收到下发的采集任务"。
+    """
+    try:
+        conn_manager = get_conn()
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                agent = _target_agent_status(
+                    cur,
+                    company_id=company_id,
+                    agent_id=agent_id,
+                    online_threshold_seconds=online_threshold_seconds,
+                )
+                mine = _list_browser_bindings_in_cursor(cur, company_id=company_id, agent_id=agent_id)
+                all_bindings = _list_browser_bindings_in_cursor(cur, company_id=company_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"browser-agent self_check 失败 (company_id={company_id}, agent_id={agent_id}): {e}")
+        return {"success": False, "error": str(e), "error_code": "database_error"}
+
+    binding_agent_ids = sorted({str(b.get("agent_id") or "") for b in all_bindings if b.get("agent_id")})
+    bound_count = len(mine)
+    registered = bool(agent.get("exists"))
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "registered": registered,
+        "online": bool(agent.get("is_online")),
+        "bound_bindings": bound_count,
+        "total_company_bindings": len(all_bindings),
+        "binding_agent_ids": binding_agent_ids,
+        "can_receive_tasks": registered and bound_count > 0,
+        "last_heartbeat_at": agent.get("last_heartbeat_at"),
+    }
+
+
 def _validation_error(error: str, error_code: str) -> dict[str, Any]:
     return {"success": False, "error": error, "error_code": error_code}
 

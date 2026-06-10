@@ -26,6 +26,7 @@ _NOTIFIED_RISK_JOBS: set[str] = set()
 _DOMAIN_TOOL_MAP: dict[str, str] = {
     "claim": "browser_sync_job_claim",
     "heartbeat": "browser_agent_heartbeat",
+    "self_check": "browser_agent_self_check",
     "startup_cleanup": "browser_sync_job_startup_cleanup",
     "job_complete": "browser_sync_job_complete",
     "job_fail": "browser_sync_job_fail",

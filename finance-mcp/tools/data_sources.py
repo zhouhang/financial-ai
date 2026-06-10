@@ -6014,6 +6014,19 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="browser_agent_self_check",
+            description="Worker 专用：采集机自检 agent_id 是否被 tally 认可且有采集绑定指向它(能否收到下发的采集任务)。只读。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+                "required": ["worker_token", "company_id", "agent_id"],
+            },
+        ),
+        Tool(
             name="browser_agent_list",
             description="运维专用：列出当前公司的 browser-agent 采集节点及在线状态。",
             inputSchema={
@@ -6272,6 +6285,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_browser_sync_job_claim(arguments)
         if name == "browser_agent_heartbeat":
             return await _handle_browser_agent_heartbeat(arguments)
+        if name == "browser_agent_self_check":
+            return await _handle_browser_agent_self_check(arguments)
         if name == "browser_agent_list":
             return await _handle_browser_agent_list(arguments)
         if name == "browser_binding_list":
@@ -9884,6 +9899,20 @@ async def _handle_browser_agent_heartbeat(arguments: dict[str, Any]) -> dict[str
         capabilities=dict(arguments.get("capabilities") or {}),
     )
     return {"success": bool(row), "agent": row}
+
+
+async def _handle_browser_agent_self_check(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _require_scheduler_user(str(arguments.get("worker_token") or ""))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    company_id = str(arguments.get("company_id") or "").strip()
+    agent_id = str(arguments.get("agent_id") or "").strip()
+    if not company_id:
+        return {"success": False, "error": "missing company_id"}
+    if not agent_id:
+        return {"success": False, "error": "missing agent_id"}
+    return browser_assignment.self_check_browser_agent(company_id=company_id, agent_id=agent_id)
 
 
 async def _handle_browser_agent_list(arguments: dict[str, Any]) -> dict[str, Any]:

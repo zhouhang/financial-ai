@@ -35,4 +35,18 @@ if (Test-Path $LogFile) {
 } else {
   Write-Host "LOG    : not found at $LogFile"
 }
+
+# Task-match self-check: confirm tally actually dispatches collection tasks to THIS agent_id.
+# (agent can be alive + WS-connected but receive zero tasks if BROWSER_AGENT_ID != the
+#  agent_id tally's bindings are assigned to. This catches that silent failure.)
+Write-Host ""
+Write-Host "---- task-match self-check (agent_id vs tally bindings) ----"
+$Py = Join-Path $Root ".venv\Scripts\python.exe"
+$Checker = Join-Path $Root "scripts\win\selfcheck-agent-match.py"
+if ((Test-Path $Py) -and (Test-Path $Checker)) {
+  $env:PYTHONIOENCODING = "utf-8"
+  & $Py $Checker
+} else {
+  Write-Host "TASK-MATCH : SKIP   (python venv or checker not found)"
+}
 Write-Host ""
