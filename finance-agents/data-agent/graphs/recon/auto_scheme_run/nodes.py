@@ -774,17 +774,6 @@ def _merge_runtime_summary_notification(
     return patched
 
 
-def _merge_runtime_exception_sampling(
-    artifacts: dict[str, Any],
-    sampling: dict[str, Any],
-) -> dict[str, Any]:
-    patched = dict(artifacts or {})
-    runtime_summary = _safe_dict(patched.get("runtime_summary"))
-    runtime_summary["exception_sampling"] = _safe_dict(sampling)
-    patched["runtime_summary"] = runtime_summary
-    return patched
-
-
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
@@ -3590,12 +3579,18 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         )
 
     # 建 anomaly_key → payload 索引，用于把响应中的 id 关联回原始 payload
-    payload_by_key: dict[str, dict[str, Any]] = {
-        p["anomaly_key"]: p for p in exception_payloads
-    }
+    # 同时去重：若多条 anomaly 生成了相同的 anomaly_key，保留首条；
+    # 重复键会导致 Postgres execute_values ON CONFLICT DO UPDATE 报
+    # "command cannot affect row a second time"，整批失败。
+    payload_by_key: dict[str, dict[str, Any]] = {}
+    for p in exception_payloads:
+        akey = p["anomaly_key"]
+        if akey not in payload_by_key:
+            payload_by_key[akey] = p
+    deduped_payloads = list(payload_by_key.values())
 
-    for batch_start in range(0, len(exception_payloads), _EXCEPTION_BULK_BATCH_SIZE):
-        chunk = exception_payloads[batch_start : batch_start + _EXCEPTION_BULK_BATCH_SIZE]
+    for chunk_idx, batch_start in enumerate(range(0, len(deduped_payloads), _EXCEPTION_BULK_BATCH_SIZE)):
+        chunk = deduped_payloads[batch_start : batch_start + _EXCEPTION_BULK_BATCH_SIZE]
         result = await call_mcp_tool(
             "execution_run_exception_bulk_create",
             {
@@ -3636,9 +3631,18 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
                         },
                     }
                 )
+        else:
+            error_msg = str(result.get("error") or result.get("message") or result)
+            logger.error(
+                "exception_bulk_create chunk failed: run_id=%s chunk=%d error=%s dropped=%d",
+                run_id,
+                chunk_idx,
+                error_msg,
+                len(chunk),
+            )
 
     sampling_metadata["created_count"] = created
-    sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)
+    sampling_metadata["create_failed_count"] = max(0, len(deduped_payloads) - created)
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
     ctx["exception_creation_limited"] = False

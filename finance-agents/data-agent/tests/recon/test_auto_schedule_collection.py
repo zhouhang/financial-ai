@@ -2057,3 +2057,130 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
         assert feedback_json["public_detail_url"].endswith(
             "/recon/runs/run-001/exceptions?owner=ding-user-001"
         )
+
+
+def test_create_exception_tasks_node_dedupes_anomaly_key_before_bulk_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批量落库前按 anomaly_key 去重：250 条中 3 条重复 key，bulk 收到的数量 = 247。
+
+    Postgres execute_values ON CONFLICT DO UPDATE 遇重复 key 会报
+    "command cannot affect row a second time"导致整批失败；
+    去重必须在分 chunk 之前完成，以避免跨 chunk 时依然带重复 key。
+    """
+    bulk_calls: list[list[str]] = []  # 每次调用收集到的 anomaly_key 列表
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_bulk_create":
+            keys = [str(exc["anomaly_key"]) for exc in payload.get("exceptions", [])]
+            bulk_calls.append(keys)
+            return {"success": True, "created": len(keys)}
+        return {"success": True}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    # 250 条 anomaly，其中 3 条与已有 key 重复（item_id 索引 1、51、101 与 0、50、100 相同）
+    base_anomalies = [
+        {"item_id": f"run-dedup:{idx}", "anomaly_type": "source_only"}
+        for idx in range(250)
+    ]
+    # 注入 3 条重复 item_id（与索引 0、50、100 完全一样）
+    duplicates = [
+        {"item_id": "run-dedup:0", "anomaly_type": "source_only"},
+        {"item_id": "run-dedup:50", "anomaly_type": "source_only"},
+        {"item_id": "run-dedup:100", "anomaly_type": "source_only"},
+    ]
+    anomalies = base_anomalies + duplicates  # total 253, unique 250
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-dedup-001"},
+            "scheme_code": "scheme-dedup",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "财务", "identifier": "owner-dedup"}
+                },
+                "plan_meta_json": {"notify_policy": {"explosion_threshold": 1000}},
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    # 有且仅有 1 次 bulk 调用（250 条 < 500 批大小）
+    assert len(bulk_calls) == 1, f"期望 1 次 bulk 调用，实际 {len(bulk_calls)} 次"
+    received_keys = bulk_calls[0]
+
+    # 去重后 250 条（253 - 3 重复）
+    assert len(received_keys) == 250, (
+        f"去重后应传 250 条，实际 {len(received_keys)} 条"
+    )
+    # bulk 调用中无重复 key
+    assert len(set(received_keys)) == len(received_keys), (
+        "bulk_create 收到的 exceptions 中存在重复 anomaly_key"
+    )
+    # ctx 计数与实际落库数一致
+    assert recon_ctx["exception_created_count"] == 250
+
+
+def test_create_exception_tasks_node_logs_error_on_chunk_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """chunk 调用失败时应记录 error 日志，包含 run_id / chunk 序号 / 错误信息 / 丢弃条数。
+
+    成功的 chunk 仍正常计入 created_count。
+    """
+    import logging
+
+    call_count = {"n": 0}
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_bulk_create":
+            call_count["n"] += 1
+            # 第 1 chunk (idx=0) 成功，第 2 chunk (idx=1) 失败
+            if call_count["n"] == 1:
+                return {"success": True, "created": len(list(payload.get("exceptions", [])))}
+            return {"success": False, "error": "ON CONFLICT DO UPDATE command cannot affect row"}
+        return {"success": True}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    # 501 条 → 2 chunks (500 + 1)
+    n = 501
+    anomalies = [
+        {"item_id": f"log-{i}", "anomaly_type": "source_only"}
+        for i in range(n)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-log-001"},
+            "scheme_code": "scheme-log",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "财务", "identifier": "owner-log"}
+                },
+                "plan_meta_json": {"notify_policy": {"explosion_threshold": 1000}},
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    with caplog.at_level(logging.ERROR, logger="graphs.recon.auto_scheme_run.nodes"):
+        result = asyncio.run(nodes.create_exception_tasks_node(state))
+
+    recon_ctx = result["recon_ctx"]
+
+    # 第 2 chunk 失败 → 应有 error 日志
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert error_records, "chunk 失败时应记录 error 日志"
+    error_text = error_records[0].getMessage()
+    assert "run-log-001" in error_text, f"日志应包含 run_id，实际: {error_text!r}"
+    assert "ON CONFLICT" in error_text, f"日志应包含错误信息，实际: {error_text!r}"
+
+    # chunk 0 成功 → created=500；chunk 1 失败 → created 不增加
+    assert recon_ctx["exception_created_count"] == 500
