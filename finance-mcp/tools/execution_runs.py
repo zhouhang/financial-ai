@@ -3101,20 +3101,34 @@ def _exception_bulk_create(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(exceptions, list):
         return {"success": False, "error": "exceptions 必须为数组"}
     if not exceptions:
-        return {"success": True, "created": 0}
+        return {"success": True, "created": 0, "exceptions": []}
+    # 校验每条 payload 的必填字段（与单条工具同标准）
+    for idx, exc in enumerate(exceptions):
+        if not isinstance(exc, dict):
+            return {"success": False, "error": f"第 {idx} 条不是对象"}
+        for field in ("anomaly_key", "anomaly_type", "summary"):
+            if not str(exc.get(field) or "").strip():
+                return {
+                    "success": False,
+                    "error": f"第 {idx} 条缺少必填字段: {field}",
+                }
     run = auth_db.get_execution_run(company_id=company_id, run_id=run_id)
     if not run:
         return {"success": False, "error": "run_id 对应执行记录不存在"}
     scheme_code = _as_text(arguments.get("scheme_code")) or _as_text(run.get("scheme_code"))
     if not scheme_code:
         return {"success": False, "error": "缺少 scheme_code 且无法从 run 记录推断"}
-    created = auth_db.bulk_create_execution_run_exceptions(
+    result_rows = auth_db.bulk_create_execution_run_exceptions(
         company_id=company_id,
         run_id=run_id,
         scheme_code=scheme_code,
         exceptions=exceptions,
     )
-    return {"success": True, "created": created}
+    return {
+        "success": True,
+        "created": len(result_rows),
+        "exceptions": result_rows,
+    }
 
 
 def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:

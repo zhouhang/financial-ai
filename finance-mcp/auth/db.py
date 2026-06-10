@@ -10791,13 +10791,15 @@ def bulk_create_execution_run_exceptions(
     scheme_code: str,
     exceptions: list[dict],
     batch_size: int = 1000,
-) -> int:
-    """批量创建或幂等更新执行异常，返回持久化条数。
+) -> list[dict]:
+    """批量创建或幂等更新执行异常，返回 [{id, anomaly_key}] 列表。
 
-    每 batch_size 条一批，单批单事务。字段语义与 create_execution_run_exception 完全一致。
+    每 batch_size 条一批，单批单事务。使用 execute_values + RETURNING 取回自增 id
+    与 anomaly_key，让上层可将 exception_id 关联回原始 payload，驱动催办通知。
+    字段语义与 create_execution_run_exception 完全一致。
     """
     if not exceptions:
-        return 0
+        return []
 
     sql = """
         INSERT INTO execution_run_exceptions (
@@ -10806,13 +10808,7 @@ def bulk_create_execution_run_exceptions(
             owner_name, owner_identifier, owner_contact_json,
             reminder_status, processing_status, fix_status,
             latest_feedback, feedback_json, is_closed
-        ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s::jsonb,
-            %s, %s, %s::jsonb,
-            %s, %s, %s,
-            %s, %s::jsonb, %s
-        )
+        ) VALUES %s
         ON CONFLICT (run_id, anomaly_key)
         DO UPDATE SET
             anomaly_type = EXCLUDED.anomaly_type,
@@ -10843,12 +10839,13 @@ def bulk_create_execution_run_exceptions(
             END,
             is_closed = EXCLUDED.is_closed,
             updated_at = CURRENT_TIMESTAMP
+        RETURNING id, anomaly_key
     """
 
-    created = 0
+    result_rows: list[dict] = []
     for batch_start in range(0, len(exceptions), batch_size):
         batch = exceptions[batch_start : batch_start + batch_size]
-        params_seq = [
+        values = [
             (
                 company_id,
                 run_id,
@@ -10872,10 +10869,26 @@ def bulk_create_execution_run_exceptions(
         conn_manager = get_conn()
         try:
             with conn_manager as conn:
-                with conn.cursor() as cur:
-                    cur.executemany(sql, params_seq)
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    rows = psycopg2.extras.execute_values(
+                        cur,
+                        sql,
+                        values,
+                        template=(
+                            "(%s, %s, %s, %s, %s,"
+                            " %s, %s::jsonb,"
+                            " %s, %s, %s::jsonb,"
+                            " %s, %s, %s,"
+                            " %s, %s::jsonb, %s)"
+                        ),
+                        page_size=1000,
+                        fetch=True,
+                    )
                 conn.commit()
-            created += len(batch)
+            result_rows.extend(
+                {"id": str(row["id"]), "anomaly_key": str(row["anomaly_key"])}
+                for row in (rows or [])
+            )
         except Exception as e:
             logger.error(
                 f"批量创建 execution_run_exceptions 失败 "
@@ -10883,7 +10896,7 @@ def bulk_create_execution_run_exceptions(
                 f"batch_start={batch_start}, batch_size={len(batch)}): {e}"
             )
             raise
-    return created
+    return result_rows
 
 
 def get_execution_run_exception(*, company_id: str, exception_id: str) -> dict | None:

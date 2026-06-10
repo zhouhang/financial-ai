@@ -785,31 +785,6 @@ def _merge_runtime_exception_sampling(
     return patched
 
 
-async def _persist_runtime_exception_sampling(
-    *,
-    auth_token: str,
-    ctx: dict[str, Any],
-    sampling: dict[str, Any],
-) -> None:
-    run = _safe_dict(ctx.get("execution_run_record"))
-    run_id = str(run.get("id") or "").strip()
-    if not auth_token or not run_id or not sampling:
-        return
-    artifacts = _merge_runtime_exception_sampling(
-        _safe_dict(run.get("artifacts_json")),
-        sampling,
-    )
-    update_result = await call_mcp_tool(
-        "execution_run_update",
-        {"auth_token": auth_token, "run_id": run_id, "artifacts_json": artifacts},
-    )
-    if bool(update_result.get("success")):
-        ctx["execution_run_record"] = _safe_dict(update_result.get("run")) or {
-            **run,
-            "artifacts_json": artifacts,
-        }
-
-
 def _get_recon_ctx(state: AgentState) -> dict[str, Any]:
     return dict(state.get("recon_ctx") or {})
 
@@ -2754,156 +2729,6 @@ def _resolve_notify_policy(run_plan: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def _anomaly_sampling_owner_identifier(item: dict[str, Any]) -> str:
-    contact = _safe_dict(item.get("_exception_owner_contact_json") or item.get("owner_contact_json"))
-    return str(
-        item.get("_exception_owner_identifier")
-        or item.get("owner_identifier")
-        or contact.get("mobile")
-        or item.get("_exception_owner_name")
-        or item.get("owner_name")
-        or item.get("owner")
-        or ""
-    ).strip()
-
-
-def _sampling_group_key(item: dict[str, Any]) -> tuple[str, str]:
-    anomaly_type = str(item.get("anomaly_type") or "unknown").strip() or "unknown"
-    return anomaly_type, _anomaly_sampling_owner_identifier(item)
-
-
-def _sampling_type_first_group_order(
-    group_order: list[tuple[str, str]],
-    sample_limit: int,
-) -> list[tuple[str, str]]:
-    if len(group_order) <= sample_limit:
-        return group_order
-
-    type_order: list[str] = []
-    groups_by_type: dict[str, list[tuple[str, str]]] = {}
-    for key in group_order:
-        anomaly_type = key[0]
-        if anomaly_type not in groups_by_type:
-            groups_by_type[anomaly_type] = []
-            type_order.append(anomaly_type)
-        groups_by_type[anomaly_type].append(key)
-
-    prioritized: list[tuple[str, str]] = []
-    for anomaly_type in type_order:
-        prioritized.append(groups_by_type[anomaly_type][0])
-        if len(prioritized) >= sample_limit:
-            return prioritized
-
-    depth = 1
-    while len(prioritized) < sample_limit:
-        appended = False
-        for anomaly_type in type_order:
-            owner_groups = groups_by_type[anomaly_type]
-            if depth >= len(owner_groups):
-                continue
-            prioritized.append(owner_groups[depth])
-            appended = True
-            if len(prioritized) >= sample_limit:
-                return prioritized
-        if not appended:
-            break
-        depth += 1
-    return prioritized
-
-
-def _sample_anomalies_for_exception_creation(
-    anomalies: list[dict[str, Any]],
-    *,
-    sample_limit: int,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    total_count = len(anomalies)
-    try:
-        safe_limit = int(sample_limit)
-    except (TypeError, ValueError):
-        safe_limit = _DEFAULT_EXCEPTION_SAMPLE_LIMIT
-    safe_limit = max(1, safe_limit)
-    metadata = {
-        "enabled": True,
-        "reason": "explosion_threshold_exceeded",
-        "sample_limit": safe_limit,
-        "total_count": total_count,
-        "sample_count": 0,
-        "created_count": 0,
-        "create_failed_count": 0,
-        "strategy": _EXCEPTION_SAMPLING_STRATEGY,
-        "fallback_used": False,
-    }
-    if total_count <= safe_limit:
-        metadata["sample_count"] = total_count
-        return list(anomalies), metadata
-
-    try:
-        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        group_order: list[tuple[str, str]] = []
-        for item in anomalies:
-            key = _sampling_group_key(item)
-            if key not in groups:
-                groups[key] = []
-                group_order.append(key)
-            groups[key].append(item)
-        first_pass_order = _sampling_type_first_group_order(group_order, safe_limit)
-
-        sampled: list[dict[str, Any]] = []
-        selected_by_key: dict[tuple[str, str], int] = {}
-        for key in first_pass_order:
-            if len(sampled) >= safe_limit:
-                break
-            sampled.append(groups[key][0])
-            selected_by_key[key] = 1
-
-        remaining_slots = safe_limit - len(sampled)
-        remaining_total = sum(
-            max(0, len(groups[key]) - selected_by_key.get(key, 0)) for key in group_order
-        )
-        if remaining_slots > 0 and remaining_total > 0:
-            fractional_allocations: list[tuple[float, tuple[str, str], int]] = []
-            for key in group_order:
-                remaining_in_group = max(0, len(groups[key]) - selected_by_key.get(key, 0))
-                if remaining_in_group <= 0:
-                    continue
-                raw_share = remaining_slots * (remaining_in_group / remaining_total)
-                whole_share = min(remaining_in_group, int(raw_share))
-                if whole_share:
-                    sampled.extend(
-                        groups[key][
-                            selected_by_key.get(key, 0) : selected_by_key.get(key, 0)
-                            + whole_share
-                        ]
-                    )
-                    selected_by_key[key] = selected_by_key.get(key, 0) + whole_share
-                fractional_allocations.append((raw_share - whole_share, key, remaining_in_group))
-
-            leftover_slots = safe_limit - len(sampled)
-            for _, key, _ in sorted(
-                fractional_allocations,
-                key=lambda item: (-item[0], group_order.index(item[1])),
-            ):
-                if leftover_slots <= 0:
-                    break
-                cursor = selected_by_key.get(key, 0)
-                if cursor >= len(groups[key]):
-                    continue
-                sampled.append(groups[key][cursor])
-                selected_by_key[key] = cursor + 1
-                leftover_slots -= 1
-
-        sampled = sampled[:safe_limit]
-        metadata["sample_count"] = len(sampled)
-        return sampled, metadata
-    except Exception as exc:
-        logger.error("[recon][exception_sampling] 分层抽样失败，回退为前 %s 条: %s", safe_limit, exc)
-        fallback = list(anomalies[:safe_limit])
-        metadata["sample_count"] = len(fallback)
-        metadata["fallback_used"] = True
-        metadata["fallback_error"] = str(exc)
-        return fallback, metadata
-
-
 def _get_nested_value(payload: Any, path: str) -> Any:
     current: Any = payload
     for part in str(path or "").split("."):
@@ -3018,7 +2843,6 @@ def _compose_owner_batch_reminder_text(
     detail_url: str,
     left_name: str = "",
     right_name: str = "",
-    sampled: bool = False,
 ) -> tuple[str, str, str]:
     plan_name = str(
         run_plan.get("plan_name")
@@ -3062,8 +2886,7 @@ def _compose_owner_batch_reminder_text(
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(count_lines))
     if detail_url:
-        link_label = "查看抽样差异" if sampled else "查看差异"
-        lines.append(f"[{link_label}]({detail_url})")
+        lines.append(f"[查看差异]({detail_url})")
     lines.append("请处理完成后在钉钉待办中标记完成，并同步给财务复核。")
     return todo_title, bot_title, "\n\n".join(line for line in lines if line)
 
@@ -3108,15 +2931,14 @@ def _compose_run_summary_notification_text(
         f"待处理差异：\n{total} 条",
     ]
     if explosion and sample_count > 0:
-        lines.append(f"异常明细：\n已按异常类型和责任人抽样创建 {sample_count} 条")
+        lines.append(f"异常明细：\n已创建全部 {sample_count} 条差异明细")
     count_lines = _format_recon_result_summary_lines(summary, left_name=left_name, right_name=right_name)
     if not _summary_has_difference_counts(summary):
         count_lines = _format_anomaly_type_stats(anomalies, left_name=left_name, right_name=right_name)
     if count_lines:
         lines.append("差异分布：\n" + "\n".join(f"- {line}" for line in count_lines))
     if detail_url:
-        link_label = "查看抽样差异" if explosion else "查看差异"
-        lines.append(f"[{link_label}]({detail_url})")
+        lines.append(f"[查看差异]({detail_url})")
     content = "\n\n".join(line for line in lines if line)
     return title, content
 
@@ -3369,7 +3191,6 @@ async def _send_execution_run_exception_batch_reminder(
     run_id: str,
     left_name: str = "",
     right_name: str = "",
-    sampled: bool = False,
 ) -> dict[str, Any]:
     exception_refs = [item for item in _safe_list(owner_group.get("items")) if isinstance(item, dict)]
     if not exception_refs:
@@ -3431,7 +3252,6 @@ async def _send_execution_run_exception_batch_reminder(
         detail_url=detail_url,
         left_name=left_name,
         right_name=right_name,
-        sampled=sampled,
     )
     reminder = adapter.send_reminder(
         title=bot_title,
@@ -3769,6 +3589,11 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             }
         )
 
+    # 建 anomaly_key → payload 索引，用于把响应中的 id 关联回原始 payload
+    payload_by_key: dict[str, dict[str, Any]] = {
+        p["anomaly_key"]: p for p in exception_payloads
+    }
+
     for batch_start in range(0, len(exception_payloads), _EXCEPTION_BULK_BATCH_SIZE):
         chunk = exception_payloads[batch_start : batch_start + _EXCEPTION_BULK_BATCH_SIZE]
         result = await call_mcp_tool(
@@ -3781,7 +3606,36 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             },
         )
         if bool(result.get("success")):
-            created += int(result.get("created") or 0)
+            batch_refs = _safe_list(result.get("exceptions"))
+            created += int(result.get("created") or len(batch_refs))
+            for ref in batch_refs:
+                if not isinstance(ref, dict):
+                    continue
+                akey = str(ref.get("anomaly_key") or "")
+                exc_id = str(ref.get("id") or "")
+                original_payload = payload_by_key.get(akey) or {}
+                created_exceptions.append(
+                    {
+                        "anomaly_key": akey,
+                        "exception_id": exc_id,
+                        "exception": {
+                            "id": exc_id,
+                            "exception_id": exc_id,
+                            "anomaly_key": akey,
+                            **{
+                                k: original_payload[k]
+                                for k in (
+                                    "owner_name",
+                                    "owner_identifier",
+                                    "owner_contact_json",
+                                    "anomaly_type",
+                                    "summary",
+                                )
+                                if k in original_payload
+                            },
+                        },
+                    }
+                )
 
     sampling_metadata["created_count"] = created
     sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)
@@ -3913,7 +3767,6 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     owner_groups = _group_exception_refs_by_owner(created_exceptions)
     run_id = str(_safe_dict(ctx.get("execution_run_record")).get("id") or "")
     left_name, right_name = _resolve_side_names(ctx)
-    sampled_exceptions = bool(_safe_dict(ctx.get("exception_sampling")).get("enabled"))
 
     try:
         for owner_group in owner_groups:
@@ -3927,7 +3780,6 @@ async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
                 run_id=run_id,
                 left_name=left_name,
                 right_name=right_name,
-                sampled=sampled_exceptions,
             )
             status = str(result.get("status") or "")
             item_count = len(_safe_list(result.get("items")))

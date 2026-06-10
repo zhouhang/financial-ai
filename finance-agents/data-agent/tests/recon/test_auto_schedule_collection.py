@@ -1471,15 +1471,26 @@ def test_create_exception_tasks_node_does_not_update_run_for_sampling_when_full_
 def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """全量落库模式下，owner_mapping 正确应用到每一条差异，4 条全部写入。"""
+    """全量落库模式下，owner_mapping 正确应用到每一条差异，4 条全部写入。
+
+    bulk 响应带回 [{id, anomaly_key}]，create_exception_tasks_node 应还原
+    created_exceptions 列表（含 exception_id / owner_identifier），以便
+    maybe_auto_notify_node 正确分组发催办。
+    """
     create_payloads: list[dict[str, object]] = []
+    _exc_counter = {"n": 0}
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
         if name == "execution_run_exception_bulk_create":
             exceptions = list(payload.get("exceptions", []))
+            returned_refs: list[dict[str, object]] = []
             for exc in exceptions:
                 create_payloads.append(exc)
-            return {"success": True, "created": len(exceptions)}
+                _exc_counter["n"] += 1
+                returned_refs.append(
+                    {"id": f"exc-{_exc_counter['n']}", "anomaly_key": exc["anomaly_key"]}
+                )
+            return {"success": True, "created": len(exceptions), "exceptions": returned_refs}
         if name == "execution_run_update":
             return {
                 "success": True,
@@ -1530,6 +1541,7 @@ def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     }
 
     result = asyncio.run(nodes.create_exception_tasks_node(state))
+    recon_ctx = result["recon_ctx"]
 
     # 全量 4 条全部写入（旧代码会按 sample_limit=2 截断，只写 2 条）
     assert len(create_payloads) == 4
@@ -1541,8 +1553,95 @@ def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     assert "账单责任人" in owner_names
     for payload in create_payloads:
         assert not any(str(key).startswith("_exception_") for key in payload["detail_json"])
-    # 批量接口不返回单条 exception 记录，created_exceptions 为空列表（owner mapping 已通过 create_payloads 验证）
-    assert result["recon_ctx"]["exception_created_count"] == 4
+
+    assert recon_ctx["exception_created_count"] == 4
+
+    # created_exceptions 必须非空，且每条包含 exception_id 和 owner 字段
+    created_exceptions = recon_ctx["created_exceptions"]
+    assert len(created_exceptions) == 4, (
+        f"created_exceptions 应有 4 条，实际 {len(created_exceptions)}"
+    )
+    for item in created_exceptions:
+        assert item.get("exception_id"), f"缺少 exception_id: {item}"
+        exc = item.get("exception") or {}
+        assert exc.get("owner_identifier"), f"缺少 owner_identifier: {item}"
+
+    # 按 owner_identifier 统计分布（各 2 条）
+    owner_identifiers_in_refs = [
+        (item.get("exception") or {}).get("owner_identifier")
+        for item in created_exceptions
+    ]
+    assert owner_identifiers_in_refs.count("owner-source") == 2
+    assert owner_identifiers_in_refs.count("owner-target") == 2
+
+
+def test_create_exception_and_notify_node_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_exception_tasks_node → maybe_auto_notify_node 的接口约定不断裂。
+
+    当 bulk 响应返回 exceptions 列表时，create 节点产出的 created_exceptions 应非空，
+    喂给 notify 节点后不走 skipped_no_exception 分支。
+    """
+    _exc_counter = {"n": 0}
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_bulk_create":
+            exceptions = list(payload.get("exceptions", []))
+            returned_refs: list[dict[str, object]] = []
+            for exc in exceptions:
+                _exc_counter["n"] += 1
+                returned_refs.append(
+                    {"id": f"exc-{_exc_counter['n']}", "anomaly_key": exc["anomaly_key"]}
+                )
+            return {"success": True, "created": len(exceptions), "exceptions": returned_refs}
+        # maybe_auto_notify_node 会调 _send_run_summary_notification → summary notification
+        return {"success": True}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+    # stub out channel-config and DingTalk notify so notify node doesn't fail on missing env
+    monkeypatch.setattr(nodes, "load_company_channel_config_by_id", lambda channel_id: None)
+
+    anomalies = [
+        {"item_id": f"a-{i}", "anomaly_type": "source_only", "summary": f"差异 {i}"}
+        for i in range(3)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-c-001"},
+            "scheme_code": "scheme-c-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "财务", "identifier": "owner-c-001"}
+                },
+                "plan_meta_json": {
+                    "notify_policy": {"explosion_threshold": 1000}
+                },
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    create_result = asyncio.run(nodes.create_exception_tasks_node(state))
+    created_exceptions = create_result["recon_ctx"]["created_exceptions"]
+
+    # 核心约定：created_exceptions 非空，且每条含 exception_id
+    assert created_exceptions, "create 节点产出的 created_exceptions 不应为空"
+    for item in created_exceptions:
+        assert item.get("exception_id"), f"缺少 exception_id: {item}"
+        exc = item.get("exception") or {}
+        assert exc.get("owner_identifier"), f"缺少 owner_identifier: {item}"
+
+    # 喂给 maybe_auto_notify_node，验证不走 skipped_no_exception
+    notify_state = {**state, "recon_ctx": create_result["recon_ctx"]}
+    notify_result = asyncio.run(nodes.maybe_auto_notify_node(notify_state))
+    notify_ctx = notify_result["recon_ctx"]
+
+    assert notify_ctx.get("auto_notify_status") != "skipped_no_exception", (
+        "maybe_auto_notify_node 不应走 skipped_no_exception，"
+        f"实际 auto_notify_status={notify_ctx.get('auto_notify_status')!r}"
+    )
 
 
 def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
@@ -1641,6 +1740,58 @@ def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
     assert recon_ctx.get("exception_creation_limited") is not True, (
         "全量落库模式下不应设置 exception_creation_limited=True"
     )
+
+
+def test_create_exception_tasks_node_chunk_boundary_501(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """501 条差异应触发 2 次 bulk MCP 调用（500 + 1）。"""
+    bulk_calls: list[dict[str, object]] = []
+    _counter: dict[str, int] = {"n": 0}
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_bulk_create":
+            chunk = list(payload.get("exceptions", []))
+            refs: list[dict[str, object]] = []
+            for exc in chunk:
+                _counter["n"] += 1
+                refs.append({"id": str(_counter["n"]), "anomaly_key": exc["anomaly_key"]})
+            bulk_calls.append({"size": len(chunk)})
+            return {"success": True, "created": len(chunk), "exceptions": refs}
+        return {"success": True}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    n = 501
+    anomalies = [
+        {"item_id": f"a-{i}", "anomaly_type": "source_only", "summary": f"差异 {i}"}
+        for i in range(1, n + 1)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-chunk-001"},
+            "scheme_code": "scheme-chunk-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {"name": "财务", "identifier": "owner-chunk"}
+                },
+                "plan_meta_json": {"notify_policy": {"explosion_threshold": 1000}},
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    assert len(bulk_calls) == 2, (
+        f"501 条应分 2 次 bulk 调用（500+1），实际 {len(bulk_calls)} 次: {bulk_calls}"
+    )
+    assert bulk_calls[0]["size"] == 500
+    assert bulk_calls[1]["size"] == 1
+    assert recon_ctx["exception_created_count"] == n
+    assert len(recon_ctx["created_exceptions"]) == n
 
 
 def test_resolve_notify_policy_prefers_notify_policy_sample_limit(
@@ -1769,134 +1920,6 @@ def test_resolve_notify_policy_uses_sample_limit_env_fallback(
     assert policy["explosion_sample_limit"] == 25
 
 
-def test_sample_anomalies_for_exception_creation_stratifies_by_type_and_owner() -> None:
-    anomalies = [
-        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
-        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-a"},
-        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
-        {"item_id": "b2", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-b"},
-        {"item_id": "c1", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
-        {"item_id": "c2", "anomaly_type": "matched_with_diff", "_exception_owner_identifier": "owner-a"},
-    ]
-
-    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
-        anomalies,
-        sample_limit=4,
-    )
-
-    assert [item["item_id"] for item in sampled[:3]] == ["a1", "b1", "c1"]
-    assert len(sampled) == 4
-    assert metadata["enabled"] is True
-    assert metadata["sample_count"] == 4
-    assert metadata["total_count"] == 6
-    assert metadata["strategy"] == "stratified_by_anomaly_type_owner"
-    assert metadata["fallback_used"] is False
-
-
-def test_sample_anomalies_covers_distinct_types_when_group_count_exceeds_limit() -> None:
-    anomalies = [
-        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
-        {"item_id": "a2", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-2"},
-        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-3"},
-        {
-            "item_id": "c1",
-            "anomaly_type": "matched_with_diff",
-            "_exception_owner_identifier": "owner-4",
-        },
-    ]
-
-    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
-        anomalies,
-        sample_limit=2,
-    )
-
-    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
-    assert {item["anomaly_type"] for item in sampled} == {"source_only", "target_only"}
-    assert metadata["sample_count"] == 2
-    assert metadata["fallback_used"] is False
-
-
-def test_sample_anomalies_clamps_zero_sample_limit_to_one() -> None:
-    anomalies = [
-        {"item_id": "a1", "anomaly_type": "source_only", "_exception_owner_identifier": "owner-1"},
-        {"item_id": "b1", "anomaly_type": "target_only", "_exception_owner_identifier": "owner-2"},
-    ]
-
-    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
-        anomalies,
-        sample_limit=0,
-    )
-
-    assert [item["item_id"] for item in sampled] == ["a1"]
-    assert metadata["sample_limit"] == 1
-    assert metadata["sample_count"] == 1
-    assert metadata["fallback_used"] is False
-
-
-def test_sample_anomalies_round_robins_extra_group_coverage_across_types() -> None:
-    anomalies = [
-        {
-            "item_id": f"s{index}",
-            "anomaly_type": "source_only",
-            "_exception_owner_identifier": f"owner-s{index}",
-        }
-        for index in range(1, 6)
-    ] + [
-        {
-            "item_id": f"t{index}",
-            "anomaly_type": "target_only",
-            "_exception_owner_identifier": f"owner-t{index}",
-        }
-        for index in range(1, 6)
-    ] + [
-        {
-            "item_id": f"m{index}",
-            "anomaly_type": "matched_with_diff",
-            "_exception_owner_identifier": f"owner-m{index}",
-        }
-        for index in range(1, 6)
-    ]
-
-    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
-        anomalies,
-        sample_limit=6,
-    )
-
-    assert [item["item_id"] for item in sampled] == ["s1", "t1", "m1", "s2", "t2", "m2"]
-    assert [item["anomaly_type"] for item in sampled].count("source_only") == 2
-    assert [item["anomaly_type"] for item in sampled].count("target_only") == 2
-    assert [item["anomaly_type"] for item in sampled].count("matched_with_diff") == 2
-    assert metadata["sample_count"] == 6
-    assert metadata["fallback_used"] is False
-
-
-def test_sample_anomalies_groups_name_only_owners() -> None:
-    anomalies = [
-        {
-            "item_id": f"a{index}",
-            "anomaly_type": "source_only",
-            "_exception_owner_name": "订单责任人",
-        }
-        for index in range(1, 4)
-    ] + [
-        {
-            "item_id": f"b{index}",
-            "anomaly_type": "source_only",
-            "_exception_owner_name": "账单责任人",
-        }
-        for index in range(1, 4)
-    ]
-
-    sampled, metadata = nodes._sample_anomalies_for_exception_creation(
-        anomalies,
-        sample_limit=2,
-    )
-
-    assert [item["item_id"] for item in sampled] == ["a1", "b1"]
-    assert metadata["sample_count"] == 2
-    assert metadata["fallback_used"] is False
-
-
 def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _BatchNotifyAdapter()
     updated_payloads: list[tuple[str, dict[str, object]]] = []
@@ -2008,7 +2031,7 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert adapter.reminder_calls[0]["assignee_user_id"] == "ding-user-001"
     assert "你有3条异常待处理" in str(adapter.reminder_calls[0]["todo_title"])
     owner_content = str(adapter.reminder_calls[0]["content"])
-    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
+    assert "[查看差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions?owner=ding-user-001)" in str(
         owner_content
     )
     assert "数据集 A" not in owner_content
@@ -2020,8 +2043,8 @@ def test_maybe_auto_notify_node_groups_exceptions_by_owner(monkeypatch: pytest.M
     assert "执行完成，待处理异常已催办责任人「周行」" in summary_content
     assert "待处理异常已按责任人聚合催办" not in summary_content
     assert "如异常数量或类型不符合预期，请检查方案配置或数据日期范围。" not in summary_content
-    assert "异常明细：\n已按异常类型和责任人抽样创建 3 条" in summary_content
-    assert "[查看抽样差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
+    assert "异常明细：\n已创建全部 3 条差异明细" in summary_content
+    assert "[查看差异](https://dev.tallyai.cn/recon/runs/run-001/exceptions)" in str(
         summary_content
     )
     assert len(updated_payloads) == 3
