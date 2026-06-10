@@ -1308,7 +1308,10 @@ def test_update_rerun_exception_verification_reopens_when_anomaly_remains(monkey
     assert payload["feedback_json"]["verify_anomaly_count"] == 1
 
 
-def test_create_exception_tasks_node_samples_exploding_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_exception_tasks_node_persists_all_anomalies_when_explosion_threshold_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超过 explosion_threshold 时，全量差异都应落库（不再采样截断）。"""
     created_payloads: list[dict[str, object]] = []
     update_payloads: list[dict[str, object]] = []
 
@@ -1338,6 +1341,7 @@ def test_create_exception_tasks_node_samples_exploding_anomalies(monkeypatch: py
 
     monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
 
+    n = 55
     anomalies = [
         {
             "item_id": f"run-001:1:source_only:{index}",
@@ -1346,7 +1350,7 @@ def test_create_exception_tasks_node_samples_exploding_anomalies(monkeypatch: py
             "compare_values": [],
             "raw_record": {"订单号": f"ORD-{index}"},
         }
-        for index in range(1, 56)
+        for index in range(1, n + 1)
     ]
     state = {
         "auth_token": "token",
@@ -1380,24 +1384,25 @@ def test_create_exception_tasks_node_samples_exploding_anomalies(monkeypatch: py
     result = asyncio.run(nodes.create_exception_tasks_node(state))
     recon_ctx = result["recon_ctx"]
 
-    assert len(created_payloads) == 3
-    assert recon_ctx["exception_created_count"] == 3
-    assert recon_ctx["exception_creation_limited"] is True
-    assert recon_ctx["exception_total_count"] == len(anomalies)
-    assert recon_ctx["exception_created_sample_count"] == 3
+    # 全量落库：55 条全部写入，不截断到 sample_exception_limit=3
+    assert len(created_payloads) == n
+    assert recon_ctx["exception_created_count"] == n
+    assert recon_ctx["exception_creation_limited"] is False
+    assert recon_ctx["exception_total_count"] == n
+    assert recon_ctx["exception_created_sample_count"] == n
     assert recon_ctx["auto_notify_policy"]["explosion"] is True
-    assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == 3
-    assert recon_ctx["exception_sampling"]["enabled"] is True
+    assert recon_ctx["auto_notify_policy"]["created_exception_sample_limit"] == n
+    # 未采样，enabled 应为 False
+    assert recon_ctx["exception_sampling"]["enabled"] is False
     assert recon_ctx["exception_sampling"]["threshold"] == 10
-    assert recon_ctx["exception_sampling"]["sample_limit"] == 3
-    assert recon_ctx["exception_sampling"]["total_count"] == len(anomalies)
-    assert recon_ctx["exception_sampling"]["sample_count"] == 3
-    assert len(update_payloads) == 1
+    assert recon_ctx["exception_sampling"]["total_count"] == n
+    assert recon_ctx["exception_sampling"]["sample_count"] == n
 
 
-def test_create_exception_tasks_node_persists_exception_sampling_runtime_summary(
+def test_create_exception_tasks_node_does_not_update_run_for_sampling_when_full_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """全量落库模式下，create_exception_tasks_node 不再为采样写 execution_run_update。"""
     update_payloads: list[dict[str, object]] = []
     create_payloads: list[dict[str, object]] = []
 
@@ -1426,9 +1431,10 @@ def test_create_exception_tasks_node_persists_exception_sampling_runtime_summary
 
     monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
 
+    n = 7
     anomalies = [
         {"item_id": f"anomaly-{index}", "anomaly_type": "source_only"}
-        for index in range(1, 8)
+        for index in range(1, n + 1)
     ]
     state = {
         "auth_token": "token",
@@ -1460,21 +1466,21 @@ def test_create_exception_tasks_node_persists_exception_sampling_runtime_summary
 
     result = asyncio.run(nodes.create_exception_tasks_node(state))
 
-    assert len(create_payloads) == 2
-    assert len(update_payloads) == 1
-    artifacts = update_payloads[0]["artifacts_json"]
-    runtime_summary = artifacts["runtime_summary"]
-    assert runtime_summary["queue"] == {"job_id": "queue-001"}
-    assert runtime_summary["summary_notification"] == {"status": "sent"}
-    assert runtime_summary["exception_sampling"]["enabled"] is True
-    assert runtime_summary["exception_sampling"]["total_count"] == 7
-    assert runtime_summary["exception_sampling"]["sample_count"] == 2
-    assert result["recon_ctx"]["execution_run_record"]["artifacts_json"] == artifacts
+    # 全量落库：7 条全部写入，不截断到 sample_exception_limit=2
+    assert len(create_payloads) == n
+    # 不再为采样持久化 execution_run_update
+    assert len(update_payloads) == 0
+    # ctx 中采样元数据 enabled=False
+    recon_ctx = result["recon_ctx"]
+    assert recon_ctx["exception_sampling"]["enabled"] is False
+    assert recon_ctx["exception_sampling"]["total_count"] == n
+    assert recon_ctx["exception_sampling"]["sample_count"] == n
 
 
-def test_create_exception_tasks_node_samples_with_owner_mapping(
+def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """全量落库模式下，owner_mapping 正确应用到每一条差异，4 条全部写入。"""
     create_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
@@ -1530,6 +1536,7 @@ def test_create_exception_tasks_node_samples_with_owner_mapping(
                 "plan_meta_json": {
                     "notify_policy": {
                         "explosion_threshold": 1,
+                        # sample_exception_limit 配置了 2，但全量模式下不截断
                         "sample_exception_limit": 2,
                     }
                 },
@@ -1540,18 +1547,113 @@ def test_create_exception_tasks_node_samples_with_owner_mapping(
 
     result = asyncio.run(nodes.create_exception_tasks_node(state))
 
-    assert [payload["owner_identifier"] for payload in create_payloads] == [
-        "owner-source",
-        "owner-target",
-    ]
-    assert [payload["owner_name"] for payload in create_payloads] == [
-        "订单责任人",
-        "账单责任人",
-    ]
+    # 全量 4 条全部写入（旧代码会按 sample_limit=2 截断，只写 2 条）
+    assert len(create_payloads) == 4
+    owner_identifiers = [payload["owner_identifier"] for payload in create_payloads]
+    assert owner_identifiers.count("owner-source") == 2
+    assert owner_identifiers.count("owner-target") == 2
+    owner_names = [payload["owner_name"] for payload in create_payloads]
+    assert "订单责任人" in owner_names
+    assert "账单责任人" in owner_names
     for payload in create_payloads:
         assert not any(str(key).startswith("_exception_") for key in payload["detail_json"])
-    assert result["recon_ctx"]["created_exceptions"][0]["exception"]["owner_identifier"] == "owner-source"
-    assert result["recon_ctx"]["created_exceptions"][1]["exception"]["owner_identifier"] == "owner-target"
+    created_owner_ids = [
+        exc["exception"]["owner_identifier"]
+        for exc in result["recon_ctx"]["created_exceptions"]
+    ]
+    assert created_owner_ids.count("owner-source") == 2
+    assert created_owner_ids.count("owner-target") == 2
+
+
+def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """去掉200采样上限后，超过 explosion_threshold 的全量差异都应落库，不截断。"""
+    created_payloads: list[dict[str, object]] = []
+    update_payloads: list[dict[str, object]] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
+        if name == "execution_run_exception_create":
+            created_payloads.append(payload)
+            index = len(created_payloads)
+            return {
+                "success": True,
+                "exception": {
+                    "id": f"exception-{index}",
+                    "run_id": payload["run_id"],
+                    "owner_identifier": payload["owner_identifier"],
+                    "feedback_json": {},
+                },
+            }
+        if name == "execution_run_update":
+            update_payloads.append(payload)
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "artifacts_json": payload["artifacts_json"],
+                },
+            }
+        raise AssertionError(f"unexpected MCP tool: {name}")
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    # 250 条异常 > explosion_threshold(1000 default) 的情况还不触发爆炸,
+    # 所以把 threshold 设 100 以测试爆炸路径且数量 > 200 的旧截断值
+    n = 250
+    anomalies = [
+        {
+            "item_id": f"run-full:{idx}:source_only:{idx}",
+            "anomaly_type": "source_only",
+            "join_key": [{"source_field": "订单号", "source_value": f"ORD-{idx}"}],
+            "compare_values": [],
+            "raw_record": {"订单号": f"ORD-{idx}"},
+        }
+        for idx in range(1, n + 1)
+    ]
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "execution_run_record": {"id": "run-full-001"},
+            "scheme_code": "scheme-full-001",
+            "run_plan": {
+                "owner_mapping_json": {
+                    "default_owner": {
+                        "name": "财务负责人",
+                        "identifier": "ding-user-full",
+                    }
+                },
+                "plan_meta_json": {
+                    "notify_policy": {
+                        # threshold < n so explosion is triggered
+                        "explosion_threshold": 100,
+                        # no explicit sample_exception_limit → falls back to default 200
+                    }
+                },
+            },
+            "scheme": {
+                "scheme_meta_json": {
+                    "left_sources": [{"dataset_name": "交易订单明细表"}],
+                    "right_sources": [{"dataset_name": "支付宝资金账单"}],
+                }
+            },
+            "anomaly_items": anomalies,
+        },
+    }
+
+    result = asyncio.run(nodes.create_exception_tasks_node(state))
+    recon_ctx = result["recon_ctx"]
+
+    # 全量 250 条必须全部落库，不能被截断到 200
+    assert len(created_payloads) == n, (
+        f"期望落库 {n} 条差异明细，实际落库 {len(created_payloads)} 条（旧代码会截断到 200）"
+    )
+    assert recon_ctx["exception_created_count"] == n
+    assert recon_ctx["exception_total_count"] == n
+    # explosion 触发了，但不应有截断标记
+    assert recon_ctx.get("exception_creation_limited") is not True, (
+        "全量落库模式下不应设置 exception_creation_limited=True"
+    )
 
 
 def test_resolve_notify_policy_prefers_notify_policy_sample_limit(

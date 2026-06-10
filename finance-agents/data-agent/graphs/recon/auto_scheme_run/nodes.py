@@ -3712,6 +3712,8 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     sample_limit = int(notify_policy["sample_exception_limit"])
     total_anomaly_count = len(owner_enriched_anomalies)
     notify_explosion = total_anomaly_count > explosion_threshold
+    # 全量落库：无论是否超过爆炸阈值，都持久化全量差异明细，不做采样截断。
+    # 告警/催办仍按责任人聚合（一个责任人一条消息），不会因为差异数量变多而逐条发送。
     sampled_anomalies = owner_enriched_anomalies
     sampling_metadata: dict[str, Any] = {
         "enabled": False,
@@ -3724,12 +3726,6 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "strategy": _EXCEPTION_SAMPLING_STRATEGY,
         "fallback_used": False,
     }
-    if notify_explosion:
-        sampled_anomalies, sampling_metadata = _sample_anomalies_for_exception_creation(
-            owner_enriched_anomalies,
-            sample_limit=sample_limit,
-        )
-        sampling_metadata["threshold"] = explosion_threshold
     ctx["auto_notify_policy"] = {
         **notify_policy,
         "anomaly_count": total_anomaly_count,
@@ -3784,16 +3780,10 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)
     ctx["exception_created_count"] = created
     ctx["created_exceptions"] = created_exceptions
-    ctx["exception_creation_limited"] = notify_explosion
+    ctx["exception_creation_limited"] = False
     ctx["exception_total_count"] = total_anomaly_count
     ctx["exception_created_sample_count"] = len(sampled_anomalies)
     ctx["exception_sampling"] = sampling_metadata
-    if notify_explosion:
-        await _persist_runtime_exception_sampling(
-            auth_token=auth_token,
-            ctx=ctx,
-            sampling=sampling_metadata,
-        )
     return {"recon_ctx": ctx}
 
 
