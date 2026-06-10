@@ -15,7 +15,11 @@ if str(FINANCE_MCP_ROOT) not in sys.path:
 import logging
 
 from recon.mcp_server import diff_digestion
-from recon.mcp_server.diff_digestion import build_full_recon_frames, load_side_rows_for_keys
+from recon.mcp_server.diff_digestion import (
+    build_full_recon_frames,
+    digest_diffs,
+    load_side_rows_for_keys,
+)
 
 
 class TestLoadSideRowsForKeys:
@@ -444,6 +448,208 @@ class TestBuildFullReconFrames:
         # warning 应该被记录
         warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warning_records, "非'暂无'错误应记录 warning 日志"
+
+
+# ---------------------------------------------------------------------------
+# digest_diffs:核心重判(纯函数,不碰 DB)
+# ---------------------------------------------------------------------------
+
+# 两侧 key 字段故意同名:_execute_comparison 的 merge 产物里只有
+# source_订单编号 / target_订单编号 角色前缀列,裸列名取不到,
+# 必须用 recon_tool 的行读取 helper 才能映射回 key。
+DIGEST_KEY_MAPPINGS = [{"source_field": "订单编号", "target_field": "订单编号"}]
+DIGEST_COMPARE_CONFIG = [
+    {"name": "金额", "source_column": "金额", "target_column": "金额", "tolerance": 0}
+]
+
+
+def _side_df(rows: list[tuple[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "订单编号": [key for key, _ in rows],
+            "金额": [amount for _, amount in rows],
+        }
+    )
+
+
+def _open_diff(exception_id: str, anomaly_type: str, key_value: Any) -> dict[str, Any]:
+    return {
+        "exception_id": exception_id,
+        "anomaly_type": anomaly_type,
+        "key": {"订单编号": key_value},
+    }
+
+
+def _digest(
+    open_diffs: list[dict[str, Any]],
+    source_df: pd.DataFrame,
+    target_df: pd.DataFrame,
+) -> dict[str, dict[str, Any]]:
+    results = digest_diffs(
+        open_diffs=open_diffs,
+        source_df=source_df,
+        target_df=target_df,
+        key_mappings=DIGEST_KEY_MAPPINGS,
+        compare_columns_config=DIGEST_COMPARE_CONFIG,
+        rule_id="rule-digest-test",
+    )
+    assert len(results) == len(open_diffs)
+    return {item["exception_id"]: item for item in results}
+
+
+class TestDigestDiffs:
+    def test_basic_three_outcomes_with_same_named_key_fields(self) -> None:
+        """计划原文用例;key 字段两侧同名,暴露 merge 角色前缀列问题。
+
+        - source_only A:现两侧平 → resolved
+        - source_only C:现两侧都有但金额差 → reclassified → matched_with_diff
+        - target_only B:source 仍无 → kept
+        """
+        source_df = _side_df([("A", "10"), ("C", "9")])
+        target_df = _side_df([("A", "10"), ("B", "5"), ("C", "10")])
+        outcomes = _digest(
+            [
+                _open_diff("e-a", "source_only", "A"),
+                _open_diff("e-c", "source_only", "C"),
+                _open_diff("e-b", "target_only", "B"),
+            ],
+            source_df,
+            target_df,
+        )
+        assert outcomes["e-a"]["outcome"] == "resolved"
+        assert outcomes["e-a"]["new_type"] == "matched"
+        assert outcomes["e-a"]["resolved_to"] == "matched"
+        assert outcomes["e-c"]["outcome"] == "reclassified"
+        assert outcomes["e-c"]["new_type"] == "matched_with_diff"
+        assert outcomes["e-c"]["resolved_to"] == "matched_with_diff"
+        assert outcomes["e-b"]["outcome"] == "kept"
+        assert outcomes["e-b"]["new_type"] == "target_only"
+        assert "resolved_to" not in outcomes["e-b"]
+        # 原条目字段保留
+        assert outcomes["e-a"]["anomaly_type"] == "source_only"
+        assert outcomes["e-a"]["key"] == {"订单编号": "A"}
+
+    def test_calls_execute_comparison_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from recon.mcp_server import recon_tool
+
+        calls: list[tuple[int, int]] = []
+        real = recon_tool._execute_comparison
+
+        def counting(df_source, df_target, *args, **kwargs):
+            calls.append((len(df_source), len(df_target)))
+            return real(df_source, df_target, *args, **kwargs)
+
+        monkeypatch.setattr(recon_tool, "_execute_comparison", counting)
+        _digest(
+            [
+                _open_diff("e-a", "source_only", "A"),
+                _open_diff("e-c", "source_only", "C"),
+                _open_diff("e-b", "target_only", "B"),
+            ],
+            _side_df([("A", "10"), ("C", "9")]),
+            _side_df([("A", "10"), ("B", "5"), ("C", "10")]),
+        )
+        assert len(calls) == 1, "全部差异 key 必须合并成一次比对"
+        # 子集应包含全部差异 key 命中的行
+        assert calls[0] == (2, 3)
+
+    def test_matched_with_diff_now_equal_resolves(self) -> None:
+        outcomes = _digest(
+            [_open_diff("e-a", "matched_with_diff", "A")],
+            _side_df([("A", "10")]),
+            _side_df([("A", "10")]),
+        )
+        assert outcomes["e-a"]["outcome"] == "resolved"
+        assert outcomes["e-a"]["resolved_to"] == "matched"
+
+    def test_matched_with_diff_target_gone_reclassifies_to_source_only(self) -> None:
+        outcomes = _digest(
+            [_open_diff("e-a", "matched_with_diff", "A")],
+            _side_df([("A", "10")]),
+            _side_df([]),
+        )
+        assert outcomes["e-a"]["outcome"] == "reclassified"
+        assert outcomes["e-a"]["new_type"] == "source_only"
+        assert outcomes["e-a"]["resolved_to"] == "source_only"
+
+    def test_target_only_now_source_only_reclassifies(self) -> None:
+        """source_only ↔ target_only 翻转也算 reclassified。"""
+        outcomes = _digest(
+            [_open_diff("e-a", "target_only", "A")],
+            _side_df([("A", "10")]),
+            _side_df([]),
+        )
+        assert outcomes["e-a"]["outcome"] == "reclassified"
+        assert outcomes["e-a"]["new_type"] == "source_only"
+
+    def test_exclusive_rule_blocks_false_resolution(self) -> None:
+        """同 key 同时落 matched_exact 和 matched_with_diff(残留多行快照)→ 不许 resolved。"""
+        source_df = _side_df([("K", "10"), ("K", "11")])
+        target_df = _side_df([("K", "10")])
+        outcomes = _digest(
+            [
+                _open_diff("e-so", "source_only", "K"),
+                _open_diff("e-mwd", "matched_with_diff", "K"),
+            ],
+            source_df,
+            target_df,
+        )
+        assert outcomes["e-so"]["outcome"] != "resolved"
+        assert outcomes["e-so"]["outcome"] == "reclassified"
+        assert outcomes["e-so"]["new_type"] == "matched_with_diff"
+        # 原类型就是 matched_with_diff → kept
+        assert outcomes["e-mwd"]["outcome"] == "kept"
+        assert outcomes["e-mwd"]["new_type"] == "matched_with_diff"
+        assert "resolved_to" not in outcomes["e-mwd"]
+
+    def test_gone_key_is_kept_never_resolved(self) -> None:
+        """两侧都查不到该 key(缺数据)→ kept,绝不算解决。"""
+        outcomes = _digest(
+            [
+                _open_diff("e-so", "source_only", "ZZZ"),
+                _open_diff("e-mwd", "matched_with_diff", "ZZZ"),
+            ],
+            _side_df([("A", "10")]),
+            _side_df([("A", "10")]),
+        )
+        for exception_id, original_type in (("e-so", "source_only"), ("e-mwd", "matched_with_diff")):
+            assert outcomes[exception_id]["outcome"] == "kept"
+            assert outcomes[exception_id]["new_type"] == original_type
+            assert "resolved_to" not in outcomes[exception_id]
+
+    def test_empty_key_value_is_kept_and_excluded_from_subsets(self) -> None:
+        outcomes = _digest(
+            [_open_diff("e-empty", "source_only", "")],
+            _side_df([("A", "10")]),
+            _side_df([("A", "10")]),
+        )
+        assert outcomes["e-empty"]["outcome"] == "kept"
+        assert outcomes["e-empty"]["new_type"] == "source_only"
+        assert "resolved_to" not in outcomes["e-empty"]
+
+    def test_one_to_many_target_rows_follow_comparison_buckets(self) -> None:
+        """key 在 target 命中 2 行:不抛错,归宿与 _execute_comparison 落桶一致。
+
+        source K:10 vs target [K:10, K:12] → merge 出两行(一行 exact 一行带差)
+        → 独占规则按 matched_with_diff 判。
+        """
+        outcomes = _digest(
+            [_open_diff("e-k", "source_only", "K")],
+            _side_df([("K", "10")]),
+            _side_df([("K", "10"), ("K", "12")]),
+        )
+        assert outcomes["e-k"]["outcome"] == "reclassified"
+        assert outcomes["e-k"]["new_type"] == "matched_with_diff"
+
+    def test_one_to_many_all_equal_rows_resolve(self) -> None:
+        """key 在 target 命中 2 行且都与 source 相等 → 全落 matched_exact → resolved。"""
+        outcomes = _digest(
+            [_open_diff("e-k", "source_only", "K")],
+            _side_df([("K", "10")]),
+            _side_df([("K", "10"), ("K", "10")]),
+        )
+        assert outcomes["e-k"]["outcome"] == "resolved"
+        assert outcomes["e-k"]["resolved_to"] == "matched"
 
 
 # ---------------------------------------------------------------------------

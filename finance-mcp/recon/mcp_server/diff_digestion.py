@@ -1,8 +1,9 @@
-"""差异消化引擎:两侧全量数据准备。
+"""差异消化引擎:两侧全量数据准备 + 核心重判。
 
 给定一条历史对账 run 的未关闭差异 key 集合,产出"当前全量"的两侧
 recon-ready DataFrame(全窗口取原始数据 -> 跑该 scheme 的 proc 规则),
-供后续用对账比对函数逐条复核重判。
+再由 digest_diffs 复用对账比对函数(_execute_comparison)逐条复核重判:
+能对上 → resolved;差异类型变了 → reclassified;没变化 → kept。
 
 去重策略(在原始取数后、跑 proc 前):
 - 若 df 含 __tally_biz_date 列(或 biz_date 列作为时序凭证)→ 按原始 key 字段分组
@@ -76,6 +77,135 @@ def _normalize_key_token(value: Any) -> str:
     except (TypeError, ValueError):
         pass
     return str(value).strip()
+
+
+# 比对桶名(_execute_comparison 的返回 key)
+_COMPARISON_BUCKETS = ("matched_exact", "matched_with_diff", "source_only", "target_only")
+
+
+def digest_diffs(
+    *,
+    open_diffs: list[dict[str, Any]],
+    source_df: pd.DataFrame,
+    target_df: pd.DataFrame,
+    key_mappings: list[dict[str, str]],
+    compare_columns_config: list[dict[str, Any]],
+    rule_id: str,
+) -> list[dict[str, Any]]:
+    """把所有差异 key 的两侧子集各取一次,只调一次 _execute_comparison,按 key 映射回每条归宿。
+
+    open_diffs 每条: {"exception_id":..., "anomaly_type": "source_only"|"target_only"|
+    "matched_with_diff", "key": {<source_field>: 值}}
+    返回每条: {**原条目, "outcome": "resolved"|"reclassified"|"kept", "new_type":...,
+    "resolved_to":...(resolved/reclassified 才有)}
+
+    归宿规则:
+    - key 只落 matched_exact → resolved(resolved_to="matched")。
+    - 独占规则:同 key 同时落 matched_exact 与 matched_with_diff(上游残留同 key
+      多行快照)→ 不许 resolved,按 matched_with_diff 处理。
+    - 落 matched_with_diff / source_only / target_only → 与原类型相同 kept,
+      不同 reclassified(new_type=resolved_to=桶名)。
+    - key 在所有桶都没出现(两侧都查不到,缺数据)→ kept,绝不算解决。
+    - key 值为空 → kept,且不参与子集构建。
+
+    纯函数,不碰 DB;同 key 对侧多行时行为以 _execute_comparison 实际落桶为准。
+    """
+    from . import recon_tool
+
+    if not key_mappings:
+        raise ValueError("digest_diffs 需要至少一个 key mapping")
+    source_key_field = str(key_mappings[0].get("source_field") or "").strip()
+    target_key_field = str(key_mappings[0].get("target_field") or "").strip()
+
+    diff_tokens = [_diff_key_token(diff, source_key_field) for diff in open_diffs]
+    key_set = {token for token in diff_tokens if token}
+
+    bucket_keys: dict[str, set[str]] = {name: set() for name in _COMPARISON_BUCKETS}
+    if key_set:
+        sub_source = load_side_rows_for_keys(
+            full_df=source_df, key_field=source_key_field, keys=key_set
+        )
+        sub_target = load_side_rows_for_keys(
+            full_df=target_df, key_field=target_key_field, keys=key_set
+        )
+        comparison = recon_tool._execute_comparison(
+            sub_source,
+            sub_target,
+            key_mappings,
+            compare_columns_config,
+            rule_id,
+            None,
+        )
+        # 桶 DataFrame 是 merge 产物:两侧 key 字段同名时只有 source_/target_
+        # 角色前缀列,必须用 recon_tool 的行读取 helper 才能取回 key 值。
+        source_candidates = recon_tool._candidate_columns_for_field(source_key_field, "source")
+        target_candidates = recon_tool._candidate_columns_for_field(target_key_field, "target")
+        for bucket_name in _COMPARISON_BUCKETS:
+            bucket_df = (comparison or {}).get(bucket_name)
+            if not isinstance(bucket_df, pd.DataFrame) or bucket_df.empty:
+                continue
+            for _, row in bucket_df.iterrows():
+                normalized_row = recon_tool._normalize_dataframe_row(row)
+                token = _normalize_key_token(
+                    recon_tool._resolve_row_value(normalized_row, source_candidates)
+                )
+                if not token:
+                    token = _normalize_key_token(
+                        recon_tool._resolve_row_value(normalized_row, target_candidates)
+                    )
+                if token:
+                    bucket_keys[bucket_name].add(token)
+
+    results: list[dict[str, Any]] = []
+    for diff, token in zip(open_diffs, diff_tokens):
+        entry = dict(diff)
+        original_type = str(diff.get("anomaly_type") or "").strip()
+        outcome, new_type, resolved_to = _judge_diff_outcome(
+            token=token, original_type=original_type, bucket_keys=bucket_keys
+        )
+        entry["outcome"] = outcome
+        entry["new_type"] = new_type
+        if resolved_to is not None:
+            entry["resolved_to"] = resolved_to
+        results.append(entry)
+    return results
+
+
+def _diff_key_token(diff: dict[str, Any], source_key_field: str) -> str:
+    key_obj = diff.get("key")
+    if not isinstance(key_obj, dict):
+        return ""
+    return _normalize_key_token(key_obj.get(source_key_field))
+
+
+def _judge_diff_outcome(
+    *,
+    token: str,
+    original_type: str,
+    bucket_keys: dict[str, set[str]],
+) -> tuple[str, str, str | None]:
+    """单条差异归宿判定,返回 (outcome, new_type, resolved_to|None)。"""
+    if not token:
+        # 空 key:无法定位,保守 kept
+        return "kept", original_type, None
+    in_exact = token in bucket_keys["matched_exact"]
+    in_with_diff = token in bucket_keys["matched_with_diff"]
+    in_source_only = token in bucket_keys["source_only"]
+    in_target_only = token in bucket_keys["target_only"]
+    if in_exact and not (in_with_diff or in_source_only or in_target_only):
+        # 只含 matched_exact 才许 resolved(独占规则,防假关闭)
+        return "resolved", "matched", "matched"
+    if in_with_diff:
+        if original_type == "matched_with_diff":
+            return "kept", original_type, None
+        return "reclassified", "matched_with_diff", "matched_with_diff"
+    if in_source_only or in_target_only:
+        bucket = "source_only" if in_source_only else "target_only"
+        if original_type == bucket:
+            return "kept", original_type, None
+        return "reclassified", bucket, bucket
+    # gone:所有桶都没出现(两侧都查不到),缺数据绝不算解决
+    return "kept", original_type, None
 
 
 def build_full_recon_frames(
