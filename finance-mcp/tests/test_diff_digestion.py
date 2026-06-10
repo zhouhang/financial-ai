@@ -12,6 +12,8 @@ FINANCE_MCP_ROOT = Path(__file__).resolve().parents[1]
 if str(FINANCE_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(FINANCE_MCP_ROOT))
 
+import logging
+
 from recon.mcp_server import diff_digestion
 from recon.mcp_server.diff_digestion import build_full_recon_frames, load_side_rows_for_keys
 
@@ -227,7 +229,7 @@ def fake_loader(monkeypatch: pytest.MonkeyPatch) -> _FakeLoader:
 
 class TestBuildFullReconFrames:
     def test_runs_proc_and_returns_renamed_recon_ready_frames(self, fake_loader: _FakeLoader) -> None:
-        left_df, right_df = build_full_recon_frames(
+        left_df, right_df, meta = build_full_recon_frames(
             run=_make_run(),
             proc_rule_code="proc_test_rule",
             proc_rule_json=_make_proc_rule(),
@@ -240,6 +242,10 @@ class TestBuildFullReconFrames:
         assert [col for col in left_df.columns if not col.startswith("__")] == ["客户订单号", "含税销售金额"]
         assert [col for col in right_df.columns if not col.startswith("__")] == ["订单编号", "买家实付金额"]
         assert sorted(left_df["客户订单号"].tolist()) == ["A1", "A2"]
+        # meta 结构校验
+        assert isinstance(meta, dict)
+        assert "fetch_degraded" in meta
+        assert "dedup_mode" in meta
 
     def test_pushes_diff_keys_down_to_raw_field_and_strips_time_filters(
         self, fake_loader: _FakeLoader
@@ -292,7 +298,7 @@ class TestBuildFullReconFrames:
                 },
             }
         )
-        left_df, _right_df = build_full_recon_frames(
+        left_df, _right_df, _meta = build_full_recon_frames(
             run=_make_run(),
             proc_rule_code="proc_test_rule",
             proc_rule_json=proc_rule,
@@ -316,6 +322,128 @@ class TestBuildFullReconFrames:
         left_calls = fake_loader.calls_for("public.fake_mid_orders")
         assert len(left_calls) == 1
         assert "filters" not in left_calls[0]["query"] or not left_calls[0]["query"].get("filters")
+
+    # ------------------------------------------------------------------
+    # Fix #1: 跨分区重复行去重
+    # ------------------------------------------------------------------
+
+    def test_dedup_keep_latest_by_biz_date_for_duplicate_key_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同一 key 有新旧两行(带 __tally_biz_date),keep-latest 后只留新值行。"""
+        # 构造含 __tally_biz_date 的 frame:订单 A1 有两行,旧值和新值
+        stale_row = {
+            "custom_order_no": "A1",
+            "tax_sale_amount": "5.00",
+            "__tally_biz_date": "2026-06-01",
+        }
+        fresh_row = {
+            "custom_order_no": "A1",
+            "tax_sale_amount": "5.30",
+            "__tally_biz_date": "2026-06-02",
+        }
+        loader = _FakeLoader(
+            frames={
+                "public.fake_mid_orders": pd.DataFrame([stale_row, fresh_row]),
+                "browser-collection-fake-shop@1": pd.DataFrame(
+                    {
+                        "订单编号": ["A1"],
+                        "买家实付金额": ["5.30"],
+                    }
+                ),
+            }
+        )
+        monkeypatch.setattr(diff_digestion, "load_dataset_as_df", loader)
+        left_df, _right_df, meta = build_full_recon_frames(
+            run=_make_run(),
+            proc_rule_code="proc_test_rule",
+            proc_rule_json=_make_proc_rule(),
+            diff_keys={"A1"},
+            left_key_field="客户订单号",
+            right_key_field="订单编号",
+        )
+        # proc 输出里,A1 只应对应新值 5.30
+        a1_rows = left_df[left_df["客户订单号"] == "A1"]
+        assert len(a1_rows) == 1, "keep-latest 后 A1 只应剩一行"
+        assert a1_rows.iloc[0]["含税销售金额"] == "5.30"
+        assert meta["dedup_mode"] == "keep_latest"
+
+    def test_dedup_full_row_for_identical_duplicate_rows_without_time_column(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无时间序列时,完全相同的两行去重后只剩一行。"""
+        identical_row = {"custom_order_no": "A1", "tax_sale_amount": "5.30"}
+        loader = _FakeLoader(
+            frames={
+                "public.fake_mid_orders": pd.DataFrame([identical_row, identical_row]),
+                "browser-collection-fake-shop@1": pd.DataFrame(
+                    {
+                        "订单编号": ["A1"],
+                        "买家实付金额": ["5.30"],
+                    }
+                ),
+            }
+        )
+        monkeypatch.setattr(diff_digestion, "load_dataset_as_df", loader)
+        left_df, _right_df, meta = build_full_recon_frames(
+            run=_make_run(),
+            proc_rule_code="proc_test_rule",
+            proc_rule_json=_make_proc_rule(),
+            diff_keys={"A1"},
+            left_key_field="客户订单号",
+            right_key_field="订单编号",
+        )
+        a1_rows = left_df[left_df["客户订单号"] == "A1"]
+        assert len(a1_rows) == 1, "全列去重后 A1 只应剩一行"
+        assert meta["dedup_mode"] == "drop_duplicates"
+
+    # ------------------------------------------------------------------
+    # Fix #2: 错误分级 + fetch_degraded meta
+    # ------------------------------------------------------------------
+
+    def test_non_empty_dataset_load_error_sets_fetch_degraded_and_logs_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """非'暂无采集记录'的 DatasetLoadError 应设 fetch_degraded=True 并记录 warning。
+
+        左侧 key 批次取数遇配置/SQL 错误时,meta.fetch_degraded=True 且有 warning 日志。
+        """
+        from recon.mcp_server.dataset_loader import DatasetLoadError
+
+        batch_calls: list[str] = []
+
+        def graded_loader(dataset_ref: dict, table_name: str) -> pd.DataFrame:
+            batch_calls.append(table_name)
+            if table_name == "public.fake_mid_orders":
+                # 判断是否是 key 批次请求(有 filters 里带 custom_order_no)
+                query = dataset_ref.get("query") or {}
+                filters = query.get("filters") or {}
+                if "custom_order_no" in filters:
+                    raise DatasetLoadError("SQL 执行失败: column does_not_exist does not exist")
+                # 全量请求:返回空但有列的 frame 让 proc 能继续
+                return pd.DataFrame(columns=["custom_order_no", "tax_sale_amount"])
+            return pd.DataFrame(
+                {
+                    "订单编号": ["A1"],
+                    "买家实付金额": ["5.30"],
+                }
+            )
+
+        monkeypatch.setattr(diff_digestion, "load_dataset_as_df", graded_loader)
+        with caplog.at_level(logging.WARNING):
+            left_df, right_df, meta = build_full_recon_frames(
+                run=_make_run(),
+                proc_rule_code="proc_test_rule",
+                proc_rule_json=_make_proc_rule(),
+                diff_keys={"A1"},
+                left_key_field="客户订单号",
+                right_key_field="订单编号",
+            )
+        assert meta["fetch_degraded"] is True
+        assert meta["failed_batches"] >= 1
+        # warning 应该被记录
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "非'暂无'错误应记录 warning 日志"
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +550,7 @@ class TestBuildFullReconFramesIntegration:
     """本地真实数据集成测试;DB 不可达时自动 skip。"""
     def test_fund_scheme_pure_collection_full_frames(self) -> None:
         run, proc_rule_code, proc_rule_json, _run_id = _load_scheme_fixture(FUND_SCHEME)
-        left_df, right_df = build_full_recon_frames(
+        left_df, right_df, _meta = build_full_recon_frames(
             run=run,
             proc_rule_code=proc_rule_code,
             proc_rule_json=proc_rule_json,
@@ -438,7 +566,7 @@ class TestBuildFullReconFramesIntegration:
         diff_keys = _fetch_diff_keys(run_id, anomaly_type="source_only", limit=5)
         if not diff_keys:
             pytest.skip("本地缺少订单对账 source_only 差异样本,跳过")
-        left_df, _right_df = build_full_recon_frames(
+        left_df, _right_df, _meta = build_full_recon_frames(
             run=run,
             proc_rule_code=proc_rule_code,
             proc_rule_json=proc_rule_json,

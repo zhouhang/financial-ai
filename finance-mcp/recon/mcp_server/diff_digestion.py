@@ -3,6 +3,12 @@
 给定一条历史对账 run 的未关闭差异 key 集合,产出"当前全量"的两侧
 recon-ready DataFrame(全窗口取原始数据 -> 跑该 scheme 的 proc 规则),
 供后续用对账比对函数逐条复核重判。
+
+去重策略(在原始取数后、跑 proc 前):
+- 若 df 含 __tally_biz_date 列(或 biz_date 列作为时序凭证)→ 按原始 key 字段分组
+  取最新分区行(keep_latest 模式)。
+- 否则 → drop_duplicates 全 payload 列(排除 __* 元数据列),消除 99% 的重采重复。
+frame 返回值可能仍含同 key 多行(真实一对多或快照变更),消费方需自行处理 key 冲突。
 """
 
 from __future__ import annotations
@@ -81,8 +87,8 @@ def build_full_recon_frames(
     left_key_field: str = "",
     right_key_field: str = "",
     key_batch_size: int = DEFAULT_KEY_BATCH_SIZE,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """全窗口取原始两侧数据 -> 跑 proc -> 返回 (left_recon_ready, right_recon_ready)。
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """全窗口取原始两侧数据 -> 去重 -> 跑 proc -> 返回 (left_recon_ready, right_recon_ready, meta)。
 
     - run: execution_runs 行(需含 source_snapshot_json,其中 collections[*].binding
       描述每个原始数据集的 dataset_ref)。
@@ -90,6 +96,15 @@ def build_full_recon_frames(
     - diff_keys: 未关闭差异的 join key 值集合;配合 left/right_key_field
       (proc 输出的 join key 列名,来自 recon 规则 key_columns)做取数下推。
       key 字段缺省或反查不出原始字段时回退全量取数。
+
+    meta 结构:
+    - fetch_degraded (bool): 取数时有 warning 级失败(非"暂无"错误)时为 True。
+    - fallback_full_fetch_sides (list): 回退全量取数的侧列表。
+    - failed_batches (int): 取数批次失败总数(warning 级)。
+    - dedup_mode (str): "keep_latest" | "drop_duplicates" | "none"。
+
+    返回 frame 可能含跨分区重复行(已按 dedup_mode 尽力去重);
+    frame 也可能仍含同 key 多行(真实一对多或快照变更),消费方需自行处理 key 冲突。
     """
     from proc.mcp_server.steps_runtime import execute_steps_rule_to_frames
 
@@ -104,6 +119,10 @@ def build_full_recon_frames(
     }
     normalized_keys = sorted({str(key).strip() for key in diff_keys if str(key or "").strip()})
 
+    fetch_degraded = False
+    failed_batches = 0
+    dedup_mode = "none"
+
     preloaded_frames: dict[str, pd.DataFrame] = {}
     for table_name, usages in table_usages.items():
         binding = bindings[table_name]
@@ -115,22 +134,58 @@ def build_full_recon_frames(
             key_field_by_side=key_field_by_side,
         )
         if raw_key_field and normalized_keys:
-            df = _load_table_by_key_batches(
+            df, table_failed = _load_table_by_key_batches(
                 dataset_ref=dataset_ref,
                 table_name=table_name,
                 raw_key_field=raw_key_field,
                 keys=normalized_keys,
                 batch_size=max(int(key_batch_size), 1),
             )
+            if table_failed > 0:
+                fetch_degraded = True
+                failed_batches += table_failed
         else:
-            df = load_dataset_as_df(dataset_ref, table_name)
+            try:
+                df = load_dataset_as_df(dataset_ref, table_name)
+            except DatasetLoadError as exc:
+                if _is_empty_collection_error(exc):
+                    logger.info(
+                        "[recon][diff_digestion] 表 %s 全量取数:暂无采集记录,返回空表: %s",
+                        table_name,
+                        exc,
+                    )
+                    df = pd.DataFrame()
+                else:
+                    logger.warning(
+                        "[recon][diff_digestion] 表 %s 全量取数失败(配置/SQL错误),返回空表: %s",
+                        table_name,
+                        exc,
+                    )
+                    fetch_degraded = True
+                    failed_batches += 1
+                    df = pd.DataFrame()
+
+        # 原始取数后、跑 proc 前:去重跨分区重复行
+        df, table_dedup_mode = _dedup_raw_frame(df, raw_key_field=raw_key_field)
+        # 优先级: keep_latest > drop_duplicates > none
+        if table_dedup_mode == "keep_latest" or (table_dedup_mode != "none" and dedup_mode == "none"):
+            dedup_mode = table_dedup_mode
+
         logger.info(
-            "[recon][diff_digestion] 表 %s 全窗口取数完成 rows=%d pushdown=%s",
+            "[recon][diff_digestion] 表 %s 全窗口取数完成 rows=%d pushdown=%s dedup=%s",
             table_name,
             len(df),
             raw_key_field or "no",
+            table_dedup_mode,
         )
         preloaded_frames[table_name] = df
+
+    meta: dict = {
+        "fetch_degraded": fetch_degraded,
+        "fallback_full_fetch_sides": [],
+        "failed_batches": failed_batches,
+        "dedup_mode": dedup_mode,
+    }
 
     with tempfile.TemporaryDirectory(prefix="diff_digestion_proc_") as output_dir:
         frame_outputs = execute_steps_rule_to_frames(
@@ -142,7 +197,7 @@ def build_full_recon_frames(
         )
     left_df = _frame_for_table(frame_outputs, LEFT_RECON_READY)
     right_df = _frame_for_table(frame_outputs, RIGHT_RECON_READY)
-    return left_df, right_df
+    return left_df, right_df, meta
 
 
 def _bindings_by_table(run: dict) -> dict[str, dict[str, Any]]:
@@ -242,6 +297,12 @@ def _resolve_pushdown_raw_field(
     raw_fields: set[str] = set()
     for step in usages:
         if str(step.get("action") or "").strip() != "write_dataset":
+            logger.warning(
+                "[recon][diff_digestion] 表 %s(%s) step action 非 write_dataset(%s),key 下推不安全,回退全量",
+                table_name,
+                side,
+                str(step.get("action") or ""),
+            )
             return ""
         sources = [item for item in step.get("sources") or [] if isinstance(item, dict)]
         if len(sources) != 1:
@@ -313,6 +374,64 @@ def _key_mapping_source_field(step: dict[str, Any], key_field: str) -> str:
     return ""
 
 
+def _is_empty_collection_error(exc: DatasetLoadError) -> bool:
+    """判断 DatasetLoadError 是否属于"暂无采集记录"类(正常无命中,不是配置/SQL 错误)。"""
+    msg = str(exc)
+    return any(
+        phrase in msg
+        for phrase in (
+            "暂无采集记录",
+            "暂无浏览器采集记录",
+            "暂无平台订单明细",
+            "暂无支付宝账单明细",
+        )
+    )
+
+
+# 用于识别时序列的候选列名(优先级从高到低)
+_TALLY_BIZ_DATE_COLS = ("__tally_biz_date", "biz_date", "__tally_captured_at", "captured_at")
+
+
+def _dedup_raw_frame(df: pd.DataFrame, *, raw_key_field: str) -> tuple[pd.DataFrame, str]:
+    """在原始取数后、跑 proc 前去重跨分区重复行。
+
+    返回 (去重后的 df, dedup_mode):
+    - "keep_latest": 找到时序列,按 raw_key_field(或全列)分组取最新行。
+    - "drop_duplicates": 无时序列,全 payload 列 drop_duplicates。
+    - "none": df 为空或无需去重。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df, "none"
+
+    # 找到可用的时序列
+    time_col = ""
+    for candidate in _TALLY_BIZ_DATE_COLS:
+        if candidate in df.columns:
+            time_col = candidate
+            break
+
+    if time_col:
+        # keep latest: 按 raw_key_field(若存在)分组,取时序最大的那行
+        if raw_key_field and raw_key_field in df.columns:
+            group_cols = [raw_key_field]
+        else:
+            # 没有 key 字段信息:按全 payload 列(排除 __* 元数据列)分组
+            group_cols = [c for c in df.columns if not c.startswith("__")]
+        if group_cols:
+            idx = df.groupby(group_cols, sort=False)[time_col].transform("max") == df[time_col]
+            deduped = df[idx].drop_duplicates(subset=group_cols).reset_index(drop=True)
+        else:
+            deduped = df
+        return deduped, "keep_latest"
+
+    # 无时序列:全 payload 列 drop_duplicates(排除 __* 元数据列)
+    payload_cols = [c for c in df.columns if not c.startswith("__")]
+    if not payload_cols:
+        return df, "none"
+    deduped = df.drop_duplicates(subset=payload_cols).reset_index(drop=True)
+    return deduped, "drop_duplicates"
+
+
 def _load_table_by_key_batches(
     *,
     dataset_ref: dict[str, Any],
@@ -320,8 +439,10 @@ def _load_table_by_key_batches(
     raw_key_field: str,
     keys: list[str],
     batch_size: int,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, int]:
+    """按 key 分批取数,返回 (合并后的 df, warning 级失败批次数)。"""
     parts: list[pd.DataFrame] = []
+    failed_count = 0
     for start in range(0, len(keys), batch_size):
         batch = keys[start : start + batch_size]
         batch_ref = copy.deepcopy(dataset_ref)
@@ -333,24 +454,34 @@ def _load_table_by_key_batches(
         try:
             parts.append(load_dataset_as_df(batch_ref, table_name))
         except DatasetLoadError as exc:
-            # 单批 key 在该侧没有命中行(例如对侧独有差异)是正常情况,
-            # collection 类 loader 会以"暂无采集记录"报错,按空结果处理。
-            logger.info(
-                "[recon][diff_digestion] 表 %s key 批次(%d-%d)无命中: %s",
-                table_name,
-                start,
-                start + len(batch),
-                exc,
-            )
+            if _is_empty_collection_error(exc):
+                # 单批 key 在该侧没有命中行(例如对侧独有差异)是正常情况,
+                # collection 类 loader 会以"暂无采集记录"报错,按空结果处理。
+                logger.info(
+                    "[recon][diff_digestion] 表 %s key 批次(%d-%d)无命中: %s",
+                    table_name,
+                    start,
+                    start + len(batch),
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "[recon][diff_digestion] 表 %s key 批次(%d-%d)取数失败(配置/SQL错误): %s",
+                    table_name,
+                    start,
+                    start + len(batch),
+                    exc,
+                )
+                failed_count += 1
     non_empty = [df for df in parts if isinstance(df, pd.DataFrame) and not df.empty]
     if non_empty:
-        return pd.concat(non_empty, ignore_index=True)
+        return pd.concat(non_empty, ignore_index=True), failed_count
     # 所有批次都无命中(例如差异 key 全在对侧):返回带原始列结构的空表,
     # 否则 proc 校验源表列时会报缺列。
     for df in parts:
         if isinstance(df, pd.DataFrame) and len(df.columns):
-            return df.iloc[0:0].copy()
-    return _empty_frame_with_source_columns(dataset_ref, table_name)
+            return df.iloc[0:0].copy(), failed_count
+    return _empty_frame_with_source_columns(dataset_ref, table_name), failed_count
 
 
 def _empty_frame_with_source_columns(dataset_ref: dict[str, Any], table_name: str) -> pd.DataFrame:
