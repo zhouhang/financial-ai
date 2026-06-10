@@ -15,7 +15,7 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from data_agent_client import sync_pending_todo_exceptions, trigger_run_plan
+from data_agent_client import finalize_daily_recon_digest, sync_pending_todo_exceptions, trigger_run_plan
 from mcp_client import (
     aclose_mcp_session,
     browser_sync_job_reap_stale_agents,
@@ -50,6 +50,8 @@ class FinanceCronConfig:
     todo_sync_interval_seconds: int = 300
     reaper_interval_seconds: int = 30
     reaper_stale_after_seconds: int = 180
+    digest_finalize_interval_seconds: int = 300
+    digest_biz_date_offset_days: int = -1
 
 
 def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
@@ -104,6 +106,19 @@ def load_cron_config(path: Path | None = None) -> FinanceCronConfig:
         reaper_stale_after_seconds=max(
             30,
             int(scheduler.get("reaper_stale_after_seconds") or 180),
+        ),
+        digest_finalize_interval_seconds=max(
+            60,
+            int(
+                os.getenv("FINANCE_CRON_DIGEST_FINALIZE_INTERVAL_SECONDS")
+                or scheduler.get("digest_finalize_interval_seconds")
+                or 300
+            ),
+        ),
+        digest_biz_date_offset_days=int(
+            os.getenv("FINANCE_CRON_DIGEST_BIZ_DATE_OFFSET_DAYS")
+            or scheduler.get("digest_biz_date_offset_days")
+            or -1
         ),
     )
 
@@ -289,6 +304,16 @@ class FinanceCronSchedulerService:
             max_instances=1,
             misfire_grace_time=self.config.misfire_grace_seconds,
         )
+        self.scheduler.add_job(
+            self.finalize_daily_digest_job,
+            trigger="interval",
+            seconds=self.config.digest_finalize_interval_seconds,
+            id="finalize-daily-recon-digests",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=self.config.misfire_grace_seconds,
+        )
         self.scheduler.start()
         await self._safe_initial_refresh("运行计划", self.refresh_run_plans)
         await self._safe_initial_refresh("采集计划", self.refresh_collection_plans)
@@ -379,6 +404,64 @@ class FinanceCronSchedulerService:
                 logger.warning(
                     "[finance-cron] reaper 步骤失败: step=%s error=%s",
                     label,
+                    result.get("error"),
+                )
+
+    async def finalize_daily_digest_job(self) -> None:
+        """Best-effort company-level digest finalizer.
+
+        Worker success triggers the same finalizer immediately. This interval job
+        is the compensation path for service restarts or missed worker callbacks.
+        """
+        scheduler_token = create_scheduler_auth_token()
+        try:
+            plans = await self._load_enabled_run_plans(scheduler_token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[finance-cron] 日报兜底扫描加载计划失败: error=%s", exc)
+            return
+
+        company_ids = sorted({_as_text(plan.get("company_id")) for plan in plans if _as_text(plan.get("company_id"))})
+        if not company_ids:
+            return
+        biz_date = (
+            datetime.now(self.timezone).date()
+            + timedelta(days=self.config.digest_biz_date_offset_days)
+        ).isoformat()
+
+        for company_id in company_ids:
+            company_token = create_scheduler_auth_token(company_id=company_id)
+            try:
+                result = await finalize_daily_recon_digest(
+                    company_token,
+                    company_id=company_id,
+                    biz_date=biz_date,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[finance-cron] 日报兜底扫描异常: company_id=%s biz_date=%s error=%s",
+                    company_id,
+                    biz_date,
+                    exc,
+                )
+                continue
+            if bool(result.get("success")):
+                ready = int(result.get("ready_count") or 0)
+                delivered = int(result.get("delivered_count") or 0)
+                blocked = int(result.get("blocked_count") or 0)
+                if ready or delivered:
+                    logger.info(
+                        "[finance-cron] 日报兜底完成: company_id=%s biz_date=%s ready=%s delivered=%s blocked=%s",
+                        company_id,
+                        biz_date,
+                        ready,
+                        delivered,
+                        blocked,
+                    )
+            else:
+                logger.warning(
+                    "[finance-cron] 日报兜底失败: company_id=%s biz_date=%s error=%s",
+                    company_id,
+                    biz_date,
                     result.get("error"),
                 )
 

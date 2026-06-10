@@ -91,6 +91,18 @@ def _compact_error_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
+def _mapping_get_case_insensitive(row: Any, key: str, default: Any = None) -> Any:
+    if not isinstance(row, dict):
+        return default
+    if key in row:
+        return row.get(key)
+    normalized_key = key.lower()
+    for row_key, value in row.items():
+        if str(row_key).lower() == normalized_key:
+            return value
+    return default
+
+
 def _friendly_database_error(exc: Exception) -> str:
     detail = _compact_error_text(exc)
     lowered = detail.lower()
@@ -985,7 +997,7 @@ class DatabaseConnector(BaseDataSourceConnector):
                     count_sql += f" AND ({' OR '.join(requested_clauses)})"
                 cur.execute(count_sql, tuple(count_params))
                 count_row = cur.fetchone() or {}
-                total_count = int(count_row.get("total_count") or 0)
+                total_count = int(_mapping_get_case_insensitive(count_row, "total_count", 0) or 0)
 
                 table_sql = """
                     SELECT n.nspname AS table_schema,
@@ -1274,7 +1286,7 @@ class DatabaseConnector(BaseDataSourceConnector):
                     count_sql += f" AND ({' OR '.join(requested_clauses)})"
                 cur.execute(count_sql, tuple(count_params))
                 count_row = cur.fetchone() or {}
-                total_count = int(count_row.get("total_count") or 0)
+                total_count = int(_mapping_get_case_insensitive(count_row, "total_count", 0) or 0)
 
                 table_sql = """
                     SELECT table_schema, table_name, table_type
@@ -1330,7 +1342,13 @@ class DatabaseConnector(BaseDataSourceConnector):
                         }
                     return {"datasets": [], "scan_summary": scan_summary}
 
-                selected_table_names = sorted({str(row.get("table_name") or "") for row in table_rows if str(row.get("table_name") or "")})
+                selected_table_names = sorted(
+                    {
+                        str(_mapping_get_case_insensitive(row, "table_name") or "")
+                        for row in table_rows
+                        if str(_mapping_get_case_insensitive(row, "table_name") or "")
+                    }
+                )
                 selected_table_placeholders = ", ".join(["%s"] * len(selected_table_names))
                 cur.execute(
                     f"""
@@ -1362,26 +1380,42 @@ class DatabaseConnector(BaseDataSourceConnector):
 
         columns_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in column_rows:
-            key = (str(row.get("table_schema") or ""), str(row.get("table_name") or ""))
+            key = (
+                str(_mapping_get_case_insensitive(row, "table_schema") or ""),
+                str(_mapping_get_case_insensitive(row, "table_name") or ""),
+            )
             columns_by_key.setdefault(key, []).append(
                 {
-                    "name": str(row.get("column_name") or ""),
-                    "data_type": str(row.get("data_type") or ""),
-                    "nullable": str(row.get("is_nullable") or "").upper() == "YES",
+                    "name": str(_mapping_get_case_insensitive(row, "column_name") or ""),
+                    "data_type": str(_mapping_get_case_insensitive(row, "data_type") or ""),
+                    "nullable": (
+                        str(_mapping_get_case_insensitive(row, "is_nullable") or "").upper()
+                        == "YES"
+                    ),
                 }
             )
 
         primary_keys_by_key: dict[tuple[str, str], list[str]] = {}
         for row in pk_rows:
-            key = (str(row.get("table_schema") or ""), str(row.get("table_name") or ""))
-            primary_keys_by_key.setdefault(key, []).append(str(row.get("column_name") or ""))
+            key = (
+                str(_mapping_get_case_insensitive(row, "table_schema") or ""),
+                str(_mapping_get_case_insensitive(row, "table_name") or ""),
+            )
+            primary_keys_by_key.setdefault(key, []).append(
+                str(_mapping_get_case_insensitive(row, "column_name") or "")
+            )
 
         datasets: list[dict[str, Any]] = []
         for table_row in table_rows:
-            schema_name = str(table_row.get("table_schema") or db_name)
-            table_name = str(table_row.get("table_name") or "")
+            schema_name = str(_mapping_get_case_insensitive(table_row, "table_schema") or db_name)
+            table_name = str(_mapping_get_case_insensitive(table_row, "table_name") or "")
             key = (schema_name, table_name)
-            object_kind = "view" if str(table_row.get("table_type") or "").upper() == "VIEW" else "table"
+            object_kind = (
+                "view"
+                if str(_mapping_get_case_insensitive(table_row, "table_type") or "").upper()
+                == "VIEW"
+                else "table"
+            )
             columns = columns_by_key.get(key, [])
             primary_keys = primary_keys_by_key.get(key, [])
             resource_key = f"{schema_name}.{table_name}"

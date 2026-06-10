@@ -86,3 +86,13 @@ async def test_mcp_client_forwards_dataset_collection_idempotency_key(
     payload = captured["payload"]
     assert payload["biz_date"] == "2026-04-01"
     assert payload["idempotency_key"] == "manual-date-collection:source-1:dataset-1:2026-04-01"
+
+
+def test_mcp_session_http_clients_ignore_proxy_environment() -> None:
+    client = mcp_client._new_mcp_async_client(mcp_client._HTTP_TIMEOUT)
+    try:
+        assert client.trust_env is False
+    finally:
+        import anyio
+
+        anyio.run(client.aclose)

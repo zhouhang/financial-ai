@@ -3,7 +3,9 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import DataConnectionsPanel from './components/DataConnectionsPanel';
 import ReconWorkspace from './components/ReconWorkspace';
+import PublicReconDigestPage from './components/PublicReconDigestPage';
 import PublicReconRunExceptionsPage from './components/PublicReconRunExceptionsPage';
+import { isPublicReconDigestPath } from './components/publicReconDigestRoute';
 import { isPublicReconRunExceptionsPath } from './components/publicReconRunExceptionsRoute';
 import LoginModal from './components/LoginModal';
 import SiteFiling from './components/SiteFiling';
@@ -1758,6 +1760,17 @@ export default function App() {
           <HandoffPage />
         </div>
         <SiteFiling className="site-filing--handoff" />
+      </div>
+    );
+  }
+
+  if (isPublicReconDigestPath()) {
+    return (
+      <div className="site-shell h-dvh w-screen overflow-hidden bg-surface-secondary text-text-primary">
+        <div className="site-shell-content overflow-hidden">
+          <PublicReconDigestPage />
+        </div>
+        <SiteFiling />
       </div>
     );
   }

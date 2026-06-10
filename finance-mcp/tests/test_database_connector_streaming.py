@@ -52,6 +52,80 @@ class FakeConnection:
         self.closed = True
 
 
+class FakeMysqlDiscoverCursor:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.params: list[tuple[Any, ...]] = []
+        self.fetchall_calls = 0
+
+    def __enter__(self) -> "FakeMysqlDiscoverCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[Any, ...]) -> None:
+        normalized_query = " ".join(query.split())
+        assert "IN ()" not in normalized_query
+        self.queries.append(normalized_query)
+        self.params.append(params)
+
+    def fetchone(self) -> dict[str, Any]:
+        return {"TOTAL_COUNT": 1}
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        self.fetchall_calls += 1
+        if self.fetchall_calls == 1:
+            return [
+                {
+                    "TABLE_SCHEMA": "fuyou",
+                    "TABLE_NAME": "orders",
+                    "TABLE_TYPE": "BASE TABLE",
+                }
+            ]
+        if self.fetchall_calls == 2:
+            return [
+                {
+                    "TABLE_SCHEMA": "fuyou",
+                    "TABLE_NAME": "orders",
+                    "COLUMN_NAME": "id",
+                    "DATA_TYPE": "bigint",
+                    "IS_NULLABLE": "NO",
+                    "ORDINAL_POSITION": 1,
+                },
+                {
+                    "TABLE_SCHEMA": "fuyou",
+                    "TABLE_NAME": "orders",
+                    "COLUMN_NAME": "amount",
+                    "DATA_TYPE": "decimal",
+                    "IS_NULLABLE": "YES",
+                    "ORDINAL_POSITION": 2,
+                },
+            ]
+        if self.fetchall_calls == 3:
+            return [
+                {
+                    "TABLE_SCHEMA": "fuyou",
+                    "TABLE_NAME": "orders",
+                    "COLUMN_NAME": "id",
+                    "ORDINAL_POSITION": 1,
+                }
+            ]
+        raise AssertionError("unexpected fetchall call")
+
+
+class FakeMysqlDiscoverConnection:
+    def __init__(self, cursor: FakeMysqlDiscoverCursor) -> None:
+        self.cursor_obj = cursor
+        self.closed = False
+
+    def cursor(self) -> FakeMysqlDiscoverCursor:
+        return self.cursor_obj
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_database_connector_iter_sync_batches_uses_fetchmany(monkeypatch: Any) -> None:
     connector = DatabaseConnector(
         ConnectorContext(
@@ -94,4 +168,44 @@ def test_database_connector_iter_sync_batches_uses_fetchmany(monkeypatch: Any) -
     assert cursor.executed is True
     assert cursor.fetchmany_sizes == [1, 1, 1]
     assert cursor.itersize == 1
+    assert connection.closed is True
+
+
+def test_database_connector_discovers_mysql_metadata_with_uppercase_keys(
+    monkeypatch: Any,
+) -> None:
+    connector = DatabaseConnector(
+        ConnectorContext(
+            source_id="source-1",
+            company_id="company-1",
+            source_kind="database",
+            provider_code="mysql",
+            execution_mode="deterministic",
+            config={
+                "connection_config": {
+                    "db_type": "mysql",
+                    "host": "localhost",
+                    "port": "3306",
+                    "database": "fuyou",
+                    "username": "user",
+                    "password": "pass",
+                }
+            },
+        )
+    )
+    cursor = FakeMysqlDiscoverCursor()
+    connection = FakeMysqlDiscoverConnection(cursor)
+    monkeypatch.setattr(connector, "_connect_mysql", lambda cfg: connection)
+
+    result = connector.discover_datasets({"limit": 10, "offset": 0})
+
+    assert result["success"] is True
+    assert result["scan_summary"]["total_count"] == 1
+    assert result["dataset_count"] == 1
+    assert result["datasets"][0]["resource_key"] == "fuyou.orders"
+    assert result["datasets"][0]["schema_summary"]["columns"] == [
+        {"name": "id", "data_type": "bigint", "nullable": False},
+        {"name": "amount", "data_type": "decimal", "nullable": True},
+    ]
+    assert result["datasets"][0]["schema_summary"]["primary_keys"] == ["id"]
     assert connection.closed is True

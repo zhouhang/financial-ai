@@ -136,3 +136,63 @@ async def test_scheduler_collection_plans_include_alipay_daily_bill_date_cron(mo
     assert plan["schedule_expr"] == "30 10 * * *"
     assert plan["date_field"] == "bill_date"
     assert plan["collection_config"]["bill_type"] == "trade"
+
+
+@pytest.mark.anyio
+async def test_scheduler_collection_plans_skip_database_table_collection_schedule(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_list_datasets_with_compat",
+        lambda **kwargs: [
+            {
+                "id": "dataset-db-1",
+                "data_source_id": "source-db-1",
+                "dataset_code": "public_orders",
+                "dataset_name": "订单表",
+                "resource_key": "postgres:public.orders",
+                "meta": {
+                    "catalog_profile": {
+                        "collection_config": {
+                            "mode": "date_field",
+                            "date_field": "updated_at",
+                            "schedule": {
+                                "enabled": True,
+                                "frequency": "daily",
+                                "time": "08:30",
+                            },
+                        },
+                    },
+                },
+                "publish_status": "published",
+                "is_enabled": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "source_kind": "database",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_build_dataset_view",
+        lambda row, include_heavy=False: {"business_name": row["dataset_name"]},
+    )
+
+    result = await data_sources._handle_data_source_scheduler_list_collection_plans(
+        {"auth_token": "scheduler-token"}
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 0
+    assert result["collection_plans"] == []

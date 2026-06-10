@@ -104,6 +104,38 @@ def test_sync_pending_todo_exceptions_job_calls_data_agent(monkeypatch):
     assert captured["limit"] >= 1
 
 
+def test_finalize_daily_digest_job_calls_data_agent_once_per_company(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    async def fake_load_enabled_run_plans(scheduler_token: str):
+        return [
+            {"company_id": "company_001", "plan_code": "plan_a"},
+            {"company_id": "company_001", "plan_code": "plan_b"},
+            {"company_id": "company_002", "plan_code": "plan_c"},
+        ]
+
+    async def fake_finalize(auth_token: str, *, company_id: str, biz_date: str, **kwargs):
+        calls.append({"auth_token": auth_token, "company_id": company_id, "biz_date": biz_date})
+        return {"success": True, "ready_count": 1, "delivered_count": 1, "blocked_count": 0}
+
+    monkeypatch.setattr(scheduler_service, "create_scheduler_auth_token", lambda **kwargs: f"token:{kwargs.get('company_id', 'system')}")
+    monkeypatch.setattr(scheduler_service, "finalize_daily_recon_digest", fake_finalize)
+
+    service = scheduler_service.FinanceCronSchedulerService(
+        scheduler_service.FinanceCronConfig(
+            refresh_interval_seconds=30,
+            digest_biz_date_offset_days=-1,
+        )
+    )
+    monkeypatch.setattr(service, "_load_enabled_run_plans", fake_load_enabled_run_plans)
+
+    asyncio.run(service.finalize_daily_digest_job())
+
+    assert [call["company_id"] for call in calls] == ["company_001", "company_002"]
+    assert calls[0]["auth_token"] == "token:company_001"
+    assert calls[1]["auth_token"] == "token:company_002"
+
+
 def test_execute_run_plan_job_avoids_duplicate_slot(monkeypatch):
     triggered: list[tuple[str, str]] = []
     existing_slots: set[str] = set()

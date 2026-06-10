@@ -316,7 +316,16 @@ export function BrowserPlaybookPanel({
         return left.index - right.index;
       });
 
-      return browserSources.map(({ index: _index, ...row }) => row);
+      return browserSources.map((row) => ({
+        source: row.source,
+        title: row.title,
+        status: row.status,
+        taskStatus: row.taskStatus,
+        taskLabel: row.taskLabel,
+        taskError: row.taskError,
+        taskUpdatedAt: row.taskUpdatedAt,
+        updatedAt: row.updatedAt,
+      }));
     },
     [sources],
   );

@@ -29,6 +29,7 @@ import {
   isBrowserCollectionTechnicalSchemaSummary,
 } from './recon/browserCollectionSchema';
 import SchemeWizardIntentStep from './recon/SchemeWizardIntentStep';
+import DigestSubscriptionsPanel from './recon/DigestSubscriptionsPanel';
 import ReconWorkspaceHeader from './recon/ReconWorkspaceHeader';
 import SchemeWizardReconStep from './recon/SchemeWizardReconStep';
 import {
@@ -1534,6 +1535,7 @@ function buildRawSourceRows(
   });
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function buildDatasetSamplePayloadForTest(
   source: SchemeSourceOption,
   side: 'left' | 'right',
@@ -5717,7 +5719,7 @@ export default function ReconWorkspace({
     [],
   );
 
-  const headerRightSlot = (
+  const headerRightSlot = activeTab === 'subscriptions' ? null : (
     <div className="hidden items-center gap-2 lg:flex">
       <SummaryBadge label="方案" value={schemesTotal} />
       <SummaryBadge label="任务" value={tasksTotal} />
@@ -7070,45 +7072,47 @@ export default function ReconWorkspace({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[28px] border border-border bg-surface px-5 py-4 shadow-sm">
-            <div>
-              <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">对账中心</p>
-              <p className="mt-1 text-sm text-text-secondary">
-                统一查看对账方案、对账任务与运行记录
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              {activeTab === 'schemes' ? (
+          {activeTab === 'subscriptions' ? null : (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-[28px] border border-border bg-surface px-5 py-4 shadow-sm">
+              <div>
+                <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">对账中心</p>
+                <p className="mt-1 text-sm text-text-secondary">
+                  统一查看对账方案、对账任务与运行记录
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {activeTab === 'schemes' ? (
+                  <button
+                    type="button"
+                    onClick={openCreateSchemeModal}
+                    className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                  >
+                    <Plus className="h-4 w-4" />
+                    新增对账方案
+                  </button>
+                ) : activeTab === 'tasks' ? (
+                  <button
+                    type="button"
+                    onClick={() => openCreatePlanModal(null)}
+                    disabled={schemes.length === 0}
+                    className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Plus className="h-4 w-4" />
+                    新增运行计划
+                  </button>
+                ) : null}
                 <button
                   type="button"
-                  onClick={openCreateSchemeModal}
-                  className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                  onClick={() => void loadCenterData()}
+                  disabled={loadingCenter}
+                  className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <Plus className="h-4 w-4" />
-                  新增对账方案
+                  <RefreshCw className={cn('h-4 w-4', loadingCenter && 'animate-spin')} />
+                  刷新
                 </button>
-              ) : activeTab === 'tasks' ? (
-                <button
-                  type="button"
-                  onClick={() => openCreatePlanModal(null)}
-                  disabled={schemes.length === 0}
-                  className="inline-flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <Plus className="h-4 w-4" />
-                  新增运行计划
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => void loadCenterData()}
-                disabled={loadingCenter}
-                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <RefreshCw className={cn('h-4 w-4', loadingCenter && 'animate-spin')} />
-                刷新
-              </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {centerError ? (
             <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -7124,7 +7128,9 @@ export default function ReconWorkspace({
 
           {renderRerunNotice()}
 
-          {loadingCenter ? (
+          {activeTab === 'subscriptions' ? (
+            <DigestSubscriptionsPanel authToken={authToken} />
+          ) : loadingCenter ? (
             <div className="flex min-h-[260px] flex-col items-center justify-center rounded-[28px] border border-dashed border-border bg-surface px-6 py-10 text-center">
               <RefreshCw className="h-8 w-8 animate-spin text-text-secondary" />
               <p className="mt-4 text-sm text-text-secondary">正在同步对账中心数据...</p>

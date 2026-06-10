@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gestureLockState } from '../src/handoff/HandoffViewport';
+import { gestureLockState } from '../src/handoff/handoffPresentation';
 
 describe('gesture exclusivity', () => {
   it('locks mode/zoom buttons while a gesture is active', () => {

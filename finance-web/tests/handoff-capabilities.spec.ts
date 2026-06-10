@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { backendStatusLabel } from '../src/handoff/HandoffPage';
+import { backendStatusLabel } from '../src/handoff/handoffPresentation';
 
 describe('capabilities label', () => {
   it('shows generic status, not backend internals', () => {

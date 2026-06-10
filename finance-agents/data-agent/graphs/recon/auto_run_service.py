@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -38,6 +39,9 @@ from tools.mcp_client import (
     recon_auto_run_job_update,
     recon_auto_run_update,
     recon_auto_task_get,
+    recon_digest_delivery_record,
+    recon_digest_detail_link_create,
+    recon_digest_finalize_daily,
     recon_exception_create,
     recon_exception_get,
     recon_exception_update,
@@ -281,6 +285,16 @@ def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _public_web_base_url() -> str:
+    value = (
+        os.getenv("TALLY_PUBLIC_WEB_BASE_URL")
+        or os.getenv("TALLY_WEB_BASE_URL")
+        or os.getenv("PUBLIC_WEB_BASE_URL")
+        or "http://localhost:5173"
+    )
+    return str(value or "http://localhost:5173").strip().rstrip("/")
+
+
 def _parse_biz_date(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -300,6 +314,289 @@ def _is_run_plan_execution_success(ctx: dict[str, Any], run_record: dict[str, An
     exec_status = _normalize_status_text(ctx.get("exec_status"))
     failed_reason = str(ctx.get("failed_reason") or ctx.get("exec_error") or "").strip()
     return exec_status in _RUN_SUCCESS_STATUSES and not failed_reason
+
+
+def _digest_message_title(*, view: str, biz_date: str) -> str:
+    label = "对账日报" if view == "boss" else "对账明细"
+    return f"{biz_date} {label}"
+
+
+def _format_money(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    return f"¥{amount:,.0f}"
+
+
+def _compose_digest_message(
+    *,
+    digest: dict[str, Any],
+    subscription: dict[str, Any],
+    detail_url: str,
+) -> tuple[str, str]:
+    view = str(subscription.get("view") or "").strip().lower()
+    biz_date = str(digest.get("period_start") or "").strip()
+    structured = _safe_dict(digest.get("structured"))
+    totals = _safe_dict(structured.get("totals"))
+    narrative = str(digest.get("narrative") or "").strip()
+    title = _digest_message_title(view=view, biz_date=biz_date)
+    if view == "boss":
+        content = "\n\n".join(
+            [
+                f"📊 {biz_date} 对账日报",
+                "本报告反映对账与资金健康，非经营损益（不含成本/毛利/利润）",
+                (
+                    "资金到账总览(货款口径)\n"
+                    f"买家实付 {_format_money(totals.get('receivable_total'))} → "
+                    f"退款 {_format_money(totals.get('refund_total'))} → "
+                    f"已到账 {_format_money(totals.get('settled_total'))}\n"
+                    f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} ｜ "
+                    f"待核查 {_format_money(totals.get('stuck_amount'))}"
+                ),
+                (
+                    "平台综合扣减\n"
+                    f"{_format_money(totals.get('net_deduction_total'))}"
+                ),
+                narrative,
+                f"[查看完整明细]({detail_url})",
+            ]
+        )
+        return title, content
+
+    content = "\n\n".join(
+        [
+            f"📋 {biz_date} 对账明细",
+            (
+                "差异概览\n"
+                f"金额差异 {int(totals.get('matched_with_diff_count') or 0)} 条 · "
+                f"源侧单边 {int(totals.get('source_only_count') or 0)} 条 · "
+                f"目标侧单边 {int(totals.get('target_only_count') or 0)} 条"
+            ),
+            (
+                "资金归因\n"
+                f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} | "
+                f"综合扣减 {_format_money(totals.get('net_deduction_total'))} | "
+                f"退款 {_format_money(totals.get('refund_total'))} | "
+                f"待核查 {_format_money(totals.get('stuck_amount'))}"
+            ),
+            narrative,
+            f"[查看差异清单/导出底稿]({detail_url})",
+        ]
+    )
+    return title, content
+
+
+def _recipient_targets(subscription: dict[str, Any]) -> tuple[str, str]:
+    conversation_id = str(subscription.get("conversation_id") or "").strip()
+    if conversation_id:
+        return "", conversation_id
+    recipient = _safe_dict(subscription.get("recipient_json"))
+    return (
+        str(
+            recipient.get("user_id")
+            or recipient.get("identifier")
+            or recipient.get("provider_user_id")
+            or ""
+        ).strip(),
+        "",
+    )
+
+
+async def finalize_and_deliver_daily_digest(
+    *,
+    auth_token: str,
+    company_id: str = "",
+    biz_date: str,
+    view: str = "",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Finalize ready daily digests and deliver messages for ready subscriptions."""
+    finalize_result = await recon_digest_finalize_daily(
+        auth_token,
+        company_id=company_id,
+        biz_date=biz_date,
+        view=view,
+        dry_run=dry_run,
+    )
+    if not bool(finalize_result.get("success")):
+        return finalize_result
+
+    deliveries: list[dict[str, Any]] = []
+    for item in _safe_list(finalize_result.get("results")):
+        result = _safe_dict(item)
+        if result.get("status") != "ready":
+            deliveries.append(
+                {
+                    "status": str(result.get("status") or "skipped"),
+                    "reason": str(result.get("reason") or ""),
+                    "subscription": _safe_dict(result.get("subscription")),
+                }
+            )
+            continue
+
+        subscription = _safe_dict(result.get("subscription"))
+        digest = _safe_dict(result.get("digest"))
+        if dry_run:
+            digest = {
+                "id": "dry-run",
+                "period_start": biz_date,
+                "structured": _safe_dict(result.get("structured")),
+                "narrative": str(result.get("narrative") or ""),
+            }
+        digest_id = str(digest.get("id") or "").strip()
+        subscription_id = str(subscription.get("id") or "").strip()
+        digest_view = str(subscription.get("view") or "").strip().lower()
+        domain = str(subscription.get("domain") or "ecom").strip() or "ecom"
+        if not digest_id or not subscription_id or not digest_view:
+            deliveries.append({"status": "skipped", "reason": "missing_digest_or_subscription"})
+            continue
+
+        if dry_run:
+            detail_url = f"{_public_web_base_url()}/recon/digests/dry-run/{digest_view}"
+        else:
+            link_result = await recon_digest_detail_link_create(
+                auth_token,
+                {
+                    "digest_id": digest_id,
+                    "company_id": company_id,
+                    "view": digest_view,
+                    "biz_date": biz_date,
+                    "domain": domain,
+                    "public_base_url": _public_web_base_url(),
+                },
+            )
+            if not bool(link_result.get("success")):
+                record = await recon_digest_delivery_record(
+                    auth_token,
+                    {
+                        "company_id": company_id,
+                        "digest_id": digest_id,
+                        "subscription_id": subscription_id,
+                        "view": digest_view,
+                        "status": "failed",
+                        "reason": "link_create_failed",
+                        "error": str(link_result.get("error") or "创建详情链接失败"),
+                        "raw_result": link_result,
+                    },
+                )
+                deliveries.append({"status": "failed", "reason": "link_create_failed", "record": record})
+                continue
+            detail_url = str(link_result.get("url") or link_result.get("path") or "")
+
+        title, content = _compose_digest_message(
+            digest=digest,
+            subscription=subscription,
+            detail_url=detail_url,
+        )
+        to_user_id, conversation_id = _recipient_targets(subscription)
+        if not to_user_id and not conversation_id:
+            if not dry_run:
+                await recon_digest_delivery_record(
+                    auth_token,
+                    {
+                        "company_id": company_id,
+                        "digest_id": digest_id,
+                        "subscription_id": subscription_id,
+                        "view": digest_view,
+                        "status": "skipped",
+                        "reason": "recipient_missing",
+                        "detail_url": detail_url,
+                    },
+                )
+            deliveries.append(
+                {
+                    "status": "skipped",
+                    "reason": "recipient_missing",
+                    "title": title,
+                    "content": content,
+                    "detail_url": detail_url,
+                }
+            )
+            continue
+
+        if dry_run:
+            deliveries.append(
+                {
+                    "status": "dry_run",
+                    "title": title,
+                    "content": content,
+                    "detail_url": detail_url,
+                    "to_user_id": to_user_id,
+                    "conversation_id": conversation_id,
+                }
+            )
+            continue
+
+        channel_config_id = str(subscription.get("channel_config_id") or "").strip()
+        channel_config = (
+            load_company_channel_config_by_id(channel_id=channel_config_id)
+            if channel_config_id
+            else None
+        )
+        if channel_config is None:
+            await recon_digest_delivery_record(
+                auth_token,
+                {
+                    "company_id": company_id,
+                    "digest_id": digest_id,
+                    "subscription_id": subscription_id,
+                    "view": digest_view,
+                    "status": "failed",
+                    "reason": "channel_missing",
+                    "error": "日报订阅未配置可用通知通道",
+                    "detail_url": detail_url,
+                },
+            )
+            deliveries.append({"status": "failed", "reason": "channel_missing"})
+            continue
+
+        adapter = get_notification_adapter(
+            provider=str(getattr(channel_config, "provider", "") or ""),
+            channel_config=channel_config,
+        )
+        sent = adapter.send_bot_message(
+            title=title,
+            content=content,
+            content_type="markdown",
+            to_user_id=to_user_id,
+            conversation_id=conversation_id,
+        )
+        status = "sent" if sent.success else "failed"
+        record = await recon_digest_delivery_record(
+            auth_token,
+            {
+                "company_id": company_id,
+                "digest_id": digest_id,
+                "subscription_id": subscription_id,
+                "view": digest_view,
+                "status": status,
+                "reason": "" if sent.success else "send_failed",
+                "error": "" if sent.success else str(sent.message or "日报消息发送失败"),
+                "message_id": str(sent.message_id or ""),
+                "detail_url": detail_url,
+                "raw_result": {
+                    "provider": str(sent.provider or ""),
+                    "message": str(sent.message or ""),
+                    "code": str(sent.code or ""),
+                },
+            },
+        )
+        deliveries.append(
+            {
+                "status": status,
+                "reason": "" if sent.success else "send_failed",
+                "message_id": str(sent.message_id or ""),
+                "detail_url": detail_url,
+                "record": record,
+            }
+        )
+
+    return {
+        **finalize_result,
+        "deliveries": deliveries,
+        "delivered_count": sum(1 for item in deliveries if item.get("status") == "sent"),
+    }
 
 
 def _classify_execution_failure(failed_stage: str) -> str:

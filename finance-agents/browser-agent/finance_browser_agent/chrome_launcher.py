@@ -214,7 +214,7 @@ def wait_for_cdp(port: int, *, timeout_seconds: float = 20.0) -> bool:
     url = f"http://127.0.0.1:{port}/json/version"
     while time.time() < deadline:
         try:
-            resp = httpx.get(url, timeout=2.0)
+            resp = httpx.get(url, timeout=2.0, trust_env=False)
             if resp.status_code == 200:
                 return True
         except httpx.HTTPError:

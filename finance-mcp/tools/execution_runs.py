@@ -25,7 +25,13 @@ import psycopg2.extras
 from mcp import Tool
 
 from auth import db as auth_db
+from auth import recon_digest_detail_db, recon_digest_finalizer_db
 from auth.jwt_utils import get_user_from_token
+from auth.recon_digest_token import (
+    build_recon_digest_token,
+    verify_recon_digest_token,
+    verify_recon_run_exceptions_token,
+)
 from security_utils import resolve_upload_file_path
 from tools.execution_exception_detail_hydration import hydrate_execution_exception_details
 from tools.rule_schema import validate_rule_record
@@ -430,6 +436,123 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="recon_digest_public_bundle",
+            description="公开 token 查询对账日报详情页 bundle。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "view": {"type": "string", "enum": ["boss", "finance"]},
+                    "line_limit": {"type": "integer"},
+                },
+                "required": ["token", "view"],
+            },
+        ),
+        Tool(
+            name="recon_digest_public_export",
+            description="公开 token 导出财务详情页差异底稿（取全量，不受展示截断影响）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "view": {"type": "string", "enum": ["finance"]},
+                    "recon_type": {"type": "string"},
+                },
+                "required": ["token", "view"],
+            },
+        ),
+        Tool(
+            name="recon_digest_detail_link_create",
+            description="为已生成 digest 创建老板/财务详情页公开链接 token。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "digest_id": {"type": "string"},
+                    "auth_token": {"type": "string"},
+                    "view": {"type": "string", "enum": ["boss", "finance"]},
+                    "biz_date": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "ttl_seconds": {"type": "integer"},
+                    "public_base_url": {"type": "string"},
+                },
+                "required": ["auth_token", "digest_id", "view", "biz_date", "domain"],
+            },
+        ),
+        Tool(
+            name="recon_digest_subscription_upsert",
+            description="创建或更新老板/财务对账日报订阅。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "subscription_id": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "view": {"type": "string", "enum": ["boss", "finance"]},
+                    "period": {"type": "string"},
+                    "scope": {"type": "object"},
+                    "channel_config_id": {"type": "string"},
+                    "target_type": {"type": "string"},
+                    "recipient_json": {"type": "object"},
+                    "conversation_id": {"type": "string"},
+                    "send_window": {"type": "object"},
+                    "failure_recipients": {"type": "array"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["auth_token", "view"],
+            },
+        ),
+        Tool(
+            name="recon_digest_subscription_list",
+            description="查询老板/财务对账日报订阅。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "period": {"type": "string"},
+                    "view": {"type": "string"},
+                },
+                "required": ["auth_token"],
+            },
+        ),
+        Tool(
+            name="recon_digest_finalize_daily",
+            description="按公司+业务日执行对账日报完整性闸门并幂等生成 digest。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "biz_date": {"type": "string"},
+                    "view": {"type": "string"},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["auth_token", "biz_date"],
+            },
+        ),
+        Tool(
+            name="recon_digest_delivery_record",
+            description="记录对账日报投递结果并更新 digest delivered 状态。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "company_id": {"type": "string"},
+                    "digest_id": {"type": "string"},
+                    "subscription_id": {"type": "string"},
+                    "view": {"type": "string"},
+                    "status": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "error": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "detail_url": {"type": "string"},
+                    "raw_result": {"type": "object"},
+                },
+                "required": ["auth_token", "digest_id", "subscription_id", "view", "status"],
+            },
+        ),
+        Tool(
             name="execution_run_exception_get",
             description="查询单个执行异常。",
             inputSchema={
@@ -565,6 +688,10 @@ def create_tools() -> list[Tool]:
     ]
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         if name == "execution_scheme_list":
@@ -611,6 +738,20 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _run_exceptions(arguments)
         if name == "execution_run_public_exception_bundle":
             return _run_public_exception_bundle(arguments)
+        if name == "recon_digest_public_bundle":
+            return _recon_digest_public_bundle(arguments)
+        if name == "recon_digest_public_export":
+            return _recon_digest_public_export(arguments)
+        if name == "recon_digest_detail_link_create":
+            return _recon_digest_detail_link_create(arguments)
+        if name == "recon_digest_subscription_upsert":
+            return _recon_digest_subscription_upsert(arguments)
+        if name == "recon_digest_subscription_list":
+            return _recon_digest_subscription_list(arguments)
+        if name == "recon_digest_finalize_daily":
+            return _recon_digest_finalize_daily(arguments)
+        if name == "recon_digest_delivery_record":
+            return _recon_digest_delivery_record(arguments)
         if name == "execution_run_exception_get":
             return _exception_get(arguments)
         if name == "execution_run_exception_create":
@@ -2652,7 +2793,9 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
-    run_id = _as_text(arguments.get("run_id"))
+    raw_run_id = _as_text(arguments.get("run_id"))
+    payload = verify_recon_run_exceptions_token(raw_run_id)
+    run_id = _as_text(payload.get("run_id")) if payload else raw_run_id
     if not run_id:
         return {"success": False, "error": "run_id 不能为空"}
     bundle = auth_db.get_public_execution_run_exception_bundle(
@@ -2673,6 +2816,180 @@ def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     bundle["count"] = len(bundle["exceptions"])
     return {"success": True, **bundle}
+
+
+def _recon_digest_public_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
+    view = _as_text(arguments.get("view")).lower()
+    payload = verify_recon_digest_token(_as_text(arguments.get("token")), expected_view=view)
+    if not payload:
+        return {"success": False, "error": "无效或已过期的详情页 token"}
+
+    bundle = recon_digest_detail_db.get_public_digest_detail_bundle(
+        digest_id=_as_text(payload.get("digest_id")),
+        company_id=_as_text(payload.get("company_id")),
+        view=view,
+        biz_date=_as_text(payload.get("biz_date")),
+        domain=_as_text(payload.get("domain")),
+        line_limit=_as_int(arguments.get("line_limit"), 500, minimum=1, maximum=1000),
+    )
+    return bundle or {"success": False, "error": "日报详情不存在或已失效"}
+
+
+def _recon_digest_public_export(arguments: dict[str, Any]) -> dict[str, Any]:
+    view = _as_text(arguments.get("view")).lower()
+    if view != "finance":
+        return {"success": False, "error": "只有财务详情页允许导出底稿"}
+    payload = verify_recon_digest_token(_as_text(arguments.get("token")), expected_view=view)
+    if not payload:
+        return {"success": False, "error": "无效或已过期的详情页 token"}
+
+    bundle = recon_digest_detail_db.get_public_digest_detail_bundle(
+        digest_id=_as_text(payload.get("digest_id")),
+        company_id=_as_text(payload.get("company_id")),
+        view=view,
+        biz_date=_as_text(payload.get("biz_date")),
+        domain=_as_text(payload.get("domain")),
+        line_limit=1,
+    )
+    domain = _as_text((bundle or {}).get("domain"))
+    if not domain:
+        return {"success": False, "error": "日报详情缺少 domain，无法导出底稿"}
+    structured = _dict_or_empty(_dict_or_empty((bundle or {}).get("digest")).get("structured"))
+    rollup_scope = _dict_or_empty(structured.get("rollup_scope"))
+
+    rows = recon_digest_detail_db.list_public_digest_diff_rows(
+        company_id=_as_text(payload.get("company_id")),
+        domain=domain,
+        biz_date=_as_text(payload.get("biz_date")),
+        recon_type=_as_text(arguments.get("recon_type")),
+        plan_codes=[
+            _as_text(item)
+            for item in (rollup_scope.get("plan_codes") if isinstance(rollup_scope.get("plan_codes"), list) else [])
+            if _as_text(item)
+        ],
+        recon_types=[
+            _as_text(item)
+            for item in (rollup_scope.get("recon_types") if isinstance(rollup_scope.get("recon_types"), list) else [])
+            if _as_text(item)
+        ],
+    )
+    return {"success": True, "rows": rows, "total": len(rows)}
+
+
+def _recon_digest_detail_link_create(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = _resolve_write_company_id(
+        _as_text(arguments.get("auth_token")),
+        _as_text(arguments.get("company_id")),
+    )
+    view = _as_text(arguments.get("view")).lower()
+    digest_id = _as_text(arguments.get("digest_id"))
+    biz_date = _as_text(arguments.get("biz_date"))
+    domain = _as_text(arguments.get("domain"))
+    existing = recon_digest_detail_db.get_public_digest_detail_bundle(
+        digest_id=digest_id,
+        company_id=company_id,
+        view=view,
+        biz_date=biz_date,
+        domain=domain,
+        line_limit=1,
+    )
+    if not existing:
+        return {"success": False, "error": "日报详情不存在或无权创建公开链接"}
+    try:
+        token = build_recon_digest_token(
+            digest_id=digest_id,
+            company_id=company_id,
+            view=view,
+            biz_date=biz_date,
+            domain=_as_text(existing.get("domain")) or domain,
+            ttl_seconds=(
+                _as_int(arguments.get("ttl_seconds"), 0, minimum=1)
+                if arguments.get("ttl_seconds")
+                else None
+            ),
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    base = _as_text(arguments.get("public_base_url")).rstrip("/")
+    path = f"/recon/digests/{token}/{view}"
+    return {"success": True, "token": token, "path": path, "url": f"{base}{path}" if base else path}
+
+
+def _recon_digest_subscription_upsert(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = _resolve_write_company_id(
+        _as_text(arguments.get("auth_token")),
+        _as_text(arguments.get("company_id")),
+    )
+    item = recon_digest_finalizer_db.create_or_update_digest_subscription(
+        company_id=company_id,
+        subscription_id=_as_text(arguments.get("subscription_id")),
+        domain=_as_text(arguments.get("domain") or "ecom"),
+        view=_as_text(arguments.get("view")),
+        period=_as_text(arguments.get("period") or "daily"),
+        scope=_safe_dict(arguments.get("scope")) or {"mode": "company_all"},
+        channel_config_id=_as_text(arguments.get("channel_config_id")),
+        target_type=_as_text(arguments.get("target_type") or "user"),
+        recipient_json=_safe_dict(arguments.get("recipient_json")),
+        conversation_id=_as_text(arguments.get("conversation_id")),
+        send_window=_safe_dict(arguments.get("send_window")),
+        failure_recipients=_safe_list(arguments.get("failure_recipients")),
+        enabled=_as_bool(arguments.get("enabled"), True),
+    )
+    if not item:
+        return {"success": False, "error": "保存日报订阅失败"}
+    return {"success": True, "subscription": item}
+
+
+def _recon_digest_subscription_list(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = _resolve_write_company_id(
+        _as_text(arguments.get("auth_token")),
+        _as_text(arguments.get("company_id")),
+    )
+    subscriptions = recon_digest_finalizer_db.list_digest_subscriptions(
+        company_id=company_id,
+        period=_as_text(arguments.get("period") or "daily"),
+        view=_as_text(arguments.get("view")),
+    )
+    return {"success": True, "count": len(subscriptions), "subscriptions": subscriptions}
+
+
+def _recon_digest_finalize_daily(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = _resolve_write_company_id(
+        _as_text(arguments.get("auth_token")),
+        _as_text(arguments.get("company_id")),
+    )
+    biz_date = _as_text(arguments.get("biz_date"))
+    if not biz_date:
+        return {"success": False, "error": "biz_date 不能为空"}
+    return recon_digest_finalizer_db.finalize_company_daily_digests(
+        company_id=company_id,
+        biz_date=biz_date,
+        view=_as_text(arguments.get("view")),
+        dry_run=_as_bool(arguments.get("dry_run"), False),
+    )
+
+
+def _recon_digest_delivery_record(arguments: dict[str, Any]) -> dict[str, Any]:
+    company_id = _resolve_write_company_id(
+        _as_text(arguments.get("auth_token")),
+        _as_text(arguments.get("company_id")),
+    )
+    delivery = recon_digest_finalizer_db.upsert_digest_delivery_attempt(
+        digest_id=_as_text(arguments.get("digest_id")),
+        company_id=company_id,
+        subscription_id=_as_text(arguments.get("subscription_id")),
+        view=_as_text(arguments.get("view")),
+        status=_as_text(arguments.get("status")),
+        reason=_as_text(arguments.get("reason")),
+        error=_as_text(arguments.get("error")),
+        message_id=_as_text(arguments.get("message_id")),
+        detail_url=_as_text(arguments.get("detail_url")),
+        raw_result=_safe_dict(arguments.get("raw_result")),
+    )
+    if not delivery:
+        return {"success": False, "error": "记录日报投递结果失败"}
+    return {"success": True, "delivery": delivery}
 
 
 def _exception_get(arguments: dict[str, Any]) -> dict[str, Any]:

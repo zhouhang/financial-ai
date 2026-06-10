@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 
-from graphs.recon.auto_run_service import execute_run_plan_run
+from graphs.recon.auto_run_service import execute_run_plan_run, finalize_and_deliver_daily_digest
 from tools.mcp_client import (
     execution_run_update,
     recon_queue_complete,
@@ -150,6 +150,30 @@ async def _process_job(job: dict, system_token: str) -> None:
         artifacts["runtime_summary"] = runtime_summary
         if run_id:
             await execution_run_update(auth_token, run_id, {"artifacts_json": artifacts})
+        if bool(result.get("success")) and str(run.get("execution_status") or "") == "success":
+            biz_date = str(result.get("biz_date") or job.get("biz_date") or "").strip()
+            if biz_date:
+                digest_result = await finalize_and_deliver_daily_digest(
+                    auth_token=auth_token,
+                    company_id=company_id,
+                    biz_date=biz_date,
+                )
+                if bool(digest_result.get("success")):
+                    logger.info(
+                        "[recon-worker] digest finalizer 完成: job_id=%s biz_date=%s ready=%s delivered=%s blocked=%s",
+                        job_id,
+                        biz_date,
+                        digest_result.get("ready_count"),
+                        digest_result.get("delivered_count"),
+                        digest_result.get("blocked_count"),
+                    )
+                else:
+                    logger.warning(
+                        "[recon-worker] digest finalizer 失败: job_id=%s biz_date=%s error=%s",
+                        job_id,
+                        biz_date,
+                        digest_result.get("error"),
+                    )
         logger.info("[recon-worker] job_id=%s 完成", job_id)
     except Exception as exc:
         logger.error("[recon-worker] job_id=%s 失败: %s", job_id, exc, exc_info=True)

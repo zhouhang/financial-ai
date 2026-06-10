@@ -1,4 +1,4 @@
-export type ReconCenterTab = 'schemes' | 'tasks' | 'runs';
+export type ReconCenterTab = 'schemes' | 'tasks' | 'runs' | 'subscriptions';
 
 export type StartMode = 'upload' | 'source';
 

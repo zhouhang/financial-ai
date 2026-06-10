@@ -1,10 +1,6 @@
 import { useRef } from 'react';
 import type { HandoffFrame, HandoffInputEvent } from './types';
 
-export function gestureLockState(gestureActive: boolean): { controlsLocked: boolean } {
-  return { controlsLocked: gestureActive };
-}
-
 interface HandoffViewportProps {
   frame: HandoffFrame | null;
   disabled?: boolean;

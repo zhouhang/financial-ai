@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from graphs.recon.auto_run_service import (
     execute_run_plan_run,
     execute_auto_task_run,
+    finalize_and_deliver_daily_digest,
     prepare_execution_run_rerun,
     send_exception_reminder,
     send_execution_run_exception_reminder,
@@ -59,6 +60,10 @@ from tools.mcp_client import (
     recon_auto_run_rerun,
     recon_auto_run_update,
     recon_auto_run_verify,
+    recon_digest_public_bundle,
+    recon_digest_public_export,
+    recon_digest_subscription_list,
+    recon_digest_subscription_upsert,
     recon_auto_task_create,
     recon_auto_task_delete,
     recon_auto_task_get,
@@ -204,6 +209,28 @@ class RunPlanExecuteRequest(BaseModel):
     biz_date: str = ""
     trigger_mode: str = "manual"
     run_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class DigestSubscriptionUpsertRequest(BaseModel):
+    subscription_id: str = ""
+    domain: str = "ecom"
+    view: str
+    period: str = "daily"
+    scope: dict[str, Any] = Field(default_factory=lambda: {"mode": "company_all"})
+    channel_config_id: str = ""
+    target_type: str = "user"
+    recipient_json: dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str = ""
+    send_window: dict[str, Any] = Field(default_factory=dict)
+    failure_recipients: list[Any] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class DigestFinalizeRequest(BaseModel):
+    company_id: str = ""
+    biz_date: str
+    view: str = ""
+    dry_run: bool = False
 
 
 class ExecutionSchemeCreateRequest(BaseModel):
@@ -1358,6 +1385,82 @@ async def public_execution_run_exceptions_api(
     )
     if not result.get("success"):
         raise HTTPException(status_code=404, detail=result.get("error", "执行记录不存在"))
+    return result
+
+
+@router.get("/public/digests/{token}/{view}")
+async def public_recon_digest_bundle_api(
+    token: str,
+    view: str,
+    line_limit: int = Query(500, ge=1, le=1000),
+):
+    result = await recon_digest_public_bundle(token, view, line_limit=line_limit)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "公开对账摘要不存在"))
+    return result
+
+
+@router.get("/public/digests/{token}/{view}/export")
+async def public_recon_digest_export_api(
+    token: str,
+    view: str,
+    recon_type: str = Query(""),
+):
+    result = await recon_digest_public_export(token, view, recon_type=recon_type)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "导出对账摘要失败"))
+    return result
+
+
+@router.post("/digest-subscriptions")
+async def upsert_recon_digest_subscription_api(
+    body: DigestSubscriptionUpsertRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await recon_digest_subscription_upsert(auth_token, body.model_dump())
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "保存日报订阅失败"))
+    return result
+
+
+@router.get("/digest-subscriptions")
+async def list_recon_digest_subscriptions_api(
+    period: str = Query("daily"),
+    view: str = Query(""),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await recon_digest_subscription_list(auth_token, period=period, view=view)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "查询日报订阅失败"))
+    return result
+
+
+@router.post("/digests/finalize-daily")
+async def finalize_recon_digest_daily_api(
+    body: DigestFinalizeRequest,
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    user = _get_user_from_token(auth_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    result = await finalize_and_deliver_daily_digest(
+        auth_token=auth_token,
+        company_id=str(body.company_id or user.get("company_id") or ""),
+        biz_date=body.biz_date,
+        view=body.view,
+        dry_run=body.dry_run,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "生成日报失败"))
     return result
 
 

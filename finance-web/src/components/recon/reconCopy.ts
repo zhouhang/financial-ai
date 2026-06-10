@@ -3,6 +3,7 @@ export const RECON_COPY = {
     schemes: '对账方案',
     tasks: '对账任务',
     runs: '运行记录',
+    subscriptions: '日报订阅',
   },
   center: {
     sectionTitle: '对账中心',

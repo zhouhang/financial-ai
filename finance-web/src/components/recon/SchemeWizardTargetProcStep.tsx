@@ -392,6 +392,7 @@ function isSupportedSourceKind(value: string): value is SupportedSourceKind {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function normalizeCandidateDataset(
   raw: unknown,
   sourceFallback?: Record<string, string>,

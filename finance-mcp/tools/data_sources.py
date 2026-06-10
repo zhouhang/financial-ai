@@ -6786,6 +6786,8 @@ async def _handle_data_source_scheduler_list_collection_plans(arguments: dict[st
                 continue
             if str(source_row.get("status") or "") != "active" or not bool(source_row.get("is_enabled", True)):
                 continue
+            if _resolve_collection_driver(source_row, row) == COLLECTION_DRIVER_DB_QUERY:
+                continue
             dataset_view = _build_dataset_view(row, include_heavy=False)
             plans.append(
                 {

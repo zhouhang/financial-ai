@@ -269,8 +269,6 @@ interface EditableDatasetSemantic {
   uniqueIdentifierRawNames: string[];
   collectionDateField: string;
   collectionDateFormat: string;
-  collectionScheduleFrequency: string;
-  collectionScheduleTime: string;
   fieldRows: EditableDatasetSemanticFieldRow[];
 }
 
@@ -1387,7 +1385,6 @@ function buildEditableDatasetSemanticState(
 ): EditableDatasetSemantic {
   const semantic = readDatasetSemanticInfo(dataset);
   const collectionConfig = asRecord(dataset.collection_config) ?? asRecord(asRecord(dataset.meta)?.collection_config) ?? {};
-  const collectionSchedule = asRecord(collectionConfig.schedule) ?? {};
   const { schemaName, objectName } = parseSchemaAndObjectName(dataset);
   const fieldRows = buildEditableDatasetSemanticFieldRows(dataset);
   const uniqueIdentifierRawNames = buildUniqueIdentifierRawNames(
@@ -1412,8 +1409,6 @@ function buildEditableDatasetSemanticState(
     uniqueIdentifierRawNames,
     collectionDateField: asString(collectionConfig.date_field) ?? '',
     collectionDateFormat: normalizeCollectionDateFormat(collectionConfig.date_format, asString(collectionConfig.date_field) ?? ''),
-    collectionScheduleFrequency: asString(collectionSchedule.frequency) ?? 'daily',
-    collectionScheduleTime: asString(collectionSchedule.time) ?? '08:30',
     fieldRows,
   };
 }
@@ -5815,11 +5810,6 @@ export default function DataConnectionsPanel({
         editingDatasetSemantic.fieldRows.find((row) => row.rawName === editingDatasetSemantic.collectionDateField)
           ?.sampleValues ?? [],
       ),
-      schedule: {
-        enabled: true,
-        frequency: editingDatasetSemantic.collectionScheduleFrequency || 'daily',
-        time: editingDatasetSemantic.collectionScheduleTime || '08:30',
-      },
     };
 
     const applyLocalUpdate = (notice: string) => {
@@ -5859,8 +5849,6 @@ export default function DataConnectionsPanel({
               uniqueIdentifierRawNames: publishableKeyFields,
               collectionDateField: collectionConfig.date_field,
               collectionDateFormat: collectionConfig.date_format,
-              collectionScheduleFrequency: collectionConfig.schedule.frequency,
-              collectionScheduleTime: collectionConfig.schedule.time,
               fieldRows: prev.fieldRows.map((row) => ({
                 ...row,
                 displayName: fieldLabelMap[row.rawName] || row.displayName,
@@ -7943,13 +7931,10 @@ export default function DataConnectionsPanel({
                 <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
                   <div className="flex items-center gap-2">
                     <RefreshCw className="h-4 w-4 text-text-secondary" />
-                    <span className="text-sm font-medium text-text-primary">采集配置</span>
+                    <span className="text-sm font-medium text-text-primary">手动采集字段</span>
                   </div>
                   <p className="mt-1 text-xs text-text-secondary">
                     有 update_time / updated_at / modified_at 时优先选它，可以采集新增和更新；没有更新时间字段时选择 create_time / created_at，只能稳定采集新创建的数据。
-                  </p>
-                  <p className="mt-1 text-xs text-blue-700">
-                    发布后系统会按采集计划独立采集数据，写入数据资产层，供对账和后续 AI 数据统计使用。
                   </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     <label className="block">
@@ -7973,38 +7958,6 @@ export default function DataConnectionsPanel({
                           <ChevronDown className="h-4 w-4" />
                         </span>
                       </div>
-                    </label>
-                    <label className="block">
-                      <span className="text-xs text-text-muted">频率</span>
-                      <div className="relative mt-2">
-                        <select
-                          value={editingDatasetSemantic.collectionScheduleFrequency}
-                          onChange={(event) =>
-                            setEditingDatasetSemantic((prev) =>
-                              prev ? { ...prev, collectionScheduleFrequency: event.target.value } : prev,
-                            )
-                          }
-                          className="w-full appearance-none rounded-xl border border-border bg-surface px-3 py-2.5 pr-9 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                        >
-                          <option value="daily">每日</option>
-                        </select>
-                        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
-                          <ChevronDown className="h-4 w-4" />
-                        </span>
-                      </div>
-                    </label>
-                    <label className="block">
-                      <span className="text-xs text-text-muted">执行时间</span>
-                      <input
-                        type="time"
-                        value={editingDatasetSemantic.collectionScheduleTime}
-                        onChange={(event) =>
-                          setEditingDatasetSemantic((prev) =>
-                            prev ? { ...prev, collectionScheduleTime: event.target.value } : prev,
-                          )
-                        }
-                        className="mt-2 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition-colors focus:border-blue-300"
-                      />
                     </label>
                   </div>
                 </div>

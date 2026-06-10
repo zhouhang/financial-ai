@@ -2171,12 +2171,38 @@ def validate_dataset_completeness_node(state: AgentState) -> dict[str, Any]:
 def build_auto_run_context_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
     run_context = _safe_dict(ctx.get("run_context"))
+    run_plan = _safe_dict(ctx.get("run_plan"))
+    plan_meta = _safe_dict(run_plan.get("plan_meta_json") or run_plan.get("plan_meta") or run_plan.get("meta"))
+    rollup_cfg = _safe_dict(plan_meta.get("rollup"))
+    if rollup_cfg:
+        existing_rollup = _safe_dict(run_context.get("rollup"))
+        run_context["rollup"] = {
+            **rollup_cfg,
+            **existing_rollup,
+            "plan_code": str(
+                existing_rollup.get("plan_code")
+                or rollup_cfg.get("plan_code")
+                or ctx.get("run_plan_code")
+                or ""
+            ),
+            "plan_name_snapshot": str(
+                existing_rollup.get("plan_name_snapshot")
+                or rollup_cfg.get("plan_name_snapshot")
+                or run_plan.get("plan_name")
+                or ctx.get("run_plan_code")
+                or ""
+            ),
+            "biz_date": str(existing_rollup.get("biz_date") or rollup_cfg.get("biz_date") or ctx.get("biz_date") or ""),
+            "as_of_ts": str(existing_rollup.get("as_of_ts") or rollup_cfg.get("as_of_ts") or datetime.now().isoformat()),
+        }
     run_context.update(
         {
             "trigger_type": _normalize_execution_trigger_type(run_context.get("trigger_type")),
             "entry_mode": "dataset",
             "biz_date": str(ctx.get("biz_date") or ""),
             "run_plan_code": str(ctx.get("run_plan_code") or ""),
+            "plan_code": str(ctx.get("run_plan_code") or ""),
+            "plan_name": str(run_plan.get("plan_name") or ctx.get("run_plan_code") or ""),
             "scheme_code": str(ctx.get("scheme_code") or ""),
         }
     )

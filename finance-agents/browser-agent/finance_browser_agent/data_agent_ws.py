@@ -22,7 +22,7 @@ EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 async def _default_connector(url: str):
-    return await websockets.connect(url, max_size=None)
+    return await websockets.connect(url, max_size=None, proxy=None)
 
 
 class DataAgentWsClient:

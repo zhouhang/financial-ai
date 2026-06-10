@@ -934,6 +934,7 @@ async def run_recon_execution(execution_request: dict[str, Any]) -> tuple[dict[s
             rule_code=str(execution_request.get("rule_code") or ""),
             rule_id=str(execution_request.get("rule_id") or ""),
             auth_token=str(execution_request.get("auth_token") or ""),
+            run_context=dict(execution_request.get("run_context") or {}),
         )
         return recon_result, None
     except Exception as exc:

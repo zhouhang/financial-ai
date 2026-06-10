@@ -23,6 +23,11 @@ from typing import Any, Callable, Optional
 import pandas as pd
 from mcp import Tool
 from auth.jwt_utils import get_user_from_token
+from auth.recon_rollup_db import (
+    replace_canonical_recon_lines,
+    replace_stuck_recon_alert,
+    upsert_recon_period_rollup,
+)
 from security_utils import write_output_metadata
 from storage.output_manager import build_output_download_url, persist_generated_output_safely
 from storage.input_resolver import materialize_input_file, split_input_file_ref
@@ -31,6 +36,7 @@ from .dataset_loader import (
     dataset_display_name,
     load_dataset_as_df,
 )
+from . import recon_rollup
 
 # 导入数据过滤模块
 from tools.data_filter import filter_dataframe_by_rule_config, get_filter_statistics
@@ -51,6 +57,149 @@ _DEFAULT_OUTPUT_SHEETS = {
     "matched_with_diff": "差异记录",
 }
 SOURCE_RECORD_METADATA_COLUMN = "__tally_source_record"
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _safe_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = _text(value)
+        if text:
+            return text
+    return ""
+
+
+def _resolve_rollup_config(rule_meta: dict[str, Any]) -> dict[str, Any]:
+    meta = _safe_dict(rule_meta)
+    run_context = _safe_dict(meta.get("run_context"))
+    cfg = {
+        **_safe_dict(run_context.get("rollup")),
+        **_safe_dict(meta.get("rollup")),
+    }
+    if not cfg or cfg.get("enabled") is False:
+        return {}
+
+    field_mapping = _safe_dict(
+        cfg.get("field_mapping")
+        or cfg.get("rollup_field_mapping")
+        or meta.get("rollup_field_mapping")
+        or run_context.get("rollup_field_mapping")
+    )
+    if field_mapping:
+        cfg["field_mapping"] = field_mapping
+    cfg["domain"] = _first_text(
+        cfg.get("domain"),
+        field_mapping.get("domain"),
+        run_context.get("domain"),
+        "ecom",
+    )
+    cfg["plan_code"] = _first_text(cfg.get("plan_code"), run_context.get("plan_code"))
+    cfg["plan_name_snapshot"] = _first_text(
+        cfg.get("plan_name_snapshot"),
+        cfg.get("plan_name"),
+        run_context.get("plan_name"),
+        run_context.get("job_name"),
+        cfg.get("plan_code"),
+    )
+    cfg["recon_type"] = _first_text(cfg.get("recon_type"), run_context.get("recon_type"), "fund")
+    cfg["biz_date"] = _first_text(cfg.get("biz_date"), run_context.get("biz_date"))
+    cfg["as_of_ts"] = _first_text(cfg.get("as_of_ts"), run_context.get("as_of_ts"))
+    cfg["execution_run_id"] = _first_text(
+        cfg.get("execution_run_id"),
+        run_context.get("execution_run_id"),
+    )
+    return cfg
+
+
+def _maybe_attach_period_rollup(
+    result: dict[str, Any],
+    diff_result: dict[str, pd.DataFrame],
+    rule_meta: dict[str, Any],
+    *,
+    company_id: str,
+) -> None:
+    """Persist rollup artifacts when rule/run context explicitly enables them."""
+    cfg = _resolve_rollup_config(rule_meta)
+    if not cfg:
+        return
+
+    try:
+        required = ["plan_code", "biz_date", "as_of_ts", "recon_type", "field_mapping"]
+        missing = [key for key in required if not cfg.get(key)]
+        if missing:
+            raise ValueError(f"rollup config missing required keys: {missing}")
+
+        stuck_days_n = int(cfg.get("stuck_days_n") or 3)
+        as_of_ts = pd.Timestamp(cfg["as_of_ts"])
+        field_mapping = _safe_dict(cfg["field_mapping"])
+        canonical_df = recon_rollup.canonical_from_diff_result(diff_result, field_mapping)
+        rollup = recon_rollup.compute_recon_rollup(
+            canonical_df,
+            as_of_ts=as_of_ts,
+            stuck_days_n=stuck_days_n,
+        )
+        domain = _text(cfg.get("domain") or field_mapping.get("domain") or "ecom") or "ecom"
+        plan_code = _text(cfg["plan_code"])
+        recon_type = _text(cfg["recon_type"])
+        biz_date = _text(cfg["biz_date"])
+        plan_name_snapshot = _text(cfg.get("plan_name_snapshot") or plan_code)
+
+        detail_df = canonical_df[
+            canonical_df["match_status"].astype(str).isin(
+                {"matched_with_diff", "left_only", "right_only"}
+            )
+        ]
+
+        result["period_rollup"] = rollup
+        result["period_rollup_status"] = "succeeded"
+        result["canonical_recon_line_count"] = int(len(detail_df))
+
+        upsert_recon_period_rollup(
+            company_id=company_id,
+            domain=domain,
+            plan_code=plan_code,
+            plan_name_snapshot=plan_name_snapshot,
+            recon_type=recon_type,
+            biz_date=biz_date,
+            as_of_ts=str(as_of_ts.isoformat()),
+            **rollup,
+        )
+        replace_canonical_recon_lines(
+            company_id=company_id,
+            domain=domain,
+            plan_code=plan_code,
+            plan_name_snapshot=plan_name_snapshot,
+            recon_type=recon_type,
+            biz_date=biz_date,
+            execution_run_id=_text(cfg.get("execution_run_id")),
+            rows=detail_df.where(pd.notna(detail_df), None).to_dict(orient="records"),
+        )
+        alert = replace_stuck_recon_alert(
+            company_id=company_id,
+            domain=domain,
+            plan_code=plan_code,
+            plan_name_snapshot=plan_name_snapshot,
+            biz_date=biz_date,
+            stuck_amount=rollup.get("stuck_amount_total"),
+            stuck_count=rollup.get("stuck_order_count"),
+            stuck_days_n=stuck_days_n,
+            threshold_amount=cfg.get("stuck_amount_alert_threshold", 0),
+        )
+        result["period_rollup_alert_status"] = "created" if alert else "none"
+    except Exception as exc:  # noqa: BLE001
+        result["period_rollup_status"] = "failed"
+        result["period_rollup_error"] = str(exc)
+        logger.warning(f"[recon] period_rollup 计算/落库失败: {exc}")
 
 
 def _normalize_output_sheets_config(sheets_config: Any) -> dict[str, dict[str, Any]]:
@@ -188,6 +337,10 @@ def create_recon_tools() -> list[Tool]:
                     "auth_token": {
                         "type": "string",
                         "description": "JWT token，用于校验当前用户是否有权使用该规则"
+                    },
+                    "run_context": {
+                        "type": "object",
+                        "description": "执行上下文；可携带 biz_date/as_of_ts/execution_run_id/rollup 等运行期元数据"
                     }
                 },
                 "required": ["rule_code", "auth_token"]
@@ -239,6 +392,18 @@ def find_recon_rule_by_id(rules_config: dict, rule_id: str) -> Optional[dict]:
         if rule.get("rule_id") == rule_id:
             return rule
     return None
+
+
+def _merge_runtime_rollup_config(rule_content: dict[str, Any], run_context: dict[str, Any]) -> dict[str, Any]:
+    """Allow run-plan metadata to enable rollup without rewriting persisted recon rules."""
+    merged = dict(rule_content)
+    runtime_rollup = _safe_dict(run_context.get("rollup"))
+    if runtime_rollup and not _safe_dict(merged.get("rollup")):
+        merged["rollup"] = runtime_rollup
+    runtime_mapping = _safe_dict(run_context.get("rollup_field_mapping"))
+    if runtime_mapping and not _safe_dict(merged.get("rollup_field_mapping")):
+        merged["rollup_field_mapping"] = runtime_mapping
+    return merged
 
 
 def _normalize_validated_inputs(
@@ -446,6 +611,7 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     rule_code = arguments.get("rule_code", "")
     rule_id = arguments.get("rule_id")
     auth_token = arguments.get("auth_token", "").strip()
+    run_context = arguments.get("run_context") if isinstance(arguments.get("run_context"), dict) else {}
 
     validated_inputs, input_error = _normalize_validated_inputs(
         validated_inputs=validated_inputs_raw,
@@ -503,7 +669,10 @@ async def _handle_recon_execute(arguments: dict) -> dict:
     
     if is_recon:
         # 对账逻辑
-        rules_config = rule_content
+        rules_config = {
+            **_merge_runtime_rollup_config(rule_content, run_context),
+            "run_context": run_context,
+        }
         
         # 确定要执行的规则
         rules = rules_config.get("rules", [])
@@ -837,6 +1006,7 @@ def execute_single_recon(
         "download_url": download_url,
         "message": "；".join(message_parts)
     }
+    _maybe_attach_period_rollup(result, diff_result, meta, company_id=company_id)
     
     # 添加过滤统计详情（可选）
     if source_filter_stats:

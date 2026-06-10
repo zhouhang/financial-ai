@@ -365,3 +365,4 @@ finance-mcp/tests/**/__pycache__/**
 
 # superpowers brainstorm visual companion (local-only)
 .superpowers/
+.recon_proc_rollback_*.jsonl

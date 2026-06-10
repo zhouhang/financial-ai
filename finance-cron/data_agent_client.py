@@ -122,3 +122,24 @@ async def sync_pending_todo_exceptions(
             "poll_interval_seconds": poll_interval_seconds,
         },
     )
+
+
+async def finalize_daily_recon_digest(
+    auth_token: str,
+    *,
+    company_id: str,
+    biz_date: str,
+    view: str = "",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Trigger data-agent digest finalizer/delivery for one company business date."""
+    return await _post_data_agent_json(
+        "/recon/digests/finalize-daily",
+        auth_token,
+        {
+            "company_id": company_id,
+            "biz_date": biz_date,
+            "view": view,
+            "dry_run": dry_run,
+        },
+    )

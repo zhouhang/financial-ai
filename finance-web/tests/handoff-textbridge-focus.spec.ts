@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canSendText } from '../src/handoff/HandoffPage';
+import { canSendText } from '../src/handoff/handoffPresentation';
 
 describe('text bridge focus gating', () => {
   it('disables send when remote focus is not an editable input', () => {

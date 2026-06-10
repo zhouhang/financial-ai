@@ -10,16 +10,10 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import HandoffViewport, { gestureLockState } from './HandoffViewport';
+import HandoffViewport from './HandoffViewport';
+import { backendStatusLabel, canSendText, gestureLockState } from './handoffPresentation';
 import { parseHandoffToken } from './handoffWs';
 import { useHandoffSession } from './useHandoffSession';
-import type { HandoffCapabilities } from './types';
-
-export function canSendText(
-  s: { text: string; disabled: boolean; focusEditable: boolean | null },
-): boolean {
-  return Boolean(s.text) && !s.disabled && s.focusEditable === true;
-}
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
@@ -47,12 +41,6 @@ function statusTone(status: string): string {
     return 'text-red-700 bg-red-50 border-red-200';
   }
   return 'text-orange-700 bg-orange-50 border-orange-200';
-}
-
-export function backendStatusLabel(caps: HandoffCapabilities | undefined): string {
-  if (!caps?.backend) return '';
-  if (caps.backend === 'playwright') return '兼容模式';
-  return '远程操作';
 }
 
 const ZOOM_LEVELS = [1, 1.5, 2.25];

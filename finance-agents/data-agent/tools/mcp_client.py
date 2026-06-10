@@ -37,6 +37,13 @@ _DATA_SOURCE_CONNECTION_MODE = (
     or os.getenv("DATA_SOURCE_MODE")
     or "real"
 ).strip().lower() or "real"
+
+
+def _new_mcp_async_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Create an MCP HTTP client isolated from local proxy environment variables."""
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 def _get_result_wait_timeout(tool_name: str) -> float:
     """按工具类型返回结果等待超时。
 
@@ -79,7 +86,7 @@ class _McpSession:
 
             try:
                 logger.info("建立 MCP SSE 长连接...")
-                self._client = httpx.AsyncClient(timeout=_SSE_TIMEOUT)
+                self._client = _new_mcp_async_client(_SSE_TIMEOUT)
                 session_ready = asyncio.get_running_loop().create_future()
                 self._sse_task = asyncio.create_task(
                     self._sse_listener(session_ready)
@@ -139,7 +146,7 @@ class _McpSession:
                 "clientInfo": {"name": "data-agent", "version": "1.0"},
             },
         }
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as c:
+        async with _new_mcp_async_client(_HTTP_TIMEOUT) as c:
             r = await c.post(
                 f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                 json=init_body,
@@ -157,7 +164,7 @@ class _McpSession:
         
         # 发送 notifications/initialized
         notif_body = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as c:
+        async with _new_mcp_async_client(_HTTP_TIMEOUT) as c:
             await c.post(
                 f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                 json=notif_body,
@@ -263,7 +270,7 @@ class _McpSession:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as post_client:
+            async with _new_mcp_async_client(_HTTP_TIMEOUT) as post_client:
                 resp = await post_client.post(
                     f"{FINANCE_MCP_BASE_URL}/messages/?session_id={self.session_id}",
                     json=request_body,
@@ -641,6 +648,7 @@ async def execute_recon(
     rule_code: str,
     rule_id: str = "",
     auth_token: str = "",
+    run_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """执行对账任务（支持对账），根据规则对源文件与目标文件进行数据比对。
     
@@ -688,6 +696,8 @@ async def execute_recon(
         args["rule_id"] = rule_id
     if auth_token:
         args["auth_token"] = auth_token
+    if run_context is not None:
+        args["run_context"] = dict(run_context)
     return await call_mcp_tool("recon_execute", args)
 
 
@@ -1018,6 +1028,95 @@ async def execution_run_public_exception_bundle(
     return await call_mcp_tool(
         "execution_run_public_exception_bundle",
         {"run_id": run_id, "owner_identifier": owner_identifier, "limit": limit, "offset": offset},
+    )
+
+
+async def recon_digest_public_bundle(
+    token: str,
+    view: str,
+    *,
+    line_limit: int = 500,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_public_bundle",
+        {"token": token, "view": view, "line_limit": line_limit},
+    )
+
+
+async def recon_digest_public_export(
+    token: str,
+    view: str,
+    *,
+    recon_type: str = "",
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_public_export",
+        {"token": token, "view": view, "recon_type": recon_type},
+    )
+
+
+async def recon_digest_detail_link_create(auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_detail_link_create",
+        {"auth_token": auth_token, **(payload or {})},
+    )
+
+
+async def recon_digest_subscription_upsert(
+    auth_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_subscription_upsert",
+        {"auth_token": auth_token, **(payload or {})},
+    )
+
+
+async def recon_digest_subscription_list(
+    auth_token: str,
+    *,
+    company_id: str = "",
+    period: str = "daily",
+    view: str = "",
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_subscription_list",
+        {
+            "auth_token": auth_token,
+            "company_id": company_id,
+            "period": period,
+            "view": view,
+        },
+    )
+
+
+async def recon_digest_finalize_daily(
+    auth_token: str,
+    *,
+    company_id: str = "",
+    biz_date: str,
+    view: str = "",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_finalize_daily",
+        {
+            "auth_token": auth_token,
+            "company_id": company_id,
+            "biz_date": biz_date,
+            "view": view,
+            "dry_run": dry_run,
+        },
+    )
+
+
+async def recon_digest_delivery_record(
+    auth_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_digest_delivery_record",
+        {"auth_token": auth_token, **(payload or {})},
     )
 
 
