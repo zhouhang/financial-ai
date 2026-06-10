@@ -3733,8 +3733,13 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         "created_exception_sample_limit": len(sampled_anomalies),
     }
 
+    # 批量落库：每 500 条一批调 execution_run_exception_bulk_create
+    _EXCEPTION_BULK_BATCH_SIZE = 500
     created = 0
     created_exceptions: list[dict[str, Any]] = []
+
+    # 组装所有 exception payloads（不含 auth_token / run_id / scheme_code，批量接口统一传）
+    exception_payloads: list[dict[str, Any]] = []
     for idx, item in enumerate(sampled_anomalies, start=1):
         anomaly_key = str(item.get("item_id") or item.get("anomaly_key") or f"{run_id}:{idx}")
         atype = str(item.get("anomaly_type") or "unknown")
@@ -3745,36 +3750,38 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         item_owner_contact_json = (
             _safe_dict(item.get("_exception_owner_contact_json")) or owner_contact_json
         )
-        payload = {
-            "auth_token": auth_token,
-            "run_id": run_id,
-            "scheme_code": scheme_code,
-            "anomaly_key": anomaly_key,
-            "anomaly_type": atype,
-            "summary": str(item.get("_exception_summary") or "").strip()
-            or _build_anomaly_summary(
-                atype,
-                item,
-                left_name=left_name,
-                right_name=right_name,
-                field_labels=field_labels,
-            ),
-            "detail_json": _strip_internal_exception_owner_fields(item),
-            "owner_name": item_owner_name,
-            "owner_identifier": item_owner_identifier,
-            "owner_contact_json": item_owner_contact_json,
-        }
-        result = await call_mcp_tool("execution_run_exception_create", payload)
+        exception_payloads.append(
+            {
+                "anomaly_key": anomaly_key,
+                "anomaly_type": atype,
+                "summary": str(item.get("_exception_summary") or "").strip()
+                or _build_anomaly_summary(
+                    atype,
+                    item,
+                    left_name=left_name,
+                    right_name=right_name,
+                    field_labels=field_labels,
+                ),
+                "detail_json": _strip_internal_exception_owner_fields(item),
+                "owner_name": item_owner_name,
+                "owner_identifier": item_owner_identifier,
+                "owner_contact_json": item_owner_contact_json,
+            }
+        )
+
+    for batch_start in range(0, len(exception_payloads), _EXCEPTION_BULK_BATCH_SIZE):
+        chunk = exception_payloads[batch_start : batch_start + _EXCEPTION_BULK_BATCH_SIZE]
+        result = await call_mcp_tool(
+            "execution_run_exception_bulk_create",
+            {
+                "auth_token": auth_token,
+                "run_id": run_id,
+                "scheme_code": scheme_code,
+                "exceptions": chunk,
+            },
+        )
         if bool(result.get("success")):
-            created += 1
-            exception = _safe_dict(result.get("exception"))
-            created_exceptions.append(
-                {
-                    "anomaly_key": anomaly_key,
-                    "exception_id": str(exception.get("id") or exception.get("exception_id") or ""),
-                    "exception": exception,
-                }
-            )
+            created += int(result.get("created") or 0)
 
     sampling_metadata["created_count"] = created
     sampling_metadata["create_failed_count"] = max(0, len(sampled_anomalies) - created)

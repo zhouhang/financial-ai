@@ -591,6 +591,41 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="execution_run_exception_bulk_create",
+            description="批量创建或幂等更新执行异常（高性能批量接口，内部每1000条一批）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "scheme_code": {"type": "string"},
+                    "exceptions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "anomaly_key": {"type": "string"},
+                                "anomaly_type": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "detail_json": {"type": "object"},
+                                "owner_name": {"type": "string"},
+                                "owner_identifier": {"type": "string"},
+                                "owner_contact_json": {"type": "object"},
+                                "reminder_status": {"type": "string"},
+                                "processing_status": {"type": "string"},
+                                "fix_status": {"type": "string"},
+                                "latest_feedback": {"type": "string"},
+                                "feedback_json": {"type": "object"},
+                                "is_closed": {"type": "boolean"},
+                            },
+                            "required": ["anomaly_key", "anomaly_type", "summary"],
+                        },
+                    },
+                },
+                "required": ["auth_token", "run_id", "exceptions"],
+            },
+        ),
+        Tool(
             name="execution_run_exception_update",
             description="更新执行异常。",
             inputSchema={
@@ -756,6 +791,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _exception_get(arguments)
         if name == "execution_run_exception_create":
             return _exception_create(arguments)
+        if name == "execution_run_exception_bulk_create":
+            return _exception_bulk_create(arguments)
         if name == "execution_run_exception_update":
             return _exception_update(arguments)
         if name == "execution_run_exception_bulk_update_by_owner":
@@ -3052,6 +3089,32 @@ def _exception_create(arguments: dict[str, Any]) -> dict[str, Any]:
     if not item:
         return {"success": False, "error": "创建执行异常失败"}
     return {"success": True, "exception": item}
+
+
+def _exception_bulk_create(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
+    run_id = _as_text(arguments.get("run_id"))
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+    exceptions = arguments.get("exceptions")
+    if not isinstance(exceptions, list):
+        return {"success": False, "error": "exceptions 必须为数组"}
+    if not exceptions:
+        return {"success": True, "created": 0}
+    run = auth_db.get_execution_run(company_id=company_id, run_id=run_id)
+    if not run:
+        return {"success": False, "error": "run_id 对应执行记录不存在"}
+    scheme_code = _as_text(arguments.get("scheme_code")) or _as_text(run.get("scheme_code"))
+    if not scheme_code:
+        return {"success": False, "error": "缺少 scheme_code 且无法从 run 记录推断"}
+    created = auth_db.bulk_create_execution_run_exceptions(
+        company_id=company_id,
+        run_id=run_id,
+        scheme_code=scheme_code,
+        exceptions=exceptions,
+    )
+    return {"success": True, "created": created}
 
 
 def _exception_update(arguments: dict[str, Any]) -> dict[str, Any]:

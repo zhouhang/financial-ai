@@ -10784,6 +10784,108 @@ def create_execution_run_exception(
         return None
 
 
+def bulk_create_execution_run_exceptions(
+    *,
+    company_id: str,
+    run_id: str,
+    scheme_code: str,
+    exceptions: list[dict],
+    batch_size: int = 1000,
+) -> int:
+    """批量创建或幂等更新执行异常，返回持久化条数。
+
+    每 batch_size 条一批，单批单事务。字段语义与 create_execution_run_exception 完全一致。
+    """
+    if not exceptions:
+        return 0
+
+    sql = """
+        INSERT INTO execution_run_exceptions (
+            company_id, run_id, scheme_code, anomaly_key, anomaly_type,
+            summary, detail_json,
+            owner_name, owner_identifier, owner_contact_json,
+            reminder_status, processing_status, fix_status,
+            latest_feedback, feedback_json, is_closed
+        ) VALUES (
+            %s, %s, %s, %s, %s,
+            %s, %s::jsonb,
+            %s, %s, %s::jsonb,
+            %s, %s, %s,
+            %s, %s::jsonb, %s
+        )
+        ON CONFLICT (run_id, anomaly_key)
+        DO UPDATE SET
+            anomaly_type = EXCLUDED.anomaly_type,
+            summary = EXCLUDED.summary,
+            detail_json = EXCLUDED.detail_json,
+            owner_name = CASE
+                WHEN EXCLUDED.owner_name <> '' THEN EXCLUDED.owner_name
+                ELSE execution_run_exceptions.owner_name
+            END,
+            owner_identifier = CASE
+                WHEN EXCLUDED.owner_identifier <> '' THEN EXCLUDED.owner_identifier
+                ELSE execution_run_exceptions.owner_identifier
+            END,
+            owner_contact_json = CASE
+                WHEN EXCLUDED.owner_contact_json <> '{}'::jsonb THEN EXCLUDED.owner_contact_json
+                ELSE execution_run_exceptions.owner_contact_json
+            END,
+            reminder_status = EXCLUDED.reminder_status,
+            processing_status = EXCLUDED.processing_status,
+            fix_status = EXCLUDED.fix_status,
+            latest_feedback = CASE
+                WHEN EXCLUDED.latest_feedback <> '' THEN EXCLUDED.latest_feedback
+                ELSE execution_run_exceptions.latest_feedback
+            END,
+            feedback_json = CASE
+                WHEN EXCLUDED.feedback_json <> '{}'::jsonb THEN EXCLUDED.feedback_json
+                ELSE execution_run_exceptions.feedback_json
+            END,
+            is_closed = EXCLUDED.is_closed,
+            updated_at = CURRENT_TIMESTAMP
+    """
+
+    created = 0
+    for batch_start in range(0, len(exceptions), batch_size):
+        batch = exceptions[batch_start : batch_start + batch_size]
+        params_seq = [
+            (
+                company_id,
+                run_id,
+                scheme_code,
+                str(exc.get("anomaly_key") or ""),
+                str(exc.get("anomaly_type") or "unknown"),
+                str(exc.get("summary") or ""),
+                psycopg2.extras.Json(exc.get("detail_json") or {}),
+                str(exc.get("owner_name") or ""),
+                str(exc.get("owner_identifier") or ""),
+                psycopg2.extras.Json(exc.get("owner_contact_json") or {}),
+                str(exc.get("reminder_status") or "pending"),
+                str(exc.get("processing_status") or "pending"),
+                str(exc.get("fix_status") or "pending"),
+                str(exc.get("latest_feedback") or ""),
+                psycopg2.extras.Json(exc.get("feedback_json") or {}),
+                bool(exc.get("is_closed", False)),
+            )
+            for exc in batch
+        ]
+        conn_manager = get_conn()
+        try:
+            with conn_manager as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(sql, params_seq)
+                conn.commit()
+            created += len(batch)
+        except Exception as e:
+            logger.error(
+                f"批量创建 execution_run_exceptions 失败 "
+                f"(company_id={company_id}, run_id={run_id}, "
+                f"batch_start={batch_start}, batch_size={len(batch)}): {e}"
+            )
+            raise
+    return created
+
+
 def get_execution_run_exception(*, company_id: str, exception_id: str) -> dict | None:
     """查询单个执行异常。"""
     conn_manager = get_conn()

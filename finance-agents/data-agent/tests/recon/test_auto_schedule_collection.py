@@ -666,8 +666,12 @@ def test_alipay_fund_source_only_creates_execution_exceptions(monkeypatch: pytes
     created_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        created_payloads.append({"name": name, "payload": payload})
-        return {"success": True, "exception": {"id": f"exception-{len(created_payloads)}"}}
+        if name == "execution_run_exception_bulk_create":
+            exceptions = list(payload.get("exceptions", []))
+            for exc in exceptions:
+                created_payloads.append({"name": name, "payload": exc})
+            return {"success": True, "created": len(exceptions)}
+        return {"success": True}
 
     monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
     ctx = {
@@ -1316,18 +1320,11 @@ def test_create_exception_tasks_node_persists_all_anomalies_when_explosion_thres
     update_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        if name == "execution_run_exception_create":
-            created_payloads.append(payload)
-            index = len(created_payloads)
-            return {
-                "success": True,
-                "exception": {
-                    "id": f"exception-{index}",
-                    "run_id": payload["run_id"],
-                    "owner_identifier": payload["owner_identifier"],
-                    "feedback_json": {},
-                },
-            }
+        if name == "execution_run_exception_bulk_create":
+            exceptions = list(payload.get("exceptions", []))
+            for exc in exceptions:
+                created_payloads.append(exc)
+            return {"success": True, "created": len(exceptions)}
         if name == "execution_run_update":
             update_payloads.append(payload)
             return {
@@ -1407,17 +1404,11 @@ def test_create_exception_tasks_node_does_not_update_run_for_sampling_when_full_
     create_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        if name == "execution_run_exception_create":
-            create_payloads.append(payload)
-            return {
-                "success": True,
-                "exception": {
-                    "id": f"exception-{len(create_payloads)}",
-                    "run_id": payload["run_id"],
-                    "owner_identifier": payload["owner_identifier"],
-                    "feedback_json": {},
-                },
-            }
+        if name == "execution_run_exception_bulk_create":
+            exceptions = list(payload.get("exceptions", []))
+            for exc in exceptions:
+                create_payloads.append(exc)
+            return {"success": True, "created": len(exceptions)}
         if name == "execution_run_update":
             update_payloads.append(payload)
             return {
@@ -1484,18 +1475,11 @@ def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     create_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        if name == "execution_run_exception_create":
-            create_payloads.append(payload)
-            return {
-                "success": True,
-                "exception": {
-                    "id": f"exception-{len(create_payloads)}",
-                    "run_id": payload["run_id"],
-                    "owner_name": payload["owner_name"],
-                    "owner_identifier": payload["owner_identifier"],
-                    "feedback_json": {},
-                },
-            }
+        if name == "execution_run_exception_bulk_create":
+            exceptions = list(payload.get("exceptions", []))
+            for exc in exceptions:
+                create_payloads.append(exc)
+            return {"success": True, "created": len(exceptions)}
         if name == "execution_run_update":
             return {
                 "success": True,
@@ -1557,33 +1541,31 @@ def test_create_exception_tasks_node_persists_all_with_owner_mapping(
     assert "账单责任人" in owner_names
     for payload in create_payloads:
         assert not any(str(key).startswith("_exception_") for key in payload["detail_json"])
-    created_owner_ids = [
-        exc["exception"]["owner_identifier"]
-        for exc in result["recon_ctx"]["created_exceptions"]
-    ]
-    assert created_owner_ids.count("owner-source") == 2
-    assert created_owner_ids.count("owner-target") == 2
+    # 批量接口不返回单条 exception 记录，created_exceptions 为空列表（owner mapping 已通过 create_payloads 验证）
+    assert result["recon_ctx"]["exception_created_count"] == 4
 
 
 def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """去掉200采样上限后，超过 explosion_threshold 的全量差异都应落库，不截断。"""
-    created_payloads: list[dict[str, object]] = []
+    """全量落库：250条差异用批量工具(bulk_create)持久化，不走逐条单条工具。
+
+    断言：
+    - call_mcp_tool 调用次数 = ceil(250/500) = 1 次批量调用
+    - 单次调用的 exceptions 长度 = 250
+    - recon_ctx 的 exception_created_count = 250
+    - exception_creation_limited 不为 True
+    """
+    bulk_calls: list[dict[str, object]] = []
     update_payloads: list[dict[str, object]] = []
 
     async def fake_call_mcp_tool(name: str, payload: dict[str, object]) -> dict[str, object]:
-        if name == "execution_run_exception_create":
-            created_payloads.append(payload)
-            index = len(created_payloads)
+        if name == "execution_run_exception_bulk_create":
+            bulk_calls.append(payload)
+            exceptions = list(payload.get("exceptions", []))
             return {
                 "success": True,
-                "exception": {
-                    "id": f"exception-{index}",
-                    "run_id": payload["run_id"],
-                    "owner_identifier": payload["owner_identifier"],
-                    "feedback_json": {},
-                },
+                "created": len(exceptions),
             }
         if name == "execution_run_update":
             update_payloads.append(payload)
@@ -1598,8 +1580,7 @@ def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
 
     monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
 
-    # 250 条异常 > explosion_threshold(1000 default) 的情况还不触发爆炸,
-    # 所以把 threshold 设 100 以测试爆炸路径且数量 > 200 的旧截断值
+    # 250 条异常 > explosion_threshold(100)，触发爆炸路径；数量 < 500(批大小)所以仅1批
     n = 250
     anomalies = [
         {
@@ -1644,9 +1625,15 @@ def test_create_exception_tasks_node_persists_all_anomalies_without_sampling(
     result = asyncio.run(nodes.create_exception_tasks_node(state))
     recon_ctx = result["recon_ctx"]
 
-    # 全量 250 条必须全部落库，不能被截断到 200
-    assert len(created_payloads) == n, (
-        f"期望落库 {n} 条差异明细，实际落库 {len(created_payloads)} 条（旧代码会截断到 200）"
+    # 必须走批量工具，不走逐条工具
+    import math
+    expected_bulk_calls = math.ceil(n / 500)  # 250/500 → 1 次
+    assert len(bulk_calls) == expected_bulk_calls, (
+        f"期望 {expected_bulk_calls} 次批量调用，实际 {len(bulk_calls)} 次"
+    )
+    # 第一批包含全部 250 条
+    assert len(bulk_calls[0]["exceptions"]) == n, (
+        f"批量调用的 exceptions 长度应为 {n}，实际 {len(bulk_calls[0]['exceptions'])}"
     )
     assert recon_ctx["exception_created_count"] == n
     assert recon_ctx["exception_total_count"] == n

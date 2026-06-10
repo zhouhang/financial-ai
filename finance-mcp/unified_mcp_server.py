@@ -348,6 +348,7 @@ _EXECUTION_TOOL_NAMES = {
     "recon_digest_delivery_record",
     "execution_run_exception_get",
     "execution_run_exception_create",
+    "execution_run_exception_bulk_create",
     "execution_run_exception_update",
     "execution_run_exception_bulk_update_by_owner",
     "execution_run_exception_list_pending_todo_batches",
