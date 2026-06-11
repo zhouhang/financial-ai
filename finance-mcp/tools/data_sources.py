@@ -9716,7 +9716,9 @@ async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> d
         return {"success": False, "error": "数据集不属于当前数据源"}
 
     sample_limit = max(1, min(int(arguments.get("sample_limit") or arguments.get("limit") or 10), 50))
-    if _is_database_source_row(source_row) and _normalize_bool(arguments.get("refresh"), default=False):
+    refresh = _normalize_bool(arguments.get("refresh"), default=False)
+    cached_preview_sample = _extract_preview_sample(dataset_row)
+    if _is_database_source_row(source_row) and refresh:
         preview_sample = _refresh_database_preview_sample(
             source_row,
             dataset_row,
@@ -9725,18 +9727,38 @@ async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> d
             "dataset_detail",
         )
     else:
-        preview_sample = _extract_preview_sample(dataset_row)
+        preview_sample = cached_preview_sample
     rows = _preview_sample_rows(preview_sample, sample_limit)
+    preview_error = _safe_text(preview_sample.get("error"))
+    if refresh and preview_error and not rows:
+        rows = _preview_sample_rows(cached_preview_sample, sample_limit)
     resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
     row_count = len(rows)
-    if preview_sample.get("row_count") is not None:
+    if preview_sample.get("row_count") is not None and not (refresh and preview_error):
         try:
             row_count = int(preview_sample.get("row_count") or 0)
         except (TypeError, ValueError):
             row_count = len(rows)
+    preview_success = not bool(preview_error)
+    if refresh and preview_error:
+        return {
+            "success": False,
+            "preview_success": False,
+            "error": preview_error,
+            "source_id": source_id,
+            "resource_key": resource_key,
+            "dataset": _build_dataset_view(dataset_row),
+            "field_groups": _build_dataset_semantic_field_groups(dataset_row),
+            "preview_sample": preview_sample,
+            "rows": rows,
+            "sample_limit": sample_limit,
+            "row_count": row_count,
+            "message": f"刷新数据集样例失败: {preview_error}",
+        }
 
     return {
         "success": True,
+        "preview_success": preview_success,
         "source_id": source_id,
         "resource_key": resource_key,
         "dataset": _build_dataset_view(dataset_row),
