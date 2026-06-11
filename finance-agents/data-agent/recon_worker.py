@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 from graphs.recon.auto_run_service import execute_run_plan_run, finalize_and_deliver_daily_digest
+from graphs.recon.diff_digestion_service import run_diff_digestion
 from tools.mcp_client import (
     execution_run_update,
     recon_queue_complete,
@@ -97,9 +98,43 @@ async def _process_job(job: dict, system_token: str) -> None:
     job_id = str(job["id"])
     company_id = str(job["company_id"])
     run_plan_code = str(job["run_plan_code"])
-    logger.info("[recon-worker] 开始处理 job_id=%s run_plan_code=%s", job_id, run_plan_code)
+    trigger_mode = str(job.get("trigger_mode") or "")
+    logger.info("[recon-worker] 开始处理 job_id=%s run_plan_code=%s trigger_mode=%s", job_id, run_plan_code, trigger_mode)
     try:
         auth_token = _create_worker_token(company_id)
+
+        # ── resolve 分支：差异消化（不走全量采集+对账）──────────────────────────
+        if trigger_mode == "resolve":
+            target_run_id = str((job.get("run_context") or {}).get("target_run_id") or "").strip()
+            if not target_run_id:
+                logger.error("[recon-worker] resolve job 缺 target_run_id job_id=%s", job_id)
+                await recon_queue_fail(system_token, job_id, "resolve job 缺 target_run_id")
+                return
+
+            digestion = await run_diff_digestion(
+                auth_token=auth_token,
+                run_id=target_run_id,
+                biz_date=str(job.get("biz_date") or ""),
+            )
+
+            if digestion.get("ok"):
+                await recon_queue_complete(system_token, job_id)
+                summary = dict(digestion.get("summary") or {})
+                logger.info(
+                    "[recon-worker] resolve job 消化完成 job_id=%s resolved=%s reclassified=%s kept=%s open_counts=%s",
+                    job_id,
+                    summary.get("resolved"),
+                    summary.get("reclassified"),
+                    summary.get("kept"),
+                    summary.get("open_counts"),
+                )
+            else:
+                error = str(digestion.get("error") or "差异消化失败")
+                await recon_queue_fail(system_token, job_id, error[:2000])
+                logger.error("[recon-worker] resolve job 消化失败 job_id=%s error=%s", job_id, error)
+            return
+        # ── 原路径：全量采集+proc+对账 ───────────────────────────────────────────
+
         result = await execute_run_plan_run(
             auth_token=auth_token,
             run_plan_code=run_plan_code,
