@@ -286,6 +286,19 @@ interface DatasetCollectionDetailDialogState {
   detail: Record<string, unknown> | null;
 }
 
+interface DatasetDetailDialogState {
+  sourceId: string;
+  sourceName: string;
+  datasetId: string;
+  datasetName: string;
+  resourceKey: string;
+  loading: boolean;
+  error: string;
+  actionError: string;
+  lastLoadedAt: string;
+  detail: Record<string, unknown> | null;
+}
+
 interface DateCollectionDialogState {
   sourceId: string;
   sourceName: string;
@@ -2489,6 +2502,7 @@ export default function DataConnectionsPanel({
   );
   const platformDatasetCollectionActionIdsRef = useRef<Set<string>>(new Set());
   const [collectionDetailDialog, setCollectionDetailDialog] = useState<DatasetCollectionDetailDialogState | null>(null);
+  const [datasetDetailDialog, setDatasetDetailDialog] = useState<DatasetDetailDialogState | null>(null);
   const [dateCollectionDialog, setDateCollectionDialog] = useState<DateCollectionDialogState | null>(null);
   const [datasetViewTabsBySource, setDatasetViewTabsBySource] = useState<Record<string, DatasetViewTab>>({});
   const [physicalCatalogFiltersBySource, setPhysicalCatalogFiltersBySource] = useState<
@@ -5408,6 +5422,98 @@ export default function DataConnectionsPanel({
     [authHeaders, authToken, draftSourceIdSet, loadPlatformShopDatasetDetails],
   );
 
+  const openDatasetDetail = useCallback(
+    async (source: DataSourceListItem, dataset: DataSourceDatasetSummary) => {
+      const baseState: DatasetDetailDialogState = {
+        sourceId: source.id,
+        sourceName: source.name || source.id,
+        datasetId: dataset.id,
+        datasetName: dataset.business_name || dataset.dataset_name || dataset.dataset_code,
+        resourceKey: dataset.resource_key || dataset.dataset_code,
+        loading: true,
+        error: '',
+        actionError: '',
+        lastLoadedAt: '',
+        detail: null,
+      };
+      setDatasetDetailDialog(baseState);
+      if (!authToken || draftSourceIdSet.has(source.id)) {
+        setDatasetDetailDialog({
+          ...baseState,
+          loading: false,
+          error: '当前环境未连接后端详情接口。',
+        });
+        return;
+      }
+      try {
+        const params = new URLSearchParams({
+          resource_key: dataset.resource_key || dataset.dataset_code,
+          sample_limit: '10',
+        });
+        const response = await fetch(
+          `/api/data-sources/${source.id}/datasets/${encodeURIComponent(dataset.id)}/detail?${params.toString()}`,
+          { headers: authHeaders },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(data?.detail || data?.message || '获取详情失败'));
+        }
+        setDatasetDetailDialog({
+          ...baseState,
+          loading: false,
+          detail: asRecord(data) ?? {},
+          lastLoadedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        setDatasetDetailDialog({
+          ...baseState,
+          loading: false,
+          error: error instanceof Error ? error.message : '获取详情失败',
+        });
+      }
+    },
+    [authHeaders, authToken, draftSourceIdSet],
+  );
+
+  const refreshDatasetDetailDialog = useCallback(async () => {
+    if (!datasetDetailDialog || !authToken || draftSourceIdSet.has(datasetDetailDialog.sourceId)) return;
+    const params = new URLSearchParams({
+      resource_key: datasetDetailDialog.resourceKey,
+      sample_limit: '10',
+      refresh: 'true',
+    });
+    try {
+      const response = await fetch(
+        `/api/data-sources/${datasetDetailDialog.sourceId}/datasets/${encodeURIComponent(datasetDetailDialog.datasetId)}/detail?${params.toString()}`,
+        { headers: authHeaders },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(data?.detail || data?.message || '刷新详情失败'));
+      setDatasetDetailDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              error: '',
+              actionError: '',
+              detail: asRecord(data) ?? {},
+              lastLoadedAt: new Date().toISOString(),
+            }
+          : prev,
+      );
+    } catch (error) {
+      setDatasetDetailDialog((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              actionError: error instanceof Error ? error.message : '刷新详情失败',
+            }
+          : prev,
+      );
+    }
+  }, [authHeaders, authToken, datasetDetailDialog, draftSourceIdSet]);
+
   const openDatasetCollectionDetail = useCallback(
     async (source: DataSourceListItem, dataset: DataSourceDatasetSummary) => {
       const baseState: DatasetCollectionDetailDialogState = {
@@ -7408,10 +7514,12 @@ export default function DataConnectionsPanel({
                                   <p>最近同步：{formatTime(dataset.last_sync_at)}</p>
                                   <button
                                     type="button"
-                                    onClick={() => void openDatasetCollectionDetail(activeSource, dataset)}
+                                    onClick={() => void (activeSource.source_kind === 'database'
+                                      ? openDatasetDetail(activeSource, dataset)
+                                      : openDatasetCollectionDetail(activeSource, dataset))}
                                     className="mt-2 inline-flex items-center justify-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs whitespace-nowrap text-blue-700 transition-colors hover:bg-blue-100"
                                   >
-                                    采集详情
+                                    {activeSource.source_kind === 'database' ? '详情' : '采集详情'}
                                   </button>
                                 </div>
                               </div>
@@ -8091,6 +8199,118 @@ export default function DataConnectionsPanel({
                   {editingDatasetSemantic.publishStatus === 'published' ? '保存发布信息' : '确认发布'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {datasetDetailDialog && (
+        <div className="fixed inset-0 z-[60] bg-black/35" onClick={() => setDatasetDetailDialog(null)}>
+          <div
+            className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="border-b border-border px-5 py-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h4 className="text-base font-semibold text-text-primary">详情</h4>
+                  <p className="mt-1 truncate text-sm text-text-primary">{datasetDetailDialog.datasetName}</p>
+                  <p className="mt-1 truncate text-xs text-text-secondary">
+                    {datasetDetailDialog.sourceName} · {datasetDetailDialog.resourceKey}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDatasetDetailDialog(null)}
+                  aria-label="关闭"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary transition-colors hover:bg-surface-tertiary hover:text-text-primary"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-5">
+              {datasetDetailDialog.loading ? (
+                <div className="flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在加载详情。
+                </div>
+              ) : datasetDetailDialog.error ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {datasetDetailDialog.error}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {datasetDetailDialog.actionError && (
+                    <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                      {datasetDetailDialog.actionError}
+                    </div>
+                  )}
+                  <div className="rounded-2xl border border-border bg-surface-secondary px-4 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium text-text-primary">最新 10 条数据</p>
+                        <p className="mt-1 text-xs text-text-secondary">
+                          {datasetDetailDialog.lastLoadedAt ? `最近刷新：${formatTime(datasetDetailDialog.lastLoadedAt)}` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshDatasetDetailDialog()}
+                        className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-tertiary"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        刷新
+                      </button>
+                    </div>
+                    <div className="mt-3 max-h-80 overflow-auto rounded-xl border border-border bg-surface">
+                      {(() => {
+                        const detail = datasetDetailDialog.detail ?? {};
+                        const sampleRows = (
+                          Array.isArray(detail.rows)
+                            ? detail.rows.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+                            : []
+                        ).slice(0, 10).map((row) => asRecord(row) ?? {});
+                        const fieldGroups = normalizePlatformFieldGroups(detail.field_groups ?? detail.fieldGroups);
+                        const columns = buildSemanticSampleTableColumns(fieldGroups, sampleRows);
+                        if (sampleRows.length === 0) {
+                          return <p className="px-3 py-3 text-sm text-text-secondary">暂无样本数据。</p>;
+                        }
+                        if (columns.length === 0) {
+                          return <p className="px-3 py-3 text-sm text-text-secondary">暂无可展示字段。</p>;
+                        }
+                        return (
+                          <table className="min-w-full divide-y divide-border text-left text-xs">
+                            <thead className="sticky top-0 z-10 bg-surface-secondary text-text-secondary">
+                              <tr>
+                                {columns.map((column) => (
+                                  <th key={column.rawName} className="whitespace-nowrap px-3 py-2 font-medium">
+                                    {column.displayName}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border text-text-primary">
+                              {sampleRows.map((row, rowIndex) => (
+                                <tr key={`dataset-detail-sample-${rowIndex}`} className="hover:bg-surface-secondary/60">
+                                  {columns.map((column) => (
+                                    <td
+                                      key={`${rowIndex}-${column.rawName}`}
+                                      className="max-w-56 truncate px-3 py-2"
+                                      title={formatSampleCellValue(row[column.rawName])}
+                                    >
+                                      {formatSampleCellValue(row[column.rawName])}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
